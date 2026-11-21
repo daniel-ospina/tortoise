@@ -969,7 +969,22 @@ SWEEP_NAMES = 66
 #: two MEASURED deltas, and `11843 + 1 + 4 = 11848` is a CROSS-CHECK of the `--repin` run, never its
 #: evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11848, "91e7c7d82018c838")
+#: ⛔ MERGED `origin/main` (`69908d006b`) INTO THIS BRANCH, one merge after the block above — and
+#: the pin is RE-MEASURED on THIS tree with `--repin`, never carried: `(11856, "e9249c5490bc38d7")`.
+#: ⛔ THE +8 IS ATTRIBUTED BY THE TOOL'S OWN ROW DIFF, not by arithmetic: `--report --base
+#: 28ca66878d… --top 5000` was run in a detached worktree at the pre-merge head `aaf341542b` AND on
+#: this tree, both row sets sorted and diffed, and EXACTLY TWO rows differ, both `main`'s and neither
+#: this branch's:
+#:   * `g.query` **1492 → 1499** (+7)
+#:   * `proj.g.query` **3642 → 3643** (+1)
+#: No other row differs, so no shape was absorbed in the other direction. The occurrences arrive with
+#: `main`'s three commits (`69908d006b`, `f9f480a55a`, `dc92b0eecc`) and land in files this branch
+#: never touches — `tools/graphevent_home.py` (0→4 `g.query(`), `tests/test_14125_retired_name_calls.py`
+#: (4→8), `tests/test_13094_graphevent_home.py` (0→1) and `docs/evidence/13094-graphevent/` (0→5 plus
+#: one in `readers.json`). `11848 + 8 = 11856` is a CROSS-CHECK of the two measurements, never their
+#: evidence. `--check` exits 0 on this tree:
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11856, "e9249c5490bc38d7")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

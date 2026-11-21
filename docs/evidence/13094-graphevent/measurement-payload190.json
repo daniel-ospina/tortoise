@@ -1,0 +1,73 @@
+{
+  "graph": "probe_13094_measure",
+  "payload_bytes_per_event": 190,
+  "schema": [
+    {
+      "statement": "CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)",
+      "installed": true
+    },
+    {
+      "statement": "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent PROPERTIES 1 event_id",
+      "installed": false,
+      "refused": "ResponseError: missing supporting exact-match index"
+    },
+    {
+      "statement": "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)",
+      "installed": true
+    }
+  ],
+  "used_memory_baseline": 4274464,
+  "used_memory_after_schema": 4389072,
+  "schema_bytes": 114608,
+  "graph_memory_usage_after_schema": {
+    "total_graph_sz_mb": 0,
+    "label_matrices_sz_mb": 0,
+    "relation_matrices_sz_mb": 0,
+    "amortized_node_block_sz_mb": 0,
+    "amortized_node_attributes_by_label_sz_mb": [
+      "Warmup",
+      0,
+      "GraphEvent",
+      0
+    ],
+    "amortized_unlabeled_nodes_attributes_sz_mb": 0,
+    "amortized_edge_block_sz_mb": 0,
+    "amortized_edge_attributes_by_type_sz_mb": [],
+    "indices_sz_mb": 0
+  },
+  "points": [
+    {
+      "nodes": 20000,
+      "used_memory": 17451752
+    },
+    {
+      "nodes": 40000,
+      "used_memory": 31578336
+    },
+    {
+      "nodes": 60000,
+      "used_memory": 43521968
+    }
+  ],
+  "slope_bytes_per_node": 597.1816,
+  "graph_memory_usage_final": {
+    "total_graph_sz_mb": 29,
+    "label_matrices_sz_mb": 0,
+    "relation_matrices_sz_mb": 0,
+    "amortized_node_block_sz_mb": 0,
+    "amortized_node_attributes_by_label_sz_mb": [
+      "Warmup",
+      0,
+      "GraphEvent",
+      19
+    ],
+    "amortized_unlabeled_nodes_attributes_sz_mb": 0,
+    "amortized_edge_block_sz_mb": 0,
+    "amortized_edge_attributes_by_type_sz_mb": [],
+    "indices_sz_mb": 8
+  },
+  "tree": {
+    "git_head": "05d218fcaf",
+    "note": "the tree the measurement ran on (the head at dispatch, before this PR's commits)"
+  }
+}

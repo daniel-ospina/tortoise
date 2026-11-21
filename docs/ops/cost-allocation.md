@@ -44,7 +44,7 @@ Declared lines (2026-09-25):
 
 | Line | Basis | Default (cents/mo) | Source | Estimate? |
 |---|---|---|---|---|
-| `fly_base` | `even` | 2140 | `fly.toml` COST note (iad list price snapshot) | **yes** — `as_of 2026-09-10` |
+| `fly_base` | `even` | 2140 | `fly.toml` COST note (dated 2026-09-10 snapshot of the **pre-#13665** `shared-cpu-2x:4096MB` shape; 4-core re-derivation pending runbook §6.5) | **yes** — `as_of 2026-09-10` |
 | `falkordb_base` | `even` | 0 | not configured | yes |
 | `supabase_base` | `even` | 0 | not configured | yes |
 | `posthog` | `proportional` | 0 | not configured | yes |
