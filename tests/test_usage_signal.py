@@ -902,6 +902,13 @@ def _getattr_reaching_a_store(
     read; the note is now widened to match the code. A non-literal second argument
     (`getattr(t, name)`) stays genuinely out of scope, and is named as such beside
     `importlib.import_module`/`__import__`.
+
+    ⛔ AND THE POSITIONAL READ IS EXHAUSTIVE, not a partial leg: `getattr` is a
+    builtin that accepts NO keyword arguments (`getattr(o, name="x")` raises
+    `TypeError: getattr() takes no keyword arguments`, measured on 3.12), so the
+    keyword spelling is not a reach this leg misses — it cannot execute at all.
+    Recorded here because a reviewer counted it as a hole (it is statically
+    literal, so it looked like the same class) and the next reader will too.
     """
     found: set[str] = set()
     for node in nodes:
@@ -1223,8 +1230,12 @@ def _modules_reaching_a_store() -> frozenset[str]:
     """Every module in the tree that imports a STORE CLIENT, by parsed imports.
 
     ⛔ PARSED, NOT GREPPED, AND AGAINST EVERY DECLARED **STORE-CLIENT** ROOT (the
-    three dotless entries — a `from .projection import X` reach is a TREE module
-    and belongs to the direction test, not to this scan). This read
+    three dotless entries). ⚠️ AND THIS SCAN DOES NOT SEE A TREE-RELATIVE REACH:
+    `from .projection import FalkorProjection` written in ANOTHER tree module is
+    one hop from the client, and the direction test's only input IS this scan — so
+    no test reds on it. That is an out-of-scope residual, not a hand-off: this
+    sentence used to say such a reach "belongs to the direction test", which does
+    not scan for it either. This read
     `"from falkordb import" in source` — a substring test that saw only ONE of the
     roots the set itself declares, so the modules that reach the store through
     `redis` (`hosted_backup` constructs a real client over a derived pool,
@@ -1309,9 +1320,26 @@ def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
     # ⛔ AND THE PROBE'S EXEMPTION MUST NOT BECOME A BAN EXEMPTION. This module
     # owns the embedded store and is exempt from the PROBE only (it is in
     # `sys.modules` before the probe runs); dropping it from the SET would drop the
-    # AST ban too, which is the hole an earlier cut had. Asserted rather than left
-    # to the coverage row, which skips exempt modules by construction.
+    # AST ban too, which is the hole an earlier cut had. Asserted rather than
+    # inferred from the coverage row above: that row skips only `_COVERAGE_EXEMPT`
+    # (`{"tortoise"}`) and WOULD red on a dropped `embedded_lifecycle` today — but
+    # it stops demanding the ban the moment the name moves into that exemption,
+    # which is the lever this line pins directly. (This comment said the row "skips
+    # exempt modules by construction", which is false: it skips the COVERAGE
+    # exemption, not the probe one.)
     assert "tortoise.embedded_lifecycle" in _FORBIDDEN_GRAPH_ROOTS
+    # ⛔ AND THE PROBE-EXEMPT LIST IS PINNED EXACTLY TOO, for the same reason the
+    # coverage list is: `unbanned_probe_exempt` only enforces MEMBERSHIP, so a
+    # member added here that IS in the ban set passes it — and the probe's name
+    # list is built by REMOVING the exempt names, so adding a banned store root
+    # here deletes that root's transitive check with every row green. Pinning the
+    # tuple makes `_PROBE_EXEMPT = ("tortoise.embedded_lifecycle", "redis")` red
+    # here instead of silently narrowing the probe this PR exists to keep.
+    assert _PROBE_EXEMPT == ("tortoise.embedded_lifecycle",), (
+        f"the probe exemption is {_PROBE_EXEMPT!r}; it may hold exactly the one "
+        "module that is already in `sys.modules` before the probe runs. Adding a "
+        "name here removes it from the probe's absent-list — a banned root added "
+        "here drops its transitive check and reddens nothing else.")
     # ⛔ THE PROBE-EXEMPT LIST CANNOT BE A COVERAGE SKIP IN DISGUISE. Exempting from
     # the probe is only MEANINGFUL for a name the probe would otherwise assert
     # absent — one that is BANNED. A probe-exempt name that is not banned is
