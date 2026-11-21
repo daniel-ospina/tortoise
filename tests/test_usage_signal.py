@@ -107,6 +107,7 @@ import functools
 import json
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1108,6 +1109,14 @@ def test_no_graph_dependency() -> None:
         f"the ban read {usage_signal.__file__!r} as "
         f"{len(source)} chars — this test's whole subject is that module's source, "
         "and an empty or misdirected read makes every assertion below vacuous")
+    # ⛔ AND ITS PROVENANCE, not just its non-emptiness. The assert above closes the
+    # EMPTY read only: `source = "# clean\n"` or a read of another tree module's
+    # file left every row green (measured: 101 passed each), because 208 of the
+    # 305 modules `_offending` finds clean. So the ban compares the string it
+    # audits against a fresh read of the file it claims to audit.
+    assert source == Path(usage_signal.__file__).read_text(encoding="utf-8"), (
+        "the ban must examine THIS module's CURRENT source: a cached constant or a "
+        "misdirected read certifies a file the ban never looked at")
     offending = _offending(source)
     assert not offending, (
         f"usage_signal imports a graph client: {sorted(offending)} — a residency "
@@ -1431,12 +1440,14 @@ def _modules_reaching_a_store() -> frozenset[str]:
     the reason "it cannot be told apart from an unrelated attribute read at this
     granularity" — measurably FALSE: `_package_root_attributes` IS that
     distinction (it filters through `_REACHABLE_FROM_ROOT`, so an unrelated
-    `tortoise.__version__` read returns nothing), and it flags 0 of the 305 tree
-    modules, so wiring it in costs no false positive. Left out, this row was blind
+    `tortoise.__version__` read returns nothing), and it flags no file in the tree
+    today, so wiring it in costs no false positive. Left out, this row was blind
     to a module whose only reach is `import tortoise; tortoise.FalkorDB` while
     `_offending` caught it — the scan/ban disagreement this docstring already
     calls out one paragraph up, one spelling over. `_module_reaches_a_store` is
-    the ONE per-file predicate both this scan and its pin call.
+    the ONE per-file predicate, and `_scan_modules` is the ONE loop, that this
+    scan and its pin BOTH call — so reverting either is a red, not a silent leg
+    loss.
 
     ⚠️ NOT the whole ban set. `_FORBIDDEN_GRAPH_ROOTS` also lists modules that are
     ORDINARY imports (`tortoise.sdk`, `tortoise.ep`, `tortoise.retry`, …) and
@@ -1476,14 +1487,35 @@ def _modules_reaching_a_store() -> frozenset[str]:
     same rule where the `durations:` rows live).
     """
     package = Path(usage_signal.__file__).parent
-    found: set[str] = set()
+    return _scan_modules(_tree_module_sources(package))
+
+
+def _tree_module_sources(package: Path) -> Iterator[tuple[str, str]]:
+    """`(module name, source)` for every module in the tree, `__init__` folded.
+
+    Split from `_scan_modules` so the LOOP is feedable by the pin: the tree cannot
+    discriminate the wiring (no file reaches a store ONLY through the attribute
+    spelling today), so a synthetic pair is the only input that can.
+    """
     for path in package.rglob("*.py"):
         rel = path.relative_to(package).with_suffix("")
         parts = [part for part in rel.parts if part != "__init__"]
         module = "tortoise" + ("." + ".".join(parts) if parts else "")
-        if _module_reaches_a_store(path.read_text(encoding="utf-8")):
-            found.add(module)
-    return frozenset(found)
+        yield module, path.read_text(encoding="utf-8")
+
+
+def _scan_modules(sources: Iterator[tuple[str, str]]) -> frozenset[str]:
+    """THE SCAN'S LOOP: keep the modules whose source reaches a store client.
+
+    ⛔ ONE LOOP FOR THE TREE AND THE PIN. The pin that exercises the attribute leg
+    called `_module_reaches_a_store` directly, so reverting THIS loop to the
+    pre-fix two-leg expression kept every row green (measured: 101 passed) — the
+    helper was left correct and exercised, and the scan was silently back on the
+    narrower predicate. The wiring is pinned by feeding this function.
+    """
+    return frozenset(
+        module for module, source in sources if _module_reaches_a_store(source)
+    )
 
 
 def _module_reaches_a_store(source: str) -> bool:
@@ -1496,8 +1528,7 @@ def _module_reaches_a_store(source: str) -> bool:
     `getattr(tortoise, "FalkorDB")`). The attribute leg was missing here for two
     rounds while `_offending` applied it — a direction scan narrower than the ban
     it certifies, which is this PR's whole subject. Synthetic input is the only
-    input that can hold that leg: no tree module reaches a store ONLY that way
-    (measured: `_package_root_attributes` flags 0 of 305 files).
+    input that can hold that leg: no tree module reaches a store ONLY that way.
     """
     return _reaches_a_store_client(_imports_of(source)) or bool(
         _package_root_attributes(source)
@@ -1597,6 +1628,17 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
     assert _module_reaches_a_store(
         'import tortoise\nc = getattr(tortoise, "FalkorDB")\n'
     ), "the attribute leg must cover the `getattr` form too, not only the plain read"
+    # ⛔ AND THE SCAN'S OWN LOOP IS FED, not just the predicate. No file in the tree
+    # reaches a store ONLY through the attribute spelling, so reverting the LOOP to
+    # the pre-fix two-leg expression left every row green (measured: 101 passed) —
+    # the predicate stayed correct and exercised while the scan was back on the
+    # narrower predicate. A synthetic pair is the only input that can hold the
+    # wiring, so the pin goes through `_scan_modules` itself.
+    assert _scan_modules(iter([("tortoise.synthetic_attr_only", attr_only)])) == {
+        "tortoise.synthetic_attr_only"
+    }, (
+        "the scan's loop does not route through `_module_reaches_a_store`, so the "
+        "attribute leg can be dropped from the scan with every other row green")
 
 
 def test_the_direction_scan_agrees_with_the_ban_on_the_FOLDED_spelling() -> None:
