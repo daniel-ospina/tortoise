@@ -3114,8 +3114,13 @@ def removal_report(
 # The fix is the same one #12402/#12291 needed one artifact over: the reference has to be a
 # version the PR cannot author. That is the MERGE BASE, and `archive_surface.resolve_base`
 # owns the definition so the two gates can never disagree about what they compared. What
-# differs from `cut` is only WHICH comparison is made: `removal_report` is reused UNCHANGED
-# — its eighteen review rounds of accounting rules (archive kind matching, the SDK
+# differs from `cut` is only WHICH comparison is made — plus TWO passed-in kwargs, never a
+# second rule. `committed_rename_record=True`: the enforcing path has no override to read, so
+# the committed rename record is what it can consult, and a rename is the shape that needs no
+# freeze. `flag="--allow-surface-shrink"`: this subcommand's own spelling, so a refusal never
+# names `cut`'s `--allow-removal`. That is the whole divergence — a rename needs NO waiver on
+# `check` and still does on `cut`. Everything else is `removal_report` reused UNCHANGED: its
+# eighteen review rounds of accounting rules (archive kind matching, the SDK
 # freeze+map pair, the stale-forward contradiction, qualified vs bare waivers) are the
 # record rule, and a second implementation of it here would be a second answer.
 
@@ -4754,7 +4759,25 @@ def main() -> int:
     if getattr(args, "cmd", None) == "check":
         # The same pairing `archive_surface.py check` refuses. A waiver with no reason is an
         # unexplained deletion; a waiver with no base ref waives a removal nothing graded.
-        if bool(args.allow_surface_shrink) != bool(args.allow_surface_shrink_reason):
+        # `.strip()` BEFORE the pairing test, exactly as `cmd_cut` normalises
+        # `--allow-removal-reason`: a reason of `""` or `"   "` is not a STATED reason. Raw
+        # truthiness let both shapes through (measured: `check --allow-surface-shrink-reason ""`
+        # exited 0 silently, and a whitespace reason satisfied the pairing test beside a real
+        # waiver, so an unexplained removal could be waived by pressing space) — a guard that
+        # reads "a waiver needs a reason" and accepts a space is the false PASS the pairing
+        # exists to stop. Normalised IN PLACE so the green line echoes the string that was graded.
+        #
+        # `reason_given` is deliberately STRICTER than `cmd_cut`, which drops a blank reason to
+        # the same `""` default and so cannot tell "no flag" from "--flag ''". An operator who
+        # typed the flag believes they recorded a justification; silence would leave them with a
+        # removal nobody explained, which is the shape both refusals below exist to name.
+        reason_given = args.allow_surface_shrink_reason is not None
+        args.allow_surface_shrink_reason = (
+            args.allow_surface_shrink_reason or ""
+        ).strip() or None
+        if bool(args.allow_surface_shrink) != bool(args.allow_surface_shrink_reason) or (
+            reason_given and not args.allow_surface_shrink
+        ):
             print(
                 "REFUSED --allow-surface-shrink and --allow-surface-shrink-reason go "
                 "together: a waiver without a stated reason is an unexplained removal, and "

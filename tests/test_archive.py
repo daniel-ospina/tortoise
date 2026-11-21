@@ -27,6 +27,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -2384,7 +2385,25 @@ def test_the_shrink_arm_is_OFF_unless_a_base_ref_is_given(
     """`check(tmp)` keeps its old meaning: an opt-in arm cannot red the depth-1 `test` job."""
     (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
     _commit(tree, "tortoise/gone.py")
+    # ⛔ The fixture's DEFAULT branch is `main` and HEAD starts ON it, so a removal committed
+    # there makes `resolve_base(root, None)` return HEAD — the arm then compares HEAD with
+    # ITSELF and returns the same empty list as "the arm did not run". Measured (round-14
+    # review, P3-2): with the arm forced ON (`if base_ref is not None:` -> `if True:`) the whole
+    # of `tests/test_archive.py` stayed green at 128 passed, so this row could not red the gate
+    # it names. Commit the removal on a SIDE branch: the default branch then still holds the
+    # file, so a forced-on arm has a real removal to report.
+    subprocess.run(["git", "checkout", "-q", "-b", "side"], cwd=tree, check=True)
     _commit_drop(tree, "tortoise/gone.py")
+    # Pin the premise, so the test cannot silently drift back to the vacuous shape: the ref the
+    # arm would use without a base ref must still carry the removed file.
+    default_sha = arch.resolve_base(tree, None)[0]
+    still_holds = subprocess.run(
+        ["git", "cat-file", "-e", f"{default_sha}:tortoise/gone.py"], cwd=tree
+    ).returncode
+    assert still_holds == 0, (
+        "the default branch no longer holds the removed file, so a forced-on arm would report "
+        "nothing and this row would be vacuous again"
+    )
     assert arch.shrink_violations(tree, base_ref="HEAD~1"), "positive control: the arm fires"
     monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
     monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
@@ -2397,6 +2416,64 @@ def test_the_shrink_arm_is_OFF_unless_a_base_ref_is_given(
     assert any("MODULE REMOVED" in problem for problem in on), (
         "the call site does not pass the base ref through, so the arm is unreachable from the "
         f"CLI: {on}"
+    )
+
+
+def test_a_BLANK_or_whitespace_archive_reason_is_not_a_reason() -> None:
+    """P3-1 of the round-14 review: the pairing guard compared RAW truthiness.
+
+    Measured before the fix: `check --allow-archive-shrink-reason ""` with no waiver exited 0
+    silently, and a whitespace reason satisfied the pairing test beside a real waiver — an
+    unexplained removal waived by pressing space. `cmd_cut` normalises its own reason with
+    `.strip()`; this guard did not.
+    Mutation: drop the `.strip()`/`reason_given` normalisation -> the first case exits 0 again.
+    """
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "archive_surface.py"), *args],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+    blank = run("check", "--allow-archive-shrink-reason", "")
+    assert blank.returncode == 2, blank.stdout + blank.stderr
+    assert "go together" in (blank.stdout + blank.stderr), (
+        "a reason flag with no waiver names an override that did not happen — including when "
+        f"the value is empty: {blank.stdout}{blank.stderr}"
+    )
+
+    spaces = run(
+        "check",
+        "--base-ref",
+        "HEAD",
+        "--allow-archive-shrink",
+        "module:tortoise.sdk",
+        "--allow-archive-shrink-reason",
+        "   ",
+    )
+    assert spaces.returncode == 2, spaces.stdout + spaces.stderr
+    assert "go together" in (spaces.stdout + spaces.stderr), (
+        "refused for the wrong reason: the PAIRING guard is what must answer here, not the "
+        f"needs--base-ref guard: {spaces.stdout}{spaces.stderr}"
+    )
+
+    # Positive control: a REAL reason beside a REAL waiver passes the pairing guard and is
+    # answered by the base-ref arm instead.
+    real = run(
+        "check",
+        "--base-ref",
+        "no-such-ref-14039",
+        "--allow-archive-shrink",
+        "module:tortoise.sdk",
+        "--allow-archive-shrink-reason",
+        "deliberate: measured",
+    )
+    assert real.returncode == 2, real.stdout + real.stderr
+    assert "go together" not in (real.stdout + real.stderr), (
+        "a stated reason must pass the pairing guard and fail on the base ref instead: "
+        f"{real.stdout}{real.stderr}"
     )
 
 

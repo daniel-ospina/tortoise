@@ -2359,7 +2359,20 @@ def main(argv: list[str] | None = None) -> int:
             # exit 2 (a defect in the invocation), never exit 1 — an unwaivable invocation is
             # not a finding about the tree, and reading it as one would send the operator
             # looking for a removal that does not exist.
-            if bool(args.allow_archive_shrink) != bool(args.allow_archive_shrink_reason):
+            # `.strip()` BEFORE the pairing test, the same normalisation `cmd_cut` applies to
+            # `--allow-removal-reason` and the surface tool applies to its own reason: `""` and
+            # `"   "` are not STATED reasons. Raw truthiness accepted both (measured: a whitespace
+            # reason satisfied the pairing test beside a real waiver), so an unexplained removal
+            # could be waived by pressing space. Normalised in place so the green line echoes the
+            # string that was graded. `reason_given` keeps a blank-but-PRESENT flag distinct from
+            # no flag at all, the same distinction the surface tool makes.
+            reason_given = args.allow_archive_shrink_reason is not None
+            args.allow_archive_shrink_reason = (
+                args.allow_archive_shrink_reason or ""
+            ).strip() or None
+            if bool(args.allow_archive_shrink) != bool(args.allow_archive_shrink_reason) or (
+                reason_given and not args.allow_archive_shrink
+            ):
                 print(
                     "REFUSED --allow-archive-shrink and --allow-archive-shrink-reason go "
                     "together: an override with no stated reason is not a record, and a "
