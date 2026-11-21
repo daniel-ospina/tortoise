@@ -1322,7 +1322,9 @@ def _is_absent_third_party_distribution(cause: BaseException | None) -> bool:
     `.name` settles every real shape; the message is read only for its origin TOKEN.
 
     Both signals fail CLOSED: an origin that is neither named nor recognisably third-party is not
-    the environment, so it keeps the skip out.
+    the environment, so it keeps the skip out. That last clause is PINNED — a cause carrying no
+    origin at all must classify `stray` — because reverting it was measured green until the arm
+    in `test_the_over_refusal_population_is_itself_pinned` existed.
     """
     if not isinstance(cause, ImportError):
         return False
@@ -1563,6 +1565,22 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     assert declared in skipped["unreadable"] and skipped["stray"] == [], (
         "a third-party `.name` is enough on its own — a message naming no module must not turn "
         f"the environment into a repo-side break: {skipped['stray']}")
+
+    # ⛔ …AND A CAUSE THAT NAMES NO ORIGIN AT ALL MUST FAIL **CLOSED** (`#14099` F1, cycle 5).
+    # `111a461c` narrowed the helper to "`.name`, else the `from '<module>'` token, else REFUSE",
+    # and the last clause was enforced by NOTHING: reverting `if not name: return False` to
+    # `return True` (the pre-`111a461c` reading, where a bare hand-raised cause inside the
+    # declared module read as the environment) left this whole file GREEN. That is the fail-OPEN
+    # direction of the population pin — a cause no origin signal names drops the ten
+    # `tortoise.sdk` writers out of the measured set on the strength of a guess. Measured mutant,
+    # and the reason this arm exists: with the rule, `stray`; without it, `unreadable`.
+    monkeypatch.setattr(
+        strip, "_module_source",
+        folding(declared_module, ImportError("symbol vanished")))
+    assert declared in _writer_register_population()["stray"], (
+        "a cause naming NO origin module — no `.name`, no `from '<module>'` token — was excused "
+        "as the environment; an unrecognised origin has to fail CLOSED, or the exemption "
+        "silently swallows the population shrink it exists to bound")
 
     # a renamed writer is `missing`, never silently dropped.
     blanked = outsider.partition("::")[0]
