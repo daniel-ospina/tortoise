@@ -369,9 +369,15 @@ SWEEP_NAMES = 66
 #: rest. It only cost a residue row. ⛔ Five conversions and one deletion is SIX rows; the count is
 #: stated here because "each is now `poisoned |= …`" was this block's own first draft and the tree
 #: falsifies it (raised by a fresh review of this branch's pre-rebase head, #14058 — ⛔ cited by
-#: ISSUE NUMBER and not by sha on purpose: a pre-rebase commit is reachable from no ref and
-#: disappears on the next `gc`, so a sha here would be an unreproducible address of exactly the
-#: kind this block forbids elsewhere).
+#: ISSUE NUMBER, and the REASON is measured rather than asserted, because the draft that gave one
+#: gave a false one: it said a pre-rebase commit "is reachable from no ref and disappears on the
+#: next `gc`", and that commit (`83e94826a8a`) is an ANCESTOR of a ref, `refs/pull/14108/head`, which
+#: `git gc` does not prune. What IS measured of it: on no remote BRANCH (`git branch -r --contains
+#: 83e94826a8a` → empty; #14108's own branch, `f84afe7b4c`, does not contain it) and not on `main`
+#: (`git merge-base --is-ancestor` → NO), and not fetchable BY ITS SHA at all — `git fetch origin
+#: 83e94826a8a` from a bare clone answers `couldn't find remote ref`; only `git fetch origin
+#: refs/pull/14108/head` resolves it. So a sha here would address a ref that MOVES rather than a
+#: tree: exactly the unreproducible address this block forbids elsewhere).
 #: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
 #: MEASURED on both trees and diffed row by row (`py_files()` → `edits_for()` → `residue` on
 #: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
@@ -425,10 +431,19 @@ SWEEP_NAMES = 66
 #: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three shapes are
 #: already pinned rows on this tree, and their counts were re-read at THIS head rather than quoted
 #: from `ad79129cb5`. ⛔ The move past the 274 measured there is `#14068`'s (`2fe01fc775e`), NOT this
-#: lane's: `git diff` between `2fe01fc775e` and the `#14108` PRE-MERGE tree over `'*.py'` carries no
-#: added receiver row at all (its only non-comment `+`/`-` receiver line is the re-indented
-#: `seen.update` above, already counted) — that tree cited by ISSUE NUMBER and not by sha, per this
-#: block's own note above on `#14058`.
+#: lane's: `git diff` between `2fe01fc775e` and `83e94826a8a` over `'*.py'` carries no added receiver
+#: row at all (its only non-comment `+`/`-` receiver line is the re-indented `seen.update` above,
+#: already counted). ⛔ THAT TREE IS NAMED BY SHA, because the issue number cannot name it: `#14108`
+#: resolves to a ref that tracks the branch's CURRENT head, `d523c9be8c`, and `83e94826a8a` is the
+#: OLDEST of the EIGHT commits between `2fe01fc775e` and it (`git log --oneline
+#: 2fe01fc775e..d523c9be8c`). On that head this sentence does not drift, it INVERTS: `d523c9be8c`
+#: DELETES the `seen.update` line and leaves a comment where it was (`git diff 2fe01fc775e
+#: d523c9be8c -- '*.py'`), so "re-indented, already counted" is true ONLY on `83e94826a8a`. The sha is
+#: resolvable, and by the only path it has: `git fetch origin refs/pull/14108/head`, measured from a
+#: bare clone — NOT by sha, see the note above on `#14058`. Its own pin is `(11839,
+#: "0a7e60fa05aa31b9")`, the same pair as the parent `2fe01fc775e`, so it carries no residue
+#: measurement the parent lacks and nothing here rests on it except the ADDRESS, which is the point:
+#: an address that resolves to a different tree is the defect this block exists to catch.
 #: So `graph.query` is **276** here, `super().query` **68**, `client.delete` **43** — read with
 #: `--report`, not with a grep. A raw whole-tree grep is NOT that reading: it counts OCCURRENCES,
 #: prose included, not the pinned residue ROW, and it counts this block's OWN prose about the
@@ -480,21 +495,27 @@ SWEEP_NAMES = 66
 #: `dict` accumulator in a test is a swept receiver). Both pairs above are `--repin` output measured
 #: on the tree they name, in a detached worktree at that revision — not read off the committed pin.
 #: ⛔ A reader must not have to reconcile two paragraphs that disagree, which is the "stale on
-#: arrival" class this block polices (raised by review). ⛔ NO PRE-MERGE SHA IS CITED HERE, and this
-#: is the sentence's second correction: an earlier draft named the lane's own pre-fix tip and called
-#: it "the capture rewrite's PARENT head", which it was not — that tip's parent is `2fe01fc775e`,
-#: the very rev just named, so the draft named one tree twice and called the second one its parent
-#: (its pin was the same `(11839, …)`, so it carried no residue measurement the parent does not
-#: already have). Per this block's own note above on `#14058`, a pre-merge commit is cited by ISSUE
-#: NUMBER (`#14108`) and never by sha — so this sentence names only the two revs `main`'s own
-#: history survives, and nothing else.
+#: arrival" class this block polices (raised by review). ⛔ NO PRE-MERGE SHA IS CITED IN THIS
+#: SENTENCE, and this is the sentence's second correction: an earlier draft named the lane's own
+#: pre-fix tip and called it "the capture rewrite's PARENT head", which it was not — that tip's
+#: parent is `2fe01fc775e`, the very rev just named, so the draft named one tree twice and called
+#: the second one its parent (its pin was the same `(11839, …)`, so it carried no residue
+#: measurement the parent does not already have). So this sentence names only the two revs `main`'s
+#: own history survives, and nothing else. ⛔ That is a rule about THIS SENTENCE and not an embargo
+#: on every sha: the `#14068` attribution above does cite one deliberately, because THERE the
+#: address is the whole claim and `#14108` resolves to a different tree — its resolution path and
+#: its limits are stated at that sentence rather than re-derived here.
 #: ⛔ THE "GATE IS RED HERE" NARRATION IS SCOPED, NOT PRESENT-TENSE. That paragraph described
 #: `ad79129cb5`, where the pin read 11825 while that tree derived 11833 — `--check` red. It is NOT
 #: the state of `main` at `2fe01fc775e`, which pins `(11839, "0a7e60fa05aa31b9")` — exactly what
 #: `--repin` derives there, so `--check` exits 0 on that tree and on this head. `main` has since
-#: moved and re-cut to the pair THIS head pins, `(11838, "de5664dc98549d56")` (`1b82cc7063` made
-#: that re-cut; `e022fc935b`, `origin/main` when this was written, carries it) — so the 11839 above
-#: is a figure for the revision it names, never a stale claim about `main`'s head.
+#: moved and re-cut to `(11838, "de5664dc98549d56")` on `1b82cc7063`'s tree (`1b82cc7063` made that
+#: re-cut; `e022fc935b`, `origin/main` when this was written, carries it) — so the 11839 above is a
+#: figure for the revision it names, never a stale claim about `main`'s head. ⛔ It names the TREE and
+#: not "the pair THIS head pins", which is what it said before a merge re-cut this head to
+#: `(11844, "70d6cfdcd8b769e4")` and left the sentence asserting a pair this head does not carry —
+#: the same relative-reference class this paragraph fixes one line below for `e022fc935b`, and a
+#: reader should not have to reconcile it against this block's own pin (raised by review).
 #: The recurrence `#14062` and `#14058` document (the pin graded on PULL REQUESTS only) is real, but
 #: an earlier draft asserted it as a live red and a later review falsified that (raised by review);
 #: the fix for the recurrence is still to grade the pin on `main`.
