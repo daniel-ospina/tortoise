@@ -37,7 +37,7 @@ Each has the evidence, a confidence, and **what would disprove it**.
 
 **The causal chain — this is why local fixes keep regenerating the symptom:**
 
-```
+```text
 D3 retry loop + live session writes
    → fill the single worker's queue (D4)
       → pre_handler 6–9 s
