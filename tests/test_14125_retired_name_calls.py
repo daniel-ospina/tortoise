@@ -330,11 +330,37 @@ def _handler_names(handler: ast.ExceptHandler) -> set[str]:
 
 
 def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
-    """Whether a handler here would catch a ANY exception (bare or `Exception`)."""
+    """Whether some handler here CATCHES anything (bare or `Exception`) and DROPS it.
+
+    Whether the handler re-raises is part of the question, not a separate one:
+    the property is *"the programming error never reaches the caller"*, and a
+    broad arm that re-raises never swallows anything. Charging it would be a
+    false red on the CORRECT shape — `except Exception: _proj.close(); raise`
+    (clean up, then propagate) is a probe that already fails loudly, and
+    `tests/e2e/hosted/conftest.py` is exactly that shape.
+    """
     return any(
-        names == {"<bare>"} or "Exception" in names
-        for names in (_handler_names(h) for h in handlers)
+        (names == {"<bare>"} or "Exception" in names) and not _reraises_its_own(h)
+        for h, names in ((h, _handler_names(h)) for h in handlers)
     )
+
+
+def _reraises_its_own(handler: ast.ExceptHandler) -> bool:
+    """Whether the handler's body re-raises the exception it caught.
+
+    Wider than `_reraises` (which is deliberately exactly one bare `raise`, the
+    only shape that counts as COVERAGE): for swallowing, `raise` and
+    `raise exc` are the same outcome — nothing is dropped.
+    """
+    caught = _handler_names(handler)
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.Raise):
+            continue
+        if node.exc is None:
+            return True
+        if isinstance(node.exc, ast.Name) and node.exc.id in caught:
+            return True
+    return False
 
 
 def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
@@ -350,13 +376,20 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     error in the clause is not the property — `except ImportError: return False`
     names the seam and then swallows it, and counting the name would let a probe
     pass this gate with exactly the behaviour it exists to forbid.
+
+    ⛔ ORDER IS PART OF THE PROPERTY (review F2, and it was still open at
+    `9b7ac6ee8d`). Python tests `except` clauses in source order and runs only
+    the first match, so a narrow arm placed AFTER the broad one is UNREACHABLE:
+    `except Exception: …` then `except ImportError: raise` reads as armed to a
+    set-membership check, while behaving exactly like the pre-fix code. Coverage
+    is therefore what the narrow arms BEFORE the first broad arm can still catch.
     """
     out: set[str] = set()
     for handler in handlers:
-        if not _reraises(handler):
-            continue
         names = _handler_names(handler)
         if names == {"<bare>"} or "Exception" in names:
+            break  # nothing below a broad arm can ever run
+        if not _reraises(handler):
             continue
         out |= names
     return out
@@ -789,9 +822,18 @@ def _probe_blocks_from_source(
     return tuple(rows)
 
 
+#: Files the probe census could not read or parse. A file it cannot GRADE must
+#: never be a silent drop: `except SyntaxError: continue` made sixteen files
+#: vanish from the population while the census stayed green (measured while
+#: fixing round-3 review F1), which is the "a silent drop is a fail" class this
+#: gate exists to catch.
+_UNGRADABLE: list[str] = []
+
+
 @functools.lru_cache(maxsize=1)
 def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool], ...]:
     out: list[tuple[str, int, tuple[str, ...], bool, bool, bool]] = []
+    del _UNGRADABLE[:]
     for path in _tracked_python_files():
         rel = str(path.relative_to(ROOT))
         if not (rel.startswith("tests/") or rel.startswith("tools/")):
@@ -799,6 +841,7 @@ def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool],
         try:
             src = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            _UNGRADABLE.append(rel)
             continue
         # A cheap text prefilter, not the rule: `AVAILABLE` is a substring of
         # every `*AVAILABLE` flag spelling, `skipif` admits the
@@ -816,9 +859,27 @@ def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool],
         try:
             rows = _probe_blocks_from_source(src)
         except SyntaxError:
+            _UNGRADABLE.append(rel)
             continue
         out.extend((rel, *row) for row in rows)
     return tuple(out)
+
+
+def test_a_file_the_census_cannot_grade_is_a_red_not_a_silent_drop():
+    """A file the census cannot read or parse is UNGRADED — which must be a red.
+
+    `except SyntaxError: continue` drops the whole file from the population, so
+    the gate reads GREEN over code it never looked at. Not hypothetical, and not
+    about somebody else's tree: while fixing review F1 a malformed comment was
+    written into sixteen files, every one of them vanished from the census, and
+    `UNARMED` went EMPTY — which is indistinguishable from "every probe is
+    armed". A dropped file is a fail, not an absence.
+    """
+    _probe_report()
+    assert not _UNGRADABLE, (
+        "the probe census could not read or parse these files, so it graded "
+        f"NOTHING in them: {_UNGRADABLE}"
+    )
 
 
 def _required_names(own_import: bool) -> set[str]:
@@ -1062,6 +1123,48 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     assert looped == ((5, (), True, True, True),), (
         "a probe guard inside a `for` in a `_AVAILABLE`-resolved helper must be "
         f"graded as a ROOT, not skipped: {looped}"
+    )
+
+    # ⛔ F2 — ORDER is part of the property, and it was still open at
+    # `9b7ac6ee8d`: Python matches handlers in source order, so a narrow arm
+    # BELOW the broad one is UNREACHABLE and the block behaves exactly like the
+    # pre-fix code while a set-membership check reads it as ARMED.
+    broad_first = rows(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK as _ProbeSDK
+            _ProbeSDK()
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        except (AttributeError, NameError, TypeError, ImportError):
+            raise
+        """
+    )
+    assert broad_first == ((3, (), True, True, True),), (
+        "an inert arm (the narrow handler placed AFTER the broad one) is "
+        f"UNREACHABLE and must read as NO coverage: {broad_first}"
+    )
+
+    # ...and a broad arm that RE-RAISES swallows nothing, so it is not the
+    # class-2 shape and must not be redded. `except Exception: cleanup(); raise`
+    # is a probe that already fails loudly (`tests/e2e/hosted/conftest.py`).
+    reraised = rows(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK as _ProbeSDK
+            _ProbeSDK()
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            _cleanup()
+            raise
+        """
+    )
+    assert reraised == ((3, (), False, True, True),), (
+        "a broad arm that re-raises does not SWALLOW: `swallows` must be False, "
+        f"or the gate reds a block that is already loud: {reraised}"
     )
 
     # The tree must still hold probe rows and importing probes — otherwise the
