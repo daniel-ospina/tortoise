@@ -1525,7 +1525,9 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # finding 1 — measured on this head before the fix). ⛔ The `It is the ONLY guard on this figure:`
         # sentence is DELETED rather than softened: the paragraph claimed exclusivity while the leg above it
         # grades the same figure against its second publication, so the block asserted two incompatible
-        # things two lines apart — the class this file exists to catch, reintroduced by the commit that
+        # things in the SAME comment block — six lines apart, measured, not "two" as this note first said
+        # (#14038 review, P3: an unmeasured quantity stated as fact, in newly added text) — the class this
+        # file exists to catch, reintroduced by the commit that
         # fixed the previous instance. It is also not the only guard on the figure:
         # `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried` grades the alternative
         # basis from the pin's union set, so an alt numerator this BAND still contains is caught there —
