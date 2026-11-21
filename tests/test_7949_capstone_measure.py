@@ -17601,7 +17601,7 @@ def test_the_D5_row_is_still_one_table_row():
     """D5 is the row this bundle re-derives 278 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `270` reds instead of leaving four comments behind (a
+    any commit moving the line off `278` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
@@ -18013,9 +18013,26 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # draft cited the four line numbers and the same commit's own insertions staled two of them
     # (#13802 review, round 28, P3), which is this file's recurring defect committed in the act
     # of fixing it.
+    # ⛔ AND THE CENSUS READS EVERY SPELLING THE FIGURE IS WRITTEN IN, because a number is only
+    # graded by the SENTENCE it sits in (#14060 review round 22 — MEASURED). Two further
+    # statements of this same count existed in this file — the `off <number>` spelling in the arm
+    # above and the `carries <number> of them` spelling below — and BOTH were ten below the
+    # derived `280` while every arm stayed green: the census read the phrase `cite-shaped` only,
+    # so the docstring's own promise that "any commit moving the line off … reds" was false about
+    # the mechanism it names. That is the class a phrase-bound pin is FOR (round 13 closed three
+    # findings of exactly this shape), so the phrases are a TABLE — a new spelling of this
+    # figure gets a row here, never a second ungraded number. ⛔ WRITE NO FIGURE IN THIS BLOCK:
+    # a quoted spelling carrying a digit is censused by the very table it documents (measured —
+    # the first cut of this comment made the arm it sits in red with `{270, 280}`).
+    _D5_LINE_COUNT_PHRASES = (
+        r"(\d+)\s+cite-shaped",
+        r"moving the line off `(\d+)`",
+        r"line that carries (\d+) of",
+    )
     _typed_comment_counts = {
         int(n) for line in Path(__file__).read_text(encoding="utf-8").splitlines()
-        for n in re.findall(r"(\d+)\s+cite-shaped", line)}
+        for phrase in _D5_LINE_COUNT_PHRASES
+        for n in re.findall(phrase, line)}
     assert _typed_comment_counts == {_measured_count}, (
         f"this file states {sorted(_typed_comment_counts)} as the D5 line's `:N` count in its "
         f"own comments, but the line carries {_measured_count} — re-derive the sentence, do not "
@@ -18289,7 +18306,7 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     re-pointed the `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
     docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
     value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
-    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 270 of
+    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 278 of
     them. A row whose own thesis is that a typed line number rots cannot re-point a figure
     and leave it unread; that is the class #13879 review named when a reverted address
     "reddened no arm at all".
