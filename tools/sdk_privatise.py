@@ -354,10 +354,13 @@ SWEEP_NAMES = 66
 #: grading it, and `--check` was RED on `main` at `f392bb67d5` — the tree this re-cut was measured
 #: on. ⛔ THAT IS A WINDOW, NOT A STANDING STATE, and the present-tense "is therefore RED on `main`
 #: today" this sentence used to carry went FALSE: `#14068` (`2fe01fc775`) re-cut `main`'s pin to
-#: `(11839, "0a7e60fa05aa31b9")` — the pair this file pins below — and that tree DERIVES it, so
-#: `--check` exits 0 on `main`. Measured on BOTH trees at this head, not inferred from the pins:
-#: `untyped receivers left alone (deliberate, reported): 11839`, exit 0, here and on `origin/main`
-#: `2fe01fc775`.
+#: `(11839, "0a7e60fa05aa31b9")`, and THAT tree DERIVES it, so
+#: `--check` exits 0 on `main` at `2fe01fc775`. Measured on BOTH trees at that head, not inferred
+#: from the pins: `untyped receivers left alone (deliberate, reported): 11839`, exit 0, there and on
+#: `origin/main` `2fe01fc775`. ⛔ THE PAIR THIS FILE CARRIES IS A LATER, SMALLER ONE: `main` moved two
+#: more commits and re-cut the residue itself, so the pin below is `(11838, "de5664dc98549d56")` and
+#: `--check` reads **11838** here — the RE-CUT block below records which row moved and why. Do not
+#: restore `11839` on the strength of this sentence: it is true of `2fe01fc775`, not of this tree.
 #: The delta from `main`'s tree is −6 and it is a REMOVAL, not an absorption: SIX of the
 #: eight rows the `#14062` block above declared are the `poisoned.update` shape, and this lane
 #: deleted the shape rather than declaring it. The binding-poison arms in
@@ -503,8 +506,8 @@ SWEEP_NAMES = 66
 #: reached it independently and landed it first; what this branch could not see from `df0525a7a9` is
 #: `#14068`, whose +8 receiver rows are on `main` and account for the whole `11831` vs `11839` gap. So
 #: the two pins were never in disagreement about the −2 — they were measured on trees an 8-row merge
-#: apart. Re-derived on THIS tree with `--check` (which recomputes the residue and compares BOTH the
-#: count and the digest): `untyped receivers left alone (deliberate, reported): 11839`, exit 0 — i.e.
+#: apart. Re-derived on the FOURTH merge tree with `--check` (which recomputes the residue and compares
+#: BOTH the count and the digest): `untyped receivers left alone (deliberate, reported): 11839`, exit 0 —
 #: this PR's own diff moves the population by ZERO rows in either direction, which is what a diff of
 #: doc prose, pin data rows and comment text should do. ⛔ The pin is left at `main`'s pair deliberately:
 #: editing it to `11831` would paste this branch's OLDER tree over the merge tree's measurement, which
