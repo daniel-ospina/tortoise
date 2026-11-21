@@ -79,11 +79,16 @@ def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None
     relies on verbatim: *"`derived = replay(journal)` holds only if every write is
     carried by the journal … Journal completeness is a PRECONDITION of this
     design, not an observation about it"* (the gap is tracked as `#5089`). On a
-    CUT-OVER graph the journal stops being written — the record owns the ordinal
-    and the file is an export — so a rebuild from it would produce a graph as of
-    the arming point and **silently drop every later record**, which is the
-    direction nothing can see: `rebuild_all` prints `Done:` and the counts it
-    prints are the journal's, not the record's.
+    CUT-OVER graph the journal stops being appended to — but the append stops
+    when THIS BOX's `TORTOISE_RECORD_ALLOCATE` is rolled with the graph's row
+    `active`, NOT at the per-graph `arm` (the documented order arms every graph
+    first and rolls the flag afterwards, so that window is normal and the file
+    STILL GROWS in it); once the flag is rolled nothing appends it (no exporter
+    writes it yet: §A7.8 item 6 and §A7.5.6's drainer are unbuilt) — so a
+    rebuild from it would produce a graph as of the flag roll and **silently
+    drop every later record**, which is the direction nothing can see:
+    `rebuild_all` prints `Done:` and the counts it prints are the journal's, not
+    the record's.
 
     ⛔ THE POLARITY IS FAIL-CLOSED ON THE RECORD'S **EXISTENCE**, NOT ON A FLAG
     (#14002 review cycle 3, P2). The first cut refused only when
@@ -130,14 +135,17 @@ def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None
         return None
     return (
         "this deployment has a RECORD configured, and on any graph that has been "
-        "cut over the record owns the journal's ordinal — the JSONL is an EXPORT "
-        "there, it stops being appended to, and `derived = replay(journal)` no "
-        "longer holds for it (STORAGE-ARCHITECTURE.md §3; #14002, #5089). A "
-        "rebuild from it would produce a graph as of the arming point and "
-        "silently drop every later record. Nothing was wiped. If NO graph on this "
-        "record is cut over — so the journal really is the full log — re-run with "
-        "`--journal-is-complete`; otherwise restore the graph from the record's "
-        "own backup, not from the journal"
+        "cut over (its `record_cursor` row is `active`) the record owns the "
+        "journal's ordinal — the JSONL stops being appended to once this box's "
+        "`TORTOISE_RECORD_ALLOCATE` is rolled, NOT at the per-graph `arm` (it is "
+        "NOT an export yet: nothing writes it, §A7.8 item 6), so `derived = "
+        "replay(journal)` no longer holds for it (STORAGE-ARCHITECTURE.md §3; "
+        "#14002, #5089). A rebuild from it would produce a graph as of the "
+        "point the append stopped — later than the per-graph arm, later than "
+        "cutover — and silently drop every later record. Nothing was wiped. If "
+        "NO graph on this record is cut over — so the journal really is the full "
+        "log — re-run with `--journal-is-complete`; otherwise restore the graph "
+        "from the record's own backup, not from the journal"
     )
 
 

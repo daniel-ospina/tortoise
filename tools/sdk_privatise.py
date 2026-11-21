@@ -439,7 +439,20 @@ SWEEP_NAMES = 66
 #: `poisoned |= …` and one dead branch deleted) and this PR's +8 receiver rows are BOTH true of this
 #: tree, and a reader re-deriving the pin needs both facts, not just the surviving number.
 #: `--check` on this tree: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11841, "05a67e3380c806b1")
+#: RE-CUT DOWN at the THIRD merge tree (#14068 × `main` `df0525a7a9`): (11841, "05a67e3380c806b1") →
+#: (11839, "0a7e60fa05aa31b9"). The −2 is `main`'s, not this branch's, and it is an ATTRIBUTION
+#: rather than a direction: the residue row sets were derived on both trees
+#: (`--report --base 28ca66878d… --top 100000`, on `467e02393a` and on this merge) and diffed row by
+#: row — `found.update` 12 → 10 is the ONLY row that differs. It is `tests/test_usage_signal.py`,
+#: respelled by `main`'s `#14071` (`df0525a7a9`, the review remainder of `#14065`): the census helper
+#: there no longer carries that shape, so the row is REMOVED rather than absorbed into a new one.
+#: 11841 − 2 = 11839 and the arithmetic is a CROSS-CHECK of the measurement, not the evidence for it:
+#: the pair above is what `--repin` printed on THIS tree. All blocks above stay — `main`'s −6
+#: (`#14001`'s `poisoned.update` shape), this PR's +8 receiver rows, and the second merge's "nothing
+#: moved" are each true of the tree they were measured on, and a reader re-deriving the pin needs the
+#: chain, not just the surviving number.
+#: `--check` on this tree: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11839, "0a7e60fa05aa31b9")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
