@@ -421,8 +421,10 @@ SWEEP_NAMES = 66
 #: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three shapes are
 #: already pinned rows on this tree, and their counts were re-read at THIS head rather than quoted
 #: from `ad79129cb5`. ⛔ The move past the 274 measured there is `#14068`'s (`2fe01fc775e`), NOT this
-#: lane's: `git diff 2fe01fc775e 83e94826a8a -- '*.py'` carries no added receiver row at all (its
-#: only non-comment `+`/`-` receiver line is the re-indented `seen.update` above, already counted).
+#: lane's: `git diff` between `2fe01fc775e` and the `#14108` PRE-MERGE tree over `'*.py'` carries no
+#: added receiver row at all (its only non-comment `+`/`-` receiver line is the re-indented
+#: `seen.update` above, already counted) — that tree cited by ISSUE NUMBER and not by sha, per this
+#: block's own note above on `#14058`.
 #: So `graph.query` is **276** here, `super().query` **68**, `client.delete` **43** — read with
 #: `--report`, not with a grep. A raw whole-tree grep is NOT that reading: it counts OCCURRENCES,
 #: prose included, not the pinned residue ROW, and it counts this block's OWN prose about the
@@ -462,21 +464,28 @@ SWEEP_NAMES = 66
 #: quoted on purpose: an earlier draft of this very sentence said "36 lines later", the measurement
 #: was 38, and the figure moves whenever this block is edited — the same self-falsifying shape the
 #: paragraphs above describe. Measured, and both halves are true of different trees: `--repin`
-#: reads the SAME pair — `(11839, '0a7e60fa05aa31b9')` — on `origin/main` (`2fe01fc775e`) AND on
-#: this commit's PRE-REWRITE tree (`83e94826a8a`: the pre-rebase draft of the commit that landed as
-#: `1b82cc7063`, whose `_capture` still recorded through `seen.update`, so no row had moved there
-#: yet), so everything up to the capture rewrite moves no receiver row; the ONE row this lane's
-#: capture rewrite moves is `seen.update` **102 → 101**, which is that rewrite's own pin delta
-#: `(11839, …)` → `(11838, …)` (the re-cut paragraph below attributes it, and states why a `dict`
-#: accumulator in a test is a swept receiver). ⛔ A reader must not have to reconcile two paragraphs
-#: that disagree, which is the "stale on arrival" class this block polices (raised by review).
+#: reads the SAME pair — `(11839, '0a7e60fa05aa31b9')` — on the capture rewrite's own PARENT,
+#: `2fe01fc775e`, so everything up to that rewrite moves no receiver row; and it reads
+#: `(11838, 'de5664dc98549d56')` on the rewrite itself, `1b82cc7063`, so the ONE row the rewrite
+#: moves is `seen.update` **102 → 101** (the re-cut paragraph below attributes it, and states why a
+#: `dict` accumulator in a test is a swept receiver). Both pairs above are `--repin` output measured
+#: on the tree they name, in a detached worktree at that revision — not read off the committed pin.
+#: ⛔ A reader must not have to reconcile two paragraphs that disagree, which is the "stale on
+#: arrival" class this block polices (raised by review). ⛔ NO PRE-MERGE SHA IS CITED HERE, and this
+#: is the sentence's second correction: an earlier draft named the lane's own pre-fix tip and called
+#: it "the capture rewrite's PARENT head", which it was not — that tip's parent is `2fe01fc775e`,
+#: the very rev just named, so the draft named one tree twice and called the second one its parent
+#: (its pin was the same `(11839, …)`, so it carried no residue measurement the parent does not
+#: already have). Per this block's own note above on `#14058`, a pre-merge commit is cited by ISSUE
+#: NUMBER (`#14108`) and never by sha — so this sentence names only the two revs `main`'s own
+#: history survives, and nothing else.
 #: ⛔ THE "GATE IS RED HERE" NARRATION IS SCOPED, NOT PRESENT-TENSE. That paragraph described
 #: `ad79129cb5`, where the pin read 11825 while that tree derived 11833 — `--check` red. It is NOT
 #: the state of `main` at `2fe01fc775e`, which pins `(11839, "0a7e60fa05aa31b9")` — exactly what
 #: `--repin` derives there, so `--check` exits 0 on that tree and on this head. `main` has since
 #: moved and re-cut to the pair THIS head pins, `(11838, "de5664dc98549d56")` (`1b82cc7063` made
-#: that re-cut; `e022fc935b`, this commit's `origin/main`, carries it) — so the 11839 above is a
-#: figure for the revision it names, never a stale claim about `main`'s head.
+#: that re-cut; `e022fc935b`, `origin/main` when this was written, carries it) — so the 11839 above
+#: is a figure for the revision it names, never a stale claim about `main`'s head.
 #: The recurrence `#14062` and `#14058` document (the pin graded on PULL REQUESTS only) is real, but
 #: an earlier draft asserted it as a live red and a later review falsified that (raised by review);
 #: the fix for the recurrence is still to grade the pin on `main`.
