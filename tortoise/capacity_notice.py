@@ -50,8 +50,14 @@ arithmetic (#13998 requirement 5):
 * ⛔ IF EITHER CANNOT BE READ, NOTHING IS SENT AND THE PASS LOGS IT
   (:func:`evaluate` returns a named reason instead of a percentage). A guessed
   percentage in a customer's inbox is worse than no email.
-  ⚠️ The reading is an ESTIMATE that under-reports (it excludes the HNSW index —
-  `graph_storage.VECTOR_INDEX_EXCLUDED`), so this notice errs LATE, never early.
+  ⚠️ The reading is an ESTIMATE that systematically under-reports (it excludes
+  the HNSW index — `graph_storage.VECTOR_INDEX_EXCLUDED`), which pushes this
+  notice LATE. ⛔ It is NOT a one-way bound, and an earlier cut of this line said
+  "errs LATE, never early" — the meter's own note (`allowance_gate`,
+  `#13102` P1-3) states that the systematic exclusions all remove bytes while a
+  SAMPLES-based estimate "wobbles both ways" with an UNMEASURED sampling error,
+  so a reading can be high and the notice can fire slightly EARLY. Late is the
+  intended bias (the percentage is floored too), not a guarantee.
 
 EXACTLY ONE SEND PER THRESHOLD PER ACCOUNT, EVER. The durable ledger is
 `organizations.storage_notice_pct`, an integer HIGH-WATER MARK of the highest threshold
@@ -342,10 +348,13 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: sends; 9 passes ≠ 1 cap). It stays FINITE regardless because the ledger is
 #: once-per-threshold-per-account-ever: an account already marked at the TOP
 #: threshold (100 %) short-circuits before the gauge is read (`notify_account`'s
-#: fast path is `notice_pct >= max(THRESHOLDS)`), and one marked 80 % falls
-#: through to `evaluate` but still returns `already-notified` because
-#: `notice.threshold <= account.notice_pct` — so no threshold is left to send and
-#: the ramp is a one-off per account rather than a daily charge. ``NOTICE_MAX_SENDS_ENV`` is an absolute override;
+#: fast path is `notice_pct >= max(THRESHOLDS)`). ⛔ An account marked 80 % does
+#: NOT short-circuit there — an earlier cut of this note said it still returned
+#: `already-notified`, which is FALSE in exactly the case this paragraph is about:
+#: if the gauge crossed a tier boundary it legitimately sends the 100 % notice.
+#: What bounds the total is the LEDGER, not the fast path: each threshold can be
+#: stamped once, ever, so an account receives at most one 80 % and one 100 %
+#: notice in its lifetime and every later pass finds nothing left to send. ``NOTICE_MAX_SENDS_ENV`` is an absolute override;
 #: if you shorten the interval or raise the send budget, re-price against ONE
 #: process's budget — never against a pass count you did not measure.
 NOTICE_MAX_SENDS_PER_PASS_DEFAULT = 5

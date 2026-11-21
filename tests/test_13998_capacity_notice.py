@@ -1485,13 +1485,18 @@ _OVERLAP_NEGATED = re.compile(
     r"\b(?:cannot|can ?not|does not|do not|nor|never|no|not(?!\s+only))\b",
     re.IGNORECASE)
 _OVERLAP_CLAUSE_SPLIT = re.compile(
-    # ⛔ COMMAS, PARENTHESES AND DASHES ARE CLAUSE BOUNDARIES (#14038 review
-    # cycle 7). Without them a line laundered the claim through punctuation the
-    # cycle-6 splitter did not know: "a replacement cannot mount the held volume
-    # — a rolling replacement overlaps an old and a new process" stayed ONE
-    # "clause", so the unrelated `cannot` licensed the claim and the row passed
-    # GREEN. Splitting more finely can only make the scan stricter.
-    r"(?<=[.;:!?])\s+|\s+(?:and|but|yet|so)\s+|[,()\u2014\u2013]", re.IGNORECASE)
+    # ⛔ THE SEPARATORS ARE THE GUARD'S WHOLE MECHANISM (#14038 review cycle 8).
+    # Each widening was forced by a laundering this set let through: cycle 6 added
+    # clause granularity, cycle 7 added `[,()—–]` after a comma/dash/paren kept
+    # the claim in the same clause as an unrelated `cannot`, and cycle 8 added the
+    # subordinators after `while`/`whereas`/`although`/`because`/`when`/`since`/
+    # `though`/`as` did the same. A joiner OUTSIDE this list is not caught — see
+    # the scan's docstring, which states that limit instead of claiming coverage.
+    r"(?<=[.;:!?])\s+"
+    r"|\s+(?:and|but|yet|so|while|whereas|although|though|because|when|since"
+    r"|as|if|unless|which|that)\s+"
+    r"|[,()\u2014\u2013]",
+    re.IGNORECASE)
 
 
 def _affirmative_overlap_claims(text: str) -> list[tuple[int, str]]:
@@ -1500,8 +1505,17 @@ def _affirmative_overlap_claims(text: str) -> list[tuple[int, str]]:
     Grading a CLAUSE rather than a line is the whole point: on this topology
     every true statement about overlap is a negative one, so a clause that NAMES
     an overlap and carries no negation is the refuted claim — regardless of what
-    the rest of the line says. (A paraphrase that never names it is out of scope;
-    see the caller's docstring.)
+    the rest of the line says.
+
+    ⛔ THIS STATES ITS MECHANISM, NOT A COVERAGE CLAIM, because two earlier cuts
+    of this docstring overstated what the scan can do and that overstatement was
+    itself the finding. Concretely: it splits each line on the separators in
+    `_OVERLAP_CLAUSE_SPLIT` — terminal punctuation, the coordinators and
+    subordinators listed there, and commas/brackets/dashes — and flags any clause
+    that names an overlap with no negating token. A joiner OUTSIDE that list, or
+    a paraphrase that never names an overlap ("run side by side"), is NOT caught.
+    That residue is why the artifacts' prose is also read in review; this row
+    catches the forms it enumerates, not every way to say the thing.
     """
     claimed: list[tuple[int, str]] = []
     for lineno, line in enumerate(text.splitlines(), 1):
@@ -1565,6 +1579,14 @@ def test_the_overlap_guard_grades_each_CLAUSE_not_each_line():
         "overlaps an old and a new process.\n",
         "# a replacement cannot mount the held volume (in practice a rolling "
         "replacement overlaps an old and a new process).\n",
+        # cycle 8: a subordinator is a clause boundary too. These eight all let the
+        # refuted sentence through before `_OVERLAP_CLAUSE_SPLIT` carried them.
+        *[
+            "# a replacement cannot mount the held volume "
+            f"{joiner} a rolling replacement overlaps an old and a new process.\n"
+            for joiner in ("while", "whereas", "although", "because", "when",
+                           "since", "though", "as")
+        ],
     ):
         assert _affirmative_overlap_claims(laundered), (
             "a claim laundered past the scan by punctuation — the splitter is "
@@ -1617,12 +1639,14 @@ def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
     boundary. Each widening is pinned by that same row.
 
     ⛔ WHAT THIS ROW DOES **NOT** GRADE, stated so the self-description cannot
-    overstate its coverage the way the previous two did: it catches any CLAUSE
-    that NAMES an overlap without negating it. A paraphrase that avoids the word
-    entirely — "the old and the new process run side by side" — is OUT OF SCOPE,
-    because no word list bounds the ways to say it. That residue is why the two
-    artifacts' prose is read in review, not merely gated; this row makes the
-    named form un-shippable, not paraphrase-proof.
+    overstate its coverage the way earlier cuts did: it catches a clause that
+    NAMES an overlap without negating it, where the splitter's separator list is
+    the enumerable part and is described at `_OVERLAP_CLAUSE_SPLIT`. Two things
+    are outside it and always will be — a joiner the list does not carry, and a
+    paraphrase that never uses the word "overlap" ("the old and the new process
+    run side by side"). Neither is shippable-by-construction; both are why the two
+    artifacts' prose is also read in review. The row makes the enumerated forms
+    un-shippable, which is what it can honestly promise.
     """
     fly = (ROOT / "fly.toml").read_text(encoding="utf-8")
     mounts = fly.split("[[mounts]]")[1:]
