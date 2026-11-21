@@ -469,7 +469,7 @@ _EXISTENCE_HEAD = (
 )
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
-    r"as|where|so|but|although|though|until|whether|once|whereas|why|how)\b)"
+    r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
     r"(?![^?]{0,60}?\b[a-z0-9][a-z0-9'’._/-]*\s+(?:that|which|who|whom|whose)\b)"
     r"(?![^?]{0,60}?\b(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
     r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
@@ -632,14 +632,41 @@ _COPULA_SUBJECT = (
     #     cannot contain a second determiner, so the same preceding-word discriminator
     #     applies — the subject's OWN determiner opens the span and is untouched, which
     #     is what keeps `is that endpoint deprecated` and `is the v3 export deprecated`
-    #     routing. The recall given up is the subject whose tail is another NP
-    #     (`is our v3 export the one archived`), which is a yes/no about ONE record and
-    #     is now REPORTED rather than routed.
+    #     routing. The recall this gives up — including the part of it that goes SILENT
+    #     — is stated once, at the end of this block, so a later reader cannot take the
+    #     rule from one sentence and the recall from another.
+    # ⛔ TWO OVER-REFUSALS THE FIRST CUT OF THAT GUARD CAUSED (round-18 review, P2, both
+    # measured as REGRESSIONS — these routed before the guard and went SILENT after):
+    # (1) DETERMINER STACKING is not a second noun phrase. `all|both|half|such` are
+    #     PRE-determiners, so `all the`, `both the`, `half the`, `such a` is ONE noun
+    #     phrase — the premise "a noun phrase cannot contain a second determiner" was
+    #     simply false for them, and `is all the data archived`, `is all our old plans
+    #     retired`, `is half the exports archived`, `is such a report archived`,
+    #     `is both the reports archived` and the perfect branch `has all the data been
+    #     archived` all went silent. So a pre-determiner cannot occupy the WORD slot
+    #     (it cannot be the tail of a first noun phrase), and the quantifiers are out of
+    #     the guard's own determiner list for the same reason.
+    # (2) A HYPHEN OR SLASH IS NOT A WORD BOUNDARY FOR THIS RULE. `\b` matches before
+    #     `-` and `/`, so `how-to`, `what-if`, `all-hands` and `a/b` read as a
+    #     subordinator/determiner followed by a word, and `is the how-to guide archived`,
+    #     `is the what-if scenario archived`, `is our all-hands meeting cancelled` and
+    #     `is the a/b test cancelled` went silent. The token therefore has to END its
+    #     word. (This also repairs the pre-existing twins on the older tokens:
+    #     `is the when-in-doubt policy archived` routes again.)
+    # ⛔ AND THE RECALL THAT IS STILL GIVEN UP IS STATED, INCLUDING THE SILENT PART:
+    # a subject whose tail is a SECOND NOUN PHRASE (`is the report the board archived`) is
+    # refused. A LONG one REPORTS itself (`is our v3 export the one archived` ->
+    # `is_copula_long_subject`) because it exceeds the four-word subject bound; a SHORT
+    # one is SILENT (`is the report the board archived` -> `signal is None`), which is the
+    # module's stated notice-scope limit rather than a surprise. Both are measured, and
+    # the second is the price of closing the route: the same expression that refuses a
+    # reduced relative is what a caller sees as the unchanged relevance read.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
-    r"where|whereas|after|before|now|what|how|why)\b)"
-    r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
-    r"(?:the|a|an|our|my|its|their|these|those|this|that|all|your)\b)"
+    r"where|whereas|after|before|now|what|how|why)(?![-/])\b)"
+    r"(?!(?:(?!(?:all|both|half|such|many|most|some|any|no|each|every)\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
+    r"(?:the|a|an|our|my|its|their|these|those|this|that|your)(?![-/])\b)"
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     r"[a-z0-9][a-z0-9'’._/-]*(?:\s+[a-z0-9][a-z0-9'’._/-]*){0,3}"
 )
