@@ -535,3 +535,53 @@ def test_pin_refuses_to_extend_a_population_its_set_does_not_address():
     with pytest.raises(PinRefused) as exc:
         pin(g, ["p0"], label="Source", key_prop="url", budget=PinBudget(max_nodes=10))
     assert exc.value.code == "population-mismatch"
+
+
+def test_unpin_never_rewrites_the_population_a_set_addresses():
+    """Releasing keys must not move a `Source`-keyed set to `Point`.
+
+    Before this pin, `unpin` wrote back with its own `Point`/`id` defaults, so the
+    surviving keys kept their strings but addressed nodes that do not exist — every one
+    of them silently stopped being resident while the declaration still claimed them.
+    """
+    g = _FakeGraph(["a", "b"])
+    budget = PinBudget(max_nodes=10)
+    pin(g, ["a", "b"], label="Source", key_prop="url", budget=budget)
+    assert g.meta[PINS_META_KEY]["label"] == "Source"
+
+    unpin(g, ["a"], budget=budget)
+
+    assert g.meta[PINS_META_KEY]["label"] == "Source"
+    assert g.meta[PINS_META_KEY]["key_prop"] == "url"
+    assert g.meta[PINS_META_KEY]["keys"] == ["b"]
+
+
+def test_unpinning_with_nothing_declared_reports_no_write():
+    """`written=True` over an absent declaration told an operator the state changed."""
+    g = _FakeGraph(["a"])
+    result = unpin(g, ["a"], budget=PinBudget(max_nodes=10))
+    assert result.written is False
+    assert result.reading is not None and result.reading.keys == frozenset()
+    assert g.mutating == []
+
+
+def test_a_degree_ceiling_is_a_declaration_time_guard_and_the_budget_is_the_invariant():
+    """A hub pinned under a higher ceiling survives a lowered one — the budget does not.
+
+    §7's ceiling exists to stop one DECLARATION pulling in a window-sized neighbourhood;
+    the invariant that must hold on every read is the closure budget, so a pinned node
+    that gains neighbours is caught there rather than refused for growing.
+    """
+    g = _FakeGraph([f"n{i}" for i in range(6)])
+    for i in range(1, 5):
+        g.link("n0", f"n{i}")
+    pin(g, ["n0"], budget=PinBudget(max_nodes=100, max_degree=10))
+
+    lowered = read(g, budget=PinBudget(max_nodes=100, max_degree=2))
+    assert lowered.readable is True
+    assert lowered.closure_size == 5
+    assert lowered.over_budget() is None, "a legal set was refused for growing"
+
+    shrunk = read(g, budget=PinBudget(max_nodes=3, max_degree=10))
+    assert shrunk.over_budget() is not None
+    assert "5 node(s)" in (shrunk.gate_reason() or "")

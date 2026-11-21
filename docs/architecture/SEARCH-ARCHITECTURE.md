@@ -588,6 +588,22 @@ windowed graph harms retrieval quality is answered nowhere in that literature** 
 our graph, and its result is §9.1. Private-beta runs the graph **complete** (§1.5) regardless: §9.1's
 measurement is what gates the post-measurement phase, not what gates the beta.
 
+### 7.1 The two customer-facing controls over this window (`#14012`)
+
+The window demotes by usage recency, which leaves a customer no way to say *"I search for **this** every
+day"*. The approved capacity notices (`#13998`) and the docs page they link to (`#14013`) promise two
+controls, and both now exist — this subsection records the RULES they implement, because each one is a
+bound on the window and a later reader must not soften it:
+
+| control | where it lives | the rule that makes the copy true |
+|---|---|---|
+| **keep this resident** (pin) | `tortoise/resident_pin.py`, gate 6 of `cache_evictor.evict` | ⛔ the unit is the **CLOSED 1-hop neighbourhood**, not the node (this section's own rule: *"A pinned hub whose neighbours were evicted pays for the node and still cannot complete the walk"*), and the closure is **derived from the graph on every read** — a stored copy goes stale as edges change and a stale copy under-protects. ⛔ **Bounded**: the budget is a tenth of the window by default (`TORTOISE_PIN_MAX_NODES`), an explicit budget may never reach the window, and the cap **REFUSES** rather than trimming — a pin that silently became "most of what you asked for" misreports the declaration as honoured. ⛔ **Degree ceiling** (`TORTOISE_PIN_MAX_DEGREE`, default 32) — this table's measured anti-pattern. ⛔ Enforced in **two** places: at declaration (refuse before writing) and at **sweep** time (an over-budget set, or a set that cannot be read, refuses the pass) — neither evicting a pinned node silently nor letting pins take over the fast layer is acceptable |
+| **see what's outside** | `tortoise/outside_view.py` | derived from the projection's OWN state — resident keys read from the graph, complement computed in the record — so there is no second bookkeeping copy to go stale. ⛔ A truncated resident read is **UNMEASURED** (`None`), never a smaller number: the complement of a short resident set **over**-counts what is outside. The view states where an item IS ("not resident … still in your record"), never that it was deleted or lost (§2.0, and `#3853`'s "no default window" is untouched) |
+
+⚠️ **Neither control is a retention mechanism**, and neither changes what the record keeps: a pin buys
+**speed**, and the outside view is a statement about residency. Both are also per-ACCOUNT (the pin set is
+graph-scoped), per `#11758` — a pin is not a per-user escape from an account's allowance.
+
 ---
 
 ## 8. Cost — per tier, derived from the 30 % rule

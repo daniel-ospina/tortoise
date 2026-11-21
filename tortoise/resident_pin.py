@@ -50,6 +50,14 @@ useful *and* what makes a hub dangerous — so a key whose own degree exceeds
 :data:`DEFAULT_MAX_DEGREE` is refused with its degree named. The refusal is per KEY and
 the caller may pin the neighbours it actually needs instead.
 
+⚠️ **The degree check is a DECLARATION-time guard; the CLOSURE BUDGET is the invariant,
+and that one is re-checked on every read.** A node that gains neighbours after it is
+pinned therefore does not silently become unbounded: the closure it now pulls in is
+measured against the budget on the next :func:`read` (:meth:`PinReading.over_budget`),
+and a set that no longer fits refuses the sweep. Re-checking degree itself would refuse a
+pin for growing, which is not what §7's ceiling is about — it exists to stop one
+declaration FROM pulling in a neighbourhood the size of the window.
+
 ⚠️ **THE FAILURE DIRECTION IS ASYMMETRIC ON PURPOSE, AND THE TWO HALVES POINT OPPOSITE
 WAYS.** A pin set that cannot be READ must stop a sweep (:attr:`PinReading.readable`
 ``False`` — a sweep that cannot tell what is pinned must not delete), while a pin set
@@ -123,8 +131,14 @@ class PinRefused(RuntimeError):
         self.code = code
 
 
-def _bare(value: str, *, what: str) -> str:
-    """Validate an identifier before it is interpolated into Cypher."""
+def bare_identifier(value: str, *, what: str) -> str:
+    """Validate an identifier before it is interpolated into Cypher.
+
+    Public because it is the ONE shape check for a value this package interpolates:
+    `outside_view` reads a label and a key property the same way, and a second copy of
+    this predicate is a second thing to get wrong (the census and `cache_evictor` each
+    carry their own, pre-existing, for their own interpolations).
+    """
     if not isinstance(value, str) or not value or not set(value) <= _BARE_SAFE:
         raise PinConfigError(
             f"{what} {value!r} is not a bare Cypher identifier ([A-Za-z_][A-Za-z0-9_]*) "
@@ -442,8 +456,8 @@ def read(graph: Any, *, budget: PinBudget | None = None) -> PinReading:
                           source=f"meta:{PINS_META_KEY}", budget=budget)
 
     try:
-        _bare(label, what="label")
-        _bare(key_prop, what="key property")
+        bare_identifier(label, what="label")
+        bare_identifier(key_prop, what="key property")
     except PinConfigError as exc:
         return PinReading(label=label, key_prop=key_prop, readable=False,
                           source=f"malformed:{exc}", budget=budget)
@@ -638,8 +652,8 @@ def _closure_for(
     Split out so :func:`pin` can size the NEW keys before deciding, and so the existing
     declaration is never counted twice.
     """
-    _bare(label, what="label")
-    _bare(key_prop, what="key property")
+    bare_identifier(label, what="label")
+    bare_identifier(key_prop, what="key property")
     try:
         rows = _rows(
             graph,
@@ -685,11 +699,19 @@ def unpin(
     graph: Any,
     keys: Iterable[str],
     *,
-    label: str = "Point",
-    key_prop: str = "id",
+    label: str | None = None,
+    key_prop: str | None = None,
     budget: PinBudget | None = None,
 ) -> PinResult:
-    """Withdraw these keys. Idempotent; an unknown key is reported, never invented."""
+    """Withdraw these keys. Idempotent; an unknown key is reported, never invented.
+
+    ⛔ ``label``/``key_prop`` default to the DECLARATION's own pair, not to
+    ``Point``/``id``. A rewrite that took the caller's defaults would silently move a
+    ``Source``-keyed set to ``Point`` — the remaining keys would then address nodes that
+    do not exist, so every one of them would stop being resident while the declaration
+    still claimed them. The set is the set; releasing keys from it cannot change what it
+    addresses.
+    """
     resolved = budget
     if resolved is None:
         resolved = PinBudget.resolve()
@@ -700,13 +722,22 @@ def unpin(
             f"so removing from it would silently replace a set nobody could see",
             code="unreadable",
         )
+    eff_label = current.label if current.keys else (label or "Point")
+    eff_key_prop = current.key_prop if current.keys else (key_prop or "id")
     drop = {k for k in keys if isinstance(k, str) and k}
-    remaining = sorted(current.keys - drop)
-    if remaining == sorted(current.keys) and current.keys:
-        return PinResult(already=frozenset(drop), reading=current, budget=resolved,
+    if not current.keys:
+        # ⛔ NOTHING IS DECLARED, so there is nothing to release and nothing to write.
+        # Reporting `written=True` here (the shape before this guard) told an operator
+        # that a declaration changed when none existed — and the empty-set branch below
+        # would have issued a `DETACH DELETE` for a node that is not there.
+        return PinResult(already=frozenset(), reading=current, budget=resolved,
                          written=False)
+    remaining = sorted(current.keys - drop)
+    if remaining == sorted(current.keys):
+        return PinResult(already=frozenset(drop & current.keys), reading=current,
+                         budget=resolved, written=False)
     if remaining:
-        _write(graph, label=label, key_prop=key_prop, keys=remaining)
+        _write(graph, label=eff_label, key_prop=eff_key_prop, keys=remaining)
     else:
         # ⛔ REMOVE THE NODE, do not write an empty list: `read` treats an absent node and
         # an empty enumeration identically, so keeping the node would leave a declaration
@@ -733,6 +764,7 @@ __all__ = [
     "PinReading",
     "PinRefused",
     "PinResult",
+    "bare_identifier",
     "pin",
     "read",
     "unpin",
