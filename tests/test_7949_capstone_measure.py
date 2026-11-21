@@ -1403,7 +1403,7 @@ def test_measure_e6_reports_an_unloadable_registry_as_a_named_gap(tmp_path, monk
     row = measure.build_e6_row(broken, bars=BARS)
     assert row["verdict"] == "BLOCKED", row
     assert row["numerator"] is None and row["denominator"] is None, row
-    assert "could not be loaded" in row["note"], row["note"]
+    assert "cannot import pack_registry" in row["note"], row["note"]
     assert row["blocked_by"] == measure.E6_POPULATION_OWNER, row
     monkeypatch.undo()
 
@@ -1529,19 +1529,93 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         monkeypatch.setattr(measure, "_pack_census_module", _Census)
         e6 = measure.measure_e6()
         # An unenumerable census is a NAMED gap (the convention the loader fault follows);
-        # a wrong-typed block degrades into an empty one. Neither raises, and neither
-        # reports a `written` count the beside column does not cover.
+        # a wrong-typed block degrades into an empty one. Neither raises — the property this
+        # tuple pins. The COVERAGE claim that used to sit here needed a `declared` that could
+        # differ from `len(rows)`, which no fixture below provides, so it is asserted at the
+        # end of this block against a population that was actually enumerated.
         assert e6["error"] is None or "census" in str(e6["error"]), (why, e6["error"])
-        assert sum(e6["written"].values()) == e6["declared"], (
-            why, e6["written"], e6["declared"])
+    # ⛔ …and the DENOMINATOR may not be read from a block that survived a coercion the ROWS
+    # did not (#14060 review round 9, P2). ⛔ No fixture in the tuple above carries a `declared`
+    # that could DIFFER from `len(rows)` — four omit `population` and the fifth's
+    # (`{"population": [1]}`) coerces to `{}` — so the claim this loop used to make,
+    # `sum(written) == declared`, compared 0 with 0 on every iteration and no mutant of the
+    # guards it named could move it (the review's rule-3 finding, measured). The shapes below
+    # carry a population that CAN disagree, which is the input that exposes it: a wrong-typed
+    # `packs` beside an intact `population` enumerated zero rows, read `declared` 45 out of the
+    # SURVIVOR, and wrote `unbound_and_unexplained=0 of declared=45` GREEN — a population never
+    # enumerated beside a column of literal zeros, the silent-zero shape `#10995` forbids and a
+    # worse outcome than the `AttributeError` this PR replaced.
+    #
+    # The last two are round 10's: `declared` used to DEFAULT to `len(rows)`, so a census whose
+    # `population` block was absent still scored GREEN (and the note invented a `0 relations + 0
+    # hierarchy paths` breakdown), and a block whose split did not add up was never compared
+    # with `declared` at all. Each row below names the refusal it expects, because the three
+    # conditions are three different faults and one shared message would pass for all three.
+    intact = {"packs": 7, "relations": 39, "hierarchies": 6, "declared": 45}
+    one_row = {"dev": {"relations": [{"predicate": "p", "from_kind": "a", "to_kind": "b"}],
+                      "hierarchies": []}}
+    for bad_census, why, refusal in (
+            ({"packs": "x", "population": dict(intact)},
+             "non-object packs beside an INTACT population", "could be enumerated"),
+            ({"packs": [1, 2], "population": dict(intact)},
+             "list packs beside an intact population", "could be enumerated"),
+            ({"packs": {"dev": {"relations": 42}}, "population": dict(intact)},
+             "non-list surface beside an intact population", "could be enumerated"),
+            ({"packs": one_row},
+             "an enumerable `packs` block with NO `population` at all",
+             "no usable `population` block"),
+            ({"packs": one_row,
+              "population": {"packs": 1, "relations": 1, "hierarchies": 0, "declared": 2}},
+             "a population block whose split does not add up", "does not add up")):
+        class _PopulationCensus:
+            RELATION_WRITABLE = real.RELATION_WRITABLE
+            RELATION_PREDICATE_NOT_IN_ALLOWLIST = real.RELATION_PREDICATE_NOT_IN_ALLOWLIST
+
+            @staticmethod
+            def build_census(_packs_dir, _bad=bad_census):
+                return _bad
+
+        monkeypatch.setattr(measure, "_pack_census_module", _PopulationCensus)
+        e6 = measure.measure_e6()
+        # REFUSED BY NAME: a population that was not enumerated is never reported as one, so
+        # the `declared` the coercion left standing is not what the row counts over.
+        assert e6["error"], (why, e6)
+        assert refusal in str(e6["error"]), (why, e6["error"])
+        assert e6["declared"] == 0, (why, e6["declared"])
+        assert sum(e6["written"].values()) == 0, (why, e6["written"])
+        row = measure.build_e6_row(e6, bars=BARS)
+        assert row["verdict"] == "BLOCKED", (why, row)
+        assert row["numerator"] is None and row["denominator"] is None, (why, row)
+        assert row["blocked_by"] == measure.E6_POPULATION_OWNER, (why, row)
+        # …and the NOTE names the census, not a registry fault it did not observe (the same
+        # round-9 narration class as `written_source`): this row would otherwise publish "the
+        # pack registry … could not be loaded" for a run whose registry loaded fine.
+        assert refusal in row["note"], (why, row["note"])
+        assert "could not be loaded" not in row["note"], (why, row["note"])
+    # The coverage claim the tuple above used to make, where it CAN vary: on a census that WAS
+    # enumerated, the column covers exactly the rows the row counts.
+    monkeypatch.undo()  # `real` is the MODULE; the loader it came from is the patched name
+    live = measure.measure_e6()
+    assert live["error"] is None, live["error"]
+    assert live["declared"] > 0, live["declared"]
+    assert sum(live["written"].values()) == live["declared"], (live["written"],
+                                                                live["declared"])
     # …a row whose KEY field is a COLLECTION, which raised `TypeError: unhashable type: 'list'`
     # from the beside column's lookup — on the live path, outside every `try` — and, on the
-    # artifact path, from `_e6_key`'s dict key. `_e6_field` makes it a NON-MATCH instead.
+    # artifact path, from `_e6_key`'s dict key. What closes it is `measure_e6`'s blanket
+    # `except TypeError` around the beside loop (the arm commented "an unhashable key field:
+    # the column reads NOTHING, never a crash"): it replaces the WHOLE column with
+    # `unmeasured=len(rows)` — one reset for the run, not a per-row non-match — and, since
+    # round 9, the `written_source` beside it too.
     key_collection_rows = (({"predicate": ["a", "b"]}, "list predicate"),
                            ({"from_kind": ["x"]}, "list from_kind"),
                            ({"to_kind": {"a": 1}}, "object to_kind"))
     for bad_row, why in key_collection_rows:
-        census = {"packs": {"dev": {"relations": [bad_row], "hierarchies": []}}}
+        # ⛔ WITH a population that adds up (round 10): the census's own numbers are checked
+        # before this loop is reached, so a fixture without one would pin the population refusal
+        # rather than the key reset it exists to pin.
+        census = {"packs": {"dev": {"relations": [bad_row], "hierarchies": []}},
+                  "population": {"packs": 1, "relations": 1, "hierarchies": 0, "declared": 1}}
 
         class _KeyCensus:
             RELATION_WRITABLE = real.RELATION_WRITABLE
@@ -1557,6 +1631,12 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         # The column reads NOTHING for this shape (the artifact path degrades the same way),
         # and — the property that failed — it does not raise out of a paid run.
         assert e6["written"]["unmeasured"] == e6["declared"], (why, e6["written"], e6["declared"])
+        # ⛔ AND THE SOURCE SAYS THE COLUMN WAS NOT READ (#14060 review round 9, P3): the reset
+        # kept the SUCCESSFUL-read string, so the committed record named the artifact
+        # (`… (generated_by: …)`) as the origin of a column no cell came from — the same lie
+        # round 7 fixed for an empty `packs`, left in its twin.
+        assert "UNMEASURED" in e6["written_source"].upper(), (why, e6["written_source"])
+        assert measure.E6_CENSUS not in e6["written_source"], (why, e6["written_source"])
     # …and an EMPTY `packs` object, the one shape the fault did not cover: it read as a normal
     # read, so the beside column claimed to have read an artifact it covered none of.
     empty = tmp_path / "empty.json"
@@ -16400,8 +16480,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #: It then moved 20 -> 19 when `_e6_write_cells` was made to read `E6_SURFACES` instead of
     #: restating the tuple inline (`#11695` review F4d/Finding 2), which is the second half of
     #: the body's "stated once" claim: the record's block and this map are re-derived together.
+    #: And 19 -> 22 for the population guard's own SPLIT check (`population.relations +
+    #: population.hierarchies == population.declared`), which names the surface in the code and
+    #: in the comment that says why — a mention the bundle now genuinely carries, counted here
+    #: rather than avoided by writing the check in a shape the reader has to decode.
     assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 19}, (
+                        "probes/capstone_measure.py": 22}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")

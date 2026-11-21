@@ -4418,6 +4418,51 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     rows = _e6_census_rows(census)
     population = census.get("population")
     population = population if isinstance(population, dict) else {}
+    # ⛔ THE DENOMINATOR MUST BE THE SET THAT WAS ENUMERATED (#14060 review round 9, P2,
+    # measured: `{"packs": "x", "population": {"declared": 45, …}}` — a wrong-typed `packs`
+    # beside an INTACT `population` — enumerated ZERO rows, still read `declared` 45 out of the
+    # surviving block, and wrote `unbound_and_unexplained=0 of declared=45` GREEN beside a
+    # column of literal zeros). That is the silent-zero shape `#10995` forbids — stated in
+    # `build_rows`'s `e6_missing` guard ("a row reading as though the beside column had been
+    # measured as zero") — RESTORED by the coercion the round-6 guard added; the same input RAISED
+    # before it, so the guard turned a crash into a false PASS.
+    # ⛔ SO THE CHECK IS ON THE CENSUS'S OWN NUMBERS, not on the shape that produced them: a
+    # shape guard enumerates an unbounded surface (five rounds each found one more shape), while
+    # "the population block is not there, does not add up, or is not the set that was
+    # enumerated" is THREE conditions that no new shape walks around. The second one is what
+    # round 10 added: `declared` used to default to `len(rows)`, so a census whose `population`
+    # block was ABSENT (or a non-dict) beside an enumerable `packs` block still read GREEN, and
+    # the note beside it rendered `declared=45 (0 relations + 0 hierarchy paths)` — two coerced
+    # zeros stating a breakdown the census never carried (measured on the real 45-row census
+    # with `population` deleted). Not producer-reachable, and closed anyway, because a reported
+    # breakdown is a claim and this cell may not invent one.
+    # `build_census` enumerates every declared row of both surfaces and states the split, so all
+    # three conditions hold on every input TODAY'S producer emits — measured at this head: 45 ==
+    # 39 + 6, 45 rows enumerated; with `dev` removed, 31 == 27 + 4 and 31 rows; with `dev`
+    # ISOLATED, 31 == 27 + 4 and 31 rows. A census that disagrees with itself is REFUSED by name
+    # rather than scored over a subject it did not enumerate, which is the promise
+    # `measure_e6`'s own docstring makes.
+    counts = {key: population.get(key) for key in ("relations", "hierarchies", "declared")}
+    error = None
+    if not all(isinstance(value, int) and not isinstance(value, bool)
+               for value in counts.values()):
+        error = (f"the census carries no usable `population` block (missing or non-integer: "
+                 f"{', '.join(f'{key}={value!r}' for key, value in counts.items())}); the "
+                 f"registered denominator is not measured here, so E6 is UNMEASURED")
+    elif counts["relations"] + counts["hierarchies"] != counts["declared"]:
+        error = (f"the census's population does not add up: relations "
+                 f"{counts['relations']} + hierarchies {counts['hierarchies']} != declared "
+                 f"{counts['declared']}")
+    elif counts["declared"] != len(rows):
+        error = (f"the census declares {counts['declared']} row(s) but {len(rows)} could be "
+                 f"enumerated; a population that is not every declared row across the "
+                 f"installed packs is REFUSED rather than scored")
+    if error:
+        measurement["error"] = error
+        measurement["written_source"] = (
+            "not read — the census could not be enumerated")
+        return measurement
+    declared = counts["declared"]
     pnia = census_tool.RELATION_PREDICATE_NOT_IN_ALLOWLIST
     # An isolated pack's rows are NOT in `packs`, so they are not in `declared` either — see
     # this function's docstring. Carried rather than dropped, and the row refuses on it.
@@ -4428,11 +4473,12 @@ def measure_e6(*, packs_dir: Path | str | None = None,
                         if isinstance(load_errors, dict)
                         else {"<census>": _e6_reason_text(load_errors)}),
         "packs": population.get("packs", len(packs)),
-        "relations": population.get("relations", 0),
-        "hierarchies": population.get("hierarchies", 0),
+        "relations": counts["relations"],
+        "hierarchies": counts["hierarchies"],
         # ⛔ `population.declared` — the registered denominator, ROWS not connections,
-        # read from the census the packs produce here rather than counted again here.
-        "declared": population.get("declared", len(rows)),
+        # read from the census the packs produce here rather than counted again here — and
+        # already proved equal to the rows enumerated above (the refusal returns before this).
+        "declared": declared,
         "writable": sum(1 for _p, _s, row in rows
                         if row.get("verdict") == census_tool.RELATION_WRITABLE),
         "declaration_only": sum(1 for _p, _s, row in rows
@@ -4461,6 +4507,16 @@ def measure_e6(*, packs_dir: Path | str | None = None,
             written[value if value in ("direct", "mediated", "none") else "unmeasured"] += 1
     except TypeError:  # an unhashable key field: the column reads NOTHING, never a crash
         written = {"direct": 0, "mediated": 0, "none": 0, "unmeasured": len(rows)}
+        # ⛔ AND THE SOURCE FOLLOWS THE COUNT (#14060 review round 9, P3, measured): the reset
+        # made the column read NOTHING while `written_source` kept the SUCCESSFUL-read string,
+        # so the committed record rendered `unmeasured=<every row> from
+        # docs/…/pack-relation-census.json (generated_by: …)` for a column that was never read
+        # — the same lie the empty-`packs` arm above closes for an artifact it did not read,
+        # left in its twin. The word is what changes here, as there — and the `not read — `
+        # prefix with it, because the note splices this source into `… from {source}` (round 10:
+        # without it the record read `unmeasured=1 from the census's rows could not be keyed …`).
+        source = ("not read — the census's rows could not be keyed beside the column (a row "
+                  "field is a collection); its `written` cells are UNMEASURED")
     measurement["written"] = written
     measurement["written_source"] = source
     return measurement
@@ -4528,10 +4584,15 @@ def build_e6_row(e6: dict, *, bars: dict) -> dict:
               f"unmeasured={written.get('unmeasured')} from "
               f"{e6.get('written_source') or 'no artifact'}")
     if not measured:
-        detail = (f"the pack registry at {e6.get('packs_dir')} could not be loaded "
-                  f"({e6.get('error')}), so E6's population is UNMEASURED and the row "
-                  f"is not scored — a registry that reports zero declared rows would "
-                  f"otherwise read GREEN over a subject that is not there. {beside}")
+        # ⛔ THE NOTE NAMES THE FAULT IT WAS TOLD ABOUT, not a cause it assumed (#14060 review
+        # round 9, same class as the `written_source` fix): this branch said "the pack registry
+        # … could not be loaded" for EVERY named gap, including the census-shape gaps the same
+        # round-6 guard writes here — so a record would assert a registry fault on a run whose
+        # registry loaded fine.
+        detail = (f"E6's population is UNMEASURED at {e6.get('packs_dir')} and the row "
+                  f"is not scored — {e6.get('error')}; a measurement that reports zero "
+                  f"declared rows would otherwise read GREEN over a subject that is not "
+                  f"there. {beside}")
     elif load_errors:
         isolated = "; ".join(f"{pack} ({reason})"
                              for pack, reason in sorted(load_errors.items()))
