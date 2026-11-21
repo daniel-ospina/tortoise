@@ -675,7 +675,7 @@ SWEEP_NAMES = 66
 #: measurement: `--repin` printed `(11833, "c115acaf5bbb4163")` there, and the 11831 → 11833 (+2)
 #: step is fully attributed to the two rows named above (+1 each). ⛔ THE DIGEST IS NOT CARRIED
 #: FORWARD: after the merge and the door rename the SAME COUNT carries a DIFFERENT digest —
-#: `--repin` prints `(11833, "4358280454f50b14")` and `--check` exits 0 on THIS tree. That is
+#: `--repin` printed `(11833, "4358280454f50b14")` on THAT tree and `--check` exited 0 there. That is
 #: legitimate, not a contradiction: the digest is over the whole `row -> count` MULTISET (the note
 #: above says so), so an equal total with a different digest is a DIFFERENT tree — the rename
 #: removed rows (the −11 attributed at the pin below) and the merge added rows. ⛔ Read the PAIR
@@ -840,11 +840,11 @@ SWEEP_NAMES = 66
 #: note is already accounted for in it. That was the pin at that round; the live pin is the
 #: `SWEEP_RESIDUE` line itself, and the last paragraph above it is the one that describes it.
 #: MERGED `origin/main` (`e022fc935b2d`, #14100/#14108) — both sides' histories above are kept, and the
-#: pin is RE-MEASURED on THIS tree with `--repin`, never combined arithmetically: it prints
-#: `(11844, "70d6cfdcd8b769e4")` and `--check` exits 0 with `typed references still pointing at a
-#: public name: 0`. The row composition is read off `--report --base 28ca66878d… --top 5000` AT THIS
-#: HEAD, not inferred: `proj.g.query` 3642 and `g.query` 1492 are this PR's own rows, unchanged by the
-#: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
+#: pin was RE-MEASURED on THAT tree with `--repin`, never combined arithmetically: it printed
+#: `(11844, "70d6cfdcd8b769e4")` there, with `--check` exiting 0 and `typed references still
+#: pointing at a public name: 0`. The row composition is read off `--report --base 28ca66878d…
+#: --top 5000` AT THAT HEAD, not inferred: `proj.g.query` 3642 and `g.query` 1492 are this PR's own
+#: rows, unchanged by that merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch's DIFF does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
 #:
