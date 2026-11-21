@@ -1399,8 +1399,12 @@ def _readable_module_sources(
 
     The refusal is CARRIED because a fabricated cause is a DIFFERENT failure dressed as the
     environment's. Measured: ``ModuleNotFoundError(name)`` passes ``name`` as the *message*, so
-    the copy has ``.name is None`` and a message that merely CONTAINS ``tortoise`` — which
-    `_is_absent_third_party_distribution` reads as repo-side. So the module the declaration
+    the copy carries **no origin signal at all** — ``.name is None``, and the module name is not
+    in a ``from '<module>'`` token — which `_is_absent_third_party_distribution` REFUSES (its
+    last clause fails CLOSED). ⛔ What the message CONTAINS is not what refuses it: measured at
+    this head, a positional copy naming even a THIRD-PARTY module
+    (``ModuleNotFoundError("prometheus_client")``) also grades repo-side, so the refusal is the
+    missing origin, never the text. So the module the declaration
     exists to excuse landed in ``stray`` (a population shrink) and every arm that re-raised
     through the fake inherited the wrong verdict — silently, because those arms only assert an
     outsider is ``stray``.
@@ -1455,7 +1459,14 @@ def _folding(
     this lived inside `test_the_over_refusal_population_is_itself_pinned` and the pin grew its
     own copy, reverting the control's fallback to the pre-F1 `ModuleNotFoundError(name)`
     synthesis left BOTH tests green: the pin exercised `_env_source` directly, so it graded the
-    helper while nothing graded the control's use of it. One builder, one wiring, measured once.
+    helper while nothing graded the control's use of it. One builder, one wiring.
+
+    ⛔ RESIDUAL — THE CONTROL'S *USE* OF THESE HELPERS IS A SHAPE GUARD, NOT A MEASURED ONE
+    (`#14099`). The helpers above ARE measured (`test_the_environment_refusal_is_carried_not_
+    re_synthesised`, mutants in its docstring). Whether the CONTROL binds them is visible in a
+    diff, not caught by a test: measured, giving the control its own local pre-F1 fake again —
+    helpers untouched — leaves the whole file GREEN (95 passed). So a revert here is a reviewer's
+    catch, and this comment is the record of that, not a claim of coverage.
 
     The fallback is `_env_source`, never an inline raise: a module this venv could not read must
     re-raise THE ENVIRONMENT'S OWN refusal instead of a tailored copy of it.
@@ -1739,10 +1750,11 @@ def test_the_environment_refusal_is_carried_not_re_synthesised(monkeypatch):
 
     Measured before this arm existed: the control's fallback was
     ``raise _UnreadableFold(...) from ModuleNotFoundError(name)``, and `ModuleNotFoundError`'s
-    first positional argument is its *message*, not its ``name=`` — so the copy had
-    ``.name is None`` and a message that contains ``tortoise``. `_is_absent_third_party_distribution`
-    read that as a REPO-SIDE break, and the ten `tortoise.sdk` writers — the one population the
-    declaration exists to excuse — landed in ``stray``. Nothing red, because every other arm only
+    first positional argument is its *message*, not its ``name=`` — so the copy carried NO origin
+    signal (``.name is None``, no ``from '<module>'`` token) and
+    `_is_absent_third_party_distribution` REFUSED it, fail-closed, as a REPO-SIDE break. The ten
+    `tortoise.sdk` writers — the one population the declaration exists to excuse — landed in
+    ``stray``. Nothing red, because every other arm only
     asserted that an OUTSIDER had left the population.
 
     ⛔ AND THE TOLERANT READ ITSELF WAS UNPINNED (`#14099` F2). Both halves ran inline, BEFORE the
@@ -1810,10 +1822,15 @@ def test_the_environment_refusal_is_carried_not_re_synthesised(monkeypatch):
         "would leave the measured population as `stray`")
 
     # (3) AND THE WALK AGREES, THROUGH THE CONTROL'S OWN WIRING — `_folding`, the builder the
-    # control's fakes come from, so this arm reds if the control's fallback is reverted even
-    # while `_env_source` stays correct. This is the F1 verdict end to end: this box cannot read
-    # the declared module, the fake folds an UNRELATED module, and the declared module's keys must
-    # land in `unreadable` — not in `stray`, which is the population shrink the declaration bounds.
+    # control's fakes come from, so this arm reds if the fake's FALLBACK is reverted even while
+    # `_env_source` stays correct. This is the F1 verdict end to end: arm (1)'s fake folded the
+    # declared module and `refusals` carried it, the fake below folds an UNRELATED module, and the
+    # declared module's keys must land in `unreadable` — not in `stray`, which is the population
+    # shrink the declaration bounds. ⛔ ENVIRONMENT-INDEPENDENT ON PURPOSE: the declared module is
+    # readable on this box (measured: `refusals == {}` in a full venv), so the fold comes from the
+    # fake, and the same arm runs unchanged in CI. (The genuinely-partial venv cell is only
+    # reachable with `--noconftest`: `tests/conftest.py` imports `tortoise.sdk` at collection, so
+    # under plain `pytest tests/` a real fold aborts the session before any arm runs.)
     # MEASURED with the pre-F1 synthesis restored: `stray` = the folded outsider's keys PLUS all
     # ten `tortoise.sdk` keys, `unreadable` 0 of 10.
     #
