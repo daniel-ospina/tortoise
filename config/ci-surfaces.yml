@@ -9640,8 +9640,8 @@ surfaces:
   # the same `core`-fallback shape the `test_12894` rows above record, and a row on
   # any named surface would leave it asleep on precisely that diff class because a
   # named-surface match REPLACES the `core` fallback (#2938/#7951).
-  # Hermetic on the fast lane: SEVEN cases — five arithmetic sweeps over a fixed
-  # grid, plus the two pins that make them load-bearing (one drives the real
+  # Hermetic on the fast lane: arithmetic cases over a fixed grid, plus the two
+  # pins that make them load-bearing (one drives the real
   # `get_relationships_bounded` over a stub graph inside its `ThreadPoolExecutor`;
   # the other reads the generated Q2-crit query text). No DB, no graph server, no
   # docker, no network, no model call. ⛔ NO SECONDS FIGURE IS QUOTED HERE ON
@@ -9654,6 +9654,10 @@ surfaces:
   # this file — the largest TEST BODY is under 0.02 s — and any file in the suite
   # pays the fixture too. `pytest -q --durations=5` is the authority for the
   # split; re-derive there rather than trusting a transcription of one run.
+  # ⛔ NO CASE COUNT IS QUOTED EITHER, for the same reason the note above gives
+  # about seconds: a hand-written total re-stales on every case a later round
+  # adds. An earlier cut of this very comment said "five cases" over a file that
+  # had seven — one of them added by the commit that wrote the number.
   - test_14192_beta_variance_sum_bound.py
   # #14192: the measurement harness's OWN verdict — the half of the issue's Done-when
   # that the first cut could not fail. `core`, and the placement is MEASURED: the pins
@@ -15343,14 +15347,15 @@ durations:
   # row must EXIST rather than merely default: the `core:` registration above is what
   # puts the file in `fast_pool()`, and `--integrity` stays green either way, so only
   # this row records the weight. `2.0` is the header's flat `DEFAULT_FAST_WEIGHT` and
-  # is the honest value here: the file's OWN cost is five arithmetic sweeps over a
-  # fixed grid (19 x 19 x 2 + 7 extra pairs = 729) plus two query-driving cases, and
+  # is the honest value here: the file's OWN cost is arithmetic over a fixed grid
+  # (19 x 19 x 2 + 7 extra pairs = 729) plus the two query-driving pins, and
   # the largest test BODY measures under 0.02 s. ⛔ NO WALL/SETUP/TEARDOWN FIGURE
   # IS QUOTED: those belong to the SHARED session fixture, not to this file, and the
   # two cuts that quoted them were contradicted by real readings (see the dated
   # correction above). `pytest -q --durations=5` is the authority for the split, and
   # `--refresh-durations` replaces this row from junit once a push-to-main sweep
-  # includes the file.
+  # includes the file. (No case count is quoted here either — see the note on the
+  # `core:` registration above.)
   test_14192_beta_variance_sum_bound.py: 2.0
   # #14192 — a file this PR ADDS, so it can carry no CI junit reading yet
   # (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only).

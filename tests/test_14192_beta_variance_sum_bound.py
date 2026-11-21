@@ -104,19 +104,66 @@ def test_the_bound_is_attained_just_below_the_threshold() -> None:
                           (bound - 0.01) / 2.0) > CONTESTED_VARIANCE_THRESHOLD
 
 
-def test_degenerate_operands_stay_excluded_by_both_rules() -> None:
-    """NULL/negative/zero-sum shapes: the twin answers 0.0, the guard excludes.
+def _guard_admits(alpha: float, beta: float) -> bool:
+    """The guard's own predicate, evaluated the way the generated Cypher does.
 
-    Both directions agree, so the guard cannot turn a shape the twin rejects
-    into one the selection admits, nor the reverse.
+    Both operands are readable numbers here, so the query's
+    ``numeric_operand_cypher`` cannot NULL the sum and the arm reduces to the
+    strict comparison against the bound. A non-numeric or absent operand drops
+    the row in the ``WHERE`` (NULL, not ``True``) — that is #11702's territory,
+    pinned against the twin, not this bound.
+    """
+    return alpha + beta < beta_variance_sum_bound(CONTESTED_VARIANCE_THRESHOLD)
+
+
+def test_the_guard_admits_exactly_the_pairs_the_bound_allows() -> None:
+    """The guard's OWN verdict, on pairs whose sum can go either way.
+
+    A shape the twin answers ``0.0`` for cannot say anything about this bound:
+    ``not (admitted and width > threshold)`` is then ``True`` whatever the bound
+    is, because the right conjunct is already false. So both directions are
+    pinned on shapes whose width CAN cross the threshold:
+
+    - ADMITTED, and it must be: ``(2.6, 2.6)`` sums to ``5.2 < 5.25`` and its
+      width is ``0.04032``, i.e. the twin calls it CONTESTED. A guard that
+      refused it would drop a cap-exempt critical peer (D3/D4) — the P0-class
+      false rejection this file exists to prevent.
+    - REFUSED, and it must be: ``(3.0, 3.0)`` sums to ``6.0 >= 5.25`` and its
+      width is ``0.03571``, so the division it spares could only reject it.
+    - THE BOUNDARY: at ``s == bound`` the widest pair computes EXACTLY the
+      threshold, and the query's test is strict, so the guard's refusal and the
+      twin's exclusion agree there.
+
+    MUTANTS, and the row each reddens:
+
+    - ``beta_variance_sum_bound``'s ``- 1.0`` → ``- 2.0`` (bound 4.25): the
+      admitted arm reddens, because ``5.2 < 4.25`` is false.
+    - ``- 1.0`` → ``+ 2.0`` (bound 8.25): the refused arm reddens, because
+      ``6.0 < 8.25`` is true.
+    - ``- 1.0`` → ``- 0.5`` (bound 5.75): the boundary arm reddens, because the
+      symmetric pair at ``s == 5.25`` is then ADMITTED by the guard.
+
+    OBSERVED at this head (bound ``5.25``): ``(2.6, 2.6)`` → ``5.2``,
+    admitted, width ``0.0403225806``; ``(3.0, 3.0)`` → ``6.0``, refused, width
+    ``0.0357142857``; ``(2.625, 2.625)`` → ``5.25``, refused, width ``0.04``.
+    All three are exact in float, so no ``approx`` hides a boundary slip.
     """
     bound = beta_variance_sum_bound(CONTESTED_VARIANCE_THRESHOLD)
-    for a, b in ((0.0, 0.0), (3.0, -1.0), (1e150, 1e150), (-1.0, 9.0)):
-        assert _beta_variance(a, b) <= CONTESTED_VARIANCE_THRESHOLD
-        # The guard's own predicate, evaluated the way Cypher would.
-        admitted_by_guard = (a + b) < bound
-        assert not (admitted_by_guard and
-                    _beta_variance(a, b) > CONTESTED_VARIANCE_THRESHOLD)
+    assert bound == pytest.approx(5.25)
+
+    a, b = 2.6, 2.6
+    assert a + b < bound
+    assert _guard_admits(a, b)
+    assert _beta_variance(a, b) > CONTESTED_VARIANCE_THRESHOLD
+
+    a, b = 3.0, 3.0
+    assert a + b >= bound
+    assert not _guard_admits(a, b)
+    assert _beta_variance(a, b) <= CONTESTED_VARIANCE_THRESHOLD
+
+    half = bound / 2.0
+    assert _guard_admits(half, half) is False
+    assert _beta_variance(half, half) <= CONTESTED_VARIANCE_THRESHOLD
 
 
 # ── the two pins that make everything above load-bearing ──────────────────────

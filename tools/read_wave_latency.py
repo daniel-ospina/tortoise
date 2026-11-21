@@ -32,9 +32,14 @@ Usage (the private lane is the correct target on a shared box, #5084/#10399):
     uv run python tools/test_lane.py run -- tools/read_wave_latency.py \
         --points 2000 --queries 24 --out docs/evidence/14192-read-wave/baseline.json
 
-    # …then after the change, against the SAME corpus on the same container:
+    # …then after the change, against the SAME corpus on the same container —
+    # no flag turns the reuse on: `seed()` counts the existing Points and keeps
+    # them when the corpus is already there, so the second run re-uses it as-is.
+    # (An earlier cut of this block documented a reuse switch that no
+    # `add_argument` declares; copying that command exited 2 before measuring
+    # anything, so it is spelled out here rather than left as a trap.)
     uv run python tools/test_lane.py run -- tools/read_wave_latency.py \
-        --points 2000 --queries 24 --reuse \
+        --points 2000 --queries 24 \
         --out docs/evidence/14192-read-wave/after.json \
         --baseline docs/evidence/14192-read-wave/baseline.json
 """
