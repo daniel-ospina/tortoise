@@ -435,7 +435,19 @@ def _handler_names(handler: ast.ExceptHandler) -> set[str]:
 
 
 def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
-    """Whether some handler here CATCHES anything (bare or `Exception`) and DROPS it.
+    """Whether some handler here CATCHES a programming error and DROPS it.
+
+    The arms that count are a bare arm, an `Exception`/`BaseException` arm, and — since
+    review cycle 7 of #14160 — a NARROW arm naming one of `_RAISED`, because narrowing
+    `except Exception:` to the four names and KEEPING the drop is the substitution a lane
+    is most likely to make when this gate reds, and it swallows the rename exactly as
+    before. `ImportError` is DELIBERATELY excluded from that widening: it is the one name
+    whose purpose here can be a legitimate skip — `from tortoise.embeddings import …`
+    raises `ImportError` when the `embeddings` extra (numpy) is absent, and dropping it is
+    the correct optional-extra probe (`_OWN_CODE_ROOTS`). Charging that spelling made the
+    documented-legitimate skip unescapable, there being no class-2 allowance, so the
+    `ImportError` decision stays with `_probe_blocks_with_an_uncovered_import_seam`.
+
 
     Whether the handler re-raises is part of the question, not a separate one:
     the property is *"the programming error never reaches the caller"*, and a
@@ -451,7 +463,15 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
         #: swallowing, i.e. invisible to BOTH gates while the rename stayed swallowed
         #: (review of #14160, cycle 7, P2-3; pre-existing at `origin/main`, LATENT: the tree
         #: holds 0 instances, so the census row set is unchanged).
-        (names == {"<bare>"} or names & (_BROAD | _RAISED)) and not _reraises_its_own(h)
+        #: …and COVERAGE is read from `_reraises` (the last statement), not from
+        #: `_reraises_its_own` (any `raise` anywhere in the body): a handler that raises on
+        #: one path and DROPS on the default path — `except Exception: if _STRICT: raise;
+        #: FLAG = False` — drops the programming error, and the walking predicate called it
+        #: "re-raises, drops nothing" while `_reraises` called it "no coverage", so the block
+        #: was green in BOTH gates (review of #14160, cycle 8, P2-2). `_reraises` accepts all
+        #: three propagation forms, so nothing real is lost.
+        (names == {"<bare>"} or names & (_BROAD | (_RAISED - {"ImportError"})))
+        and not _reraises(h)
         for h, names in ((h, _handler_names(h)) for h in handlers)
     )
 
@@ -487,7 +507,9 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     property as one four-name tuple and must not be redded for its shape. The
     broad arm is never coverage: it is what swallows the rest.
 
-    A handler only COUNTS when its body is a bare `raise`. Naming a programming
+    A handler only COUNTS when it ends by PROPAGATING the caught error — a bare `raise`,
+    `raise <caught name>`, or `raise … from <caught name>` (see `_reraises`); a trailing
+    `raise … from None` discards the cause and does not count. Naming a programming
     error in the clause is not the property — `except ImportError: return False`
     names the seam and then swallows it, and counting the name would let a probe
     pass this gate with exactly the behaviour it exists to forbid.
@@ -4454,6 +4476,20 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "a narrow arm that RE-RAISES",
             "except (AttributeError, NameError, TypeError, ImportError):\n    raise\n",
             False,
+        ),
+        #: `ImportError` ALONE is NOT a swallow charge: it is the legitimate
+        #: optional-extra skip (`from tortoise.embeddings import …` raises it when the
+        #: extra is absent), and turning it into a drop-charge redded the very probe this
+        #: file documents as correct with no way to allow it (review of #14160, cycle 8).
+        #: Its own gate is `_probe_blocks_with_an_uncovered_import_seam`.
+        ("an ImportError-only arm that drops", "except ImportError:\n    FLAG = False\n", False),
+        #: …but a handler that raises on ONE path and drops on the default path DOES
+        #: swallow, and reading coverage from the walking predicate made it green in both
+        #: gates (review of #14160, cycle 8, P2-2).
+        (
+            "a conditional re-raise with a dropping default",
+            "except Exception:\n    if _STRICT:\n        raise\n    FLAG = False\n",
+            True,
         ),
         ("a bare arm", "except:\n    FLAG = False\n", True),
         ("a broad arm", "except Exception:\n    FLAG = False\n", True),
