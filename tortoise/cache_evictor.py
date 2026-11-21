@@ -52,7 +52,7 @@ look harmless. The day a CLEAN parity census exists for the graph being swept, t
 populates and this executor becomes reachable without a second decision — record readiness
 is not the trigger, and this header said it was until #11709 corrected it.
 
-⛔ FIVE INDEPENDENT GATES, and each one alone refuses
+⛔ SIX INDEPENDENT GATES, and each one alone refuses
 -----------------------------------------------------
 1. **The census** — the verdict must be in the allow-list ``{"PLAN", "CLEAN"}``.
    ⛔ An ALLOW-LIST, not "not refused": ``refused`` is True only for
@@ -86,6 +86,15 @@ is not the trigger, and this header said it was until #11709 corrected it.
    re-checks the binding at the last hop instead of trusting the caller to have kept
    the assessment and the handle together. A handle that names no graph, or a
    different one, is a REFUSAL.
+6. **The pin** (#14012) — a candidate the caller's ``pinned`` predicate reports as
+   resident is NEVER deleted, whatever the selector offered. Like the record probe
+   this is a SEAM, not a policy: what is pinned belongs to the user's declaration
+   (``tortoise/resident_pin.py``), and this module only asks. ⛔ It is checked BEFORE
+   the lease and BEFORE the record probe, because a pin is the one answer the score
+   may not overrule, and a node reported as "pinned" must not be reported as held for
+   a reader or for an unservable record instead. A predicate that RAISES holds the
+   node back: *could not ask* and *not pinned* are opposite findings, and the safe
+   direction is the one that does not delete.
 
 DRY RUN IS THE DEFAULT. ``dry_run=True`` returns the plan — which nodes, in which
 order, and which were held back and why — and emits **no** mutating statement. It
@@ -410,6 +419,12 @@ class EvictionReport:
     deleted: tuple[Candidate, ...] = ()
     skipped_record_cannot_serve: tuple[Candidate, ...] = ()
     skipped_leased: tuple[Candidate, ...] = ()
+    #: #14012 — nodes held back because the caller's ``pinned`` predicate reported them
+    #: resident. Its own list, not folded into either neighbours: a pinned node is held
+    #: by the USER's declaration, and reporting it as "the record cannot serve it" or
+    #: "a reader holds it" would send the next operator to widen a population or drain a
+    #: lease — neither of which is the answer (unpin it, or raise the pin budget).
+    skipped_pinned: tuple[Candidate, ...] = ()
     #: ``None`` — not ``0`` — where nothing was measured. A monitor that reads a
     #: missing measurement as a healthy zero is the defect this seam exists to close.
     nodes_before: int | None = None
@@ -470,6 +485,7 @@ class EvictionReport:
             "byte_ceiling_still_exceeded": over_byte_ceiling,
             "held_record_cannot_serve": len(self.skipped_record_cannot_serve),
             "held_leased": len(self.skipped_leased),
+            "held_pinned": len(self.skipped_pinned),
             "delete_unverified": self.delete_unverified,
             # ⛔ `None` = NOT APPLICABLE, `False` = NEEDED AND FAILED. Collapsing the
             # two would let a failed invalidation read as a clean pass.
@@ -491,6 +507,7 @@ class EvictionReport:
                 c.as_dict() for c in self.skipped_record_cannot_serve
             ],
             "skipped_leased": [c.as_dict() for c in self.skipped_leased],
+            "skipped_pinned": [c.as_dict() for c in self.skipped_pinned],
         }
 
 
@@ -705,6 +722,7 @@ def evict(
     record_probe: RecordProbe,
     key_prop: str = "id",
     leases: ReadLeases | None = None,
+    pinned: Callable[[Candidate], bool] | None = None,
     dry_run: bool = True,
     policy: EvictionPolicy | None = None,
 ) -> EvictionReport:
@@ -722,6 +740,14 @@ def evict(
 
     *key_prop* is the node property holding ``Candidate.key`` (``id`` for ``:Point``).
     It is interpolated into the DELETE, so it is validated as a Cypher identifier.
+
+    *pinned* (#14012) is ``Candidate -> bool``: is this node inside the user's
+    *keep this resident* declaration (its 1-hop closure included)? Checked FIRST, so a
+    pinned node is never deleted whatever the score said. ``None`` means the caller has
+    no pin set — which is a different statement from an empty one, and this module does
+    not choose it: reading the declaration, refusing an over-budget set and building the
+    gate are ``tortoise/resident_pin.py``'s, and a sweeper that must not proceed without
+    one refuses at its own door.
     """
     # ⛔ THE LICENCE IS A MAP, NOT A SET. The census's `nodes` count is the SIZED proof
     # ("this many nodes of this population are record-served"); discarding it would let
@@ -896,6 +922,9 @@ def evict(
     deleted: list[Candidate] = []
     held_record: list[Candidate] = []
     held_leased: list[Candidate] = []
+    #: #14012 — the user's declaration, held back before anything else looks at the node.
+    held_pinned: list[Candidate] = []
+    held_pinned_ids: set[int] = set()
     #: Ids already decided, so a later pass does not re-offer them. ⛔ Not a `seen`
     #: filter that also swallows HELD-BACK nodes: a node the record cannot serve sits
     #: at the HEAD of a coldest-first ordering forever, so a selector window of exactly
@@ -973,7 +1002,7 @@ def evict(
             )
             break
 
-        held_before = (len(held_record_ids), len(held_leased_ids))
+        held_before = (len(held_record_ids), len(held_leased_ids), len(held_pinned_ids))
         # ⛔ A selection is a CLAIM this module verifies before believing it.
         local: list[Candidate] = []
         local_ids: set[int] = set()
@@ -995,6 +1024,21 @@ def evict(
                     f"sweeping {population!r} — a mixed selection may not be swept"
                 )
                 break
+            # ⛔ GATE 6 — the PIN (#14012). Asked FIRST, because the score may not
+            # overrule the user's own declaration: a pinned node is not "cold", it is
+            # exempt. A predicate that RAISES holds the node back — an unanswerable
+            # question about whether something is pinned must never authorise deleting
+            # it, which is the same polarity as gate 3's "could not ask".
+            if pinned is not None:
+                try:
+                    is_pinned = pinned(candidate) is True
+                except Exception:
+                    is_pinned = True
+                if is_pinned:
+                    if candidate.node_id not in held_pinned_ids:
+                        held_pinned_ids.add(candidate.node_id)
+                        held_pinned.append(candidate)
+                    continue
             if candidate.node_id in leases.held():
                 held_leased_ids.add(candidate.node_id)
                 held_leased.append(candidate)
@@ -1043,7 +1087,8 @@ def evict(
             # cold set whose head is unservable starves at the first window and the
             # cache stays over budget forever, while the reason claims the population
             # "did not hold enough evictable nodes" — which is false.
-            held_grew = (len(held_record_ids), len(held_leased_ids)) != held_before
+            held_grew = (len(held_record_ids), len(held_leased_ids),
+                         len(held_pinned_ids)) != held_before
             if window >= after_nodes or not held_grew:
                 # ⛔ WHICH hold-back stopped this pass is REPORTED, not assumed. An
                 # all-LEASED window is not an exhausted population: the nodes are there
@@ -1053,10 +1098,18 @@ def evict(
                 # in no population query. When BOTH hold-backs are present the RECORD is
                 # the binding one (those nodes can never be taken), so it keeps
                 # "population".
-                stop_reason = (
-                    "leased" if (held_leased_ids and not held_record_ids)
-                    else "population"
-                )
+                # ⛔ #14012 ADDS A THIRD HOLD-BACK and it needs its own word for the same
+                # reason: a window made entirely of PINNED nodes is not an exhausted
+                # population either — the answer is "unpin, or raise the pin budget",
+                # and neither is reachable from a message about widening a selector.
+                if held_record_ids:
+                    stop_reason = "population"
+                elif held_leased_ids:
+                    stop_reason = "leased"
+                elif held_pinned_ids:
+                    stop_reason = "pinned"
+                else:
+                    stop_reason = "population"
                 break
             # The window grew but this pass found nothing new to take: keep widening.
             continue
@@ -1216,6 +1269,7 @@ def evict(
             deleted=tuple(deleted),
             skipped_record_cannot_serve=tuple(held_record),
             skipped_leased=tuple(held_leased),
+            skipped_pinned=tuple(held_pinned),
             nodes_before=before_nodes,
             # ⛔ UNMEASURED is None, never the pre-delete reading. Reporting
             # `nodes_after=before_nodes` beside `deleted=4` is a fabricated metric: a
@@ -1259,6 +1313,12 @@ def evict(
             cause = (
                 f"{len(held_leased)} node(s) are held by an in-flight READ, so the "
                 f"population is not exhausted"
+            )
+        elif stop_reason == "pinned":
+            cause = (
+                f"{len(held_pinned)} node(s) are PINNED (`skipped_pinned`) — the "
+                f"selector is offering nodes the user declared resident, so the "
+                f"population is not exhausted; unpin some of them or raise the pin budget"
             )
         else:
             cause = "this pass budget could plan no more"
@@ -1314,6 +1374,13 @@ def evict(
                 f"node(s) are held by an in-flight READ (`skipped_leased`), so the "
                 f"population is not exhausted; re-run when those reads finish"
             )
+        elif stop_reason == "pinned":
+            reason += (
+                f"; still {over_after} node(s) over the budget — {len(held_pinned)} "
+                f"node(s) are PINNED (`skipped_pinned`, #14012), so the population is "
+                f"not exhausted: unpin some of them, or raise "
+                f"TORTOISE_PIN_MAX_NODES while keeping it smaller than the window"
+            )
         else:
             reason += (
                 f"; still {over_after} node(s) over the budget — the selected "
@@ -1338,6 +1405,7 @@ def evict(
         deleted=tuple(deleted),
         skipped_record_cannot_serve=tuple(held_record),
         skipped_leased=tuple(held_leased),
+        skipped_pinned=tuple(held_pinned),
         nodes_before=before_nodes,
         nodes_after=after_nodes,
         bytes_before=before_bytes,

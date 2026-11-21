@@ -104,6 +104,7 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise import resident_pin
 from tortoise.cache_eviction import (
     CACHE_EVICTION_EXIT_CLEAN,
     CACHE_EVICTION_EXIT_PLAN,
@@ -215,6 +216,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="how many nodes ONE pass may take.")
     parser.add_argument("--key-prop", default="id", metavar="PROP",
                         help="the node property holding the record key (default: id)")
+    parser.add_argument("--pins-label", default="Point", metavar="LABEL",
+                        help=("#14012: the label the pin declaration addresses "
+                              "(default: Point). A pin set declared against another "
+                              "label is NOT applied to this sweep."))
+    parser.add_argument("--pins-key-prop", default=None, metavar="PROP",
+                        help=("#14012: the key property the pin declaration uses "
+                              "(default: the same as --key-prop)"))
     parser.add_argument("--selector", required=True, metavar="MODULE:CALLABLE",
                         help=("(graph, limit, population) -> [Candidate], ordered "
                               "cold-first by a policy YOU own. No default: #10976 "
@@ -359,10 +367,44 @@ def main(argv: list[str] | None = None) -> int:
                    "census": assessment.as_dict()}, args.out)
             return CACHE_EVICTION_EXIT_REFUSED
 
+        # ⛔ #14012 — THE PIN, AND IT HAS NO OFF-SWITCH. What a user declared resident
+        # may not be swept by an operator flag, so there is no `--ignore-pins`: the gate
+        # is read here, always, and a pin set that cannot be read or no longer fits its
+        # budget REFUSES the sweep rather than either silently dropping the user's
+        # declaration or silently letting pins take over the fast layer.
+        pins_label = args.pins_label
+        pins_key_prop = args.pins_key_prop or args.key_prop
+        try:
+            pin_budget = resident_pin.PinBudget.resolve(window_nodes=policy.max_nodes)
+        except resident_pin.PinConfigError as exc:
+            _emit({"verdict": "REFUSED",
+                   "reason": f"the pin budget cannot be resolved: {exc}",
+                   "census": assessment.as_dict()}, args.out)
+            return CACHE_EVICTION_EXIT_REFUSED
+        pins = resident_pin.read(graph, budget=pin_budget)
+        pin_refusal = pins.gate_reason()
+        if pin_refusal is not None:
+            _emit({"verdict": "REFUSED", "reason": pin_refusal,
+                   "pins": pins.as_dict(), "census": assessment.as_dict()}, args.out)
+            return CACHE_EVICTION_EXIT_REFUSED
+        if pins.keys and (pins.label, pins.key_prop) != (pins_label, pins_key_prop):
+            # ⛔ A pin set is declared against ONE key space. Applying a `Point`-keyed
+            # declaration to a sweep that keys on `Source.url` would compare keys that
+            # mean different things — a silent no-op at best, a wrong node held at worst.
+            _emit({"verdict": "REFUSED",
+                   "reason": (f"the pin declaration addresses {pins.label!r} by "
+                              f"{pins.key_prop!r}, but this sweep addresses "
+                              f"{pins_label!r} by {pins_key_prop!r} — an unmatched pin "
+                              f"set may not be applied to it"),
+                   "pins": pins.as_dict(), "census": assessment.as_dict()}, args.out)
+            return CACHE_EVICTION_EXIT_REFUSED
+        pinned_gate = pins.gate() if pins.keys else None
+
         report = evict(assessment, client, graph,
                        population=args.population,
                        selector=selector, record_probe=record_probe,
                        key_prop=args.key_prop,
+                       pinned=pinned_gate,
                        dry_run=not args.execute, policy=policy)
     finally:
         for handle in (client, graph):
@@ -385,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
         # ever emits it.
         "metric": report.metric(),
         "census": assessment.as_dict(),
+        "pins": pins.as_dict(),
     }
     _emit(body, args.out)
 
