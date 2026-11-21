@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (978 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (985 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair), AND THE ARMS GRADE
     ALL OF IT
@@ -1058,6 +1058,25 @@ _PARENT_CLAIM = re.compile(
     r"|\bthis\s+commit'?s\s+PRE-REWRITE\s+tree")
 
 
+#: A PAIR bound to the tree the READER is standing on: "the pair below is `(11840, …)`" / "the
+#: SAME pair this branch's tree prints". Both are the #14174 class in this block's own words — "an
+#: address that resolves to a different tree" — and both shipped GREEN on every arm until PR
+#: #14209's review F2: the pair below IS `SWEEP_RESIDUE`, and those two sentences claimed 11840 and
+#: 11843 after the merges with `main` had re-measured it to 11857.
+#:
+#: ⛔ KEYED ON THE PAIR, NOT ON THE PHRASE — the discipline this file already applies to the
+#: abbreviation and pointer arms. The block legitimately writes "the pair below was RE-DERIVED …
+#: on THIS merge tree", and legitimately quotes ANOTHER tree's pair beside it (`main` at
+#: `fbcd24760b` "for ITS tree"), so banning the words would false-block honest measurements. What
+#: is charged is a QUOTED PAIR bound to a relative subject in the PRESENT tense — the form that
+#: rots the moment the tree moves — and only where the pair is NOT the one the file carries.
+_PAIR_BELOW_CLAIM = re.compile(
+    r'(?i)(?:the\s+)?pair\s+below\s+is\b[^.]{0,90}?\(\d{4,5},\s*["\'][0-9a-f]{16}["\']\)'
+    r'|\(\d{4,5},\s*["\'][0-9a-f]{16}["\']\)[^.]{0,90}?\bthis\s+branch\'?s\s+tree\s+prints?\b'
+    r'|\bthis\s+branch\'?s\s+tree\s+prints?\b[^.]{0,90}?\(\d{4,5},\s*["\'][0-9a-f]{16}["\']\)')
+_QUOTED_PAIR_RE = re.compile(r'\((\d{4,5}),\s*["\']([0-9a-f]{16})["\']\)')
+
+
 def _pr_ref_as_tree_violations(flow: str) -> list[str]:
     """A TREE addressed by the moving PR ref's issue number (review, round 13, P2)."""
     return [flow[m.start():m.end()] for m in _PR_REF_AS_TREE.finditer(flow)
@@ -1074,6 +1093,22 @@ def _parent_claims(flow: str) -> list[str]:
     """The pre-rebase DRAFT presented as the capture rewrite's PARENT (review, round 13, P2)."""
     return [flow[m.start():m.end()] for m in _PARENT_CLAIM.finditer(flow)
             if not _refuted(flow, m.start())]
+
+
+def _pairs_bound_to_a_relative_tree(flow: str) -> list[tuple[str, tuple[int, str]]]:
+    """`(sentence, pair)` for each pair bound to "the pair below" / "this branch's tree".
+
+    `_PAIR_BELOW_CLAIM` finds the SHAPE; this reads the pair out of it so the caller can compare
+    it against the pin the file actually carries. A match with no parseable pair is still a
+    violation — it is the shape, not the digits, that rots.
+    """
+    out: list[tuple[str, tuple[int, str]]] = []
+    for m in _PAIR_BELOW_CLAIM.finditer(flow):
+        if _refuted(flow, m.start()):
+            continue
+        found = _QUOTED_PAIR_RE.search(m.group(0))
+        out.append((m.group(0), (int(found.group(1)), found.group(2)) if found else (0, "")))
+    return out
 
 
 #: Direction 1 of the `#14068` arm: a DIFF verb and the tree it diffs against, both inside one
@@ -1245,6 +1280,49 @@ def test_the_recut_pair_is_bound_to_its_rev_never_to_a_relative_head():
         f"{flow} and the pair THIS COMMIT pins, `{RESIDUE_ABBREV}` over"), (
         "a relative pin spelled `THIS COMMIT pins` is the same defect as `THIS head pins` — the "
         "arm must refuse the SHAPE, not one spelling of it")
+
+
+def test_a_pair_bound_to_the_pair_below_is_the_pins_own_pair():
+    """PR #14209 review F2 — two sentences bound a STALE pair to a relative address.
+
+    `The pair below is --repin's output on THIS tree at 1b0db04894 ((11840, …))` and
+    `(11843, …), the SAME pair this branch's tree prints` are both relative addresses, and after
+    the merge with `main` the tree printed `(11857, …)` — so both were FALSE on the tree that
+    would have shipped them. Neither was graded: they carry no `pins` verb for
+    `_RELATIVE_PIN_ADDRESS` and no `#14108` for `_PR_REF_AS_TREE`, which is why they survived a
+    clean review and needed a reader to catch them.
+
+    Object-free: it compares against `privatise.SWEEP_RESIDUE`, so it runs in every job.
+    """
+    flow = re.sub(r"\n#:\s?", " ", _residue_block())
+    own = tuple(privatise.SWEEP_RESIDUE)
+    stale = [b for b in _pairs_bound_to_a_relative_tree(flow) if b[1] != own]
+    assert not stale, (
+        "a pair bound to `the pair below` / `this branch's tree` must BE the pin this file "
+        f"carries, {own} — name the rev that derived it instead: {stale[0]!r}")
+    # ⛔ NON-VACUITY, ON THE REAL BLOCK: the two pre-fix sentences, installed verbatim. Both were
+    # GREEN on every arm before this one existed.
+    pre_fix = [
+        'The pair below is `--repin`\'s output on THIS tree at `1b0db04894` '
+        '(`(11840, "b7eb08ff3acdcce4")`), measured, never carried forward by arithmetic.',
+        '`(11843, "6aed5368ffa10513")`, the SAME pair this branch\'s tree prints, '
+        'which is why it is the branch that is red rather than the change.',
+    ]
+    for sentence in pre_fix:
+        mutant = _pairs_bound_to_a_relative_tree(f"{flow} {sentence}")
+        assert [p for _, p in mutant if p != own], (
+            "the PRE-FIX sentence must be refused — nothing graded it before this arm existed: "
+            f"{sentence!r}")
+    # ⛔ AND THE HONEST FORMS STAY GREEN, so the arm cannot be satisfied by deleting prose: a
+    # past-tense measurement, another tree's pair quoted beside it, and a pair scoped to its rev.
+    honest = [
+        'the pair below was RE-DERIVED with `--repin` on THIS merge tree',
+        '`main` at `fbcd24760b` printed `(11831, "b14af0d2db12529b")` for ITS tree',
+        'the SAME pair this branch\'s tree carried at `72c104bcbb`',
+    ]
+    for sentence in honest:
+        assert not _pairs_bound_to_a_relative_tree(sentence), (
+            f"an honest, rev-scoped measurement must NOT red this arm: {sentence!r}")
 
 
 def test_the_capture_rewrites_parent_is_the_rev_the_block_names():
