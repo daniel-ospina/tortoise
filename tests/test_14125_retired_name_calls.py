@@ -962,37 +962,28 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     module-wide set holds a neighbouring function's locals too and was measured to red
     its legitimate third-party probe (review of #14160, P2).
 
-    ⛔ THERE *IS* A SEPARATE "the block rebinds it" TERM, AND IT IS LOAD-BEARING (a
-    removal on this branch was measured WRONG). A ``_rebinds_within(block, name)`` clause
-    stood at ``_reaches_capability_seam``'s exemption and was deleted as "dead", on the
-    evidence that nothing red — which is the unwitnessed-arm defect class this gate exists
-    to forbid, but "nothing red" only meant no ROW pinned it; the term was not dead.
-    Measured on the tree that removed it, with the clause stubbed and restored:
+    ⛔ REACH IS RESOLVED AT THE CALL NODE, SO THERE IS NO SEPARATE "the block rebinds it"
+    TERM — and that is a REFUTATION of two earlier judgements on this branch, both of
+    which measured a real symptom and drew the wrong conclusion from it:
 
-        import falkordb
-        FALKORDB_AVAILABLE = False
-        try:
-            def _run():
-                falkordb = _make_client()      # rebind INSIDE a def nested in the block
-                return falkordb.g.query("RETURN 1")
-            FALKORDB_AVAILABLE = _run()
-        except Exception:
-            FALKORDB_AVAILABLE = False
+      * a ``_rebinds_within(block, name)`` clause was added because a rebind inside a
+        ``def`` NESTED in the block was exempt. True — but the fix was at the wrong
+        granularity: ``ast.walk(block)`` also sees every NESTED scope, so
+        ``except Exception as torch`` inside a nested ``def`` cancelled the exemption for
+        a call at BLOCK level that it cannot reach (§4.2.2) — the ``4k-``/``4l-`` false
+        red, and one case a REGRESSION against ``origin/main``.
+      * it was then deleted as "DEAD, unwitnessed" because no row red. Also wrong: the
+        term was load-bearing for the nested-``def`` shape, so the deletion re-opened it
+        (measured ``()`` exempt).
+      * so it was restored with a witness — and BOTH judgements were still at the wrong
+        granularity, which is what this tree now fixes.
 
-    ``()`` exempt with the term gone, a graded root with it. The three reasons given for
-    its redundancy each cover a DIFFERENT shape: ``_shadowed(block)`` is the probe's
-    enclosing FUNCTION chain and a MODULE-scope block has none; ``_module_scope_bindings``
-    adds a nested ``def``'s NAME, not its BODY; and the module-wide subtraction covers
-    ``def falkordb():`` (which binds that name at MODULE scope), not ``def _run():
-    falkordb = …``. Row ``4j-terdecies`` pins it, with a control whose nested ``def``
-    rebinds a different name, so the row cannot pass on code that simply dropped the
-    exemption.
-
-    The drift the removal DID find is real, and is fixed rather than used as a reason to
-    delete: the term read ``ast.Name``/``Store`` only — no ``Del`` (§4.2.1 counts a
-    ``del`` target as bound) and no ``ast.arg`` (a ``lambda`` parameter inside the block).
-    It is the full family list now, and rows ``4j-duodecies`` / ``4j-terdecies`` pin the
-    two additions.
+    The single rule is: a name is exempt only where it still denotes the import **at the
+    call site** (§4.2.2 — a binding reaches every use in the SAME block). ``_reaches_
+    capability_seam`` resolves ``_enclosing_bindings(node, parents)`` from the CALL NODE,
+    so a nested scope contributes exactly to the calls inside it and to nothing else.
+    That one rule closes the fail-open shape AND both false reds, and it is why no
+    "the block rebinds it" term exists to be patched.
     """
     bound = _non_own_imported_names(tree.body)
     if not bound:
@@ -1019,53 +1010,31 @@ def _global_scope_bindings(tree: ast.Module) -> set[str]:
     dropped out of the population entirely, so `UNARMED == ()` read green over it
     (review of #14160, P2).
 
-    A DECLARATION alone is not a binding (`global x` with no assignment is inert), so a
-    name counts only where the tree also BINDS it somewhere — otherwise a bare
-    `global torch` would cost a legitimate third-party probe its exemption, the false red
-    `4k-`/`4l-` forbid. Witnessed both ways in `4j-undecies`.
+    A DECLARATION alone is not a binding, and it is only a binding in the block that
+    CARRIES it: `global torch` in one function plus `torch = 1` as a LOCAL of an
+    unrelated one must not count, or a genuine third-party probe is graded (review of
+    #14160, P2 — every scope is walked with its own binding set, so the two are never
+    intersected across scopes). Witnessed both ways in `4j-undecies`.
     """
-    declared = {
-        name for node in ast.walk(tree) if isinstance(node, ast.Global) for name in node.names
-    }
-    if not declared:
-        return set()
-    bound: set[str] = set()
-    for node in ast.walk(tree):
-        _collect_binding(node, bound)
-    return declared & bound
-
-
-def _rebinds_within(block: ast.AST, name: str) -> bool:
-    """Whether `name` is RE-BOUND inside `block` — the probe's own body.
-
-    Load-bearing, not redundant: a rebind inside a `def` NESTED in the block is reached
-    by no other walk (the enclosing chain is empty for a module-scope block, and
-    `_module_scope_bindings` adds a nested `def`'s NAME but not its BODY). See
-    `_third_party_receivers` for the measurement that falsified its removal.
-
-    ⛔ THE FULL FAMILY LIST, not `ast.Name`/`Store` only: `ast.arg` (a `lambda` parameter
-    inside the block — the one family no other walk can see, because the module walk skips
-    a `lambda` body by construction) and the `Del` context (§4.2.1 counts a `del` target
-    as bound).
-    """
-    for node in ast.walk(block):
-        if isinstance(node, ast.arg) and node.arg == name:
-            return True
-        if (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, (ast.Store, ast.Del))
-            and node.id == name
-        ):
-            return True
-        if isinstance(node, ast.ExceptHandler) and node.name == name:
-            return True
-        if isinstance(node, ast.MatchAs) and node.name == name:
-            return True
-        if isinstance(node, ast.MatchStar) and node.name == name:
-            return True
-        if isinstance(node, ast.MatchMapping) and node.rest == name:
-            return True
-    return False
+    declared: dict[int, set[str]] = {}
+    bound: dict[int, set[str]] = {}
+    stack: list[tuple[ast.AST, ast.AST]] = [(tree, tree)]
+    while stack:
+        node, scope = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # the NAME binds in the ENCLOSING block; the body is another block
+            _collect_binding(node, bound.setdefault(id(scope), set()))
+            scope = node
+        elif isinstance(node, ast.Lambda):
+            scope = node
+        if isinstance(node, ast.Global):
+            declared.setdefault(id(scope), set()).update(node.names)
+        _collect_binding(node, bound.setdefault(id(scope), set()))
+        stack.extend((child, scope) for child in ast.iter_child_nodes(node))
+    out: set[str] = set()
+    for key, names in declared.items():
+        out |= names & bound.get(key, set())
+    return out
 
 
 def _module_scope_bindings(tree: ast.Module) -> set[str]:
@@ -1206,7 +1175,11 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
     out: set[str] = set()
     node = parents.get(id(block))
     while node is not None:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        #: A `lambda` is a function scope too: its parameters are invisible to every
+        #: other walk (they are `ast.arg`, and the module walk skips a lambda body by
+        #: construction), so a call inside one must see them here or the exemption
+        #: survives over OUR client (`4j-duodecies`).
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             out |= _function_scope_bindings(node)
         elif isinstance(node, ast.ClassDef):
             # ⛔ A GENERIC CLASS'S TYPE PARAMETER REACHES ITS METHODS. PEP 695: a class type
@@ -1240,7 +1213,9 @@ def _function_local_bindings(func: ast.AST) -> set[str]:
     the comprehension wholesale missed the walrus — a silent drop (review of #14160, P2).
     """
     out: set[str] = set()
-    stack: list[ast.AST] = list(getattr(func, "body", []))
+    body = getattr(func, "body", [])
+    #: A `lambda`'s body is a single EXPRESSION, not a statement list (`4j-duodecies`).
+    stack: list[ast.AST] = [body] if isinstance(body, ast.AST) else list(body)
     while stack:
         node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -1257,6 +1232,24 @@ def _function_local_bindings(func: ast.AST) -> set[str]:
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             out |= _walrus_targets(node)
             continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            #: §4.2.1 ("import statements" bind) — collected in the FUNCTION scope walk,
+            #: and NOT in `_collect_binding`: at MODULE scope the import is the very thing
+            #: the third-party exemption exists for, so counting it as a shadowing binding
+            #: of ITSELF empties `third_party` for every file (measured: every `4k-`/`4l-`
+            #: negative red).
+            #:
+            #: ⛔ AND ONLY AN IMPORT THAT BINDS THE NAME TO SOMETHING ELSE COUNTS. A local
+            #: `import some_optional_dep` re-binds the name to the SAME module, so it is
+            #: still that package's verb at the call — `tests/` has that shape inside a
+            #: skip-gated helper, and counting it graded the probe (`4k-`-class false red,
+            #: measured `((5, (), True, False, True),)`). `import somedep as torch` and any
+            #: `from … import` bind the name to a DIFFERENT thing, so those do count.
+            out |= {
+                a.asname or a.name.split(".")[0]
+                for a in node.names
+                if a.asname is not None or isinstance(node, ast.ImportFrom)
+            }
         _collect_binding(node, out)
         stack.extend(ast.iter_child_nodes(node))
     return out
@@ -1354,7 +1347,7 @@ _CAPABILITY_NAMES = frozenset({"TortoiseSDK", "FalkorProjection"})
 
 
 def _reaches_capability_seam(
-    block: ast.AST, third_party: frozenset[str] | set[str], shadowed: set[str]
+    block: ast.AST, third_party: frozenset[str] | set[str], parents: dict[int, ast.AST]
 ) -> bool:
     """Whether the block CALLS the capability seam, however the client arrived.
 
@@ -1411,14 +1404,17 @@ def _reaches_capability_seam(
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr in _CAPABILITY_CALLS:
             root = _receiver_root_name(func.value)
-            # Exempt only when the name still denotes the import WHERE THE PROBE RUNS:
-            # module scope is already subtracted in `third_party` and `shadowed` carries
-            # Exempt only when the name still denotes the import WHERE THE PROBE RUNS:
-            # module scope (`third_party`), the enclosing function chain (`shadowed`), and
-            # the block's own body (`_rebinds_within` — a rebind inside a `def` NESTED in
-            # the block is reached by NEITHER of the other two; see
-            # `_third_party_receivers`).
-            if root in third_party and root not in shadowed and not _rebinds_within(block, root):
+            # EXEMPT ONLY WHEN THE NAME STILL DENOTES THE IMPORT **AT THIS CALL SITE**.
+            # Reach is resolved FROM THE CALL NODE, not from the block: §4.2.2 says a
+            # binding reaches every use in the SAME block, and a nested `def`/`class`/
+            # `lambda` is a different block whose bindings do NOT reach a call outside it.
+            # Resolving at the block instead was wrong in BOTH directions — it missed a
+            # rebind inside a `def` nested in the block (fail-open) and it cancelled the
+            # exemption for a nested scope's binding that cannot reach a block-level call
+            # (false red, one of them a regression against `origin/main`). This ONE rule
+            # replaces the separate "the block rebinds it" term, which is why that term
+            # is gone rather than patched (review of #14160, P2).
+            if root in third_party and root not in _enclosing_bindings(node, parents):
                 continue
             return True
         if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
@@ -1586,9 +1582,6 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
         for _child in ast.iter_child_nodes(_parent):
             _parents[id(_child)] = _parent
 
-    def _shadowed(node: ast.AST) -> set[str]:
-        """Every name the FUNCTION scopes enclosing `node` bind — its own reach."""
-        return _enclosing_bindings(node, _parents)
     # MODULE-LEVEL control flow, not just `tree.body`. `tests/test_assembly_pure.py:2615`
     # puts its probe inside `if _DOCKER_URI:`, so a walk over the direct children
     # returned NO row for that file while `_skip_condition_names(tree)` already held
@@ -1600,7 +1593,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
         if _assigns_availability(stmt) and (
             _imports_own_code(stmt)
             or _touches_own_code(stmt, module_own)
-            or _reaches_capability_seam(stmt, third_party, _shadowed(stmt))
+            or _reaches_capability_seam(stmt, third_party, _parents)
         ):
             # The own-code gate applies to THIS branch too. Without it the rule
             # redded `TORCH_AVAILABLE = False / try: import torch …`, i.e. a probe
@@ -1621,7 +1614,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
         elif (_bound_names(stmt) & skip_referenced) and (
             _imports_own_code(stmt)
             or _touches_own_code(stmt, module_own)
-            or _reaches_capability_seam(stmt, third_party, _shadowed(stmt))
+            or _reaches_capability_seam(stmt, third_party, _parents)
         ):
             # A module-body probe whose flag is spelled something other than
             # `*AVAILABLE` — `LIVE`, `_FTS_ESCAPE_LIVE`, `_FALKORDB_UP` — is NOT an
@@ -1654,7 +1647,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                     # `tests/test_8870_version_anchor_write_order.py:138`), and
                     # leaving it ungated graded a third-party client's `.query` as
                     # this repository's seam (review of 90a0e9e8b20c, findings 1+3).
-                    or _reaches_capability_seam(block, third_party, _shadowed(block))
+                    or _reaches_capability_seam(block, third_party, _parents)
                 )
             )
         elif (
@@ -1680,7 +1673,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                     # Same arm, same narrowing as the resolver branch above: the
                     # passed-in client stays graded, a third-party client's
                     # generic `.query` does not (review of 90a0e9e8b20c, 1+3).
-                    or _reaches_capability_seam(block, third_party, _shadowed(block))
+                    or _reaches_capability_seam(block, third_party, _parents)
                 )
             )
     # ── ANY OTHER function whose probe feeds its own SKIP decision (review P1) ──
@@ -1720,7 +1713,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             if (
                 _imports_own_code(block)
                 or _touches_own_code(block, own_names)
-                or _reaches_capability_seam(block, third_party, _shadowed(block))
+                or _reaches_capability_seam(block, third_party, _parents)
             ):
                 graded.add(id(block))
                 roots.append(block)
@@ -3271,6 +3264,12 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     `_rebinds_within` can see (`ast.arg` is not an `ast.Name`, and the module walk
     #     skips a `lambda` body by construction), so `(lambda torch: torch.query(…))(...)`
     #     ran `.query` on OUR client and stayed exempt (review of #14160, P2).
+    # 4j-duodecies. A FORMAL PARAMETER inside a `lambda` in the probe BLOCK is a binding
+    #     only the CALL-NODE reach can see (`ast.arg` is not an `ast.Name`, and the module
+    #     walk skips a `lambda` body by construction), so `(lambda torch:
+    #     torch.query(…))(...)` ran `.query` on OUR client and stayed exempt. It is graded
+    #     because `_enclosing_bindings` treats a `lambda` as a function scope (review of
+    #     #14160, P2).
     _lambda_param_in_block = textwrap.dedent(
         """
         import torch
@@ -3289,11 +3288,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"{_lambda_param_row}"
     )
 
-    # 4j-terdecies. THE `_rebinds_within` TERM'S OWN WITNESS, and the reason it is not dead
-    #     (removing it was measured wrong — see `_third_party_receivers`). The shape is the
-    #     one ONLY that term catches: the enclosing chain is empty for a module-scope block
-    #     and `_module_scope_bindings` does not descend a nested `def`'s BODY, so with the
-    #     term gone the block reads exempt again over OUR client.
+    # 4j-terdecies. THE CALL-NODE REACH'S OWN WITNESS. The call sits inside a `def` NESTED
+    #     in the block, so its enclosing chain is THAT def, not the module — which is why
+    #     the rebind reaches the call even though `_module_scope_bindings` never descends a
+    #     nested `def`'s BODY. Resolving reach from the BLOCK instead (the shape this
+    #     branch carried through two wrong judgements) measures exempt here.
     _rebind_inside_nested_def = textwrap.dedent(
         """
         import falkordb
@@ -3317,7 +3316,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         True,
     ), (
         "a re-binding inside a `def` nested in the probe BLOCK can reach the probe, and "
-        "`_rebinds_within` is the only term that sees it — dropping it leaves the block "
+        "resolving reach from the BLOCK rather than from the CALL leaves the block "
         f"exempt over OUR client: {_rebind_nested_row}"
     )
     _nested_def_control = roots(
@@ -3416,7 +3415,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     from annotations and stand-ins, so it cannot see `PROJ = _make_proj()`, and
     #     gating the helper branches on it breaks the pinned passed-in-client rule
     #     (`tests/test_8870_version_anchor_write_order.py:138`). Instead the arm is back
-    #     in every branch and NARROWED: `_reaches_capability_seam(block, third_party, _shadowed(block))`
+    #     in every branch and NARROWED: `_reaches_capability_seam(block, third_party, _parents)`
     #     skips an ATTRIBUTE call only when the receiver's ROOT name is bound by a
     #     NON-own import AND is not re-bound anywhere in the module
     #     (`_third_party_receivers`) — the `some_optional_dep.query` false red — and
