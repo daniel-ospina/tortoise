@@ -3446,14 +3446,19 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     DIRECTION, and the family where main genuinely differs is the `str`-field one
     #     above (`except … as falkordb` in a nested `def`, call at block level: main `()`,
     #     block-granularity grades it, this tree `()`).
-    #     Measured: green here, and the ONLY row that reds when the block-granularity
-    #     subtraction (the `ast.walk(block)` mechanism the deleted `_rebinds_within` was)
-    #     is put back — verified by comparing EVERY source classification this self-test
-    #     makes against the mutant (576 of them when this line was written): exactly one
-    #     flips, and it is this control. The total grows as rows are added; the flip count
-    #     does not, and each head re-measures it rather than inheriting the previous one.
-    #     That is why the fail-open row above cannot stand alone (review of #14160, P2:
-    #     without this the fix could be reverted with all eight tests green).
+    #     Measured: green here, and putting the block-granularity subtraction back (the
+    #     `ast.walk(block)` mechanism the deleted `_rebinds_within` was) reds THREE rows,
+    #     not one: this control plus the two class-body barrier controls
+    #     (`_class_body_method_control`, `_class_body_comprehension_control`) — the same
+    #     block-granularity error also forbids the two shapes those rows pin as exempt.
+    #     Verified by comparing EVERY source classification this self-test makes against
+    #     the mutant; the total grows as rows are added, so it is not restated here, and
+    #     the FLIP count is re-measured at each head rather than inherited (review of this
+    #     PR at `592fc53ecb5a`, P3: the earlier "exactly one" was falsified — an
+    #     inline-`assert roots(…)` call is invisible to a count taken under `-O`, which is
+    #     how the wrong figure was produced). That is why the fail-open row above cannot
+    #     stand alone (review of #14160, P2: without this the fix could be reverted with
+    #     all eight tests green).
     _nested_def_control = roots(
         textwrap.dedent(
             """
