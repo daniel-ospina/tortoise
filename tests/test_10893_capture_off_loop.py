@@ -193,10 +193,12 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # PROBLEM: the verdict is keyed on the METHOD NAME alone, so this line
     # exempts EVERY on-loop `sdk._get_proj()` on the capture path, at any cost,
     # whatever its caller — and `_get_proj` is not a capture-specific leg
-    # (measured: 396 `_get_proj(` lines under `tortoise/` — 395 besides the
-    # definition itself, 207 of them in `sdk.py` where it is defined; the same
-    # all-lines-except-the-definition count the `_graph_write_with_retry` row
-    # above states 36 by, so the two sizes are comparable), it is the cold
+    # (measured on this tree with `git grep -c '_get_proj('`: 395 lines under
+    # `tortoise/`, 394 besides the one `def`; 207 in `tortoise/sdk.py`, where it
+    # is defined, i.e. 206 besides that `def` — and the sibling row's 36 for
+    # `_graph_write_with_retry(` is likewise its `sdk.py` lines minus its `def`
+    # (37 with it), so compare 206 with 36 and not with the def-included 207),
+    # it is the cold
     # projection attach. `#4451` owns the completion-gate leg named here and
     # NOT that population; a future on-loop `_get_proj` elsewhere joins the
     # exemption silently and is then reported as `#4451`'s. Declared rather
