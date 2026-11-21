@@ -801,8 +801,30 @@ def _imports_of(source: str) -> set[str]:
                 # invisible, which is a third way to reach a store client.
                 if node.level == 0:
                     found |= {
-                        f"{node.module}.{alias.name}" for alias in node.names
+                        f"{node.module}.{alias.name}"
+                        for alias in node.names
+                        if alias.name != "*"
                     }
+                    # ⛔ `from <pkg> import *` BINDS THE PACKAGE'S PUBLIC NAMES, and
+                    # the bare `*` recorded above matches no root. For a root the
+                    # guard deliberately does not ban (`tortoise` itself), that made
+                    # the star form TRIPLY blind: the AST ban saw the literal `*`,
+                    # the direction scan saw no store root (`_imports_of` contains
+                    # none), and the probe cannot see `embedded_lifecycle` (it is
+                    # probe-exempt AND already in `sys.modules`). Measured: a
+                    # module-level `from tortoise import *` in the real
+                    # `usage_signal.py` bound `embedded_lifecycle` — the module that
+                    # owns the embedded store — with all 98 rows green. Emitting every
+                    # reachable name under that prefix is a SUPERSET (a star import
+                    # may bind fewer), which is this helper's stated contract and
+                    # fails CLOSED.
+                    if any(alias.name == "*" for alias in node.names):
+                        prefix = f"{node.module}."
+                        found |= {
+                            name
+                            for name in _REACHABLE_FROM_ROOT
+                            if name.startswith(prefix)
+                        }
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
                 found |= {f"tortoise.{alias.name}" for alias in node.names}
@@ -936,14 +958,15 @@ def test_no_graph_dependency() -> None:
     built at runtime (`tortoise.__dict__[...]`, `f"tortoise.{x}"`) would pass, and
     are OUT OF SCOPE rather than covered. ⛔ SO ARE THE REBINDING FORMS THE FIXPOINT
     DOES NOT WALK, which are STATIC and therefore easy to assume are covered: only
-    `x = …` and `x: T = …` propagate the bound name. A walrus
-    (`if (t := tortoise): t.FalkorDB`), a loop or `with … as` target, a tuple
-    target, and a DEFAULT ARGUMENT (`def f(t=tortoise): return t.Tortoise`) all
-    reach the client and are not seen. They are named here because the clause above
-    promises "aliases and rebindings followed", and a reader deciding sufficiency
-    must not read that as every static form. (`getattr(tortoise, "FalkorDB")` with
-    BOTH arguments literal IS covered — see `_getattr_reaching_a_store` — because
-    that is statically decidable.)
+    `x = …` and `x: T = …` propagate the bound name, and the exceptions are listed
+    as EXAMPLES rather than a closed set — a walrus (`if (t := tortoise): …`), a
+    loop or `with … as` target, a TUPLE, LIST or STARRED target, a comprehension
+    target, a `match` capture pattern, and a DEFAULT ARGUMENT
+    (`def f(t=tortoise): return t.Tortoise`) all reach the client and are not seen.
+    They are named because the clause above promises "aliases and rebindings
+    followed", and a reader deciding sufficiency must not read that as every static
+    form. (`getattr(tortoise, "FalkorDB")` with BOTH arguments literal IS covered —
+    see `_getattr_reaching_a_store` — because that is statically decidable.)
 
     ⚠️ **ALSO OUT OF SCOPE, and easier to get wrong: the TRANSITIVE hop.** The ban
     is one-hop by design (the closure is not walked — walking it would forbid the
@@ -1154,6 +1177,15 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     }
     # A NON-literal name stays out of scope (and is named as such in the docstring).
     assert _offending("import tortoise\nc = getattr(tortoise, NAME)\n") == set()
+    # ⛔ AND THE STAR IMPORT, which was TRIPLY blind: the bare `*` matched no root,
+    # the scan saw no store root, and the probe cannot see `embedded_lifecycle`. In a
+    # fresh interpreter `from tortoise import *` really does bind it (the package has
+    # no `__all__`, and `embedded_lifecycle` is a public name), so this spelling
+    # reached the module that owns the embedded store with every row green.
+    assert _offending("from tortoise import *\nh = embedded_lifecycle\n") >= {
+        "tortoise.embedded_lifecycle",
+        "tortoise.sdk",
+    }
     # …and the harmless spellings stay clean, so the ban is not a blanket. Bare
     # `import tortoise` and an unrelated attribute must not redden, and neither
     # must an attribute read on a name that was never bound to the package root
