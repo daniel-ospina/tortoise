@@ -420,7 +420,7 @@ _BROAD = frozenset({"Exception", "BaseException"})
 # never reaches it. A future widening that grades ANY module-body `try` that
 # imports own code WOULD charge it, and that is the sentence to re-read before
 # widening.)
-_OWN_CODE_ROOTS = frozenset({"tortoise", "tests", "tools"})
+_OWN_CODE_ROOTS = frozenset({"tortoise", "tests", "tools", "battery", "benchmarks"})
 
 
 def _handler_names(handler: ast.ExceptHandler) -> set[str]:
@@ -1166,13 +1166,25 @@ def _function_scope_bindings(fn: ast.AST) -> set[str]:
 
 
 def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]:
-    """Bindings in every FUNCTION scope that lexically encloses `block` — the closure chain.
+    """Bindings in every scope that lexically encloses `block` — the closure chain.
 
     A local of an OUTER function reaches a probe in a nested one, so the chain is the
     reach, not the innermost `def` alone. Module scope is not here: it is subtracted
     once, module-wide, by `_third_party_receivers`.
+
+    ⛔ A CLASS BODY IS TWO RULES, NOT ONE (§4.2.2): "the scope of names defined in a
+    class block is limited to the class block" — so a class-body binding reaches a use
+    DIRECTLY in that block (including a `try` in it) and does NOT reach a method body.
+    Only the second half used to be implemented, so `class C: torch = proj` …
+    `torch.query(…)` inside the class body read EXEMPT over OUR client — a fail-open
+    the call-node refactor introduced (`3b7f3e57d426` graded it; measured `()` at the
+    head of #14160 when this was fixed, `((5, (), True, False, True),)` after).
+    `crossed_callable` is what separates the halves: a `def`/`lambda` between the call
+    and the class means the class-body names cannot reach it, which is why the two
+    METHOD controls stay `()`.
     """
     out: set[str] = set()
+    crossed_callable = False
     node = parents.get(id(block))
     while node is not None:
         #: A `lambda` is a function scope too: its parameters are invisible to every
@@ -1181,6 +1193,7 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
         #: survives over OUR client (`4j-duodecies`).
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             out |= _function_scope_bindings(node)
+            crossed_callable = True
         elif isinstance(node, ast.ClassDef):
             # ⛔ A GENERIC CLASS'S TYPE PARAMETER REACHES ITS METHODS. PEP 695: a class type
             # parameter "is valid within the class body and inner scopes contained
@@ -1189,10 +1202,13 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # through `_function_scope_bindings`, so a `ClassDef` never entered the shadow
             # set and `class C[torch]: def probe(self): torch.query(…)` kept the
             # exemption — the silent drop, one node kind over (review of #14160, P1).
-            # ONLY the type parameters are added: §4.2.2 says a class block's names "do
-            # not extend to the code blocks of methods", so `class C: torch = …` must keep
-            # leaving a method's probe exempt — there are two control rows for that.
             out |= _type_param_names(node)
+            if not crossed_callable:
+                # the OTHER half: names the class body binds reach a use in that same
+                # block. A nested `def`/`class` contributes its NAME but not its body,
+                # which is exactly the descent `_function_local_bindings` implements.
+                out |= _function_local_bindings(node)
+            crossed_callable = True
         node = parents.get(id(node))
     return out
 
@@ -1501,6 +1517,15 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     (review of this PR, execution leg). One of the five is not charged
     (`test_extractor_reliability.py:898` already re-raises, `swallows=False`); it is
     graded because its `pytest.xfail` guard reads names the `try` binds.
+    ⛔ AND IT IS A MEASUREMENT, NOT A PIN. The self-test pins PRESENCE, never an exact
+    total: `test_the_import_seam_census_sees_the_shapes_it_grades` asserts only LOWER
+    BOUNDS on the population (`roots >= 30`, `importing >= 20`) plus the presence of two
+    named files, so the row/root/file numbers above are measurements and a later lane
+    that moves the tree owes no re-cut of a literal. (This paragraph said "Population pin
+    moves …" until a reviewer measured that no such pin exists; the correction first
+    landed as bare `:2191`/`:2195` line citations, which are stale by design and pointed
+    at unrelated lines by the head that carried them — the bounds are named by symbol here
+    instead. Final review of #14160, P2; execution re-measured at the resolved head.)
 
     ⛔ THE SENTINEL IS USUALLY CARRIED BY A GUARD, NOT BY THE MESSAGE (review of
     `cd75ec7144`, P1). The first version of this widening keyed only on the skip
@@ -3563,6 +3588,90 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "the OTHER direction, and it needs no import rule: an OWN-code alias is graded "
         "by the own-import arm, so the rows above cannot be satisfied by widening the "
         f"exemption — it was also graded at the parent head: {_aliased_own_row}"
+    )
+
+    # 4j-quindecies. THE OWN-CODE ROOTS ARE A DECLARED SET, and two repo packages were
+    #     missing from it: `battery` and `benchmarks` are first-party code (both carry
+    #     `__init__.py`, both import in CI with no extras, `battery/runner/setup.py:334`
+    #     defines our own `query` wrapper), so `import battery.runner.setup as torch` …
+    #     `torch.query(…)` is OUR seam and must be graded. Under the three-name root set
+    #     it read EXEMPT — a fail-open the import-rule removal exposed, because the
+    #     own-import arm is what grades this family (final review of #14160, P2).
+    for _own_pkg in ("battery.runner.setup", "benchmarks.synthetic_corpus"):
+        _repo_alias_row = roots(
+            textwrap.dedent(
+                f"""
+                import falkordb as torch
+
+                def _probe():
+                    import {_own_pkg} as torch
+                    try:
+                        torch.query("SELECT 1")
+                        return True
+                    except Exception:
+                        return False
+
+                TORCH_AVAILABLE = _probe()
+                """
+            )
+        )
+        assert len(_repo_alias_row) == 1 and _repo_alias_row[0][1:] == ((), True, False, True), (
+            f"`{_own_pkg}` is REPO-OWNED code, so the alias rebinds the receiver to OUR "
+            "seam and the guard must be graded — leaving it exempt is a silent drop "
+            "over an own-code rename, the class this census exists to catch: "
+            f"{_repo_alias_row}"
+        )
+
+    # 4j-sedecies. A CLASS BODY IS TWO RULES (§4.2.2): its names reach a use DIRECTLY in
+    #     that block, and do NOT reach a method body. Only the second half was
+    #     implemented, so a class-body rebind and a call in that same body read EXEMPT
+    #     over OUR client — a fail-open the call-node refactor introduced (`3b7f3e57d426`
+    #     graded it; measured `()` at the head of #14160 before this, `((5, (), True,
+    #     False, True),)` after) (final review of #14160, P2). The METHOD control is the
+    #     other half and must stay `()`.
+    _class_body_rebind_graded = textwrap.dedent(
+        """
+        import falkordb as torch
+
+        def _probe(proj):
+            try:
+                class C:
+                    torch = proj
+                    torch.query("RETURN 1")
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe(None)
+        """
+    )
+    _class_body_row = roots(_class_body_rebind_graded)
+    assert len(_class_body_row) == 1 and _class_body_row[0][1:] == ((), True, False, True), (
+        "a binding in a class body reaches a use in that SAME block (§4.2.2: a class "
+        "block's names are limited to that block), so the `.query` runs on the "
+        f"rebound client and must be graded: {_class_body_row}"
+    )
+    _class_body_method_control = textwrap.dedent(
+        """
+        import falkordb as torch
+
+        def _probe(proj):
+            try:
+                class C:
+                    torch = proj
+                    def m(self):
+                        return torch.query("RETURN 1")
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe(None)
+        """
+    )
+    assert roots(_class_body_method_control) == (), (
+        "the CONTROL: a class-body name does NOT reach a METHOD body, so the same shape "
+        "is not evidence the method's receiver left the import — grading it is the "
+        f"`4k-`/`4l-` false red: {roots(_class_body_method_control)}"
     )
 
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
