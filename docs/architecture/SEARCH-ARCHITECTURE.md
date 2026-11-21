@@ -614,6 +614,15 @@ header records from measurement (a byte ceiling is a *lagging* signal: 20 000 `:
 needs an engine-side per-node reading first; it is not an oversight, and this line is what makes that
 findable.
 
+⚠️ **The pin's scope is the READING, not the sweep.** Gate 6 is a seam: `cache_evictor.evict`
+re-asks the caller's `pinned` predicate immediately before the `DELETE`, but `tools/cache_evict.py`
+passes `read(...).gate()` — a lambda over the frozenset ONE read computed — so re-asking returns the
+same answer. A `pin` issued while a sweep is in flight is therefore **not** honoured by that sweep.
+An earlier revision of gate 6's header said "a pinned node is NEVER deleted", which the code cannot
+deliver; it now says *as of the reading the caller took*, and this line is the residual made findable
+rather than discovered. Closing the window needs a declaration re-read per candidate at the last hop —
+a cost decision, not a one-line patch (→ #14214).
+
 ⚠️ **Neither control is a retention mechanism**, and neither changes what the record keeps: a pin buys
 **speed**, and the outside view is a statement about residency. Both are also per-ACCOUNT (the pin set is
 graph-scoped), per `#11758` — a pin is not a per-user escape from an account's allowance.

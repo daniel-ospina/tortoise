@@ -9672,6 +9672,51 @@ surfaces:
   - test_14012_resident_pin.py
   - test_14012_outside_view.py
   - test_14012_resident_cli.py
+  # #14192: the variance-sum bound the Q2-crit selection leans on. `core`, and the
+  # placement is MEASURED, not stylistic: both operands it pins
+  # (`beta_variance_sum_bound`, `_beta_variance`) live in `tortoise/search_engine.py`,
+  # which has no SOURCE_PATTERNS entry and falls through to `core` —
+  # `--changed-files tortoise/search_engine.py --event pull_request` -> `surfaces: ['core']`,
+  # `full: false`. That is exactly the guard it exists for: the file's whole
+  # assertion is the one-directional soundness property (the guard must never reject
+  # a pair whose Beta width clears `CONTESTED_VARIANCE_THRESHOLD`), so the revert the
+  # row has to catch is a diff to the bound or to the twin in `search_engine.py` —
+  # the same `core`-fallback shape the `test_12894` rows above record, and a row on
+  # any named surface would leave it asleep on precisely that diff class because a
+  # named-surface match REPLACES the `core` fallback (#2938/#7951).
+  # Hermetic on the fast lane: arithmetic cases over a fixed grid, plus the two
+  # pins that make them load-bearing (one drives the real
+  # `get_relationships_bounded` over a stub graph inside its `ThreadPoolExecutor`;
+  # the other reads the generated Q2-crit query text). No DB, no graph server, no
+  # docker, no network, no model call. ⛔ NO SECONDS FIGURE IS QUOTED HERE ON
+  # PURPOSE, and two earlier cuts of this comment did quote one (a single run's
+  # "6.7 s, of which 6.6 s was import/collection" — wrong about WHAT the time was;
+  # then a band of 5.6-6.9 s wall / 3.7-4.3 s setup / 1.5-2.0 s teardown — real
+  # readings fell outside it at BOTH ends). Both are WITHDRAWN, quoted only so the
+  # next lane does not re-derive them. What is stable across runs is the
+  # SHAPE: the wall time is the SHARED SESSION FIXTURE's setup and teardown, not
+  # this file — the largest TEST BODY is under 0.02 s — and any file in the suite
+  # pays the fixture too. `pytest -q --durations=5` is the authority for the
+  # split; re-derive there rather than trusting a transcription of one run.
+  # ⛔ NO CASE COUNT IS QUOTED EITHER, for the same reason the note above gives
+  # about seconds: a hand-written total re-stales on every case a later round
+  # adds. An earlier cut of this very comment said "five cases" over a file that
+  # had seven — one of them added by the commit that wrote the number.
+  - test_14192_beta_variance_sum_bound.py
+  # #14192: the measurement harness's OWN verdict — the half of the issue's Done-when
+  # that the first cut could not fail. `core`, and the placement is MEASURED: the pins
+  # import nothing from `tortoise` at all, they load `tools/read_wave_latency.py` by path,
+  # and that tool takes the no-surface early return on a tool-only diff — so the `core`
+  # row alone would still leave them asleep on exactly that diff class. The
+  # `CORE_ALSO` entry in `tools/ci_selection.py` is the other half, and
+  # `test_a_tool_only_diff_selects_this_pin` in this file is what keeps both.
+  # Hermetic: source loading plus pure `dict` comparison — no DB, no graph, no docker, no
+  # network, no model call.
+  # #14192 review(): the HARNESS's own verdict must be able to go red — the
+  # rank-identity pin. Registered because it guards `tools/read_wave_latency.py`
+  # and a revert of `_result_id`/`compare()` would otherwise ship with CI green
+  # (the false PASS the pin exists to remove).
+  - test_14192_read_wave_tool.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -15355,6 +15400,30 @@ durations:
   test_14012_resident_pin.py: 2.0
   test_14012_outside_view.py: 2.0
   test_14012_resident_cli.py: 2.0
+  # #14192 — a file this PR ADDS, so it can carry no CI junit reading yet
+  # (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only). The
+  # row must EXIST rather than merely default: the `core:` registration above is what
+  # puts the file in `fast_pool()`, and `--integrity` stays green either way, so only
+  # this row records the weight. `2.0` is the header's flat `DEFAULT_FAST_WEIGHT` and
+  # is the honest value here: the file's OWN cost is arithmetic over a fixed grid
+  # (19 x 19 x 2 + 7 extra pairs = 729) plus the two query-driving pins, and
+  # the largest test BODY measures under 0.02 s. ⛔ NO WALL/SETUP/TEARDOWN FIGURE
+  # IS QUOTED: those belong to the SHARED session fixture, not to this file, and the
+  # two cuts that quoted them were contradicted by real readings (see the dated
+  # correction above). `pytest -q --durations=5` is the authority for the split, and
+  # `--refresh-durations` replaces this row from junit once a push-to-main sweep
+  # includes the file. (No case count is quoted here either — see the note on the
+  # `core:` registration above.)
+  test_14192_beta_variance_sum_bound.py: 2.0
+  # #14192 — a file this PR ADDS, so it can carry no CI junit reading yet
+  # (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only).
+  # `2.0` is the header's flat `DEFAULT_FAST_WEIGHT`: a handful of cases that load one
+  # module by path and compare dicts. ⛔ NO CASE COUNT IS QUOTED (it re-stales on every
+  # case a later round adds — this row's first cut said "five" and the commit that wrote
+  # it added a sixth). As above, NO WALL/SETUP/TEARDOWN FIGURE is quoted — the
+  # wall time `pytest -q` reports belongs to the shared session fixture; `--durations=5`
+  # is the authority and `--refresh-durations` replaces this row from junit.
+  test_14192_read_wave_tool.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2
   test_name_entropy_12294.py: 0.1

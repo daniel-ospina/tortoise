@@ -1077,7 +1077,6 @@ SWEEP_NAMES = 66
 #: identical digest is an identical residue SET, which says `main`'s `69908d006b..72c104bcbb` commits
 #: (the `reap-redislite-orphans` rewrite, the platform-gated node-id list, the `.env`/runbook edits)
 #: add and remove NO untyped-receiver row. `--check` exits 0 on this tree.
-SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on this branch: `f9f480a55ab3` (#14164, the
 #: #13094 change-feed reader census + measured residency) added untyped `Graph` receivers and
@@ -1238,7 +1237,6 @@ SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
 #: rows, attributed row by row in that block, not this branch's. `11840 → 11857` is a CROSS-CHECK of
 #: two independent readings, never the derivation of this pin.
 #: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
 #:
 #: ⛔ MERGED `origin/main` `e74cf1d13d` (`#14161` + `#14208`) — a SEVENTH tree, so the pair is
 #: `--repin`'s output on THIS tree and NEITHER side's figure is carried: the 11857 in the block above
@@ -1273,7 +1271,19 @@ SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
 #: 0 on this tree with `typed references still pointing at a public name: 0`. ⛔ So this merge
 #: re-pins NOTHING, deliberately: the pin is not "refreshed" to show that a merge happened, and no
 #: numeral above is re-cut to match a tree that did not move it.
-SWEEP_RESIDUE = (11866, "74d2e8bbd0314d5a")
+#:
+#: ⛔ FOLDED `origin/main` `10e51693f1` (the PR's own conflicted head, re-resolved on `main`'s tip) —
+#: an EIGHTH tree, so the pair is `--repin`'s output on THIS tree and neither side's figure is
+#: carried: the conflicting 11866 above marked the PRE-FOLD branch tree, and `main`'s 11858 marked
+#: `main`'s OWN tree, which is not this one either. `--repin` on the resolved tree prints
+#: **(11870, '6da40999bb5162fa')**, and `--check` exits 0 with
+#: `typed references still pointing at a public name: 0`.
+#: The +4 over the 11866 line is the FOLD's, not this branch's: it arrives with `main`'s `#14212`/
+#: `#14215`/`#14216` test churn, whose new fakes call `super().query` on a parent no typing can
+#: decide — the same ordinary-word-receiver shape the blocks above attribute per file — and this
+#: branch's own contribution is unchanged, because every line it adds to those paths is `#:`
+#: prose or a docstring figure and `edits_for` walks the AST.
+SWEEP_RESIDUE = (11870, "6da40999bb5162fa")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
