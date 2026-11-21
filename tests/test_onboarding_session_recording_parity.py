@@ -17,7 +17,10 @@ through the same primitive. Two consequences this file pins:
   success.
 * **The disclosure touches no FLOW state.** The `capture-disclosed` step is
   written AUTOMATICALLY by the capture path (and may be asserted by an ORG-WIDE
-  agent credential at the checkpoint surface, which refuses any `graph_id`). The
+  agent credential at the checkpoint surface, which refuses any `graph_id` and is
+  only safe ON/AFTER the first capture — the step is first-write-wins and
+  `first_capture` is its `created`, so an early assert retires the announcement).
+  The
   pushed-down plan-review finding
   (§8) is that a new disclosure render can silently consume it, so the render
   is asserted to be a pure read.

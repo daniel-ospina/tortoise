@@ -3679,7 +3679,7 @@ def test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint(client, monkeypatch)
     the capture's graph IS the org default, so `main`'s write and gate were on one
     graph and were CORRECT — skipping by ``bool(org["graph_id"])`` would silently
     drop the checkpoint, the completion gate and `first_capture` for a class that
-    already had them (`onboarding/SKILL.md`: the capture path is the only writer).
+    already had them (`onboarding/SKILL.md`: the capture path is its only AUTOMATIC writer).
 
     This row is the other half of the pair: the custom-bound row above asserts the
     skip, this one asserts the KEEP. A coarse predicate reds exactly one of them.

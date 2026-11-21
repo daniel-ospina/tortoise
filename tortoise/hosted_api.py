@@ -21850,8 +21850,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # node "writes to the same physical graph an org-wide key writes to"
         # (#3365, `_capture_session_key`), so its capture `proj` WAS the default
         # graph — dropping the checkpoint there would silently lose it for a class
-        # that already had it (`onboarding/SKILL.md`: the capture path is the ONLY
-        # writer of `capture-disclosed`) [#14086 review round 4, P1].
+        # that already had it (`onboarding/SKILL.md`: the capture path is the
+        # ONLY AUTOMATIC writer) [#14086 review round 4, P1].
         # For a CUSTOM-bound key the block runs NEITHER half: the write would file
         # org-level state inside the customer's graph, and the gate would read —
         # and could COMPLETE — the org's, which is the cross-graph write
