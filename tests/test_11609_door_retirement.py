@@ -82,14 +82,18 @@ THAT UNBLOCKS IT, not silently:
   9 (envelope: the six READ doors, `check_structure`, `calibrate_summary`, and `search` — whose
   `rest_spec` cell is a RECORD, not a retention reason, and whose own annotation is
   `-> list[dict]`) + 0 (rest_spec as a retention reason: measured FALSE, §1.5) + 1 (paged
-  destination) + 0 (no arm) + 7 (destination not an MCP door yet — the DELETE pair retired in
-  lane P6) = 17, and
+  destination) + 0 (no arm) + 2 (destination not an MCP door — `org_create`, `ingest`) = 12,
+  and
   `TestProtectedDoorsStayLive` reads EVERY protected name back from the code — a name that
   lands in this list without an assertion behind it is the shape the #13052 review caught.
 
 ⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, 21 UNTIL LANE P6, 19 AFTER THAT
-LANE'S `rest_spec` PAIR, AND 17 AFTER ITS DELETE PAIR — the count at this head (P6 retired TWO
-pairs: the `rest_spec` pair, then the DELETE pair). `create_point` and
+LANE'S `rest_spec` PAIR, 17 AFTER ITS DELETE PAIR, AND **12 AT THIS HEAD** — #11609 lane P7
+retired FIVE more forward in the batch that REGISTERED their destinations: `tortoise_delete`
+(→ `tortoise_delete_knowledge`), `tortoise_create_edge` / `tortoise_create_operator`
+(→ `tortoise_link_entities`), `tortoise_events_poll` (→ `tortoise_poll_events`), and
+`tortoise_list_graphs` (→ `tortoise_graph_overview(section="graphs")`, whose handler had
+dispatched to that very body since #4282). `create_point` and
 `diary_write` were two of those twenty-five, held by ONE reason each — "create_entity has
 no point arm" / "…no diary arm". That is the reason this file's own contract is written
 around: a door may leave `PROTECTED` only in the batch that makes its stated reason FALSE,
@@ -101,11 +105,14 @@ retired both. `issue_insight` and `session_context` were two of the remaining tw
 and left on the same terms in lane P6: their recorded reason (`rest_spec` — *the row IS the
 REST route*) was MEASURED FALSE by lane P4, and P6 is the batch that acts on that
 measurement. `delete_point` and `delete_entity` were two of the remaining nineteen and left
-in the same lane, on the owner's #9660 ruling: the canonical row is executed by KEEPING the
-single `tortoise_delete` entry and widening what it deletes, so `delete_knowledge` — the
-destination both were held against — was never going to arrive as its own row. The
+in the same lane, on the owner's #9660 ruling: the canonical row is executed by KEEPING ONE
+`tortoise_delete` entry and widening what it deletes, so `delete_knowledge` — the
+destination both were held against — was never going to arrive as a separate row. **P7 is
+the batch that gave that kept entry the target's own spelling** (`tortoise_delete_knowledge`)
+and retired `tortoise_delete` onto it, so the ruling's shape and the target's name are now
+the same thing. The
 arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the population 25 became
-23 became 21 became 19 became 17 — a count left at 19 would have been a table claiming two
+23 became 21 became 19 became 17 became 12 — a count left at 19 would have been a table claiming two
 names that are no longer live, which is the rot the population check exists to red. ⛔ THIS
 PROSE SAID 19/`NINE` WHILE THE ASSERTIONS BELOW READ 17/`SEVEN` after #13626 merged — the
 assertions were right and the prose was pre-DELETE-pair, which is the shape a lane
@@ -306,29 +313,48 @@ PROTECTED = {
     # grew the arms. Do not restore them without first removing those arms.
 }
 
-#: The other SEVEN of the registry block's 17: live, off the 27-target, and held for a
-#: reason with no PROPERTY to assert — their recorded destination is not live on `main`
-#: yet, so there is no container to answer through and nothing that can be measured
-#: beyond "still live, still not retired" (which `TestProtectedDoorsStayLive` pins for
-#: every name in this table too). ⛔ Kept as a separate table rather than folded into
-#: `PROTECTED`, because `PROTECTED`'s contract is a retaining artefact this file READS
-#: BACK from the code; a name here has none, and pretending otherwise would make the
-#: table's own docstring false. What the split buys: `len(PROTECTED) + len(NO_CONTAINER_YET)
-#: == 17` turns the registry's prose enumeration into a checked POPULATION, so a live
-#: door dropped from either table reds here instead of surviving as a comment.
+#: The other TWO of the registry block's 12: live, off the 27-target, and held for a
+#: reason with no PROPERTY to assert — their recorded destination is not a live MCP door,
+#: so there is no container to answer through and nothing that can be measured beyond
+#: "still live, still not retired" (which `TestProtectedDoorsStayLive` pins for every name
+#: in this table too). ⛔ Kept as a separate table rather than folded into `PROTECTED`,
+#: because `PROTECTED`'s contract is a retaining artefact this file READS BACK from the
+#: code; a name here has none, and pretending otherwise would make the table's own
+#: docstring false. What the split buys:
+#: `len(PROTECTED) + len(NO_CONTAINER_YET) == 12` turns the registry's prose enumeration
+#: into a checked POPULATION, so a live door dropped from either table reds here instead of
+#: surviving as a comment.
 NO_CONTAINER_YET = {
     # ⛔ `tortoise_delete_point` / `tortoise_delete_entity` USED to sit here (held by
     # ``delete_knowledge not live``) and left in #11609 lane P6: the owner's #9660 ruling
-    # executes that row by KEEPING `tortoise_delete` and widening it, so the destination is
-    # live under the kept entry's own name and both doors retire FORWARD. `tortoise_delete`
-    # itself stays — it IS the kept entry.
-    "tortoise_delete": "delete_knowledge not live",
-    "tortoise_create_edge": "link_entities not live",
-    "tortoise_create_operator": "link_entities not live",
-    "tortoise_events_poll": "poll_events not live",
+    # executes that row by KEEPING one delete entry and widening it, so the destination is
+    # live under the kept entry's own name and both doors retire FORWARD.
+    #
+    # ⛔ FIVE MORE LEFT IN #11609 LANE P7 — the lane that REGISTERED their destinations:
+    # `tortoise_delete` (→ `tortoise_delete_knowledge`), `tortoise_create_edge` and
+    # `tortoise_create_operator` (→ `tortoise_link_entities`), `tortoise_events_poll`
+    # (→ `tortoise_poll_events`), and `tortoise_list_graphs` (→
+    # `tortoise_graph_overview(section="graphs")`, which had dispatched to that very body
+    # since #4282 — so "no container row yet" was already false). Each left in the change
+    # that made its reason false, which is the whole contract of `PROTECTED`.
+    #
+    # The two below are the residue, and neither is retirable by this lane:
+    #   · `tortoise_org_create` — `tenancy:create_memory_graph` is an SDK/REST operation and
+    #     the 2026-09-22 settlement keeps tenancy off the MCP, so there is NO MCP
+    #     destination to forward to. Removing it is an ARCHIVE batch (no destination), and
+    #     it is not this lane's: `tests/test_13036_capstone_v2.py` records it in
+    #     `UNDRIVEN` as "excluded from tenant HTTP by design" (its own doctrine: an
+    #     UNDRIVEN row is recorded, never passed), and `tortoise/supabase_control.py`
+    #     documents it as the MCP entry point.
+    #   · `tortoise_ingest` — `write_knowledge_batch` exists only on the SDK (so no MCP
+    #     pointer can name it), and the MCP door has a LIVE product caller:
+    #     `tortoise/curation.py`'s `IngestWriter` (`TOOL = "tortoise_ingest"`) writes through
+    #     it against a hosted deployment. Archiving the door breaks that writer, so it is a
+    #     separate batch that converts the caller first. ⛔ Not a "blocked forever": the
+    #     owner's 2026-11-12 ruling removes everything outside the target, and this is the
+    #     named precondition for doing it.
     "tortoise_org_create": "account tenancy, not on the MCP (#11609 settled 2026-09-22)",
-    "tortoise_ingest": "write_knowledge_batch not live",
-    "tortoise_list_graphs": "inside `overview`; no container row yet",
+    "tortoise_ingest": "write_knowledge_batch is SDK-only; a live hosted caller (curation.IngestWriter) must move first",
 }
 
 
@@ -523,10 +549,13 @@ class TestEveryPointerResolvesInOneHop:
         `len(TOOL_REGISTRY) == 42` pin ever existed, so 42 is not a surface this chain may
         claim as advertised.
         """
-        assert len(TOOL_REGISTRY) == 40, (
-            f"live surface is {len(TOOL_REGISTRY)}, not 40 — these waves remove doors only "
-            "(each builds ARMS on a container that already existed; no new tool ships), "
-            "so the number can only fall")
+        assert len(TOOL_REGISTRY) == 39, (
+            f"live surface is {len(TOOL_REGISTRY)}, not 39 — every wave removes doors "
+            "into arms on a container that already existed, and #11609 lane P7 registered "
+            "the FOUR approved target names that had no entry, so the chain is "
+            "44 − 4 (P6's two pairs) = 40, then 40 + 4 (P7's registrations) − 5 "
+            "(P7's forward retirements: create_edge, create_operator, events_poll, "
+            "delete, list_graphs) = 39")
 
 
 class TestTheDestinationPerformsTheAbsorbedOperation:
@@ -861,10 +890,10 @@ class TestProtectedDoorsStayLive:
         which prove the reason false AT the container instead of trusting the table's
         silence.
 
-    The other SEVEN (`NO_CONTAINER_YET`) have no live container at all, so the only thing
+    The other TWO (`NO_CONTAINER_YET`) have no live container at all, so the only thing
     to measure is "still live, still not retired" — pinned below for them too. The two
     tables together are what make the enumeration checkable as a POPULATION; neither
-    alone is 17 of 17.
+    alone is 12 of 12.
     """
 
     def test_the_two_tables_cover_the_enumerated_population_and_do_not_overlap(self):
@@ -873,14 +902,16 @@ class TestProtectedDoorsStayLive:
             f"PROTECTED holds {len(PROTECTED)}: the registry block names 10 doors with a "
             "retaining property — if a door gained or lost one, move it in the batch that "
             "changed the code, not to wherever a green run lands")
-        assert len(NO_CONTAINER_YET) == 7, (
-            f"NO_CONTAINER_YET holds {len(NO_CONTAINER_YET)}: seven names are held because "
-            "their recorded destination is not live — a container landing moves one")
+        assert len(NO_CONTAINER_YET) == 2, (
+            f"NO_CONTAINER_YET holds {len(NO_CONTAINER_YET)}: two names are held because "
+            "their destination is not a live MCP door — `tortoise_org_create` (tenancy) "
+            "and `tortoise_ingest` (SDK-only destination, live hosted caller). A "
+            "container landing, or an archive batch moving its caller, moves one")
         both = set(PROTECTED) & set(NO_CONTAINER_YET)
         assert not both, f"a door is in both tables, which is a contradiction: {both}"
         population = set(PROTECTED) | set(NO_CONTAINER_YET)
-        assert len(population) == 17, (
-            f"the two tables cover {len(population)} names, not the 17 live names off the "
+        assert len(population) == 12, (
+            f"the two tables cover {len(population)} names, not the 12 live names off the "
             "27-target that the registry block enumerates — a live door dropped from both "
             "is a door with NO recorded reason to stay live")
         missing = sorted(n for n in population if n not in live)

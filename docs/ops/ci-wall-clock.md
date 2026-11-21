@@ -295,7 +295,12 @@ enters at the flat 2.0 s default, and the merged head emits ten shards at **720.
 hand-added figures are re-added from the
 emitted 25 m: 56.6 m / 85.0 m / 5.0 m (the row above), which is the 1-decimal restatement of the
 terms' own total, 56.64 m, that
-`config/ci-surfaces.yml` already records for this same quantity — ⛔ NOT the sum of the four ROUNDED
+`config/ci-surfaces.yml` already records for this same quantity — its S=11 header block reads
+**arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
+`test_demo_session_read_exclusion_8290.py` `durations:` row repeats 85.0 m against the 90 m cap — ⛔ and the × 1.5 is taken on the UNROUNDED
+total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying the
+ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre, which
+is how this one sentence came to disagree with the row above it — ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
 first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was

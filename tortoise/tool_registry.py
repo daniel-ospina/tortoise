@@ -843,9 +843,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         sdk_method="supersede_knowledge",  # #11609 lane B: retired into the container
     ),
     # ── Subscriptions / claim lifecycle (#432) ─────────────────────
+    # #11609 lane P7: the approved target row 8. `tortoise_events_poll` retires
+    # FORWARD into this name (its handler is the same body), because the reason it
+    # was held — "`poll_events` not live" — is false the moment this entry exists.
     ToolDefinition(
-        name="tortoise_events_poll",
-        id="surface.events_poll",
+        name="tortoise_poll_events",
+        id="surface.poll_events",
         description="Poll graph/claim events after an opaque cursor (at-least-once). "
                     "Returns {events, next_cursor}. Event types: 12 registered claim "
                     "types (PointAdded, OperatorAdded, PointRetracted, PointSuperseded, "
@@ -892,6 +895,18 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # `test_the_read_classification_this_issue_asked_about`, which names
         # #9576/#4122 — see the `TestReadTierCannotHideAnOutOfBoundaryWrite`
         # family in `tests/test_tool_registry.py`.
+        risk="read",
+        http_policy=True,
+        sdk_method="poll_events",
+    ),
+    # ⛔ RETIRED DECLARATION, KEPT ON PURPOSE (#11609 lane P7) — same reason as
+    # `tortoise_delete` above: `RETIRED_TOOL_REGISTRY` is built from this list.
+    ToolDefinition(
+        name="tortoise_events_poll",
+        id="surface.events_poll",
+        description="RETIRED — use `tortoise_poll_events(after=..., types=..., "
+                    "limit=...)`. Poll graph/claim events after an opaque cursor "
+                    "(at-least-once); returns {events, next_cursor}.",
         risk="read",
         http_policy=True,
         sdk_method="poll_events",
@@ -1485,8 +1500,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         sdk_method="update_knowledge",
     ),
     ToolDefinition(
-        name="tortoise_delete",
-        id="surface.delete",
+        # #11609 lane P7: the approved target row 18, BY THIS NAME. The #9660 ruling
+        # (owner 2026-10-25) executes that row by KEEPING **one** delete entry and
+        # widening it — it never says the entry must be spelled `delete`, and `delete`
+        # is not on the approved 27. So the kept entry takes the target's own name and
+        # `tortoise_delete` retires FORWARD into it below: one entry, widened, with the
+        # preview-then-confirm protocol intact (its handler body is the same).
+        name="tortoise_delete_knowledge",
+        id="surface.delete_knowledge",
         # #9660 (owner ruling 2026-10-25): ONE delete for every kind, behind a
         # preview-then-confirm protocol — not a family of per-kind delete tools,
         # because every agent that connects re-reads the tool list every session,
@@ -1499,6 +1520,29 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Call again with confirmation=<token> to delete. When the item "
                     "is wrong rather than unwanted, supersede it or retract it "
                     "instead.",
+        risk="destructive",
+        http_policy=True,
+        # ⛔ `_delete`, NOT the public `delete_knowledge` (#4337). The binding must be
+        # what THIS handler reaches: the preview-then-confirm body resolves
+        # `sdk._delete` and runs the token protocol on top, so `delete_knowledge` is
+        # the SDK's public name for the same writer but is not the call the door
+        # makes. Declaring the public name put a binding in the manifest that the
+        # handler never reaches — the false-declaration drift #3838 calls out.
+        sdk_method="_delete",
+    ),
+    # ⛔ RETIRED DECLARATION, KEPT ON PURPOSE (#11609 lane P7). `RETIRED_TOOL_REGISTRY`
+    # is built from THIS list, so a name that is retired but whose declaration is
+    # deleted does not resolve at all — a caller would get "unknown tool" instead
+    # of the #3883 warning naming `tortoise_delete_knowledge`. Its handler stays in
+    # `mcp_server.py` and forwards to the live entry, so the two answer identically.
+    ToolDefinition(
+        name="tortoise_delete",
+        id="surface.delete",
+        description="RETIRED — use `tortoise_delete_knowledge(id, dry_run=True)` for "
+                    "the preview, then `tortoise_delete_knowledge(id, "
+                    "confirmation=<token>)`. Delete one item by id — a Point, a "
+                    "relation (operators are Points), a Source, an Object, a "
+                    "Subject, or an Event. DESTRUCTIVE and PERMANENT.",
         risk="destructive",
         http_policy=True,
         sdk_method="_delete",
@@ -1533,6 +1577,50 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         risk="read",
         http_policy=True,
         sdk_method="_get_owned_entities",
+    ),
+    # ── #11609 lane P7 — the approved target row 5 ──────────────────
+    # `get_historical_knowledge` is the only one of the four unregistered targets
+    # that absorbs NO existing door: it is a capability the SDK has carried since
+    # #1538/E2E-9 and the MCP surface never exposed. So there is no forward entry
+    # for it and no door retires with it — it is the "40 − 17 + 4" arithmetic's
+    # fourth `+1` and nothing else changes.
+    ToolDefinition(
+        name="tortoise_get_historical_knowledge",
+        id="surface.get_historical_knowledge",
+        description="Point-in-time read: what was true at `at_date`. Walks the CORRECTS "
+                    "chain from `point_id` (a current or superseded Point) to the "
+                    "point whose [validFrom, validTo] window covers the date. "
+                    "EVERY reply carries `status` (found | ambiguous | absent) and "
+                    "`found`; branch on `status`, never on `found` alone — "
+                    "`ambiguous` carries `found: true` with two or more "
+                    "`candidates` and NO `valid_point`. A `found` reply carries "
+                    "`valid_point` plus `current` (the chain head) and `chain`.",
+        risk="read",
+        http_policy=True,
+        sdk_method="get_historical_knowledge",
+    ),
+    # ── #11609 lane P7 — the approved target row 19 ────────────────
+    # ONE linking verb: `relation` alone decides the writer (derivation, direct
+    # edge, carrying operator, provenance anchor, or plain typed edge). It absorbs
+    # `tortoise_create_edge` and `tortoise_create_operator`, both of which retire
+    # FORWARD into it below — the third and fourth `-1`s of this lane's arithmetic.
+    ToolDefinition(
+        name="tortoise_link_entities",
+        id="surface.link_entities",
+        description="Connect two nodes — the relation decides HOW. One linking verb "
+                    "for five writers: `wasDerivedFrom` → the derivation writer; "
+                    "`IMPL`/`NAND` without operator=true → a bare direct edge; "
+                    "`supports`/`refutes`/`mutuallySupportive`/`mutuallyExclusive` "
+                    "or operator=true → a carrying operator Point; `references` + "
+                    "entity_label → the provenance writer (the only arm with the "
+                    "sourceVersion anchor); anything else → a plain typed edge. "
+                    "A LIST of targets is the part/whole fan-out — ONE operator "
+                    "over N targets — where `semantics` (the Layer-2 meaning that "
+                    "resolves direction) applies. A keyword the chosen arm cannot "
+                    "record is refused, never dropped.",
+        risk="write",
+        http_policy=True,
+        sdk_method="link_entities",
     ),
     # ── Orient / Direct consolidation (epic #888 W3) ────────────────
     ToolDefinition(
@@ -2271,9 +2359,9 @@ GRAPH_ARGUMENT_DESCRIPTION = (
     "asked for. If the refusal repeats with the graph you were asked for, stop and tell "
     "the user which graph was refused — never retry with `graph` dropped. "
     "Accepts, in order of preference: the graph's id, the namespace string "
-    "`tortoise_list_graphs` returns for it (e.g. `org_<workspace>_<graph_id>` "
-    "— that tool lists namespaces, not ids), "
-    "or its name when that name is unique in this workspace. An unknown, "
+    "`tortoise_graph_overview(section=\"graphs\")` returns for it (e.g. "
+    "`org_<workspace>_<graph_id>` — listings report namespaces, not ids), "
+    "or its name when unique in this workspace. An unknown, "
     "ambiguous, deleted or other-workspace graph is refused. Any graph OTHER "
     "than `default` needs a HOSTED workspace connection: a stdio or self-host "
     "server has no workspace graph set to resolve a name or id against, so it "
@@ -2478,6 +2566,10 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_get_point": "memory", "tortoise_query": "memory",
     "tortoise_paginated_query": "memory", "tortoise_query_points_by_tag": "memory",
     "tortoise_delete_point": "memory", "tortoise_delete": "memory",
+    "tortoise_delete_knowledge": "memory",
+    "tortoise_get_historical_knowledge": "memory",
+    "tortoise_link_entities": "graph",
+    "tortoise_poll_events": "sessions",
     "tortoise_supersede": "memory",
     "tortoise_invalidate": "memory", "tortoise_retract_point": "memory",
     "tortoise_list_tags": "memory",
@@ -2720,11 +2812,11 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # an existing caller's immediate-delete behaviour is unchanged — only a caller who
     # FOLLOWS the pointer meets the confirmation step, which is the point of it.
     "tortoise_delete_point":
-        'tortoise_delete(id, dry_run=True) for the preview, then '
-        'tortoise_delete(id, confirmation=<token>)',
+        'tortoise_delete_knowledge(id, dry_run=True) for the preview, then '
+        'tortoise_delete_knowledge(id, confirmation=<token>)',
     "tortoise_delete_entity":
-        'tortoise_delete(id, dry_run=True) for the preview, then '
-        'tortoise_delete(id, confirmation=<token>)',
+        'tortoise_delete_knowledge(id, dry_run=True) for the preview, then '
+        'tortoise_delete_knowledge(id, confirmation=<token>)',
     # ── #11609 Phase 2 — the two arms `tortoise_check_confidence` now carries ──
     # These two doors were held live by a reason with an ABSENCE behind it: the
     # container "does not recompute" and "has no recall arm". Both arms LAND here,
@@ -3052,6 +3144,47 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_diary_write":
         'tortoise_create_entity(type="diary", name=<entry>, '
         'props={"authoredBy": ..., "topic": ..., "wing": ...})',
+
+    # ── #11609 lane P7 — the four doors the four newly-registered targets absorb ──
+    # Each of these sat in `NO_CONTAINER_YET` (or, for `tortoise_delete`, was the
+    # KEPT entry the #9660 ruling keeps under a name that is not on the target).
+    # Their recorded reason was "<destination> not live", and the reason is FALSE
+    # the moment the destination's own registry row exists — so they retire
+    # FORWARD in the same change that registers it, which is the only shape the
+    # `PROTECTED` contract permits.
+    #
+    # ⛔ `tortoise_delete` is retired onto the entry it USED to be. The kept entry
+    # kept every byte of its behaviour (its handler body is the same function) and
+    # took the target's own spelling, so a caller that follows this pointer lands
+    # on the same preview-then-confirm protocol — `dry_run`/`confirmation` are
+    # named because that protocol is the difference between a preview and a
+    # destruction.
+    #
+    # ⓘ `tortoise_events_poll`'s replacement takes exactly its three arguments (the
+    # handler is the same body), so no discriminator needs naming.
+    "tortoise_delete":
+        'tortoise_delete_knowledge(id, dry_run=True) for the preview, then '
+        'tortoise_delete_knowledge(id, confirmation=<token>)',
+    "tortoise_events_poll":
+        'tortoise_poll_events(after=..., types=..., limit=...)',
+    # ⛔ `predicate`/`source_id`/`target_id` mirror the door's own argument names,
+    # and `target_id` accepts a LIST so the part/whole fan-out the operator door
+    # performed (one operator over N targets) still has a single call.
+    "tortoise_create_edge":
+        'tortoise_link_entities(relation=<predicate>, from_id=..., to_id=...)',
+    # `operator=True` is named because it is what selects the carrying-operator
+    # arm on a relation the ontology would otherwise store as a plain edge, and
+    # `semantics` because it is the tool's own resolved direction.
+    "tortoise_create_operator":
+        'tortoise_link_entities(relation=<op_type>, from_id=..., target_ids=..., '
+        'direction=..., semantics=...)',
+    # ── #11609 lane P7 — `list_graphs` retires on the container it already reaches ──
+    # Its `NO_CONTAINER_YET` reason was "inside `overview`; no container row yet".
+    # `tortoise_graph_overview` has dispatched `section="graphs"` to THIS VERY
+    # door's body since #4282 (`_dispatch_overview_section`), including the #9340
+    # HTTP tenant filter that is the reason it is a section rather than an SDK
+    # read — so "no container row yet" is false, and the door retires forward.
+    "tortoise_list_graphs": 'tortoise_graph_overview(section="graphs")',
 }
 
 

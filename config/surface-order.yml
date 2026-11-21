@@ -250,14 +250,42 @@ family_rank:
 # absorbed into a new sibling) per the owner's #9660 ruling, and `TortoiseSDK.delete`
 # dispatches by label, so the capability is unchanged. No container row arrives, so no other
 # keyword can move. The nine unmoved rows are the check's own output.
+# #11609 LANE P7 (the last mile): 40 -> 39, and this time FOUR counts move because this
+# wave both REGISTERS rows and RETIRES rows, which no earlier wave did:
+#   · `fetch` 9 -> 10  — `tortoise_get_historical_knowledge` ARRIVES (row 5).
+#   · `link` 2 -> 3    — `tortoise_link_entities` ARRIVES (row 19) and derives `link`, so the
+#                        `link` count moves 2 + 1 = 3 by that single row. ⛔ THE TWO DOORS IT
+#                        ABSORBS CONTRIBUTE NOTHING TO THIS KEYWORD and this note used to say
+#                        they did: `create_edge` and `create_operator` both resolve through
+#                        `derive_keyword` to `create` (their LEFTMOST table token is `create`;
+#                        `edge` and `operator` are never reached), so subtracting them from
+#                        `link` and adding them back was a double error — a wrong mechanism in
+#                        a right conclusion, which is the shape that gets copied. The keyword
+#                        they actually leave is accounted for in the `create` bullet below.
+#   · `list` 4 -> 3    — `tortoise_list_graphs` retires into `graph_overview(section="graphs")`.
+#   · `create` 8 -> 6  — the same P7 batch's retirement half: the two `create_*` doors leave
+#                        and their `create` keywords leave with them (8 - 2 = 6), while neither
+#                        replacement row derives `create` — `link_entities` derives `link`.
+# `check`, `operate`, `update`, `find` and `delete` are unmoved, and `trace` holds at 1 — the
+# `fetch` 9 -> 10 in the first bullet is `tortoise_get_historical_knowledge`'s arrival (row 5) and
+# NOTHING ELSE. ⛔ `poll_events` is not a `fetch` row: `tortoise_poll_events` derives `trace`
+# (`keyword: trace`, rank 7), and the door it absorbs — `tortoise_events_poll` — derives `trace`
+# too, so that pair moves `trace` one-for-one and leaves both `fetch` and `trace` where they were.
+# This note used to spell both of them `(fetch)` and to call `tortoise_delete` "the KEPT `delete`
+# row": `tortoise_delete` RETIRES FORWARD into `tortoise_delete_knowledge` in this same wave
+# (`RETIRED_TOOL_REGISTRY`, `tool_registry.py`), so `delete` holds at 2 because one `delete` row
+# LEFT and one ARRIVED — reading it as a kept row tells the next author a retired door is live.
+# Both corrections are the derivation's own output, not a re-count by hand. Measured, not
+# asserted: this is the check's own output against the P7 registry (`fetch: 10, create: 6,
+# update: 5, delete: 2, list: 3, find: 2, trace: 1, check: 5, link: 3, operate: 2`).
 baseline_counts:
-  fetch: 9
-  create: 8
-  list: 4
+  fetch: 10
+  create: 6
+  list: 3
   check: 5
   operate: 2
   update: 5
   find: 2
   delete: 2
-  link: 2
+  link: 3
   trace: 1
