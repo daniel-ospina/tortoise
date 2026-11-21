@@ -1259,7 +1259,7 @@ def _heading_may_bound_the_slice(
     the false-red direction, the same one `_heading_lines_carrying_extra_attributes`
     refuses `class` for.
 
-    `test_a_visible_heading_beside_a_hidden_one_still_bounds_the_storage_slice` pins
+    `test_a_visible_heading_beside_a_hiding_one_still_bounds_the_storage_slice` pins
     both halves: the adjacency that the window broke, and the wrapped spelling the
     exact-line test already covers.
     """
@@ -2430,7 +2430,7 @@ def test_a_css_invisible_advertised_heading_does_not_bound_the_storage_slice() -
             _assert_storage_section_reviewed(caught)
 
 
-def test_a_visible_heading_beside_a_hidden_one_still_bounds_the_storage_slice() -> None:
+def test_a_visible_heading_beside_a_hiding_one_still_bounds_the_storage_slice() -> None:
     """A heading's boundary is decided by ITS OWN line, never by its neighbour's.
 
     ⛔ THE FALSE RED THE ±1 NEIGHBOURHOOD CAUSED (#14229 review, measured). The
@@ -2439,20 +2439,23 @@ def test_a_visible_heading_beside_a_hidden_one_still_bounds_the_storage_slice() 
     `id`" — which the parser falsifies: `_record_attributes` stamps every attribute of
     a tag with the TAG's own position, so both attributes land on ONE line at any
     wrapping depth. `line - 1` / `line + 1` could therefore only match a DIFFERENT
-    heading, and did: with `<h2 id="storage-draft" hidden>` on the line after a visible
-    `<h2 id="storage-limits">`, the visible heading stopped bounding, the slice ran long
-    and the wording golden reddened on a page whose boundary was correct.
+    heading, and did: a hiding heading on the line after a visible
+    `<h2 id="storage-limits">` stopped the VISIBLE one from bounding, the slice ran
+    long, and the wording golden reddened on a page whose boundary was correct — the
+    false-red direction this file refuses `class` for.
 
-    Two arms, because the window's justification has two halves:
+    Three arms, because the window's justification has two halves and the member set
+    moved:
 
-    * the ADJACENCY it broke must bound again — this arm FAILS on the window;
-    * the WRAPPED spelling it claimed to cover is already covered by the exact-line
-      test, so deleting the window loses no coverage (second arm, plus the fragment
-      assertion that measures the stamping).
-
-    The premise is measured too: `storage-draft` carries `hidden`, so `_unmet_by_reader`
-    refuses it a layer up and it is not a second bound candidate — which is also why
-    `hidden` is not a member of `_STATIC_HIDING_ATTRIBUTES`.
+    * the ADJACENCY must bound — driven with `aria-hidden`, a CURRENT member, since
+      that is the shape the window can still mis-fire on (this arm FAILS on the
+      window);
+    * the WRAPPED spelling the window claimed to cover is already covered by the
+      exact-line test, so deleting the window loses no coverage (plus the fragment
+      assertion that measures the stamping);
+    * `hidden` decides nothing at ANY distance, which is why it left the member set:
+      `_unmet_by_reader` refuses such a heading a layer up, so it is not a candidate
+      and its only possible effect was on a NEIGHBOUR.
     """
     page = _read(DOCS)
     boundary = _h2_offset(page, "storage") + len(_docs_section())
@@ -2465,47 +2468,40 @@ def test_a_visible_heading_beside_a_hidden_one_still_bounds_the_storage_slice() 
     advertised_toc = toc_entry + '      <a href="#storage-limits">Limits</a>\n'
     visible = '<h2 id="storage-limits">Limits</h2>\n'
 
-    # ── arm 1: a hidden heading on the NEXT line must not unbound its neighbour ──
-    mutant = (
-        page[:boundary]
-        + visible
-        + '<h2 id="storage-draft" hidden>Draft</h2>\n'
-        + f"<p>{claim}</p>\n"
-        + page[boundary:]
-    ).replace(toc_entry, advertised_toc, 1)
+    def _mutant_with_neighbour(neighbour: str) -> str:
+        return (
+            page[:boundary]
+            + visible
+            + neighbour
+            + f"<p>{claim}</p>\n"
+            + page[boundary:]
+        ).replace(toc_entry, advertised_toc, 1)
+
+    # ── arm 1: a heading that cannot bound on the NEXT line must not unbound its
+    #          neighbour (driven with `aria-hidden`, a current member)
+    neighbour = '<h2 id="storage-draft" aria-hidden="true">Draft</h2>\n'
+    mutant = _mutant_with_neighbour(neighbour)
     assert '<a href="#storage-limits">' in mutant, (
         "premise: the visible heading is ADVERTISED, so only the neighbourhood can "
         "stop it bounding"
     )
-    assert not any(
-        heading_id == "storage-draft"
-        for heading_id, _offset in extract_heading_positions(mutant)
-    ), (
-        "premise: a `hidden` heading is already refused one layer up "
-        "(`_unmet_by_reader`), so this control measures the NEIGHBOURHOOD and not a "
-        "second bound candidate"
+    assert 'href="#storage-draft"' not in mutant, (
+        "premise: the neighbour is NOT advertised, so it cannot be the bound the "
+        "slice ends at — the only advertised heading after #storage is the visible one"
     )
     visible_line = mutant.count("\n", 0, _h2_offset(mutant, "storage-limits")) + 1
-    # ⛔ THE NEIGHBOUR IS MEASURED FROM THE PARSER, not from the member set: `hidden` is
-    # no longer a member (see below), and that is the point — because a `hidden`
-    # heading is never a bound CANDIDATE, its only possible effect in the old set was
-    # to unbind a NEIGHBOUR, which is the false red this arm drives.
-    hidden_lines = {
-        line
-        for tag, name, line in extract_element_attributes(mutant)
-        if tag == "h2" and name == "hidden"
-    }
-    assert hidden_lines == {visible_line + 1}, (
-        "premise: the `hidden` attribute lands on the line AFTER the visible heading — "
-        "the neighbour the ±1 window consulted. Got "
-        f"{sorted(hidden_lines)} against the visible heading's line {visible_line}"
+    assert _heading_lines_carrying_extra_attributes(mutant) == {visible_line + 1}, (
+        "premise: the neighbour's attribute line IS what `_heading_lines_carrying_"
+        "extra_attributes` reports, and it is the line AFTER the visible heading — "
+        f"the neighbour the ±1 window consulted. Got "
+        f"{sorted(_heading_lines_carrying_extra_attributes(mutant))} against the "
+        f"visible heading's line {visible_line}"
     )
     caught = _docs_section(page=mutant)
     assert claim not in " ".join(_visible_text(caught).split()), (
         "a visible advertised heading carrying only `id` stopped bounding because a "
-        "`hidden` heading sits on the next source line: the slice ran long and the "
-        "wording golden reds on a page whose boundary is CORRECT (#14229 review) "
-        "— the false-red direction this file refuses `class` for"
+        "hiding heading sits on the next source line: the slice ran long and the "
+        "wording golden reds on a page whose boundary is CORRECT (#14229 review)"
     )
     assert "Draft" not in caught and "Limits" not in caught, (
         "the slice did not stop at the visible heading: it is the FIRST advertised "
@@ -2534,6 +2530,25 @@ def test_a_visible_heading_beside_a_hidden_one_still_bounds_the_storage_slice() 
         "a WRAPPED statically-hiding heading now bounds the slice: the exact-line "
         "test does not cover the spelling the deleted neighbourhood was written for, "
         "so this fix would have lost that coverage (#14229 review)"
+    )
+
+    # ── arm 3: `hidden` decides nothing, at any distance ──────────────────
+    # The member set's evidence, asserted rather than narrated: a `hidden` heading is
+    # refused one layer up, so it is never a bound CANDIDATE — and removing it from
+    # the set therefore changes no page. Re-adding an unreachable member would red here.
+    assert extract_heading_positions('<h2 id="x" hidden>T</h2>') == [], (
+        "a `hidden` heading is now RECORDED, so it is a bound candidate and `hidden` "
+        "belongs in `_STATIC_HIDING_ATTRIBUTES` after all"
+    )
+    hidden_mutant = _mutant_with_neighbour('<h2 id="storage-draft" hidden>Draft</h2>\n')
+    assert _heading_lines_carrying_extra_attributes(hidden_mutant) == set(), (
+        "`hidden` is back in `_STATIC_HIDING_ATTRIBUTES`: its ONLY possible effect is "
+        "on a NEIGHBOUR (it can never be a bound candidate), which is the false red "
+        "this test refuses (#14229 review)"
+    )
+    hidden_caught = _docs_section(page=hidden_mutant)
+    assert claim not in " ".join(_visible_text(hidden_caught).split()), (
+        "a `hidden` heading on the next line stopped its visible neighbour bounding"
     )
 
 
