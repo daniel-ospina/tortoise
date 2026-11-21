@@ -953,11 +953,15 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
 
     NON-VACUOUS, measured at this head BOTH ways: (a) restoring the pre-fix `159`/`150`/`222` while
     keeping the corrected denominator reds THIS test; (b) mutating `all 218 comparable ones` to `222`
-    fails the history-free identity with "the halves do not add up to the whole", and (c) in a real
-    `--depth 1` clone of this head the arm RUNS (no skip) and passes on that identity; (d) mutating the
-    SPLIT's own denominator (`146 of the 218 comparable` → `146 of the 300 comparable`) reds the
-    self-consistency arm in that same history-free shape — measured GREEN before that arm existed,
-    because the with-history comparison which also catches it cannot run in a `fetch-depth: 1` checkout.
+    reds the SELF-CONSISTENCY arm — measured message *"… publishes its comparable denominator more than
+    once"* — while the mutation that reaches the history-free IDENTITY is the pair denominator
+    (`227 pairs` → `231`), which fails it with "the halves do not add up to the whole"; and (c) in a
+    real `--depth 1` clone of this head the arm RUNS (no skip — `-rs` reports none) and passes on that
+    identity; (d) mutating the SPLIT's own denominator (`146 of the 218 comparable` → `146 of the 300
+    comparable`) reds the self-consistency arm in that same history-free shape — measured GREEN before
+    that arm existed, because the with-history comparison which also catches it cannot run in a
+    `fetch-depth: 1` checkout. ⛔ (b) NAMED THE WRONG ARM until this was measured: the two denominators
+    are asserted EQUAL first, so a one-spelling edit is caught there and never reaches the identity.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     body = _unbolded(text)
@@ -994,11 +998,13 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
     # GREEN — the only arm that compared the spellings is the WITH-HISTORY one below, which cannot run
     # there. So the half that runs in CI asserted a numerator agreement over a denominator it never read.
     assert int(split.group(2)) == int(comparable_said.group(1)) == int(drifted_said.group(2)), (
-        "the header publishes its comparable denominator more than once — "
-        f"{split.group(2)} in the split sentence, {comparable_said.group(1)} in `all … comparable ones` "
-        f"and {drifted_said.group(2)} in the `N of the M comparable` this arm grades — and they are ONE "
-        "figure. Re-measure it by content and update EVERY spelling; if these three name different "
-        "sentences, re-point the patterns above rather than widening this arm."
+        "the header publishes its comparable denominator in more than one sentence — "
+        f"{split.group(2)} in the split sentence and {comparable_said.group(1)} in `all … comparable "
+        "ones` — and they are ONE figure. (The third term above is that SAME split sentence's own "
+        f"`{drifted_said.group(2)} of the M comparable`, kept so this arm names the text it grades "
+        "below: it is not an INDEPENDENT spelling.) Re-measure it by content and update EVERY "
+        "spelling; if these name different sentences, re-point the patterns above rather than "
+        "widening this arm."
     )
     # (1) HISTORY-FREE — the arm the CI shape gets. The halves must add up to the whole.
     assert int(comparable_said.group(1)) + incomparable == pairs, (
@@ -1277,10 +1283,14 @@ def _two_span_pairs(text: str, repo: Path = REPO) -> set[tuple[str, int]]:
 def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     """Every way the header's published drift figures disagree with a recount of the file they describe.
 
-    Only the DENOMINATOR half is recomputed here (spellings, pairs, collisions, and the "N of those M"
-    cross-references to them). The drifter numerator compares two historical blobs and needs history:
-    `git show <head>:<path> | sed -n '<N>p'` at the pin and at the named `main`. So the numerator is checked
-    only for INTERNAL agreement with the denominator and across its three published mentions.
+    Only the DENOMINATOR half is recomputed HERE (spellings, pairs, collisions, and the "N of those M"
+    cross-references to them). This function grades the drifter numerator only for INTERNAL agreement —
+    with the denominator, and across its three published mentions. ⛔ Its own re-derivation is NOT this
+    function's job and does not "need history": `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried`
+    re-derives it from the pin's blobs where the pin is readable, and grades the history-free
+    `comparable + incomparable == pairs` identity where it is not — so this file has a numerator
+    measurement in the `actions/checkout` default `fetch-depth: 1` shape, and an earlier form of this
+    docstring claiming the numerator "needs history" was refuted by that arm (`#14038` fix round).
     """
     problems: list[str] = []
     spellings, pairs = _resolved_pairs(text, repo)
@@ -1387,7 +1397,13 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # is the exact direction a stale figure takes when a denominator moves under it (`#13599` review,
         # finding 1 — measured on this head before the fix). It is the ONLY guard on this figure: the
         # three-mention agreement arm cannot reach the alternative basis, because the document publishes
-        # `123` in that sentence alone, so there is no second mention to agree with.
+        # `123` in that sentence alone, so there is no second mention to agree with. ⛔ It is NOT the ONLY
+        # guard on the figure, though, and this comment claimed it was until the re-derivation landed:
+        # `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried` grades the alternative
+        # basis from the pin's union set, so an alt numerator this BAND still contains is caught there —
+        # MEASURED on this head: `230 pairs and 158 drifters` → `… and 156 drifters` sits inside
+        # `155..158`, passes this band, and reds that arm (1 failed, 29 passed). The band bounds the
+        # figure; the re-derivation MEASURES it.
         if extra_pairs is not None and not drifters <= alt_drifters <= drifters + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_drifters} drifters against the primary basis's "
