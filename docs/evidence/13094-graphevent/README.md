@@ -35,7 +35,7 @@ them; claims carry the `file:line` that refutes them if wrong.
 Produced by `uv run python tools/graphevent_home.py readers` (`readers.json` beside this file).
 **16 statements** in `tortoise/` read or maintain the `:GraphEvent` label — including the three
 `ensure_event_schema` DDL statements, because a re-home has to recreate the schema they describe, and the
-two whole-graph export scans, which carry the label without naming it.
+two whole-graph scans in the restore path, which carry the label without naming it.
 
 | # | reader | `file:line` (this head) | what it needs | class |
 |---|---|---|---|---|
@@ -73,12 +73,15 @@ The **serving** row is exactly one statement, so a re-home re-points one read an
   a re-indent is not a false red while a reword is a real one), and `min_occurrences` is asserted where
   one file holds the same statement twice. ⛔ **Where that is a proof and where it is not**: the
   `event_store.py` dedupe pair is the ONLY two occurrences of its text in that file, so deleting one reds
-  the census; the two `hosted_backup.py` restore-side scans are byte-identical to two OTHER occurrences
-  in that file (four in total), so there `min_occurrences: 2` proves the file still carries the statement
-  twice and **not** that both censused sites survive — the `line` is the address for those two, and the
-  residual is named on the rows. ⚠️ Both of those rows are in `restore_graph`; **the dump side is not
-  censused at all** — the export's node reader is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`), and
-  no row carries it (`#14204`).
+  the census; the two `hosted_backup.py` restore-side scans share their text with four occurrences in
+  that file (two MORE live reads at `:3603`, plus a docstring mention at `:3442`), so those rows pin the
+  EXACT count — deleting any of the four reds (`occurrences`), which a `min_occurrences` floor did not
+  do: measured, deleting BOTH censused sites left 2 and stayed green. What the pin still cannot do is
+  say WHICH occurrence a row addresses — the `line` is that address and nothing grades it. ⚠️ Both of
+  those rows are in `restore_graph`; **the export side is not censused at all** — the paged dump's node
+  statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`) and the export endpoint's own
+  whole-graph scan is `hosted_api.py:33402` (`_export_graph_snapshot`, which carries `:GraphEvent`
+  nodes into the export payload), and no row carries either (`#14204`).
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
@@ -348,10 +351,12 @@ remaining scope** (its comment 7065026251), in the order the constraints force:
 3. **A backfill + cutover + strip verb**, preview-by-default, refusing to stop the graph write or
    delete a row unless the census proves coverage in the same process (the `#13610`/`#13796` pattern
    already used for vectors: a gate that is **measured, never asserted**).
-4. **Re-point the three maintenance readers** that reach the label directly rather than through
+4. **Re-point the four maintenance readers** that reach the label directly rather than through
    `read_after`: `_head_seq`'s fallback (`webhook_delivery.py:1049`), the backup footprint
-   (`hosted_backup.py:892`), and the export/restore scans (`:1333`/`:1534` — the export must either
-   skip the label or be documented as not carrying a record-only shape).
+   (`hosted_backup.py:892`), and the two restore-side scans (`:1333`/`:1534`). ⚠️ Neither is an
+   export scan — both are in `restore_graph`, and the export side is NOT censused at all
+   (`hosted_backup.py:454` and `hosted_api.py:33402`, #14204), so a re-point driven by this census
+   alone would leave the export endpoint reading the old home.
 5. **Prove it on a scratch tenant** with the `superset` verb before and after, and only then strip.
 6. **Falsifiers, stated up front:** (a) with the record short of the graph, the cutover REFUSES and
    names both counts; (b) a payload-only emit after the cutover still reaches `poll_events` (the

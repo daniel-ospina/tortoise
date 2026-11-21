@@ -254,11 +254,17 @@ def test_every_declared_reader_still_names_its_statement_in_the_tree():
     anything. The declared `line` is an address at the head it was cut at; the
     ASSERTION is on the statement text.
 
-    ⛔ `min_occurrences` is what makes the pin able to catch a LOSS: two rows in
-    `event_store.py` share one statement text (the dedupe probe and
-    `_event_row_exists`), as do the two whole-graph export scans in
-    `hosted_backup.py`. A single-occurrence check would let one survivor satisfy
-    both rows, so deleting the other would go unnoticed.
+    ⛔ `min_occurrences` + `occurrences` are what make the pin able to catch a
+    LOSS. Two rows in `event_store.py` share one statement text (the dedupe probe
+    and `_event_row_exists`), as do the two restore-side scans in
+    `hosted_backup.py`: a single-occurrence check would let one survivor satisfy
+    both rows, so deleting the other would go unnoticed. ⛔ And a FLOOR is not
+    enough — measured on `hosted_backup.py`, the statement occurs FOUR times
+    (`:1333`, `:1534`, the live read at `:3603` and a docstring mention at
+    `:3442`), so deleting BOTH censused sites still leaves 2 and a
+    `min_occurrences: 2` floor stays GREEN with both rows pointing at deleted
+    code. `occurrences` therefore pins the EXACT count where a row declares it,
+    which is what makes any deletion of these sites red.
     """
     module = _tool()
     missing = []
@@ -271,6 +277,13 @@ def test_every_declared_reader_still_names_its_statement_in_the_tree():
                 missing.append(f"{reader['file']}:{reader['line']} "
                                f"{reader['reader']} — {snippet!r} "
                                f"(found {found}, needs {needed})")
+            exact = reader.get("occurrences")
+            if exact is not None and found != exact:
+                missing.append(f"{reader['file']}:{reader['line']} "
+                               f"{reader['reader']} — {snippet!r} "
+                               f"(found {found}, pinned EXACTLY {exact}: an "
+                               "occurrence was deleted or added — re-derive the "
+                               "row at the CURRENT head)")
     assert not missing, (
         "the reader census no longer resolves — re-derive the row(s) (and the "
         "`line` addresses) at the CURRENT head, never by renumbering:\n  "
