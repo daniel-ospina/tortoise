@@ -91,8 +91,9 @@ def _undeclared_blocking(totals: dict[str, float]) -> dict[str, float]:
     """The census's verdict: legs at/above the bar that no issue owns.
 
     Factored out of the test body so the THRESHOLD's semantics are pinnable
-    WITHOUT a wall clock — see `test_the_census_bar_reports_magnitude_and_not
-    _probe_overhead`, which pins both ends of the bar on synthetic totals.
+    WITHOUT a wall clock — see
+    `test_the_census_bar_reports_magnitude_and_not_probe_overhead`, which pins
+    both ends of the bar on synthetic totals.
     """
     return {m: ms for m, ms in totals.items()
             if ms >= _ON_LOOP_BAR_MS and m not in _ON_LOOP_RESIDUAL}
@@ -136,7 +137,7 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # `_capture_stamp_targets` at `:21212`) go through this ONE retry wrapper —
     # but the stamp is JOURNAL-FIRST, so it is TWO synchronous legs per stamp on
     # the loop and the census observes BOTH: this wrapper, and the journal
-    # `_emit_event` that precedes it (`sdk.py:11559`). Measured on three
+    # `_emit_event` that precedes it (`sdk.py:11559`). Measured on FOUR
     # consecutive runs of this test on this tree: `_emit_event` 0.51 / 0.56 /
     # 0.83 / 0.92 ms and this wrapper 0.99–3.62 ms per row. ⛔ An earlier cut of
     # this comment said "the census sees a single leg and not two": the second
