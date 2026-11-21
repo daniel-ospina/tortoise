@@ -21877,14 +21877,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # checkpoint and the trigger, exactly as it did on `main`.)
         #
         # This construction is also where any `organizations.graph_name` read
-        # happens (`_org_default_namespace`) — ON THE LOOP, and only for a
-        # GRAPH-BOUND credential; the org-wide path takes the auth seam's
-        # published hint and reads nothing.
+        # happens (`_org_default_namespace`) — and it is a READ, so it rides the
+        # CAPTURE POOL while the construction stays on the loop (#7500: the
+        # read may be off-loaded, `_make_sdk` may not — the same split the
+        # indexing lane uses, `_org_sdk_from_name(org_id, await _cp_offload(…))`).
+        # ⛔ WHY THE READ MUST NOT RUN INLINE (#14086 fixer). For a GRAPH-BOUND
+        # credential NO auth seam publishes the hint (`_publish_default_namespace`
+        # is org-wide only), so `_org_default_namespace` takes its point read of
+        # `organizations.graph_name` — a synchronous PostgREST round trip, which
+        # inline here is a stall ON the single uvicorn worker's loop: the exact
+        # class this PR exists to remove, and one no existing guard sees (the AST
+        # guards match control-plane calls lexically inside an `async def`, and
+        # this one sits one call away in a sync helper). Pinned by
+        # `tests/test_capture_loop_responsiveness.py::`
+        # `test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop`.
+        # The org-wide path is unaffected: it takes the published hint and reads
+        # nothing at all.
         if not org.get("graph_id"):
             completion_sdk = _org_sdk(org["org_id"])
         else:
-            default_graph = (_org_default_namespace(org["org_id"])
-                             or _graph_name_for_namespace(org["org_id"]))
+            default_graph = (await _run_off_loop(
+                _CAPTURE_EXECUTOR, _org_default_namespace, org["org_id"])
+                or _graph_name_for_namespace(org["org_id"]))
             completion_sdk = (_org_sdk_from_name(org["org_id"], default_graph)
                               if _data_graph_name(org) == default_graph
                               else None)
@@ -39377,10 +39391,11 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     graph IS the org default), so on THAT path the ``organizations.graph_name``
     read above does not happen for it. A key BOUND TO THE DEFAULT graph is NOT in
     that class: it keeps the block, and the read it pays is the SAME single
-    pre-existing one ``main`` paid inside the inline gate — resolved ON THE LOOP,
-    once, and reused to construct the SDK via ``_org_sdk_from_name`` (no second
-    read) [#14086 review round 4, P1: the guard is a property of the binding, not
-    ``bool(graph_id)``].
+    pre-existing one ``main`` paid inside the inline gate — resolved ONCE, in a
+    CAPTURE-POOL worker (the READ is off-loaded; the construction stays on the
+    loop, #7500), and reused to construct the SDK via ``_org_sdk_from_name`` (no
+    second read) [#14086 review round 4, P1: the guard is a property of the
+    binding, not ``bool(graph_id)``].
     The other caller still reaches it: ``mcp_server._maybe_onboarding_auto_complete``
     calls this with ``sdk=None`` for any hosted org, and the MCP tools that reach
     it (``tortoise_create_point`` at ``mcp_server.py``'s ``_maybe_onboarding_auto_complete``

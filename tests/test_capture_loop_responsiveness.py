@@ -3728,6 +3728,74 @@ def test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint(client, monkeypatch)
         f"got {resp.json().get('first_capture')!r}")
 
 
+def test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop(client, monkeypatch):
+    """⛔ THE ROUND-4 GUARD'S DECISION READ IS A CONTROL-PLANE CALL (#14086 fixer).
+
+    Deciding whether a GRAPH-BOUND credential's own graph IS the org default
+    needs the org default's name, and for a graph-bound credential NO auth seam
+    publishes the hint (`_publish_default_namespace` is org-wide only) — so
+    `_org_default_namespace` takes its `organizations.graph_name` point read.
+    Run inline in `_capture_session_impl` that is a synchronous PostgREST round
+    trip ON the single uvicorn worker's loop: the same class of stall this PR
+    exists to remove (`/v1/search` waiting 8–17 s behind a capture), and one the
+    AST guards in `tests/test_health_ready_nonblocking.py` cannot see — they
+    match control-plane calls lexically inside an `async def`, and this one sits
+    one call away, in a sync helper.
+
+    #7500 is why only the READ moves: `_make_sdk` must stay on the loop, so the
+    split is `_run_off_loop(read)` and then `_org_sdk_from_name` — the same
+    idiom the indexing lane already uses
+    (`_org_sdk_from_name(org_id, await _cp_offload(...))`).
+
+    Mutation check (must stay true): resolving inline again puts every recorded
+    resolve back on `MainThread` and reds the assertion below; the sibling rows
+    (`..._graph_bound_capture_skips_the_org_level_checkpoint_entirely` and
+    `..._a_bound_DEFAULT_key_keeps_the_org_level_checkpoint`) pin that moving
+    the read changes WHERE it runs and nothing about the verdict.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app, get_current_org
+
+    threads: list[str] = []
+    real_resolve = ha_mod._org_default_namespace
+
+    def _recording_resolve(org_id):
+        threads.append(threading.current_thread().name)
+        return real_resolve(org_id)
+
+    monkeypatch.setattr(ha_mod, "_org_default_namespace", _recording_resolve)
+
+    previous = app.dependency_overrides.get(get_current_org)
+    app.dependency_overrides[get_current_org] = lambda: dict(
+        TEST_TEAM, graph_id="gid_resolve_14086",
+        graph_namespace="org_team-001_gid_resolve_14086")
+    ha_mod._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:$gid, kind:'custom', "
+        "namespace:$ns, status:'active'})",
+        params={"gid": "gid_resolve_14086", "tid": TEST_ORG_ID,
+                "ns": "org_team-001_gid_resolve_14086"})
+    try:
+        resp, _records, _writer = _measure_capture_graph_work(
+            monkeypatch, 2, "graph-bound-resolve-off-loop-14086")
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_current_org] = previous
+        else:
+            app.dependency_overrides.pop(get_current_org, None)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (graph-bound resolve run)")
+    assert resp.status_code == 200, resp.text[:300]
+    assert threads, (
+        "a GRAPH-BOUND capture never resolved the org default — this row would "
+        "prove nothing about WHERE that read runs")
+    on_loop = [n for n in threads if n == "MainThread"]
+    assert not on_loop, (
+        "the graph-bound default resolve — one `organizations.graph_name` "
+        "control-plane point read — ran ON the event loop; it must ride the "
+        f"capture pool (#10893/#14086); threads: {threads!r}")
+
+
 def test_the_pre_existing_offload_exemption_is_actually_consumed():
     """The declaration's consumer is real; nothing pins its USE in the verdict.
 
