@@ -96,6 +96,37 @@ acceptance bar).
 **F3 · Semantics — free, ~1 week.** Bi-temporal closure for negation/substitution (`#14198`); current-vs-history read rule
 declared per read (`#2952`). *Exit:* all four pair shapes resolve; **the demo runs**, numeric and noun-substitution variants.
 
+**F4 · Document-pack ingest — the launch surface — free to build, needs a pricing decision.** A customer hands us **a pack
+of documents** (`#14219`), and it runs **through the extractor's own stages** and **the installed ontology packs** — not
+beside them. The code's pipeline is **`X1`–`X5`** — five stages in `tortoise/extractor_v2.py` (this document renames them because the
+module's own S-numbers would collide with Track S here; that module's two further design-only stages have **no code
+counterpart**, per `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`). Three of them spend tokens per document: **`X1`** story summary, **`X2`**
+map-to-embed, **`X4`** gap review. **`X3`** is a graph read and **`X5`** is deterministic.
+
+- **Packs are the business logic.** Kinds, relations and guards (`#12060`'s accept / redirect / refuse contract) apply at
+  ingest volume, not only at single writes — a bulk path that writes raw points would recreate exactly the bloat the capability
+  audit (`#13083`) removes.
+- **The token dimension exists and is priced nowhere.** The gate names `capture_extraction` ("LLM usage in tokens for
+  extraction"), maps it to `max_extraction_tokens` (`allowance_gate.py:932`), binds it on the `sessions` door only — while
+  `product/pricing.json` carries **no per-tier token allowance and no token overage rate**. So the dimension can refuse but
+  nothing can bill: "past the allowance, pay overage" is not currently expressible.
+- **Degrade, never lose:** an exhausted token budget yields **stored, not extracted** (`#4258`'s disclosure shape), never a
+  discarded document. **Content-hash dedup runs before spending** (`billing.cost_basis.dedup` is already `content_hash`), so a
+  re-submission costs zero tokens.
+
+*Exit:* 20- and 500-document packs ingested through `X1`–`X5` + packs, token spend reported per document and per stage and
+reconciled to the org allowance, the overage path exercised, a re-submission costing zero tokens, no write outside a
+pack-declared kind, and search latency inside the F1 budget during the ingest.
+**Packs are consulted, and this was verified rather than assumed:** the extractor uses each pack's declared **`relations`**
+to derive each kind's *edgemates* and runs a **fixpoint** until zero relations are half-offered (`extractor_v2.py`), and
+`enforcement.py` reads `kindDefs[].enforcement` / `extraction.enforcement.relations[predicate]`; `cache_projection` reads
+`kindDefs.<kind>.folds`; `domain_validators` filters `pack.relations`. ⚠️ **MCP/SDK are the open question** — they expose
+relationship filtering by a `FromKind→ToKind` path, but nothing in this review showed them consulting the pack's own
+relation declarations; that is filed as a verification issue, not asserted as a defect.
+
+**⚠️ Needs two owner decisions before the cost half can be implemented: the included token amounts per tier, and the token
+overage rate.**
+
 ### Track S — build the destination *(starts now; spend only when a gate says so; S = scale)*
 
 Track S is **not** blocked on Track F. Its first three items are free and independent, and doing them now is exactly what
@@ -104,7 +135,7 @@ makes the later spend cheap.
 | item | cost | why now |
 |---|---|---|
 | **S1 Stateless API tier** — move the model out of the API process; drop the `/data` dependency | free | every comparable runs disposable servers. This is the prerequisite for cheap replicas, and it is a refactor that only gets harder once more depends on it |
-| **S2 Define the scaling unit in writing** — "N tenants' working sets + 1 embedder + 1 pool", with the per-tenant footprint from M5 (`#14015`) | free | turns "how many machines" into a measured number |
+| **S2 Define the scaling unit in writing** — "N tenants' working sets + 1 embedder + 1 pool", with the per-tenant footprint from the **M5** miss-rate measurement (`#14015`) | free | turns "how many machines" into a measured number |
 | **S3 Latency budget per stage, published** — the numbers we intend to defend (Hindsight's 100–600 ms class) | free | you cannot hold a budget you never wrote down |
 | **S4 Land the nine `#1677` guards** | free | unblocks using the cores we already pay for. The scope is the **nine rows**, not three — the rate-limit buckets and the ~85 s pre-warm at ~N× RSS are what make N workers expensive on 4096 MB |
 | **S5 Dedicated CPU** on the API box | ≈ +$8/mo | removes burst throttling (0.24 s ↔ 2.07 s spread on identical work) |
