@@ -160,33 +160,35 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`mcp_server.py:5250`", _MCP, 5250, "entity_type=entity_type"),
-    # ⛔ §2.5's `:Tag` traversal row cites `mcp_server.py:11281` and, until this row, NOTHING read
-    # it (`grep -rn 11281 tests/` -> nothing): the audit document's header promises a reader for
+    # ⛔ §2.5's `:Tag` traversal row cites `mcp_server.py:11590` and, until this row, NOTHING read
+    # it (`grep -rn 11590 tests/` -> nothing): the audit document's header promises a reader for
     # every entry it re-derives, and this one had none. `:11280` is the `g.query(` call; the
-    # document cites the query LITERAL's first line, which is `:11281` (its siblings in the same
+    # document cites the query LITERAL's first line, which is `:11590` (`#14169` moved it from `:11281`; its
+    # siblings in the same
     # paragraph follow the same convention — `sdk.py:31533` is the literal while `:31377` is the call).
     (_AUDIT, "`mcp_server.py:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
-    # (`` `mcp_server.py:5184`/`:8206`/`:11281` ``), and the §2.5 token above cannot see a bare
-    # `:NNNN`. Review at `b9e7822362c6`, P2: reverting ONLY the header half (`:11281` -> `:11280`)
+    # (`` `mcp_server.py:5250`/`:8515`/`:11590` `` on this head; `:5184`/`:8206`/`:11281` before
+    # `#14169` moved them), and the §2.5 token above cannot see a bare
+    # `:NNNN`. Review at `b9e7822362c6`, P2: reverting ONLY the header half (`:11590` -> `:11589`)
     # left every arm green — `_PINS` counts were unchanged (63/63), `_TOKEN_OCCURRENCES`' key count
     # stayed 1 (the §2.5 spelling is a different key), `_REDEFINED_13854` was untouched and the
     # `_resolved_pairs` census was identical (223 pairs) — so the document could name two addresses
     # for one reader with nothing red. That is the false pass this file exists to stop, and it is the
     # `#13466` shape (four header entries re-pointed, nothing red). Its siblings on the same header
-    # line are pinned per SITE for exactly this reason: `` `:8206` `` and `` `:5654` `` each carry a
-    # bare-token row with count 2 (header + §2.5). This row and its count are the site the re-derived
+    # line are pinned per SITE for exactly this reason: `` `:8515` `` and `` `:5720` `` each carry a
+    # bare-token row with count 2 (header + §2.5) — measured on this head. This row and its count are the site the re-derived
     # §2.5 row left behind.
     (_AUDIT, "`:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # 1 -> 3 at the #13991 merge of `origin/main` `0656b056d7`: the branch's OWN prose adds two more
-    # BARE sites of this same address, so the bare-token row DIRECTLY ABOVE (`` `:11281` ``, count
-    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11281` row above it (count 1,
+    # BARE sites of this same address, so the bare-token row DIRECTLY ABOVE (`` `:11590` ``, count
+    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11590` row above it (count 1,
     # unchanged — the row whose token carries the path, not a bare `:NNNN`) covers only the §2.5
     # one-token spelling. Deliberately no "N lines above": that distance moved twice on this branch
     # already, and a stated count is the defect class this file exists to catch. Measured on the merged document
     # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
-    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11281`"))'` -> 3), with the site
-    # lines RE-MEASURED on this document rather than carried — `grep -n '`:11281`' on the MERGED
+    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11590`"))'` -> 3), with the site
+    # lines RE-MEASURED on this document rather than carried — `grep -n '`:11590`' on the MERGED
     # document gives `:173` / `:186` / `:592`. They have moved twice since the pre-merge `:182`/`:585`
     # edition: `main`'s merge `0656b056d7` shifted two of them, the P2 fix above (which sits BETWEEN
     # them) added +2 to the third, and the two-line "five pairs as two code spans" correction
@@ -196,8 +198,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     #   :186  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :592  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
-    # Re-derive with `grep -n '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
+    #   :592  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`, later moved to `:11590`
+    #         by `#14169` — the ONE surviving `11281` spelling, kept because it is history, not an address.
+    # Re-derive with `grep -n '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
     # trusting this list on a later head: a line number in prose is exactly the claim this file pins
     # for the document, and it drifts the same way.
     # All three name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
@@ -208,7 +211,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:8515`", _MCP, 8515, "entity_type=entity_type"),
     # ⛔ The four `sdk.py` members of §2.5's `:Tag` row are enumerated in the header as BARE `:NNNN`
     # siblings — a spelling none of the rows above reaches (they all require a path or the one-token
-    # form), which is the same one-site-vs-one-string gap the `:11281` header half and `:6989` were:
+    # form), which is the same one-site-vs-one-string gap the `:11590` header half and `:6989` were:
     # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
     # the fragment the header paragraph quotes for it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31551`", "tortoise/sdk.py", 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})"),
@@ -443,8 +446,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11590`'): 1,
     # 3: the header's BARE spelling of the same address, plus the two BARE sites the #13991 branch
     # itself adds (§2.5's five-address enumeration and its `:11280` -> `:11281` provenance sentence) —
-    # see the row's own comment for the three line numbers. Measured on the merged document:
-    # `grep -o '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 3.
+    # see the row's own comment for the three line numbers. Measured on the merged document, and again
+    # after `#14169` re-keyed the address:
+    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 3.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5720`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8515`'): 2,
@@ -1957,13 +1961,14 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 61 -> 62 at the #13854 fix lane: the vector-index-parity plan's reader row was re-pointed to
     # `hosted_backup.py:1548` (a comment) for `_index_has_is_operator()`, which was `:2666` at that lane's head
     # — and that document had NO pin at all, so nothing would have reddened the next rotation of it.
-    # 62 -> 63 after #13879's merge: §2.5's `:Tag` row cites `mcp_server.py:11281`, re-derived from the
+    # 62 -> 63 after #13879's merge: §2.5's `:Tag` row cites `mcp_server.py:11590` (`:11281` as written
+    # then, re-pointed by `#14169`), re-derived from the
     # pin-head `10730`, and NOTHING read it — the same class as the `:6989` and `hosted_backup.py:2683`
     # rows above.
     # 63 -> 64 at the #13992 review (P2): the SAME address is written TWICE in the document, and the
-    # row above pins only the §2.5 spelling (`mcp_server.py:11281`) — the header enumerates it BARE as
-    # `:11281`, where no row and no count reached. Reverting just the header half left every arm green,
-    # measured above. One ROW per SITE, never one row per STRING: `:8206`/`:5654` on that same header
+    # row above pins only the §2.5 spelling (`mcp_server.py:11590`) — the header enumerates it BARE as
+    # `:11590`, where no row and no count reached. Reverting just the header half left every arm green,
+    # measured above. One ROW per SITE, never one row per STRING: `:8515`/`:5720` on that same header
     # line are the neighbours that already carry their own bare-token row.
     # 68 -> 72 at the #14043 review (finding 3): four addresses the revision writes at THIS head were
     # in neither the header's enumeration nor `_PINS`, so the header's reader rule sent a reader to the
