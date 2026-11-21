@@ -6740,12 +6740,19 @@ def test_the_cost_note_pin_reds_when_the_historical_label_is_stripped(monkeypatc
 def test_the_cost_note_pin_reds_when_two_shapes_are_priced_unlabelled(monkeypatch):
     """The round-10 PREDICATE, guarded: one stale claim BESIDE one current one.
 
-    `if priced != {declared_cpus}` is the assertion with no other mutant: revert
-    it to the older `if declared_cpus not in priced:` and both probes above
-    still pass, because the declared shape is then PRESENT in the priced set and
-    the label leg is never evaluated. That state — a stale `shared-cpu-2x` price
-    row left standing next to a genuine `shared-cpu-4x` row, unlabelled — is the
+    `if priced != {declared_cpus}` is the assertion with no other mutant, and THIS
+    input is the only one that sees it. Revert it to the older
+    `if declared_cpus not in priced:` and the label-strip probe above still passes —
+    but NOT because it sees the predicate: its priced set is `{2}`, so the old form
+    (`4 not in {2}`) is TRUE, enters the label leg, and reds on the stripped label
+    just as the new form does. This probe's input is the only one whose priced set
+    CONTAINS the declared shape (`{2, 4}`), so there the old form skips the label
+    leg entirely and the pin reads GREEN — which is the two-claims state, and the
     one #14156 review F2 is about, so it is reproduced here rather than read.
+    (Corrected in the #14156 follow-up: the first version of this paragraph said
+    "both probes above still pass, because the declared shape is then PRESENT in
+    the priced set" — true of this input, false of the label-strip probe, which
+    passes for the reason above. A fresh reviewer measured it.)
 
     Non-vacuity of the mutation itself is asserted first: the two-claims input
     must really parse as {2, 4}, or the probe would be proving the label leg
