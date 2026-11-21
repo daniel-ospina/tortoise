@@ -73,7 +73,7 @@ Four of the five have moved their expensive write work behind a queue; we alread
 | derived hot layer in front | vector+entity | **hot-graph cache** | servers as disposable caches | **KV hot layer** | NVMe cache | ✅ graph + eviction executor |
 | **expensive work at write, behind a queue** | **<50 ms ack, queue, scale on depth** | async ingest | **"cost shifted to writes"** | **"dreaming" phase** | — | ❌ inline |
 | **parallel legs, bounded traversal** | **4 signals scored in parallel** | hybrid (legs not stated) | **4 legs in parallel** | *not recorded* | — | ❌ sequential |
-| **published retrieval latency** | 100–150 ms | p95 <100 ms | **recall 100–600 ms** | sub-300 ms | **14 ms warm / 500 ms cold** | ❌ none published |
+| **published retrieval latency** | p50 148 ms / p95 200 ms | p95 <100 ms | **recall 100–600 ms** | sub-300 ms | **14 ms warm / 500 ms cold** | ❌ none published |
 
 ⚠️ **Every figure in that table is VENDOR-PUBLISHED, not reproduced here.** They establish the *class* of latency the market ships; they are never our own measurement. Only turbopuffer publishes a **cold/warm split** — the others publish a single retrieval latency.
 

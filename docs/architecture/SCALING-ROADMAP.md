@@ -19,11 +19,13 @@ infrastructure that can handle load. We can have things ready for scaling withou
 3 returned. Sources are vendor papers, engineering blogs and architecture references; they are **third-party claims, not
 reproduced here**.
 
-⚠️ **Provenance, stated per claim, because it is uneven.** Only the Mem0 claims carry a durable link
-(`docs.mem0.ai/core-concepts/memory-evaluation`, cited where used). The Zep, Hindsight, Supermemory and turbopuffer figures in §1
-and §2.5 are summaries of their papers/blogs with **no URL recorded here** — they are re-checkable only by re-sourcing them, and
-one of them already came back wrong when checked (the Mem0 cells at §1, §2.5, §3 and the §2.5 convergence count were corrected
-on that check). Re-source a figure before quoting it outside this document.
+⚠️ **Provenance, stated per claim, because it is uneven.** ONE page is linked:
+`docs.mem0.ai/core-concepts/memory-evaluation`, and it backs only Mem0's **three storage layers, six-stage pipeline and four
+parallel retrieval signals**. Everything else is a summary of vendor papers/blogs with **no URL recorded here**: Mem0's **< 50 ms
+ack, queue-depth autoscaling, partitioning and search percentiles**, and every Zep, Hindsight, Supermemory and turbopuffer figure
+in §1 and §2.5. That is not a formality — the Mem0 material WAS checked against its one link and came back wrong in four cells
+(the storage-layer description and the durable-store count in §1/§2, the parallel-legs count and the "single source" conclusion
+in §2.5, plus their twins in `PLAN-private-beta-and-scale.md` §2–§3). Re-source a figure before quoting it outside this document.
 
 ---
 
@@ -38,8 +40,7 @@ on that check). Re-source a figure before quoting it outside this document.
 - **Writes are asynchronous**: an add returns in **< 50 ms** and the real work (fact distillation, deduplication, embedding,
   entity linking, temporal reasoning) happens on a queue. Workers autoscale on **queue depth**, and tenant ordering is kept by
   **partitioning**.
-- **Reads are the latency-critical plane**: hybrid search reported at **100–150 ms**; paper figures p50 0.148 s / p95 0.200 s
-  for search.
+- **Reads are the latency-critical plane**: the paper reports search at **p50 148 ms / p95 200 ms**.
 - Ingestion is a **six-stage pipeline**, with the slow stages explicitly allowed to complete later
   (`docs.mem0.ai/core-concepts/memory-evaluation`).
 
@@ -79,7 +80,7 @@ purpose-built index, or an external API.
 |---|---|---|
 | system of record | **Postgres record** (`STORAGE-ARCHITECTURE.md` §2.0 owner ruling) | Mem0: vector store primary; SQL = ADD history log — ⚠️ **not the same** |
 | derived search layer | **graph cache + pgvector** | Zep: Konig with hot-graph cache ✅ same shape |
-| hybrid retrieval | **semantic + keyword + graph** | Zep/Mem0: same three legs ✅ same |
+| hybrid retrieval | **semantic + keyword + graph** | Zep: the same three legs; Mem0: three plus entity/temporal signals (four in total) ✅ same three |
 | **write path** | synchronous through the API | **queued, acked < 50 ms**, workers autoscaled ✗ ours is inline |
 | **query embedding** | **inside the request**, 2–4 s on the box's shared cores (4 since `#14156`) | dedicated worker tier / external API ✗ |
 | **batching** | none for interactive queries | continuous batching + max-wait bound ✗ |
@@ -123,8 +124,7 @@ write path. The remaining two ✗ rows, success-path stage metrics and the scali
 
 - Vector store as **primary fact storage** + graph/entity store, with SQL as an ADD-event history log. Adds ack in **< 50 ms**;
   extraction/embedding/dedup/entity-linking run on a
-  **queue**, workers autoscaled on **queue depth**, tenant ordering by **partitioning**. Search **100–150 ms**
-  (p50 0.148 s, p95 0.200 s).
+  **queue**, workers autoscaled on **queue depth**, tenant ordering by **partitioning**. Search **p50 148 ms / p95 200 ms**.
 
 **Take:** acknowledgement ≠ completion. A write should not wait for its embedding.
 
@@ -218,8 +218,9 @@ vendor; it makes the choice reversible.
 tracked handoffs under `docs/` are from August). Its claims are therefore **restated in full in the table below**, so this section
 stands alone and nothing here is checkable only against a file a reader cannot open.
 
-Each claim was re-measured before being adopted — several were true when written and are not true now, which is exactly what the
-handoff's own §5.4 warns about.
+Each claim was re-measured before being adopted — several were true when written and are not true now. The handoff warns about
+exactly this decay in its own §5.4 (an **external** section that cannot be opened here; the warning, restated: a claim that was
+true when written ages out, so re-measure before adopting it).
 
 | handoff claim | verdict | evidence (2026-11-21) |
 |---|---|---|
