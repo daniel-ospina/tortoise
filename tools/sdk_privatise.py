@@ -958,18 +958,20 @@ SWEEP_NAMES = 66
 #: merged tree, never a figure carried forward. `origin/main` at `1b0db04894` prints
 #: `(11840, "b7eb08ff3acdcce4")`, and THIS merged tree prints the SAME pair, so the branch
 #: contributes ZERO rows — which is what makes this a measurement of `main` rather than of this
-#: diff. THE −3 FROM 11843 IS ATTRIBUTED BY MEASUREMENT AND BY COMMIT, never by arithmetic:
+#: diff. THE NET −3 FROM 11843 IS ATTRIBUTED BY MEASUREMENT AND BY COMMIT, never by arithmetic:
 #: `--repin` was run on the pin's own tree `f9f480a55ab3` → `(11843, "6aed5368ffa10513")` (the pin
-#: reproduces there), on `72c104bcbb` → the same pair, and on `67dc298ec3` →
-#: `(11837, "52e9a205697f528f")`, so exactly ONE commit moved the row SET: `67dc298ec3` (#14194,
-#: the read-ledger half of #14184, merged two minutes after this lane's last fetch). The row sets
-#: were sorted and diffed, and EXACTLY four rows differ, all of them going to ZERO — `inst.query`
-#: 3, `inst.get_point` 1, `inst.paginated_query` 1, `inst.query_points_by_tag` 1 — the stale
-#: retired doors that commit stopped driving, which is a residue FALL caused by fixing the tests
-#: #14184 names. The remaining `11843 − 3 = 11840` is then THREE rows ADDED by later `main`
-#: commits between `67dc298ec3` and `1b0db04894` (`cur['proj'].g.query` 2 → 4 and a new
-#: `terms.update` row); both are untyped dict receivers already inside this sweep's documented
-#: edge, so no new SHAPE was absorbed. This branch's surviving edit
+#: reproduces there), on `67dc298ec3`'s OWN PARENT `72c104bcbb` → the same pair, and on
+#: `67dc298ec3` → `(11837, "52e9a205697f528f")`, so ONE commit moved the row SET: `67dc298ec3`
+#: (#14194, the read-ledger half of #14184, merged two minutes after this lane's last fetch). The
+#: row sets were sorted and diffed, and EXACTLY four rows differ, all of them going to ZERO —
+#: `inst.query` 3, `inst.get_point` 1, `inst.paginated_query` 1, `inst.query_points_by_tag` 1 —
+#: SIX references between those four rows, which is the `11843 → 11837` the pair above records:
+#: the stale retired doors that commit stopped driving, a residue FALL caused by fixing the tests
+#: #14184 names. THREE references are then ADDED by later `main` commits between `67dc298ec3` and
+#: `1b0db04894` (`cur['proj'].g.query` 2 → 4 and a new `terms.update` row, `11837 + 3 = 11840`);
+#: both are untyped dict receivers already inside this sweep's documented edge, so no new SHAPE
+#: was absorbed. The net −3 is those two MEASURED moves and nothing else (`11843 − 6 + 3 =
+#: 11840`, a CROSS-CHECK of the pairs above, never their evidence). This branch's surviving edit
 #: (`tests/test_de2e7_gates_mcp.py`, the half #14194 did NOT touch) adds and removes NOTHING: the
 #: sorted row sets of `origin/main`'s tree and of this merged tree are IDENTICAL, 855 keys on both
 #: sides. `--check` exits 0 on this tree after the re-pin, with
