@@ -36,7 +36,7 @@ competitor research (`SCALING-ROADMAP.md` §1–§2.5) · trackers `#11081` (rel
 
 ## 2. Diagnosis — seven mechanisms, and how they compound
 
-Each has the evidence and a confidence.
+Each has the evidence, a confidence, and **what would disprove it**.
 
 | # | mechanism | evidence | conf. | what would disprove it |
 |---|---|---|---|---|
