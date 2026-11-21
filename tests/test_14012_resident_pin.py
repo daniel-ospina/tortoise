@@ -29,6 +29,7 @@ from tortoise.resident_pin import (
     PINS_META_KEY,
     PinBudget,
     PinConfigError,
+    PinReading,
     PinRefused,
     pin,
     read,
@@ -987,6 +988,40 @@ class _LabelledGraph(_FakeGraph):
                              [self.nodes[i].get("id") for i in sorted(nbrs)]])
             return _Result(rows)
         return super().query(statement, params=params)
+
+
+def test_a_gate_built_from_an_unreadable_or_truncated_reading_REFUSES():
+    """`read(g).gate()` must not answer "nothing is pinned" when the read failed.
+
+    ⛔ MUTATION-VERIFIED GAP: this assertion did not exist, and both mutations of the guard
+    — deleting the `if not self.readable or self.truncated:` refusal, and returning the bare
+    closure comparison — left the whole suite GREEN. Every other `.gate()` call in these
+    suites is built from a `readable=True, truncated=False` reading, so the door this PR
+    exists to close had no row at all. The consequences it prevents: an unreadable
+    declaration yields an EMPTY closure, so the predicate answers "nothing is pinned" and a
+    caller that skips `gate_reason()` deletes the entire pinned population while the report
+    reads `held_pinned: 0`; a truncated one yields a PARTIAL closure and deletes exactly the
+    pinned nodes past the read bound.
+    """
+    unreadable = PinReading(label="Point", key_prop="id", readable=False,
+                            source="unreadable:RuntimeError: boom")
+    with pytest.raises(PinRefused) as exc:
+        unreadable.gate()
+    assert exc.value.code == "unreadable"
+
+    truncated = PinReading(label="Point", key_prop="id",
+                           keys=frozenset({"p0"}), closure=frozenset({"p0"}),
+                           truncated=True, source="meta:pins")
+    with pytest.raises(PinRefused) as exc2:
+        truncated.gate()
+    assert exc2.value.code == "truncated"
+
+    # And the live path: a real `read()` over a graph whose declaration cannot be parsed
+    # must not hand out a gate either.
+    g = _FakeGraph(["p0"])
+    g.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0", 7]}
+    with pytest.raises(PinRefused):
+        read(g).gate()
 
 
 def test_the_closure_is_label_scoped_so_a_foreign_labels_neighbour_is_not_counted():
