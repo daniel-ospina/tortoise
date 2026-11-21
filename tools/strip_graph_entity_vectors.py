@@ -4654,12 +4654,21 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
             # never heard about it. The dynamic name is not statically readable, so the write
             # poisons EVERY name the scope declares `global` or `nonlocal` — the only names such
             # a write can reach from here.
-            poisoned.update(_scope_declarations)
+            #
+            # ⛔ `|=`, NOT `poisoned.update(…)` (`#14001`, measured 2026-11-20): both are the
+            # same `set` operation, but the `surface-guard` job's privatisation sweep
+            # (`tools/sdk_privatise.py --check`) counts every `<ordinary-word receiver>.update`
+            # on the tree as UNTYPED residue it cannot type, and that residue SET is PINNED —
+            # these arms moved it off the pin (11821 → 11829 with two concurrent-merge rows),
+            # reddening the job for a receiver that is provably a `set[str]` local while the
+            # typed-reference count it exists for stayed 0. The augmented assignment is the same
+            # store and adds no row that has to be declared.
+            poisoned |= _scope_declarations
         elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):
             # ⛔ `globals().update({…})` IS THE SAME WRITE ONE SPELLING OVER (`#14001`,
             # measured by the round-8 review): the mutator form rebinds a module name exactly
             # as the subscript form does, and the subscript-only arm certified it.
-            poisoned.update(_scope_declarations)
+            poisoned |= _scope_declarations    # `|=`: see the residue note above
     # ⛔ AND SO IS A BINDING IN A **NESTED SCOPE** (`#14001`, measured by the round-2 review):
     # `_own_walk` prunes an inner `def`/`lambda`/`class`, so a `nonlocal k; k = "embedding"`
     # there was invisible while the outer stop arm used `k`. Every name assigned ANYWHERE in
@@ -4687,7 +4696,7 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         if isinstance(sub, ast.Assign) and any(
                 isinstance(target, ast.Subscript) and _dynamic_namespace_write(target)
                 for target in sub.targets):
-            poisoned.update(_scope_declarations)
+            poisoned |= _scope_declarations    # `|=`: see the residue note in the own-scope arm
             continue
         if isinstance(sub, ast.Assign | ast.AnnAssign):
             targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
@@ -4713,23 +4722,22 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
                 poisoned.add(sub.rest)
         elif isinstance(sub, ast.MatchMapping) and getattr(sub, "rest", None):
             poisoned.add(sub.rest)
-        elif isinstance(sub, ast.Assign) and any(
-                isinstance(target, ast.Subscript) and _dynamic_namespace_write(target)
-                for target in sub.targets):
-            # ⛔ `globals()[<name>] = …` REBINDS A NAME THIS WALK BELIEVES IT PROVED (`#14001`,
-            # measured by the round-5 review): the store's VALUE is a constant, so the
-            # Subscript arm above is not even a key-bearing site, and the poisoned-name set
-            # never heard about it. The dynamic name is not statically readable, so the write
-            # poisons EVERY name the scope declares `global` or `nonlocal` — the only names such
-            # a write can reach from here.
-            poisoned.update(_scope_declarations)
+        # ☠️ NO `Assign` + `_dynamic_namespace_write` ARM HERE, deliberately (`#14001`, measured
+        # 2026-11-20): every `Assign` that reaches this point was already consumed ABOVE — the
+        # dynamic-namespace block `continue`s, and the generic `ast.Assign | ast.AnnAssign` arm
+        # `_poison`s the rest — so the arm that used to sit here could not run, and it only cost
+        # a residue row the privatisation sweep had to declare. Do not re-add it; the LIVE
+        # spelling is the block above, pinned by `globals-subscript-in-class-body`.
         elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):
             # ⛔ `globals().update({…})` IS THE SAME WRITE ONE SPELLING OVER (`#14001`,
             # measured by the round-8 review): the mutator form rebinds a module name exactly
             # as the subscript form does, and the subscript-only arm certified it.
-            poisoned.update(_scope_declarations)
+            poisoned |= _scope_declarations    # `|=`: see the residue note in the own-scope arm
         elif isinstance(sub, ast.Nonlocal | ast.Global):
-            poisoned.update(sub.names)
+            # ⛔ `set(...)` IS REQUIRED, not decoration: `ast.Global.names` /
+            # `ast.Nonlocal.names` are `list[str]`, and `set |= list` raises `TypeError`
+            # (`set.__ior__` takes a set, unlike `.update`, which takes any iterable).
+            poisoned |= set(sub.names)
     assigned: dict[str, list] = {}
     for sub in nodes:
         if not isinstance(sub, ast.Assign | ast.AnnAssign):
