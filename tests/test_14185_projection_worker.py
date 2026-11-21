@@ -252,6 +252,37 @@ def test_the_depth_gauge_is_read_AFTER_the_fold_not_at_pop(armed):
     assert settled["queue_depth"] == projection_worker.stats().queue_depth
 
 
+def test_an_OLDER_snapshot_never_overwrites_a_newer_one(armed):
+    """⛔ #14222 review cycle 4, P1: a lock orders the PUBLISHES, not the READS.
+
+    The snapshot is captured under `_cond` and applied under `_publish_lock`.
+    A lock around only the apply orders two publishes by when they QUEUED, so a
+    thread descheduled between the capture and the apply can write an older
+    value LAST — gauges reading 1 while the queue holds 2, and `stats()` saying 2.
+    The sequence number stamped with the values is what makes the older one
+    DROPPED instead. Built directly here because the interleaving needs to be
+    constructed, not raced for.
+    """
+    worker = projection_worker.worker()
+    item = projection_worker.PendingProjection(
+        record={}, seq=1, tenant=None, journal_skipped=False,
+        project=lambda *a, **k: None, enqueued_at=time.monotonic())
+
+    with worker._cond:
+        older = worker._stamp_locked()          # (seq=1, depth=0, …)
+        worker._pending.append(item)
+        newer = worker._stamp_locked()          # (seq=2, depth=1, …)
+
+    worker._publish(newer)
+    assert monitoring.projection_worker_gauges()["queue_depth"] == 1
+
+    worker._publish(older)                       # arrives late; must be dropped
+    assert monitoring.projection_worker_gauges()["queue_depth"] == 1, (
+        "an older snapshot overwrote a newer one — the gauge went backwards")
+    assert (monitoring.projection_worker_gauges()["queue_depth"]
+            == worker.stats().queue_depth)
+
+
 def test_the_metrics_surface_carries_the_lag(armed):
     """`metrics()` names the lag — an operator reads it without the module."""
     metrics = monitoring.metrics()
@@ -750,7 +781,7 @@ def test_a_drain_predicate_is_exact_even_after_a_fork(armed):
     worker._submitted, worker._projected = 9, 1   # an inherited high-water mark
     worker._pending.clear()
     worker._inflight = None
-    worker._pid = os.getpid() + 1_000_000          # pretend another process
+    worker._cond_pid = os.getpid() + 1_000_000     # pretend another process
 
     start = time.perf_counter()
     assert projection_worker.wait_for_drain(2) is True
@@ -778,7 +809,7 @@ def test_a_forked_worker_republishes_its_gauges(armed):
     assert monitoring.projection_worker_gauges()["pending_positions"] == 3
 
     worker = projection_worker.worker()
-    worker._pid = os.getpid() + 1_000_000          # pretend this was inherited
+    worker._cond_pid = os.getpid() + 1_000_000     # pretend this was inherited
 
     stats = projection_worker.stats()               # triggers the fork reset
     gauges = monitoring.projection_worker_gauges()
@@ -806,13 +837,23 @@ def test_a_STOPPED_worker_still_refreshes_its_condition(armed):
     """
     worker = projection_worker.worker()
     assert worker.stop(drain=False, timeout=5) is True
-    assert worker._pid is None
 
+    # Simulate the child: the Condition in hand was created by another process.
+    worker._cond_pid = os.getpid() + 1_000_000
     inherited = worker._cond
     worker.stats()
     assert worker._cond is not inherited, (
-        "a stopped worker's Condition must be re-created, not reused")
-    assert worker._pending is not None and worker.stats().queue_depth == 0
+        "an inherited Condition must be re-created, not reused")
+    assert worker._cond_pid == os.getpid()
+    assert worker.stats().queue_depth == 0
+
+    # …and a fork after a STOP is detected too, which `_pid is None` could not
+    # distinguish from "this process, stopped".
+    worker.stop(drain=False, timeout=5)
+    worker._cond_pid = os.getpid() + 1_000_000
+    stopped_cond = worker._cond
+    worker.stats()
+    assert worker._cond is not stopped_cond
 
 
 def test_stopping_from_the_consumer_itself_does_not_clear_a_live_consumer(armed):
