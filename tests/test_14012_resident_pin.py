@@ -1383,3 +1383,120 @@ def test_a_window_held_back_by_a_late_reader_does_not_abandon_the_remaining_pass
         "a lease-only hold-back was reported as a pin, sending the operator to `unpin` "
         "a declaration that does not exist"
     )
+
+
+def test_a_window_held_back_by_a_reader_names_the_READ_not_a_pin():
+    """The `leased` branch of the carried-out diagnosis.
+
+    ⛔ Mutating this branch to `"pinned"` left all 203 related tests green while the report
+    said "0 node(s) are PINNED … unpin some of them, or raise TORTOISE_PIN_MAX_NODES" for a
+    window a READER was holding — a remedy for a pin that does not exist, and a hold count
+    of zero. A reader cannot be cleared by `unpin`.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph([f"p{i}" for i in range(12)])
+    leases = ReadLeases()
+
+    def probe_starts_a_reader(candidate: Candidate) -> bool:
+        # ⛔ The seam matters: the record probe runs AFTER the plan-time lease gate, so the
+        # node is planned and then held at the LAST hop — which is the arm under test.
+        leases.acquire(candidate.node_id)
+        return True
+
+    report = evict(
+        _assessment(nodes=12), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=probe_starts_a_reader,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=2),
+    )
+
+    assert report.deleted == ()
+    assert "in-flight READ" in report.reason, (
+        "the reason did not name the reader that stopped the sweep: "
+        f"reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "a LEASE-held window was reported as a pin — the operator is offered `unpin` for a "
+        f"pin that does not exist. reason={report.reason!r}"
+    )
+    assert report.metric()["pass_budget_exhausted"] is False
+
+
+def test_a_window_held_back_by_a_raising_predicate_is_not_reported_as_a_pin():
+    """The `pin-unanswerable` branch, which collapsing into `"pinned"` would hide.
+
+    ⛔ Folding an unanswerable predicate into `"pinned"` leaves the report offering `unpin`
+    for nodes that were never shown to be pinned — advice the file's own
+    `pin-unanswerable` arm says cannot be followed, because nothing was established about
+    them. Measured: that mutation left all 203 related tests green.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(8)])
+    asks: dict[int, int] = {}
+
+    def pin_raises_after_the_plan(candidate: Candidate) -> bool:
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        if asks[candidate.node_id] == 1:
+            return False                      # planned, so it reaches the last hop
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=8), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_raises_after_the_plan,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=2),
+    )
+
+    assert report.deleted == ()
+    assert "could not answer" in report.reason, (
+        f"the reason did not say the predicate could not answer: reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "nodes whose predicate RAISED were reported as pinned, so the report offers `unpin` "
+        f"for a state nothing established. reason={report.reason!r}"
+    )
+
+
+def test_a_pass_budget_exhausted_AFTER_a_deleting_pass_keeps_its_own_reason():
+    """The `hold_reason = None` reset — what makes the carry-out mapping load-bearing.
+
+    ⛔ Without the reset, an earlier pass's hold is still in scope when a LATER pass deletes
+    and the budget then runs out, so the report claims the sweep was stopped by a pin while
+    it actually stopped on the pass budget after evicting nodes. Measured: removing the
+    reset left all 203 related tests green, and turned an honest
+    `PARTIAL / budget_exhausted=True / "… re-run to continue"` into
+    `budget_exhausted=False` plus "2 node(s) are PINNED … unpin some of them".
+    """
+    g = _FakeGraph([f"p{i}" for i in range(6)])
+    asks: dict[int, int] = {}
+
+    def pinned_at_the_delete(candidate: Candidate) -> bool:
+        # p0/p1 are held at the delete statement (2nd ask), then held at plan time after.
+        if candidate.key not in {"p0", "p1"}:
+            return False
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=6), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pinned_at_the_delete,
+        dry_run=False,
+        # pass 1 is fully held back (p0/p1); pass 2 DELETES p2/p3; the budget then runs out
+        # with `after_nodes` still over `max_nodes`.
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=2),
+    )
+
+    assert len(report.deleted) == 2, "the deleting pass did not run — this row grades nothing"
+    assert "re-run to continue" in report.reason, (
+        "the reason carried an EARLIER pass's pin hold into a stop that the pass budget "
+        f"caused after it had already evicted nodes. reason={report.reason!r}"
+    )
+    assert report.metric()["pass_budget_exhausted"] is True, (
+        "the binding constraint was the pass budget, not the pin"
+    )
