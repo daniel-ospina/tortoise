@@ -206,8 +206,8 @@ the pathspec and the endpoint all travel with that second figure, because
 `git diff -U0 32441c280d HEAD -- tortoise/hosted_api.py | grep -c '^@@'` gives 25 while git's default `-U3`
 gives 23 (and `--numstat` prints no hunk count at all; without the pathspec both commands describe the whole
 repo instead — every file in the interval, not this row's — and the repo-wide totals are **deliberately not
-quoted here**, because such a figure moves with every commit that touches this document, the one that writes
-this sentence included, so quoting one would print a number already stale at its own head. Re-run the command
+quoted here**, because such a figure is a function of the commit that reads it: any commit that adds or removes
+a line here moves it, this one included, so quoting one would print a number already stale at its own head. Re-run the command
 rather than read a figure here). `+419` of the growth sits above the three sites (20 hunks, largest net `+157`)
 and `+91` below them, and at the same two heads a cite at old 10500 moved `+97` while one at 40000
 moved `+499`. The three share a delta because **no hunk between them changes the count** — the cumulative
