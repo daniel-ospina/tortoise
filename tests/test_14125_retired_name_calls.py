@@ -817,6 +817,40 @@ def _non_own_imported_names(nodes: list[ast.stmt]) -> set[str]:
     return out
 
 
+def _third_party_receivers(tree: ast.Module) -> set[str]:
+    """Third-party import names that still DENOTE that import where a probe uses them.
+
+    ``_non_own_imported_names`` answers "which names did a non-own import bind
+    ANYWHERE in this file", and the narrowing used that answer directly. That is a
+    NAME, not a BINDING: ``import falkordb`` at the top of the module and
+    ``falkordb = proj`` inside the probe leaves the name holding OUR client, while the
+    exemption still skipped the ``.query`` call on it. Measured: that shape was graded
+    at ``994fb1d52f`` and UNGRADED from ``61fc96cd`` on — the narrowing's own
+    regression (two fresh reviewers, same finding; control unchanged on both heads).
+
+    So an imported name that is re-bound anywhere in the module is not evidence of the
+    import at a call site and buys no exemption. An import binds through its ALIAS, not
+    an ``ast.Name`` Store, so ``import x`` alone never removes ``x``; and the
+    whole-module walk can only make the gate grade MORE, never less. The
+    parameter / passed-in-client witnesses are unaffected, because those receiver names
+    are not in the import set to begin with.
+    """
+    bound = _non_own_imported_names(tree.body)
+    if not bound:
+        return set()
+    rebound = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            args = node.args
+            rebound |= {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+            rebound |= {a.arg for a in (args.vararg, args.kwarg) if a is not None}
+    return bound - rebound
+
+
 def _receiver_root_name(node: ast.expr) -> str | None:
     """The NAME at the root of a receiver chain — `PROJ.g.query` -> `PROJ`.
 
@@ -858,7 +892,7 @@ _CAPABILITY_NAMES = frozenset({"TortoiseSDK", "FalkorProjection"})
 
 
 def _reaches_capability_seam(
-    block: ast.AST, third_party: frozenset[str] | set[str] = frozenset()
+    block: ast.AST, third_party: frozenset[str] | set[str]
 ) -> bool:
     """Whether the block CALLS the capability seam, however the client arrived.
 
@@ -886,13 +920,21 @@ def _reaches_capability_seam(
     NOTHING, and a swallowed rename reads as "storage unavailable" again — the
     class-2 false PASS this file exists to catch (review of 90a0e9e8b20c, finding
     3). So the receiver decides, on EVIDENCE: a receiver whose root name a NON-own
-    import binds is that optional extra and is skipped; every other receiver — a
+    import binds is that optional extra and is skipped — UNLESS that name is re-bound
+    anywhere in the module, in which case it no longer denotes the import where the
+    probe uses it (`_third_party_receivers`); every other receiver — a
     parameter (`def _probe(proj)` … `proj.g.query`), a client assigned at module
     scope, `FalkorProjection.from_uri(…)` — is still graded. `receiver_is_sdk`
     (tools/sdk_privatise.py) was considered for this and rejected: it answers from
     annotations and stand-ins, so it cannot see the `PROJ = _make_proj()` shape the
     finding names, and gating on it would break the pinned parameter-client witness
     (`tests/test_8870_version_anchor_write_order.py:138`).
+
+    ⛔ `third_party` IS A REQUIRED PARAMETER, deliberately. It once defaulted to
+    `frozenset()`, which IS the UNGATED behaviour this narrowing exists to remove:
+    every call site passes it today, so a fifth one that forgot would have silently
+    re-opened the `some_optional_dep.query` false red with nothing red on any test. A
+    missing argument now fails loudly at the call site instead (review P2).
     """
     for node in ast.walk(block):
         if not isinstance(node, ast.Call):
@@ -910,8 +952,10 @@ def _reaches_capability_seam(
 def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     """The `try` blocks that DECIDE availability — FOUR admission rules.
 
-      * a module-body `try` that assigns an `*AVAILABLE` flag (own-code contact
-        required);
+      * a module-body `try` that assigns an `*AVAILABLE` flag — admitted by the SAME
+        three ORed arms as the skip-read rule below (own import inside the `try`,
+        own-code contact, or the narrowed capability call), NOT by own-code contact
+        alone;
       * a module-body `try` that binds a name the module's own `skipif`/`skip`
         condition READS — `LIVE`, `_FTS_ESCAPE_LIVE`, `_LIVE_OK` are the same
         decision as `FALKORDB_AVAILABLE` even though none ends in `AVAILABLE`;
@@ -931,6 +975,23 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     through a handler-less `try/finally` — a pure wrapper, see
     `_control_flow_tries`).
 
+    ⛔ DECLARED RESIDUAL — a probe inside a `def test_…` BODY is graded by NOTHING.
+    The population is module-body `try`s plus `try`s inside module-LEVEL helpers that
+    the flag is resolved by, or that a skip decision calls; a test function is in
+    neither set, even when it is the same shape (`except Exception` → sentinel →
+    `pytest.skip`). Live instance at this writing: `tests/test_index_surfacing.py:269`
+    — a broad `except Exception` inside a `for` in a test body, capturing into
+    `unsupported` and feeding `pytest.skip(...)`; measured `_reaches_capability_seam`
+    TRUE, `_assigns_availability` FALSE, and absent from `_probe_report()` while the
+    census reports `UNARMED == ()`. It is DECLARED here rather than silently left out,
+    and the widening is named: admit any function containing a `skip`/`skipif`/`xfail`
+    call that ALSO binds a name the call reads, reusing the sentinel set
+    `_skip_guard_call_names` already computes. NOT done here because it changes the
+    population and needs a decision first: the named block tolerates unsupported
+    engines on purpose (a legitimate skip), so grading it demands knowing which errors
+    must re-raise — a design call, not a mechanical edit (review P1, declared not
+    dropped).
+
     Nested `try`s inside a probe body are not roots: a `try/_proj.close()/except
     Exception: pass` cleanup is not the availability decision. The import-seam
     check reaches into them separately, because a swallowed import there is the
@@ -942,9 +1003,12 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     skip_referenced = _skip_condition_names(tree)
     module_own = _own_imported_names(tree.body)
     #: Names this module imported from a NON-own package (`import torch`, `import
-    #: some_optional_dep`). A capability ATTRIBUTE called on one of them is that
-    #: package's verb, not our seam — see `_reaches_capability_seam`.
-    third_party = _non_own_imported_names(tree.body)
+    #: some_optional_dep`), MINUS any re-bound anywhere in the module: a name that no
+    #: longer denotes the import where a probe uses it is not evidence that the
+    #: `.query` is a third-party verb (`_third_party_receivers`). A capability
+    #: ATTRIBUTE called on one of them is that package's verb, not our seam — see
+    #: `_reaches_capability_seam`.
+    third_party = _third_party_receivers(tree)
     # MODULE-LEVEL control flow, not just `tree.body`. `tests/test_assembly_pure.py:2615`
     # puts its probe inside `if _DOCKER_URI:`, so a walk over the direct children
     # returned NO row for that file while `_skip_condition_names(tree)` already held
@@ -2193,6 +2257,65 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"deletable with every row green: {module_body_own_import_unused_skip_read}"
     )
 
+    # 4j-bis. The SKIP-READ filter's CAPABILITY arm — the one term 4i-ter cannot reach.
+    #     `_imports_own_code` and `_touches_own_code` are both False here (the client is
+    #     built at module scope, nothing own is imported, nothing own is touched), so the
+    #     narrowed capability arm is the ONLY admitter. Deleting it left all eight tests
+    #     green with ZERO rows changed on the real tree — measured independently, twice
+    #     (two fresh reviewers, same finding), so it was a silent drop of exactly the
+    #     class this gate exists to forbid. Measured `((6, (), True, False, True),)` at
+    #     this head, `()` with the term removed.
+    module_body_skip_read_capability = roots(
+        """
+        import pytest
+
+        PROJ = _make_proj()
+        LIVE = False
+        try:
+            PROJ.g.query("RETURN 1")
+            LIVE = True
+        except Exception:
+            LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert module_body_skip_read_capability == ((6, (), True, False, True),), (
+        "the SKIP-READ filter's narrowed CAPABILITY arm has no other witness — its "
+        "sibling terms are covered by 4i/4j/4i-ter, so without this row that arm can be "
+        f"deleted with the whole file green: {module_body_skip_read_capability}"
+    )
+
+    # 4j-ter. A third-party NAME that is RE-BOUND to our client is not an exemption.
+    #     The narrowing keyed on a name a non-own import bound ANYWHERE in the file, so
+    #     `falkordb = proj` inside the probe still bought the exemption while the name
+    #     held OUR client — graded at `994fb1d52f`, ungraded from `61fc96cd` (the
+    #     narrowing's regression, measured on both heads with the no-import control
+    #     unchanged). `_third_party_receivers` now subtracts re-bound names. Measured
+    #     `((5, (), True, False, True),)`.
+    third_party_name_rebound_to_our_client = roots(
+        """
+        import falkordb
+
+        def _probe(proj):
+            try:
+                falkordb = proj
+                falkordb.g.query("RETURN 1")
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe(None)
+        """
+    )
+    assert third_party_name_rebound_to_our_client == ((5, (), True, False, True),), (
+        "a name bound by a non-own import and then RE-BOUND to our own client is not "
+        "evidence of a third-party verb at the call site — exempting it re-opens the "
+        f"silent drop the narrowing opened: {third_party_name_rebound_to_our_client}"
+    )
+
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
     #     90a0e9e8b20c, P2), so the `()` pin that stood here is DELETED — its own text
     #     instructed exactly that if the coverage was restored. A module-body guard
@@ -2216,8 +2339,14 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     guarantee the `()` pin could never give.
 
     # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so it
-    #     must never admit a third-party-only probe: at the module body, nor in either
-    #     helper branch. The two rows below are the NEGATIVE half of the narrowing
+    #     must not admit a third-party-only probe: at the module body, nor in either
+    #     helper branch. That holds for a receiver whose ROOT NAME an import bound and
+    #     that is NOT re-bound anywhere — not for every third-party-looking receiver:
+    #     `CLIENT = make_client(); CLIENT.query(…)` IS graded (the name is not an
+    #     import), and so is a collection handle from
+    #     `client.get_or_create_collection(...)`; this comment used to deny that (review
+    #     P2, corrected — the exemption is a BINDING, not a shape). The two rows below
+    #     are the NEGATIVE half of the narrowing
     #     (`third_party`): re-adding an UNGATED arm anywhere reddens them, and dropping
     #     the arm outright reddens the positive rows 4k+ that follow (review of
     #     90a0e9e8b20c, findings 1+3).
