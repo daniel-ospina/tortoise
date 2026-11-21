@@ -764,12 +764,31 @@ _DRIFT_PIN = "ccb49741b2ec"
 
 
 def _git_resolves(spec: str) -> bool:
-    """Does *spec* resolve in this checkout's object DB? (`<rev>^{commit}` or `<rev>:<path>`.)"""
+    """Does *spec* resolve in this checkout's object DB?"""
     out = subprocess.run(
         ["git", "rev-parse", "--verify", "-q", spec],
         cwd=REPO, capture_output=True, text=True, check=False,
     )
     return out.returncode == 0
+
+
+def _path_in_tree(rev: str, path: str) -> bool | None:
+    """Is *path* an entry of *rev*'s tree? `None` when that tree cannot be read.
+
+    ⛔ ASKED OF `ls-tree`, NOT OF `<rev>:<path>`. `git rev-parse --verify -q '<rev>:<path>'` exits 1
+    BOTH for a genuine absence AND for a missing TREE object, so a treeless partial clone
+    (`filter=tree:0`) whose lazy fetch fails would be counted "absent at the pin" — inflating the
+    drifter figure and inviting a false correction of a published number (#14038 review, P3).
+    `ls-tree` separates them: rc 1 = the tree could not be read (cannot-run), rc 0 with EMPTY output
+    = genuine absence, rc 0 with an entry = present.
+    """
+    out = subprocess.run(
+        ["git", "ls-tree", rev, "--", path],
+        cwd=REPO, capture_output=True, text=True, check=False,
+    )
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() != ""
 
 
 def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
@@ -788,26 +807,39 @@ def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
     ⛔ HOW EACH CAUSE IS DECIDED, because a commit probe cannot answer a blob question: the commit
     probe below only establishes that `<rev>` is a commit this checkout holds. The PATH question is
     asked separately, of the TREE (`<rev>:<path>` resolves or it does not). A path that resolves
-    but still fails to render is neither cause, so it stays in the SKIP class — a partial clone's
-    failed lazy fetch would otherwise be counted as "absent at the pin", inflating the drifter
-    figure and inviting a false correction of a published number, which is this file's own worst
-    case (#14038 review, P3).
+    but still fails to render is neither cause, so it stays in the SKIP class — a BLOBLESS partial
+    clone's failed lazy fetch would otherwise be counted as "absent at the pin", inflating the
+    drifter figure and inviting a false correction of a published number, which is this file's own
+    worst case (#14038 review, P3). See `_path_in_tree` for how the tree itself is asked, which is
+    what keeps a TREELESS (`filter=tree:0`) clone out of that bucket too.
     """
     return _git_resolves(f"{rev}^{{commit}}")
 
 
 @functools.lru_cache(maxsize=None)
 def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
-    """*path*'s lines at *rev*, or `None` when *rev* is unreadable (a fact about the CHECKOUT).
+    """*path*'s lines at *rev*; `None` when this checkout cannot produce them.
 
-    A path that is ABSENT at *rev* returns an empty list — an artifact fact, which the caller grades
-    rather than skips. ⛔ MEMOISED per `(rev, path)`: the caller walks one entry per cited LINE, so
-    without this the same module is re-rendered once per cite (measured at 227 `git show` calls over
-    53 distinct paths, the slowest arm in this file at 12.56 s; 53 calls after).
+    THREE outcomes, and the difference between the last two is the whole point:
+      * the lines — *path* is in *rev*'s tree and renders;
+      * `[]` — *path* is genuinely ABSENT from that tree (an artifact fact, graded by the caller as
+        not-comparable, never skipped);
+      * `None` — the CANNOT-RUN class, on either of two causes: *rev* itself is unresolvable, or the
+        path is in the tree but its blob will not render (a failed lazy fetch in a partial clone, a
+        corrupt object). Both are facts about this CHECKOUT, so the arm skips rather than counting a
+        pair it could not read.
+
+    ⛔ MEMOISED per `(path, rev)` — the caller walks one entry per cited LINE, so without this the
+    same module is re-rendered once per cite (measured at 227 `git show` calls over 53 distinct
+    paths, the slowest arm in this file at 12.56 s; 53 calls after).
     """
     if not _rev_is_readable(rev):
         return None
-    if not _git_resolves(f"{rev}:{path}"):
+    in_tree = _path_in_tree(rev, path)
+    if in_tree is None:
+        # the tree object itself could not be read — cannot-run, never "absent".
+        return None
+    if not in_tree:
         # The TREE says the path is not in that revision — an artifact fact, graded not skipped.
         return []
     out = subprocess.run(
