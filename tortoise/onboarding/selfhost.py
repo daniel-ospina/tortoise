@@ -129,7 +129,7 @@ class _SdkSeedSurface:
     def query(self, cypher, **params):
         return _proj(self._sdk).query(cypher, **params)
 
-    def create_subject(self, name, subjectKind=None, **props):
+    def _create_subject(self, name, subjectKind=None, **props):
         # #9572: ``None`` = not supplied, forwarded as absent (see
         # ``hosted_api._OrgSeedSurface`` for the hosted twin). A BLANK kind is
         # "not supplied" too (review P2) — ``kind_fallbacks.named_kind``.
@@ -140,7 +140,7 @@ class _SdkSeedSurface:
             props["subjectKind"] = subjectKind
         return self._sdk._create_subject(name, **props)
 
-    def create_edge(self, relation, from_id, to_id):
+    def _create_edge(self, relation, from_id, to_id):
         return self._sdk._create_edge(relation, from_id, to_id)
 
 
