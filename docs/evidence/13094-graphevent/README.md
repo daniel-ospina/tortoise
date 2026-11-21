@@ -217,7 +217,16 @@ The verb that answers this on a **real tenant**, per event type and by payload m
 an operator to backfill a record that was never asked), and for a feed the cursor could **not prove it
 reached the end of** — the walk ends with a `count()` comparison and a NULL-`seq` check, because three
 shapes the store admits (a NULL `seq`, a `seq` stored as a string, a duplicated `(seq, event_id)` pair
-past a page boundary) make an empty page indistinguishable from the end. ⚠️ Its own verdict carries the limit that matters: **even at `covered`, the
+past a page boundary) make an empty page indistinguishable from the end.
+
+⚠️ **The count comparison also refuses on CONCURRENT MUTATION, and that is disclosed rather than
+surprising.** The total is counted AFTER the walk, so a row appended in the tail window, or any row
+DELETED after being read (retention purges delete `:GraphEvent`), yields `total != len(rows)` and exit
+`2`. The direction is right — a feed that changed under the read is not something to certify — but it
+means "no verdict" here can mean *"the feed moved while I read it"*, not *"the feed is broken"*.
+Re-run before concluding anything about the tenant.
+
+⚠️ Its own verdict carries the limit that matters: **even at `covered`, the
 producers disagree** (refutation 1 is a property of the producer, not of any tenant's history), so a
 `covered` tenant is not evidence that a re-point would not drop future events. And a type the record
 carries under another name (`PointRetracted` / `EntityMutated`) is reported as a **named deficit**

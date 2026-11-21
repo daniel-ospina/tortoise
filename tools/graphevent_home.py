@@ -111,6 +111,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from collections import Counter
 from collections.abc import Mapping
 from typing import Any
@@ -733,6 +734,10 @@ def superset(graph_rows: list[dict[str, Any]],
 #: neither, and a one-hop reader filed as `maintenance` would pass. Measured at
 #: #14164 review round 2: six capability-bearing shapes returned `None` under a
 #: `-[*`-only arm, including the audit's own EP walk verbatim.
+#:
+#: ⛔ Matched against a WHITESPACE-STRIPPED snippet, so `- [r]->` and `-[r]->` are
+#: one shape rather than two — the engine accepts both spellings.
+_NO_WS = re.compile(r"\s+")
 GRAPH_CAPABILITY_CYPHER = (
     "-[*",                # a variable-length traversal
     "*]",                 # a TYPED variable-length pattern, `-[r:NEXT*]->`
@@ -771,9 +776,14 @@ def graph_capability(row: Mapping[str, Any]) -> str | None:
         if word in prose:
             return word
     for snippet in row.get("snippets", ()):
-        haystack = snippet.lower()
+        # ⛔ WHITESPACE IS NOT A BYPASS. Every arm is a contiguous substring, so
+        # `MATCH (e:GraphEvent) - [r:T]-> (p)` — spacing the engine ACCEPTS — looked
+        # like no capability at all (#14183 review, non-blocking 6, measured). Both
+        # sides are whitespace-stripped before matching, so a re-spaced pattern is
+        # the same pattern.
+        haystack = _NO_WS.sub("", snippet.lower())
         for shape in GRAPH_CAPABILITY_CYPHER:
-            if shape in haystack:
+            if _NO_WS.sub("", shape) in haystack:
                 return f"cypher:{shape}"
     return None
 

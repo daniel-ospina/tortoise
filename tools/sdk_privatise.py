@@ -1176,7 +1176,23 @@ SWEEP_NAMES = 66
 #: NEW row SHAPE — is not what happened here. Re-measured on the MERGED tree with `--repin`,
 #: never carried from the pair quoted above by arithmetic: `(11861, "f0647020531c078c")`, and
 #: `--check` exits 0 on it.
-SWEEP_RESIDUE = (11861, "f0647020531c078c")
+#: RE-CUT on the #13094 round-2 branch, and THIS is the pin: `--repin` printed
+#: `(11846, "af4be7eb196a5773")` on this tree. ⛔ ATTRIBUTED BY A ROW-BY-ROW DIFF, not by
+#: arithmetic: `--report --base 28ca66878d… --top 5000` was run in a detached worktree at
+#: `origin/main` (`69908d006b`) AND on this tree, both row sets sorted and diffed, and EXACTLY
+#: TWO rows differ — `g.query` 1499 → 1501 (+2) and `super().query` 68 → 69 (+1). All three are
+#: the change-feed walk's END-PROOF, which is the point of the change: the two `g.query(…)` in
+#: `tools/graphevent_home.py` (the NULL-`seq` count and the total count that make "reached the
+#: end" distinguishable from "the read stopped early") and the one `super().query(…)` in the
+#: `tests/test_13094_graphevent_home.py` stub that stands in for a FalkorDB connection. They are
+#: the ordinary-word receiver this counter exists to REPORT, not typed SDK call sites.
+#: `11843 + 3 = 11846` is a CROSS-CHECK of that measurement, never its evidence.
+#:
+#: ⚠️ #14180 pins `(11843, "6aed5368ffa10513")` for the tree WITHOUT this branch. That is correct
+#: for its tree and stale for this one — **whichever of the two lands second must re-measure with
+#: `--repin`**, never carry this line across. `--check` exits 0 on this tree:
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11846, "af4be7eb196a5773")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
