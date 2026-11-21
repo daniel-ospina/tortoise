@@ -61,6 +61,9 @@ _CP = "tortoise/cache_projection.py"
 _AU = "tortoise/audit.py"
 _PI = "tortoise/projection/__init__.py"
 _SDK = "tortoise/sdk.py"
+#: `#14087` review round 7: `00_index.md`'s entity-verdict row points at this file's `:43` in the
+#: PRESENT tense ("the bullet is `entity_verdict.py:43`"), so the address is head-relative.
+_EV = "tortoise/entity_verdict.py"
 _MCP = "tortoise/mcp_server.py"
 _RS = "tortoise/record_serve.py"
 _GJ = "tortoise/goal_judgement.py"
@@ -280,6 +283,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
     # the guard set is per-token, and an unlisted token is coverage the file only APPEARED to have.
     ("docs/00_index.md", "`sdk.py:28581` at this head", "tortoise/sdk.py", 28581, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    # ⛔ #14087 review round 7 (P3): the SAME `00_index.md:118` line writes a SECOND present-tense
+    # this-head address — `the bullet is entity_verdict.py:43` — and no arm read it. Its sibling
+    # (`sdk.py:28581`, the row above) was pinned, which is exactly how an unpinned neighbour hides:
+    # `grep -c 'entity_verdict\.py:43' tests/test_12184_shifted_cites.py` -> 0 before this row, so a
+    # re-point or a rotation of `entity_verdict.py` under it would have moved the address with every
+    # arm green. One ROW per SITE, never one row per STRING.
+    (_INDEX, "entity_verdict.py:43", _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
     ("docs/architecture/ENTITY-VERDICT-BANDS.md", "(`sdk.py:28581`), so any non-NULL", "tortoise/sdk.py", 28581, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
     ("docs/architecture/ENTITY-VERDICT-BANDS.md", "called at `sdk.py:28945`", "tortoise/sdk.py", 28945, "result = apply_entity_merge("),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
@@ -488,6 +498,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28581` at this head'): 1,
+    # ⛔ #14087 review round 7: the pin row added for the SAME line's other present-tense address.
+    # Occurs ONCE in the document (`grep -o 'entity_verdict\.py:43' docs/00_index.md | wc -l` -> 1), so a
+    # second site must not appear unannounced.
+    ('docs/00_index.md', 'entity_verdict.py:43'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28581`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28945`'): 1,
     ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2683'): 1,
@@ -1972,7 +1986,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # empty line respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
     # document on top of its own `:Point` join; the END stayed one short until #14087 re-derived it
     # here. One ROW, one token — the row count did not move.)
-    assert len(_PINS) == 82
+    # 82 -> 83 at the #14087 review round 7 (P3): `00_index.md`'s entity-verdict row carries a
+    # SECOND present-tense this-head address on the line this PR edits (`entity_verdict.py:43`),
+    # and NOTHING read it — its `sdk.py:28581` sibling was pinned and the neighbour was not, so a
+    # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
+    # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
+    assert len(_PINS) == 83
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
