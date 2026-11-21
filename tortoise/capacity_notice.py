@@ -245,8 +245,12 @@ def threshold_reached(pct: int | None) -> int | None:
 
     Highest rather than first-unclaimed: an account that jumps from 60 % to 105 %
     between passes gets the 100 % notice only. Sending the 80 % one as well would
-    be two emails in one pass, and sending it *afterwards* is the out-of-order
-    case :func:`claim_notice` makes impossible.
+    be two emails in one pass. ⛔ It does NOT follow that a later 80 % send is
+    IMPOSSIBLE — an earlier cut of this docstring said so, and the module
+    docstring refutes it: `claim_notice` keeps the LEDGER monotone (a stamp may
+    never LOWER the mark) but the send precedes the stamp, so two CONCURRENT
+    passes can still deliver the two notices in the wrong order. "Highest" is what
+    makes ONE PASS emit at most one notice; it does not order the inbox.
     """
     if pct is None:
         return None
@@ -331,16 +335,16 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: this tree can compute — and stating one was the defect: it claimed a daily
 #: bound that nothing enforced.
 #:
-#: What this constant DOES bound, and all it claims: ONE process's ONE pass
-#: spends at most this many sends, so a pass can never consume more than 5 of
-#: that process's 100/day budget — 5 % — leaving at least 95 for every other
-#: send. ⛔ IT IS A SHARE, NOT A RESERVATION, and the difference is the whole
-#: honest claim: `reserve_send_slot` is a first-come check-then-reserve with no
-#: priority (``email_notify`` skips WHICHEVER path's send arrives once the
-#: counter is at cap), so a boot pass that finds only five slots left still takes
-#: them, and a concurrent invite or OTP is still dropped. The guard lowers this
-#: notice's exposure from "whatever remains" to "at most 5 of 100"; it does not
-#: ring-fence anyone else's mail, and it must not be read as doing so.
+#: What this constant DOES bound: ONE process's ONE pass spends at most this
+#: many sends, so the pass's own spend is <= 5 of that process's 100/day budget.
+#: ⛔ IT IS NEITHER A RESERVATION NOR AN AVAILABILITY GUARANTEE, and that is the
+#: whole honest claim — an earlier cut said this "leaves at least 95 for every
+#: other send", which the very next sentence refutes. `reserve_send_slot` is a
+#: first-come check-then-reserve with no priority (`email_notify` skips WHICHEVER
+#: path's send arrives once the counter is at cap): a boot pass arriving at 96/100
+#: sends its 4 allowed and leaves ZERO for a concurrent invite or OTP. The guard
+#: lowers this notice's exposure from "whatever remains" to "at most 5"; it does
+#: not ring-fence anyone else's mail, and it must not be read as doing so.
 #: The fleet-wide aggregate is bounded, and it is not one expression: a process
 #: spends at most this cap PER PASS — its boot pass plus every ``interval`` pass
 #: it lives through (``_capacity_notice_sweep_loop``), so ~25 for a process alive
@@ -766,7 +770,11 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     Returns ``{"status": …}`` with one of: ``sent``, ``already-notified``,
     ``no-email``, ``deleted-org``, ``suspended-org``, ``notice-mark-unavailable``
     (the account ROW could not be read — the ledger column has not been migrated,
-    or a base column is missing; the log line names which), ``below-threshold``/
+    a base column is missing, or the read failed TRANSIENTLY, which `read_account`
+    refuses to treat as schema drift; the log line names which),
+    ``unreadable-allowance`` and ``unreadable-reading`` (the gauge pair could not
+    be read — returned verbatim, and listed here because the closed list below is
+    what a caller aggregates on), ``below-threshold``/
     ``no-reading``/``no-allowance`` (the
     evaluate reasons are passed through verbatim so the caller can aggregate
     them), ``skipped`` (send budget), ``failed`` (provider), ``unknown-account``.
@@ -941,8 +949,13 @@ async def sweep_pass(*, cp=None, send=None, enumerate_orgs=None,
 
     ⛔ A PRECONDITION THIS PASS CANNOT SUPPLY: the gauge it reads has ONE
     production writer, the backup sweep (``BACKUP_SWEEP_ENABLED``, off unless the
-    deploy's secret conjunction is present). With it off, every account reads
-    ``ABSENT`` → ``no-reading`` and NOTHING is ever sent, silently. The summary
+    deploy's secret conjunction is present). With it off no NEW reading is
+    written, so accounts fall to ``no-reading`` as their readings AGE OUT — the
+    graph-storage dimension carries a staleness bound (24 h), so a reading taken
+    before the switch was turned off stays usable until then and a notice CAN
+    still be sent in that window. ⛔ An earlier cut said "every account reads
+    ABSENT … NOTHING is ever sent", which is true only AFTER the staleness bound,
+    not immediately. Past that bound nothing is sent, silently. The summary
     therefore carries a ``no-reading`` count WHENEVER ANY account answers
     ``no-reading`` (``statuses`` gains a key only for a status the pass actually
     saw, so an all-``below-threshold`` pass has no such key), and an all-

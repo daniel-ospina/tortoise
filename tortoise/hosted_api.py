@@ -4629,8 +4629,14 @@ async def _capacity_notice_sweep_loop(interval: float,
     uptime is this one (`#2953`'s boot sweeps run at boot AND on the periodic
     interval).
 
-    The cost of a boot pass is one complete enumeration plus one point read per
-    account — the same read a pass already does — and an account whose ledger
+    The cost of a boot pass is one complete enumeration plus, per account not
+    already at the top mark, THREE control-plane reads (the account row via
+    ``read_account``, the allowance via ``quota.resolve_org_limits``, and the
+    gauge via ``allowance_gate.read_dimension``), plus a pre-send mark re-read and
+    the ``claim_notice`` PATCH when it actually sends. ⛔ An earlier cut said "one
+    point read per account", which the next clause of that same sentence already
+    contradicts ("short-circuits BEFORE the gauge is read" — the gauge read is
+    one of the three). An account whose ledger
     mark is already at the top threshold short-circuits before the gauge is read
     (``notify_account``). ``first_delay`` spreads a fleet-wide restart so a boot
     storm does not fire N passes in the same second.

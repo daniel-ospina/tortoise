@@ -84,8 +84,11 @@
 -- ⛔ A PRECONDITION THIS MIGRATION CANNOT PROVIDE: the gauge the notices read has
 -- ONE production writer, the backup sweep (`backup_sweep.py` →
 -- `record_graph_storage`), which `BACKUP_SWEEP_ENABLED` leaves OFF unless the
--- deploy's secret conjunction is present. With it off every account reads
--- `no-reading` and no notice is ever sent — silently, except for the pass's own
+-- deploy's secret conjunction is present. With it off no NEW reading is written,
+-- so accounts fall to `no-reading` as their readings AGE OUT — the graph-storage
+-- dimension carries a 24 h staleness bound, so a reading taken before the switch
+-- was turned off stays usable until then and a notice CAN still be sent in that
+-- window. Past that bound no notice is sent — silently, except for the pass's own
 -- INFO line, which counts `no-reading` for exactly this reason.
 --
 -- ⚠️ Deploy ORDER: this migration must apply BEFORE the capacity-notice sweep
