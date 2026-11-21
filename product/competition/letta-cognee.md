@@ -1,8 +1,24 @@
 # Letta (MemGPT) & Cognee
 
-> Two developer-adopted open-source agent-memory frameworks frequently cited in the "there is more to memory than RAG" debate — but they sit at opposite ends of the memory-design spectrum. **Letta** is an agent harness whose memory is a git-backed filesystem the LLM edits itself (agent-managed context, no graph). **Cognee** is a graph-building memory engine (extract entities + relationships into a knowledge graph, with opt-in contradiction edges and bi-temporal fact validity).
+> Two developer-adopted open-source agent-memory frameworks frequently cited in the "there is more to memory than RAG" debate — but they sit at opposite ends of the memory-design spectrum. **Letta** is an agent harness whose memory is a git-backed filesystem the LLM edits itself (agent-managed context, no graph). **Cognee** is a graph-building memory engine (extract entities + relationships into a knowledge graph, with contradiction edges, **conflict review on by default since 1.6.6**, and bi-temporal fact validity).
 
 > **Multi-product profile.** Two companies in one file per the skill's multi-product rule: they compete for the same builder, are cross-migrated (Cognee ships `LettaSource`, `ZepSource`, `GraphitiSource` importers), and are routinely named together in third-party comparisons. Sub-sections are marked per system wherever they differ.
+
+---
+
+> ### 🔄 Cognee pivoted the framing on 2026-11-19 — from "agent memory" to "an ontology of your business"
+>
+> The **2026-11-19** release ("Meet the new cognee") shipped three things at once, and the first one moves Cognee onto a different competitive axis than the one this profile was originally scoped to:
+>
+> 1. **Auto-ontology** — Cognee learns the *taxonomy* of a customer's business from that customer's own data, and uses it to route retrieval. Sold as **Premium, $99/mo.**
+> 2. **LLM-free extraction** — GLiNER (~194M params) on CPU replaces LLM extraction; ~30× faster per chunk, no API bill.
+> 3. **Memory promotion + permissions** — cross-department sharing with approval and suspicious-permission flagging.
+>
+> Two weeks earlier (**2026-11-04**, cognee 1.6.6) it made **conflict review run by default**, with a human choosing which of two contradicting facts wins.
+>
+> Together those two releases are the company walking up the ladder toward the belief layer — the vocabulary/type rung and the conflict-resolution rung. It has **not** shipped propagation or a reasoner, so the climb is real but stops short of the reasoning substrate. Mechanics are in `§6b.1` and `§6b.2` below; the interpretation is in `_analysis.md` §"Cognee — the ontology pivot".
+>
+> ⚠️ **Timing note:** Cognee's own homepage already claimed *"Cognee generates the ontologies your agents follow"* when this profile was first written (retrieved 2026-09-11) — i.e. the **claim preceded the shipped product by ~2 months**. Treat any Cognee ontology claim made before 2026-11-19 as marketing, not capability.
 
 ---
 
@@ -37,14 +53,18 @@
 | Funding raised | **$7.5M Seed** (Feb 2026), led by Pebblebed, with 42CAP and Vermilion Ventures; ~$9M total across 2 rounds (Caplight $9M / Seedtable $8.9M / TheCompanyCheck $9.09M) |
 | Team size | Not publicly disclosed — Berlin team across engineering, design, product, commercial roles |
 | Markets | Global — developers (OSS), agent builders, enterprises (BYOC) |
-| Key milestones | Cognee 1.0 launch → $7.5M seed (Feb 2026) → BEAM SOTA claim (0.79 @ 100K, 0.67 @ 10M) → 30.6K GitHub stars, 5M+ SDK runs/month |
+| Key milestones | $7.5M seed (2026-02-19) → Cognee 1.0 launch (2026-06-26) → BEAM SOTA claim (0.79 @ 100K, 0.67 @ 10M) → 30.6K GitHub stars (2026-09) → **1.6.3 temporal search + "shows you the conflict" (2026-10-21)** → **1.6.6 conflict review on by default, user picks the winning fact (2026-11-04)** → **"Meet the new cognee": auto-ontology + local GLiNER extraction + memory promotion (2026-11-19)** → **33.4K GitHub stars, 500+ companies (2026-11-21)** |
 
-[Source](https://www.cognee.ai/pricing) — retrieved 2026-09-11 · [Cognee seed announcement](https://www.cognee.ai/cognee-raises-seven-million-five-hundred-thousand-dollars-seed) — retrieved 2026-09-11 · [Trending Topics](https://www.trendingtopics.eu/cognee-berlin-startup-raises-7-5-million-builds-long-term-memory-for-ai-agents/) — retrieved 2026-09-11 · [Caplight](https://www.caplight.com/company/cognee) — retrieved 2026-09-11 · [Seedtable](https://www.seedtable.com/startups/Cognee-EW98RKN) — retrieved 2026-09-11
+[Source](https://www.cognee.ai/pricing) — retrieved 2026-09-11 · [Cognee seed announcement](https://www.cognee.ai/cognee-raises-seven-million-five-hundred-thousand-dollars-seed) — retrieved 2026-09-11 · [Trending Topics](https://www.trendingtopics.eu/cognee-berlin-startup-raises-7-5-million-builds-long-term-memory-for-ai-agents/) — retrieved 2026-09-11 · [Caplight](https://www.caplight.com/company/cognee) — retrieved 2026-09-11 · [Seedtable](https://www.seedtable.com/startups/Cognee-EW98RKN) — retrieved 2026-09-11 · [Newsroom memo 007](https://www.cognee.ai/newsroom/memory-that-resolves-conflict) — retrieved 2026-11-21 · [Newsroom memo 008](https://www.cognee.ai/newsroom/you-pick-which-fact-wins) — retrieved 2026-11-21 · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) — retrieved 2026-11-21 · [Changelog](https://www.cognee.ai/changelog) · [cognee 1.0 announcement](https://www.cognee.ai/cognee-1-0-announcement) (2026-06-26 launch date) — retrieved 2026-11-21
 
 ⚠️ Funding total is inconsistent across aggregators ($8.9M–$9.09M). The $7.5M seed itself is confirmed by Cognee's own announcement.
 ⚠️ Team size not public — no headcount figure found on their site, LinkedIn, or press.
 
-*Last checked: 2026-09-11*
+🔄 **Changed 2026-11-21:** milestones extended (1.6.3 temporal search, 1.6.6 conflict review on by default, the 2026-11-19 auto-ontology release); star count 30.6K → 33,448; company count now "more than 500".
+
+🔢 **Milestone arc (newsroom memo sequence) — useful as a strategy read:** memo 003 "memory that learns from its own structure" (ontology learning, 2026-08-26) → memo 004 "who is asking" + provenance (2026-09-09) → memo 005 local extraction / cost (2026-09-24) → memo 007 "memory that resolves conflict" (2026-10-21) → memo 008 "you pick which fact wins" (2026-11-04) → memo 009 "who gets to see what" / auto-ontology (2026-11-19). The order is vocabulary → provenance → conflict → adjudication → governance.
+
+*Last checked: 2026-11-21*
 
 ---
 
@@ -68,15 +88,19 @@
 
 | Product | Description |
 |---|---|
-| **Cognee OSS** (`topoteretes/cognee`, Apache-2.0) | Python library: `pip install cognee`. Turns documents/code/app data into a knowledge graph + vector index + relational provenance store. Ships MCP server, CLI, HTTP API, Python API, Rust SDK, TypeScript SDK |
-| **Cognee Cloud** | Managed memory service. Runs on `gpt-oss-120b` (OpenAI open-weight model) |
+| **Cognee OSS** (`topoteretes/cognee`, Apache-2.0) | Python library: `pip install cognee`. Turns documents/code/app data into a knowledge graph + vector index + relational provenance store. Ships MCP server, CLI, HTTP API, Python API, Rust SDK, TypeScript SDK. Since 2026-11-19 also runs **fully LLM-free** (`cognee[gliner]`, GLiNER extraction + FastEmbed embeddings) |
+| **Cognee Cloud** | Managed memory service. Runs on `gpt-oss-120b` (OpenAI open-weight model) per the pricing-page footer; the 2026-11-19 post names `gpt-5.6-luna` as "cognee's default LLM" in its small-model cost comparison — ⚠️ unresolved which is the live Cloud default; both recorded |
+| **Cognee Cloud — Premium (new, 2026-11-19)** | **Auto-ontology** (entity types learned from the customer's own data, organized into an is-a hierarchy) + **Ontology Editor** (refine types/entities in plain language, review before applying) + additional data domains. $99/mo + token usage |
+| **Cognee Cloud — "company brain" surface** | Cross-source ingestion (Slack, Notion, Google Drive, GitHub, Linear, Obsidian, Asana, OneNote, Google Calendar — 12+ native plus an n8n node claiming 200+ sources) into **per-source datasets**, with **dataset-level permissions, workspace segregation, and memory promotion** across departments (reader/contributor/admin roles, approval requests, suspicious-permission flagging) |
 | **Cognee Enterprise** | Fixed-scope BYOC engagement: deployed in the customer's own VPC, with forward-deployed engineers (FDE), customer-specific evals, domain packs/ontology design |
 
 **Category:** AI memory infrastructure — knowledge-graph memory engine. Positioned as an infrastructure/library layer under any agent (Claude Code, Codex, Cursor, LangGraph, OpenClaw), not a competing agent harness.
 
-[Source](https://docs.cognee.ai/core-concepts/architecture) — retrieved 2026-09-11 · [cognee.ai/pricing](https://www.cognee.ai/pricing) — retrieved 2026-09-11
+[Source](https://docs.cognee.ai/core-concepts/architecture) — retrieved 2026-09-11 · [cognee.ai/pricing](https://www.cognee.ai/pricing) — retrieved 2026-11-21 · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) — retrieved 2026-11-21
 
-*Last checked: 2026-09-11*
+🔄 **Changed 2026-11-21 (Cognee release 2026-11-19):** Cognee now sells a *second* category alongside memory — an **ontology of the customer's business**, generated from that customer's data and sold as a Premium tier. That is the **enterprise-ontology axis** (Palantir Foundry Ontology / Microsoft Fabric IQ — see the premise-labs ontology set), not the agent-memory axis this profile was originally scoped to. Cognee's own comparison page now positions it as a **"company brain"** platform ranked against Mem0, Zep, Supermemory, Letta and MemoryLake.
+
+*Last checked: 2026-11-21*
 
 ---
 
@@ -114,9 +138,25 @@
 
 **Brand voice:** Developer + enterprise infrastructure. Benchmark-forward (BEAM SOTA), case-study-heavy (Bayer, Knowunity), SEO/GEO-comparison-heavy ("Cognee vs Zep", "Migrating from Mem0/Zep/Graphiti/Letta"), social-proof-driven (a wall of third-party X testimonials).
 
-[Source](https://www.cognee.ai/) — retrieved 2026-09-11
+**🔄 Changed 2026-11-21 (Cognee release 2026-11-19) — the "business understanding" value proposition (verbatim):**
 
-*Last checked: 2026-09-11*
+> "Automatically build an ontology of your business"
+
+> "Both of these problems boil down to the same limitation — default extraction finds entities and relationships, but doesn't understand the rules of a particular business. It can't know that a company's 15% discount only applies to orders signed before March, or that a 'maintenance contract' and a 'service agreement' describe the same kind of deal. Capturing that context requires an ontology."
+
+> "Now, our auto-ontology builds that structure from your data."
+
+**Premium tier tagline (verbatim, pricing page):** "A knowledge graph that speaks your business's language, with types and domains learned from your own data."
+
+**Section headline (verbatim, 2026-11-19 post):** "Your agents can finally afford to know your company"
+
+**The strategic reframing, stated by them:** the problem is no longer recall — it is that *"the resulting memory often mixed up distinct entities and generated circular answers"* and that graphs *"contained plenty of connections, but offered little tangible insight into how their product data was actually structured."* Both quoted complaints come from named customer segments (a manufacturing company-brain builder; a manufacturer).
+
+⚠️ **Read the vocabulary carefully:** the example they give to justify an ontology ("a 15% discount only applies to orders signed before March") is a **business rule**, but the mechanism they ship captures it as **entity types plus source-grounded descriptions**, not as an evaluable constraint. See `§6b.1` for what the ontology mechanically does and does not do.
+
+[Source](https://www.cognee.ai/) — retrieved 2026-09-11 · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) — retrieved 2026-11-21 · [cognee.ai/pricing](https://www.cognee.ai/pricing) — retrieved 2026-11-21
+
+*Last checked: 2026-11-21*
 
 ---
 
@@ -185,21 +225,25 @@ Explicitly segmented into three audiences on the homepage:
 
 ### Cognee
 
-**Revenue model:** Open-core — Apache-2.0 self-host free → Cognee Cloud consumption pricing ($/token + $/workspace) → Enterprise BYOC engagements (fixed-scope, forward-deployed).
+**Revenue model:** Open-core — Apache-2.0 self-host free → Cognee Cloud consumption pricing ($/token + $/workspace) → **Premium subscription (auto-ontology)** → Enterprise BYOC engagements (fixed-scope, forward-deployed).
+
+🔄 **PRICING CHANGED MATERIALLY — but the repricing date is NOT published.** The token rate fell 10× and the free allowance rose ~100×. **The verified bracket, not a date:** `$1.00 / 1M tokens` was still live on **2026-09-28** (the company-brain guide states *"Pricing is set at $1.00 per 1M tokens processed"*, and newsroom memo 005 of 2026-09-24 announced *"cloud tokens down to a dollar per million"*), and `$0.10 / 1M` with **100M included** is live on **2026-11-21**. ⛔ **Do not attribute the cut to the 2026-11-19 release** — that post announces local GLiNER extraction as its cost story and never mentions token pricing; no Cognee post dates the repricing. The table below replaces the 2026-09-11 version (which read: Free 1M tokens / Standard **$1.00 per 1M tokens** + $5 per extra workspace / Enterprise custom).
 
 | Tier | Price | Key limits / features |
 |---|---|---|
-| **Free** | $0/mo | 1M tokens included, 1 workspace, unlimited users, unlimited API calls, agentic integrations (Claude Code, Codex, MCP) |
-| **Standard** | **$1.00 / 1M tokens** + **$5 per additional workspace/mo** | Unlimited workspaces (at $5 each), data-source integrations (Slack, Notion, Linear, Google Drive), code indexing for repos, in-app support |
-| **Enterprise** | Custom (BYOC engagement) | Everything in Standard **plus: bi-temporal memory & conflict resolution, provenance on every answer, personalization per user & agent**, dedicated Slack + support engineer, BYO cloud, support SLA. Engagement lengths: Startup (12 mo, discounted, pre-Series B only), Standard 6/12/24 mo |
+| **Standard** | **$0/month** + **100M tokens included** (no card) + **$0.10 per 1M tokens** thereafter; **$5 per extra workspace/mo** | Unlimited users & API calls, agentic integrations (Claude Code, Codex, MCP), data-source integrations (Slack, Notion, Linear, Google Drive), in-app support |
+| **Premium** *(new)* | **$99/month** + token usage at the Standard rate | Everything in Standard, **plus: auto-ontology (entity types learned from your own data), Ontology Editor (refine types/entities in plain words), additional data domains to classify your data, ontology kept up to date as your data grows**, priority support |
+| **Enterprise** | Custom (BYOC engagement) | Everything in Premium, **plus: bi-temporal memory & conflict resolution, provenance on every answer, personalization per user & agent**, dedicated Slack + support engineer, BYO cloud, support SLA. Engagement lengths: Startup (12 mo, heavily discounted, pre-Series B only), 6 / 12 (recommended) / 24 mo |
 | **OSS self-host** | Free forever | "Run the full memory engine locally or on your own stack — free, forever." Apache-2.0 |
 
-⚠️ **Critical pricing/licensing asymmetry:** the pricing page lists **"Bi-temporal memory & conflict resolution"** and **"Provenance on every answer"** as *Enterprise-plan* features — even though the OSS docs describe a `valid_to` bi-temporal field (`close_node()`/`is_valid()`) and provenance tracking in the relational store. See §6 for the reconciliation.
+🔑 **The feature tiering is now the competitive tell.** `Auto-ontology` sits at **Premium ($99/mo self-serve)** while **`bi-temporal memory & conflict resolution`** and **`provenance on every answer`** sit at **Enterprise (BYOC contract)**. So Cognee sells the **vocabulary layer** at a low self-serve price and keeps the **epistemic layer** (time, conflict, provenance) behind a bespoke engagement — the inverse of a company that has propagation: you cannot tier a computed number the way you tier a generated taxonomy.
+
+⚠️ **Critical pricing/licensing asymmetry (carried forward, still unresolved):** the pricing page lists "Bi-temporal memory & conflict resolution" and "Provenance on every answer" as *Enterprise-plan* features even though the OSS docs describe a `valid_to` bi-temporal field (`close_node()`/`is_valid()`), conflict review on by default (1.6.6), and provenance tracking in the relational store. See §6 for the reconciliation — and note that **1.6.6 shipped conflict review to OSS/Cloud, not only to Enterprise**, which widens this contradiction rather than resolving it.
 ⚠️ Enterprise tier has no public price — documented as a gap, not fabricated.
 
-✅ Verified against the live pricing page. [Source](https://www.cognee.ai/pricing) — retrieved 2026-09-11
+✅ Verified against the live pricing page. [Source](https://www.cognee.ai/pricing) — retrieved 2026-11-21
 
-*Last checked: 2026-09-11*
+*Last checked: 2026-11-21*
 
 ---
 
@@ -259,24 +303,88 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 
 | Capability | Status | Detail |
 |---|---|---|
-| **Contradiction edge** | ✅ exists, ⚠️ **opt-in** | Contradiction detection writes a `contradicts` edge carrying both fact texts, the model's reason, and a **confidence score** (sample run: `confidence: 1.0`). "nothing is overwritten or deleted" |
+| **Contradiction edge** | ✅ exists — contradictions surfaced since **1.6.3**; **review on by default since 1.6.6** | Contradiction detection writes a `contradicts` edge carrying both fact texts, the model's reason, and a **confidence score** (sample run: `confidence: 1.0`). "nothing is overwritten or deleted" |
 | **Bi-temporal validity** | ✅ exists, ⚠️ node-level only | Every `DataPoint` gains `valid_to` (int ms-epoch, default `None` = still current). `close_node()` stamps it when a fact is superseded; `is_valid(node, at_ms)` checks currency. Closing is last-write-wins; **edges attached to the node are not stamped** |
 | **Event/interval time** | ✅ | `Event`/`Interval` nodes with `time_from`/`time_to` — records when an event *occurred*, distinct from whether a fact still *holds* |
 | **Edge-level bi-temporal** | ✅ (COGX + Graphiti import) | `COGXFact` relation edges carry bi-temporal `valid_at` / `invalid_at` windows; preserved when importing Zep/Graphiti exports |
 | **Confidence / belief** | ⚠️ partial | Per-contradiction LLM-judged score; per-node **feedback weights** (rated 5/5 moved answer-used elements 0.5 → 0.55, `DEFAULT_FEEDBACK_INFLUENCE=0.2`). **No propagation/inference over the graph** |
 | **Truth-subspace reranking** | ⚠️ **experimental, opt-in, off by default** | Builds up to k=8 anchor vectors from distilled session learnings, stores cosine "truth alignment" per chunk, nudges query-time ranking with `use_truth_weight=True` |
 | **Provenance** | ✅ in OSS docs, ⚠️ Enterprise-marketed | Relational store tracks which documents/chunks each piece came from; an opt-in provenance ledger attributes nodes/relationships to their source root. Sessions record which graph elements each answer used. **But the pricing page lists "Provenance on every answer" as an Enterprise feature** |
+| **Conflict detection surfaced** | ✅ surfaced since **1.6.3**; review step **on by default since 1.6.6** | Contradictions are presented to the user rather than silently resolved: *"if two of your sources disagree, it shows you the conflict instead of quietly picking a side"* (1.6.3). Conflict review runs by default from 1.6.6 |
+| **Conflict resolution** | ✅ **exists — human-adjudicated, one conflict at a time** | `list_conflicts()` / `resolve_conflict()`; the user picks the winning fact, the choice persists across sessions, rejected facts are kept as **superseded evidence**, and an optional reason may be recorded. **No propagation**: the pick changes which fact `recall` returns for that pair, and updates nothing else in the graph |
 
 **Backend caveat (verbatim from changelog):** `close_node()` persists only "on the default Ladybug (Kuzu) adapter"; "on backends without it, `close_node` logs a warning and returns `False`". Also explicit: "**No axioms are evaluated.** There is still no domain/range, cardinality, or disjointness reasoning, and no reasoner runs."
 
 **Memory flow:** session cache (short-term, raw, no graph extraction) → `improve(session_ids=...)` distills lessons and pushes Q&A/traces into the permanent graph (self-improvement defaults on) → `recall(query, session_id=...)` checks session cache first, falls through to the graph, tags results with `_source`.
 
-**Notable gaps (Cognee):**
+#### 〔6b.1〕The ontology layer — a *taxonomy* that routes retrieval (auto-ontology, Premium)
+
+**What it is.** Cognee's ontology is a **type hierarchy plus descriptions**, not a logic. Two ways to get one:
+
+| Path | Who supplies the vocabulary | Where it runs |
+|---|---|---|
+| **Supplied ontology** (long-standing) | The customer, as an RDF/OWL/Turtle file (`ONTOLOGY_FILE_PATH`, a resolver, or `cognify(ontology_file_path=…)`) | OSS, Cloud |
+| **Auto-ontology** (new, 2026-11-19) | **Cognee learns it from the customer's own data** | **Cloud Premium only ($99/mo)** |
+
+**The auto-ontology mechanism, as described (verbatim anchors):**
+
+1. *"identifies the entity types your business uses and organizes them into a hierarchy. For example, an SLA is a type of commitment, and a renewal is a type of deal."*
+2. *"It then processes your data a second time, assigning each entity the most specific applicable type and adding descriptions rooted in the source material."* → **two-pass extraction**: pass 1 discover types, pass 2 type-assign + describe.
+3. The ontology then feeds **forward into extraction**: *"before extracting, cognee picks the entity and relation types to look for, from your ontology if you have one, or otherwise from a quick scan of each document."*
+4. And **into retrieval**: *"When you ask a question, cognee uses these types to find relevant entities before retrieving the information needed to answer."* → **the ontology is a retrieval router.**
+5. **Editing:** the Ontology Editor takes plain language — *"Tell the Ontology Editor to 'merge Decision and DecisionRecord,' and review the proposed changes before applying them."*
+6. **Interop:** *"Already have an ontology? Bring it in — cognee reads OWL, Turtle, JSON-LD and the other standard RDF formats."* → standards import is treated as table stakes.
+7. **Explore:** graph browsable level by level — *"domains, subdomains, entity types, and individual entities."*
+
+**What the supplied-ontology path mechanically does and does not do** (documented, verified against `docs.cognee.ai`):
+
+| Behaviour | Detail |
+|---|---|
+| Grounding | Extracted entities/types are checked against the ontology **before graph nodes are built**. A match sets `ontology_valid=True` and attaches parent-class + object-property edges |
+| Modes | `annotate` (default — unmatched entities kept verbatim) / `strict` (unmatched **dropped**, with every touching edge) |
+| Reasoning | `ONTOLOGY_REASONING=owl_rl` expands the OWL 2 RL closure *so more things match*. Requires `cognee[ontology]`; closure is materialised in memory and cost grows with ontology size |
+| ❌ **Axioms are never evaluated** | *"Strict mode itself does no domain/range, cardinality, or disjointness checking"*; *"no reasoner runs either"* (without `owl_rl`), and even **with** `owl_rl` it *"never rejects an entity for violating an axiom"* |
+| ❌ Relationship names unchecked | *"Relationship names are never checked against the ontology's object properties, so no edge is dropped for its own sake — only for having a dropped endpoint"* |
+| ⚠️ Pruning is partial | `strict` prunes only the **extracted graph**. Chunks are stored and embedded *before* grounding runs, so `CHUNKS`, `CHUNKS_LEXICAL` and `RAG_COMPLETION` still retrieve text mentioning dropped entities — **only graph-based search sees the pruned view** |
+| ⚠️ Fails loudly on empty ontology | `strict` over an empty/mistyped ontology raises `EmptyOntologyInStrictModeError` rather than silently dropping everything |
+| Collapsing | Nodes matched to the same ontology individual are merged onto one survivor with their edges rewired |
+
+⚠️ **Undocumented seam (gap, not a negative finding):** the docs describe the **supplied**-ontology path. Whether **auto-ontology's generated hierarchy feeds the same `annotate`/`strict` grounding machinery, and whether it can be exported as RDF**, is not stated in the docs — so the two paths' relationship is unverified.
+
+#### 〔6b.2〕Conflict review — resolution without propagation
+
+Two releases, in sequence:
+
+| Release | Date | What shipped (verbatim anchor) |
+|---|---|---|
+| **1.6.3** | 2026-10-21 | Dates extracted at ingest; time-scoped questions routed to temporal search and *"ranked by how tightly they fit the window, boundary dates included"*. Conflicts are **surfaced**: *"if two of your sources disagree, it shows you the conflict instead of quietly picking a side."* Motivation stated as: *"An agent that knows a fact but not when it was true will hand you last quarter's answer with full confidence."* |
+| **1.6.6** | 2026-11-04 | **Conflict review on by default**, plus an API (`list_conflicts()` / `resolve_conflict()`) and a Cloud UI flow to pick the winner. *"when you choose which fact is right, cognee keeps that choice and answers from it from then on."* Choice persists **across sessions**; *"Edit, delete or rebuild the data, and choices that no longer apply are retired with it."* |
+
+**The semantics, precisely:** rejected facts are **not deleted** — they remain as *superseded evidence*; the selected fact becomes *current* and alternatives *superseded*; a later review **preserves the user's earlier choice** while that fact remains available; an optional reason can be recorded in the UI.
+
+**The limit that defines the competitive line:** adjudication is **local and human**. One conflict, one human decision, one pair of facts. The chosen fact governs what `recall` returns for that contradiction. **Nothing else in the graph is updated** — there is no propagation to facts that depended on the loser, no inferred confidence change on related claims, and no way to express "this claim supports that one." The motivating example they give is exactly a local pick: *"When two documents name a different CEO for the same company, an agent that keeps both will quote whichever it finds first."*
+
+#### 〔6b.3〕Notable gaps (Cognee)
+
+**Carried forward (unchanged):**
 - ❌ No belief propagation / no inference engine over the graph (no EP, no factor graph, no transitive implication closure)
 - ❌ No general typed logical operators — `contradicts` is the only logical edge type found; there is no `implies`/support/attack primitive
-- ⚠️ Contradiction detection is opt-in; confidence is an LLM judgement, not a calibrated, propagated number
+- ⚠️ Confidence is an LLM judgement, not a calibrated, propagated number
 - ⚠️ Bi-temporal validity is node-level (`valid_to`), not a general claim/edge-interval system; only the default backend supports it
 - ⚠️ Graph accuracy depends on the extraction LLM and input structure (see §11)
+
+**New / sharpened by the 2026-11 releases:**
+- ❌ **Axioms are never enforced**, even in `owl_rl` — the ontology cannot catch "this entity is both a Person and a Company", a violated cardinality, or disjoint classes. It only *matches and annotates*
+- ❌ **Ontology is a retrieval router, not a reasoning substrate** — by their own description its job is *"to find relevant entities before retrieving"*
+- ⚠️ **Business rules are described as the reason for an ontology but are not modelled as rules** — the "15% discount only before March" example lands as a type plus a description, not an evaluable constraint
+- ⚠️ **Conflict resolution does not propagate** — a human pick is local; nothing downstream of the rejected fact is revised
+- ⚠️ **Auto-ontology is Premium-cloud gated** and (per the docs gap above) its output format and its relationship to the OSS grounding path are unstated
+- ⚠️ **`strict` mode prunes inconsistently** — the graph prunes, chunk/RAG retrieval does not
+- ⚠️ **Extraction quality is split by tier**: the OSS LLM-free extractor is described as *"a demo you can experiment with, while the production extractor, which offers higher accuracy and broader label coverage, is available through Enterprise"* — so the headline 30×/no-API-bill claim describes the tier that is **not** the accurate one
+
+🔄 **Changed 2026-11-21:** two capability rows added (`Conflict detection surfaced`, `Conflict resolution`), the `contradicts` status corrected from opt-in to on-by-default review, and three subsections added below — the ontology layer, conflict review, and the sharpened gap list.
+
+*Last checked: 2026-11-21*
 
 ### 6c. Architecture contrast — graph? reasoning state? (factual capability comparison)
 
@@ -285,14 +393,20 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 | Primary memory substrate | Git-backed Markdown filesystem (MemFS) + conversation DB | Knowledge graph + vector index + relational provenance store | Typed graph (points + operators) |
 | Graph-structured? | ❌ No | ✅ Yes — extracted entities/relations | ✅ Yes — claims + typed operators |
 | Who writes memory | **The LLM agent itself**, via file tools | An extraction LLM pipeline over ingested data | Explicit graph writes (agent/operator API) |
-| Typed logical relations | ❌ None | ⚠️ `contradicts` edge only (opt-in) | ✅ IMPL (implies), NAND (contradicts) |
+| Typed logical relations | ❌ None | ⚠️ `contradicts` edge only — surfaced since **1.6.3**, review on by default since **1.6.6** | ✅ IMPL (implies), NAND (contradicts) |
+| **Type / vocabulary layer** | ❌ None | ✅ **strong** — is-a hierarchy, supplied (RDF/OWL/Turtle/JSON-LD) **or auto-generated from the customer's data** (Premium); two-pass type assignment; plain-language Ontology Editor; ontology routes both extraction and retrieval | ✅ **present, curated** — core ontology + expansion packs (`objectKinds`/`pointKinds`/`eventKinds`/`documentKinds` + `subclassOf`), a content-addressed **kind index** and kNN classifier with margin gate, nearMiss decoys and batched LLM adjudication of the low-margin tail (`kind_index.py`, `kind_classifier.py`, `kind_guards.py`). **Generated from data: no. Imported from a standards format: no.** |
+| **Conflict adjudication** | ❌ None | ✅ **human picks the winner** (`list_conflicts()` / `resolve_conflict()`), on by default since 1.6.6, reason optional, loser kept as superseded evidence. **Local — does not propagate** | ✅ Computed — EP belief propagation over the graph; NAND/IMPL operators; mitigations at 0.10–0.50 strength; a change in one belief updates what it implies |
+| **Axiom enforcement** | ❌ None | ❌ **None** — "no domain/range, cardinality, or disjointness"; `owl_rl` only expands the closure for *matching*, never rejects on a violation | ❌ **None — and not what our guards do.** `kind_guards.py` redirects a *known confusion* from a static table and its docstring is explicit: *"redirect a mis-filed write, never refuse it"* (`refuse` is unreachable by design, #1934). No disjointness or cardinality check. **Neither system enforces axioms.** |
+| **Standards-format ontology import (OWL/Turtle/JSON-LD)** | ❌ None | ✅ Yes for **supplied** ontologies. Auto-ontology **output** is not documented as RDF-exportable — see §6b.3 | ❌ **Not supported** — vocabulary is authored as pack YAML |
 | Confidence / belief weights | ❌ None | ⚠️ LLM-judged per-contradiction score + feedback retrieval weights | ✅ Belief propagation over the graph |
 | Temporal validity | ❌ None (git commit history only) | ⚠️ `valid_to` node stamps (supersede-not-delete), Event/Interval | ✅ Temporal validity / supersession |
 | Provenance to source turn | ❌ (git commit history of the memory file) | ⚠️ relational store per document/chunk; claim-level ledger opt-in; "provenance on every answer" marketed Enterprise | ✅ Claim → source conversation turn |
 | Retriever | File search / read tools; optional keyword+semantic mod | Vector seeds + graph traversal + hybrid (RRF-style) | Graph traversal with propagated confidence |
-| Verdict | **Agent-managed context store over raw content — not a reasoning-state graph** | **Index/knowledge graph over raw content with partial epistemics — not a reasoning-state graph** (no propagation, no typed implication) | Reasoning-state graph |
+| Verdict | **Agent-managed context store over raw content — not a reasoning-state graph** | **Index/knowledge graph over raw content with partial epistemics — not a reasoning-state graph** (no propagation, no typed implication, no axiom enforcement; conflict resolution is a human pick). As of 2026-11 it also ships a **business-vocabulary layer** that is genuinely better-developed than ours at *acquiring* a taxonomy (learned from data, plain-language edited, standards-importable) — while still carrying **no belief semantics** | Reasoning-state graph |
 
-*Last checked: 2026-09-11*
+🔄 **Changed 2026-11-21:** four rows added (Type/vocabulary layer, Conflict adjudication, Axiom enforcement, Standards-format ontology import) and the Verdict rewritten — Cognee now ships a better-developed *vocabulary* layer than ours while still carrying no belief semantics.
+
+*Last checked: 2026-11-21*
 
 ---
 
@@ -320,7 +434,7 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 
 | Channel | Activity |
 |---|---|
-| Open-source funnel | 30.6K GitHub stars, 151.7K PyPI downloads/month, `good-first-issue` labels cultivated for contribution |
+| Open-source funnel | **33,448 GitHub stars** (2026-11-21; was 30.6K on 2026-09-11 — see §8), 151.7K PyPI downloads/month (2026-09-11 read), `good-first-issue` labels cultivated for contribution |
 | LLM-agent surface | First-party integrations for **Claude Code, Codex, Cursor, OpenClaw, LangGraph, Hermes** + MCP server — rides the coding-agent wave |
 | Comparison + migration SEO | "Cognee vs Zep", "vs mem0", "vs Supermemory"; "Migrating from Mem0 / Zep / Graphiti / Letta" — direct poaching pages |
 | GEO ("generative engine optimization") | Homepage ships a copy-paste prompt: *"I'm evaluating cognee… What does it do, how does it compare to Mem0, Zep and Letta, what are its strengths and weaknesses, and who is it best for?"* with Ask ChatGPT / Perplexity / Claude buttons |
@@ -332,9 +446,11 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 
 **Sales motion:** OSS/self-serve → Cloud consumption → Enterprise BYOC (FDE-led). Startup-package discount for pre–Series B companies.
 
-[Source](https://www.cognee.ai/) · [cognee.ai/pricing](https://www.cognee.ai/pricing) — retrieved 2026-09-11
+[Source](https://www.cognee.ai/) · [cognee.ai/pricing](https://www.cognee.ai/pricing) — retrieved 2026-09-11; open-source-funnel star figure re-read 2026-11-21
 
-*Last checked: 2026-09-11*
+🔄 **Changed 2026-11-21:** the open-source-funnel row's star count updated 30.6K → 33,448 (in-row dated). The rest of this section is the 2026-09-11 read and was not re-checked on 2026-11-21.
+
+*Last checked: 2026-09-11 (only the open-source-funnel row re-read 2026-11-21)*
 
 ---
 
@@ -364,9 +480,10 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 
 | Signal | Value |
 |---|---|
-| GitHub stars | **30,642** (`topoteretes/cognee`, Apache-2.0) — more stars than Letta's main repo |
-| GitHub forks / contributors | 3,015 forks / 304 contributors |
-| GitHub open issues | 221 open issues (520 including PRs) |
+| GitHub stars | **33,448** (`topoteretes/cognee`, Apache-2.0) — `api.github.com` read 2026-11-21. **Up from 30,642 on 2026-09-11** (+2,806 in ~10 weeks). 3,543 forks, 1,112 open issues. More stars than Letta's main repo |
+| Companies | **"More than 500 companies build with cognee"** in software, finance, legal, pharma, research and education (Cognee's own claim, 2026-11-19) |
+| GitHub forks / contributors | **3,543 forks** / 304 contributors (forks read 2026-11-21; contributors are the 2026-09-11 read) |
+| GitHub open issues | **1,112 open issues including PRs** (`open_issues_count`, 2026-11-21 — GitHub's counter includes PRs; the 2026-09-11 read was 221 issues / 520 incl. PRs) |
 | PyPI downloads | **151,729/month**, 20,016/week, 3,127/day (`cognee`) |
 | SDK runs | **5M+ SDK runs/month** (homepage) |
 | Pipeline volume growth | ~2,000 runs → 1M+ runs (per seed announcement) |
@@ -378,9 +495,11 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 | ⚠️ Revenue / ARR | No public data |
 | ⚠️ LongMemEval / LoCoMo | No published LongMemEval or LoCoMo score found — BEAM is their published benchmark |
 
-[Source](https://api.github.com/repos/topoteretes/cognee) · [pypistats](https://pypistats.org/api/packages/cognee/recent) · [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) · [cognee.ai/research-and-evaluation-results](https://www.cognee.ai/research-and-evaluation-results) — retrieved 2026-09-11
+🔄 **Changed 2026-11-21:** stars 30,642 → **33,448** (API read), forks 3,015 → **3,543**, open issues 520 → **1,112** incl. PRs, and the "more than 500 companies" figure added. PyPI/Discord and contributor figures remain the 2026-09-11 reads and are marked as such.
 
-*Last checked: 2026-09-11*
+[Source](https://api.github.com/repos/topoteretes/cognee) · [pypistats](https://pypistats.org/api/packages/cognee/recent) · [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) · [cognee.ai/research-and-evaluation-results](https://www.cognee.ai/research-and-evaluation-results) · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) (stars + companies) — retrieved 2026-11-21
+
+*Last checked: 2026-11-21*
 
 ---
 
@@ -408,13 +527,18 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 |---|---|
 | Main site | `cognee.ai` — pricing, benchmarks, cost calculator, case studies, academy, newsroom, brand resources, events |
 | Docs | `docs.cognee.ai` — Mintlify; ships `llms.txt`, `llms-full.txt` (3.9 MB), per-surface shards (`llms-core.md`, `llms-mcp.md`, `llms-api.md`) |
-| Content strategy | **Benchmark + comparison + migration + ontology thought-leadership.** Pages: "AI Memory Benchmarks: The Complete Guide (2026)", "Cognee vs Zep/mem0/Supermemory", "Migrating from …", case studies, cost calculator |
+| Content strategy | **Benchmark + comparison + migration + ontology thought-leadership**, now with a **biweekly "memo" newsletter** (memos 001–009, 2026-07-29 → 2026-11-19) that sequences product narrative — a release-cadence drumbeat rather than a blog. Pages: "AI Memory Benchmarks: The Complete Guide (2026)", "Cognee vs Zep/mem0/Supermemory", "Migrating from …", "Best Platforms to Build an AI Company Brain in 2026", case studies, cost calculator, academy |
+| Cost as content | A **cost calculator** plus a dedicated argument that extraction should be **LLM-free** (GLiNER on CPU, "~30× faster per chunk", "avoids an estimated $570 of API charges per gigabyte"). Cost is treated as a first-class product surface, not a footnote. The argument is anchored in a customer story (verbatim): one user *"burned through ~€10 in about 90 minutes just ingesting a 728 MB drive"* |
 | GEO play | Homepage prompt to ask ChatGPT/Perplexity/Claude about Cognee — deliberate LLM-answer optimization |
 | ⚠️ Traffic / DA | No public data |
 
-[Source](https://www.cognee.ai/) · [docs.cognee.ai/llms.txt](https://docs.cognee.ai/llms.txt) — retrieved 2026-09-11
+🔢 **Notable content move:** the 2026-09-28 guide *"Best Platforms to Build an AI Company Brain in 2026 (Ranked & Compared)"* ranks **cognee first** against Mem0, Zep, Supermemory, Letta and MemoryLake on five self-selected criteria — a comparison page that manufactures category leadership by defining the category. Same play as "Cognee vs Zep" at the memory layer, now run one level up at the **company-brain** layer.
 
-*Last checked: 2026-09-11*
+🔄 **Changed 2026-11-21:** content strategy now includes the biweekly memo cadence (001–009) and the company-brain comparison page; "Cost as content" row is new.
+
+[Source](https://www.cognee.ai/) · [docs.cognee.ai/llms.txt](https://docs.cognee.ai/llms.txt) — retrieved 2026-09-11 · [cognee.ai/newsroom](https://www.cognee.ai/newsroom) · [2026-11-19 launch post](https://www.cognee.ai/new-cognee-experience) · [cognee.ai/build-an-ai-company-brain](https://www.cognee.ai/build-an-ai-company-brain) — retrieved 2026-11-21
+
+*Last checked: 2026-11-21*
 
 ---
 
@@ -422,7 +546,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 | Channel | Letta | Cognee |
 |---|---|---|
-| GitHub | 24,699 stars (letta) + 3,274 (letta-code), 155 contributors | 30,642 stars, 3,015 forks, 304 contributors |
+| GitHub | 24,699 stars (letta) + 3,274 (letta-code), 155 contributors | **33,448 stars**, 3,543 forks (2026-11-21; was 30,642 / 3,015 on 2026-09-11), 304 contributors (2026-09-11 read) |
 | Discord | **11,911 members / 1,188 online** | **4,078 members / 270 online** |
 | npm / PyPI | 288,317 npm downloads/mo | 151,729 PyPI downloads/mo |
 | X/Twitter | Company handle not confirmed (footer link only) | Third-party advocate posts embedded on homepage (@svpino, @akshay_pachaar, @iruletheworldmo); no verified company follower count |
@@ -435,9 +559,11 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 ⚠️ X/Twitter and LinkedIn follower counts could not be verified for either company without an authenticated session — documented as gaps.
 
-[Source](https://discord.com/api/v9/invites/letta?with_counts=true) · [Discord API (cognee)](https://discord.com/api/v9/invites/NQPKmU5CCg?with_counts=true) · GitHub API — retrieved 2026-09-11
+[Source](https://discord.com/api/v9/invites/letta?with_counts=true) · [Discord API (cognee)](https://discord.com/api/v9/invites/NQPKmU5CCg?with_counts=true) — retrieved 2026-09-11 (Discord membership figures only) · GitHub API — retrieved **2026-11-21** (stars/forks/issues)
 
-*Last checked: 2026-09-11*
+🔄 **Changed 2026-11-21:** the Cognee GitHub cell updated to the 2026-11-21 API read. Discord membership and contributor counts remain the 2026-09-11 reads.
+
+*Last checked: 2026-11-21*
 
 ---
 
@@ -515,7 +641,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 **Cognee**
 - [cognee.ai](https://www.cognee.ai/) — homepage: positioning, three-segment framing, 5M+ SDK runs/month, 30.6k stars, Bayer/Knowunity case studies, testimonials, integration list, "Ask an AI" GEO block. Retrieved 2026-09-11
-- [cognee.ai/pricing](https://www.cognee.ai/pricing) — live pricing (Free/Standard/Enterprise/BYOC engagement tiers) + the Enterprise-only feature list (bi-temporal & conflict resolution, provenance on every answer). Retrieved 2026-09-11
+- [cognee.ai/pricing](https://www.cognee.ai/pricing) — live pricing (Free/Standard/Enterprise/BYOC engagement tiers) + the Enterprise-only feature list (bi-temporal & conflict resolution, provenance on every answer). Retrieved 2026-09-11 — ⚠️ **superseded by the 2026-11-21 read below**: the Free tier became Standard-with-100M-tokens and a Premium tier was added
 - [docs.cognee.ai/core-concepts/architecture](https://docs.cognee.ai/core-concepts/architecture) — three-store architecture, provenance role. Retrieved 2026-09-11
 - [docs.cognee.ai/core-concepts/data-flows](https://docs.cognee.ai/core-concepts/data-flows) — session learning / self-improvement / ingestion pipelines. Retrieved 2026-09-11
 - [docs.cognee.ai/examples/contradiction-handling](https://docs.cognee.ai/examples/contradiction-handling) — `contradicts` edge with reason + confidence; feedback weights 0.5→0.55; nothing deleted. Retrieved 2026-09-11
@@ -531,6 +657,19 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - [cognee.ai/about-us](https://www.cognee.ai/about-us) — team page (Vasilije Markovic, CEO & founder). Retrieved 2026-09-11
 - [Caplight](https://www.caplight.com/company/cognee) / [Seedtable](https://www.seedtable.com/startups/Cognee-EW98RKN) / [TheCompanyCheck](https://www.thecompanycheck.com/company/b/cognee/zo7d4gvxj80d47h59) — total funding $8.9M–$9.09M across 2 rounds. Retrieved 2026-09-11
 - [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) and [research & evaluation results](https://www.cognee.ai/research-and-evaluation-results) — 0.79 @ 100K, 0.67 @ 10M. Retrieved 2026-09-11
+
+**Cognee — 2026-11 delta (ontology pivot), all retrieved 2026-11-21**
+- ["Meet the new cognee: auto-ontology, local models, permissions"](https://www.cognee.ai/new-cognee-experience) (2026-11-19) — auto-ontology mechanism, the two-pass type assignment, Ontology Editor plain-language editing, OWL/Turtle/JSON-LD import, GLiNER/FastEmbed local extraction (2,000-token chunk ~1.2 s on Apple M4 Pro vs ~35 s for `gpt-5.6-luna`; est. $570/GB avoided), the OSS-vs-Enterprise extractor split, memory promotion + permission flagging, 12 integrations + n8n
+- [Newsroom memo 007 — "memory that resolves conflict"](https://www.cognee.ai/newsroom/memory-that-resolves-conflict) (2026-10-21) — 1.6.3 temporal search, boundary dates, "shows you the conflict instead of quietly picking a side", the "last quarter's answer with full confidence" framing, embedding-vs-LLM token accounting, `.env.template` local run, Codex plugin, vulnerability disclosure policy, n8n verified node (200+ sources)
+- [Newsroom memo 008 — "you pick which fact wins"](https://www.cognee.ai/newsroom/you-pick-which-fact-wins) (2026-11-04) — 1.6.6 conflict review **on by default**, choice persists across sessions, stale choices retired on edit/delete/rebuild, `forget(clean_history=True)`, vector copy without re-embedding, Obsidian/Asana/OneNote sources
+- [cognee.ai/changelog](https://www.cognee.ai/changelog) — **25 changelog POSTS** (not only releases; includes company news and monthly recaps). Carries the 2026-11-19 launch post. ⚠️ It holds **no 1.6.3 / 1.6.6 release entries** — the version-dated facts above come from the newsroom memos, not this page
+- [cognee.ai/newsroom](https://www.cognee.ai/newsroom) — memo index 001–009 (2026-07-29 → 2026-11-19), used for the milestone arc
+- [docs.cognee.ai/guides/resolve-conflicts](https://docs.cognee.ai/guides/resolve-conflicts) / [docs.cognee.ai/python-api/conflicts](https://docs.cognee.ai/python-api/conflicts) — `list_conflicts()` / `resolve_conflict()`; selected fact = current, alternatives = superseded; rejected facts retained as superseded evidence
+- [docs.cognee.ai/cognee-cloud/ui/memory-review](https://docs.cognee.ai/cognee-cloud/ui/memory-review) — Cloud UI conflict-review flow, optional reason capture
+- [docs.cognee.ai/core-concepts/further-concepts/ontologies](https://docs.cognee.ai/core-concepts/further-concepts/ontologies) — re-fetched 2026-11-21: `annotate`/`strict` modes, `ONTOLOGY_REASONING=none|owl_rl`, `EmptyOntologyInStrictModeError`, "no domain/range, cardinality, or disjointness checking", relationship names never checked against object properties, chunk/RAG retrieval unaffected by `strict` pruning, `cognee[ontology]` extra
+- ["Best Platforms to Build an AI Company Brain in 2026"](https://www.cognee.ai/build-an-ai-company-brain) (2026-09-28) — the company-brain category claim, the five-criteria self-ranking (cognee placed first), "30+ data sources", COGX exchange format, single-Postgres claim
+- [cognee.ai/pricing](https://www.cognee.ai/pricing) — re-fetched 2026-11-21: Standard $0 + 100M tokens + $0.10/1M, **Premium $99/mo (auto-ontology)**, Enterprise feature list unchanged (bi-temporal & conflict resolution, provenance, personalization), BYOC engagement table, `gpt-oss-120b` cloud footer
+- [cognee.ai/benchmarks](https://www.cognee.ai/benchmarks) — **404 at retrieval** (the live pages are `/research-and-evaluation-results` and the docs `accuracy-benchmarks`); recorded as a gap, not a negative finding
 
 ### Gaps documented (not fabricated)
 
@@ -549,9 +688,18 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - ⚠️ **`letta-ai/letta` reports 0 open issues** — issues appear disabled or redirected on that repo; use `letta-code` (353 open) for issue-volume signal.
 - ⚠️ **pypistats.org rate-limited** on several attempts; figures above are from successful calls.
 
+**Added 2026-11-21 (ontology pivot):**
+- ⚠️ **Auto-ontology → grounding seam undocumented:** the docs describe the **supplied**-ontology path (`ONTOLOGY_FILE_PATH`/resolver → `annotate`/`strict`). Whether the **auto-generated** hierarchy feeds the same grounding machinery, and whether it can be **exported as RDF/OWL**, is not stated anywhere public. Unverified — do not claim either way.
+- ⚠️ **Cloud default LLM conflict:** the pricing-page footer says Cloud runs on `gpt-oss-120b`; the 2026-11-19 post names `gpt-5.6-luna` as "cognee's default LLM" when computing its 35 s baseline. Both recorded; unresolved which is the live default.
+- ⚠️ **The `$570/GB` and `30×` figures are Cognee's own estimates** against an *"estimated"* LLM baseline on a single Apple M4 Pro, not a reproduced measurement. Treated as vendor claims.
+- ⚠️ **The OSS extractor is not the accurate one:** Cognee states the open-source LLM-free extractor is *"a demo you can experiment with, while the production extractor, which offers higher accuracy and broader label coverage, is available through Enterprise"* — so the headline local-extraction numbers describe the less accurate tier. Do not read "LLM-free and 30× faster" as "as good as the LLM path".
+- ⚠️ **"500+ companies"** is Cognee's own claim on its 2026-11-19 post; no independent confirmation (the older "70+ deployments incl. Bayer" single-source note still stands as a separate, smaller figure).
+- ⚠️ **No public ARR, headcount, or churn** after the Premium launch; the $99 price is published but attach rate is unknown.
+- ⚠️ **Auto-ontology accuracy unmeasured:** no published evaluation of the generated taxonomy (precision/recall of type assignment), and no third-party review found.
+
 ### Suggested follow-up
 - Read the MemGPT paper and Letta's "Memory Models" / "Context Constitution" research posts for the theoretical claim that token-space context management substitutes for a graph.
 - Run Cognee's `contradiction_feedback_demo.py` and `fact_validity.py` locally to verify the `contradicts` edge, confidence score, and `valid_to` behavior on a non-default backend (the documented Kuzu/Ladybug limitation).
 - Check whether Cognee's `valid_to` and `contradicts` are available in Cognee Cloud outside the Enterprise tier (pricing page implies not).
 
-*Last updated: 2026-09-11*
+*Last updated: 2026-11-21*
