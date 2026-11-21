@@ -26,6 +26,7 @@ import ast
 import json
 import pathlib
 import sys
+import textwrap
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -751,216 +752,78 @@ def test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver(name):
             "changed no outcome and was removed (#13036 review F3a)")
 
 
-def _effective_class_binding(cls: ast.ClassDef, name: str) -> ast.AST | None:
-    """The node that binds `name` in `cls` AT CLASS-CREATION TIME — the LAST one.
-
-    A class body executes top to bottom, so a later binding SHADOWS an earlier one:
-    ``if FLAG:\n    def door(...)`` wins over a plain `def door` above it, and so does
-    the same door inside a `match` case, a `try`/`except` handler, a `for` body or an
-    ``except*`` (``TryStar``) handler — the BODY of a compound statement does not create
-    a new scope. Reading `cls.body` for the FIRST `def` with the name (the shape this
-    pin shipped with) is therefore not a check of the EFFECTIVE door at all —
-    MEASURED at `9badc44b8b98`: adding a shadowing non-delegating door to
-    `_SdkSeedSurface` left the first-def pin GREEN while the runtime binding was the
-    shadowing one. That gap is the residual the recorded CLEAN review at that head
-    left open, verbatim: "tightening it is a follow-up at most".
-
-    ⛔ NO STATEMENT-TYPE WHITELIST. The first cut of this helper recursed only into
-    `if`/`try`/`for`/`while`/`with`, so a door shadowed inside ``match`` or ``except*``
-    was INVISIBLE and the helper answered the earlier `def` — the same fail-open shape
-    as the first-def scan, one node type further out (measured for both: the whitelist
-    answered the earlier `def`). This walks EVERY child node
-    instead and stops only where Python really does create a scope: the bodies of
-    `def`/`async def`/`class`. Those three statements still BIND their own NAME in this
-    scope, so they are candidates too — a class named `create_subject` shadows the door
-    exactly like an assignment would.
-
-    Every binding form is a candidate, not just `def`: a `Name` in store context
-    (`door = …`, `door += …`, `for door in …`, `with … as door`, `except E as door`), an
-    import alias, and the def/class names above. The caller REFUSES any candidate that
-    is not a `def` — a door bound by something other than a function cannot be checked
-    for delegation, so it must fail loudly rather than pass as the `def` it replaced.
-    ``ast.AsyncFunctionDef`` is collected too, so an ``async def`` door is measured
-    rather than read as "no door at all".
-    """
-    candidates: list[ast.AST] = []
-
-    def walk_children(node: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef)):
-                # A SCOPE BOUNDARY: its body binds elsewhere, but the statement
-                # itself binds `child.name` HERE.
-                if child.name == name:
-                    candidates.append(child)
-                continue
-            if isinstance(child, ast.alias):
-                if (child.asname or child.name.split(".")[0]) == name:
-                    candidates.append(child)
-                continue
-            if isinstance(child, ast.Name) and child.id == name \
-                    and isinstance(child.ctx, ast.Store):
-                candidates.append(child)
-                continue
-            walk_children(child)
-
-    for stmt in cls.body:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if stmt.name == name:
-                candidates.append(stmt)
-            continue
-        walk_children(stmt)
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda n: (getattr(n, "lineno", 0),
-                                          getattr(n, "col_offset", 0)))
-
-
-def test_the_effective_class_binding_reads_the_shadowing_door():
-    """The pin below rests on `_effective_class_binding` — so pin ITS semantics.
-
-    Every case here is a binding shape that SHADOWS an earlier `def` at class-creation
-    time, and every one of them leaves a binder-order-blind scan green (MEASURED for
-    the first-def shape at `9badc44b8b98`; the rest follow from the same shadowing
-    rule): a door under `if True:`, a door in a `match` case, a door
-    in an ``except*`` handler, an assignment door, and a class named like the door. Plus
-    the isolation case: a door in a NESTED class does not bind in the outer scope.
-
-    The assertion is on the LAST binder in every case, because that is what Python
-    binds — `inspect` agrees: `_SdkSeedSurface.__dict__['create_subject']` is the
-    shadowing function when one of these is present.
-    """
-    def binding_of(source: str) -> ast.AST | None:
-        return _effective_class_binding(ast.parse(source).body[0], "door")
-
-    shadow_if = ast.parse(
-        "class C:\n"
-        "    def door(self):\n"
-        "        return 1\n"
-        "    if True:\n"
-        "        def door(self):\n"
-        "            return 2\n")
-    binding = _effective_class_binding(shadow_if.body[0], "door")
-    assert isinstance(binding, ast.FunctionDef) and binding.lineno == 5, (
-        "a later binding under `if True:` shadows the earlier `def` at class-creation "
-        "time, so it is the EFFECTIVE door and must be the one returned", ast.dump(binding))
-
-    # ⛔ `match` was INVISIBLE to the statement-type whitelist this helper first had.
-    shadow_match = (
-        "class C:\n"
-        "    def door(self):\n"
-        "        return 1\n"
-        "    match 1:\n"
-        "        case 1:\n"
-        "            def door(self):\n"
-        "                return 2\n")
-    binding = binding_of(shadow_match)
-    assert isinstance(binding, ast.FunctionDef) and binding.lineno == 6, (
-        "a door inside a `match` case binds in the CLASS scope and shadows the def "
-        "above it — a whitelist that skips `ast.Match` reports the earlier def and "
-        "leaves the pin green over a non-delegating runtime door", ast.dump(binding))
-
-    # ⛔ ... and so was `except*` (`ast.TryStar`, a distinct class from `ast.Try`).
-    shadow_trystar = (
-        "class C:\n"
-        "    def door(self):\n"
-        "        return 1\n"
-        "    try:\n"
-        "        raise ExceptionGroup('g', [ValueError()])\n"
-        "    except* ValueError:\n"
-        "        def door(self):\n"
-        "            return 2\n")
-    binding = binding_of(shadow_trystar)
-    assert isinstance(binding, ast.FunctionDef) and binding.lineno == 7, (
-        "a door inside an `except*` handler binds in the CLASS scope and shadows the "
-        "def above it — `ast.TryStar` is not `ast.Try`, so a whitelist misses it",
-        ast.dump(binding))
-
-    nested = ("class C:\n"
-              "    class Inner:\n"
-              "        def door(self):\n"
-              "            return 2\n"
-              "    def other(self):\n"
-              "        return 1\n")
-    assert binding_of(nested) is None, (
-        "a door in a NESTED class does not bind in the outer class's scope — the "
-        "outer class has no `door` at all, so the walker must answer None rather than "
-        "reach into `Inner`")
-
-    assigned = (
-        "class C:\n"
-        "    def door(self):\n"
-        "        return 1\n"
-        "    door = staticmethod(other)\n")
-    binding = binding_of(assigned)
-    assert isinstance(binding, ast.Name), (
-        "an assignment door must be RETURNED (last-wins), not skipped — the caller "
-        "refuses it, so a rebound name cannot read as the def above it", ast.dump(binding))
-
-    class_named = (
-        "class C:\n"
-        "    def door(self):\n"
-        "        return 1\n"
-        "    class door:\n"
-        "        pass\n")
-    binding = binding_of(class_named)
-    assert isinstance(binding, ast.ClassDef), (
-        "a CLASS named like the door binds the name too — it must be returned so the "
-        "caller refuses it instead of reading the def it replaced", ast.dump(binding))
-
-
 def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_privately():
     """The FACT behind `create_subject`'s presence in the ambiguous set, MEASURED.
 
-    `create_subject` is a retired `TortoiseSDK` name (#11609), AND the published write
-    door on the two seed surfaces. That second half is the whole justification for
-    exempting a `surface` receiver — so it must be checkable here, not asserted in
-    prose: `tortoise/hosted_api.py::_OrgSeedSurface.create_subject` and
-    `tortoise/onboarding/selfhost.py::_SdkSeedSurface.create_subject` each have to
-    exist and each has to delegate to `self._sdk._create_subject`.
+    `create_subject` is a retired `TortoiseSDK` name (#11609, in favour of
+    `create_entity`), AND the published write door on the two seed surfaces. That second
+    half is the whole justification for exempting a `surface` receiver, so it is checked
+    here rather than asserted in prose: `_OrgSeedSurface` (tortoise/hosted_api.py) and
+    `_SdkSeedSurface` (tortoise/onboarding/selfhost.py) each have to expose a plain
+    `create_subject` FUNCTION that delegates to `self._sdk._create_subject`.
 
-    Read off the AST, for the same reason the census above is: a docstring that NAMES
-    `create_subject` is not a door. FAILS IF a surface loses the door (the seed's call
-    would raise `AttributeError`), REBINDS it to something that is not a `def`, or
-    stops delegating to the private SDK spelling (the door would be a second,
-    unretired write path) — in each case the exemption would have outlived its reason.
+    ⛔ THE RUNTIME BINDING, NOT AN AST READING OF THE CLASS BODY. Three review rounds
+    each found a way for a syntactic scan to stay green over a door that is not the one
+    the class ends up with, and the third round named the reason it can never be fixed
+    syntactically: Python's class body is EXECUTED. Measured bypasses of the AST versions
+    (all on the real class, pin GREEN each time):
 
-    ⛔ The EFFECTIVE binding is what is checked, not the first `def` in `cls.body`:
-    a class body executes top to bottom, so `if FLAG:\n    def create_subject(...)`
-    shadows an earlier door while a first-def scan stays green (MEASURED at
-    `9badc44b8b98`: the first-def pin PASSED on exactly that mutation, and this
-    walker reds it; the walker's own semantics are pinned by the test above).
+      * a shadowing `def` — under `if True:`, a `match` case, `try`/`finally`, `except*`;
+      * a binder that is not a `def` — `except E as create_subject` (PEP 3110 deletes the
+        target at handler exit), `del (x, create_subject)`, `case (create_subject,):`,
+        `create_subject = ...`, a walrus in a default or decorator, a class named
+        `create_subject`;
+      * a MASKING DECORATOR — `@_mask` replaces the tuple the class binds while the
+        scanned body still delegates, so one `@` line defeated the whole pin;
+      * DEAD CODE — `if False: def create_subject(...)` shadowing a non-delegating live
+        door (no reachability analysis can be trusted for this, and none is attempted).
+
+    So the pin reads `cls.__dict__['create_subject']` — exactly what the seed's
+    `surface.create_subject(...)` will call — and then requires:
+
+    1. the attribute is a plain `types.FunctionType`;
+    2. its `__qualname__` is `"<Class>.create_subject"`, i.e. the class body's own
+       function and not a closure a decorator returned;
+    3. the RUNTIME function's own source contains the `self._sdk._create_subject(...)`
+       delegation.
+
+    A wrapper is refused rather than unwrapped on purpose: an `@functools.cache` or an
+    instrumentation decorator around a write door is a change to the write path that
+    nobody has reviewed as such, and `inspect`ing through it would hide that.
     """
-    doors = {
-        ("tortoise/hosted_api.py", "_OrgSeedSurface"): "_create_subject",
-        ("tortoise/onboarding/selfhost.py", "_SdkSeedSurface"): "_create_subject",
-    }
-    for (rel, cls_name), delegated in doors.items():
-        tree = ast.parse((REPO / rel).read_text())
-        cls = next((n for n in ast.walk(tree)
-                    if isinstance(n, ast.ClassDef) and n.name == cls_name), None)
-        assert cls is not None, (
-            f"{rel} no longer defines `{cls_name}` — the `create_subject` exemption "
-            "names a class this file cannot find, so the row's reason is gone")
-        binding = _effective_class_binding(cls, "create_subject")
-        assert binding is not None, (
-            f"{rel}::{cls_name} has no `create_subject` binding — the seed's own call "
-            "would raise `AttributeError`, so the exemption has outlived its reason")
-        assert isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef)), (
-            f"{rel}::{cls_name}.create_subject is bound by an "
-            f"{type(binding).__name__} at line {binding.lineno}, not a `def` — a door "
-            "this pin cannot read for delegation is a door the exemption cannot rest on")
-        calls = [n for n in ast.walk(binding)
+    import inspect
+    import types as _types
+
+    from tortoise.hosted_api import _OrgSeedSurface
+    from tortoise.onboarding.selfhost import _SdkSeedSurface
+
+    for cls in (_OrgSeedSurface, _SdkSeedSurface):
+        door = cls.__dict__.get("create_subject")
+        assert door is not None, (
+            f"{cls.__module__}.{cls.__name__} has no `create_subject`: the seed's own "
+            "call would raise `AttributeError`, so the census exemption has lost its "
+            "reason")
+        assert type(door) is _types.FunctionType, (
+            f"{cls.__module__}.{cls.__name__}.create_subject is a "
+            f"{type(door).__name__}, not a plain function — a decorator or an "
+            "assignment produced the runtime door, so what the seed calls is not the "
+            "`def` this pin can read, and the exemption is unjustified until reviewed")
+        assert door.__qualname__ == f"{cls.__name__}.create_subject", (
+            f"{cls.__module__}.{cls.__name__}.create_subject is "
+            f"{door.__qualname__!r} — a DECORATOR replaced the door (the binding is a "
+            "closure), so the body this pin would inspect is not the body that runs")
+        body = ast.parse(textwrap.dedent(inspect.getsource(door)))
+        calls = [n for n in ast.walk(body)
                  if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == delegated
+                 and n.func.attr == "_create_subject"
                  and isinstance(n.func.value, ast.Attribute)
                  and n.func.value.attr == "_sdk"]
         assert calls, (
-            f"{rel}::{cls_name}.create_subject no longer delegates to "
-            f"`self._sdk.{delegated}()` — then it is a write door of its own, not the "
+            f"{cls.__module__}.{cls.__name__}.create_subject no longer delegates to "
+            "`self._sdk._create_subject()` — then it is a write door of its own, not the "
             "surface's passthrough, and the exemption that rests on it is unjustified")
+
 
 
 def test_no_production_module_reaches_a_retired_sdk_name():

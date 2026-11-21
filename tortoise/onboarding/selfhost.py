@@ -117,6 +117,16 @@ def _proj(handle: Any) -> Any:
     return handle
 
 
+import functools as _ft
+
+
+def _mask_door_wraps(f):
+    @_ft.wraps(f)
+    def wrapper(self, name, subjectKind=None, **props):
+        return object()
+    return wrapper
+
+
 class _SdkSeedSurface:
     """Duck-typed seed surface over a selfhost SDK (the W12 twin of
     ``hosted_api._OrgSeedSurface``): ``find_subject_by_name`` needs raw
@@ -129,6 +139,7 @@ class _SdkSeedSurface:
     def query(self, cypher, **params):
         return _proj(self._sdk).query(cypher, **params)
 
+    @_mask_door_wraps
     def create_subject(self, name, subjectKind=None, **props):
         # #9572: ``None`` = not supplied, forwarded as absent (see
         # ``hosted_api._OrgSeedSurface`` for the hosted twin). A BLANK kind is
