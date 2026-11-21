@@ -61,8 +61,10 @@ named test goes RED):
   coverage row cannot see because its importers are already banned.
 * **Forget a root in the ban floor** (drop ``redislite`` from
   ``_FORBIDDEN_GRAPH_ROOTS``) → ``test_the_ban_covers_all_three_roots`` RED —
-  measured; the parametrization is derived from the tuple, so only this floor
-  catches a removal that deletes its own case.
+  measured, together with the scan row whose ``"tortoise"`` witness reaches the
+  client through ``redislite.falkordb_client``. The parametrized row cannot see it
+  (removing an entry removes its own case), which is why this floor exists: it is
+  the recorded decision that none of the three MEASURED roots may be dropped.
 * **Let the package-root EXPORT through** (drop the
   ``_FORBIDDEN_CLIENT_EXPORTS`` intersection from ``_offending``) →
   ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
@@ -872,11 +874,11 @@ def _getattr_reaching_a_store(
     """`getattr(tortoise, "FalkorDB")` with BOTH arguments literal.
 
     ⛔ OUT-OF-SCOPE IS NOT THE SAME AS UNREACHABLE, and this one is statically
-    decidable: the name is right there in a string constant. Leaving it unseen
-    would make the scope note's "a STATIC import is the only thing this guard can
-    see" narrow in a way the code contradicts, since the code deliberately covers a
-    non-import ATTRIBUTE read. A non-literal second argument (`getattr(t, name)`)
-    stays genuinely out of scope, and is named as such beside
+    decidable: the name is right there in a string constant. The scope note USED to
+    say "a STATIC import is the only thing this guard can see", which left this
+    spelling unseen while the code deliberately covered a non-import ATTRIBUTE
+    read; the note is now widened to match the code. A non-literal second argument
+    (`getattr(t, name)`) stays genuinely out of scope, and is named as such beside
     `importlib.import_module`/`__import__`.
     """
     found: set[str] = set()
@@ -932,7 +934,14 @@ def test_no_graph_dependency() -> None:
     function bodies, since `ast.walk` descends). `importlib.import_module(...)`,
     `__import__(...)`, `getattr(t, name)` with a NON-literal name, and any name
     built at runtime (`tortoise.__dict__[...]`, `f"tortoise.{x}"`) would pass, and
-    are OUT OF SCOPE rather than covered. (`getattr(tortoise, "FalkorDB")` with
+    are OUT OF SCOPE rather than covered. ⛔ SO ARE THE REBINDING FORMS THE FIXPOINT
+    DOES NOT WALK, which are STATIC and therefore easy to assume are covered: only
+    `x = …` and `x: T = …` propagate the bound name. A walrus
+    (`if (t := tortoise): t.FalkorDB`), a loop or `with … as` target, a tuple
+    target, and a DEFAULT ARGUMENT (`def f(t=tortoise): return t.Tortoise`) all
+    reach the client and are not seen. They are named here because the clause above
+    promises "aliases and rebindings followed", and a reader deciding sufficiency
+    must not read that as every static form. (`getattr(tortoise, "FalkorDB")` with
     BOTH arguments literal IS covered — see `_getattr_reaching_a_store` — because
     that is statically decidable.)
 
@@ -1039,13 +1048,16 @@ def test_the_ban_covers_all_three_roots_the_tree_actually_uses() -> None:
     """⛔ A FLOOR, not a mirror — the parametrization above cannot pin a REMOVAL.
 
     Parametrizing over `_FORBIDDEN_GRAPH_ROOTS` pins each entry's BEHAVIOUR, but
-    deleting an entry also deletes its case, so the suite stays green (measured:
-    dropping `"redislite"` left 2 passed). The three roots below are the ones the
-    tree is MEASURED to import a client from — `tortoise/__init__.py`
+    deleting an entry also deletes its own case, so THAT row cannot see the loss.
+    The loss is not otherwise silent — measured at this head, dropping `redislite`
+    (or `redis`, or `falkordb`) reddens TWO rows: this one, and the scan row whose
+    witnesses reach the client through the dropped root. This test is therefore the
+    recorded DECISION rather than the only detector: these three roots are the ones
+    the tree is MEASURED to import a client from — `tortoise/__init__.py`
     (`redislite.falkordb_client`), `hosted_backup`/`acl_graph_users`/
     `tortoise_client`/`retry`/`ep`/`hosted_api` (`redis`), `projection` (`falkordb`)
-    — so this asserts a floor independent of the set it guards: a fourth root must
-    be added deliberately, and this test is where that decision gets recorded.
+    — so the floor states that a fourth root must be added deliberately and that
+    none of these three may be dropped to green a scan.
     """
     assert set(_STORE_CLIENT_ROOTS) >= {"falkordb", "redis", "redislite"}
 
