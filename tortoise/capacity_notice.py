@@ -656,12 +656,19 @@ def claim_notice(cp, org_id: str, threshold: int,
 #: ledger must not re-send; a deletion column is never additive — see
 #: `_ACCOUNT_DRIFT_SOFT`), while `suspended_at` is tier 0015 and must DEGRADE.
 _ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
-                   "suspended_at")
+                   "suspended_at", "customer_email")
 
 #: Columns in `_ACCOUNT_SELECT` whose ABSENCE must DEGRADE, not stop the pass.
 #: `suspended_at` is migration **0015** — an additive tier (`_ORG_ADDITIVE_0015_TIER`),
 #: NOT a base column, so the #1096 doctrine applies: a schema one migration behind
 #: reads it as NULL and stays un-suspended instead of taking the feature down.
+#:
+#: ⛔ `customer_email` is here for the same reason (`0012_teams_billing_columns`,
+#: renamed to organizations by `20260915000001_tenancy_team_to_org`): it is the
+#: SECOND address in the recipient chain, not the first, so its absence costs the
+#: chain one rung and must never cost the pass — a schema older than 0015 is
+#: older than the billing tier too, and refusing to notify every account because a
+#: FALLBACK column is missing would be the same failure in the other direction.
 #:
 #: ⛔ `storage_notice_pct` and `deleted_at` are DELIBERATELY NOT here: the mark is
 #: the LEDGER, and an unreadable ledger must refuse to send
@@ -672,7 +679,7 @@ _ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
 #: fail-closed direction too (#1096: a deletion column is never an additive tier).
 #: A single PostgREST 400 does not say WHICH column it rejected, which is why
 #: `read_account` retries without these and re-raises when the retry also fails.
-_ACCOUNT_DRIFT_SOFT = ("suspended_at",)
+_ACCOUNT_DRIFT_SOFT = ("suspended_at", "customer_email")
 
 #: What a REJECTED PROJECTION looks like from this seam (#14038 review, P1).
 #:
@@ -738,6 +745,10 @@ class Account:
     notice_pct: int | None
     deleted: bool = False
     suspended: bool = False
+    #: The Stripe mirror's billing contact (0012, `billing.mirror_subscription`'s
+    #: `customer_email=` twin) — the SECOND address in the chain, and the one a
+    #: SESSION-lane org usually has when `email` is NULL. See `_notice_recipient`.
+    customer_email: str | None = None
 
 
 def read_account(cp, org_id: str) -> Account | None:
@@ -792,7 +803,67 @@ def read_account(cp, org_id: str) -> Account | None:
     return Account(org_id=org_id, email=row.get("email"),
                     name=row.get("name"), notice_pct=mark,
                     deleted=bool(row.get("deleted_at")),
-                    suspended=bool(row.get("suspended_at")))
+                    suspended=bool(row.get("suspended_at")),
+                    customer_email=row.get("customer_email"))
+
+
+def _owner_email(org_id: str, cp) -> str | None:
+    """The account's ACTIVE OWNER address via GoTrue — the THIRD chain rung.
+
+    ``supabase_control.owner_email`` is the seam ``hosted_api._billing_owner_email``
+    already uses for the same question, so this module does not invent a second
+    resolver. ⛔ FAIL-SOFT AND ``None``-POSSIBLE: that function swallows the GoTrue
+    admin transport error but its ``owner_user_id`` control-plane read sits
+    OUTSIDE its guard (``hosted_api._billing_owner_email`` says so, and catches
+    here for exactly that reason), so any exception degrades this rung to ``None``
+    rather than costing the account its notice. Blocking I/O — callers run it off
+    the loop.
+    """
+    from .supabase_control import owner_email
+
+    try:
+        return owner_email(cp, org_id)
+    except Exception:  # degrade the RUNG, never the account's notice
+        return None
+
+
+def _notice_recipient(account: Account, cp) -> str | None:
+    """Resolve WHO to mail — the chain, in the order the checkout already uses.
+
+    ⛔ THE BARE COLUMN IS NOT THE ANSWER (#14038 review, P1). This notice used to
+    grep `organizations.email` and stop: a NULL was reported as a plain ``no-email``
+    status, so the account silently never received the one notice it can ever get.
+    That column is populated ONLY by the lanes that pass `p_email` to
+    `provision_team` (`/v1/register`, the Edge Function) — every SESSION-lane
+    create (`create_org`, the onboarding sub-org, the new-org checkout webhook)
+    passes none, so it is NULL **exactly where a session member is the one who
+    upgraded** (`hosted_api._billing_owner_email` states this at length), which is
+    precisely the paying, capacity-holding population these two thresholds exist
+    to tell.
+
+    The order is `hosted_api._billing_customer_email`'s, not invented here:
+
+    1. ``organizations.email`` — the account's own recorded contact.
+    2. ``organizations.customer_email`` — the Stripe mirror's billing contact
+       (0012). Already on the row this pass read, so it costs ZERO round trips;
+       this rung is what closes the common session-lane case.
+    3. ``supabase_control.owner_email`` — the ACTIVE OWNER's GoTrue address
+       (``#1765``'s promoted property, the rung `_billing_owner_email` calls).
+       Two network calls, so it is reached ONLY for an account whose notice is
+       already known to be due — at most ``max_sends`` times per pass.
+
+    ⛔ RESIDUAL, STATED RATHER THAN IMPLIED: an account with none of the three
+    (a registry/agent-minted org carries no address at all) still answers
+    ``no-email`` and is still not mailed — the copy greets a PERSON, so there is
+    nobody to greet. What changed is that the RUNG ORDER now lets the notice reach
+    the account that HAS an address anywhere on these surfaces, instead of only the
+    ones whose row happens to carry the one column this module used to read.
+    """
+    for candidate in (account.email, account.customer_email):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+    resolved = _owner_email(account.org_id, cp)
+    return resolved.strip() if resolved and resolved.strip() else None
 
 
 async def notify_account(org_id: str, *, cp=None, account: Account | None = None,
@@ -805,7 +876,12 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     Resend path, budget-guarded and idempotency-keyed. Tests pass a fake.
 
     Returns ``{"status": …}`` with one of: ``sent``, ``already-notified``,
-    ``no-email``, ``deleted-org``, ``suspended-org``, ``notice-mark-unavailable``
+    ``no-email`` (a notice was DUE and the whole recipient chain —
+    `organizations.email`, then `customer_email`, then the owner's GoTrue address;
+    see `_notice_recipient` — resolved nothing, so it RANKS BELOW the gauge
+    checks: an account that is also unarmed or below threshold reports that
+    reason instead, because it is the more actionable of two true statements),
+    ``deleted-org``, ``suspended-org``, ``notice-mark-unavailable``
     (the account ROW could not be read — the ledger column has not been migrated,
     a base column is missing, or the read failed TRANSIENTLY, which `read_account`
     refuses to treat as schema drift; the log line carries the exception TYPE and
@@ -870,10 +946,6 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         # The notice offers a capacity purchase; offering it to an account that
         # cannot use the capacity is noise at best, and the stamp is once-ever.
         return {"status": "suspended-org", "org_id": org_id}
-    if not account.email:
-        # A registry/agent-minted org carries no address; the copy greets a
-        # PERSON, so there is nobody to greet.
-        return {"status": "no-email", "org_id": org_id}
     if account.notice_pct is not None and account.notice_pct >= max(THRESHOLDS):
         # The high-water mark is already at the TOP threshold: no threshold can
         # be left to send, so skip the fleet's most expensive step (two sync
@@ -904,8 +976,26 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         return {"status": "already-notified", "org_id": org_id,
                 "threshold": notice.threshold,
                 "notified": account.notice_pct}
+    # ⛔ THE RECIPIENT IS RESOLVED HERE, NOT IN `read_account` (#14038 review, P1).
+    # Above this point the account has not been shown to owe a notice, so paying
+    # for the chain's third rung (two network calls per account) on the whole
+    # fleet every interval would buy nothing. Below it, the notice is due and the
+    # remaining question is only where to send it. `no-email` therefore RANKS
+    # BELOW the gauge checks now — an account with no address reports
+    # ``no-allowance``/``below-threshold``/``no-reading`` when that is also true,
+    # which is the more actionable of two true statements about it.
+    recipient = await asyncio.to_thread(_notice_recipient, account, cp)
+    if not recipient:
+        # A registry/agent-minted org carries no address on any rung; the copy
+        # greets a PERSON, so there is nobody to greet.
+        logger.info(
+            "capacity notice: team %s owes the %s%% notice but resolves no "
+            "address (organizations.email, organizations.customer_email and the "
+            "owner's GoTrue email are all empty) — nothing is sent for it",
+            org_id, notice.threshold)
+        return {"status": "no-email", "org_id": org_id}
     copy = render(notice.threshold,
-                  email_notify.recipient_first_name(None, account.email,
+                  email_notify.recipient_first_name(None, recipient,
                                                    account.name))
     # Re-read the mark ONCE more immediately before the send (#14038 review, P2):
     # another process may have stamped while this one was reading the gauge, and
@@ -944,7 +1034,7 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     if sender is None:
         async def sender(c: Copy) -> dict:
             return await email_notify.send_notice_email(
-                account.email, c.subject, c.html, c.text,
+                recipient, c.subject, c.html, c.text,
                 idempotency_key=f"capacity-notice:{org_id}:{notice.threshold}",
                 label=f"capacity notice {notice.threshold}%")
     result = await sender(copy)

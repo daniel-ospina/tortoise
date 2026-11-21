@@ -2779,3 +2779,167 @@ def test_no_artifact_quotes_the_config_reference_for_what_it_does_not_say():
         "this file repeats that fabricated quotation")
     assert "cannot be used for Machines with attached volumes" in module_src, (
         "the measured replacement wording must be what the docstring carries")
+
+
+# ── 15. WHO gets mailed: the recipient chain (#14038 review, P1) ────────────
+#
+# ⛔ WHY THIS SECTION EXISTS. The first cut resolved the recipient from
+# `organizations.email` and stopped. That column is populated ONLY by the lanes
+# that pass `p_email` to `provision_team` (`/v1/register`, the Edge Function) —
+# every SESSION-lane create passes none — so it is NULL exactly where a session
+# member is the one who upgraded (`hosted_api._billing_owner_email` states this),
+# and the notice was silently swallowed for the paying, capacity-holding
+# population these two thresholds exist to tell. Reported as a plain `no-email`
+# status, so nothing surfaced it as a fault. The rows below pin the chain, the
+# rung ORDER, and the cost guard that keeps the third rung off the whole fleet.
+
+
+def _account(**overrides) -> cn.Account:
+    # ⛔ NO `row.update(overrides)` HERE: `update` is one of the ordinary-word
+    # receivers the #13899 sweep counts as untyped residue, so a dict mutation in
+    # a test helper would move `SWEEP_RESIDUE` for a reason that has nothing to do
+    # with the SDK surface. A dict merge has no attribute access at all.
+    fields = {"org_id": ORG_ID, "email": "dana@acme.example", "name": "Acme",
+              "notice_pct": None} | overrides
+    return cn.Account(**fields)
+
+
+def test_the_recipient_chain_prefers_the_account_own_address():
+    """Rung 1: the address the account itself recorded wins."""
+    with patch("tortoise.supabase_control.owner_email",
+               side_effect=AssertionError("rung 3 must not be paid for")):
+        got = cn._notice_recipient(
+            _account(email="dana@acme.example",
+                     customer_email="billing@acme.example"), object())
+    assert got == "dana@acme.example"
+
+
+def test_the_recipient_chain_falls_to_the_stripe_billing_contact():
+    """Rung 2: a session-lane org — `email` NULL, the 0012 twin set.
+
+    This is the row that would have been a silent `no-email` before the fix, and
+    it is the COMMON shape for the population: the account upgraded, the Stripe
+    webhook mirrored `customer_email`, and no lane ever passed `p_email` at
+    create. Rung 2 costs zero round trips because it is a column of the same
+    `organizations` row `read_account` already read.
+    """
+    with patch("tortoise.supabase_control.owner_email",
+               side_effect=AssertionError("rung 3 must not be paid for")):
+        got = cn._notice_recipient(
+            _account(email=None, customer_email="billing@acme.example"),
+            object())
+    assert got == "billing@acme.example"
+
+
+def test_the_recipient_chain_falls_to_the_owner_go_true_address():
+    """Rung 3: neither column answers, the ACTIVE OWNER's GoTrue address does."""
+    with patch("tortoise.supabase_control.owner_email",
+               lambda cp, org_id: "owner@acme.example"):
+        got = cn._notice_recipient(
+            _account(email=None, customer_email=None), object())
+    assert got == "owner@acme.example"
+
+
+def test_the_recipient_chain_survives_a_raising_owner_lookup():
+    """⛔ Fail-soft on the RUNG, never on the account.
+
+    `supabase_control.owner_email` swallows the GoTrue admin transport error but
+    its `owner_user_id` control-plane read sits OUTSIDE that guard
+    (`hosted_api._billing_owner_email` says so and catches for the same reason),
+    so an exception here must degrade the rung to None rather than let a broken
+    admin lookup cost the account the one notice it can ever get.
+    """
+    with patch("tortoise.supabase_control.owner_email",
+               side_effect=RuntimeError("control-plane read escaped")):
+        got = cn._notice_recipient(
+            _account(email=None, customer_email=None), object())
+    assert got is None
+
+
+def test_a_blank_column_is_not_an_address():
+    """Whitespace is not an address, and it must fall THROUGH, not be mailed."""
+    with patch("tortoise.supabase_control.owner_email",
+               lambda cp, org_id: "   "):
+        got = cn._notice_recipient(
+            _account(email="   ", customer_email=""), object())
+    assert got is None
+
+
+def test_a_session_lane_account_without_the_column_address_is_still_notified():
+    """END TO END: the notice reaches the account the fix exists for.
+
+    Patches the ONE real send path, so the assertion is about the address the
+    mailer would actually have been handed — not about an injected `send`, which
+    never sees the recipient.
+    """
+    cp = _fake_cp(email=None, customer_email="billing@acme.example")
+    seen: list[str] = []
+
+    async def _fake_send(address, subject, html, text, **_kwargs):
+        seen.append(address)
+        return {"status": "sent", "message_id": "msg_rung2"}
+
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)), \
+         patch("tortoise.email_notify.send_notice_email", _fake_send):
+        out = _pass(cp=cp, enumerate_orgs=lambda limit=None: [
+            _org_row(email=None, customer_email="billing@acme.example")])
+    assert out["statuses"]["sent"] == 1
+    assert seen == ["billing@acme.example"]
+    assert cp.tables["organizations"][0]["storage_notice_pct"] == 80
+
+
+def test_an_account_with_no_address_on_any_rung_is_reported_by_name():
+    """The residual, pinned: nothing mailed, and the status says `no-email`."""
+    cp = _fake_cp(email=None, customer_email=None)
+    send = _Sender()
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)), \
+         patch("tortoise.supabase_control.owner_email",
+               lambda cp, org_id: None):
+        out = _pass(cp=cp, send=send, enumerate_orgs=lambda limit=None: [
+            _org_row(email=None, customer_email=None)])
+    assert out["statuses"]["no-email"] == 1 and send.calls == []
+    assert cp.tables["organizations"][0]["storage_notice_pct"] is None
+
+
+def test_the_owner_rung_is_not_consulted_when_the_notice_is_not_due():
+    """⛔ THE COST GUARD, which is why the resolution moved below `evaluate`.
+
+    Rung 3 is two network calls per account (a membership read plus a GoTrue
+    admin GET). Resolving it in `read_account` would pay that on the WHOLE fleet
+    every interval to answer a question most accounts never ask. Here the gauge
+    says the account is below both thresholds, so the chain must not be entered
+    at all — asserted by making the rung itself raise.
+    """
+    cp = _fake_cp(email=None, customer_email=None)
+    send = _Sender()
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(10.0)), \
+         patch("tortoise.supabase_control.owner_email",
+               side_effect=AssertionError("owner rung entered for a cheap exit")):
+        out = _pass(cp=cp, send=send, enumerate_orgs=lambda limit=None: [
+            _org_row(email=None, customer_email=None)])
+    assert out["statuses"]["below-threshold"] == 1 and send.calls == []
+
+
+def test_a_schema_without_the_billing_contact_column_still_notifies():
+    """`customer_email` is 0012 — DEGRADE the rung, never the pass (#1096).
+
+    A schema older than the billing tier rejects the projection; `read_account`
+    retries without its drift-soft columns, so the address falls to rung 1 and
+    the account is still notified. Refusing the pass over a FALLBACK column's
+    absence would be the same defect in the other direction.
+    """
+    cp = _ColumnBlindCP(missing="customer_email")
+    send = _Sender()
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)):
+        out = _pass(cp=cp, send=send, enumerate_orgs=lambda limit=None: [_org_row()])
+    assert out["statuses"]["sent"] == 1
+    assert any("customer_email" not in select for select in cp.calls), (
+        "the retry must actually drop the rejected column")
