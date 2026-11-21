@@ -185,11 +185,12 @@ absent from this list, so the rule above was sending a reader to the pin, where 
 unrelated `params={"eid": _eid, "oid": _oid},` statement (`main`'s `:22919` is a different line of the same door):
 `sdk.py:22267` (the capture writer) with its read-back `:22390`, and `hosted_api.py:23503` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:23315` — ⚠️ **the `hosted_api.py`
-pair is re-derived for THIS edition at `72c104bcbb`** (the two were at 23082 / 22894 when the `#13394`
-sweep wrote them, and a `+421`-line growth of the file between that head and this one moved both — the
-same `+421` moves row 15's `MERGE (p:PackInstall …)` below by the same amount, which is one insert above
-all three sites and not three coincidences (`23503−23082 = 23315−22894 = 421`); nothing
-but the file's length changed, so the row's verdict, mechanism and quoted fragments are untouched); and §2.5's `:Tag`
+pair is re-derived for THIS edition at `72c104bcbb`** (the two were at 23082 / 22894 at the head the
+`#14022`-rot repair `#14059` wrote them on — ⚠️ **not** the `#13394` sweep's head, where this same pair
+reads `:22919`/`:22731`, as row 13's note below records; a `+421`-line growth of the file between that
+head and this one moved both, the same `+421` that moves row 15's `MERGE (p:PackInstall …)` below — one
+insert above all three sites, not three coincidences (`23503−23082 = 23315−22894 = 421`) — and nothing but
+the file's length changed, so the row's verdict, mechanism and quoted fragments are untouched); and §2.5's `:Tag`
 paragraph, whose **five** reader addresses the `#13879` review re-derived from that row's own quoted
 fragments — the group this list carried only as the number it then gave for the `mcp_server.py`
 member — `sdk.py`: `:31551`
