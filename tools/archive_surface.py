@@ -1082,23 +1082,6 @@ def _modules_with_a_body(paths, read) -> set[str]:
     return out
 
 
-def _path_carries_a_module_body(root: Path, path: str | None) -> bool:
-    """Does the module file at `path` carry a BODY? (`path=None` means the module is not here)
-
-    A set of dotted names is a set of PATHS, and arm 1b exists because a path is not a body —
-    the file can survive with its statements gone. So any diagnostic that says "this tree still
-    carries it" must ask the FILE, not the set: the set answered `True` for a module whose body
-    had been truncated to nothing, and the waiver line then told an operator that nothing was
-    removed about the removal the same run had just demanded a record for (review P2 of PR
-    #14039). Unreadable counts as CONTENT — the same fail-closed answer `_modules_with_a_body`
-    gives, so the diagnostic and the arm can never disagree.
-    """
-    if path is None:
-        return False
-    text = _file_text(root, path)
-    return text is None or _init_carries_a_body(text)
-
-
 def _head_carries_runtime_body(
     root: Path,
     symbol: str,
@@ -1107,18 +1090,20 @@ def _head_carries_runtime_body(
 ) -> bool:
     """Does the HEAD side still carry the module's RUNTIME body? — one answer, two callers.
 
-    ⛔ `_path_carries_a_module_body` answers a DIFFERENT question and must not be substituted for
-    this one. That helper counts a `.pyi` STUB as a body (it is an AST question, and a stub IS
+    ⛔ There is ONE predicate here on purpose: a second, body-only copy of this question ("the
+    file exists and parses") answers a DIFFERENT thing, and the difference is not cosmetic. A
+    body-only test counts a `.pyi` STUB as a body (it is an AST question, and a stub IS
     statements) and counts an UNREADABLE file as content (the safe reading on the BASE side,
     where a shallow clone explains the absence). Arm 1b grades BOTH of those as REMOVED on the
     HEAD side — a stub holds no runtime statements, and a file that exists but cannot be read is
-    positive evidence about THIS tree.
+    positive evidence about THIS tree. A second copy of the test is exactly how the unused-waiver
+    diagnostic came to print "this tree still carries it, so nothing was removed" about the very
+    removal the same run had just graded and credited (review P2 of PR #14039) — a correct
+    verdict beside a false stated fact, the class this file keeps having to remove.
 
-    Using the wrong one made the unused-waiver diagnostic print "this tree still carries it, so
-    nothing was removed" about the very removal the same run had just graded and credited (review
-    P2 of PR #14039) — a correct verdict beside a false stated fact, the class this file keeps
-    having to remove. Arm 1b is this helper's other caller, so the two can no longer disagree
-    about the same file by construction.
+    ⛔ Unreadable counts as CONTENT on the BASE side and as REMOVED on the HEAD side; that is why
+    this helper takes both maps and decides the `stubbed` clause itself. Arm 1b is its other
+    caller, so the two can no longer disagree about the same file by construction.
     """
 
     head_carrier = head_paths_by_module.get(symbol)
@@ -1543,9 +1528,10 @@ def shrink_violations(
             # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
             # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
             # head carrier at all, so it is `base - head` that lands in this arm while the row's
-            # existence silences it. `_froze_only_stubs` reads the row's own `blocks[].path`
-            # (the archived file is always `.py` — see its docstring for the measured false
-            # PASS that made the suffix-keyed first cut dead code).
+            # existence silences it. `_row_froze_a_stub` reads the SOURCE the row recorded —
+            # `archived_from`, never the archived file's suffix (the archived file is always
+            # `.py`; see its docstring for the measured false PASS that made the suffix-keyed
+            # first cut dead code).
             if runtime_carrier is not None and _row_froze_a_stub(working[key]):
                 out.append(
                     _record_froze_a_stub(
@@ -1607,10 +1593,10 @@ def shrink_violations(
         #
         # ⛔ THE DECISION IS `_head_carries_runtime_body`, not a second copy of this test: the
         # unused-waiver diagnostic below asks the same question, and when it carried its own copy
-        # it answered with `_path_carries_a_module_body` — which counts a stub and an unreadable
-        # file as bodies — so one run printed "the body was removed" here and "this tree still
-        # carries it" there (review P2 of PR #14039). The helper answers `stubbed` itself, which
-        # is why there is no `if not stubbed:` wrapper any more.
+        # it answered with a body-only test — which counts a stub and an unreadable file as
+        # bodies — so one run printed "the body was removed" here and "this tree still carries
+        # it" there (review P2 of PR #14039). The helper answers `stubbed` itself, which is why
+        # there is no `if not stubbed:` wrapper any more.
         if _head_carries_runtime_body(
             root, module, head_paths_by_module, base_paths_by_module
         ):
@@ -2530,7 +2516,20 @@ def main(argv: list[str] | None = None) -> int:
             # exit 2 (a defect in the invocation), never exit 1 — an unwaivable invocation is
             # not a finding about the tree, and reading it as one would send the operator
             # looking for a removal that does not exist.
-            if bool(args.allow_archive_shrink) != bool(args.allow_archive_shrink_reason):
+            # `.strip()` BEFORE the pairing test, the same normalisation `cmd_cut` applies to
+            # `--allow-removal-reason` and the surface tool applies to its own reason: `""` and
+            # `"   "` are not STATED reasons. Raw truthiness accepted both (measured: a whitespace
+            # reason satisfied the pairing test beside a real waiver), so an unexplained removal
+            # could be waived by pressing space. Normalised in place so the green line echoes the
+            # string that was graded. `reason_given` keeps a blank-but-PRESENT flag distinct from
+            # no flag at all, the same distinction the surface tool makes.
+            reason_given = args.allow_archive_shrink_reason is not None
+            args.allow_archive_shrink_reason = (
+                args.allow_archive_shrink_reason or ""
+            ).strip() or None
+            if bool(args.allow_archive_shrink) != bool(args.allow_archive_shrink_reason) or (
+                reason_given and not args.allow_archive_shrink
+            ):
                 print(
                     "REFUSED --allow-archive-shrink and --allow-archive-shrink-reason go "
                     "together: an override with no stated reason is not a record, and a "
