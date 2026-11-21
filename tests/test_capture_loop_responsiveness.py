@@ -2865,10 +2865,9 @@ def _is_a_pre_existing_offload(cypher: str) -> bool:
     neither ``_CAPTURE_TAIL_STATEMENTS`` (the prohibition set) nor
     ``_TAIL_MUST_BE_ISSUED`` (the presence set) — they are the statements the
     NEEDLE loop is told to EXEMPT, and no NEEDLE catches an on-loop copy of them
-    (they match zero of the six). ⛔ The session-alive arm is a different matter:
-    the probe CONTAINS ``_SESSION_ALIVE``, and that arm never consults this
-    exemption (`if any(_SESSION_ALIVE in c for c in on_loop)`), so an on-loop
-    copy IS caught — by that arm, not by a needle (see the paragraph below).
+    (they match zero of the six). The arm that DOES catch one is the
+    prohibition's ``session-alive`` leg — the probe CONTAINS ``_SESSION_ALIVE``
+    and that leg consults no exemption (see the paragraph below).
 
     ⛔ WHAT THIS EXEMPTION CAN AND CANNOT DO, measured rather than assumed
     (#14086 review, P2). An on-loop copy of the probe is still CAUGHT — by the
@@ -3310,16 +3309,24 @@ def test_a_failed_receipt_probe_dispatch_never_500s_a_committed_capture(
         "a capture whose probe could not be DISPATCHED 500'd — the arm is not "
         f"fail-open: {resp.text[:300]}")
     warnings = resp.json().get("warnings") or []
-    dispatch_warnings = [w for w in warnings if "could not be dispatched" in w]
+    # ⛔ THE WARNING NAMES WHAT IS KNOWN, NOT MORE (#14086 review, round 3 P3):
+    # `_run_off_loop_fail_open` has ONE `except`, so it cannot tell a failed
+    # dispatch from a leg that ran and raised — the messages say "did not
+    # complete (dispatch failed or … raised)" for exactly that reason, and this
+    # row matches THAT contract rather than the old "could not be dispatched".
+    dispatch_incomplete = [
+        w for w in warnings
+        if "receipt probe did not complete" in w
+        or "receipt re-check did not complete" in w]
     # ⛔ TWO sites, and each says so: the pre-check and the post-write re-check
     # are separate fail-open arms (the same reason the tail test counts the
     # `_SESSION_ALIVE` statement instead of merely finding it). Asserting the
     # COUNT is what makes this row discriminating per site — a revert of either
     # one leaves a single warning and reds this assertion.
-    assert len(dispatch_warnings) == 2, (
-        "the receipt's two probe arms must EACH report a failed dispatch, so "
-        "neither can be reverted to a bare `await _run_off_loop(...)` silently "
-        f"(saw {len(dispatch_warnings)}: {dispatch_warnings})")
+    assert len(dispatch_incomplete) == 2, (
+        "the receipt's two probe arms must EACH report an incomplete dispatch, "
+        "so neither can be reverted to a bare `await _run_off_loop(...)` "
+        f"silently (saw {len(dispatch_incomplete)}: {dispatch_incomplete})")
 
 
 def test_a_failed_EP_pass_dispatch_never_500s_a_committed_capture(
@@ -3364,7 +3371,7 @@ def test_a_failed_EP_pass_dispatch_never_500s_a_committed_capture(
     assert resp.status_code == 200, (
         "a committed capture 500'd because its EP pass could not be DISPATCHED "
         f"— the arm is not fail-open: {resp.text[:300]}")
-    assert any("EP pass could not be dispatched" in w
+    assert any("EP pass did not complete" in w
                for w in (resp.json().get("warnings") or [])), (
         resp.json().get("warnings"))
 
@@ -3575,6 +3582,88 @@ def test_the_capture_completion_gate_reads_the_org_DEFAULT_graph_not_the_capture
         f"{[id(g) for g in disclosed_handles]} vs default {id(stub.proj)}")
 
 
+def test_a_graph_bound_capture_skips_the_org_level_checkpoint_entirely(
+        client, monkeypatch):
+    """⛔ A PER-GRAPH KEY MUST NOT RUN AN ORG-LEVEL SURFACE (#14086 review, round 3 P2).
+
+    `capture-disclosed` and the completion gate are ORG-LEVEL: their sibling
+    checkpoint route REFUSES a graph-bound key outright
+    (``_reject_graph_bound_org_surface(org, "onboarding checkpoint")`` — *"a
+    graph-bound key writing it would be a cross-graph write"*). The capture route
+    cannot refuse (it must keep capturing data), so it must not perform the
+    org-level side effect either. Handed the org DEFAULT graph, a per-graph key
+    would mint — and the gate could COMPLETE — the org's onboarding: exactly the
+    cross-graph leak that guard exists to prevent, on behalf of a credential
+    scoped to one graph.
+
+    The fixtures' credential is org-wide, so every other row in this file runs the
+    block; this one overrides the org with a CUSTOM `graph_id` and asserts the
+    block is never entered.
+
+    Mutation check (must stay true): dropping the `org.get("graph_id")` guard ->
+    `_org_sdk` is asked for the org's DEFAULT graph on a graph-bound capture and
+    the `capture-disclosed` step is written — both assertions below red.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app, get_current_org
+
+    org_sdk_calls: list[str] = []
+    real_org_sdk = ha_mod._org_sdk
+
+    def _recording_org_sdk(org_id, **kwargs):
+        if org_id == TEST_ORG_ID:
+            org_sdk_calls.append(org_id)
+        return real_org_sdk(org_id, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_org_sdk", _recording_org_sdk)
+
+    steps_written: list[str] = []
+    real_write_step = ha_mod._os.write_completed_step
+
+    def _recording_write_step(graph, org_id, step_id, **kwargs):
+        steps_written.append(step_id)
+        return real_write_step(graph, org_id, step_id, **kwargs)
+
+    monkeypatch.setattr(ha_mod._os, "write_completed_step",
+                        _recording_write_step)
+
+    previous = app.dependency_overrides.get(get_current_org)
+    app.dependency_overrides[get_current_org] = lambda: dict(
+        TEST_TEAM, graph_id="gid_custom_14086",
+        graph_namespace="org_team-001_gid_custom_14086")
+    # The graph-ownership probe requires a `Graph` row for the key's graph (403
+    # GRAPH_NOT_FOUND otherwise), so the capture itself must be able to succeed —
+    # otherwise this row never reaches the checkpoint block it is about.
+    ha_mod._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:$gid, kind:'custom', "
+        "namespace:$ns, status:'active'})",
+        params={"gid": "gid_custom_14086", "tid": TEST_ORG_ID,
+                "ns": "org_team-001_gid_custom_14086"})
+    try:
+        resp, _records, _writer = _measure_capture_graph_work(
+            monkeypatch, 2, "graph-bound-skips-org-surface-14086")
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_current_org] = previous
+        else:
+            app.dependency_overrides.pop(get_current_org, None)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (graph-bound run)")
+    assert resp.status_code == 200, resp.text[:300]
+    assert org_sdk_calls == [], (
+        "a GRAPH-BOUND capture resolved the org's DEFAULT-graph SDK — that is the "
+        "cross-graph write `_reject_graph_bound_org_surface` refuses for every "
+        "sibling org-level surface (#14086 review, round 3 P2)")
+    assert "capture-disclosed" not in steps_written, (
+        "a GRAPH-BOUND capture wrote the org-level `capture-disclosed` step — and "
+        f"with it could complete the org's onboarding; steps: {steps_written!r}")
+    assert resp.json().get("first_capture") is False, (
+        "a GRAPH-BOUND capture reported `first_capture` — an org-level funnel fact "
+        "cannot be derived per graph; got "
+        f"{resp.json().get('first_capture')!r}")
+
+
 def test_the_pre_existing_offload_exemption_is_actually_consumed():
     """The declaration's consumer is real; nothing pins its USE in the verdict.
 
@@ -3585,10 +3674,11 @@ def test_the_pre_existing_offload_exemption_is_actually_consumed():
     (``if not _is_a_pre_existing_offload(c)``) — and that is the one arm which
     cannot reach these statements: the probe matches ZERO of the six
     ``_CAPTURE_TAIL_STATEMENTS``, so the needle-matched prohibition could never
-    have accused the leg that was already off the loop (#14086 review, P2).
-    ⛔ It emits NO tail needle (its statement READS ``s.capture_ok AS ok``; it
-    never ``SET``s one), so today the exemption changes no verdict — it is a
-    declared record with a caller.
+    have accused the leg that was already off the loop (#14086 review, P2). What
+    the exemption buys is a FUTURE needle collision not re-flagging a #4625 leg.
+    ⛔ It emits NO tail needle (its statement READS
+    ``s.capture_ok AS ok``; it never ``SET``s one), so today the exemption changes
+    no verdict — it is a declared record with a caller.
 
     ⛔ WHAT IS PINNED HERE IS THE HELPER, NOT ITS USE IN THE VERDICT (#14086
     review, P3). No row drives an exempt statement through an offenders list, so
