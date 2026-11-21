@@ -3885,12 +3885,23 @@ def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() 
     renders BEFORE it, i.e. inside the section, while the slice excludes it and
     every storage pin stays green.
 
-    Measured on this box's Chrome against the mutant built below: the claim painted
-    at `y=4648`, `#storage` at 3433 and `#quickstart` at 4762, with the nearest
-    preceding heading `storage-what-you-can-do` (inside the section), and
-    `body.innerText` containing the claim. The allowlist was `[]`, the destinations
-    `['mailto:hello@premiselabs.co']`, the vocabulary `[]` and the golden equal to
-    the fixture — all three pins green over a claim a reader meets in the section.
+    ⛔ WHICH ROUTES ACTUALLY INVERT THE TREE — measured, because the earlier
+    version of this docstring asserted the inversion for a mutant that does not
+    produce it. Chrome on this box, `--headless=new --dump-dom`, on the mutants
+    built below (rect tops; `#storage` at 3601 throughout):
+
+      heading in a `<td>`, claim in "in table" mode
+        (`<li><table><tr><td>{h}</td></tr>{c}</table>`)   claim 4924 < `#quickstart` 5011  → IN the section
+      the same under an `<svg><table>` breakout            claim 5082 < `#quickstart` 5169  → IN the section
+      `<li><table><li>{h}<tr><td>{c}`                     claim 5002 > `#quickstart` 4944  → NOT in the section
+
+    So only the CELL routes move the claim across the bound. Where the heading
+    itself is foster-parented out (the `<li>`/`</div>` rows) the browser puts the
+    heading before the table and the claim inside it, i.e. on the FAR side of the
+    bound — no inversion. Those rows are still pinned, because the rule this guard
+    enforces is the one the model can actually settle (`an open table above the
+    bounding heading cannot bound`), and refusing there is the loud direction; the
+    closed-table control at the end of this test is what bounds that over-refusal.
 
     ⛔ BOTH DIRECTIONS, as everywhere in this module. A table OPEN across the bound
     must refuse (the slice runs long, the loud direction), and a table that opens
@@ -3915,40 +3926,70 @@ def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() 
     # keeps it open, and an open table is exactly the precondition for foster
     # parenting back across the bound. Checking the stack alone left all four
     # bypassable, so `_unmet_by_reader` also consults `_table_open_unmatched`.
+    # ⛔ EACH ROUTE PLACES THE CLAIM ITSELF (`{c}`), because WHERE the claim sits
+    # relative to the heading is the difference between a route that reproduces the
+    # inversion a browser really performs and one that only exercises the rule.
     routes = {
+        # ⛔ THE MEASURED INVERSION (Chrome, on this box — see the docstring): the
+        # heading stays INSIDE a cell, so it is not foster-parented, while the claim
+        # after the cell is in "in table" mode and IS foster-parented immediately
+        # BEFORE the table — above the heading, inside `#storage`, opposite to
+        # source order. Without these three rows this test would assert an inversion
+        # no row performs.
+        # The shape is the one `_html_links._unboundable`'s own docstring cites as
+        # the measured hazard (`<table><tr><td><h2 id="quickstart">…</td></tr>CLAIM
+        # </table>`), so the rule and the mutant now describe the same document.
+        "cell holds the heading, claim foster-parented out": (
+            "<li><table><tr><td>{h}</td></tr>{c}</table>"
+        ),
+        "cell holds the heading under an `<svg><table>` breakout": (
+            "<li><svg><table><tr><td>{h}</td></tr>{c}</table>"
+        ),
+        "cell holds the heading under a `<math><table>` breakout": (
+            "<div><math><table><tr><td>{h}</td></tr>{c}</table>"
+        ),
         # the `<li>` start-tag loop STOPS at the first SPECIAL element, `table`
-        "<li> stops at a special element": "<li><table><li>{h}",
+        "<li> stops at a special element": "<li><table><li>{h}<tr><td>{c}</td></tr></table>",
         # the button rule is gated on "in scope", and `table` is a scope element
-        "<button> gated on table being in scope": "<button><table><button>{h}",
+        "<button> gated on table being in scope": (
+            "<button><table><button>{h}<tr><td>{c}</td></tr></table>"
+        ),
         # AAA removes only the formatting node, never the table above it
-        "<a> adoption agency keeps the table": "<a><table><a>{h}",
+        "<a> adoption agency keeps the table": (
+            "<a><table><a>{h}<tr><td>{c}</td></tr></table>"
+        ),
         # a browser IGNORES an end tag whose element is not in scope; `div` is not
-        "</div> is ignored while a table is open": "<div><table></div>{h}",
+        "</div> is ignored while a table is open": (
+            "<div><table></div>{h}<tr><td>{c}</td></tr></table>"
+        ),
         # ⛔ AND THE SHAPES THAT BEAT A PREVIOUS REVISION OF THIS GUARD. `table` is
         # a BREAKOUT tag, so `<svg><table>` opens a real HTML table — a flag read
         # before `_open` (which clears `_foreign`) missed it.
-        "<svg><table> breaks out to a real table": "<li><svg><table><li>{h}",
-        "<svg><table> under a scope-blocked end tag": "<div><svg><table></div>{h}",
-        "<math><table> breaks out to a real table": "<div><math><table></div>{h}",
+        "<svg><table> breaks out to a real table": (
+            "<li><svg><table><li>{h}<tr><td>{c}</td></tr></table>"
+        ),
+        "<svg><table> under a scope-blocked end tag": (
+            "<div><svg><table></div>{h}<tr><td>{c}</td></tr></table>"
+        ),
+        "<math><table> breaks out to a real table": (
+            "<div><math><table></div>{h}<tr><td>{c}</td></tr></table>"
+        ),
         # …and a boolean flag was cleared by a NESTED table's own `</table>` while
         # the outer table stayed open, which is why the flag is now a depth.
         "a nested `</table>` must not close the outer": (
-            "<li><table><tr><td><table></table><li>{h}"
+            "<li><table><tr><td><table></table><li>{h}<tr><td>{c}</td></tr></table>"
         ),
         "a nested `</table>` under a scope-blocked end tag": (
-            "<div><table><tr><td><table></table></div>{h}"
+            "<div><table><tr><td><table></table></div>{h}<tr><td>{c}</td></tr></table>"
         ),
         "a nested `</table>` with AAA keeping the outer": (
-            "<a><table><tr><td><table></table><a>{h}"
+            "<a><table><tr><td><table></table><a>{h}<tr><td>{c}</td></tr></table>"
         ),
     }
     for why, template in routes.items():
         mutant = (
             page[: heading.start()]
-            + template.format(h=heading.group(0))
-            + "<tr><td>"
-            + claim
-            + "</td></tr></table>"
+            + template.format(h=heading.group(0), c=claim)
             + page[heading.end() :]
         )
         # Without the inversion this mutant proves nothing, so assert it first.
@@ -3959,10 +4000,11 @@ def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() 
         section = _docs_section(page=mutant)
         assert "permanently deleted" in section, (
             "the section bound cut the source at a heading a browser may "
-            "foster-parent content across. The claim sits AFTER that heading in "
-            "the source and is therefore outside the slice, while a browser inserts "
-            "it BEFORE the table — inside `#storage` — so the wording, vocabulary "
-            "and destination pins all read a section the reader does not see. "
+            "foster-parent content across: the claim sits AFTER that heading in "
+            "the source, so the slice excludes it, while the open table means a "
+            "browser may render it on the other side of the bound — inside "
+            "`#storage` — where the wording, vocabulary and destination pins would "
+            "all read a section the reader does not see. "
             f"Route: {why}, which removes the `<table>` from the parser's stack "
             "while the browser keeps it open. A heading with a table open above it "
             "must not bound (`_unmet_by_reader`), which keeps the slice long and "
