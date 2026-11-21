@@ -1511,3 +1511,80 @@ def test_coverage_for_miss_reports_the_smallest_covering_grid_point():
     assert coverage_for_miss(curve, -0.01) is None
     full = coverage_for_miss(curve, 1.0)
     assert full is not None and full > 0.0, "everything misses nothing only at F=1"
+
+
+# ── the pins that guard the PROSE claims a cell pin cannot reach ──────────────
+
+def test_the_object_doubling_range_excludes_the_first_doubling_it_names():
+    """The `10.4 – 12.0 pp per doubling` range is scoped to AFTER the first step.
+
+    ⛔ This pins the CLAIM, not the datum. §3's table pin already holds the `15.5` cell, so
+    reverting §0's scoping to "at every size" left every other pin green (measured: 71/71 on
+    `d5bc1df8`). The claim is mechanically checkable — the artifact holds the first doubling's
+    gain and it lies OUTSIDE the printed range — so a sentence that prints the range without
+    excluding that step is a sentence the artifact refutes.
+    """
+    art = _artifact()
+    first = next(g for g in art["labels"]["object"]["flattening"]["scale_free"]["gains"]
+                 if round(g["from_coverage"], 4) == 0.05 and round(g["to_coverage"], 4) == 0.1)
+    lo, hi = 10.4, 12.0
+    assert not (lo <= first["pp_removed"] <= hi), (
+        "the premise moved: the first doubling no longer sits outside the range, so this pin "
+        f"has lost its subject ({first['pp_removed']} pp vs {lo}–{hi})")
+    for name, text in _m5_documents():
+        # PARAGRAPH scope, not document scope: a scoped sentence elsewhere in the same file must
+        # not license an unscoped one here (measured — a document-wide window kept the pin green
+        # with §0's own scoping reverted).
+        for para in text.split("\n\n"):
+            # Whitespace-flattened: the record wraps at ~100 columns, so "per doubling" and the
+            # scope word both straddle lines. Matching the raw paragraph skipped §0 entirely
+            # (measured), which is how an unscoped sentence stayed invisible.
+            flat = " ".join(para.split())
+            if _num(lo) not in flat or _num(hi) not in flat or "per doubling" not in flat:
+                continue
+            para = flat
+            assert "after the first" in para.lower(), (
+                f"{name}: a paragraph prints the {lo}–{hi} pp per-doubling range without scoping "
+                f"it to after the first doubling, which the artifact puts at {first['pp_removed']} pp "
+                f"— the range is refuted as written: {para.strip()[:200]!r}")
+
+
+# Tables the record publishes that are NOT figure tables, and so are not cell-recomputed:
+# §1 is a table of DEFINITIONS and the Provenance block is metadata. Naming them here is what
+# keeps the census below honest — a table that is neither registered in `_TABLES` nor listed
+# here is unguarded, which is the hole this pin exists to close.
+_NON_FIGURE_TABLES = {
+    "| quantity | definition | what it decides |",
+    "| | |",
+}
+
+
+def test_every_readme_table_is_registered_in_the_cell_pins():
+    """The cell-recompute census is a CENSUS, not a list that only sees itself.
+
+    `_TABLES` names ten tables and every one is recomputed cell by cell — but a table ADDED to
+    the record and not registered here was invisible to every pin (measured on `d5bc1df8`:
+    a new table carrying two real-but-transposed artifact values left 71/71 green, because the
+    `%`/`pp` membership pins accept any figure the artifact holds SOMEWHERE). So the number of
+    published tables is pinned, not just the ones we remembered.
+    """
+    text = README.read_text()
+    lines = text.splitlines()
+    seeds = sorted({ln for prefix, _after, _b in _TABLES.values() for ln in [prefix]})
+    # A table's first line is a header row: it starts with `|` and the NEXT line is the `|---|`
+    # rule. Counting those (not every `|` line) is what makes "a new table" visible.
+    found = []
+    for i, line in enumerate(lines[:-1]):
+        if line.startswith("|") and set(lines[i + 1].replace("|", "").replace(" ", "")) <= {"-", ":"} \
+                and lines[i + 1].startswith("|"):
+            found.append(line)
+    # `_TABLES`' first element is a header PREFIX (enough to find the table), while `found`
+    # holds the whole header row — so the comparison is a prefix match, not equality.
+    missing = [p for p in seeds if not any(h.startswith(p) for h in found)]
+    assert not missing, (
+        f"a table header `_TABLES` names is no longer in the record: {missing}")
+    unregistered = [h for h in found
+                    if not any(h.startswith(p) for p in seeds) and h not in _NON_FIGURE_TABLES]
+    assert not unregistered, (
+        "the record publishes table(s) the cell pins do not recompute — a figure there is "
+        f"membership-only, so a real-but-wrong value passes: {unregistered}")
