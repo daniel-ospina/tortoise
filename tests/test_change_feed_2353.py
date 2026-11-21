@@ -637,8 +637,7 @@ def test_existing_mcp_tool_relays_the_field_without_a_surface_change(
     """
     import inspect
 
-    from tortoise.mcp_server import _transport_mode, tortoise_events_poll, \
-        tortoise_poll_events
+    from tortoise.mcp_server import _transport_mode, tortoise_events_poll, tortoise_poll_events
     from tortoise.sdk import TortoiseSDK
 
     # Both spellings carry the SAME three parameters: the retired name is a forwarder,

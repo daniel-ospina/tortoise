@@ -297,7 +297,7 @@ class TestDeleteKnowledgeKeepsThePreviewProtocol:
         return sdk, calls
 
     def test_the_first_call_deletes_nothing_and_returns_a_token(self, monkeypatch, served):
-        sdk, calls = self._stub_preview(monkeypatch, served)
+        _sdk, calls = self._stub_preview(monkeypatch, served)
         receipt = ms.tortoise_delete_knowledge("nope")
         assert calls == [], (
             "the preview reached the writer — a token-less call must change NOTHING")
@@ -314,7 +314,7 @@ class TestDeleteKnowledgeKeepsThePreviewProtocol:
         assert len(calls) == 1, calls
 
     def test_the_retired_name_forwards_the_same_protocol(self, monkeypatch, served):
-        sdk, calls = self._stub_preview(monkeypatch, served)
+        _sdk, calls = self._stub_preview(monkeypatch, served)
         receipt = ms.tortoise_delete("nope")
         assert calls == [], "`tortoise_delete` must forward the preview, not delete"
         assert receipt["dry_run"] is True and receipt["confirmation"], receipt
