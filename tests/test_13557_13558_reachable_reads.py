@@ -334,6 +334,25 @@ SELECTED = [
     # participle, so an adjective modifier of the subject's own head noun still routes.
     # This is the recall the anchor costs, kept and pinned rather than assumed.
     ("is the deprecated export archived", "ended", "is_copula"),
+    # ── the STATED boundary: a determiner-less second NP ROUTES (round-21 review, P2) ──
+    # Pinned as a ROUTING row on purpose. The `-ed` anchor that refused it also silently
+    # refused every `-ed`-ending head noun, so it was withdrawn; this row is what the
+    # module now does, and the prose on `_COPULA_SUBJECT` states it. A later lane that
+    # closes this class changes these rows deliberately, not by accident.
+    ("is the export customers requested archived", "ended", "is_copula"),
+    # ── …and the class the withdrawn anchor had silently broken (round-21 review, P1) ──
+    # `-ed`-ending HEAD NOUNS and DEGREE WORDS inside the subject all routed at HEAD~1 and
+    # returned `signal is None` after round 20. Both are pinned here so the next widening
+    # reds instead of costing them quietly.
+    ("is the feed archived", "ended", "is_copula"),
+    ("is the seed archived", "ended", "is_copula"),
+    ("is the migration seed archived", "ended", "is_copula"),
+    ("is the deprecated feed archived", "ended", "is_copula"),
+    ("is the most recent export archived", "ended", "is_copula"),
+    ("is the most recent report deprecated", "ended", "is_copula"),
+    ("is our most recent plan retired", "ended", "is_copula"),
+    ("is the data all archived", "ended", "is_copula"),
+    ("is our report all archived", "ended", "is_copula"),
 ]
 
 
@@ -668,15 +687,19 @@ NOT_SELECTED = [
     # The prose claimed "a subject whose tail is a second noun phrase is refused", and
     # the closed determiner list was narrower than that claim: `his|her` and the
     # pre-determiners were absent, and a second NP with NO determiner needed a different
-    # anchor (`-ed` verb immediately before the participle). All five routed to the whole
-    # ended population with `signal=None` before this round. The three long ones report
-    # `is_copula_long_subject` (pinned in NOTICE_ONLY below); the two short ones are
-    # SILENT, which is the stated notice-scope limit.
+    # anchor. All five routed to the whole ended population with `signal=None` before this
+    # round. The three long ones report `is_copula_long_subject` (pinned in NOTICE_ONLY
+    # below); the other two are SILENT, which is the stated notice-scope limit.
+    # ⛔ THE DETERMINER-LESS ROW IS WITHDRAWN FROM THIS LIST (round-21 review, P1,
+    # measured): the `-ed` anchor that refused it also refused every subject whose HEAD
+    # NOUN ends in `ed` (`feed`, `seed`, `need`, `bed`, `shed`) and was SILENT about it, so
+    # the anchor is gone and `is the export customers requested archived` ROUTES — pinned
+    # in `SELECTED` below as the STATED boundary, not left to be discovered. Telling a
+    # bare noun from a bare verb needs a lexicon this detector does not have.
     "is the report his team archived",
     "is the contract every employee signed archived",
     "is the report each manager reviewed archived",
     "is the dashboard all customers use deprecated",
-    "is the export customers requested archived",
     # …the same class on the `which` shape, which is the row the pre-fix detector
     # also served (round-3 review, P1: *"`which claims were retracted by legal`
     # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP

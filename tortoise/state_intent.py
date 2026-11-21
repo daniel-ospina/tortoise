@@ -691,27 +691,42 @@ _COPULA_SUBJECT = (
     #   `is the dashboard all customers use deprecated` <- …or `all`
     #   `is the export customers requested archived`    <- second NP with NO determiner
     #
-    # The list is now complete over the determiners this module already recognises
-    # elsewhere (`his|her` is the sibling list's spelling) and over the pre-determiners,
-    # and the determiner-less case gets its own narrow anchor: an `-ed` word immediately
-    # followed by the ending participle is a FINITE VERB inside the subject followed by
-    # the question's own predicate, which is what a determiner-less reduced relative is.
-    # ⛔ THE RECALL THIS COSTS IS STATED: a subject whose own modifier is an `-ed`
-    # ADJECTIVE immediately before the participle (`is the deprecated export archived`
-    # routes — the adjective is not followed by the participle) is kept, but a two-verb
-    # spelling that reads as a clause is refused, and a short refusal is SILENT (the
-    # notice-scope limit above), which is the price of not serving the whole population.
+    # The list is now COMPLETE OVER ITS OWN TABLE — not over English (round-21 review,
+    # P2): `his|her` (the sibling list's spelling) and the pre-determiners are members, and
+    # the boundary is named so a later reader does not read "refused" as "all of them".
+    # ⛔ THE `-ed` ANCHOR THAT TRIED TO CLOSE THE DETERMINER-LESS CASE IS WITHDRAWN
+    # (round-21 review, P1, measured): "an `-ed` word" is not "a finite verb" — `feed`,
+    # `seed`, `need`, `bed` and `shed` all END in `ed`, so it silently refused a subject
+    # whose HEAD NOUN is one of them (`is the feed archived`, `is the seed archived`,
+    # `is the migration seed archived`, `is the deprecated feed archived`), where HEAD~1
+    # routed. A SILENT refusal of an ordinary state question is the second-worst outcome
+    # this module recognises and it bought exactly one spelling, so it is gone.
+    # ⛔ AND THE WIDENED LIST REFUSED DEGREE WORDS INSIDE THE SUBJECT (round-21 review,
+    # P1, measured — the commonest state question this product gets):
+    # `is the most recent export archived` and `is the data all archived` returned
+    # `signal is None` where HEAD~1 routed. Two POSITION rules fix that — in the position
+    # slot, never in the word-run slot (the wrong placement kills the guard entirely, the
+    # round-19 failure mode):
+    #   (a) a determiner-vocabulary word DIRECTLY PRECEDED BY A DETERMINER is one NP
+    #       (`the most recent`), so it cannot open a second one;
+    #   (b) a determiner-vocabulary word IMMEDIATELY FOLLOWED BY THE PARTICIPLE is a
+    #       POST-NOMINAL quantifier (`the data all archived`), not a second NP.
+    # ⛔ AND THE RESIDUAL THIS GUARD CANNOT CLOSE IS STATED RATHER THAN CALLED CLOSED:
+    # a second NP with NO determiner (`is the export customers requested archived`) and one
+    # opening with an indefinite quantifier this module does not name (`several`, `fewer`,
+    # `other`, `another`, `much`, `enough` — `is the export several teams use deprecated`)
+    # still ROUTE, because telling a bare noun from a bare verb needs a lexicon this
+    # detector does not have.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
     r"where|whereas|after|before|now|what|how|why)(?![-/])\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
-    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of)\b)"
+    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of|"
+    r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
-    r"all|both|half|such|many|most|some|any|no|each|every)(?![-/])\b)"
-    # …and the determiner-less reduced relative: a finite `-ed` verb inside the subject
-    # IMMEDIATELY followed by the ending participle (`customers requested archived`).
-    rf"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){{0,4}}[a-z][a-z0-9'’._/-]*ed\s+(?:{_ENDING_WORDS})\b)"
+    rf"all|both|half|such|many|most|some|any|no|each|every)(?![-/])\b"
+    rf"(?!\s+(?:{_ENDING_WORDS})\b))"
     # ⛔ AND A SUBJECT PRONOUN MAY ONLY **BE** THE SUBJECT (round-18 review, P1,
     # measured — the SAME #14033 defect still open after round 17's two guards, in the
     # same worst direction). Both guards above miss it: a REDUCED RELATIVE whose
