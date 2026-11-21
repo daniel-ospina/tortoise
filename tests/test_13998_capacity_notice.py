@@ -1577,7 +1577,10 @@ _SUBJECT = re.compile(r"idempotency[-\s]?key|provider\s+key", re.IGNORECASE)
 #: is not a guess — a review defeated the previous cut with each of
 #: "covered"/"prevents"/"avoids"/"removes"/"eliminates"/"blocks"/"makes a
 #: replay safe"/"ensures ... the notice is sent at most once", so every one of
-#: them is here and is a case in the discrimination test below.
+#: them is here, verbatim, as a case in the discrimination test below. A review
+#: then found the CODE said all of them were covered while "makes a replay safe"
+#: was not ("replay" was missing from `_SEND_OBJECT`) — so the case is the real
+#: wording now, not a near-miss containing "send".
 _COLLAPSE = re.compile(
     r"collaps|dedup|suppress|prevent|avoid|remov|eliminat|block|cover"
     r"|makes?.{0,24}(?:safe|forgiving)"
@@ -1600,7 +1603,8 @@ _RETENTION_BOUND = re.compile(
 #: send-object-only rule read that sentence as not-a-claim, which is how the
 #: guard stayed blind to the very site it was written for.
 _SEND_OBJECT = re.compile(
-    r"\bemail|\bnotice|\bsend|\bsent|\bdeliver|\bstamp|\baccept|\bduplicate",
+    r"\bemail|\bnotice|\bsend|\bsent|\bdeliver|\bstamp|\baccept|\bduplicate"
+    r"|\breplay",
     re.IGNORECASE)
 #: ...but NOT the session-create idempotency key, which is a different promise
 #: (one row per click) that no provider window governs. Both `hosted_api.py`
@@ -1608,6 +1612,24 @@ _SEND_OBJECT = re.compile(
 #: the discrimination test, asserted NOT to be provider-send claims.
 _NOT_PROVIDER_SEND = re.compile(
     r"session_id|one\s+click|non-episodic|\b402\b", re.IGNORECASE)
+#: The veto above is whole-sentence and would otherwise hide a REAL claim that
+#: happens to mention a session row — a review showed three such sentences
+#: ("prevents the duplicate notice, so a replayed 402 report never sends twice",
+#: "collapses the duplicate email even when one click is retried", "removes the
+#: duplicate send on the non-episodic session path"). So it only applies when no
+#: delivery word is present: the sentence must be about ROWS, not about an email.
+_DELIVERY_WORD = re.compile(
+    r"\bemail|\bnotice|\bsend|\bsent|\bdeliver|\bstamp|\baccept",
+    re.IGNORECASE)
+
+
+def _is_provider_send_claim(sentence: str) -> bool:
+    if not (_SUBJECT.search(sentence)
+            and _COLLAPSE.search(sentence)
+            and _SEND_OBJECT.search(sentence)):
+        return False
+    return not (_NOT_PROVIDER_SEND.search(sentence)
+                and not _DELIVERY_WORD.search(sentence))
 
 
 def _prose_units(text: str) -> list[str]:
@@ -1658,9 +1680,7 @@ def _idempotency_claims(text: str) -> tuple[list[str], list[str]]:
     claims: list[str] = []
     unbounded: list[str] = []
     for sentence in _sentences(text):
-        if not (_SUBJECT.search(sentence) and _COLLAPSE.search(sentence)
-                and _SEND_OBJECT.search(sentence)
-                and not _NOT_PROVIDER_SEND.search(sentence)):
+        if not _is_provider_send_claim(sentence):
             continue
         claims.append(sentence)
         if not _RETENTION_BOUND.search(sentence):
@@ -1695,13 +1715,22 @@ def test_every_idempotency_key_claim_names_the_providers_retention_window():
     This row grades the CLAIM, not a literal string, and it grades the file — not
     a selected region — so a new claim in a docstring, a `#:` block, a `--`
     header or a runtime log message is in scope. ⛔ WHAT IT DOES NOT GRADE, said
-    so the row cannot overstate itself: a claim that never names the key at all
-    ("deduplication makes the send safe") is outside the subject match, and a
-    `24 h` that is real but belongs to something else in the same sentence would
-    satisfy the bound. Both are why the four artifacts' prose is also read in
-    review; this row makes the enumerated wordings un-shippable, which is what it
-    can promise. `test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim`
-    pins the detector's discriminating power on every wording a review defeated.
+    so the row cannot overstate itself — all four were found by review, not
+    guessed, and each is a limit of the TRIGGER rather than a claim this branch
+    makes:
+      * a claim that never names the key at all ("deduplication makes the send
+        safe") — outside the subject match;
+      * a claim that names the key but no delivery object (email/notice/send/
+        sent/deliver/stamp/accept/duplicate/replay) — outside `_SEND_OBJECT`;
+      * a claim phrased entirely in session-row vocabulary (`session_id`, `one
+        click`, `non-episodic`, `402`) with no delivery word — the
+        session-create veto, which is scoped exactly that way so it cannot
+        swallow a real notice claim (three such sentences are graded as cases
+        below);
+      * a real but UNRELATED `24 h` in the claim's own sentence — the bound is
+        matched by shape, not by referent.
+    Every wording a review used to defeat a cut of this row is a case in
+    `test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim`.
     """
     graded = 0
     for rel in _IDEMPOTENCY_ARTIFACTS:
@@ -1747,6 +1776,9 @@ def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
         "the provider Idempotency-Key avoids a second email",
         "the provider Idempotency-Key removes the duplicate notice",
         "the provider Idempotency-Key makes the duplicate send safe",
+        # verbatim, so the code comment above cannot claim it while the sample is
+        # a near-miss: "replay" is a delivery word in its own right
+        "the provider Idempotency-Key makes a replay safe",
         "the provider Idempotency-Key ensures the notice is sent at most once",
         # the runtime log STRING that cut 2 never read (the full message, since a
         # claim is judged in its real sentence, not as a fragment)
@@ -1797,6 +1829,21 @@ def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
         assert not claims, (
             f"a session-create idempotency-key sentence was graded as a "
             f"provider-send claim: {not_a_provider_send!r}")
+    # ⛔ AND THE VETO MUST NOT HIDE A REAL CLAIM that happens to mention a row:
+    # a review showed the whole-sentence veto swallowing these three, so the veto
+    # is scoped to sentences with no delivery word, and these are graded.
+    for still_a_claim in (
+        "the provider Idempotency-Key prevents the duplicate notice, so a "
+        "replayed 402 report never sends twice",
+        "the provider Idempotency-Key collapses the duplicate email even when "
+        "one click is retried",
+        "the provider Idempotency-Key removes the duplicate send on the "
+        "non-episodic session path",
+    ):
+        claims, unbounded = _idempotency_claims(still_a_claim)
+        assert claims and unbounded, (
+            "the session-create veto swallowed a real provider-send claim: "
+            f"{still_a_claim!r}")
 
 
 def test_the_module_docstring_names_the_post_rename_table():
