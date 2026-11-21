@@ -1102,9 +1102,11 @@ def _module_scope_bindings(tree: ast.Module) -> set[str]:
             continue
         if isinstance(node, ast.AnnAssign) and node.value is None:
             # ⛔ A BARE ANNOTATION AT MODULE SCOPE BINDS NOTHING. `torch: object` only
-            # records an annotation — reading the name afterwards is a NameError (measured)
-            # — but its TARGET is an `ast.Name` with `Store` context, so the generic walk
-            # counted it and a legitimate third-party probe was graded: a 4k-/4l- false red
+            # records an annotation — it is not a binding operation, so an earlier
+            # `import torch` still denotes itself afterwards (and with NO earlier binding
+            # the read is a `NameError`, measured) — but its TARGET is an `ast.Name` with
+            # `Store` context, so the generic walk counted it and a legitimate third-party
+            # probe was graded: a 4k-/4l- false red
             # (review of #14160, cycle 5). The annotation is still walked, because a walrus
             # in it IS evaluated here. In a FUNCTION the same line DOES make the name local
             # (`UnboundLocalError`, measured), so `_function_local_bindings` keeps counting
@@ -1277,9 +1279,10 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
                 # the ENCLOSING scope, a later one in the comprehension scope where the
                 # earlier targets are bound — never with its own target bound. Measured:
                 # `[None for clients in clients.query()]` resolves `clients` from the
-                # enclosing scope, and the same shape with the target meant to be local is
-                # a TypeError. So a call inside `gen.iter` must NOT see `gen.target`; `elt`,
-                # the `ifs` and a LATER generator's iterable do see the earlier targets.
+                # enclosing scope (with a `C.query()` returning `[1,2,3]` the result is
+                # `[None, None, None]`), and an iterable that is unbound is a `NameError`.
+                # So a call inside `gen.iter` must NOT see `gen.target`; `elt`, the `ifs`
+                # and a LATER generator's iterable do see the earlier targets.
                 # Subtracting all of them graded a call in the outermost iterable — a
                 # 4k-/4l- false red (review of #14160, cycle 5).
                 if id(generator.iter) in seen:
@@ -3456,18 +3459,19 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     above (`except … as falkordb` in a nested `def`, call at block level: main `()`,
     #     block-granularity grades it, this tree `()`).
     #     Measured: green here, and putting the block-granularity subtraction back (the
-    #     `ast.walk(block)` mechanism the deleted `_rebinds_within` was) reds THREE rows,
-    #     not one: this control plus the two class-body barrier controls
-    #     (`_class_body_method_control`, `_class_body_comprehension_control`) — the same
-    #     block-granularity error also forbids the two shapes those rows pin as exempt.
+    #     `ast.walk(block)` mechanism the deleted `_rebinds_within` was) reds FOUR rows,
+    #     not one: this control, the two class-body barrier controls
+    #     (`_class_body_method_control`, `_class_body_comprehension_control`), and the
+    #     `outermost iterable` row of `4j-vicesimus-bis` — the same block-granularity
+    #     error also forbids the three shapes those rows pin as exempt.
     #     Verified by comparing EVERY source classification this self-test makes against
     #     the mutant; the total grows as rows are added, so it is not restated here, and
     #     the FLIP count is re-measured at each head rather than inherited (review of this
-    #     PR at `592fc53ecb5a`, P3: the earlier "exactly one" was falsified — an
-    #     inline-`assert roots(…)` call is invisible to a count taken under `-O`, which is
-    #     how the wrong figure was produced). That is why the fail-open row above cannot
-    #     stand alone (review of #14160, P2: without this the fix could be reverted with
-    #     all eight tests green).
+    #     PR, P3: two earlier versions of this sentence were falsified — "one", then
+    #     "three" — and an inline-`assert roots(…)` call is invisible to a count taken
+    #     under `-O`, which is how the first wrong figure was produced). That is why the
+    #     fail-open row above cannot stand alone (review of #14160, P2: without this the
+    #     fix could be reverted with all eight tests green).
     _nested_def_control = roots(
         textwrap.dedent(
             """
@@ -4087,7 +4091,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     that would refuse a legitimate optional-extra probe (review of #14160, cycle 5).
     for _label, _body in (
         ("outermost iterable", "len([None for torch in torch.query('SELECT 1')])"),
-        ("later generator iterable", "len([None for _x in [1] for torch in (torch,)])"),
+        ("later generator iterable", "len([None for _x in [1] for torch in torch.query('SELECT 1')])"),
     ):
         _outermost_row = roots(
             textwrap.dedent(
@@ -4133,7 +4137,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         )
 
     # 4j-duovicesimus. A MODULE-LEVEL BARE ANNOTATION BINDS NOTHING. `torch: object` only
-    #     records an annotation — reading the name afterwards is a `NameError` (measured) —
+    #     records an annotation — it is not a binding operation, so an earlier
+    #     `import torch` still denotes itself afterwards (with NO earlier binding the read
+    #     is a `NameError`, measured) —
     #     but its TARGET is an `ast.Name` with `Store` context, so the generic module walk
     #     counted it and a legitimate third-party probe read GRADED: a 4k-/4l- false red
     #     (review of #14160, cycle 5). The annotation is still walked, because a walrus in
