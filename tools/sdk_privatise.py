@@ -811,7 +811,24 @@ SWEEP_NAMES = 66
 #: is a cross-check of the measurement, never its evidence. The digest is the field that proves the
 #: tree: it differs from BOTH sides' digests, as a third tree's must.)
 #: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11831, "b14af0d2db12529b")
+#:
+#: RE-CUT → (11842, "7bcd7d0191780274") by the `#14012` lane ("keep this resident" + "see what's
+#: outside"). The +11 is THIS lane's own and it is ATTRIBUTED PER FILE, not by arithmetic on the
+#: pin: the residue rows were derived on the merge parent and on this tree with the tool's own
+#: `edits_for` walk, and the four files this branch ADDS account for the whole delta —
+#: `tortoise/outside_view.py` +2 (`graph.query`), `tortoise/resident_pin.py` +3 (`graph.query`), and
+#: the two hermetic suites, `tests/test_14012_outside_view.py` +2 (`self.query`, `super().query` —
+#: the fake graph's doors, mirroring the shape they stand in for) and
+#: `tests/test_14012_resident_pin.py` +4 (`self.query`, `super().query`, `props.update`, and
+#: `self.meta.setdefault(params['key'], {}).update` — a dict accumulator in the fake). Every row is
+#: an ordinary-word receiver on an object no typing can decide, which is exactly what this counter
+#: exists to report; `typed references still pointing at a public name` stays **0**, so no typed
+#: site was added and the SDK population is untouched. ⛔ The `graph.query` rows are NOT a new
+#: shape — `graph.query` was already a residue row on `main` (281 occurrences there); these files
+#: increase its count, and the digest moves because the row's COUNT moves. That the figure lands at
+#: 11831 + 11 = 11842 is a CROSS-CHECK of the measurement, not the evidence for it: the pair below
+#: is what `--repin` prints on THIS tree.
+SWEEP_RESIDUE = (11842, "7bcd7d0191780274")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
