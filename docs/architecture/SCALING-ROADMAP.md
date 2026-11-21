@@ -77,7 +77,8 @@ purpose-built index, or an external API.
 | **stage metrics** | present on **error** paths only (`stages_ms` in a 504 body) | per-stage p50/p95 **always** ✗ |
 | scaling unit | one process, one machine | queue depth → replicas ✗ |
 
-Two structural gaps, everything else is already aligned or landed:
+Two structural gaps explain most of the ✗ rows above — the synchronous read path (query embedding, batching) and the inline
+write path. The remaining two ✗ rows, success-path stage metrics and the scaling unit, are Phase A's **A4** and **A5**:
 
 1. **The read path does the expensive, batchable work synchronously.** A single query embed costs ~2–4 s here; batched it is
    ~0.36 s per item — a ~5–10× difference that is pure scheduling, not hardware.
@@ -151,7 +152,7 @@ The four moves, and how many of the five actually exhibit each:
 4. **Parallel retrieval legs with bounded traversal** — **2 of 5** (Hindsight's four legs; Mem0's four signals, scored in parallel
    and rank-fused — no bounded graph traversal) — we do not (we chain them).
 
-So: move 2 is universal, move 3 is near-universal, move 1 is **half** and depends on how generously "cheap store" is read, and **move 4 rests on two comparables' published designs** (Hindsight's four parallel legs, Mem0's multi-signal scorer) — worth adopting, and still the thinnest of the four moves rather than a convergence. Item 3 is Phase A work (`A1`); item 4 is `#14192`, tracked as PLAN `F1`. Both cost only code.
+So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and depends on how generously "cheap store" is read, and **move 4 rests on two comparables' published designs** (Hindsight's four parallel legs, Mem0's multi-signal scorer) — worth adopting, and still the thinnest of the four moves rather than a convergence. Item 3 is Phase A work (`A1`); item 4 is `#14192`, tracked as PLAN `F1`. Both cost only code.
 
 ## 3. The roadmap — phase A is free
 
