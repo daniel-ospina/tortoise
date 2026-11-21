@@ -1354,6 +1354,59 @@ def test_a_non_positive_window_is_not_a_silent_unbounded_rollup(
         )
 
 
+def test_the_two_refusal_arms_do_not_silence_each_other(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ ONE KEY FOR TWO ARMS SILENCED THE SECOND REFUSAL (#14011 review P2).
+
+    `_warn_once` is once-per-process *by key*, so the typo arm and the
+    non-positive arm both spelling `"window"` meant: set the knob to a typo, get
+    the warning, correct it to `0` in the same process — and hear nothing, while
+    the suppressed message still names the operator's OLD `raw`. The newer, still
+    wrong value was never described. Each arm carries its own key, so both
+    refusals are heard in either order.
+    """
+    import logging
+
+    knob = usage_signal.USAGE_WINDOW_DAYS_ENV
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        monkeypatch.setenv(knob, "seven")
+        assert usage_signal._window_days() is None  # typo arm
+        monkeypatch.setenv(knob, "0")
+        assert usage_signal._window_days() is None  # non-positive arm
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 2, (
+        f"the typo refusal silenced the non-positive one ({len(messages)} "
+        f"warning(s) for two distinct bad values): {messages}"
+    )
+    assert any("is not a day count" in m and "'seven'" in m for m in messages), messages
+    assert any(
+        "is not a positive day count" in m and "'0'" in m for m in messages
+    ), messages
+
+    # …and the reverse order tells the same story, so the fix is not an accident
+    # of which arm happens to run first.
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        monkeypatch.setenv(knob, "-3")
+        assert usage_signal._window_days() is None  # non-positive arm
+        monkeypatch.setenv(knob, "soon")
+        assert usage_signal._window_days() is None  # typo arm
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 2, messages
+    assert any(
+        "is not a positive day count" in m and "'-3'" in m for m in messages
+    ), messages
+    assert any("is not a day count" in m and "'soon'" in m for m in messages), messages
+
+
 def test_a_positive_window_is_returned_and_warns_about_nothing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
