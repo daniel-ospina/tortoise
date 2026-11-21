@@ -805,7 +805,9 @@ def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
     ⛔ SEPARATED FROM `_pin_blob_lines` ON PURPOSE. `git show <rev>:<path>` exits 128 for TWO
     different facts: this checkout cannot produce the object (no history in a `fetch-depth: 1`
     clone; a failed lazy fetch in a partial clone; a corrupt object), and the PATH does not exist
-    at *rev* at all. The first is about the CHECKOUT and must SKIP. The SECOND is about the
+    at *rev* at all. The first is about the CHECKOUT and must NOT be counted: it is the cannot-run
+    class, and what the arm does instead is grade the history-free identity (nothing skips — there is
+    no `pytest.skip` in this file, see the arm's own note). The SECOND is about the
     ARTIFACT and must be graded — a module created after the pin is exactly the case a file:line
     census meets first (this PR adds `tortoise/capacity_notice.py`), and folding it into the skip
     would stop grading the numerator for the whole document while the message blamed CI history
@@ -816,7 +818,8 @@ def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
     probe below only establishes that `<rev>` is a commit this checkout holds. The PATH question is
     asked separately, by `_path_in_tree` — `git ls-tree`, never `<rev>:<path>`, which cannot tell an
     absent path from a missing tree. A path that IS in the tree but whose blob still fails to render
-    is neither cause, so it stays in the SKIP class — a BLOBLESS partial
+    is neither cause, so it stays in the CANNOT-RUN class (returns `None`, and the caller grades the
+    history-free identity — no skip) — a BLOBLESS partial
     clone's failed lazy fetch would otherwise be counted as "absent at the pin", inflating the
     drifter figure and inviting a false correction of a published number, which is this file's own
     worst case (#14038 review, P3). See `_path_in_tree` for how the tree itself is asked, which is
@@ -837,8 +840,8 @@ def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
         TREE cannot be read (`_path_in_tree` returns `None` — a treeless `filter=tree:0` clone whose
         lazy fetch failed, a missing tree object, an unreadable rev); or the path IS in the tree but
         its blob will not render (a blobless clone's failed lazy fetch, a corrupt object). All three
-        are facts about this CHECKOUT, so the arm skips rather than counting a pair it could not
-        read. ⛔ THREE, not two: the tree arm is the one the tri-state exists for, and dropping it
+        are facts about this CHECKOUT, so the arm does not count a pair it could not read: it returns
+        `None` and the CALLER grades the history-free identity instead (no skip — #14038 cycle-6). ⛔ THREE, not two: the tree arm is the one the tri-state exists for, and dropping it
         leaves its `None` no slot — so the fall-through is "absent", which is the #14038 bug again.
 
     ⛔ MEMOISED per `(path, rev)` — the caller walks one entry per cited LINE, so without this the
@@ -862,7 +865,8 @@ def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
     )
     if out.returncode != 0:
         # The path IS in the tree but the blob would not render: an object this checkout cannot
-        # produce — the cannot-run class, so this arm keeps its SKIP rather than miscounting.
+        # produce — the cannot-run class, so this arm refuses the count rather than miscounting: it
+        # returns None and the caller grades the history-free identity (no skip — see the arm's note).
         return None
     return out.stdout.splitlines()
 
@@ -1071,7 +1075,8 @@ def test_the_tree_probe_grades_absence_and_an_unreadable_tree_DIFFERENTLY(tmp_pa
     absence, which is exactly the bug. So:
       * absent from a HEALTHY tree -> `False` -> `[]`, graded not-comparable;
       * present in a tree whose subtree cannot be read -> `None` -> the cannot-run class, so the
-        census SKIPS rather than counting a pair it could not read.
+        census does not COUNT a pair it could not read (the caller grades the history-free identity
+        instead — nothing skips).
     """
     repo = tmp_path / "tiny"
     repo.mkdir()
