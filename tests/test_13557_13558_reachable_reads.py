@@ -344,9 +344,11 @@ SELECTED = [
     # `-ed`-ending HEAD NOUNS and DEGREE WORDS inside the subject all routed at
     # `e84612d43f` (the revision BEFORE round 20) and returned `population=None,
     # signal=None` after round 20. Both are pinned here so the next widening reds instead
-    # of costing them quietly. ⛔ THE BASELINE IS `e84612d43f`, NOT HEAD~1 — HEAD~1 IS round
-    # 20, the commit that refuses them (round-22 review, P3); a baseline a reader cannot
-    # reproduce reads as a fix that changed nothing.
+    # of costing them quietly. ⛔ THE BASELINE IS `e84612d43f` — ABSOLUTE, NEVER RELATIVE: a
+    # relative rev is stable only in the working copy it was drafted in, and the first cut of
+    # this note said "HEAD~1", which by the time it was read had become round 21 (round-23
+    # review, P3). Round 20 is `6a301c4647` (the commit that refuses them), round 21 is
+    # `a6225cbad1`, and the rows route at `e84612d43f`.
     ("is the feed archived", "ended", "is_copula"),
     ("is the seed archived", "ended", "is_copula"),
     ("is the migration seed archived", "ended", "is_copula"),
@@ -367,6 +369,15 @@ SELECTED = [
     ("is the invoice no longer cancelled", "ended", "is_copula"),
     ("is the export all but archived", "ended", "is_copula"),
     ("is the export most recent archived", "ended", "is_copula"),
+    # ── …and the PERFECT branch's post-nominal quantifier (round-23 review, P2) ────
+    # `has the data all BEEN archived` puts `been` between the quantifier and the
+    # participle, so rule (b) never reached it: 77/77 focused probes were SILENT while both
+    # flat twins (`has all the data been archived`, `has the data been archived`) ROUTED and
+    # are pinned as routing. The lookahead now accepts `been` + the participle too — the
+    # same position one auxiliary later.
+    ("has the data all been archived", "ended", "is_copula"),
+    ("has the reports both been archived", "ended", "is_copula"),
+    ("have the claims each been withdrawn", "ended", "is_copula"),
 ]
 
 
