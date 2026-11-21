@@ -679,13 +679,64 @@ _COPULA_SUBJECT = (
     # the word DIRECTLY before it is not a pre-determiner and not `of`:
     # `is all the data` (stacking) and `is one of the exports` (partitive) do not fire;
     # `is every report the board archived` and `is the report the board archived` do.
+    # ⛔ AND THE DETERMINER LIST WAS NARROWER THAN THE PROSE ABOVE CLAIMED (round-20
+    # review, P2, measured). "a subject whose tail is a SECOND NOUN PHRASE is refused"
+    # was FALSE for a second NP opening with a POSSESSIVE (`his|her`) or with a
+    # PRE-DETERMINER, and for a second NP with NO determiner at all — five content
+    # questions still ROUTED to the whole ended population with `signal=None`:
+    #
+    #   `is the report his team archived`               <- possessive second NP
+    #   `is the contract every employee signed archived` <- pre-determiner second NP
+    #   `is the report each manager reviewed archived`  <- …or `each`
+    #   `is the dashboard all customers use deprecated` <- …or `all`
+    #   `is the export customers requested archived`    <- second NP with NO determiner
+    #
+    # The list is now COMPLETE OVER ITS OWN TABLE — not over English (round-21 review,
+    # P2): `his|her` (the sibling list's spelling) and the pre-determiners are members, and
+    # the boundary is named so a later reader does not read "refused" as "all of them".
+    # ⛔ THE `-ed` ANCHOR THAT TRIED TO CLOSE THE DETERMINER-LESS CASE IS WITHDRAWN
+    # (round-21 review, P1, measured): "an `-ed` word" is not "a finite verb" — `feed`,
+    # `seed`, `need`, `bed` and `shed` all END in `ed`, so it silently refused a subject
+    # whose HEAD NOUN is one of them (`is the feed archived`, `is the seed archived`,
+    # `is the migration seed archived`, `is the deprecated feed archived`), where the
+    # revision BEFORE round 20 (`e84612d43f`) routed. A SILENT refusal of an ordinary state
+    # question is the second-worst outcome this module recognises and it bought exactly
+    # one spelling, so it is gone. (⛔ THE BASELINE MATTERS, AND THE FIRST CUT OF THIS NOTE
+    # NAMED IT WRONG — round-22 review, P3: HEAD~1 IS round 20, the commit that refused
+    # these; they route at HEAD~2. A trail a reader cannot reproduce reads as a fix that
+    # changed nothing.)
+    # ⛔ AND THE WIDENED LIST REFUSED DEGREE WORDS INSIDE THE SUBJECT (round-21 review,
+    # P1, measured): `is the most recent export archived` and `is the data all archived`
+    # returned `population=None, signal=None` where `e84612d43f` routed. THREE POSITION
+    # rules fix that — in the position slot, never in the word-run slot (the wrong
+    # placement kills the guard entirely, the round-19 failure mode):
+    #   (a) a determiner-vocabulary word DIRECTLY PRECEDED BY A DETERMINER is one NP
+    #       (`the most recent`), so it cannot open a second one;
+    #   (b) a determiner-vocabulary word IMMEDIATELY FOLLOWED BY THE PARTICIPLE is a
+    #       POST-NOMINAL quantifier (`the data all archived`), not a second NP;
+    #   (c) …nor is one followed by a DEGREE or NEGATION adverb (`no longer`, `any longer`,
+    #       `all but`, `most recent`). ⛔ RULE (c) IS THE ROUND-22 REVIEW'S P2, measured:
+    #       without it `is the export no longer archived`, `is our plan no longer retired`,
+    #       `is the report any longer archived`, `is the invoice no longer cancelled`,
+    #       `is the export all but archived` and `is the export most recent archived` were
+    #       SILENT while the semantically identical `is the export not archived` ROUTED —
+    #       an internally inconsistent pair, with no notice on the refused half.
+    # ⛔ AND THE RESIDUAL THIS GUARD CANNOT CLOSE IS STATED RATHER THAN CALLED CLOSED:
+    # a second NP with NO determiner (`is the export customers requested archived`) and one
+    # opening with an indefinite quantifier this module does not name (`several`, `fewer`,
+    # `other`, `another`, `much`, `enough` — `is the export several teams use deprecated`)
+    # still ROUTE, because telling a bare noun from a bare verb needs a lexicon this
+    # detector does not have.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
     r"where|whereas|after|before|now|what|how|why)(?![-/])\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
-    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of)\b)"
+    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of|"
+    r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
-    r"(?:the|a|an|our|my|its|their|these|those|this|that|your)(?![-/])\b)"
+    r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
+    rf"all|both|half|such|many|most|some|any|no|each|every)(?![-/])\b"
+    rf"(?!\s+(?:(?:longer|more|less|recent|but|yet|than)\b|(?:{_ENDING_WORDS})\b)))"
     # ⛔ AND A SUBJECT PRONOUN MAY ONLY **BE** THE SUBJECT (round-18 review, P1,
     # measured — the SAME #14033 defect still open after round 17's two guards, in the
     # same worst direction). Both guards above miss it: a REDUCED RELATIVE whose
