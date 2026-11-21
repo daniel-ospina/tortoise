@@ -651,17 +651,33 @@ def _stamp(value: str | None) -> float:
 #: the tree that imports a store client is named here. Scope, stated rather than
 #: implied: it covers DIRECT importers (the closure is not walked — this module
 #: legitimately imports `read_ledger` for `_stamp`/`row_key`, and a closure would
-#: have to forbid that too).
+#: have to forbid that too). ⛔ ONE MODULE IS OUT OF SCOPE FOR THAT REASON AND NOT
+#: BY OVERSIGHT: `tortoise.embedded_lifecycle` imports `redis`, but importing
+#: `usage_signal` ALREADY pulls it in transitively (measured: it is in
+#: `sys.modules` before this file's probes run), so banning it would make the
+#: reachability probe assert something the module cannot satisfy. The direction
+#: test below skips exactly that one, and names it.
+_CLOSURE_ALREADY_REACHED = ("tortoise.embedded_lifecycle",)
 _FORBIDDEN_GRAPH_ROOTS = (
     "falkordb",
     "redis",
     "tortoise.__main__",
+    "tortoise.acl_graph_users",
     "tortoise.backup",
     "tortoise.cypher_guard",
+    "tortoise.ep",
+    "tortoise.hosted_api",
+    "tortoise.hosted_backup",
     "tortoise.projection",
+    "tortoise.retry",
     "tortoise.sdk",
     "tortoise.session_indexer",
+    "tortoise.tortoise_client",
 )
+
+#: The package roots that ARE a store client, as the direction test below has to
+#: recognise them. Kept beside the set it derives from so the two cannot drift.
+_STORE_CLIENT_ROOTS = ("falkordb", "redis")
 
 
 def _imports_of(source: str) -> set[str]:
@@ -809,33 +825,73 @@ def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
     )
 
 
+def _modules_reaching_a_store() -> set[str]:
+    """Every module in the tree that imports a STORE CLIENT, by parsed imports.
+
+    ⛔ PARSED, NOT GREPPED, AND AGAINST EVERY DECLARED ROOT. This read
+    `"from falkordb import" in source` — a substring test that saw only ONE of the
+    two roots the set itself declares, so the modules that reach the store through
+    `redis` (`hosted_backup` constructs a real client over a derived pool,
+    `acl_graph_users`, `tortoise_client`, `retry`, `ep`, `hosted_api`,
+    `embedded_lifecycle`) were invisible and the coverage test reported protection
+    it did not deliver. A substring is wrong in the other direction too:
+    `"import redis" in source` matches PROSE (it flags `tortoise/__init__.py`,
+    whose only match is a docstring line).
+    """
+    package = Path(usage_signal.__file__).parent
+    found: set[str] = set()
+    for path in package.rglob("*.py"):
+        rel = path.relative_to(package).with_suffix("")
+        parts = [part for part in rel.parts if part != "__init__"]
+        module = "tortoise" + ("." + ".".join(parts) if parts else "")
+        imported = _imports_of(path.read_text(encoding="utf-8"))
+        if any(
+            name == root or name.startswith(root + ".")
+            for name in imported
+            for root in _STORE_CLIENT_ROOTS
+        ):
+            found.add(module)
+    return found
+
+
+def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
+    """⛔ The scan must read BOTH declared roots, or its verdict is vacuous.
+
+    Pinned POSITIVELY on purpose: `uncovered == []` alone cannot see a predicate
+    that narrowed back to `falkordb` (it would simply scan fewer modules and stay
+    green). Naming modules that reach the store through `redis` is what reddens.
+    """
+    found = _modules_reaching_a_store()
+    for module in (
+        "tortoise.hosted_backup",
+        "tortoise.acl_graph_users",
+        "tortoise.tortoise_client",
+    ):
+        assert module in found, (
+            f"{module} imports a store client through `redis` and the scan did not "
+            f"see it — the reachability guard is narrower than the set it checks: "
+            f"found={sorted(found)!r}"
+        )
+
+
 def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
     """⛔ THE OTHER DIRECTION: a real graph-owning module may not be left out.
 
     Derived from the TREE rather than listed, so a future module that starts
     holding the client cannot slip past the guard the way `.projection` did.
     """
-    package = Path(usage_signal.__file__).parent
-    covered = [
-        p.relative_to(package).with_suffix("") for p in package.rglob("*.py")
-    ]
-    uncovered: list[str] = []
-    for rel in covered:
-        parts = [part for part in rel.parts if part != "__init__"]
-        module = "tortoise" + ("." + ".".join(parts) if parts else "")
-        source = package.joinpath(*rel.parts).with_suffix(".py").read_text(
-            encoding="utf-8"
-        )
-        if not ("from falkordb import" in source or "import falkordb" in source):
-            continue
-        if not any(
+    uncovered = [
+        module
+        for module in _modules_reaching_a_store()
+        if module not in _CLOSURE_ALREADY_REACHED
+        and not any(
             module == root or module.startswith(root + ".")
             for root in _FORBIDDEN_GRAPH_ROOTS
-        ):
-            uncovered.append(module)
+        )
+    ]
     assert uncovered == [], (
         f"module(s) reach a graph client but are not in the forbidden set, so a "
-        f"serve counter could import them unnoticed: {uncovered}"
+        f"serve counter could import them unnoticed: {sorted(uncovered)}"
     )
 
 
