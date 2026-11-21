@@ -2060,6 +2060,44 @@ class _AnchorHrefParser(HTMLParser):
             return
         if tag in self._VOID:
             return
+        # ⛔ `html` AND `body` ARE NOT PUSHED EITHER (#14073 review, P0, measured).
+        # This docstring's own contract — "only elements a browser puts in the tree are
+        # pushed" — was FALSE for these two, and the cost was a fail-open in BOTH
+        # directions. In "in body" a start tag whose name is `html`/`body` is a parse
+        # error that inserts NOTHING: a browser merges its attributes into the
+        # pre-inserted root/body (`13.2.6.4.7 — "in body"`). This parser does not
+        # pre-insert those roots, so pushing the token put a PHANTOM at the CURRENT
+        # depth instead of at the bottom — and `html` is a member of `_P_SCOPE_BOUNDARY`
+        # (hence `_SCOPE_BOUNDARY`), so the phantom became a scope boundary ABOVE live
+        # content and stopped end tags a browser honours:
+        #
+        #   extract_visible_text('<audio><html></audio>CLAIM</html></audio>')  ->  ''
+        #   (without the `<html>`: `'CLAIM'`)
+        #
+        # The mechanism is the drop direction: `</audio>` could not close the `audio`,
+        # an `_UNRENDERED` ancestor stayed open across the claim, `_text_is_painted()`
+        # returned False and the text was silently dropped — so a sentence the page must
+        # NOT make vanished from the wording golden while a browser painted it.
+        # End-to-end through `_assert_storage_section_reviewed` that shape left the
+        # allowlist, the destinations, the vocabulary scan and the golden ALL green with
+        # a contradicting paragraph inside `#storage`. The BOUND side escapes the same
+        # way in the other direction (an OVER-advertised TOC, i.e. a SHORTER slice):
+        #
+        #   extract_anchors_within(
+        #       '<div class="toc"><html></div><a href="#x">x</a></html></div>',
+        #       tag='div', class_token='toc')  ->  [['#x']]
+        #
+        # where a browser closes `div.toc` at its own `</div>` and leaves the anchor
+        # OUTSIDE it. `<body>` is not a `_P_SCOPE_BOUNDARY` member, so only `html`
+        # triggers the boundary half; both are refused together because neither creates
+        # an element, and the pairing is what the rows below pin.
+        #
+        # ⛔ NOT ROUTED THROUGH `_ignored_token`: `_open()`'s `body` branch is what sets
+        # `_body_seen` (the frameset rule reads it), and returning there would silently
+        # disable that. `_open` has already run by now, so skipping only the PUSH keeps
+        # the frameset arm intact.
+        if tag in ("html", "body"):
+            return
         opened_container = False
         if self._container is not None:
             wanted_tag, wanted_class = self._container
