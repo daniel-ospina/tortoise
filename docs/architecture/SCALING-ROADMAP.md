@@ -116,7 +116,7 @@ The remaining two ✗ rows — success-path stage metrics and the scaling unit �
 - **Latency is set by the slowest branch, not the sum** — *"Recall latency is determined by the slowest parallel branch
   rather than the sum of all branches."* Our stages are a chain (`pre_handler → embed_encode → retrieval → ep → ordering`), so
   we pay **the sum** — but ⚠️ **only the three legs INSIDE `retrieval` can overlap at all**: `retrieval` is 1,199 ms of an
-  11,354 ms chain, while `pre_handler` (6–9 s) and `embed_encode` (2–4 s) are not branches of anything, so parallelising the legs
+  11,354 ms chain, while `pre_handler` (5,996 ms in the slow trace) and `embed_encode` (2–4 s) are not branches of anything, so parallelising the legs
   buys at most a fraction of 1.2 s, never the ~5.4 s. Hindsight's 100–600 ms is the payoff of the bullet above — **cost moved to
   writes** — not of parallelism alone.
 - **Bounded graph traversal** and **hierarchical compression** (facts → observations → mental models) — the compression ladder
