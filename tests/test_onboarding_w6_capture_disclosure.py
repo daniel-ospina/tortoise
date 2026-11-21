@@ -7,10 +7,15 @@ W6 (session-capture disclosure, self-use path) owns:
   carries `first_capture` exactly once per org — for a credential whose OWN
   graph IS the org default, which is the class the pipeline writes the
   graph-held `capture-disclosed` checkpoint for (`write_completed_step` FWW,
-  so the disclosure can never re-fire), UNLESS either #1927's
-  session_recording off-switch quieted the request first (409, never a
-  checkpoint write) OR the key is CUSTOM-graph-bound, which runs neither half
-  and never sets the flag (#14086; the user-facing half is #14131);
+  so the disclosure can never re-fire), UNLESS #1927's session_recording
+  off-switch quieted the request first (409, never a checkpoint write), OR
+  the key is CUSTOM-graph-bound, which runs neither half and never sets the
+  flag (#14086; the user-facing half is #14131), OR the org's
+  `capture-disclosed` step was already asserted at the checkpoint surface by
+  an ORG-WIDE agent credential — the step is FWW and `first_capture` is its
+  `created`, so an early assert retires the announcement and that surface is
+  only safe ON/AFTER the first capture (SKILL.md §8; the same limit is stated
+  in `tortoise/capture_disclosure.py`);
 - the Settings → Captured-sessions VIEW/DELETE leg (W4's Home 4 seam): GET
   /v1/sessions/{id} (dual-auth, #1828) renders the transcript panel, and
   DELETE /v1/sessions/{id} removes the Session + its owned subgraph AND
