@@ -1405,8 +1405,12 @@ def _writer_register_population() -> dict[str, list[str]]:
     names NO origin at all (a bare `raise ImportError("…")` inside the declared module's chain)
     is `stray` too: unrecognised is not the environment.
     """
-    import ast
-
+    # ⛔ NO LOCAL `import ast` HERE. This walk used to `ast.walk` each definition inline, so it
+    # carried its own import; the extraction into `_module_writer_facts` (the `lru_cache`d half)
+    # moved the ONLY `ast` use out of this function and left the import behind — `ruff check .`
+    # (CI-pinned 0.16.4) graded it `F401` and red-ed the `lint` job at `ee96389683eb`. The module
+    # already imports `ast` at the top, so the name was never undefined: this is dead text, and
+    # deleting it changes no verdict.
     from tortoise import embed_writer_register as register
 
     population: dict[str, list[str]] = {
