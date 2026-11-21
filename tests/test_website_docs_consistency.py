@@ -1934,6 +1934,19 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
     does not emit — `title = "…"`, `data-30day="…"`, `data_del="…"` all carried a
     claim past the previous pattern (#14073 review; the fail-open is pinned by
     `test_the_storage_attribute_allowlist_catches_every_legal_spelling`).
+
+    ⛔ DECLARED RESIDUAL — A RENDERING DIRECTIVE IS NOT COPY, SO NO PIN HERE READS IT.
+    Every pin above judges the section's MARKUP and the text a browser paints FROM it;
+    a `<style>` block inside the section whose `content:` property paints a claim (or a
+    `<script>` that writes one) is neither text nor an attribute, and measured on this
+    tree such a block leaves the allowlist, the destination pin, the vocabulary scan
+    and this golden ALL green. Not closed here on purpose: doing it properly means
+    either modelling the CSS cascade or refusing every `<style>`/`<script>` in the
+    section, and the second one is a false red on the `application/ld+json` block a docs
+    page legitimately carries — and a directive is not how page copy is written, so this
+    is the tail of the class rather than a route a copy edit takes. Named so the next
+    reader does not have to discover it; a page that adds one makes the review manual
+    again, which is the honest cost.
     """
     markup = _docs_section()
     _assert_storage_section_reviewed(markup)
