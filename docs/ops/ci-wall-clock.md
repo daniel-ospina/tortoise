@@ -322,8 +322,8 @@ terms' own total, 56.64 m, that
 total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying the
 ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre, which
 is how this one sentence came to disagree with the row above it. ⛔ **THIS PARAGRAPH ITSELF RESTATED
-84.9 m / 5.1 m UNTIL THE `#14183` RE-CUT** — that is the ROUNDED-SUM path its own next clause
-forbids — and `origin/main` and this branch corrected it independently, to the same pair —
+84.9 m / 5.1 m UNTIL THE `#14183` RE-CUT** — that is exactly the ROUNDED-SUM path the clause just
+above forbids — and `origin/main` and this branch corrected it independently, to the same pair —
 ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
