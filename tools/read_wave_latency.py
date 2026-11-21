@@ -114,8 +114,15 @@ class Recorder:
 RECORDER = Recorder()
 
 
+_TIMERS_INSTALLED = False
+
+
 def install_timers() -> None:
     """Wrap the wave members with wall-clock timers (no product change)."""
+    global _TIMERS_INSTALLED
+    if _TIMERS_INSTALLED:
+        return
+    _TIMERS_INSTALLED = True
     import importlib
 
     grouped: dict[str, list[tuple[str, str]]] = {}
@@ -187,6 +194,17 @@ def run(args) -> dict:
     from tortoise.sdk import TortoiseSDK
 
     install_timers()
+    if args.no_embed:
+        # A DETERMINISTIC ARM. This box's embedder is contended (measured:
+        # ``embed_get`` bimodal between 0 ms and ~330 ms, and the dense leg
+        # DECLARED ``vector:load_in_flight`` on most queries), which swamps a
+        # p50/p95 comparison of the SCHEDULING change being measured. Pinning
+        # the embedder off makes the dense leg declare ``no_embedder`` (#2952)
+        # in BOTH arms, so the comparison isolates what the change touches. It
+        # is NOT a claim about production latency — the stage table says the
+        # leg declined.
+        from tortoise.embeddings import EmbeddingModel
+        EmbeddingModel.get = staticmethod(lambda *_a, **_k: None)  # type: ignore[method-assign]
     sdk = TortoiseSDK()
     proj = sdk._get_proj()
     n_points = seed(proj, args.points, args.corpus_seed)
@@ -309,6 +327,70 @@ def compare(new: dict, base: dict) -> dict:
     }
 
 
+def ab_relationships(args) -> dict:
+    """Interleave OLD vs NEW ``get_relationships_bounded`` on the same id set.
+
+    WHY A SECOND MEASUREMENT EXISTS. The full-read comparison is the product
+    question, but it carries this box's embedder contention and every other
+    stage. This mode isolates the ONE function #14192 changed: it loads the
+    pre-change implementation out of a git revision (``--ab-relationships-from``),
+    runs both against the same graph and the same ids, ALTERNATING them so a
+    load spike cannot land on one arm, and checks that the two answers are
+    equal. The output objects must be identical — a scheduling change that
+    moves an entry is an answer change.
+    """
+    import importlib
+    import subprocess
+    import tempfile
+
+    from tortoise import search_engine
+    from tortoise.sdk import TortoiseSDK
+
+    rev = args.ab_relationships_from
+    src = subprocess.run(
+        ["git", "show", f"{rev}:tortoise/search_engine.py"],
+        cwd=_REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    pkg_dir = Path(_REPO_ROOT) / "tortoise"
+    old_path = pkg_dir / "_ab_14192_old_search_engine.py"
+    old_path.write_text(src)
+    try:
+        old_mod = importlib.import_module("tortoise._ab_14192_old_search_engine")
+    finally:
+        old_path.unlink()
+
+    sdk = TortoiseSDK()
+    proj = sdk._get_proj()
+    seed(proj, args.points, args.corpus_seed)
+    ids = [r[0] for r in proj.g.query(
+        "MATCH (n:Point) WHERE n.is_operator = false RETURN n.id "
+        f"LIMIT {args.ab_ids}").result_set]
+
+    old_ms: list[float] = []
+    new_ms: list[float] = []
+    for _ in range(args.ab_rounds):
+        for fn, bucket in ((old_mod.get_relationships_bounded, old_ms),
+                           (search_engine.get_relationships_bounded, new_ms)):
+            t = time.perf_counter()
+            fn(proj.g, ids)
+            bucket.append((time.perf_counter() - t) * 1000.0)
+
+    old_out = old_mod.get_relationships_bounded(proj.g, ids)
+    new_out = search_engine.get_relationships_bounded(proj.g, ids)
+    return {
+        "arm": f"ab-relationships-from-{rev}",
+        "git_sha": _git_sha(),
+        "ids": len(ids),
+        "rounds": args.ab_rounds,
+        "entries": sum(len(v) for v in new_out.values()),
+        "identical": dict(old_out) == dict(new_out),
+        "old_decoration_error": getattr(old_out, "decoration_error", ""),
+        "new_decoration_error": getattr(new_out, "decoration_error", ""),
+        "old_ms": stats(old_ms),
+        "new_ms": stats(new_ms),
+        "delta_p50_ms": round(stats(new_ms)["p50"] - stats(old_ms)["p50"], 3),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--points", type=int, default=2000)
@@ -320,9 +402,85 @@ def main() -> None:
     ap.add_argument("--baseline", default="",
                     help="a previous run's JSON — prints the delta and the "
                          "rank-identity verdict")
+    ap.add_argument("--no-embed", action="store_true",
+                    help="pin the embedder off so the dense leg DECLARES "
+                         "no_embedder in both arms (the deterministic arm; "
+                         "see run())")
+    ap.add_argument("--ab-relationships-from", default="",
+                    help="a git revision: interleave its "
+                         "get_relationships_bounded against the working tree's "
+                         "on the same ids, and assert the two answers are equal")
+    ap.add_argument("--ab-full-read-from", default="",
+                    help="a git revision: run the WHOLE read twice — once with "
+                         "that revision's get_relationships_bounded — and "
+                         "compare the totals and the fused order")
+    ap.add_argument("--ab-ids", type=int, default=12)
+    ap.add_argument("--ab-rounds", type=int, default=7)
     args = ap.parse_args()
-    if not args.label:
+    if args.label:
+        pass
+    else:
         args.label = Path(args.out).stem
+
+    if args.ab_relationships_from:
+        report = ab_relationships(args)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))
+        print(f"\nwrote {out}")
+        return
+
+    if args.ab_full_read_from:
+        # The whole read, twice, in ONE process against ONE corpus: arm 1 has
+        # the pre-change ``get_relationships_bounded`` patched in at the module
+        # attribute the SDK's call-site import resolves, arm 2 the working
+        # tree's. The two arms therefore differ in exactly the change under
+        # test, and ``compare`` reports both the totals and the rank verdict.
+        import importlib
+        import subprocess
+
+        from tortoise import search_engine
+
+        rev = args.ab_full_read_from
+        src = subprocess.run(
+            ["git", "show", f"{rev}:tortoise/search_engine.py"],
+            cwd=_REPO_ROOT, capture_output=True, text=True, check=True).stdout
+        pkg_dir = Path(_REPO_ROOT) / "tortoise"
+        old_path = pkg_dir / "_ab_14192_old_search_engine.py"
+        old_path.write_text(src)
+        try:
+            old_mod = importlib.import_module("tortoise._ab_14192_old_search_engine")
+        finally:
+            old_path.unlink()
+
+        new_fn = search_engine.get_relationships_bounded
+        search_engine.get_relationships_bounded = old_mod.get_relationships_bounded
+        base = run(args)
+        search_engine.get_relationships_bounded = new_fn
+        # ``install_timers`` is idempotent (it must be: the calls inside
+        # ``run()`` would otherwise be double-wrapped and this arm's cost
+        # counted twice), so the restored NEW function has to be wrapped here
+        # or arm 2's ``post_relationships`` column would read a false 0.0.
+        def _timed_new(*a, **k):
+            t = time.perf_counter()
+            try:
+                return new_fn(*a, **k)
+            finally:
+                RECORDER.add("post_relationships",
+                             (time.perf_counter() - t) * 1000.0)
+
+        search_engine.get_relationships_bounded = _timed_new
+        after = run(args)
+        search_engine.get_relationships_bounded = new_fn
+        verdict = compare(after, base)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"baseline": base, "after": after,
+                                   "verdict": verdict}, indent=2))
+        print(json.dumps(verdict, indent=2)[:4000])
+        print(f"\nwrote {out}")
+        return
 
     report = run(args)
     out = Path(args.out)

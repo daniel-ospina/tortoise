@@ -5793,6 +5793,42 @@ VARIANCE_SUM_MIN = 1e-154
 VARIANCE_SUM_MAX = 1e102
 
 
+def beta_variance_sum_bound(threshold: float) -> float:
+    """#14192 — the largest ``α+β`` a pair can have and still exceed ``threshold``.
+
+    THE ARITHMETIC. With ``s = α+β`` and ``α, β ≥ 0``, ``αβ ≤ s²/4``, so
+
+        variance = (αβ/s²)/(s+1) ≤ (1/4)/(s+1)
+
+    — the maximum is attained at ``α = β = s/2``. Therefore
+
+        variance > threshold  ⟹  1/(4(s+1)) > threshold  ⟹  s < 1/(4·threshold) − 1
+
+    at ``threshold = CONTESTED_VARIANCE_THRESHOLD = 0.04`` that is ``s < 5.25``.
+
+    ⛔ WHAT THIS IS FOR, AND WHY IT IS SAFE. It is a NECESSARY condition, never
+    a sufficient one: it can only reject a pair whose variance is provably not
+    above the threshold, so adding it in front of ``beta_variance_cypher(…) >
+    $contested_threshold`` cannot change a result set — it only spares the
+    division, the coercion CASE and the band checks on the rows that were
+    always going to be rejected. Measured on the #14192 corpus, that read
+    (``get_relationships_bounded``'s Q2-crit) went from ~160 ms to ~58 ms with
+    the row set BYTE-IDENTICAL (79 rows both ways), and it is the single
+    most expensive query on the search read.
+
+    It is a bound on the SUM, not on either operand, because the formula's
+    only denominator-free quantity is the sum. The Python twin is
+    ``tests/test_14192_beta_variance_sum_bound.py``, which sweeps the grid and
+    asserts the invariant this function's comment claims.
+    """
+    if threshold <= 0.0:
+        # A threshold at or below zero admits everything, so no finite bound
+        # exists. Answer infinity rather than a number that would prune rows
+        # the caller asked for.
+        return float("inf")
+    return 0.25 / threshold - 1.0
+
+
 def beta_variance_cypher(alpha_operand: str, beta_operand: str) -> str:
     """Cypher twin of :func:`_beta_variance` — `0.0` where it is not computable.
 
@@ -6611,6 +6647,77 @@ class RelationshipDecoration(dict):
     decoration_error: str = ""
 
 
+class _ReadWave:
+    """#14192 — independent graph reads, dispatched together, consumed later.
+
+    THE SHAPE. ``submit(name, thunk)`` starts the thunk on a worker
+    IMMEDIATELY and returns; ``result(name)`` blocks on it. A caller submits
+    every read it can already name, and only then consumes them — so N reads
+    whose costs are independent cost ``max(read)`` instead of ``sum(read)``.
+    That is the property this issue is about: *"Recall latency is determined by
+    the slowest parallel branch rather than the sum of all branches"*
+    (``docs/architecture/SCALING-ROADMAP.md`` §2.5, Hindsight).
+
+    ⛔ NO BUDGET LIVES HERE, AND NONE MOVES. Every member keeps the per-read
+    timeout it already passes to ``graph.query`` (``_DECORATION_TIMEOUT_MS``
+    for the bounded-relationship reads). This class cannot extend, shorten or
+    pool a deadline, so #3834's wait budget is untouched: the read buys its
+    latency by SCHEDULING, never by patience, and a slow member stays bounded
+    by the read that owns it.
+
+    ⛔ FAILURES SURFACE WHERE THEY USED TO. ``result()`` re-raises the worker's
+    exception in the CONSUMING thread, so a caller's existing ``try/except``
+    around the read still sees it and the degradation contract (#2952/#6971)
+    does not move: a raise still resets the whole decoration and labels it.
+
+    ⛔ THE ORDER OF A MEMBER'S OWN ROWS IS UNCHANGED — each query still returns
+    its own result set, so a re-schedule can reorder WORK, never ROWS, and the
+    fused ranking cannot be affected by it (``rrf_fusion`` is rank-based).
+    """
+
+    __slots__ = ("_futures", "_max_workers", "_pool")
+
+    def __init__(self, max_workers: int = 8) -> None:
+        self._pool = None
+        self._max_workers = max_workers
+        self._futures: dict[str, object] = {}
+
+    def submit(self, name: str, thunk) -> None:
+        """Start ``thunk`` now. Returns immediately; never raises."""
+        if self._pool is None:
+            import concurrent.futures
+            self._pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                thread_name_prefix="read-wave")
+        self._futures[name] = self._pool.submit(thunk)
+
+    def result(self, name: str):
+        """Block on ``name`` and return its value (``[]`` if never submitted).
+
+        An ABSENT member is an empty read, not an error: the call sites submit
+        conditionally (``if op_ids:``), and a caller must not have to
+        distinguish "the guard was false" from "the read answered nothing".
+        """
+        fut = self._futures.get(name)
+        return [] if fut is None else fut.result()
+
+    def close(self) -> None:
+        """Release the pool. Never blocks, never joins a member.
+
+        ``wait=False`` on purpose: this runs on BOTH the success and the
+        failure path, and a caller that is abandoning a read must not pay the
+        latency of the reads it is abandoning. A member already running is
+        left to finish on its own worker — exactly how a
+        cancelled-but-running leg is handled in ``degradation_chain`` — while
+        one that has not started is cancelled. Both are bounded by the
+        per-read timeout the member was given.
+        """
+        pool = self._pool
+        self._pool = None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
 def get_relationships_bounded(
     graph,
     point_ids: list[str],
@@ -6676,6 +6783,14 @@ def get_relationships_bounded(
 
     rels: RelationshipDecoration = RelationshipDecoration(
         {pid: [] for pid in point_ids})
+    #: #14192 — the wave the SIX independent reads below are submitted to.
+    #: They are all anchored on ``point_ids``/``op_ids``; only the operator
+    #: reads DEPEND on Q1a, so the wave is opened once Q1a has answered and
+    #: everything that can then be named is submitted -- measured, the four
+    #: operator reads were 6 sequential round trips on a read whose p50 was
+    #: 159 ms of a 231 ms search, and 3 of them walk the same operator
+    #: fan-out independently.
+    _wave = _ReadWave()
 
     try:
         # Q1a: operator edges per point (bounded by point degree).
@@ -6699,49 +6814,45 @@ def get_relationships_bounded(
             point_ops[pid].append((row[1], row[2], row[3], row[4] or "IMPL", row[5], row[6]))
             op_ids.add(row[3])
 
-        # Q1b: CORRECTS edges (direct point→point supersede links).
-        # Chained OPTIONAL MATCH can cartesian (m outgoing × k incoming rows)
-        # — dedupe by id in Python below.
+        # Q1b/CORRECTS: the direct point→point supersede links. ⛔ SUBMITTED to
+        # the wave below (its rows are only read in the assembly), so the
+        # chained-OPTIONAL-MATCH cartesian — deduped by id in Python below — is
+        # paid for in parallel with the operator reads instead of before them.
         corrects_out: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
         corrects_in: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
-        if point_ids:
-            rows = graph.query(
-                "MATCH (n:Point) WHERE n.id IN $ids "
-                "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
-                "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
-                "RETURN n.id, old.id, old.status, old.createdAt, "
-                "  new.id, new.status, new.createdAt",
-                params={"ids": point_ids},
-                timeout=_DECORATION_TIMEOUT_MS,
-            ).result_set
-            for row in rows:
-                pid = row[0]
-                old_id, old_status, old_created = row[1], row[2], row[3]
-                new_id, new_status, new_created = row[4], row[5], row[6]
-                if old_id and old_id not in {o[0] for o in corrects_out[pid]}:
-                    corrects_out[pid].append((old_id, old_status, old_created))
-                if new_id and new_id not in {n[0] for n in corrects_in[pid]}:
-                    corrects_in[pid].append((new_id, new_status, new_created))
+        _wave.submit("corrects", lambda: graph.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
+            "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
+            "RETURN n.id, old.id, old.status, old.createdAt, "
+            "  new.id, new.status, new.createdAt",
+            params={"ids": point_ids},
+            timeout=_DECORATION_TIMEOUT_MS,
+        ).result_set)
 
+        # Q2b/Q2-crit/Q2-family/Q2-support are INDEPENDENT of one another (all
+        # keyed on ``op_ids``/``expand_ops``), so they are SUBMITTED here and
+        # CONSUMED below: five reads, ONE wave, ``max(read)`` instead of
+        # ``sum(read)``. Measured on the #14192 corpus, this wave was 159 ms of
+        # a 231 ms search — 69 % of the read — and three of its members walk
+        # the same operator fan-out independently.
+        #
+        # ⛔ Q1a is deliberately NOT in this wave: its rows are what ``op_ids``
+        # IS, so the three operator reads cannot be named before it answers.
+        # That is a data dependency, not an ordering choice.
+        #
         # Q2b: mitigations per operator — ids are excluded from endpoint
         # expansion in Cypher (direction-agnostic: legacy inbound mitigated_by
         # graphs are covered by the NOT pattern).
-        op_mitigations: dict[str, list[dict]] = {}
         if op_ids:
-            rows = graph.query(
+            _wave.submit("mitigations", lambda: graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
                 "WITH op "
                 "MATCH (op)-[:mitigated_by]->(m:Point) "
                 "RETURN op.id, m.id, m.status, m.createdAt, m.content",
                 params={"op_ids": list(op_ids)},
                 timeout=_DECORATION_TIMEOUT_MS,
-            ).result_set
-            for row in rows:
-                op_id = row[0]
-                op_mitigations.setdefault(op_id, []).append({
-                    "id": row[1], "status": row[2] or "",
-                    "created_at": row[3], "snippet": (row[4] or "")[:120],
-                })
+            ).result_set)
 
         # Q2-crit: critical-class endpoints — NAND edges, terminal-status peers,
         # AND contested peers (in-Cypher variance on the coalesced α/β — exact,
@@ -6750,7 +6861,7 @@ def get_relationships_bounded(
         # caps (D3/D4). Low volume in practice.
         op_crit: dict[str, dict[str, tuple]] = {}
         if op_ids:
-            rows = graph.query(
+            _wave.submit("crit", lambda: graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
                 "WITH op "
                 "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
@@ -6768,6 +6879,18 @@ def get_relationships_bounded(
                 # owner (`ep_has_belief_cypher` / `ep_pair_stored`).
                 f"       OR ({ep_measured_cypher('other')} "
                 f"           AND {ep_pair_stored_cypher('other')} "
+                # #14192: a NECESSARY precondition on the SUM, in front of the
+                # division. `alpha*beta <= s*s/4` bounds the width by
+                # `1/(4*(s+1))`, so a pair whose `alpha+beta` is at or above
+                # `$variance_sum_max` provably cannot exceed $contested_threshold
+                # — the guard rejects only rows the variance test was going to
+                # reject anyway, and spares the coercion CASE, the band checks
+                # and the division on every other row. Measured on the #14192
+                # corpus: 160 ms -> 58 ms, row set byte-identical
+                # (`beta_variance_sum_bound` carries the derivation).
+                f"           AND {numeric_operand_cypher('coalesce(other.posterior_alpha, other.ep_alpha, 1.0)')} "
+                f"               + {numeric_operand_cypher('coalesce(other.posterior_beta, other.ep_beta, 1.0)')} "
+                "               < $variance_sum_max "
                 # #11702 cycle 17: the shared width formula, not a local
                 # re-derivation. FalkorDB RAISES on `string * string` /
                 # `bool * bool` ("Type mismatch: expected Integer, Float, or
@@ -6800,22 +6923,11 @@ def get_relationships_bounded(
                 "  other.posterior_beta, other.ep_beta, other.confidence "
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
-                        "contested_threshold": CONTESTED_VARIANCE_THRESHOLD},
+                        "contested_threshold": CONTESTED_VARIANCE_THRESHOLD,
+                        "variance_sum_max": beta_variance_sum_bound(
+                            CONTESTED_VARIANCE_THRESHOLD)},
                 timeout=_DECORATION_TIMEOUT_MS,
-            ).result_set
-            for row in rows:
-                # #11702 cycle 16: TOTAL coercion on the coalesced operands —
-                # a stored non-numeric α raised here and the whole operator
-                # decoration for the response was dropped.
-                a_num, b_num = numeric_operand(row[6]), numeric_operand(row[7])
-                op_crit.setdefault(row[0], {})[row[3]] = (
-                    row[1], row[2], row[4] or "", row[5] or "",
-                    a_num or 0.0, b_num or 0.0, bool(row[8]), row[9],
-                    bool(row[10]),
-                    # #11702: raw α/β + mirror (11..15) for the shared readers.
-                    (row[11], row[12], row[13], row[14], row[15])
-                    if len(row) > 15 else None,
-                )
+            ).result_set)
 
         # The operators of the TOP-K result points are the ones that get
         # support endpoint expansion. The global budget (140 ≈ 14 × 10)
@@ -6832,7 +6944,7 @@ def get_relationships_bounded(
         # are already covered EXACTLY by Q2-crit — this fetch is pure filler.
         op_support: dict[str, dict[str, tuple]] = {}
         if expand_ops:
-            rows = graph.query(
+            _wave.submit("support", lambda: graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
                 "CALL { WITH op MATCH (op)-[r2:IMPL|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
@@ -6853,20 +6965,82 @@ def get_relationships_bounded(
                 "  other.posterior_beta, other.ep_beta, other.confidence",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
                 timeout=_DECORATION_TIMEOUT_MS,
-            ).result_set
-            for row in rows:
-                # #11702 cycle 16: TOTAL coercion, same as the Q2-crit twin
-                # above — a stored non-numeric operand on a SUPPORT peer raised
-                # here and the blanket `except` dropped the relationship
-                # decoration for the whole response.
-                a_num, b_num = numeric_operand(row[6]), numeric_operand(row[7])
-                op_support.setdefault(row[0], {})[row[3]] = (
-                    row[1], row[2], row[4] or "", row[5] or "",
-                    a_num or 0.0, b_num or 0.0, bool(row[8]), row[9],
-                    bool(row[10]),
-                    (row[11], row[12], row[13], row[14], row[15])
-                    if len(row) > 15 else None,
-                )
+            ).result_set)
+
+        # Q2f: family sizes per (op, edge-type) for ALL result operators.
+        # Plain aggregate WITHOUT the mitigation-exclusion pattern (the NOT
+        # pattern cost ~50ms here) — family is approximate disclosure and
+        # mitigations are rare (their count inflates family by exactly the
+        # separately-listed mitigations, documented). Covers tail points'
+        # private operators so the D3 structure-count degradation is real.
+        if op_ids:
+            _wave.submit("family", lambda: graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "WITH op "
+                "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
+                "RETURN op.id, type(r2) AS et, count(other)",
+                params={"op_ids": list(op_ids)},
+                timeout=_DECORATION_TIMEOUT_MS,
+            ).result_set)
+
+        # ── #14192: the wave RESOLVES here — one pass over the five reads that
+        # have been running concurrently since they were submitted. Each block
+        # fills its OWN map from its OWN result set and reads no other, so the
+        # order below cannot change a result; it is the original source order,
+        # which keeps this diff a relocation rather than a rewrite.
+        #
+        # ⛔ A member that RAISES still lands in this function's ``except``
+        # (``result()`` re-raises on the consuming thread), so the whole-batch
+        # RESET + ``decoration_error`` labelling (#6971) is unchanged.
+        for row in _wave.result("corrects"):
+            pid = row[0]
+            old_id, old_status, old_created = row[1], row[2], row[3]
+            new_id, new_status, new_created = row[4], row[5], row[6]
+            if old_id and old_id not in {o[0] for o in corrects_out[pid]}:
+                corrects_out[pid].append((old_id, old_status, old_created))
+            if new_id and new_id not in {n[0] for n in corrects_in[pid]}:
+                corrects_in[pid].append((new_id, new_status, new_created))
+
+        op_mitigations: dict[str, list[dict]] = {}
+        for row in _wave.result("mitigations"):
+            op_id = row[0]
+            op_mitigations.setdefault(op_id, []).append({
+                "id": row[1], "status": row[2] or "",
+                "created_at": row[3], "snippet": (row[4] or "")[:120],
+            })
+
+        for row in _wave.result("crit"):
+            # #11702 cycle 16: TOTAL coercion on the coalesced operands —
+            # a stored non-numeric α raised here and the whole operator
+            # decoration for the response was dropped.
+            a_num, b_num = numeric_operand(row[6]), numeric_operand(row[7])
+            op_crit.setdefault(row[0], {})[row[3]] = (
+                row[1], row[2], row[4] or "", row[5] or "",
+                a_num or 0.0, b_num or 0.0, bool(row[8]), row[9],
+                bool(row[10]),
+                # #11702: raw α/β + mirror (11..15) for the shared readers.
+                (row[11], row[12], row[13], row[14], row[15])
+                if len(row) > 15 else None,
+            )
+
+        for row in _wave.result("support"):
+            # #11702 cycle 16: TOTAL coercion, same as the Q2-crit twin
+            # above — a stored non-numeric operand on a SUPPORT peer raised
+            # here and the blanket `except` dropped the relationship
+            # decoration for the whole response.
+            a_num, b_num = numeric_operand(row[6]), numeric_operand(row[7])
+            op_support.setdefault(row[0], {})[row[3]] = (
+                row[1], row[2], row[4] or "", row[5] or "",
+                a_num or 0.0, b_num or 0.0, bool(row[8]), row[9],
+                bool(row[10]),
+                (row[11], row[12], row[13], row[14], row[15])
+                if len(row) > 15 else None,
+            )
+
+        op_family: dict[tuple[str, str], int] = {}
+        for row in _wave.result("family"):
+            op_family[(row[0], row[1])] = int(row[2])
 
         # Unified endpoint store: critical classes first, then support filler
         # (same tuple shape — dict-merge dedupes).
@@ -6876,26 +7050,6 @@ def get_relationships_bounded(
             for src in (op_crit, op_support):
                 merged.update(src.get(op_id, {}))
             op_endpoints[op_id] = merged
-
-        # Q2f: family sizes per (op, edge-type) for ALL result operators.
-        # Plain aggregate WITHOUT the mitigation-exclusion pattern (the NOT
-        # pattern cost ~50ms here) — family is approximate disclosure and
-        # mitigations are rare (their count inflates family by exactly the
-        # separately-listed mitigations, documented). Covers tail points'
-        # private operators so the D3 structure-count degradation is real.
-        op_family: dict[tuple[str, str], int] = {}
-        if op_ids:
-            rows = graph.query(
-                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
-                "WITH op "
-                "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
-                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
-                "RETURN op.id, type(r2) AS et, count(other)",
-                params={"op_ids": list(op_ids)},
-                timeout=_DECORATION_TIMEOUT_MS,
-            ).result_set
-            for row in rows:
-                op_family[(row[0], row[1])] = int(row[2])
 
         # ── Assembly: class-aware, epistemically-prioritized ────────────────
         # Priority (D4): NAND > contested > superseded/retracted >
@@ -7148,6 +7302,12 @@ def get_relationships_bounded(
         rels = RelationshipDecoration({pid: [] for pid in point_ids})
         rels.decoration_error = f"{type(exc).__name__}: {exc}"
         logger.warning("Bounded relationship query failed", exc_info=True)
+    finally:
+        # #14192: release the wave on BOTH paths. Non-blocking, and a member
+        # that has not started is cancelled — this runs on the FAILURE path
+        # too, where the read is abandoning work on purpose and must not pay
+        # for the reads it is abandoning (``_ReadWave.close``).
+        _wave.close()
 
     return rels
 
