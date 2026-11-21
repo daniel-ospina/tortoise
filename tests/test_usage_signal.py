@@ -1284,8 +1284,10 @@ def test_no_graph_dependency() -> None:
         "ban set minus the probe exemptions, or the transitive leg certifies "
         "coverage it does not deliver")
 
-    def _probe(import_stmt: str) -> str:
+    def _probe(import_stmt: str) -> tuple[str, tuple[str, ...]]:
         """Run the sys.modules walk in a CLEAN interpreter over one import.
+
+        Returns `(modules the walk FOUND, the name list it WALKED WITH)`.
 
         ⛔ THE PROGRAM IS BUILT HERE, interpolating `_probe_forbidden()` directly,
         and there is deliberately NO separate emitter function. An earlier cut put
@@ -1299,6 +1301,26 @@ def test_no_graph_dependency() -> None:
         **102 passed** and `_probe_source` as dead code. ONE BODY means there is no
         edge between building the program and running it, so there is no edge that
         can be left unpinned.
+
+        ⛔ AND THE PROGRAM PRINTS THE LIST IT ACTUALLY WALKED WITH, because one body
+        closes the EMITTER hop and still cannot see a narrowing written AROUND the
+        interpolation: measured at `bdfbac3c96`,
+        `forbidden=[r for r in _probe_forbidden() if r != 'tortoise.sdk']` and the
+        same filter naming `tortoise.projection` each left the file at **102
+        passed** — the exact-entry controls below witness `redis` and `tortoise.ep`,
+        so every narrowing that keeps those two was still invisible. So the walk
+        emits its effective list on a second record and the assertion below holds it
+        to `_probe_forbidden()`: derivation -> program -> walk is now a closed chain,
+        and a filter anywhere along it reds. `\x1f` (unit separator) is the record
+        separator because it cannot occur in a module name — and the read below is
+        `rstrip("\n")`, NOT `strip()`: Python counts `\x1f` as whitespace
+        (`'\x1f'.isspace()` is `True`, bidi class S), so a blanket `strip()` eats the
+        separator exactly when the found-list is EMPTY — the clean-import case — and
+        hands the effective list back as the found list (measured: it made the
+        `leaked == ""` row report all fifteen roots as leaked). The one thing this
+        cannot witness is a rewrite that narrows the walk AND fabricates a full list
+        INSIDE the program: the subprocess has no access to `_probe_forbidden()`, so
+        that is a hand-written second literal next to the narrowed one, not a filter.
         """
         src = (
             "import sys;"
@@ -1306,15 +1328,17 @@ def test_no_graph_dependency() -> None:
             f"forbidden={list(_probe_forbidden())!r};"
             "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
             "for r in forbidden)];"
-            "print(','.join(sorted(bad)))"
+            "print(','.join(sorted(bad)) + chr(31) + ','.join(sorted(forbidden)))"
         )
-        return subprocess.run(
+        out = subprocess.run(
             [sys.executable, "-c", src],
             capture_output=True,
             text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
             check=True,
-        ).stdout.strip()
+        ).stdout.rstrip("\n")
+        found, _, effective = out.partition(chr(31))
+        return found, tuple(name for name in effective.split(",") if name)
 
     # ⛔ AND THIS LEG NEEDS POSITIVE CONTROLS, not only the negative assertion.
     # Everything above asserts the probe finds NOTHING, so every way of breaking the
@@ -1334,7 +1358,15 @@ def test_no_graph_dependency() -> None:
     # everywhere else). Measured silent before this pair, each at 102 passed: the
     # inline narrowed program in `_probe`, the `'.' not in r` filter, and
     # `for r in ('falkordb', 'redis')` inside the walk. Both now red.
-    _observed = _probe("import tortoise.ep").split(",")
+    _found, _effective = _probe("import tortoise.ep")
+    _observed = _found.split(",")
+    assert set(_effective) == set(_probe_forbidden()), (
+        f"the walk ran with {sorted(_effective)} but the derivation is "
+        f"{sorted(_probe_forbidden())} — a narrowing BETWEEN them (a filter around "
+        "the interpolation, a narrowed matcher) leaves every named control green "
+        "while the leg certifies coverage it does not deliver (#14118 item 1). "
+        "Measured green before this row: dropping `tortoise.sdk`, or "
+        "`tortoise.projection`, from the interpolated list")
     assert "redis" in _observed, (
         "the transitive probe cannot detect a store client at all: importing "
         "tortoise.ep must put a `redis` module in sys.modules, so an empty answer "
@@ -1345,7 +1377,7 @@ def test_no_graph_dependency() -> None:
         "sys.modules, so its absence means the list was narrowed somewhere between "
         "the derivation and the walk — helper, program or matcher — and the "
         "transitive leg certifies coverage it does not deliver (#14118 item 1)")
-    leaked = _probe("from tortoise import usage_signal")
+    leaked, _ = _probe("from tortoise import usage_signal")
     assert leaked == "", (
         f"importing usage_signal pulled a graph client into sys.modules: {leaked}")
 
