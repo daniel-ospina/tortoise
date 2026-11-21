@@ -826,8 +826,14 @@ raised inside the same guard that decides routing — so with any of those
 supplied you get that filtered read and NO report, and a state question you
 filtered looks exactly like an honest empty again. (A value equal to the
 default — `threshold=0`, `min_confidence=0`, `order_by="relevance"` — is not a
-filter and does not silence it.) The filter and the population are different
-answers: send the question ALONE to get the population or the report. (The
+filter and does not silence it.) ⛔ AND THE TOOL'S OTHER THREE RETRIEVAL
+ARGUMENTS ARE NOT IN THAT SET, which is why this sentence names its members
+rather than saying "any argument": `kind`, `entity_type` and `limit` change
+WHICH rows a read returns and are applied by the population itself, so they do
+NOT ask for a filtered relevance read and leave the report intact — `kind=`
+alone never silences the notice, and neither does `limit=`. The filter and the
+population are different answers: send the question ALONE to get the population
+or the report. (The
 hosted `GET /v1/search` route below takes only the question and `limit`,
 neither of which is a routing argument, so it is not silenced.)
 ⛔ THIS TOOL CANNOT REPORT the cue it saw
@@ -845,9 +851,8 @@ same path, `selfhost_api.py`) recognises the cue too — routing happens inside
 the SDK call — but it passes NO sink and answers with the bare row list, so on
 a self-hosted deployment a declined state question is still indistinguishable
 from "nothing has ended"; the private SDK sink above is the only way to read it
-there. The difference it makes
-there is that "the route declined my state question" stops looking like "the
-graph says nothing has ended".
+there — and what that sink buys is the distinction between "the route declined
+my state question" and "the graph says nothing has ended".
 """
 
 #: ⛔ AND THE FAMILY ARM NEEDS ITS OWN SENTENCE (round-7 review, P2): there a shape

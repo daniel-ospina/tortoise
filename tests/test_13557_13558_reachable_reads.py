@@ -1222,9 +1222,13 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     # notice, while the served block listed the routes with no clause saying so. A
     # caller reading only this description therefore could not predict the outcome of
     # a filtered call, which is #14033's third acceptance criterion. The five names
-    # below are exactly this tool's retrieval arguments beyond `query`, and the
-    # signature assertion is what keeps that true: an argument that is renamed or
-    # dropped leaves the served clause describing an argument nobody can pass.
+    # below are the retrieval arguments that SILENCE the report, which is NOT the
+    # same as "this tool's retrieval arguments beyond `query`" — the round-16
+    # review's third residual measured that over-claim, and this file now pins the
+    # other side of it below (`kind`/`entity_type`/`limit` narrow the read and leave
+    # the report intact). The signature assertion is what keeps the named five
+    # true: an argument that is renamed or dropped leaves the served clause
+    # describing an argument nobody can pass.
     _filter_args = {"threshold", "min_confidence", "order_by",
                     "relationship_filter", "traversal_path"}
     assert _filter_args <= set(inspect.signature(tortoise_search).parameters), (
@@ -1274,6 +1278,35 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
         "the SERVED description dropped the NEUTRAL-VALUE carve-out: a caller who "
         "passed `threshold=0` explicitly is then told they silenced a report that in "
         "fact still fires (#14033 round-13 review, P3)")
+
+    # ⛔ AND THE GENERAL SENTENCE MUST NOT BE READ AS COVERING THE OTHER THREE
+    # (#14033 round-16 review, third residual — the one that is a SERVED-TEXT
+    # defect rather than a note). "A RETRIEVAL ARGUMENT THAT CHANGES THE READ
+    # SILENCES THE REPORT" is read against `_retrieval_knobs()` in `sdk.py`, which
+    # does NOT classify `kind`, `entity_type` or `limit`: the population applies
+    # them, so they change WHICH rows a read returns and never whether the report
+    # fires (measured — `test_a_retrieval_knob_suppresses_the_notice_too` drives
+    # `kind=` and reads the sink). Without a carve-out the sentence tells a caller
+    # who narrowed by `kind` that they silenced a report that in fact still fires,
+    # i.e. the served block mispredicts the boundary it exists to make predictable.
+    assert _re.search(
+        r"AND THE TOOL'S OTHER THREE RETRIEVAL ARGUMENTS ARE NOT IN THAT SET",
+        _doc_flat), (
+        "the SERVED description dropped the `kind`/`entity_type`/`limit` carve-out, so "
+        "the general \"A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE "
+        "REPORT\" reads as covering arguments that do NOT silence it (#14033 "
+        "round-16 review, third residual)")
+    for _name in ("kind", "entity_type", "limit"):
+        assert _re.search(rf"`{_name}`", _doc_flat), (
+            f"the carve-out no longer names `{_name}`, so a caller who narrowed by it "
+            "cannot tell whether the cue report still fires")
+    assert _re.search(
+        r"do NOT ask for a filtered relevance read and leave the report intact",
+        _doc_flat,
+    ), (
+        "the carve-out lost its AFFIRMATIVE claim — the names alone do not say what "
+        "happens to the report, and a negation of this sentence would ship green"
+    )
 
 
 def test_the_bounded_cost_claims_name_every_scan():
@@ -2156,6 +2189,21 @@ def test_a_retrieval_knob_suppresses_the_notice_too(sdk):
     sdk._tortoise_fts_query("which claims were retracted by legal",
                             entity_type="point", limit=5, _state_route_out=plain)
     assert plain.get("reason") == "shape", plain
+
+    # ⛔ AND `kind` IS NOT ONE OF THE SILENCING KNOBS (#14033 round-16 review, third
+    # residual). `_retrieval_knobs()` classifies five arguments and NOT `kind`,
+    # `entity_type` or `limit` — the population applies those, so they change which
+    # rows come back and never whether the report fires. The served block states
+    # that only because it was measured here: adding `("kind", kind is not None)`
+    # to that list reds this arm.
+    narrowed: dict = {}
+    sdk._tortoise_fts_query("which claims were retracted by legal",
+                            entity_type="point", kind="claim", limit=5,
+                            _state_route_out=narrowed)
+    assert narrowed.get("reason") == "shape", (
+        f"`kind=` silenced the cue report ({narrowed!r}) — the SERVED description "
+        f"says `kind`/`entity_type`/`limit` leave the report intact (#14033 "
+        f"round-16 review, third residual)")
 
     # ⛔ AND THE SERVED CLAUSE'S CARVE-OUT IS THE MEASURED BEHAVIOUR, not a hope
     # (#14033 round-13 review, P3). The served text now says a retrieval argument
