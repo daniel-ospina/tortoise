@@ -118,6 +118,16 @@ KNOWN_STALE_TOOL_NAMES = {
         # `recompute=True` arm now. Upstream-authored mirror, still resolves via the
         # #3883 shim (see the note at the top of the map).
         "tortoise_compute_confidence",  # → tortoise_check_confidence(recompute=True, ...)
+        # #11609 lane P7 retired the operator door FORWARD into `tortoise_link_entities`
+        # (row 19) by REGISTERING it — the mirror's invocation map still shows
+        # `tortoise_create_operator(...)`. RATCHETED for the reason stated at the top of
+        # this map: `how-to-use-tortoise` is sha-pinned in `config/served-skills-upstream.yml`,
+        # so an edit here drifts the mirror (`--check-local` -> DRIFT) and the next `--sync`
+        # reverts it. The name still resolves through the #3883 shim, whose warning names
+        # `tortoise_link_entities(target_ids=...)`; re-cutting the mirror upstream shrinks
+        # this row out. `research-domain` and `tortoise-onboarding` ARE authored here and
+        # were re-pointed in this same change.
+        "tortoise_create_operator",     # → tortoise_link_entities(relation, from_id, target_ids=...)
         # `#11609`'s delete arm: the mirror's invocation map still prints a bare
         # `tortoise_delete_point` row, which retired FORWARD into `tortoise_delete`
         # (`docs/product/canonical-mcp-tools.md:423` — a preview, then the confirmation
@@ -155,6 +165,11 @@ KNOWN_STALE_TOOL_NAMES = {
     "tortoise-decide": {
         "tortoise_compute_confidence",  # → tortoise_check_confidence(recompute=True, ...)
         "tortoise_recall",              # → tortoise_check_confidence(recall=True, ...)
+        # #11609 lane P7: the operator door retired FORWARD into `tortoise_link_entities`
+        # (row 19). This skill is sha-pinned upstream (`config/served-skills-upstream.yml`),
+        # so the row is RATCHETED rather than re-pointed; the name still resolves through
+        # the #3883 shim, which names the container and its `target_ids=` spelling.
+        "tortoise_create_operator",     # → tortoise_link_entities(relation, from_id, target_ids=...)
         # → tortoise_create_entity(type="point", ...); see the note at the top.
         "tortoise_create_point",
     },

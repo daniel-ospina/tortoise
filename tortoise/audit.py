@@ -2598,7 +2598,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             else:
                 fix, suffix = (
                     "Verify semantic contradiction BEFORE converting — if "
-                    f"confirmed: tortoise_create_operator('NAND', {_quoted(src_id)}, "
+                    f"confirmed: tortoise_link_entities('NAND', {_quoted(src_id)}, "
                     f"[{_quoted(tgt_id)}])"), ""
             issues5.append(AuditIssue(
                 issue_type="impl_instead_of_nand",
