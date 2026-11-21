@@ -1280,7 +1280,7 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
     while node is not None:
         seen.add(id(node))
         if isinstance(
-            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
         ) and _is_header_child(node, previous):
             # ⛔ A CALL IN THE HEADER IS NOT IN THE DEFINITION'S SCOPE. Decorators, bases,
             # keywords, defaults and annotations all evaluate in the ENCLOSING scope — the
@@ -1459,6 +1459,17 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     if isinstance(child, (ast.arguments, ast.keyword, ast.arg)):
         return True
     if any(expression is child for expression in getattr(node, "decorator_list", ()) or ()):
+        return True
+    #: A TYPE PARAMETER's `bound` / `default_value` evaluates in the ENCLOSING scope too
+    #: (PEP 695): `class C[T: torch.query(…)]: torch = …` defines fine, so that call
+    #: resolved the MODULE import, not the class body — yet it was charged with the
+    #: generic's own bindings. `_header_expressions` excludes these fields for a different
+    #: reason (a `:=` in a bound is a COMPILE-TIME SyntaxError, so it can bind nothing),
+    #: and inheriting that exclusion into the REACH direction graded a legitimate probe:
+    #: measured `()` → `((3, (), True, False, True),)` (review of this PR, P3).
+    #: The ascent reaches the definition with the TYPE-PARAMETER node as the child, not
+    #: the bound expression itself, so the test is on that node's identity.
+    if any(parameter is child for parameter in getattr(node, "type_params", ()) or ()):
         return True
     return any(expression is child for expression in _header_expressions(node))
 
@@ -4260,10 +4271,20 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a class keyword": (
             'class _Inner(metaclass=torch.query("SELECT 1")):\n        torch = _make()'
         ),
+        #: A `lambda`'s DEFAULT evaluates in the enclosing scope like any other, and its
+        #: PARAMETER named after the import is what made the miss visible: the lambda's own
+        #: scope was charged to a call that cannot be in it (measured `()` → graded before
+        #: the fix). `ast.Lambda` was simply absent from the header test's caller tuple.
+        "a lambda default": '(lambda torch=torch.query("SELECT 1"): torch)',
+        #: …and a PEP 695 type parameter BOUND, the second family `_header_expressions`'
+        #: deliberate exclusion was inherited into.
+        "a type-parameter bound": (
+            'def _inner[T: torch.query("SELECT 1")]():\n        torch = _make()'
+        ),
     }.items():
         _header_row = roots(_header_reach_probe.format(header=_header))
         assert _header_row == (), (
-            f"a {_label} evaluates in the ENCLOSING scope, so the call there still runs on "
+            f"{_label.capitalize()} evaluates in the ENCLOSING scope, so the call there runs on "
             f"the import and the probe must stay EXEMPT: {_header_row}"
         )
     _body_after_header = roots(
