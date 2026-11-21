@@ -40856,7 +40856,7 @@ class _OrgSeedSurface:
     def query(self, cypher, **params):
         return self._sdk._get_proj().query(cypher, **params)
 
-    def _create_subject(self, name, subjectKind=None, **props):
+    def create_subject(self, name, subjectKind=None, **props):
         # #9572: ``None`` = not supplied, forwarded as absent — a fabricated
         # ``"other"`` default here would re-open the clobber the SDK doors had.
         # A BLANK kind is "not supplied" too (review P2): ``named_kind``.
@@ -40865,7 +40865,7 @@ class _OrgSeedSurface:
             props["subjectKind"] = subjectKind
         return self._sdk._create_subject(name, **props)
 
-    def _create_edge(self, relation, from_id, to_id):
+    def create_edge(self, relation, from_id, to_id):
         return self._sdk._create_edge(relation, from_id, to_id)
 
 
@@ -51036,7 +51036,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 199 tracked files (742 distinct
+# ABSOLUTE line number from 199 tracked files (740 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
