@@ -742,6 +742,68 @@ def test_record_reconcile_HANDS_the_declared_name_to_the_CACHE_CONSUMER(
         f"reach the cache read instead: {captured.err}")
 
 
+def test_the_verbs_never_shadow_the_DSNs_ROLE_with_a_connect_kwarg(monkeypatch):
+    """The record's ROLE rides in the DSN's `options`; nothing may replace it.
+
+    ``psycopg2.connect(dsn, options=…)`` REPLACES the DSN's own ``options``
+    parameter rather than appending to it, and ``options=-c role=<name>`` is how a
+    deployment (and every live test) reaches the record's application role
+    without a second credential. A statement-timeout kwarg therefore demoted the
+    session to the provisioning SUPERUSER, which the tenant prologue then
+    refused — the verbs answered "record is unreadable (RecordProjectionError)"
+    on a DSN that worked everywhere else.
+
+    Measured twice, months apart, on two verb families: ``record-serve``
+    (PR #9862 review, P1) and then ``record-reconcile`` / ``record-restore``
+    (PR #14068's armed legs on ``test-record-postgres``). The bound is now
+    APPENDED to the DSN's own options, which reds this pin if anyone hands
+    ``connect()`` a bare timeout again.
+
+    No database is contacted: ``psycopg2.connect`` is replaced, and both DSN
+    forms are covered because a deployment may use either.
+    """
+    import psycopg2
+
+    captured: list = []
+
+    def fake_connect(dsn, **kw):
+        captured.append((dsn, kw))
+        return object()
+
+    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+
+    uri = ("postgresql://record:record@127.0.0.1:5432/record"
+           "?options=-c%20role%3Dtortoise_record_app")
+    keyword = ("host=127.0.0.1 dbname=record user=record password=record"
+               " options='-c role=tortoise_record_app'")
+
+    for dsn in (uri, keyword):
+        cli._connect_record(dsn)
+
+    assert [d for d, _ in captured] == [uri, keyword], (
+        "the DSN must reach libpq as given: its `options` are where the "
+        f"record's application role lives: {[d for d, _ in captured]}")
+    for dsn, kw in captured:
+        options = kw.get("options", "")
+        assert "role=tortoise_record_app" in options, (
+            "the DSN's own `options` were REPLACED, so the session runs as the "
+            "provisioning superuser and the tenant prologue refuses it "
+            f"(PR #9862 P1, re-found by PR #14068): {dsn!r} -> {options!r}")
+        assert "statement_timeout" in options, (
+            f"the read bound must survive too: {options!r}")
+    assert "connect_timeout" in captured[0][1]
+
+    # A DSN with NO options of its own still gets the bound — and ONLY the bound
+    # (no empty leading token, which libpq would reject or ignore).
+    from tortoise.record_reconcile import RECORD_STATEMENT_TIMEOUT_MS
+
+    captured.clear()
+    cli._connect_record("postgresql://record:record@127.0.0.1:5432/record")
+    assert captured[0][1]["options"] == (
+        f"-c statement_timeout={int(RECORD_STATEMENT_TIMEOUT_MS)}"), (
+        f"a bare DSN must get exactly the bound: {captured[0][1]}")
+
+
 # ── 3. the end-to-end acceptance (both stores; SKIPS without them) ───────────
 
 
@@ -794,7 +856,62 @@ def _both_stores():
             "both stores are provisioned but psycopg2 is not installed — the "
             "`postgres` extra is missing (`uv sync --extra postgres`), so this "
             "leg cannot run and must not skip (#13337).")
+    _ensure_record_schema(dsn)
     return dsn
+
+
+#: The record's APPLICATION role — `NOBYPASSRLS`, the role the runbook mandates
+#: (`docs/infra-runbook.md` → "The record's connecting role") and the one
+#: `scope_connection`/`RecordWriter` REFUSE to substitute. The provisioner's DSN
+#: is the CONTAINER's superuser (`postgres-provision` creates database+role
+#: `record`), which is all four bypasses at once, so a write through it is
+#: refused by design — measured on `test-record-postgres` job 136655957683 of PR
+#: #14068, where all three armed legs reported `{'object': 0}` against a record
+#: that had in fact refused every write:
+#:
+#:   ``RecordProjectionError: the record's connection runs as a role that BYPASSES
+#:   RLS … Arm TORTOISE_RECORD_DSN with tortoise_record_app``
+#:
+#: The spelling is `options=-c role=<name>` (libpq's connect-time `SET ROLE`),
+#: and it is NOT re-implemented here: the ONE definition is
+#: `tests/test_9078_record_written_by_production_path.py::_app_role_dsn`, which
+#: `tests/test_12894_record_cursor_live.py` already imports for the same reason.
+RECORD_APP_ROLE = "tortoise_record_app"
+
+
+def _record_app_dsn(dsn: str | None = None) -> str:
+    """`dsn` (default: the provisioned one) as the record's APPLICATION role."""
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+    return _app_role_dsn(dsn or os.environ[RECORD_DB_ENV])
+
+
+def _ensure_record_schema(dsn: str) -> None:
+    """Apply the record migrations to the provisioned database, once.
+
+    ⛔ The schema is NOT assumed from another suite having run earlier in the
+    same job: `test-record-postgres` runs twelve record files before this one, so
+    a database that carries `public.object` by then says nothing about a `-k`
+    run, a reordered job, or a second lane sharing the server — and the failure
+    mode of assuming it is the worst one (a query against a missing table raises
+    inside a helper and reads as "the write did not happen").
+    `_ensure_record_schema` is idempotent by inspection and re-applies the
+    tenancy migration that CREATES `tortoise_record_app`, which is exactly the
+    role `_record_app_dsn` needs, so a fresh container is armed by this call
+    rather than by luck.
+    """
+    import psycopg2
+
+    from tests.test_9078_record_written_by_production_path import (
+        _ensure_record_schema as apply_schema,
+    )
+
+    conn = psycopg2.connect(dsn)
+    conn.autocommit = True
+    try:
+        apply_schema(conn)
+    finally:
+        conn.close()
 
 
 def test_the_ONE_misconfiguration_that_reds_is_a_RECORD_without_a_CACHE(
@@ -1047,7 +1164,11 @@ def _org_wide_write(monkeypatch, org: str, graph_id: str, namespace: str,
     from tortoise import hosted_api
 
     _seed_default_graph(org, graph_id, namespace)
-    monkeypatch.setenv("TORTOISE_RECORD_DSN", os.environ[RECORD_DB_ENV])
+    # APP ROLE, not the provisioned superuser: the writer refuses a bypassing
+    # connection (R6/#9600), which is what made all three armed legs report an
+    # empty record on `test-record-postgres` while every write had in fact been
+    # refused. This is the same connection production makes.
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", _record_app_dsn())
     monkeypatch.setenv(
         "TORTOISE_EVENT_LOG_BASE_DIR",
         os.environ.get("TORTOISE_EVENT_LOG_BASE_DIR")
@@ -1088,7 +1209,8 @@ def _graph_bound_write(monkeypatch, org: str, graph_id: str, namespace: str,
     from tortoise import hosted_api
 
     _seed_default_graph(org, graph_id, namespace)
-    monkeypatch.setenv("TORTOISE_RECORD_DSN", os.environ[RECORD_DB_ENV])
+    # The same APP-ROLE connection the org-wide door makes (see that helper).
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", _record_app_dsn())
     monkeypatch.setenv(
         "TORTOISE_EVENT_LOG_BASE_DIR",
         os.environ.get("TORTOISE_EVENT_LOG_BASE_DIR")
@@ -1159,7 +1281,10 @@ def test_BOTH_DOORS_write_ONE_cache_graph_and_reconcile_CLEAN_on_it(
     try:
         args = _reconcile_args(cache_graph=None)
         args.db = os.environ["TORTOISE_DB_URI"]
-        args.record_dsn = os.environ[RECORD_DB_ENV]
+        # the APP ROLE: the reader sets the tenant GUC and scopes by RLS, which
+        # a bypassing superuser connection would silently defeat (same gate the
+        # write path passes through).
+        args.record_dsn = _record_app_dsn()
         args.org, args.graph = org, graph_id
         code = cli._cmd_record_reconcile(args)
     finally:
@@ -1177,7 +1302,10 @@ def test_BOTH_DOORS_write_ONE_cache_graph_and_reconcile_CLEAN_on_it(
     try:
         args = _reconcile_args(cache_graph=namespace)
         args.db = os.environ["TORTOISE_DB_URI"]
-        args.record_dsn = os.environ[RECORD_DB_ENV]
+        # the APP ROLE: the reader sets the tenant GUC and scopes by RLS, which
+        # a bypassing superuser connection would silently defeat (same gate the
+        # write path passes through).
+        args.record_dsn = _record_app_dsn()
         args.org, args.graph = org, graph_id
         code = cli._cmd_record_reconcile(args)
     finally:
@@ -1222,7 +1350,10 @@ def test_an_ORG_WIDE_object_write_reconciles_CLEAN_on_the_DECLARED_name(
     try:
         args = _reconcile_args(cache_graph=None)
         args.db = os.environ["TORTOISE_DB_URI"]
-        args.record_dsn = os.environ[RECORD_DB_ENV]
+        # the APP ROLE: the reader sets the tenant GUC and scopes by RLS, which
+        # a bypassing superuser connection would silently defeat (same gate the
+        # write path passes through).
+        args.record_dsn = _record_app_dsn()
         args.org, args.graph = org, graph_id
         code = cli._cmd_record_reconcile(args)
     finally:
@@ -1267,7 +1398,10 @@ def test_an_ORG_WIDE_event_is_PRESENT_once_the_name_is_READ(monkeypatch, capsys)
     try:
         args = _reconcile_args(cache_graph=None)
         args.db = os.environ["TORTOISE_DB_URI"]
-        args.record_dsn = os.environ[RECORD_DB_ENV]
+        # the APP ROLE: the reader sets the tenant GUC and scopes by RLS, which
+        # a bypassing superuser connection would silently defeat (same gate the
+        # write path passes through).
+        args.record_dsn = _record_app_dsn()
         args.org, args.graph = org, graph_id
         cli._cmd_record_reconcile(args)
     finally:
@@ -1288,7 +1422,10 @@ def test_an_ORG_WIDE_event_is_PRESENT_once_the_name_is_READ(monkeypatch, capsys)
     try:
         args = _reconcile_args(cache_graph=derived)
         args.db = os.environ["TORTOISE_DB_URI"]
-        args.record_dsn = os.environ[RECORD_DB_ENV]
+        # the APP ROLE: the reader sets the tenant GUC and scopes by RLS, which
+        # a bypassing superuser connection would silently defeat (same gate the
+        # write path passes through).
+        args.record_dsn = _record_app_dsn()
         args.org, args.graph = org, graph_id
         cli._cmd_record_reconcile(args)
     finally:

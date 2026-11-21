@@ -787,6 +787,82 @@ def _cmd_reconcile(args):
     return 0
 
 
+def _record_options(dsn: str, bound_ms: int) -> str:
+    """The DSN's own libpq `options`, with the read bound APPENDED — never replaced.
+
+    libpq's `options` is ONE string, and psycopg2 REPLACES the one a DSN carries
+    when `options=` is also passed as a connect keyword. `options=-c role=<name>`
+    is the connect-time spelling of `SET ROLE`, i.e. how a deployment (and every
+    live test) reaches the record's application role without a second
+    credential — so replacing it silently demoted the session to the
+    provisioning SUPERUSER, which the tenant prologue
+    (`record_projection.scope_connection`) then correctly refused.
+
+    Both DSN forms are read with the STDLIB, so this answer does not depend on a
+    driver object (the DB-free suites stub `psycopg2` as a bare module):
+
+    * URI form — `postgresql://…?options=-c%20role%3D…`;
+    * keyword form — `options='-c role=…'` (via `shlex`, so a quoted value is
+      not split on its space).
+
+    ⛔ Do NOT widen this into "pass the timeout some other way" without keeping
+    ONE thing true: whatever the DSN says about `options` reaches the server.
+    """
+    existing = ""
+    if dsn.startswith(("postgresql://", "postgres://")):
+        from urllib.parse import parse_qs
+
+        # `partition`, not `urlsplit(...).query`: the parsed URL object's `.query`
+        # is an untyped `.query` receiver, i.e. one more row on
+        # `tools/sdk_privatise.py`'s residue pin — a gate this change has no
+        # business moving for a string split (#14068).
+        _, _, query = dsn.partition("?")
+        query = query.partition("#")[0]
+        existing = (parse_qs(query).get("options") or [""])[0]
+    else:
+        import shlex
+
+        try:
+            parts = shlex.split(dsn)
+        except ValueError:              # unbalanced quotes: leave libpq's error alone
+            parts = dsn.split()
+        for part in parts:
+            if part.startswith("options="):
+                existing = part[len("options="):]
+                break
+    bound = f"-c statement_timeout={int(bound_ms)}"
+    return f"{existing} {bound}".strip()
+
+
+def _connect_record(dsn: str):
+    """A record connection bounded by `statement_timeout`, with the DSN's ROLE kept.
+
+    See `_record_options`, which is the whole fix, and the two measurements
+    behind it — the SAME clobber found twice, once per verb family:
+
+    * `record-serve` — PR #9862 review P1: the session stayed on the
+      provisioning superuser and the verb exited 2 on a DSN that worked
+      everywhere else;
+    * `record-reconcile` and `record-restore` — PR #14068's armed legs on
+      `test-record-postgres` reported "record is unreadable
+      (RecordProjectionError)" for the same reason. On the restore side the
+      clobber cannot wipe (the refusal is upstream of the first write) but it
+      cannot VERDICT either: an UNKNOWN where a clean run was available.
+    """
+    import psycopg2
+
+    from tortoise.record_reconcile import (
+        RECORD_CONNECT_TIMEOUT_S,
+        RECORD_STATEMENT_TIMEOUT_MS,
+    )
+
+    return psycopg2.connect(
+        dsn,
+        connect_timeout=RECORD_CONNECT_TIMEOUT_S,
+        options=_record_options(dsn, RECORD_STATEMENT_TIMEOUT_MS),
+    )
+
+
 def _cmd_record_reconcile(args):
     """#9189 / §17.2 — the record↔cache reconciler's PRODUCTION TRIGGER.
 
@@ -852,8 +928,6 @@ def _cmd_record_reconcile(args):
     from tortoise.record_reconcile import (
         CACHE_READ_TIMEOUT_MS,
         EXIT_UNAVAILABLE,
-        RECORD_CONNECT_TIMEOUT_S,
-        RECORD_STATEMENT_TIMEOUT_MS,
         VERDICT_CLEAN,
         exit_code_for,
         log_result,
@@ -881,7 +955,7 @@ def _cmd_record_reconcile(args):
               "UNKNOWN, not zero.", file=sys.stderr)
         return EXIT_UNAVAILABLE
     try:
-        import psycopg2
+        import psycopg2  # noqa: F401 — availability probe; `_connect_record` connects
     except ImportError:
         print("Error: psycopg2 is not installed — the record cannot be read, "
               "so divergence is UNKNOWN, not zero. Install the `postgres` "
@@ -976,11 +1050,10 @@ def _cmd_record_reconcile(args):
     proj = None
     try:
         try:
-            conn = psycopg2.connect(
-                dsn,
-                connect_timeout=RECORD_CONNECT_TIMEOUT_S,
-                options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
-            )
+            # ⛔ `_connect_record`, never `connect(options=…)`: the keyword form
+            # REPLACES a DSN's own `options`, which is where the record's
+            # application role rides (measured on PR #14068's armed legs).
+            conn = _connect_record(dsn)
             view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
         except PlacementTableUnavailable:
             # A fault in the INSTALL, not in the record (#10663). Collapsing it
@@ -1472,10 +1545,6 @@ def _cmd_record_restore(args):
         PlacementTableUnavailable,
         read_record_view,
     )
-    from tortoise.record_reconcile import (
-        RECORD_CONNECT_TIMEOUT_S,
-        RECORD_STATEMENT_TIMEOUT_MS,
-    )
     from tortoise.record_restore import (
         EXIT_REFUSED,
         EXIT_RESTORED,
@@ -1571,7 +1640,7 @@ def _cmd_record_restore(args):
         return EXIT_UNAVAILABLE
 
     try:
-        import psycopg2
+        import psycopg2  # noqa: F401 — availability probe; `_connect_record` connects
     except ImportError:
         print("Error: psycopg2 is not installed — the record cannot be read, "
               "so nothing was restored and the cache's state is UNCHANGED. "
@@ -1584,11 +1653,10 @@ def _cmd_record_restore(args):
     proj = None
     try:
         try:
-            conn = psycopg2.connect(
-                dsn,
-                connect_timeout=RECORD_CONNECT_TIMEOUT_S,
-                options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
-            )
+            # The same construction as `record-reconcile` (`_connect_record`):
+            # a `connect(options=…)` kwarg REPLACES the DSN's own `options` and
+            # takes the record's application role with it.
+            conn = _connect_record(dsn)
             view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
         except PlacementTableUnavailable:
             # As in `record-reconcile` (#10663): a packaging fault, not a
@@ -1737,7 +1805,7 @@ def _cmd_record_text(args):
         return EXIT_UNAVAILABLE
 
     try:
-        import psycopg2
+        import psycopg2  # noqa: F401 — availability probe; `_connect_record` connects
     except ImportError:
         print("Error: psycopg2 is not installed — the record cannot be read, "
               "so no text was served. Install the `postgres` extra.",
@@ -1745,34 +1813,22 @@ def _cmd_record_text(args):
         return EXIT_UNAVAILABLE
 
     from tortoise.record_read import RecordReadError
-    from tortoise.record_reconcile import (
-        RECORD_CONNECT_TIMEOUT_S,
-        RECORD_STATEMENT_TIMEOUT_MS,
-    )
 
     conn = None
     try:
         try:
-            conn = psycopg2.connect(dsn, connect_timeout=RECORD_CONNECT_TIMEOUT_S)
-            # ⛔ THE BOUND IS SET AS A SESSION SETTING, NOT AS A CONNECT KWARG.
-            # Passing `options=…` to `connect()` REPLACES the DSN's own
-            # `options` parameter — and libpq's `options=-c role=<name>` is the
-            # connect-time spelling of `SET ROLE`, which is how a deployment
-            # (and this verb's live tests) connects as `tortoise_record_app`
-            # without a separate credential. Overriding it left the session on
-            # the provisioning superuser, which the tenant prologue then
-            # correctly refused — measured: the verb exited 2 on a DSN that
-            # worked everywhere else (PR #9862 review, P1). `set_config` also
-            # accepts a bind parameter, which `SET` does not.
-            # (autocommit for this one statement: `set_config` would otherwise
-            # open a transaction, and `conn.autocommit = False` below cannot be
-            # assigned inside one — measured, "set_session cannot be used inside
-            # a transaction".)
-            conn.autocommit = True
-            conn.cursor().execute(
-                "SELECT set_config('statement_timeout', %s, false)",
-                (str(int(RECORD_STATEMENT_TIMEOUT_MS)),),
-            )
+            # ⛔ THE BOUND IS A SESSION SETTING, NEVER A `connect(options=…)` KWARG.
+            # The keyword form REPLACES the DSN's own `options`, and that is
+            # where the record's application role rides
+            # (`options=-c role=tortoise_record_app`, libpq's connect-time
+            # `SET ROLE`). This verb's measurement -- PR #9862 review, P1: the
+            # session stayed on the provisioning superuser and the tenant
+            # prologue correctly refused a DSN that worked everywhere else --
+            # lives on `_connect_record`, together with the second instance of
+            # the same clobber PR #14068 found in `record-reconcile` /
+            # `record-restore`. One construction, so it cannot come back once
+            # per verb.
+            conn = _connect_record(dsn)
         except Exception as e:
             print(f"Error: the record is unreadable ({type(e).__name__}) — no "
                   f"text was served and no verdict was produced.",
