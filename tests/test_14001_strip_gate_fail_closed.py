@@ -555,6 +555,49 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ THE CANONICAL SHAPE OF THE DYNAMIC-NAMESPACE DEFECT, in the WRITER'S OWN SCOPE (`#14001`,
+    # round-5 review — the spelling `_dynamic_namespace_write`'s own docstring names): a subscript
+    # write to the module namespace with a CONSTANT key. No key-shape rule can see it (the key is a
+    # constant, so the stop arm's own `props[gk]` reads as a non-property store). What makes the row
+    # CATCH anything is the opposite of what this comment first said: `gk` IS an ordinary assignment
+    # target (`gk = "x"`), so the static value map knows `props[gk]` is the non-property `"x"` and
+    # CERTIFIES the writer, and the own-scope dynamic-namespace arm then poisons the scope's `global`
+    # declarations (`poisoned |= _scope_declarations`). That arm is NOT the `ast.Nonlocal | ast.Global`
+    # arm: measured, stubbing the latter leaves this row green (`2 passed`, with `nonlocal-rebinding`),
+    # while stubbing the own-scope dynamic arm reds it — and only it. ⛔ `gk = "x"` IS LOAD-BEARING, not
+    # scenery: delete just that line and the row goes VACUOUS — measured, it then passes even with the
+    # arm stubbed to `pass`, because with no static value the stop arm is merely UNPROVEN and the gate
+    # refuses on its own. A lane that "tidied" the row to match the old comment would therefore have
+    # deleted the pin's discriminating power while the table stayed green. The two rows below pin
+    # the MUTATOR and the ONE-SCOPE-IN spellings; without this row the plain form the defect was
+    # MEASURED on had no regression pin, so an ordering change in the own-scope loop could re-open
+    # it with every row here still green. Re-measure when a row joins the table: `32 of 33` is the
+    # count at the row set below, and it is `32 of 33 ROWS`, not "32 of 33 siblings" — the table
+    # holds 33 rows INCLUDING this one, so it has 32 siblings and every one of them passes.
+    # ⛔ THE COUNT MOVED ONCE ALREADY: it read "30 of 31" until `#14057` added the two
+    # `masked-ask-*` rows and no sibling re-measure followed, which is exactly the rot this line
+    # warns about. Re-measured here at 33 rows: 1 failed, 58 passed of the file's 59 tests.
+    # ⛔ NAME THE MUTANT BY ITS TEXT, AND COUNT THE CANDIDATES FIRST — this comment has already
+    # sent one reviewer at the wrong arm. `poisoned |= _scope_declarations` appears FOUR times and
+    # TWO of them are in the own-scope loop: the subscript-write arm (line ~4666) and the
+    # `_dynamic_namespace_mutation` arm right below it (~4671). Disarming the SECOND also prints
+    # exactly "1 failed, 58 passed" — it reds `globals-mutator-rebinding` instead — so the bare
+    # count does not distinguish the right mutation from the wrong one. The mutant is the FIRST of
+    # the two: the `poisoned |= _scope_declarations` whose very next non-comment line is
+    # `elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):`, in the branch that
+    # poisons on `_dynamic_namespace_write(target)`. Disarm THAT to `pass` and the file must print
+    # `1 failed, 58 passed` with the single failing id
+    # `test_the_resolver_bypasses_are_closed[globals-subscript-rebinding]`. Any other failing id is
+    # the wrong arm. Disarm-then-RESTORE, and never transcribe the number from a review.
+    ("globals-subscript-rebinding", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        globals()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
     # the MUTATOR spelling of the dynamic-namespace write (residual 4's other half) …
     ("globals-mutator-rebinding", """
     global gk
