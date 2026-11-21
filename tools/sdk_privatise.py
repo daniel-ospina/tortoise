@@ -528,14 +528,6 @@ SWEEP_NAMES = 66
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
 #: so no typed call site is legitimised by this re-cut.
-#: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8. Its whole diff is figure literals: stripping every digit
-#: run from each `-`/`+` pair leaves the pair identical, so it cannot move a receiver population. The
-#: reason the gate is red here is the recurrence `#14062` and `#14058` both document, now a THIRD
-#: time: the pin is graded on PULL REQUESTS only, so `main` merges with nothing grading it — and
-#: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
-#: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
-#: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
-#:
 #: ⛔ THIS RECORD CARRIES NO ASSIGNMENT, deliberately: merging two re-cuts left BOTH
 #: `SWEEP_RESIDUE` lines in this file, and Python binds the LAST one, so the earlier value was
 #: dead text that still read as the pin. ONE assignment, at the end of the records, cannot be

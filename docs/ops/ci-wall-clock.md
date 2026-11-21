@@ -279,12 +279,12 @@ to 24 m — `#12926` registered its own fast suite (`tests/test_embed_switch_gat
 pool without moving it further: this re-cut's union of the two sides' duration rows (main's
 `test_embed_decision_step_11086.py` and this branch's `test_12943_cache_leg.py`) emitted **24 m** at the
 `e0accb8fe6` re-cut, and the re-cut against `origin/main` `69908d006b` emits **25 m** — the packed
-worst shard is 720.1 s, 0.2 s past the 720 s minute boundary, the same 0.2 s mechanism `#11576` records
+worst shard is 720.1 s, 0.1 s past the 720 s minute boundary, the same sub-second mechanism `#11576` records
 above, not a new pre-suite term. Measured with the authority: `--emit-push-matrix` on the manifest
 being merged; it read 23 m on the pre-`#12926` base this branch first merged (`2c67c0cf99`). The three hand-added figures are re-added for the emitted 25 m: 56.6 m / 85.0 m /
 5.0 m (the row above), the 1-decimal restatement of the terms' own total, 56.65 m, that
 `config/ci-surfaces.yml` records for this same quantity — ⛔ NOT the sum of the four ROUNDED
-terms, which reads 55.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
+terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
 first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
