@@ -519,25 +519,28 @@ SWEEP_NAMES = 66
 #: so no typed call site is legitimised by this re-cut. `#13998`'s own +7 above survives intact:
 #: `cp.query` **269** and `row.update` **60** carry the seven rows that record enumerates.
 
-#: ⛔ RE-CUT DOWN by this lane, and the move is a REMOVAL it made — not drift and not absorption:
-#: eight call sites in `tests/test_9572_discriminator_not_clobbered.py` spelled a RETIRED public SDK
-#: name (`surface.create_subject(…)`) on an untyped receiver, so this sweep counted them as residue.
-#: `_OrgSeedSurface` / `_SdkSeedSurface` are the two duck-typed onboarding seed surfaces, and
-#: `seed.py` calls the PRIVATE spelling (`_create_subject`, `_create_edge`) — which is the real SDK's
-#: own shape, pinned by `tests/test_onboarding_seed.py` running against a live SDK. The surfaces
-#: still exposed the pre-retirement PUBLIC names, so every self-hosted AND hosted seed raised
-#: `AttributeError` (measured: 11 failed in `tests/test_onboarding_selfhost_w12.py`). Renaming the
-#: two surfaces to the private spelling fixes the callers and removes residue in the same act — the
-#: rows were residue BECAUSE they spelled the retired public name. The eight call sites moved with
-#: them; the FastAPI route `create_subject` in `hosted_api.py` is NOT renamed, because that is an
-#: HTTP endpoint and not a seed-surface method.
-#: ⛔ THE PIN MOVED BY SIX, NOT EIGHT, and that number is MEASURED rather than derived from the site
-#: count: `--repin` printed (11838, "63ba2bae2c53c633") on the base this was rebased onto and
-#: (11832, "3c543a79221c65bb") on this tree. ⛔ The row-to-site mapping was NOT isolated — the sweep
-#: publishes no per-file residue breakdown, and `--report` shows 0 untyped receivers left — so this
-#: record names the SITES that changed and the MEASURED delta, and does not claim the two are an
-#: equation. What is exact is the changed set: two surface `def` lines and eight test call sites, in
-#: three files.
+#: ⛔ REVERTED BY THE #14038 MERGE: an earlier cut of this file RECORDED a rename of the two
+#: duck-typed onboarding seed surfaces (`_OrgSeedSurface` in `hosted_api.py`, `_SdkSeedSurface` in
+#: `onboarding/selfhost.py`) from the PUBLIC doors `create_subject`/`create_edge` to the private
+#: spellings. That record was FALSE in its premise and its measurement, and the rename it licensed
+#: BROKE the product: `onboarding/seed.py` calls `surface.create_subject(...)` and
+#: `surface.create_edge(...)` (three sites), neither surface defines `__getattr__`, so every hosted
+#: AND self-hosted seed raised `AttributeError` and the REST seed route 500'd — measured at
+#: `93ada9cece`, where `tests/test_onboarding_selfhost_w12.py` was **13 failed** and
+#: `tests/test_onboarding_seed.py` **2 failed**. The public doors are RESTORED (the surfaces again
+#: declare `create_subject`/`create_edge` and delegate to the SDK's private ones), and the eight
+#: test-double call sites in `tests/test_9572_discriminator_not_clobbered.py` were restored with
+#: them. ⛔ THIS IS THE SHAPE THE BLOCK BELOW FORBIDS, reached anyway: *"the alternative — giving a
+#: SURFACE private-looking doors so a name-based sweep stays quiet — is the sweep dictating the
+#: adapter's API"*. A residue count is not a reason to change a published adapter contract, and a
+#: test double renamed in lockstep with the real surface hides exactly this failure
+#: (`tests/test_onboarding_seed.py`'s door pin is what caught it). The eight rows are therefore
+#: RESTORED as residue: they are ordinary-word receivers on an untyped object, which is what this
+#: counter exists to report, not to eliminate.
+#: ⛔ THE PIN MOVED BY +8 on the revert, MEASURED on this tree with `--repin` (11845 →
+#: 11853), which is the eight restored call sites and nothing else — a CROSS-CHECK of the revert,
+#: not the evidence for the pin. The FastAPI route `create_subject` in `hosted_api.py` is NOT
+#: affected either way: that is an HTTP endpoint, not a seed-surface method.
 #: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8 — but NOT for the reason an earlier draft gave. It said
 #: "its whole diff is figure literals: stripping every digit run from each `-`/`+` pair leaves the
 #: pair identical", and that is FALSE at this head: this PR also rewrites
@@ -799,7 +802,7 @@ SWEEP_NAMES = 66
 #: at a public name: 0`. ⛔ NO ROW IS ATTRIBUTED BY THE DIRECTION OF THE DELTA: a re-pin absorbs
 #: whatever shape the tree holds in EITHER direction (#14003 review, round 3, P3 / #14030), so the
 #: count is read from `--report` against `SWEEP_BASE`, not inferred from the difference.
-SWEEP_RESIDUE = (11845, '1797f10f33f3441c')
+SWEEP_RESIDUE = (11853, '6fd7431f4665e801')
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
