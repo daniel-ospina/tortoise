@@ -1437,9 +1437,16 @@ def test_no_graph_dependency() -> None:
     _direct = _probe("import tortoise.session_indexer")
     assert "tortoise.session_indexer" in _direct, (
         "the probe must report a banned root it was told to import: `import "
-        "tortoise.session_indexer` puts it in sys.modules and it is in "
-        f"`_probe_forbidden()`, so {sorted(_direct)!r} means the matcher was "
-        "restricted past the two roots the older controls named (#14118 item 1)")
+        "tortoise.session_indexer` puts it in sys.modules, so "
+        f"{sorted(_direct)!r} means the matcher was restricted past the two roots "
+        "the older controls named (#14118 item 1). ⛔ THERE IS A SECOND CAUSE: if "
+        "this root is not in `_probe_forbidden()` at all then it was dropped from "
+        "`_FORBIDDEN_GRAPH_ROOTS`, the matcher is innocent, and the row that names "
+        "the real cause is "
+        "`test_the_no_graph_guard_covers_every_module_that_reaches_a_store`. Ask "
+        "`_probe_forbidden()` before hunting the matcher — "
+        f"'tortoise.session_indexer' in _probe_forbidden() = "
+        f"{'tortoise.session_indexer' in _probe_forbidden()}")
     leaked = _probe("from tortoise import usage_signal")
     assert leaked == set(), (
         f"importing usage_signal pulled a graph client into sys.modules: "
