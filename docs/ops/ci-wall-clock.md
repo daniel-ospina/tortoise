@@ -296,7 +296,8 @@ because the 24/25 boundary is EXACTLY `est_seconds` 720.0 (`shard_watchdog_minut
 `ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and 720.2 → 24.0067 → **25**), and `main`'s pack moved
 the three-removed arm 0.2 s above that cliff. Two lanes measured this same pair opposite ways within
 an hour for exactly that reason, so the durable fact is NOT which minute a given tree emits: it is
-that these three suites move the ceiling by ~0.2 s around a 720.0 s cliff, so any conclusion quoted
+that these three suites move the ceiling by ~0.5 s around a 720.0 s cliff (`720.7 − 720.2` at the
+merged tree; their declared 6.0 s over the 11 shards is ~0.55 s/shard), so any conclusion quoted
 here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
 LOWER A WEIGHT: the three enter at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
