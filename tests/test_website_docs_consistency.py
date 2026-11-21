@@ -3968,7 +3968,7 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     # scan returned `''`. Driven as the full 6×4 grid so a member cannot be dropped
     # from the set unnoticed.
     for unrendered in ("audio", "video", "canvas", "datalist", "meter", "progress"):
-        for closer in ("li", "dd", "dt", "plaintext"):
+        for closer in ("li", "dd", "dt", "plaintext", "search"):
             closed_p = section.replace(
                 "</h2>",
                 f"</h2><p><{unrendered}><{closer}>FalkorDB permanently deletes it"
@@ -3990,6 +3990,49 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
                 match=None if closer == "plaintext" else "no longer matches the reviewed wording",
             ):
                 _assert_storage_section_reviewed(closed_p)
+
+    # ⛔ P1, ROUND 12 — THE OTHER THREE `_IMPLICITLY_CLOSED` SIBLINGS. The set named
+    # `button`, `a` and `nobr` as tags a sibling start tag closes, but only the block
+    # family was modelled in `_close_implied`, so their close never ran on the text
+    # path and an `_UNRENDERED` child survived it. Measured in Chrome:
+    # `<button><audio><button>CLAIM` renders `<button><audio></audio></button>
+    # <button>CLAIM</button>` (rect 120x15, `closest('audio')` null), and `<a>`/`<nobr>`
+    # land the same way through the adoption agency algorithm (`143x17`, no audio
+    # ancestor) — while this scan returned `''` for all three. Driven per token so a
+    # member cannot be dropped from `_close_implied` unnoticed.
+    for unrendered in ("audio", "video", "canvas", "datalist", "meter", "progress"):
+        for sibling in ("a", "button", "nobr"):
+            closed_sibling = section.replace(
+                "</h2>",
+                f"</h2><{sibling}><{unrendered}><{sibling}>FalkorDB permanently "
+                f"deletes it</{sibling}></{unrendered}></{sibling}>",
+                1,
+            )
+            assert closed_sibling != section
+            assert "falkor" in _banned_vocabulary(closed_sibling), (
+                f"`<{sibling}>` closes the open `<{sibling}>` and everything inside it "
+                f"(pops the `<{unrendered}>` above), so a browser paints the claim at "
+                f"body level; the scan must read it"
+            )
+
+    # ⛔ P1, ROUND 12 — FOSTER PARENTING IS PER TABLE. A cell belonging to a NESTED
+    # table must not end the OUTER table's truncation. Measured:
+    # `<table><audio><table><tr><td>CLAIM</td></tr></table></audio></table>` — Chrome
+    # foster-parents the `<audio>` out (`closest('audio')` null, 143x17 painted) while
+    # this scan kept `[table, audio, …]` and returned `''`.
+    for unrendered in ("audio", "video", "canvas", "datalist", "meter", "progress"):
+        nested = section.replace(
+            "</h2>",
+            f"</h2><table><{unrendered}><table><tr><td>FalkorDB permanently deletes it"
+            f"</td></tr></table></{unrendered}></table>",
+            1,
+        )
+        assert nested != section
+        assert "falkor" in _banned_vocabulary(nested), (
+            f"a cell of an INNER table ended the outer table's truncation: the "
+            f"foster-parented `<{unrendered}>` is not an ancestor of that text in a "
+            f"browser, so the claim is painted and must be read"
+        )
 
     # ⛔ P0, ROUND 10 — FOSTER PARENTING: a browser moves text OUT of a table, so the
     # table is not its ancestry at all. Measured: `<table><audio><table>CLAIM</table>

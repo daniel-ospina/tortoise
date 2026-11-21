@@ -1196,8 +1196,13 @@ class _AnchorHrefParser(HTMLParser):
 
         Spec "in body", the `input` and `select` start-tag rules — see
         `_SELECT_POP` for the citations and the measured divergence this closes.
-        Called FIRST in `handle_starttag`, before this tag's own state lands, so the
-        pop reads the PRE-tag ancestry — the ancestry the browser's own step reads.
+        Called from `handle_starttag` before this tag's own state lands, so the pop
+        reads the PRE-tag ancestry — the ancestry the browser's own step reads. It is
+        NOT the first call there: the implied `</p>` (`_close_p_scope`), the sibling
+        closes (`_close_implied`) and the table-context discard (`_clear_table_context`)
+        run before it, in that order, which is the spec's order for those rules and,
+        for `<p><select><div>`, means the `<p>` close can have popped the select
+        already — so this call sees what is left, exactly as a browser does.
 
         Returns True only for a token the spec says to IGNORE after popping (a
         NESTED `<select>`): the caller must then create no element for it, or the
@@ -1757,7 +1762,23 @@ class _AnchorHrefParser(HTMLParser):
             # the table means the text is inside it and the ancestry is real — the
             # elements the "in table" mode had already foster parented OUT are popped
             # by `_clear_table_context`, which is why nothing has to be dropped here.
-            if any(frames[k][0] in ("td", "th", "caption") for k in range(index + 1, len(frames))):
+            # ⛔ AND THE CELL MUST BELONG TO *THIS* TABLE (#14073 review round 12, P1,
+            # measured). The old test scanned EVERY frame above the table, so a cell of
+            # a NESTED table ended the truncation of the outer one:
+            # `<table><audio><table><tr><td>CLAIM</td></tr></table></audio></table>` —
+            # Chrome foster-parents the `<audio>` OUT (`closest('audio')` on the text is
+            # null, rect 143x17 painted), while this walk saw the inner `<td>` and
+            # declared the ancestry real, keeping `[table, audio, …]` and returning `''`.
+            # Walking upward stops at the first `<table>`: cells beyond it are another
+            # table's context, not this one's.
+            in_own_cell = False
+            for k in range(index + 1, len(frames)):
+                if frames[k][0] in ("td", "th", "caption"):
+                    in_own_cell = True
+                    break
+                if frames[k][0] == "table":
+                    break
+            if in_own_cell:
                 continue
             # Text in the "in table" mode itself: foster parented in FRONT of the
             # table, so the table is not an ancestor either.
