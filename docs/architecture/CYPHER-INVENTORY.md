@@ -24,24 +24,24 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **304** files scanned |
-| files carrying at least one statement site | **100** |
-| **statement sites (this census)** | **1318** |
-| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **868** (586 read, 282 write) |
-| **`plain` READS — the migration candidates** | **586** |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **306** files scanned |
+| files carrying at least one statement site | **102** |
+| **statement sites (this census)** | **1324** |
+| of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **872** (588 read, 284 write) |
+| **`plain` READS — the migration candidates** | **588** |
 | `adjacency` (edge pattern, fixed length) | 293 |
 | `ep` (the epistemic scalars) | 32 |
 | `traversal` (variable length) | 3 |
 | `fulltext` | 2 |
 | `ddl` | 17 |
-| `unresolved` (statement not statically resolvable) | 103 |
+| `unresolved` (statement not statically resolvable) | 105 |
 | non-Cypher door calls (excluded from every shape total) | 262 |
-| **AST door calls** = census + non-Cypher | **1580** |
+| **AST door calls** = census + non-Cypher | **1586** |
 
-> **The finding, with its count: 586 of 1318 product statements (44.5 %) need none of the
+> **The finding, with its count: 588 of 1324 product statements (44.4 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
-> not an adjective; it is 586 statements.
+> not an adjective; it is 588 statements.
 
 ---
 
@@ -65,7 +65,7 @@ the box, are:
 
 | mode | statement sites | files | note |
 |---|---|---|---|
-| product surface (this census) | **1318** | **100** | `tortoise/**/*.py`, test modules excluded |
+| product surface (this census) | **1324** | **102** | `tortoise/**/*.py`, test modules excluded |
 | every tracked surface (`--all-surface`) | **9,142** | **839** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,134 / 9,150 / 9,170 here, and only `9,142` reproduces at this tree — the 2,514 files it scans are `main`'s 2,512 at `ef1d6f7561` plus this lane's two (`tools/vector_parity_13906.py`, which carries 7 door sites, and `tests/test_vector_parity_13906.py`, which carries 0). The delta against that merge parent is **+8 sites and +2 carrying files**, enumerated rather than counted: 7 in `tools/vector_parity_13906.py` and 1 in `tortoise/record_vector.py` (the re-classification §7's cut records). The number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
@@ -92,20 +92,20 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 304 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 306 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,634 occurrences of the door predicate across 109 files
+1,640 occurrences of the door predicate across 111 files
 2,365 occurrences of the verb predicate across 147 files   (upper-bound shape, see below)
 
-1,634  regex door-pattern occurrences
+1,640  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,580  occurrences on a line carrying a door CALL          [measured]
+= 1,586  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,580  AST door calls
-= 1318  classified Cypher statements + 262 non-Cypher door calls
+= 1,586  AST door calls
+= 1,324  classified Cypher statements + 262 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -113,9 +113,9 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 304 files>` → **1,634** across **109** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,641 / 110**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,634 / 109 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 306 files>` → **1,640** across **111** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,646 / 112**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,640 / 111 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
@@ -217,15 +217,15 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 
 | shape | total | roles |
 |---|---|---|
-| `plain` | **868** | read=586, write=282 |
+| `plain` | **872** | read=588, write=284 |
 | `adjacency` | **293** | read=192, write=101 |
 | `ep` | **32** | read=21, write=11 |
 | `ddl` | **17** | ddl=17 |
 | `traversal` | **3** | read=3 |
 | `fulltext` | **2** | read=2 |
-| `unresolved` | **103** | unresolved=103 |
+| `unresolved` | **105** | unresolved=105 |
 
-**What the unresolved bucket is.** 103 sites hand a door a statement built where no static reader
+**What the unresolved bucket is.** 105 sites hand a door a statement built where no static reader
 can follow: a **parameter** (`def _count(proj, query: str)` in `tortoise/audit.py:247`), a
 **call-built** string (`proj.g.query(cypher, …)` where `cypher` is an argument), a helper's return
 value, or — since `#13098` review P1 — a `CALL` whose procedure NAME the text cannot prove
@@ -267,8 +267,8 @@ The order a campaign should take, derived from §3 rather than chosen:
 | # | class | why here | size |
 |---|---|---|---|
 | 1 | `plain` reads already served by `record_serve` (`point-by-id`, `node-by-key`) | simplest shape (one node, one key) **and** the seam serving it already shipped with a parity rule | 2 reads, measured in §5 |
-| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 586 |
-| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 586 |
+| 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 588 |
+| 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 588 |
 | 4 | `plain` writes | **not a Cypher→SQL move** — these disappear with the node when `#13083` makes the shape `record_only` | 282 |
 | — | `adjacency` / `traversal` / `ep` / `fulltext` | **do not flip without a reopen on `#4051`** | 330 |
 
@@ -943,20 +943,45 @@ this change is a query, so the migration metric §0 is about does not move.
 reporting `files_scanned: doc=302 tool=303` on `main` before this branch merged it. One re-cut carries
 both, which is why a paragraph for one change explains two files.
 
-<!-- cypher-inventory:sites = 1318 -->
-<!-- cypher-inventory:files = 100 -->
-<!-- cypher-inventory:files_scanned = 304 -->
-<!-- cypher-inventory:unresolved = 103 -->
-<!-- cypher-inventory:candidates = 586 -->
+**The cut this PR (#14012, `feat/14012-pin-and-outside-view`) makes — SIX statement sites in TWO
+new files, and it is the first cut in this document whose new `plain` READS are migration
+candidates.** Re-cut by RUNNING the tool on this tree, never by arithmetic on the markers.
+`tortoise/resident_pin.py` (the bounded pin, `SEARCH-ARCHITECTURE.md` §7) and
+`tortoise/outside_view.py` (what the fast layer does not hold) are product surface and each carries
+sites, so `files` 100→**102** and `files_scanned` 304→**306**; `sites` 1318→**1324** and
+`ast_door_calls` 1580→**1586** (= 1324 + 262, `non_cypher_door_calls` **262** unchanged — neither file
+opens a non-Cypher door). The six sites split three ways: **two `plain` READS** — the resident key
+list (`MATCH (n:{label}) RETURN n.{key_prop} AS key LIMIT {bound}`) and the resident count
+(`MATCH (n:{label}) RETURN count(n)`) — which is why `plain` 868→**872** (read 586→**588**),
+`candidates` 586→**588** and `partial` 318→**320** (both interpolate an identifier, the shape the
+`???` marker exists for); **two `plain` WRITES** — the one `:Meta` declaration (`MERGE … SET n +=
+$props`) and its removal (`MATCH (n:Meta {key:$key}) DETACH DELETE n`) — which keep `plain` write
+282→**284** and stay `graph-maintenance`, because a pin declaration IS graph state and `#13083`'s
+`record_only` shape is what will eventually move them; and **two `unresolved`** — the two
+`_rows(graph, statement, params)` helpers, whose statement is a parameter, landing in the documented
+over-report arm so `unresolved` 103→**105**. `adjacency` **293**, `ep` **32**, `ddl` **17**,
+`traversal` **3** and `fulltext` **2** are unchanged, because none of the six is an edge pattern,
+an epistemic scalar or a DDL statement. ⚠️ **The two new candidates are the migration metric moving
+for a FEATURE, not for a cleanup**: this PR adds reads that are SQL-shaped by construction (they
+count and list one tenant's cache keys), and the honest census counts them rather than exempting
+them. §1's `rg` reconciliation is re-measured at this tree (door **1,640 / 111** whole-text, verb
+**2,374 / 149**, bare **1,646 / 112**), and Appendix A is regenerated with `--markdown` at this head
+— the two new files' six rows are in it, so a reader can resolve every one.
+
+<!-- cypher-inventory:sites = 1324 -->
+<!-- cypher-inventory:files = 102 -->
+<!-- cypher-inventory:files_scanned = 306 -->
+<!-- cypher-inventory:unresolved = 105 -->
+<!-- cypher-inventory:candidates = 588 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
 <!-- cypher-inventory:shape_ddl = 17 -->
 <!-- cypher-inventory:shape_ep = 32 -->
 <!-- cypher-inventory:shape_fulltext = 2 -->
-<!-- cypher-inventory:shape_plain = 868 -->
+<!-- cypher-inventory:shape_plain = 872 -->
 <!-- cypher-inventory:shape_traversal = 3 -->
-<!-- cypher-inventory:shape_unresolved = 103 -->
-<!-- cypher-inventory:shape_plain_read = 586 -->
-<!-- cypher-inventory:shape_plain_write = 282 -->
+<!-- cypher-inventory:shape_unresolved = 105 -->
+<!-- cypher-inventory:shape_plain_read = 588 -->
+<!-- cypher-inventory:shape_plain_write = 284 -->
 <!-- cypher-inventory:shape_adjacency_read = 192 -->
 <!-- cypher-inventory:shape_adjacency_write = 101 -->
 <!-- cypher-inventory:shape_ep_read = 21 -->
@@ -964,10 +989,10 @@ both, which is why a paragraph for one change explains two files.
 <!-- cypher-inventory:shape_ddl_ddl = 17 -->
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
-<!-- cypher-inventory:shape_unresolved_unresolved = 103 -->
+<!-- cypher-inventory:shape_unresolved_unresolved = 105 -->
 <!-- cypher-inventory:non_cypher_door_calls = 262 -->
-<!-- cypher-inventory:ast_door_calls = 1580 -->
-<!-- cypher-inventory:partial = 318 -->
+<!-- cypher-inventory:ast_door_calls = 1586 -->
+<!-- cypher-inventory:partial = 320 -->
 
 ---
 
@@ -1031,8 +1056,8 @@ both, which is why a paragraph for one change explains two files.
 | `tortoise/billing.py:1013` | `reconcile_org` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.subscription_id, t.stripe_customer_…` |
 | `tortoise/billing.py:1138` | `org_billing_identity` | plain | read | candidate:SQL-shaped | `MATCH (t:Team {id:$id}) RETURN t.id, t.tier, t.subscription_id, t.st…` |
 | `tortoise/billing.py:1504` | `reconcile_subscriptions` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) RETURN t.id, t.tier, t.subscription_id, t.stripe_cust…` |
-| `tortoise/cache_evictor.py:669` | `_delete_nodes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `UNWIND $rows AS r MATCH (n) WHERE id(n) = r.id AND n.{} = r.key DETA…` |
-| `tortoise/cache_evictor.py:689` | `_delete_nodes` | plain | read | candidate:SQL-shaped | `UNWIND $rows AS r MATCH (n) WHERE id(n) = r.id AND n.{} = r.key RETU…` |
+| `tortoise/cache_evictor.py:686` | `_delete_nodes` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `UNWIND $rows AS r MATCH (n) WHERE id(n) = r.id AND n.{} = r.key DETA…` |
+| `tortoise/cache_evictor.py:706` | `_delete_nodes` | plain | read | candidate:SQL-shaped | `UNWIND $rows AS r MATCH (n) WHERE id(n) = r.id AND n.{} = r.key RETU…` |
 | `tortoise/cache_projection.py:3893` | `_rows` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/cache_projection.py:4239` | `project_records` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/capture_fold.py:701` | `read_fold_evidence` | ep | read | stays:ep-carveout (§6.3) | `MATCH ({}:Point {}}) RETURN {}.extractedFrom, {}.extractedFromAll, {…` |
@@ -1544,6 +1569,9 @@ both, which is why a paragraph for one change explains two files.
 | `tortoise/onboarding/state.py:695` | `_run` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/onboarding/state.py:698` | `_run` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/onboarding/state.py:700` | `_run` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/outside_view.py:182` | `_rows` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/outside_view.py:230` | `resident_keys` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) RETURN n.{} AS key LIMIT {}` |
+| `tortoise/outside_view.py:246` | `resident_count` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) RETURN count(n)` |
 | `tortoise/pack_manifest_store.py:466` | `upsert_tenant_manifest` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (m:PackManifest {namespace: $ns}) SET m.name = $name, m.versio…` |
 | `tortoise/pack_manifest_store.py:483` | `upsert_tenant_manifest` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (p:{} {namespace: $ns}) SET p.version = $version, p.status = $…` |
 | `tortoise/pack_manifest_store.py:523` | `get_tenant_manifests` | plain | read | candidate:SQL-shaped | `MATCH (m:PackManifest) RETURN m.namespace, m.name, m.version, m.stat…` |
@@ -1803,6 +1831,9 @@ both, which is why a paragraph for one change explains two files.
 | `tortoise/residency.py:283` | `declare_residency` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (n:Meta {key:$key}) SET n += $props` |
 | `tortoise/residency.py:291` | `clear_residency` | plain | read | candidate:SQL-shaped | `MATCH (n:Meta {key:$key}) RETURN 1` |
 | `tortoise/residency.py:297` | `clear_residency` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (n:Meta {key:$key}) DETACH DELETE n` |
+| `tortoise/resident_pin.py:403` | `_rows` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/resident_pin.py:525` | `_write` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (n:Meta {key:$key}) SET n += $props` |
+| `tortoise/resident_pin.py:746` | `unpin` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (n:Meta {key:$key}) DETACH DELETE n` |
 | `tortoise/review_verdicts.py:193` | `VerdictLayer.ep_posterior` | ep | read | stays:ep-carveout (§6.3) | `MATCH (n:Point {id:$id}) RETURN n.posterior_alpha, n.ep_alpha, n.bas…` |
 | `tortoise/review_verdicts.py:212` | `VerdictLayer._candidate_props` | plain | read | candidate:SQL-shaped | `MATCH (n:Point {id:$id}) RETURN properties(n)` |
 | `tortoise/review_verdicts.py:294` | `VerdictLayer.mark_queued` | ep | write | stays:ep-carveout (§6.3) | `MATCH (n:Point {id:$id}) SET n.reviewDecision=$decision, n.reviewDec…` |
