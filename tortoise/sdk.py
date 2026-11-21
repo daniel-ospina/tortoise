@@ -5699,25 +5699,19 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #:   either — where `apply`'s inline re-wire read it as journal data and
 #:   reported a phantom link failure (measured).
 #:
-#: Strip it at prop INTAKE like the envelope set above, and ALSO before any
-#: RELAY that forwards a caller bag into another method — the collision is at
-#: the call, so `update_entity` (relays to `_update_entity`) and
-#: `create_subject`/`create_object`/`create_event` (relay to `create_entity`)
-#: drop the reserved names before splatting, and `create_source` — the one door
-#: that bypasses intake — drops them itself. With every relay covered, the
-#: collision is impossible and live == replay.
-#: ``record_sink`` (#10000) / ``write_sink`` (#14002): `_emit_event` appends,
-#: to the list the caller hands in, the RECORD write's outcome (record_sink) or
-#: the CHOKEPOINT's own ``LiveWrite`` VERBATIM (write_sink — not a "skip fact":
-#: it carries event/seq/appended/applied/record/unprojected/armed, see
-#: ``tortoise/live_write.py::LiveWrite``), so the caller decides from what the
-#: write did. A caller prop of either name splatted into the call binds the
-#: parameter and suppresses that outcome. ⛔ The CONSEQUENCES DIFFER and are not
-#: interchangeable: a suppressed ``record_sink`` makes the capture writer read
-#: every turn as unrecorded and fall back to the graph (safe, but silent), while
-#: a suppressed ``write_sink`` leaves ``hosted_api._report_narrative_home`` — its
-#: only consumer — unable to tell "no durable journal" from "append skipped", so
-#: it names the wrong home and the wrong remedy. Prose is no gate:
+#: Strip it at prop INTAKE like the envelope set above, and ALSO before any RELAY that forwards a caller
+#: bag into another method — the collision is at the call, so `update_entity` (relays to `_update_entity`)
+#: and `create_subject`/`create_object`/`create_event` (relay to `create_entity`) drop the reserved names
+#: before splatting, and `create_source` — the one door that bypasses intake — drops them itself; with
+#: every relay covered, the collision is impossible and live == replay.
+#: ``record_sink`` (#10000) / ``write_sink`` (#14002): `_emit_event` appends, to the caller's list, the RECORD write's outcome
+#: (record_sink) or the chokepoint's ``LiveWrite`` VERBATIM — write_sink is NOT a "skip fact": it carries
+#: event/seq/appended/applied/record/unprojected/armed (see ``tortoise/live_write.py::LiveWrite``), so the caller decides a
+#: store from what the write did. A caller prop of either name splatted into the call binds the parameter and
+#: suppresses that outcome — and the CONSEQUENCES DIFFER, they are not interchangeable: a suppressed
+#: ``record_sink`` makes the capture writer read every turn as unrecorded and fall back to the graph (safe,
+#: but silent), while a suppressed ``write_sink`` leaves its ONLY consumer ``hosted_api._report_narrative_home``
+#: unable to tell "no durable journal" from "append skipped" — it names the wrong home and remedy. Prose is no gate:
 #: DERIVED from `_emit_event`'s signature by `test_2296_document_created_journal`.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
                             "record_sink", "write_sink")
