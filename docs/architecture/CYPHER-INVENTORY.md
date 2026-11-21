@@ -925,9 +925,20 @@ LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers
 it must not be able to mask whether the harness can fail at all — which is exactly what it did before
 the order was fixed (`#13098` review F8).
 
+### `files_scanned` 302 → **303**: a file arrived and no pin moved with it
+
+`#14065` (`ac57b2d38ae`, the per-node USAGE signal) added **`tortoise/usage_signal.py`** — a product-surface
+file that carries **no** statement site (no `MATCH`/`MERGE`/`RETURN`, no `execute` door call), so every other
+pin in this table is unmoved and only `files_scanned` drifted: `--check` reported
+`doc=302 tool=303` on the `differential` job for **every** PR, i.e. **red on `main`**, not on any branch. The
+same commit also left `tests/test_usage_signal.py` unregistered in `config/ci-surfaces.yml` (the
+`manifest-integrity` gate), and that is the same disease: a gate nobody ran in the PR that moved its inputs.
+⚠️ **This is a RE-DERIVATION, not an increment** — `uv run python tools/cypher_inventory.py --check` on
+`origin/main` at `f392bb67d55` reports exactly this one key.
+
 <!-- cypher-inventory:sites = 1318 -->
 <!-- cypher-inventory:files = 100 -->
-<!-- cypher-inventory:files_scanned = 302 -->
+<!-- cypher-inventory:files_scanned = 303 -->
 <!-- cypher-inventory:unresolved = 103 -->
 <!-- cypher-inventory:candidates = 586 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
