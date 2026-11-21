@@ -360,7 +360,13 @@ def _checked_window(days: float, raw: str, origin: str) -> float | None:
         # bounding memory. Prune-everything at `0` would be a different reading
         # (`pruned_before` would have to be "now"), so this refuses instead.
         _warn_once(
-            "window",
+            # ⛔ A KEY OF ITS OWN, not the typo arm's "window" (#14011 review,
+            # non-blocking P2). Sharing a key meant that within one process a
+            # value going typo → `0` (or the reverse) emitted only the FIRST
+            # warning, so the suppressed one carried the operator's OLD `raw` and
+            # the second refusal was invisible. "window-nonfinite" below is
+            # separate for exactly this reason.
+            "window-nonpositive",
             "usage signal: %s=%r is not a positive day count — the roll-up is "
             "running UNBOUNDED (every entry kept); fix the value to bound it",
             origin,
@@ -1035,7 +1041,7 @@ class UsageReading:
             "served_total": self.served_total,
             "pruned": self.pruned,
             "pruned_before": self.pruned_before,
-        "pruned_undated": self.pruned_undated,
+            "pruned_undated": self.pruned_undated,
             "capped": self.capped,
             "lines_read": self.lines_read,
             "lines_skipped": self.lines_skipped,
