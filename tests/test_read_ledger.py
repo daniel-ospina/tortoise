@@ -801,9 +801,11 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
 
     They read through the `_query` ACCESSOR with `_record_reads=False` (#7983): the
     retired public `query()` was only the caller-facing skin over it, and #13899
-    removed the skin, not the flag. ⚠️ ONLY TWO of the recording accessors accept that
-    flag — `_query` and `_query_points_by_tag`. `_paginated_query` does NOT: its
-    signature is `kind / skip / limit / include_retracted / **filters` and it records
+    removed the skin, not the flag. ⚠️ THREE functions accept that flag — `_query`,
+    `_query_points_by_tag`, and the FTS funnel `_tortoise_fts_query` (the census at the
+    bottom of this file pins `>= 3`; `_recall_gaps` switches it off on two of them,
+    the funnel AND `_query`). `_paginated_query` is NOT one of them: its signature is
+    `kind / skip / limit / include_retracted / **filters` and it records
     unconditionally, so passing `_record_reads=False` to it is swallowed by
     `**filters`, accepted by `validate_filter_key` as an ordinary filter key, and
     rendered as a property predicate no Point carries — an EMPTY page instead of an
