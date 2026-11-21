@@ -335,6 +335,12 @@ class _AnchorHrefParser(HTMLParser):
     #: the whole point of the inert rule is that template content is not markup a
     #: reader meets, and refusing it there would red a correct page.
     _MODE_DEPENDENT = frozenset({"noscript"})
+    #: The `_RAW` members that are RENDERING DIRECTIVES rather than text carriers: a
+    #: styled/painted claim lives in CSS or in a script, not in a text node, so no
+    #: wording pin can read it and a consumer asking "is this statically reviewable?"
+    #: must refuse it (`extract_raw_text_elements`). `title`/`textarea`/`xmp` are
+    #: excluded: their content IS text, and the wording pins read it.
+    _RAW_TEXT_DIRECTIVES = frozenset({"style", "script"})
     # Foreign-content roots: inside these, `_INERT` does not apply.
     _FOREIGN = frozenset({"svg", "math"})
     # HTML5's foreign-content BREAKOUT start tags (spec 13.2.6.5): inside
@@ -754,7 +760,7 @@ class _AnchorHrefParser(HTMLParser):
     #: entries from a tree a browser has thrown away.
     _RECORDINGS = (
         "hrefs", "ids", "attrs", "headings", "containers", "mode_dependent",
-        "text",
+        "raw_text", "text",
     )
     #: Diagnostic ratchets, NOT document recordings: they describe what the PARSE met
     #: (`foreign_tags` is the declared-limits watchdog), so an honored `<frameset>`
@@ -789,6 +795,14 @@ class _AnchorHrefParser(HTMLParser):
         # SCRIPTING MODE — see `_MODE_DEPENDENT`. The attribute allowlist's input:
         # it must refuse such a region instead of clearing it (#14073 review).
         self.mode_dependent: list[tuple[str, int]] = []
+        # `(tag, line)` of every `<style>`/`<script>` element met OUTSIDE another
+        # suppressed region — a rendering DIRECTIVE, whose painted output no text pin
+        # can read (`content:` in a `<style>`, or a `<script>` that writes a node).
+        # Recorded so a consumer can REFUSE such a section rather than clear it: on
+        # this tree a `<style>` block whose `::after` painted a claim left the
+        # allowlist, the destination pin, the vocabulary scan and the wording golden
+        # all green (#14073 review round 7, measured in Chromium).
+        self.raw_text: list[tuple[str, int]] = []
         # The TEXT NODES a reader meets, in document order — one entry per text node
         # in the rendered tree, tags gone and entities decoded by the tokenizer. A
         # DOCUMENT-TREE recording (declared in `_RECORDINGS`, so an honoured
@@ -1204,13 +1218,31 @@ class _AnchorHrefParser(HTMLParser):
         `el.hidden = false`), and dropping it would blind the blog guard to a link a
         visitor can click (#14073 review, measured).
 
-        ⛔ DECLARED RESIDUAL — CSS. A heading hidden by `style="display: none"`, by
-        a stylesheet rule its `class` matches, or by anything else the cascade
-        decides is still RECORDED, and therefore still BOUNDS: this parser reads
-        markup and cannot compute a cascade. The direction is the fail-open one, so
-        it is named rather than left implicit — the guard's own vocabulary and
-        attribute pins are what a CSS-hidden heading's copy faces, and a page that
-        hides copy with CSS is making a decision no markup-level guard can read.
+        ⛔ DECLARED RESIDUAL — CSS, NARROWED AND MEASURED. A heading hidden by
+        `style="display: none"`, by a stylesheet rule its `class` matches, or by
+        anything else the cascade decides is still RECORDED here, and this parser
+        cannot compute a cascade — so the recording itself cannot answer visibility.
+
+        ⛔ AND THE OLD SENTENCE HERE WAS FALSE, which is why it is replaced rather
+        than kept: it said "the guard's own vocabulary and attribute pins are what a
+        CSS-hidden heading's copy faces". They are not — those pins read the SLICE,
+        and a CSS-hidden heading that is ADVERTISED in the TOC CUTS the slice, so the
+        copy under it is outside every pin. Measured (#14073 review round 7):
+        `<h2 id="storage-limits" style="display:none">` plus a TOC entry and a
+        `FalkorDB`/`allowance`/`tier` "permanently deletes" paragraph painted at
+        770x27 px INSIDE the `#storage` band in Chromium, with the golden, the
+        vocabulary scan, the destination pin and the allowlist all green.
+
+        ⛔ SO THE HIDING IS SPLIT BY WHO CAN DECIDE IT. Markup-decidable hiding is
+        refused by the CONSUMER, not here: a heading carrying `style`, `hidden` or
+        `aria-hidden` may not bound the docs page's slice
+        (`_heading_may_bound_the_slice` in `tests/test_website_docs_consistency.py`),
+        so the slice runs LONG and the golden reds loudly. Hiding that needs a
+        STYLESHEET — the `class` case — stays the residual named above, because
+        refusing it would red a correct page whose heading carries a `class` (the
+        round-5 false-red control). A page that hides copy with CSS is still making a
+        decision no markup-level guard can read; what changed is that the copy now
+        has to be past a boundary the markup itself declares.
         """
         if any(
             open_tag in self._UNBOUNDABLE_ANCESTORS
@@ -2016,6 +2048,10 @@ class _AnchorHrefParser(HTMLParser):
                 # NOT inside another suppressed region: a `<noscript>` inside an
                 # inert `<template>` is template content and renders in no mode.
                 self.mode_dependent.append((tag, self.getpos()[0]))
+            if tag in self._RAW_TEXT_DIRECTIVES and not self._suppress:
+                # Same suppression rule: a `<style>` inside an inert `<template>`
+                # renders in neither mode, so it is not a directive a reader meets.
+                self.raw_text.append((tag, self.getpos()[0]))
             self._suppress.append(tag)
             return True
         if tag == "frameset" and not self._body_seen and not self._suppress:
@@ -3064,6 +3100,28 @@ def extract_element_attributes(html: str) -> list[tuple[str, str, int]]:
     parser.feed(html)
     parser.close()
     return parser.attrs
+
+
+def extract_raw_text_elements(html: str) -> list[tuple[str, int]]:
+    """``(tag, line)`` for every ``<style>``/``<script>`` in ``html``'s tree.
+
+    A rendering DIRECTIVE is not copy: a ``<style>`` block whose ``content:`` property
+    paints a sentence, or a ``<script>`` that writes a node, contributes no text node
+    and no attribute, so no text pin and no attribute pin can read it. Measured on
+    this tree, a ``<style>`` whose ``::after`` painted a claim inside the ``#storage``
+    section left the attribute allowlist, the destination pin, the vocabulary scan and
+    the wording golden ALL green (#14073 review round 7).
+
+    A caller asking "is this markup statically reviewable?" must therefore REFUSE a
+    region whose answer is a directive, not clear it — the same shape as
+    ``extract_mode_dependent_regions``. An empty result is the only answer that clears
+    the markup for that question. A directive inside an inert ``<template>`` is NOT
+    reported: template content renders in no mode, so the inert rule already answers it.
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    return parser.raw_text
 
 
 def extract_mode_dependent_regions(html: str) -> list[tuple[str, int]]:

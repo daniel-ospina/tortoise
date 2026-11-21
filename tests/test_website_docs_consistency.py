@@ -60,6 +60,7 @@ from tests._html_links import (  # noqa: E402
     extract_first_base_href,
     extract_heading_positions,
     extract_mode_dependent_regions,
+    extract_raw_text_elements,
     extract_visible_text,
     is_blog_entry,
 )
@@ -1178,6 +1179,68 @@ def test_docs_toc_anchors_all_resolve() -> None:
 # here can rot when `product/pricing.json` changes.
 
 
+#: Attributes whose presence on a heading hides it by the MARKUP's own rule, without a
+#: stylesheet: `style` (`display:none`), `hidden`, `aria-hidden`. Deliberately excludes
+#: `class`, which hides only through a rule this parser cannot compute — see
+#: `_heading_lines_carrying_extra_attributes`.
+_STATIC_HIDING_ATTRIBUTES = frozenset({"style", "hidden", "aria-hidden"})
+
+
+def _heading_lines_carrying_extra_attributes(html: str) -> set[int]:
+    """Lines on which an `<h2>` carries a STATICALLY HIDING attribute.
+
+    The slice bound's second premise (#14073 review round 7). The bound was justified
+    by "a heading a reader can REACH through the TOC had to be added deliberately",
+    and that premise reads visibility as implied by the index. It is not: a TOC entry
+    plus `<h2 id="storage-limits" style="display:none">` is advertised AND invisible,
+    so it cut the slice while a reader landing at `#storage` saw the copy after the
+    cut as part of the section — measured, a `FalkorDB`/`allowance`/`tier`
+    "permanently deletes" paragraph painted 770x27 px inside the `#storage` band with
+    the golden, the vocabulary scan, the destination pin and the allowlist ALL green.
+
+    ⛔ `class` IS DELIBERATELY NOT IN THIS SET, and that is a measured limit rather
+    than an oversight. A `class` only hides through a STYLESHEET RULE, which this
+    parser cannot compute — so a heading carrying `class` must keep BOUNDING, or the
+    round-5 control that moves `class` in front of `id` on the next heading reds the
+    golden on an edit that never touched the storage copy (that is the false-red
+    direction, and `test_the_storage_slice_bound_catches_the_heading_it_exists_for`
+    pins it). `style`, `hidden` and `aria-hidden` are hiding decided by the MARKUP
+    ITSELF, which is exactly the part a static guard can read.
+
+    The remaining residual — a `class` a stylesheet rule hides — is unchanged and is
+    declared on `effective_heading` in `tests/_html_links.py`. Read out of the parsed
+    tree (`extract_element_attributes`), never the source, so an attribute inside a
+    comment or an inert `<template>` is not counted.
+    """
+    return {
+        line
+        for tag, name, line in extract_element_attributes(html)
+        if tag == "h2" and name in _STATIC_HIDING_ATTRIBUTES
+    }
+    return {
+        line
+        for tag, name, line in extract_element_attributes(html)
+        if tag == "h2" and name != "id"
+    }
+
+
+def _heading_may_bound_the_slice(
+    html: str, offset: int, extra_attribute_lines: set[int],
+) -> bool:
+    """Whether the `<h2>` at `offset` is plain enough to end a reader-facing slice.
+
+    The heading's own line and its neighbours are checked because a legal start tag
+    may wrap: `<h2\n  id="x"\n  style="display:none">` puts the offending attribute
+    on a different line from the `id`. Over-refusing here is the safe direction (the
+    slice runs long and a pin reds), so the neighbourhood is deliberate.
+    """
+    line = html.count("\n", 0, offset) + 1
+    return not any(
+        candidate in extra_attribute_lines
+        for candidate in (line - 1, line, line + 1)
+    )
+
+
 def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     """The markup of `docs.html`'s `#<anchor>` section, up to the next ADVERTISED `<h2`.
 
@@ -1246,14 +1309,28 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
 
     ⚠️ THE DECLARED RESIDUAL, stated rather than left to be derived: a heading that
     IS advertised — `<h2 id="storage-limits">` plus a TOC entry for it — cuts the
-    slice there, and everything under it leaves all three pins. That is the design
-    (see the bound rule above: a heading a reader can reach through the TOC had to
-    be added deliberately), and it is pinned as a live behaviour by
+    slice there, and everything under it leaves all three pins. That is the design (see
+    the bound rule above: a heading a reader can reach through the TOC had to be added
+    deliberately), and it is pinned as a live behaviour by
     `test_the_storage_slice_bound_catches_the_heading_it_exists_for`, so it cannot
-    be mistaken for an accident. What it is NOT is a guarantee that the extra
-    heading was reviewed against the plain-language rule: nothing here requires
-    `#storage` to be a single level-2 heading, so a reviewer of a PR that adds one
-    is the only thing between an advertised sub-heading and an unreviewed claim.
+    be mistaken for an accident.
+
+    ⛔ BUT "ADVERTISED" IS NOT "VISIBLE", and until round 7 this paragraph read
+    reachability as if it were: a TOC entry plus
+    `<h2 id="storage-limits" style="display:none">` is advertised AND invisible, so it
+    cut the slice while a reader landing at `#storage` met the paragraph under it AS
+    PART OF THE SECTION — measured, a `FalkorDB`/`allowance`/`tier` "permanently
+    deletes" claim painted inside the `#storage` band with all pins green. A heading
+    may therefore bound only if it does not hide ITSELF: `_heading_may_bound_the_slice`
+    refuses `style`/`hidden`/`aria-hidden`, and on that violation the slice runs LONG
+    (loud) instead of stopping at an invisible line. The `class`-via-stylesheet case is
+    NOT refused — see `_heading_lines_carrying_extra_attributes` for why that is a
+    measured limit rather than an oversight.
+
+    What the residual still does NOT guarantee: that an extra VISIBLE heading was
+    reviewed against the plain-language rule. Nothing here requires `#storage` to be a
+    single level-2 heading, so a reviewer of a PR that adds one is the only thing
+    between an advertised sub-heading and an unreviewed claim.
 
     `page` exists for the mutation controls below, which drive a MUTANT page
     through this real bound rather than through a reimplementation of it.
@@ -1303,10 +1380,17 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
             href, DOCS, base=_document_base_url(html, DOCS),
         )) is not None
     }
+    # ⛔ THE BOUND PREMISE, MEASURED (round 7): a heading carrying any attribute other
+    # than `id` may be INVISIBLE (`style="display:none"`, a `class` a rule hides), so
+    # it cannot decide what a reader at the anchor meets. Computed once, before the
+    # loop, so this is one parse of the page rather than one per candidate.
+    extra_attribute_lines = _heading_lines_carrying_extra_attributes(html)
     for heading_id, offset in headings:
         if offset <= start:
             continue  # the section's OWN opening tag
-        if heading_id in advertised:
+        if heading_id in advertised and _heading_may_bound_the_slice(
+            html, offset, extra_attribute_lines,
+        ):
             return html[start:offset]
     return html[start:]
 
@@ -1693,6 +1777,13 @@ def _attributes_outside_allowlist(markup: str) -> list[str]:
         if name not in allowed
     } | {
         f"<{tag}>" for tag, _line in extract_mode_dependent_regions(markup)
+    } | {
+        # ⛔ A RENDERING DIRECTIVE IS REFUSED TOO, not cleared: `<style>`/`<script>`
+        # contributes no text node and no attribute, so a `content:` property can paint
+        # a claim that every pin here stays green over (#14073 review round 7,
+        # measured in Chromium). Refusing the section is the strong form — a directive
+        # added later is a manual review instead of a silent pass.
+        f"<{tag}>" for tag, _line in extract_raw_text_elements(markup)
     })
 
 
@@ -1983,22 +2074,26 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
     claim past the previous pattern (#14073 review; the fail-open is pinned by
     `test_the_storage_attribute_allowlist_catches_every_legal_spelling`).
 
-    ⛔ DECLARED RESIDUAL — A RENDERING DIRECTIVE IS NOT COPY, SO NO PIN HERE READS IT.
+    ⛔ WAS A DECLARED RESIDUAL, NOW REFUSED — A RENDERING DIRECTIVE IS NOT COPY.
     Every pin above judges the section's MARKUP and the text a browser paints FROM it;
     a `<style>` block inside the section whose `content:` property paints a claim (or a
-    `<script>` that writes one) is neither text nor an attribute, and measured on this
-    tree such a block leaves the allowlist, the destination pin, the vocabulary scan
-    and this golden ALL green. A `<script type="application/ld+json">` block is NOT part
-    of this residual — it is already refused by the allowlist's `type` — so the gap is
-    exactly the attribute-free `<style>`/`<script>`.
+    `<script>` that writes one) is neither text nor an attribute, so a `<style>`-only
+    attack had no pin. It was declared here as a cost decision — "refusing every
+    `<style>`/`<script>` in the section WOULD close the static case, at the price of a
+    new pin, its own mutant, and a red on any directive the section ever carries".
+    Round 7 measured the cost of NOT closing it and it is the larger one
+    (#14073 review): a single attribute-free `<style>` whose `::after` painted
+    `FalkorDB permanently deletes items above the allowance for your tier after thirty
+    days` inside the section left the allowlist, the destination pin, the vocabulary
+    scan and this golden ALL green, and Chromium painted it (`770x82`, inside the
+    `#storage` band). The price quoted above has been paid instead: the refusal is the
+    directive arm of `_attributes_outside_allowlist`, its mutant is arm 4 of
+    `test_each_pin_in_the_storage_aggregate_reds_on_its_own_violation`, and a
+    directive added to the section later reds rather than passing silently.
 
-    Not closed here, and the reason is a cost decision rather than an impossibility:
-    refusing every `<style>`/`<script>` in the section WOULD close the static case, at
-    the price of a new pin, its own mutant, and a red on any directive the section ever
-    carries (a red that says "this section is no longer statically reviewable", which is
-    the honest outcome but not this change's). Modelling the CSS cascade is the general
-    fix and is out of a static guard's reach. Named so a directive added later is a
-    manual review rather than a silent pass.
+    Modelling the CSS CASCADE remains out of a static guard's reach, and a `<style>`
+    placed OUTSIDE the section that targets a node inside it is the same class — that
+    is the residual this now leaves, and it is the one the section cannot see.
     """
     markup = _docs_section()
     _assert_storage_section_reviewed(markup)
@@ -2236,6 +2331,57 @@ def test_an_end_tag_a_browser_ignores_does_not_end_the_storage_slice() -> None:
     assert sliced != reviewed, (
         "the golden pin is blind to the injected claim, so this control proves nothing"
     )
+
+
+def test_a_css_invisible_advertised_heading_does_not_bound_the_storage_slice() -> None:
+    """A TOC entry is not evidence a reader MEETS the heading it points at.
+
+    ⛔ The bound's justification was "a heading a reader can REACH through the TOC
+    had to be added deliberately". Reachable is not VISIBLE, and the gap was a false
+    PASS of exactly the claim this section exists to refuse (#14073 review round 7):
+    with `<h2 id="storage-limits" style="display:none">` advertised in the real TOC
+    and a `FalkorDB`/`allowance`/`tier` "permanently deletes" paragraph under it,
+    the heading cut the slice while a reader landing at `#storage` met that paragraph
+    as part of the section — measured in Chromium at 770x27 px inside the `#storage`
+    band, with the golden, the vocabulary scan, the destination pin and the
+    allowlist all green.
+
+    The heading now refuses to bound (`_heading_may_bound_the_slice`: a bounding
+    heading must carry `id` and nothing else), so the copy falls INSIDE the slice and
+    the pins see it. The direction is deliberately the LOUD one: a boundary a reader
+    cannot see must not decide what was reviewed.
+    """
+    page = _read(DOCS)
+    boundary = _h2_offset(page, "storage") + len(_docs_section())
+    claim = (
+        "FalkorDB permanently deletes items above the allowance for your tier "
+        "after thirty days."
+    )
+    invisible = (
+        '<h2 id="storage-limits" style="display:none">Limits</h2>\n'
+        f"<p>{claim}</p>\n"
+    )
+    toc_entry = '      <a href="#storage">How your data is stored and searched</a>\n'
+    assert toc_entry in page, "the TOC entry this control advertises was renamed"
+    mutant = (page[:boundary] + invisible + page[boundary:]).replace(
+        toc_entry, toc_entry + '      <a href="#storage-limits">Limits</a>\n', 1,
+    )
+    # THE PREMISE, asserted: the heading really is ADVERTISED, so the only thing that
+    # can stop it bounding is visibility — not a dropped TOC entry.
+    assert '<a href="#storage-limits">' in mutant
+    escaped = _slice_bound_at_any_h2(mutant)
+    assert claim not in " ".join(_visible_text(escaped).split()), (
+        "premise: a bound that cuts at this heading puts the claim OUTSIDE the "
+        "slice — that is the behaviour this control exists to refuse"
+    )
+    caught = _docs_section(page=mutant)
+    assert claim in " ".join(_visible_text(caught).split()), (
+        "a CSS-invisible advertised heading still bounds the #storage slice, so "
+        "copy a reader meets inside the section escapes every pin (#14073 review "
+        "round 7)"
+    )
+    with pytest.raises(AssertionError, match="<h2 style>"):
+        _assert_storage_section_reviewed(caught)
 
 
 def test_the_storage_slice_bound_catches_the_heading_it_exists_for() -> None:
@@ -3554,7 +3700,6 @@ def test_the_storage_attribute_allowlist_catches_every_legal_spelling() -> None:
     # check by looking at the allowlist's positive cases.
     for label, wrapper in (
         ("comment", '<!-- <h3 title="{claim}"> -->'),
-        ("script body", '<script>var s = "<h3 title=\'{claim}\'>";</script>'),
         ("inert template", '<template><h3 title="{claim}"></h3></template>'),
     ):
         inert = wrapper.format(claim=marker)
@@ -3566,6 +3711,21 @@ def test_the_storage_attribute_allowlist_catches_every_legal_spelling() -> None:
             f"string no browser renders, and the allowlist's "
             f"'the section carries' claim stops being true of its own answer"
         )
+
+    # ⛔ A SCRIPT BODY IS TWO QUESTIONS, so it gets two assertions instead of one
+    # row in the loop above. Its fake ATTRIBUTE must not be counted (a browser makes
+    # no attribute there), and the `<script>` ELEMENT must be refused in its own
+    # right — a directive can paint a claim that no text pin reads (#14073 review
+    # round 7). Collapsing them into `== []` is what let the second hide: the fix
+    # for the first was the parser route, and the element refusal arrived later.
+    script_body = '<script>var s = "<h3 title=\'{claim}\'>";</script>'
+    with_script = section.replace(opening, script_body.format(claim=marker) + opening, 1)
+    assert with_script != section, "could not insert the script body case"
+    assert _attributes_outside_allowlist(with_script) == ["<script>"], (
+        "the script BODY's fake attribute must not be reported and the <script> "
+        "element itself must be: got "
+        f"{_attributes_outside_allowlist(with_script)}"
+    )
 
 
     # ── the one suppressed region whose answer depends on the MODE ───────────
@@ -3707,6 +3867,22 @@ def test_each_pin_in_the_storage_aggregate_reds_on_its_own_violation() -> None:
     assert _visible_text(retargeted) == _visible_text(section)
     with pytest.raises(AssertionError, match="links to"):
         _assert_storage_section_reviewed(retargeted)
+
+    # 4. A RENDERING DIRECTIVE: an attribute-free `<style>` whose `::after` paints a
+    #    claim. It contributes no text node and no attribute, so no other rule here
+    #    can see it — measured in Chromium painting inside the `#storage` band while
+    #    the golden, the vocabulary scan and the destinations all stayed green
+    #    (#14073 review round 7).
+    directed = section.replace(
+        "</p>", '</p><style>#storage-record::after{content:"x"}</style>', 1
+    )
+    assert directed != section, "the directive control could not add a <style>"
+    assert _visible_text(directed) == _visible_text(section)
+    assert sorted(set(extract_anchor_hrefs(directed))) == list(
+        _REVIEWED_SECTION_HREFS
+    )
+    with pytest.raises(AssertionError, match="<style>"):
+        _assert_storage_section_reviewed(directed)
 
     # 3. The reviewed wording: one sentence added, nothing else touched.
     reworded = section.replace(
@@ -5009,7 +5185,7 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     # `<select><option><title>CLAIM</title></option></select>` +1360 px, the same
     # `<title>` in a `<div>` 0, a `<template>` inside the option 0, and a `hidden`
     # select 0. Each row below is one of those measurements.
-    for raw in ("title", "iframe", "style", "noembed", "noframes"):
+    for raw in ("title", "iframe", "noembed", "noframes"):
         raw_label = section.replace(
             "</h2>",
             f"</h2><select><option><{raw}>FalkorDB permanently deletes it</{raw}></option>"
@@ -5024,6 +5200,28 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         )
         with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
             _assert_storage_section_reviewed(raw_label)
+    # `<style>` is the SAME painted label, and it is now refused by the DIRECTIVE
+    # backstop first (`extract_raw_text_elements`): a rendering directive paints what
+    # no text pin can read, so it is refused rather than cleared — the same shape as
+    # `<noscript>` below, and loud either way (#14073 review round 7). Its own arm, so
+    # the paint premise is still asserted while the firing pin is the allowlist.
+    style_label = section.replace(
+        "</h2>",
+        "</h2><select><option><style>FalkorDB permanently deletes it</style>"
+        "</option></select>",
+        1,
+    )
+    assert style_label != section, "the `<style>`-in-a-label control could not inject"
+    assert "falkor" in _banned_vocabulary(style_label), (
+        "a `<style>` inside a painted `<option>` was dropped from the wording pin, so "
+        "the premise this arm pins (the claim IS painted) no longer holds"
+    )
+    assert "<style>" in _attributes_outside_allowlist(style_label), (
+        "a `<style>` in the section is not refused by the directive backstop, so a "
+        "`content:` property can paint a claim every pin here stays green over"
+    )
+    with pytest.raises(AssertionError, match="<style>"):
+        _assert_storage_section_reviewed(style_label)
     # `<noscript>` is the SAME painted label (measured +1360) but it is refused by the
     # ATTRIBUTE backstop first (`_mode_dependent`: a `<noscript>` region's rendering
     # depends on the scripting mode), so the pin that fires is the allowlist, not the
