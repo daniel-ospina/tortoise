@@ -1795,6 +1795,41 @@ def test_a_waiver_over_a_STUB_ONLY_base_whose_row_is_at_the_BASE_says_it_too(
     assert "from the base" not in waived[0], waived[0]
 
 
+def test_a_waiver_over_a_STUB_ONLY_base_with_NO_carrier_says_it_too(tree: Path) -> None:
+    """An ABSENT base carrier is the strongest proof there was no `.py` — and it was the one shape
+    that fell through (review F1 of round 22).
+
+    The split keyed on `endswith(".pyi")`, so an empty carrier — the base holding the row and NO
+    file at all, i.e. an earlier PR already archived and deleted a stub-only module — took the
+    had-runtime arm and re-emitted both removed falsities: "it is not a record", and "restore the
+    source from a commit that still holds it" over a repo where `git log --all -- tortoise/
+    stubby.py` is empty. The polarity is now "does the base carry a RUNTIME source".
+
+    Discriminating: keying on `.pyi` reds this row (measured), because `` does not end with it.
+    """
+    (tree / "tortoise").mkdir(exist_ok=True)
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review F1", root=tree)
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.pyi"], cwd=tree, check=True)
+    _commit(tree, ".")  # the BASE: the row exists, NO carrier on either side
+    (tree / "unrelated.txt").write_text("x\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "on neither side" in waived[0], waived[0]
+    assert "FROZE ONLY A STUB" not in waived[0], (
+        f"no commit holds a `.py` for this module, so nothing runtime was removed: {waived[0]}"
+    )
+    assert "not a record" not in waived[0], waived[0]
+
+
 def test_the_stub_waiver_text_names_the_head_carrier_it_can_see() -> None:
     """`base_paths_by_module` proves the BASE side only (review F2).
 
