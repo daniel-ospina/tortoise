@@ -2662,7 +2662,7 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
     # ── IN SCOPE IS THE PRECONDITION: a boundary between select and token ──
     # ⛔ "IS ANY `<select>` OPEN?" IS NOT THE SPEC'S QUESTION (#14073 review round 14,
     # P2, measured). The rule reads *"If the stack of open elements has a select
-    # element in scope"*, and §13.2.2.4 puts `table`/`td`/`th`/`caption`/`object`/
+    # element in scope"*, and §13.2.4.2 puts `table`/`td`/`th`/`caption`/`object`/
     # `template` in the scope-boundary list — so a cell between the current node and
     # the select makes the answer NO and NO POP happens, exactly as for the implied
     # `</p>`. Measured in Chrome: `aInSelect` true and `innerText` empty (the anchor
@@ -2687,7 +2687,7 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
         "one no reader meets — bounding at it is the fail-open escape"
     )
     # ── `select` IS ITSELF A SCOPE BOUNDARY (#14073 review round 15, P1, measured) ──
-    # §13.2.2.4's scope-element list contains `select`, so a `<p>` beyond an open
+    # §13.2.4.2's scope-element list contains `select`, so a `<p>` beyond an open
     # `<select>` is NOT in button scope and the implied close must not run. Without the
     # member the walk went past the select, closed the `<p>` and popped the select with
     # it, so a heading and an anchor a browser never renders were recorded/collected.
@@ -4237,7 +4237,7 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         # control 2: well-formed unrendered content must not refuse the page.
         wellformed = section.replace(
             "</h2>",
-            f"</h2><canvas><div>fallback</div></canvas>",
+            "</h2><canvas><div>fallback</div></canvas>",
             1,
         )
         _visible_text(wellformed)
@@ -7603,7 +7603,7 @@ def test_the_ruby_implied_close_asks_the_ordinary_scope_question() -> None:
 
     ⛔ THE PRECONDITION ON "GENERATE IMPLIED END TAGS" IS *"If the stack of open
     elements has a `ruby` element in scope"*, and the scope-boundary list at
-    §13.2.2.4 does not contain `button` — that member is added only for BUTTON scope.
+    §13.2.4.2 does not contain `button` — that member is added only for BUTTON scope.
     This module asked the button-scope question, and the off-by-one-set was a fail-open
     (#14073 review round 14, P1, measured): `<ruby><button><rp>P<rt>CLAIM` kept the
     `<rp>` (a `display: none` `_UNRENDERED` element) on the stack, so every following
@@ -7618,7 +7618,7 @@ def test_the_ruby_implied_close_asks_the_ordinary_scope_question() -> None:
         _AnchorHrefParser._P_SCOPE_BOUNDARY - {"button"}
     ) == _AnchorHrefParser._SCOPE_BOUNDARY, (
         "`_SCOPE_BOUNDARY` is no longer the button-scope list MINUS `button`: "
-        "the two lists differ in exactly that member (spec 13.2.2.4), and using the "
+        "the two lists differ in exactly that member (spec 13.2.4.2), and using the "
         "button-scope one for a rule that asks the ordinary question is the fail-open "
         "this test exists for"
     )
@@ -7748,12 +7748,12 @@ def test_the_script_data_wedge_states_its_own_rule() -> None:
     # ⛔ THE TWO BOUNDARY CASES DO NOT SHARE AN ANSWER (#14073 review round 16, P2,
     # measured). `handle_data` is fed a chunk `HTMLParser`'s CDATA mode cut at the
     # `</script` it matched, so the next character after a chunk ending in `<script` is
-    # `<` — outside §13.2.5.27's delimiter set — so the state is ESCAPED and the element
-    # closes there. Guessing `double` wedged a document every browser paints (and the
+    # `<` — outside §13.2.5.26's returned-escaped arm — so the state is ESCAPED and the
+    # element closes there. Guessing `double` wedged a document every browser paints (and the
     # parent commit read it right, so this was a regression):
     assert _script_data_state("<!--<script") == "escaped", (
         "a chunk ending exactly at `<script` was reported double-escaped: the next "
-        "character is the `<` of the `</script` the chunker cut at, §13.2.5.27 "
+        "character is the `<` of the `</script` the chunker cut at, §13.2.5.26 "
         "reconsumes in the ESCAPED state, and calling it double wedges legal markup "
         "(#14073 review round 16, P2)"
     )

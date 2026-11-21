@@ -81,10 +81,11 @@ def _script_data_state(data: str) -> str:
     The two boundary cases do NOT share an answer, though they share a rule:
 
     * ending at `<script` — `handle_data` is fed a chunk that `HTMLParser`'s CDATA mode
-      cut at the `</script` it matched, so the next character is `<`. §13.2.5.27 (script
-      data double escape start) sends anything outside tab/LF/FF/space, `/` and `>` back
-      to *script data escaped state* — so the state at the chunk end is ESCAPED, the
-      element closes at that `</script`, and the document must be read normally.
+      cut at the `</script` it matched, so the next character is `<`.
+      §13.2.5.26 (script data double escape start) reconsumes anything outside
+      tab/LF/FF/space, `/` and `>` in *script data escaped state* — so the state at the
+      chunk end is ESCAPED, the element closes at that `</script`, and the document must
+      be read normally.
     * ending at `</script` — the next character is `<` again, and §13.2.5.31 (script data
       double escape end) also says *"Anything else: reconsume in the script data double
       escaped state"*, so the state stays DOUBLE.
@@ -111,7 +112,7 @@ def _script_data_state(data: str) -> str:
                     # THE DELIMITER IS THE NEXT CHUNK'S FIRST BYTE, AND IT IS KNOWN.
                     # `handle_data` is fed a chunk `HTMLParser`'s CDATA mode cut at the
                     # `</script` it matched, so the next character here is `<` — which
-                    # is not in the ` \t\n\f/>` delimiter set, so §13.2.5.27 reconsumes
+                    # is not in the ` \t\n\f/>` delimiter set, so §13.2.5.26 reconsumes
                     # in SCRIPT DATA ESCAPED and the state stays `escaped`. Guessing
                     # `double` here wedged `<script><!--<script</script><p>CLAIM</p>`,
                     # a document a browser paints (#14073 review round 16, P2). The
