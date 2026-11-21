@@ -339,8 +339,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # prose and `sdk.py:3801` is an EMPTY LINE. Both are one-token spellings already, so no figure
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
     # ⛔ #14087 review: the span's END was one short — `:16081` is the paragraph's PENULTIMATE line and
-    # `:16082` (`turns`` list is that same requirement for the record-held lane.`) is its last, with
-    # `:16083` blank. A span token pins only its START, so the short end was invisible to `_PINS`;
+    # `:16082` (the line reading "turns list is that same requirement for the record-held lane.") is its
+    # last, with `:16083` blank. A span token pins only its START, so the short end was invisible to `_PINS`;
     # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
     # and grades it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16077-16082", "tortoise/sdk.py", 16077, "**JSONL event log (#548):** written when *point* is provided"),
