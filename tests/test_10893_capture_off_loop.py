@@ -100,9 +100,29 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # `_record_write_op` -> `metering.record_write_ops` (a blocking MERGE +
     # MATCH in registry mode, a blocking control-plane RPC in Supabase mode).
     # Its docstring records the off-load as tracked by #4451; this census is
-    # where that promise is visible. Measured after this cycle's two commits:
-    # 2 calls, 81.5 ms — the whole of what is left on the loop.
+    # where that promise is visible.
+    # ⛔ NO FIGURE HERE. This table is about OWNERSHIP — which issue removes the
+    # leg — and a millisecond reading copied into it is a SECOND carrier of a
+    # number the docstring already states and nothing re-derives; that is how
+    # this entry came to say "2 calls, 81.5 ms" while the census docstring below
+    # said "4 on-loop calls, 81.5 ms" for the same commits (#14086 cycle-4
+    # review, F2). State a magnitude once, or not at all.
     "_get_registry": "#4451 (metering registry read inside `record_write_ops`)",
+    # The two provenance stamps in `_capture_session_impl`
+    # (`_stamp_capture_provenance` at `hosted_api.py` ~21182 and
+    # `_capture_stamp_targets` at ~21209) go through this ONE retry wrapper, so
+    # the census sees a single leg and not two: measured 2.50 ms + 4.11 ms on the
+    # loop (a throwaway spy keyed on the retry's own `what=` argument).
+    # ⛔ NOT a same-cycle off-load: `_stamp_capture_provenance` is JOURNAL-FIRST
+    # (#9350) — one `PointRevised` per minted id, then the stamp inside its own
+    # `_live_write_scope` lane — so moving it to another thread changes which
+    # thread OWNS that lane, which is a behaviour change, not a move of WHERE the
+    # same callable runs. It needs its own measurement (#14104).
+    # ⚠️ This entry is keyed on a GENERIC retry wrapper with ~9 other call sites,
+    # so it exempts any FUTURE on-loop use of it at any cost. #14104's step 3
+    # replaces this with a leg-specific declaration; until then the entry says
+    # whose work it is, not that the leg is acceptable.
+    "_graph_write_with_retry": "#14104 (the capture's two provenance stamps)",
     # NOT observed on the measured path (the checkpoint that reached it is now
     # off-loaded). Listed because the census drives ONE branch of this handler
     # and the completion gate is reached from others; an entry here is a
@@ -178,31 +198,58 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     bar is 1 ms of TOTAL on-loop time for the request, two orders of magnitude
     below the 552 ms the mint cost.
 
-    Measured on the instrumented tree after this cycle's two commits: 4 on-loop
-    calls, 81.5 ms total, of which the metering registry read is 81.47 ms.
+    Measured on the instrumented tree after this cycle's two commits: ONE
+    on-loop leg, `_get_registry` — the metering registry read inside
+    `record_write_ops` (#4451). Every other entry in the inherited table is a
+    declaration about OWNERSHIP that does not run on the path this test drives.
+
+    ⛔ Its COST is a reading, not a pin, and that distinction is deliberate:
+    nothing here asserts a millisecond figure, because a wall-clock number
+    beside an assertion re-stales against the run it came from — on a loaded
+    runner it MOVES, and the review that closed this cycle read 68 ms for the
+    same leg where the author's box read 81 ms for it. (An earlier cut of this
+    docstring and of `_ON_LOOP_RESIDUAL` stated the same measurement twice with
+    different call counts, which is what a duplicated figure does.) What IS
+    pinned is membership: `_get_registry` must appear in `totals` (the
+    instrument-liveness assert below), and no UNDECLARED leg may appear at all.
     """
     rows: list[dict] = []
     depth = threading.local()
     saved: dict[str, object] = {}
 
     def _wrap(name: str, fn):
-        def _probe(self, *a, **kw):
+        # ⛔ `*a, **kw` and NO named `self`: the probe is installed back under
+        # the SAME descriptor kind it was read from (plain / `staticmethod` /
+        # `classmethod`), so the descriptor machinery binds exactly the first
+        # argument the original got. Naming `self` here is what silently broke
+        # all 15 `staticmethod`s on the class — the probe became an INSTANCE
+        # method, so `sdk._helper(x)` was invoked as `fn(instance, x)` and raised
+        # `… got multiple values for argument 'point_kind'` INSIDE the capture
+        # this census measures, leaving every leg downstream of it uncharged
+        # (#14086 cycle-4 review, F1 — measured on `_dedup_match_clauses`,
+        # `sdk.py:32725`, on the point-creation path).
+        def _probe(*a, **kw):
             # Re-entry guard: a sync SDK method calling another one must be
             # charged to the OUTER method, or the census reports the whole call
             # tree as one leg per level.
             if getattr(depth, "n", 0):
-                return fn(self, *a, **kw)
+                return fn(*a, **kw)
             if not _on_loop():
-                return fn(self, *a, **kw)
+                return fn(*a, **kw)
             depth.n = 1
             t0 = time.monotonic()
+            err = None
             try:
-                return fn(self, *a, **kw)
+                return fn(*a, **kw)
+            except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+                err = f"{type(exc).__name__}: {exc}"
+                raise
             finally:
                 depth.n = 0
                 rows.append({"method": name,
                              "ms": (time.monotonic() - t0) * 1000.0,
-                             "thread": threading.current_thread().name})
+                             "thread": threading.current_thread().name,
+                             "err": err})
 
         _probe.__name__ = getattr(fn, "__name__", name)
         _probe.__doc__ = getattr(fn, "__doc__", None)
@@ -211,11 +258,20 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     for name, attr in list(vars(TortoiseSDK).items()):
         if name.startswith("__"):
             continue
-        raw = getattr(attr, "__func__", attr)
+        if isinstance(attr, staticmethod):
+            kind: type | None = staticmethod
+        elif isinstance(attr, classmethod):
+            kind = classmethod
+        elif inspect.isfunction(attr):
+            kind = None
+        else:
+            continue
+        raw = attr.__func__ if kind is not None else attr
         if not inspect.isfunction(raw) or not _is_sync_callable(raw):
             continue
-        saved[name] = vars(TortoiseSDK)[name]
-        setattr(TortoiseSDK, name, _wrap(name, raw))
+        saved[name] = attr
+        probe = _wrap(name, raw)
+        setattr(TortoiseSDK, name, probe if kind is None else kind(probe))
 
     try:
         r = client.post("/v1/sessions", json={"conversation": _CONV})
@@ -225,6 +281,19 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
 
     assert r.status_code == 200, r.text[:300]
     assert saved, "no synchronous TortoiseSDK methods were instrumented"
+
+    # ⛔ A LEG THAT RAISED LEAVES EVERY LATER LEG UNCHARGED. This is the second
+    # half of F1: a broken probe (the `staticmethod` bug above) raised inside the
+    # capture, the handler caught/absorbed it, and the census still reported a
+    # clean bill because `rows` simply stopped growing at that point. So any
+    # exception observed in a probed leg is a FAILURE of the instrument's
+    # coverage, whatever the SDK's own fail-open arm then did with it.
+    raised = [f"{r['method']}: {r['err']}" for r in rows if r["err"]]
+    assert not raised, (
+        "a synchronous SDK leg RAISED while the census was measuring it, so "
+        "every leg after it on the same path went uncharged and this census is "
+        "not evidence about the class — a `TypeError` here is usually the "
+        "probe's own signature rather than the SDK's:\n  " + "\n  ".join(raised))
 
     totals: dict[str, float] = {}
     for row in rows:
