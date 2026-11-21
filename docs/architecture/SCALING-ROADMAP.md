@@ -193,7 +193,8 @@ So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and
 - **C1. Separate the embedder into its own deployment** (CPU-sized independently), with the API never embedding inline.
 - **C2. Scale API replicas on queue depth / in-flight requests**, not CPU.
 - **C3. Move the keyword leg to Postgres** (`#14000`) so the graph holds only what it is uniquely good at, and the read path stops
-  paying graph round-trips for text search.
+  paying graph round-trips for text search. ⚠️ **This one is free, code-only work** — it sits under Phase C because it belongs with
+  the read-path changes, not because it needs spend; the plan sequences it as **S9** in the free group, to proceed in parallel.
 
 ## 4. What we should explicitly NOT copy
 
@@ -209,7 +210,9 @@ So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and
 
 **Our topology already matches the leaders — record + derived layer + hybrid legs. What differs is that they moved the expensive,
 batchable work into queues and workers, and we still do it inside the request.** Phase A is entirely free, and it is the
-difference between "a machine that answers in 6 s" and "a machine that answers in 300 ms and catches up in the background".
+difference between a read path that spends **6–9 s in `pre_handler`** and 2–4 s embedding inline, and one that acks the write,
+pays **0.36 s/item** for a batched embed instead of 2–4 s inline, and pays only the **~1.2 s** of retrieval legs — the rest of the
+budget is what S3 exists to write down.
 
 **Contradiction test:** no recorded decision is reversed. `STORAGE-ARCHITECTURE.md` §2.0 (record is truth, graph is derived) *requires* A1 — the fold is
 already the mechanism. `#11758` (per-account storage) and `#4495`/`#5331` (no node pricing) are untouched. A2 does not pick a
@@ -236,6 +239,11 @@ true when written ages out, so re-measure before adopting it).
 | **"The transport wait bound is 10 s and is a recorded owner decision (`#3834`)"** | **confirmed** | consistent with the refusals we see: `transport wait bound (10s) exceeded …`. **This is why "raise the budget" is not a fix.** |
 | **"`fly scale vm` does not survive a deploy"** | **confirmed by construction** | `fly.toml` is what a deploy applies; `#14156` fixed exactly that. |
 | **"Contradiction is only detected for numeric/date changes; negation and noun substitution leave two rival claims with no edge"** | **confirmed, and it is a real product gap** | their classifier table (`UPDATE`/`REVISES` vs `ADD`), plus the competitor evidence in §6.1 below. |
+
+⚠️ **The 504 is the *best* failure this box produces, not the worst.** A request that hit the 10 s transport bound and rendered a
+refusal at 13.5 s is the benign case; the four that died at the **30 s client bound** are the case where the loop was blocked so
+completely that no refusal could render at all. So the 10 s bound does not bound the outage — it bounds only how fast a *refusal*
+arrives, and reading the four client timeouts as "also 504s, at a different number" would understate them.
 
 ### 6.1 The contradiction gap — what the competitors do, and what we should take
 
