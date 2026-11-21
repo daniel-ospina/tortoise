@@ -593,6 +593,69 @@ def test_unpinning_with_nothing_declared_reports_no_write():
     assert g.mutating == []
 
 
+# ── review round 5: the guard no row saw, the partial list, the no-op cap ───────
+def test_a_stored_declaration_with_an_injected_label_reads_as_malformed():
+    """`read()`'s identifier guard is the LAST gate before a stored pair reaches Cypher.
+
+    ⛔ Deleting it left the suite green. The `:Meta {key:'pins'}` node is operator metadata
+    in a shared store (SDK, `graph-scripts`, a restore can MERGE it), so the value it
+    validates is NOT one this module wrote; the existing malformed-declaration rows cover
+    the TYPE arm (`keys=7`) and the corrupt-ENTRY arm, neither of which reaches
+    `bare_identifier`. This row is the identifier arm's only coverage.
+    """
+    g = _FakeGraph(["p0"])
+    g.meta[PINS_META_KEY] = {"label": "Point}) DETACH DELETE n //", "key_prop": "id",
+                             "keys": ["p0"]}
+    reading = read(g, budget=PinBudget(max_nodes=10))
+    assert reading.readable is False
+    assert (reading.source or "").startswith("malformed:")
+    assert g.mutating == [], "a malformed declaration reached a query that mutates"
+
+
+def test_pin_refuses_a_list_carrying_a_bad_key_rather_than_applying_part_of_it():
+    """ALL OR NOTHING, the promise the docstring makes — enforced, not merely stated.
+
+    ⛔ Measured: `pin(g, ["a", ""])` wrote `['a']` and returned `written=True`, so a stray
+    empty argv element (`--key ""`) produced a partially applied declaration reported as
+    success. This is the CALLER's list — a different door from the stored one the
+    corrupt-entry test above covers, and a separate fix.
+    """
+    g = _FakeGraph(["a", "b"])
+    with pytest.raises(PinRefused) as exc:
+        pin(g, ["a", ""], budget=PinBudget(max_nodes=10))
+    assert exc.value.code == "bad-key"
+    assert "Nothing was pinned" in exc.value.reason
+    assert g.mutating == [], "a refused declaration still wrote"
+    assert PINS_META_KEY not in g.meta
+
+
+def test_unpin_refuses_a_list_carrying_a_bad_key_rather_than_releasing_part_of_it():
+    g = _FakeGraph(["a", "b"])
+    budget = PinBudget(max_nodes=10)
+    pin(g, ["a", "b"], budget=budget)
+    with pytest.raises(PinRefused) as exc:
+        unpin(g, ["a", ""], budget=budget)
+    assert exc.value.code == "bad-key"
+    assert g.meta[PINS_META_KEY]["keys"] == ["a", "b"], "a refused release still wrote"
+
+
+def test_repinning_declared_keys_on_an_over_budget_set_is_refused_not_reported_ok():
+    """The cap check lived only inside `if fresh:`, so a no-op pin skipped it entirely.
+
+    ⛔ Measured: re-pinning the same keys at `max_nodes=1` returned `written=True`,
+    `added=[]` and `verdict: OK`, while the envelope's own `set.over_budget` named the
+    violation and every sweep refused it.
+    """
+    g = _FakeGraph(["p0", "p1", "p9"])
+    g.link("p0", "p1")
+    pin(g, ["p0"], budget=PinBudget(max_nodes=10))
+    with pytest.raises(PinRefused) as exc:
+        pin(g, ["p0"], budget=PinBudget(max_nodes=1))
+    assert exc.value.code == "budget"
+    assert "over budget" in exc.value.reason
+    assert g.meta[PINS_META_KEY]["keys"] == ["p0"], "a refused re-pin still wrote"
+
+
 def test_a_degree_ceiling_is_a_declaration_time_guard_and_the_budget_is_the_invariant():
     """A hub pinned under a higher ceiling survives a lowered one — the budget does not.
 
@@ -714,6 +777,124 @@ def test_a_malformed_read_bound_refuses_rather_than_falling_back(monkeypatch):
     with pytest.raises(PinConfigError) as exc2:
         rp.key_limit()
     assert "below its floor" in str(exc2.value)
+
+
+def test_a_pin_held_head_at_the_reach_bound_is_not_told_to_re_run():
+    """An all-pinned head told "re-run to continue" sends the operator into a loop.
+
+    ⛔ The reach guard exists because "re-run to continue" is a LIE once the held-back
+    head reaches the widest prefix ONE call can examine — re-running offers the same
+    nodes and stops in the same place. It counted the record and lease hold-backs and
+    not the pin, which is the third: with 6 pinned nodes, batch 1 x 3 passes (reach 4),
+    the run reported "re-run to continue" while the only working reply ("unpin, or raise
+    the pin budget") lived in a branch this path never reaches.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(6)])
+    pinned_keys = frozenset(f"p{i}" for i in range(6))
+
+    def all_pinned(candidate: Candidate) -> bool:
+        return candidate.key in pinned_keys
+
+    report = evict(
+        _assessment(nodes=6), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=all_pinned, dry_run=False,
+        policy=EvictionPolicy(max_nodes=3, batch_size=1, max_passes=3),
+    )
+    assert report.deleted == ()
+    assert "re-run to continue" not in report.reason, (
+        "an all-pinned head was told to re-run: re-running examines the same nodes and "
+        f"stops in the same place. reason={report.reason}"
+    )
+    assert "pinned" in report.reason.lower()
+
+
+def test_a_node_taken_after_the_pin_predicate_recovered_leaves_no_stale_held_entry():
+    """A stale held entry makes `deleted` intersect a `skipped_*` list.
+
+    ⛔ `held_pinned_ids` only prevented a duplicate APPEND — it was never consulted when
+    a node was taken, so a node whose predicate RAISED once (a store blip) and answered
+    False on the retry was DELETED while staying in `skipped_pin_unanswerable`. The
+    record-probe list beside it already prunes exactly this, for exactly this reason.
+    """
+    g = _FakeGraph(["p0", "p1", "p2"])
+    calls: dict[str, int] = {}
+
+    def flaky(candidate: Candidate) -> bool:
+        seen = calls.get(candidate.key or "", 0) + 1
+        calls[candidate.key or ""] = seen
+        if seen == 1:
+            raise RuntimeError("pin store blip")
+        return False
+
+    report = evict(
+        _assessment(nodes=1), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=flaky, dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=10, max_passes=4),
+    )
+    assert report.deleted, "sanity: the second pass must be able to take something"
+    deleted_ids = {c.node_id for c in report.deleted}
+    stale = deleted_ids & {c.node_id for c in report.skipped_pin_unanswerable}
+    assert not stale, (
+        f"node(s) {sorted(stale)} are reported as BOTH deleted and held-back — a stale "
+        f"entry: deleted={[c.key for c in report.deleted]}, "
+        f"held={[c.key for c in report.skipped_pin_unanswerable]}"
+    )
+
+
+def test_a_malformed_read_bound_makes_the_declaration_unreadable_not_a_traceback(
+        monkeypatch):
+    """`key_limit()` raises by design; `read()` is the door that must not let it escape.
+
+    ⛔ `tools/cache_evict.py` and `tools/resident.py show` call `read()` directly, so an
+    uncaught `PinConfigError` became a traceback with exit 1 — "retry the FLAGS" — for a
+    config fault no flag change clears. Converted to the module's own unreadable state,
+    every door refuses with ITS code instead (the sweep exits 3 REFUSED).
+    """
+    import tortoise.resident_pin as rp
+
+    g = _FakeGraph(["p0", "p1"])
+    g.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+    monkeypatch.setenv(rp.KEY_LIMIT_ENV, "abc")
+    reading = read(g)          # must not raise
+    assert reading.readable is False
+    assert reading.source.startswith("config:")
+    assert rp.KEY_LIMIT_ENV in reading.source
+    assert (reading.gate_reason() or "") != "", (
+        "an unreadable declaration must carry a refusal reason, or a sweep would "
+        "proceed over it"
+    )
+
+
+def test_a_partially_corrupt_declaration_is_malformed_not_silently_narrowed():
+    """A dropped key is a LOSS of the user's declaration, and the next pin makes it final.
+
+    ⛔ `keys: ["p0", 7]` used to read as `readable=True, keys=["p0"]`, so the reader saw
+    a shorter set than the declaration holds and the next `pin` REWROTE the declaration
+    without the `7` — the same silent loss the truncation guard refuses. A bad ENTRY is
+    now classified like a wrong-typed `keys` FIELD.
+    """
+    g = _FakeGraph(["p0", "p1"])
+    g.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id",
+                             "keys": ["p0", 7]}
+    reading = read(g, budget=PinBudget(max_nodes=10))
+    assert reading.readable is False, (
+        "a declaration with a non-string key read as READABLE — the caller then sees a "
+        "narrowed set it will rewrite over, dropping the entry it could not represent"
+    )
+    assert "malformed" in (reading.source or "")
+    assert "7" in (reading.source or ""), "the malformed entry must be NAMED"
+
+    # And the writer refuses rather than rewriting: `pin` is guarded by `not readable`.
+    with pytest.raises(PinRefused) as exc:
+        pin(g, ["p1"], budget=PinBudget(max_nodes=10))
+    assert exc.value.code == "unreadable"
+    assert g.meta[PINS_META_KEY]["keys"] == ["p0", 7], (
+        "a refused pin rewrote a declaration it could not read"
+    )
 
 
 def test_a_window_too_small_for_a_pin_names_that_rather_than_an_impossible_number():

@@ -58,6 +58,13 @@ class _Graph:
             return _Result([])
         if "MATCH (n:Point) RETURN count(n)" in statement:
             return _Result([[len(self.nodes)]])
+        # ⛔ THE KEY READ, which this fake used to answer with `[]` while reporting a
+        # nonzero count — the self-inconsistent shape a wrong `key_prop` produces for
+        # real, and the one `outside_view.read` now refuses. A fake that says "3 resident"
+        # and then "no keys" is not a graph the product can be, so it must not be the
+        # shape the verb's test drives.
+        if "AS key LIMIT" in statement:
+            return _Result([[k] for k in self.nodes])
         if "UNWIND $keys AS k" in statement:
             rows = []
             for key in params["keys"]:
@@ -374,6 +381,44 @@ def test_outside_with_a_non_bare_key_prop_is_a_usage_error_not_unmeasured(
     assert exc.value.code == resident.EXIT_USAGE
 
 
+def test_outside_refuses_a_zero_key_bound_instead_of_widening_it(
+        wired, capsys, monkeypatch):
+    """`--max-keys 0` must reach the module's floor refusal, never be defaulted away.
+
+    ⛔ `args.max_keys or DEFAULT` silently rewrote `0` to 200,000 — the WIDENING
+    direction on the one flag that bounds a read — which also made the module's own floor
+    ("a bound of zero cannot read any key") unreachable from the command line. A caller
+    asking for a bound of zero is making a mistake; the answer is the refusal, not the
+    maximum.
+    """
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                       "org_a", "--graph-id", "g_1", "--max-keys", "0",
+                       "--window-nodes", "1000"])
+    assert exc.value.code == resident.EXIT_USAGE
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_outside_refuses_a_top_below_its_floor_instead_of_leaving_the_record_unmeasured(
+        wired, capsys, monkeypatch, value):
+    """`--top -1` used to reach the record as `LIMIT -1` and come back exit 4 UNMEASURED.
+
+    ⛔ Exit 4 is "the measurement failed, retry" — the code an operator RETRIES for a flag
+    mistake no retry can fix, and the module's own table says a flag mistake is usage.
+    The `--max-keys` half of this floor has its own row; this is the `--top` half, which
+    the floor in `outside_view.read` covers but no row reached through the CLI.
+    """
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                       "org_a", "--graph-id", "g_1", "--top", value,
+                       "--window-nodes", "1000"])
+    assert exc.value.code == resident.EXIT_USAGE, (
+        "a flag mistake surfaced as UNMEASURED (exit 4) — the code an operator retries"
+    )
+
+
 def test_pin_with_a_non_bare_label_is_a_refusal_not_a_traceback(wired, capsys):
     """A first pin on an EMPTY declaration reaches `bare_identifier` inside `pin`.
 
@@ -480,29 +525,98 @@ def test_a_pinned_key_is_held_back_by_the_sweep(sweep, capsys, tmp_path):
 
 
 def test_a_pin_set_over_its_budget_stops_the_sweep_before_evict(sweep, capsys,
-                                                               tmp_path):
+                                                               tmp_path, monkeypatch):
     graph, calls = sweep
     graph.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
     # `--max-nodes` is the WINDOW, so the derived pin cap is 100; declare a smaller one.
     code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
     assert code == 0, "sanity: 1000-node window, 2-slot closure — inside the cap"
 
-    import os
-
-    os.environ["TORTOISE_PIN_MAX_NODES"] = "1"
-    try:
-        capsys.readouterr()
-        code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes",
-                                            "1000"))
-        assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
-    finally:
-        del os.environ["TORTOISE_PIN_MAX_NODES"]
+    # ⛔ `monkeypatch`, not `os.environ[...]` + `del`: the `del` form DESTROYED an ambient
+    # value instead of restoring the prior one, so a wrapper or a developer shell that
+    # exported this variable had it unset for every later test in the same process — which
+    # silently switches `PinBudget.resolve()`'s source from `env:…` to `derived:…`.
+    monkeypatch.setenv("TORTOISE_PIN_MAX_NODES", "1")
+    capsys.readouterr()
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes",
+                                        "1000"))
+    assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
     assert len(calls) == 1, (
         "the sweep reached `evict` with a pin set it may not honour — an over-budget "
         "pin set must stop the run, not warn beside a deletion"
     )
     out = json.loads(capsys.readouterr().out)
     assert "pinned closure is 2 node(s)" in out["reason"]
+
+
+# ── review round 5: the arms a green suite could not see ────────────────────────
+def test_a_truncated_declaration_stops_the_sweep_and_names_the_truncation(
+        sweep, capsys, tmp_path, monkeypatch):
+    """The sweep's `or pins.truncated` arm is a STATED enforcement arm, so it is pinned.
+
+    ⛔ Deleting `or pins.truncated` left the suite green, and
+    `docs/architecture/SEARCH-ARCHITECTURE.md` claims this as one of the two places the cap
+    is enforced. The state that makes the arm load-bearing is a truncated declaration AND
+    an unparseable budget at once: with the arm the refusal names the TRUNCATION (a fact
+    about the declaration, settled before any budget is resolved); without it the same run
+    reports a CONFIG error and sends an operator to fix a value that is not the cause.
+    """
+    from tortoise import resident_pin
+
+    graph, calls = sweep
+    graph.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id",
+                                 "keys": ["p0", "p1", "p2"]}
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == 0, "sanity: three readable keys, inside both bounds"
+
+    monkeypatch.setattr(resident_pin, "DEFAULT_KEY_LIMIT", 1)
+    monkeypatch.setenv("TORTOISE_PIN_MAX_NODES", "not-a-number")
+    calls.clear()
+    capsys.readouterr()
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
+    assert calls == [], "a truncated pin read is not a licence to delete"
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert "could not be read in full" in reason, reason
+    assert "cannot be resolved" not in reason, (
+        "a truncated declaration was reported as a BUDGET configuration error — the arm "
+        "that settles declaration facts before resolving a budget was removed"
+    )
+
+
+def test_show_with_no_resolvable_budget_says_the_cap_was_not_checked(
+        wired, capsys, monkeypatch):
+    """`show` may hold no budget; it may not therefore imply it checked the cap.
+
+    ⛔ The skipped half was announced on STDERR only, while the envelope said
+    `verdict: OK, reason: ""` — so a scheduler keying on the verdict recorded "within
+    budget" for a run that measured nothing.
+    """
+    monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
+    monkeypatch.delenv("TORTOISE_PIN_MAX_NODES", raising=False)
+    wired.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+    # ⛔ THE FIELD ALONE DOES NOT CLOSE THIS. `cap_checked: false` fixes the consumer
+    # that reads the JSON; the consumer that reads the EXIT STATUS still saw 0, which is
+    # the surface a scheduler actually keys on. Two lanes fixed this finding
+    # independently — one added the field, one changed the verdict — and BOTH are kept,
+    # because they close different doors: the cap is the question `show` exists to
+    # answer, so "cannot check it" is the tool's UNMEASURED answer (exit 4), and the
+    # field says which half was skipped. `unpin` stays budget-free either way: it is the
+    # documented remedy and must work in exactly this state.
+    assert resident.main(["show", *BASE]) == resident.EXIT_UNMEASURED
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "UNMEASURED"
+    assert out["cap_checked"] is False
+    assert "--window-nodes" in out["reason"]
+
+
+def test_show_with_a_budget_says_the_cap_was_checked(wired, capsys):
+    """The positive half, so `cap_checked` cannot be a constant `false`."""
+    wired.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+    assert resident.main(["show", *BASE, "--window-nodes", "1000"]) == resident.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["cap_checked"] is True
+    assert out["reason"] == ""
 
 
 def test_a_pin_set_for_another_key_space_refuses_the_sweep(sweep, capsys, tmp_path):
@@ -555,37 +669,27 @@ def test_the_unapplied_pin_set_refusal_is_overridable_in_one_auditable_flag(
 
 # ── review round 1: a pin problem must not block sweeps that do not use it ─────
 def test_a_pin_budget_misconfiguration_does_not_refuse_a_sweep_with_NOTHING_pinned(
-        sweep, capsys, tmp_path):
+        sweep, capsys, tmp_path, monkeypatch):
     """#10976's state (an over-budget cache) must not be reached through a pin typo.
 
     Resolving the pin budget before reading the declaration refused EVERY sweep — with
     nothing pinned — on an unrelated env typo or a window too small for a pin to exist.
     """
     _, calls = sweep
-    import os
-
-    os.environ["TORTOISE_PIN_MAX_NODES"] = "not-a-number"
-    try:
-        code = cache_evict.main(_sweep_argv(_report_file(tmp_path),
-                                            "--max-nodes", "1000"))
-    finally:
-        del os.environ["TORTOISE_PIN_MAX_NODES"]
+    monkeypatch.setenv("TORTOISE_PIN_MAX_NODES", "not-a-number")
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path),
+                                        "--max-nodes", "1000"))
     assert code == 0, "an unused pin budget refused a sweep with nothing pinned"
     assert len(calls) == 1 and calls[0]["pinned"] is None
 
 
 def test_the_same_misconfiguration_IS_refused_once_something_is_pinned(
-        sweep, capsys, tmp_path):
+        sweep, capsys, tmp_path, monkeypatch):
     graph, calls = sweep
     graph.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
-    import os
-
-    os.environ["TORTOISE_PIN_MAX_NODES"] = "not-a-number"
-    try:
-        code = cache_evict.main(_sweep_argv(_report_file(tmp_path),
-                                            "--max-nodes", "1000"))
-    finally:
-        del os.environ["TORTOISE_PIN_MAX_NODES"]
+    monkeypatch.setenv("TORTOISE_PIN_MAX_NODES", "not-a-number")
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path),
+                                        "--max-nodes", "1000"))
     assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
     assert len(calls) == 0
     out = json.loads(capsys.readouterr().out)
@@ -639,12 +743,18 @@ def test_a_record_scope_refusal_exits_4_with_the_reason(wired, capsys, monkeypat
     )
 
 
-def test_show_and_unpin_need_no_budget(wired, capsys, monkeypatch):
-    """`unpin` is the documented remedy for an over-budget set, so it must not need one."""
+def test_unpin_needs_no_budget_even_when_the_cap_cannot_be_checked(
+        wired, capsys, monkeypatch):
+    """`unpin` is the documented remedy for an over-budget set, so it must not need one.
+
+    ⛔ `show` is split out below, deliberately: it used to be asserted here as `OK`, which
+    locked in a healthy verdict over a cap that was never checked. The remedy (`unpin`)
+    must still work in EXACTLY that configuration — that is the whole reason the two
+    verbs are not the same, and it is what a blanket "require a budget" change would
+    have broken.
+    """
     monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
     monkeypatch.delenv("TORTOISE_PIN_MAX_NODES", raising=False)
     wired.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
-    assert resident.main(["show", *BASE]) == resident.EXIT_OK
-    capsys.readouterr()
     assert resident.main(["unpin", *BASE, "--key", "p0"]) == resident.EXIT_OK
     assert PINS_META_KEY not in wired.meta

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise import outside_view, record_projection
 from tortoise.cache_eviction import Assessment, CacheState
 from tortoise.cache_evictor import Candidate, EvictionPolicy, evict
+from tortoise.cache_projection import NODE_TABLES
 
 ORG = "org_test"
 GRAPH_ID = "g_abc"
@@ -368,6 +369,146 @@ def test_the_columns_this_module_reads_are_real_record_columns():
         f"outside_view reads {missing}, which public.point does not have "
         f"(record_projection.table_columns() parsed from the migrations)"
     )
+
+
+def test_every_record_label_resolves_a_REAL_topic_and_timestamp_column():
+    """The label axis is six tables; pinning `point` alone let two assumptions survive.
+
+    ⛔ Both were single-table assumptions and both shipped: `TOPIC_COLUMN` was hardcoded
+    to `point_kind` (which exists ONLY on `public.point`, so every other label failed out
+    of the box on a column the caller never passed), and `SPAN_SQL` hardcoded
+    `created_at` (which `public.event` does not have, so `--label Event` came back
+    UNMEASURED — exit 4, "the measurement failed, retry" — forever). Pinning the maps
+    against the parsed schema is what makes a renamed column a RED rather than a SQL
+    error in production.
+    """
+    tables = record_projection.table_columns()
+    for label, table in sorted(NODE_TABLES.items()):
+        columns = tables.get(table)
+        assert columns, f"no parsed schema for public.{table}"
+        topic = outside_view.TOPIC_COLUMN_BY_LABEL.get(label)
+        assert topic is not None, f"no topic mapping for {label}"
+        if topic:
+            assert topic in columns, (
+                f"outside_view groups {label} by {topic!r}, which public.{table} does "
+                f"not have (record_projection.table_columns())"
+            )
+        ts = outside_view.TIMESTAMP_COLUMN_BY_LABEL.get(label)
+        assert ts and ts in columns, (
+            f"outside_view reads the span of {label} from {ts!r}, which public.{table} "
+            f"does not have — that is the exit-4-forever shape this arm exists to catch"
+        )
+
+
+def test_every_label_keys_the_graph_by_its_CONTRACT_property():
+    """`id` is the contract key for four of six labels — and the WRONG one for two.
+
+    ⛔ The resident side reads the GRAPH by `n.{key_prop}`; the outside side compares the
+    RECORD's `node_key`. `cache_projection.KEY_PROPERTY` is the authority
+    (`Event -> eventId`, `Source -> url`), and the schema's own identity checks are
+    `node_key = event_id` / `node_key = url`. With `id` the graph read returns NULLs, the
+    read drops them, `truncated` stays False (only `len(rows)` is compared) and the
+    complement runs against an EMPTY resident array — so the view reported the WHOLE
+    population as outside with `complete=True`, exit 0. This arm is the third column
+    axis, and the reason the other two had arms is that this one did not.
+    """
+    from tortoise.cache_projection import KEY_PROPERTY
+
+    for label in sorted(NODE_TABLES):
+        assert KEY_PROPERTY.get(label), f"no contract key recorded for {label}"
+    # The default follows the label, not a literal.
+    # The graph fake is Point-shaped and only has to RECEIVE the statement: the property
+    # it is asked for is the thing under test.
+    seen: dict[str, str] = {}
+    for label in sorted(NODE_TABLES):
+        graph = _Graph(["k0"])
+        _view(graph, _Conn(_record_rows(["k0"])), label=label) if label != "Session" \
+            else None
+        key_statements = [s for s in graph.statements if "AS key" in s]
+        if label == "Session":
+            # No kind column, so `read()` refuses before it reaches the graph — covered
+            # by the arm below; here only the contract key is asserted.
+            pass
+        else:
+            prop = KEY_PROPERTY[label]
+            assert any(f"n.{prop} AS key" in st for st in key_statements), (
+                f"{label} was read by a property other than its contract key "
+                f"{prop!r}: {key_statements[:2]}"
+            )
+        seen[label] = KEY_PROPERTY[label]
+    assert seen["Event"] == "eventId" and seen["Source"] == "url"
+
+
+def test_a_key_property_that_is_not_the_labels_contract_key_is_a_usage_error():
+    """`--key-prop id --label Event` must be REFUSED, not silently measured.
+
+    Measured before this refusal: the view answered `outside == record_total` with
+    `complete=True` — a fabricated measurement reported as a healthy pass, on the axis
+    the truncation guard does not look at.
+    """
+    with pytest.raises(ValueError) as exc:
+        _view(_Graph(["p0"]), _Conn(_record_rows(["p0"])), label="Event", key_prop="id")
+    text = str(exc.value)
+    assert "contract key" in text and "eventId" in text, text
+
+
+def test_a_graph_reporting_residents_it_cannot_key_is_unmeasured_never_everything_outside():
+    """The self-inconsistent read is refused as a MEASUREMENT, not reported as a number.
+
+    A graph that says "N resident" and then yields no keys for the requested property has
+    two readings that disagree; the complement of an empty resident set is the whole
+    population, so returning it would state that everything is outside with
+    `complete=True`.
+    """
+    class _CountOnly(_Graph):
+        def query(self, statement, params=None):
+            if "count(n)" in statement:
+                return _Result([[3]])
+            return _Result([])          # the key read yields nothing
+
+    view = _view(_CountOnly(["p0"]), _Conn(_record_rows(["p0"])))
+    assert view.complete is False
+    assert view.outside is None, (
+        "the view reported a number from a resident read that returned no keys — that "
+        "number is the whole population by construction"
+    )
+    assert "disagree" in view.reason
+
+
+def test_a_label_whose_table_has_no_kind_column_demands_one_instead_of_defaulting():
+    """`session` carries no `*_kind`, so the grouping dimension has no default.
+
+    Refused as a USAGE error naming what the table DOES have — never as UNMEASURED (a
+    failed measurement) and never by silently applying `point_kind`, which is what made
+    every non-`Point` label unusable with the shipped defaults.
+    """
+    assert not outside_view.TOPIC_COLUMN_BY_LABEL["Session"]
+    with pytest.raises(ValueError) as exc:
+        _view(_Graph(["s0"]), _Conn(_record_rows(["s0"])), label="Session")
+    text = str(exc.value)
+    assert "no kind column" in text and "topic-column" in text, text
+
+
+def test_the_span_renders_the_labels_OWN_timestamp():
+    """`public.event` has no `created_at`; the rendered span must not ask it for one.
+
+    ⛔ Graded on the RENDER, not through a full `read()`: the fake graph answers `Point`
+    statements only, so driving `--label Event` end to end here would grade the fake. The
+    schema half (does `public.event` actually carry `started_at`?) is the arm above.
+    """
+    sql = outside_view.SPAN_SQL.format(
+        table=NODE_TABLES["Event"], tier="",
+        ts=outside_view.TIMESTAMP_COLUMN_BY_LABEL["Event"])
+    assert "created_at" not in sql, (
+        "the span asked public.event for created_at, which it does not have — the whole "
+        "view then reads as UNMEASURED (exit 4) for a table that answers fine"
+    )
+    assert "started_at" in sql
+    # And the default label's span is unchanged, so the fix did not move `Point`.
+    default_sql = outside_view.SPAN_SQL.format(
+        table=NODE_TABLES["Point"], tier="",
+        ts=outside_view.TIMESTAMP_COLUMN_BY_LABEL["Point"])
+    assert "created_at" in default_sql
 
 
 def test_a_useless_key_bound_is_refused_rather_than_read_as_an_empty_cache():

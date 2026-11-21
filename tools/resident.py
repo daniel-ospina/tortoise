@@ -283,10 +283,46 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "show":
             reading = resident_pin.read(graph, budget=budget)
             refusal = reading.gate_reason()
+            # ⛔ `cap_checked` EXISTS BECAUSE THE VERDICT CANNOT CARRY THIS ON ITS OWN.
+            # With no resolvable budget (a lowered-but-unreadable window, or a window too
+            # small for a pin to exist) `show` deliberately still reads the declaration —
+            # but `over_budget()` then answers `None` by design, so `verdict: OK` meant
+            # "read fine, cap never checked", which a scheduler keying on the verdict
+            # records as "within budget". The skip is now a FIELD, and the reason says
+            # so, instead of a stderr note a consumer never reads.
+            # ⛔ THE CAP IS THE QUESTION `show` EXISTS TO ANSWER, so "no budget could be
+            # resolved" is an UNMEASURED answer, not a healthy one. It used to emit
+            # `verdict: OK` / exit 0 over an unchecked declaration, disclosing the gap
+            # only on stderr and in `pin.budget: null` — so a scheduler or a `--out`
+            # consumer keying on the verdict read a pass, while `pin` REFUSES the same
+            # configuration: the two halves of one control disagreeing.
+            # ⛔ `unpin` stays budget-free on purpose (it is the documented remedy, and
+            # `resident_pin.unpin` re-derives nothing), so nothing reachable is blocked.
+            if budget is None and reading.keys:
+                _emit({
+                    "verdict": "UNMEASURED",
+                    "graph": args.graph,
+                    #: The same field the OK arm carries, so a consumer reads ONE key for
+                    #: "was the cap checked" whether the answer is OK or UNMEASURED.
+                    "cap_checked": False,
+                    "reason": (f"the pin set's cap cannot be checked: no residency "
+                               f"window was resolvable, so whether these "
+                               f"{len(reading.keys)} key(s) are inside the pin budget is "
+                               f"UNKNOWN — pass --window-nodes or set "
+                               f"{resident_pin.EVICTION_MAX_NODES_ENV}"),
+                    "pin": reading.as_dict(),
+                }, args.out)
+                return EXIT_UNMEASURED
             _emit({
                 "verdict": "REFUSED" if refusal else "OK",
                 "graph": args.graph,
-                "reason": refusal or "",
+                "cap_checked": budget is not None,
+                "reason": refusal or (
+                    "" if budget is not None else
+                    "the declaration was read, but no pin budget could be resolved, so "
+                    "whether it is WITHIN BUDGET was not checked — `cap_checked` is "
+                    "false and every sweep will resolve its own budget"
+                ),
                 "pin": reading.as_dict(),
             }, args.out)
             return EXIT_REFUSED if refusal else EXIT_OK
@@ -323,10 +359,25 @@ def main(argv: list[str] | None = None) -> int:
                     # `unpin` can tell "the operator named nothing" from "the operator
                     # named a different population" (an explicit mismatch is REFUSED, not
                     # silently overridden). `pin`/`outside` resolve their own defaults.
-                    label=args.label or "Point", key_prop=args.key_prop or "id",
-                    topic_column=args.topic_column or outside_view.TOPIC_COLUMN,
-                    top=args.top or outside_view.DEFAULT_TOP_TOPICS,
-                    key_limit=args.max_keys or outside_view.DEFAULT_RESIDENT_KEY_LIMIT,
+                    # ⛔ THE LABEL DECIDES THE KEY PROPERTY (`cache_projection.KEY_PROPERTY`):
+                    # `id` is the contract key for four of six labels and the WRONG one
+                    # for `Event` (`eventId`) and `Source` (`url`). Defaulting to `id`
+                    # here was the fabricated-measurement path — the graph read returned
+                    # nothing and the record complement reported the whole population as
+                    # outside, with `complete=True` and exit 0. `None` hands the decision
+                    # to the module, which also REFUSES a non-contract property.
+                    label=args.label or "Point", key_prop=args.key_prop,
+                    # ⛔ `is None`, NEVER `or`: `--max-keys 0` was silently rewritten to
+                    # the DEFAULT — 200,000, the WIDENING direction — which also made the
+                    # module's own floor refusal ("a bound of zero cannot read any key",
+                    # pinned by `test_a_useless_key_bound_is_refused_rather_than_read_as_an_empty_cache`)
+                    # unreachable from the command line: the guard refuses zero, and the
+                    # verb handed it the maximum instead. `--top 0` had the same shape.
+                    topic_column=args.topic_column,
+                    top=(args.top if args.top is not None
+                         else outside_view.DEFAULT_TOP_TOPICS),
+                    key_limit=(args.max_keys if args.max_keys is not None
+                               else outside_view.DEFAULT_RESIDENT_KEY_LIMIT),
                 )
             except (ValueError, resident_pin.PinConfigError) as exc:
                 # A `--label` the record has no table for, or a `--topic-column` that is

@@ -515,7 +515,20 @@ def _declaration(graph: Any) -> tuple[str, str, list[str]] | str:
     if raw_keys is None:
         keys: list[str] = []
     elif isinstance(raw_keys, (list, tuple)):
-        keys = [k for k in raw_keys if isinstance(k, str) and k]
+        # ⛔ A PARTIALLY-CORRUPT LIST IS MALFORMED, NOT NARROWED. Dropping a non-string
+        # (or empty) entry kept `readable=True`, so the reader saw a shorter set than the
+        # declaration holds and the next `pin` REWROTE the declaration without it — e.g.
+        # `keys: ["p0", 7]` read as `["p0"]` and came back `["p0","p1"]`, the `7` gone
+        # for good, from a command reporting `written: true`. That is the same silent
+        # loss of the user's declaration the truncation guard refuses, so a bad ENTRY is
+        # classified exactly like a wrong-typed `keys` FIELD: malformed, with the entry
+        # named. Reachability, stated honestly: the only in-repo writer emits strings, so
+        # this needs a hand/foreign writer — which is precisely the case the reader is
+        # the last line of defence for.
+        bad = [k for k in raw_keys if not isinstance(k, str) or not k]
+        if bad:
+            return f"malformed:keys entry {bad[0]!r}"
+        keys = list(raw_keys)
     else:
         return f"malformed:keys={type(raw_keys).__name__}"
     return (label, key_prop, keys)
@@ -546,7 +559,18 @@ def read(graph: Any, *, budget: PinBudget | None = None) -> PinReading:
         return PinReading(label=label, key_prop=key_prop, readable=False,
                           source=f"malformed:{exc}", budget=budget)
 
-    limit = key_limit()
+    # ⛔ A MALFORMED BOUND IS A REFUSAL, NOT A TRACEBACK. `key_limit()` raises
+    # `PinConfigError` by design, and this call sits OUTSIDE the guard — so
+    # `tools/cache_evict.py` and `tools/resident.py show` (which call `read()` directly)
+    # let it escape as an uncaught exception, i.e. exit 1 ("retry the FLAGS") with a
+    # traceback, for a config fault no flag change clears. Converted here to the
+    # module's own "unreadable" state, so every door refuses with ITS code: the sweep
+    # exits 3 REFUSED, the verb its usage/refusal arm.
+    try:
+        limit = key_limit()
+    except PinConfigError as exc:
+        return PinReading(label=label, key_prop=key_prop, readable=False,
+                          source=f"config:{exc}", budget=budget)
     asked = sorted(keys)[: limit + 1]
     truncated = len(keys) > limit
     try:
@@ -649,7 +673,25 @@ def pin(
     if resolved is None:
         resolved = PinBudget.resolve()
 
-    wanted = sorted({k for k in keys if isinstance(k, str) and k})
+    given = list(keys)
+    bad = [k for k in given if not isinstance(k, str) or not k]
+    if bad:
+        # ⛔ REFUSED, NOT FILTERED. `sorted({k for k in keys if isinstance(k, str) and k})`
+        # silently dropped these, so `pin(g, ["a", ""])` wrote `['a']` and reported
+        # `written: true` — a declaration the user is told succeeded while part of it was
+        # discarded. That is the ONE outcome this function exists to prevent (see the
+        # docstring above): "you asked for ten and got six" must be distinguishable from
+        # "you asked for six", and a filtered list makes it indistinguishable. Note this
+        # is the CALLER's list, a different door from the stored one `_declaration`
+        # rejects: that one is about a foreign writer, this one about this very call.
+        raise PinRefused(
+            f"{len(bad)} of {len(given)} key(s) are not non-empty strings "
+            f"({', '.join(repr(k) for k in bad[:5])}{'…' if len(bad) > 5 else ''}) — a pin "
+            f"declaration is ALL OR NOTHING, so the list is refused whole rather than "
+            f"partly applied. Nothing was pinned.",
+            code="bad-key",
+        )
+    wanted = sorted(set(given))
     if not wanted:
         raise PinRefused(
             "no keys were given, so there is nothing to keep resident",
@@ -686,6 +728,21 @@ def pin(
 
     already = frozenset(k for k in wanted if k in current.keys)
     fresh = [k for k in wanted if k not in current.keys]
+
+    # ⛔ A DECLARATION THAT CANNOT CHANGE STILL HAS AN ANSWER TO GIVE ABOUT THE CAP. The
+    # budget check below lives inside `if fresh:`, so re-pinning keys that are already
+    # declared skipped it entirely and reported `verdict: OK` / `written: true` for a set
+    # the very next sweep refuses — the control saying the state is fine in the one place
+    # an operator reads it. Refused here so the verb and the sweep agree.
+    if not fresh:
+        over = current.over_budget()
+        if over:
+            raise PinRefused(
+                f"this declaration is unchanged, but the set it leaves behind is over "
+                f"budget: {over}. Nothing was written — reporting success here would "
+                f"tell an operator the pin is fine while every sweep refuses it.",
+                code="budget",
+            )
 
     # ⛔ Probe the NEW keys against the graph BEFORE writing anything: a declaration that
     # names a node the graph does not hold would resolve to an empty closure and pin
@@ -874,7 +931,20 @@ def unpin(
         )
     eff_label = current.label if current.keys else (label or "Point")
     eff_key_prop = current.key_prop if current.keys else (key_prop or "id")
-    drop = {k for k in keys if isinstance(k, str) and k}
+    given = list(keys)
+    bad = [k for k in given if not isinstance(k, str) or not k]
+    if bad:
+        # ⛔ The same ALL-OR-NOTHING rule `pin` applies, for the same reason: a filtered
+        # release reports "nothing left to release" for keys it silently discarded, so a
+        # caller that asked to drop `""` and `a` believes both are gone when `a` is not.
+        raise PinRefused(
+            f"{len(bad)} of {len(given)} key(s) are not non-empty strings "
+            f"({', '.join(repr(k) for k in bad[:5])}{'…' if len(bad) > 5 else ''}) — a "
+            f"release is ALL OR NOTHING, so the list is refused whole. Nothing was "
+            f"released.",
+            code="bad-key",
+        )
+    drop = set(given)
     if not current.keys:
         # ⛔ NOTHING IS DECLARED, so there is nothing to release and nothing to write.
         # Reporting `written=True` here (the shape before this guard) told an operator
