@@ -70,7 +70,7 @@ def test_the_parts_sum_to_pre_handler_exactly(monkeypatch):
     ``middleware`` part is defined as — *arrival → the handler task created* —
     is exactly that gap. Making the two origins the same instant (as this row
     used to) leaves the sum invariant true under the mutant the invariant
-    exists to prevent: ``self._parts_t0 = now`` (``read_stages.py:241``).
+    exists to prevent: ``self._parts_t0 = now`` (``read_stages.py:335``).
     """
     clock = {"t": 1000.0}
     monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
