@@ -1429,9 +1429,13 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # ⛔ The block is that comment at `:17442` (first line of the 24-line run;
     # `:17439` is the code above it), NOT the `("Point", "quote",
     # "FULLTEXT")` entry: that entry was already there at `e0accb8fe6^:21014`,
-    # added by #13322 (`5f6ed5ae6a`). An earlier draft of this note attributed the
-    # +24 to it, which sends the next re-derivation looking for a change the named
-    # commit does not make.
+    # added by #11706 (`d06c001ff9`, `feat(11682)` — "search the fact by its
+    # verbatim `quote`"; verified with `git log -S'("Point", "quote", "FULLTEXT")'`
+    # over this file, which is the only commit it names). An earlier draft of this
+    # note attributed the entry to #13322 (`5f6ed5ae6a`), which does NOT touch
+    # `tortoise/projection/__init__.py` at all, and attributed the +24 to it — both
+    # send the next re-derivation looking for a change the named commit does not
+    # make.
     ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21042`"),
     ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
