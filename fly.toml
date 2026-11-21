@@ -65,16 +65,18 @@ kill_timeout = 30
   #   (+$21.40/mo, plus a 2nd volume at $0.15/GB/mo) and is blocked on the
   #   app-state work in runbook §6. Operator decides that spend; not taken here.
   #   ⚠️ THIS NOTE PRICES THE PRE-#13665 `shared-cpu-2x` SHAPE. The `[[vm]]`
-  #   block has declared 4 cores since #13665, so neither figure above is the
+  #   block declares 4 cores as of #14156 (the resize itself was the manual
+  #   `fly scale vm` made under #13665), so neither figure above is the
   #   current shape's total: the 2→4 step is ≈+$1.4/mo, derived from BOTH dated
   #   rate sheets in the `[[vm]]` comment — do NOT read these as 4-core prices.
   #   Re-pricing this note is the re-fetch follow-up recorded in runbook §6.5;
   #   if you take it, move that table in the same change (it carries this
   #   snapshot) rather than leaving two dates disagreeing.
   #   ⚠️ LIST-PRICE ESTIMATE, NOT A QUOTE, AND DATED (snapshot 2026-09-10).
-  #   Fly bills actual usage; live rates have since moved — EVERY line item is
-  #   HIGHER on the 2026-11-21 re-fetch (runbook §6.5 records it), so these are
-  #   lower bounds, not a spread. Re-fetch
+  #   Fly bills actual usage; live rates have since moved — every CPU/RAM line
+  #   item is HIGHER on the 2026-11-21 re-fetch (runbook §6.5 records it; the
+  #   volume/stopped-machine rates were NOT re-fetched), so these are lower
+  #   bounds, not a spread. Re-fetch
   #   Fly's pricing page before a spend decision. Full caveat: runbook §6.5.
   auto_stop_machines = "off"
   auto_start_machines = true

@@ -6532,9 +6532,13 @@ def test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so():
     text = REAL_FLY_TOML.read_text(encoding="utf-8")
     declared_cpus = _real_fly_toml()["vm"][0]["cpus"]
 
-    # Everything before the `[[vm]]` table is the `[[services]]` block, which is
-    # where the COST note lives (the reverse split would read the [[vm]] comment).
-    services_region = text.split("[[vm]]", 1)[0]
+    # Everything before the `[[vm]]` TABLE is the `[[services]]` block, which is
+    # where the COST note lives. Split on the table's own line, not on the bare
+    # token: the COST note itself MENTIONS `` `[[vm]]` `` inline (twice), so a
+    # bare-token split cuts inside that comment and only happens to keep the
+    # label by paragraph ordering — re-ordering the note would false-RED a
+    # correct file.
+    services_region = re.split(r"(?m)^\[\[vm\]\]\s*$", text)[0]
     priced = {int(n) for n in re.findall(r"shared-cpu-(\d+)x", services_region)}
     assert priced, (
         "the [[services]] COST note names no `shared-cpu-Nx` shape any more, so "

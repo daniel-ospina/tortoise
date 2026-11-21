@@ -1938,8 +1938,8 @@ stop (or suspend) it for idleness. Fly's default when the key is absent is
 de-registration cannot cascade into a cold stop — otherwise a routing glitch
 would become an ~85 s cold start on the next request. Availability/cost
 tradeoff: keeping ≥1 machine warm is ~$21.40/mo on §6.5's dated 2-core
-snapshot (≈+$1.4/mo at the 4 cores `fly.toml` declares since #13665 — §6.5),
-which is already paid today
+snapshot (≈+$1.4/mo for the 2→4 shape step, plus §6.5's dated-vs-live gap —
+see §6.5), which is already paid today
 because the app serves continuously; the counterfactual is an unpredictable
 cold-start outage for ~$21/mo of savings, which is not worth it for a P0 API.
 
@@ -2041,8 +2041,11 @@ already enforces.
 `shared-cpu-2x:4096MB` machine adds **+$21.40/mo** in `iad`, plus its volume at
 $0.15/GB/mo — roughly **$42.80/mo total compute** for the two-machine fleet,
 double today's compute run-rate. Both figures are on §6.5's dated 2-core basis,
-so at the 4 cores the file declares they are a slight UNDERSTATEMENT (≈+$1.4/mo
-per machine) — never an overstatement; §6.5 owns the re-derivation. That is
+so at the 4 cores the file declares they UNDERSTATE, in two separate terms:
++≈$1.4/mo per machine for the 2→4 shape step, and a further ≈+$4/mo per machine
+for the 2026-11-21 rates being higher than the dated sheet (a today's-rate
+4-core box is ≈$26.76 vs the $21.40 this paragraph uses) — so ≈+$5/mo per
+machine in total, never an overstatement; §6.5 owns the re-derivation. That is
 material: it is the operator's call,
 not something to enable quietly. What was done instead costs **$0** and removes
 the dominant failure mode (§6.2 + the app-side `/health` fix + the TCP routing
@@ -2382,8 +2385,9 @@ curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
 > not a guaranteed monthly figure. They assume ONE machine, region `iad`,
 > running continuously, and one attached volume — and, because this table has
 > not been re-derived since 2026-09-10, they price the **pre-#13665
-> `shared-cpu-2x` / `memory_mb = 4096`** shape. The `[[vm]]` block has declared
-> **`shared-cpu-4x` (4 cores) since #13665**, and that shape is ≈+$1.4/mo more on
+> `shared-cpu-2x` / `memory_mb = 4096`** shape. The `[[vm]]` block declares
+> **`shared-cpu-4x` (4 cores) as of #14156** (the resize itself was the manual
+> `fly scale vm` made under #13665), and that shape is ≈+$1.4/mo more on
 > either dated rate sheet (cores up, the RAM-above-preset line down as the
 > preset's included RAM doubles) — `fly.toml`'s `[[vm]]` comment carries that
 > derivation. Every figure below is therefore the 2-core basis, not today's
@@ -2398,11 +2402,13 @@ curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
 > [pricing page](https://fly.io/docs/about/pricing/) **is the source of truth;
 > re-fetch it before making a spend decision.** (Re-fetched 2026-11-21 for the
 > `[[vm]]` comment: $2.19/mo per shared vCPU including 256 MB of RAM per vCPU,
-> plus $6.00/GB/mo beyond the preset. EVERY line moved UP on that re-fetch —
-> the 512 MB preset (2 vCPU) is now ≈$4.38, *above* the $4.04 recorded here,
-> and a 4096 MB two-core machine ≈$25.38, well above the $21.40 this table
-> carries — so the monthly TOTALS below are low, and no line item should be
-> read as directionally safe. The only line that moves DOWN is
+> plus $6.00/GB/mo beyond the preset. EVERY CPU/RAM line moved UP on that
+> re-fetch — the 512 MB preset (2 vCPU) is now ≈$4.38, *above* the $4.04
+> recorded here, and a 4096 MB two-core machine ≈$25.38, well above the
+> $21.40 this table carries — so the monthly TOTALS below are low, and no CPU
+> or RAM line should be read as directionally safe. (The volume and
+> stopped-machine rates were NOT re-fetched on 2026-11-21; only the vCPU and
+> RAM-above-preset rates were.) The only line that moves DOWN is
 > RAM-above-preset on the SAME 4096 MB machine as cores rise, because the
 > preset's INCLUDED RAM scales per vCPU (256 MB/core): 3.5 GB at 2 cores →
 > 3.0 GB at 4 → −$3.00, which is what makes the 2→4 step ≈+$1.38 rather than
