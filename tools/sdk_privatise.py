@@ -427,9 +427,15 @@ SWEEP_NAMES = 66
 #: grep of the three shapes (`git grep -hoE '\bclient\.(query|update|delete)\b' <rev> -- '*.py'`)
 #: reports `client.delete` **48** at `2fe01fc775e` — it counts OCCURRENCES, not the pinned residue
 #: ROW, and it counts a block's OWN prose about the shape, so the figure reproduces only against a
-#: NAMED revision: the same grep at this head reports **49**, because this block names
-#: `client.delete` one more time than the block it replaced (measured at both revs, not inferred).
-#: Earlier prose quoting "46" matched neither figure. So the
+#: NAMED revision. ⛔ NO FIGURE FOR A HEAD IS PUBLISHED HERE, deliberately: the sentence's own
+#: backticked mention is counted by the sentence's own command, so a head figure in this block is
+#: self-refuting — every correction increments the number it publishes (four consecutive drafts
+#: stated 46 → 48 → 49 → 50 and none converged: the defect class this block exists to prevent,
+#: reproduced in the block's own words). The stable claim is the SCOPE, not the digit: excluding
+#: this file with `… -- '*.py' ':!tools/sdk_privatise.py'`, that same grep reports `client.delete`
+#: **45** at BOTH `2fe01fc775e` AND this head — the prose population did not move at all, and every
+#: unit of the whole-tree movement is this block's own words (3 textual mentions at `2fe01fc775e`,
+#: 5 here: +2). So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
