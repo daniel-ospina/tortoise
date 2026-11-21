@@ -36,7 +36,7 @@ import re
 import sys
 from html import unescape as html_unescape
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlsplit
 from xml.etree import ElementTree
 
 import pytest
@@ -1310,27 +1310,37 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     return html[start:]
 
 
-def _browser_origin(url: str) -> tuple[str, str, int | None] | None:
-    """`(scheme, host, non-default port)` as a browser normalizes it, or None.
+def _browser_origin(url: str) -> tuple[str, int | None] | None:
+    """`(host, non-default port)` for a WEB url, browser-normalized, or None.
 
-    ⛔ THE SAME-PAGE QUESTION IS AN ORIGIN QUESTION, not a string comparison of
-    `netloc`: `HTTPS://PREMISELABS.CO/tortoise/docs`, `https://premiselabs.co:443/…`
-    and `https://someone@premiselabs.co/…` all reach this page in a browser, and an
-    equality test on the raw netloc refused every one of them — a NEW false red this
-    function introduced, the same family as the relative-href one it was fixing
-    (#14073 review, measured). The default port is dropped, the scheme and host are
-    lowercased, and userinfo is ignored (it does not change the origin) — but a host
-    that differs in MORE than case (a trailing dot, say) is still a different host,
-    because that is what an origin comparison does.
+    ⛔ THE SAME-PAGE QUESTION IS "DOES THIS ENTRY LAND ON THIS DOCUMENT", not a
+    string comparison of `netloc`: `HTTPS://PREMISELABS.CO/tortoise/docs`,
+    `https://premiselabs.co:443/…` and `https://someone@premiselabs.co/…` all reach
+    this page in a browser, and an equality test on the raw netloc refused every one
+    of them — a NEW false red this function introduced, the same family as the
+    relative-href one it was fixing (#14073 review, measured). The default port is
+    dropped, the host is lowercased, and userinfo is ignored (it changes the origin
+    a script sees, not the document a navigation lands on). A host that differs in
+    MORE than case (a trailing dot, say) is still a different host.
+
+    ⛔ AND THE SCHEME IS NORMALIZED, deliberately — `http://` and `https://` to the
+    canonical host are ONE answer here, because a TOC entry spelled `http://` is
+    upgraded/redirected onto this very page, so refusing it shrinks the advertised
+    set and reddens the golden on copy nobody touched (#14073 review: the previous
+    revision silently reversed this, and no row said which way it should be). The
+    scheme still gates WHICH urls can name a document at all: `ftp:`/`mailto:`/
+    `javascript:` return None, because an anchor to them does not navigate this page.
     """
-    parsed = urlparse(url)
-    scheme = (parsed.scheme or "https").lower()
     try:
+        parsed = urlparse(url)
         port = parsed.port
-    except ValueError:  # an unparsable port names no document here
+    except ValueError:  # an unparsable port or IPv6 literal names no document here
+        return None
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in ("http", "https"):
         return None
     default = 443 if scheme == "https" else 80
-    return (scheme, (parsed.hostname or "").lower(), None if port == default else port)
+    return ((parsed.hostname or "").lower(), None if port == default else port)
 
 
 #: An OPTIONAL scheme followed by TWO OR MORE slashes and the authority text: the shape
@@ -1407,8 +1417,13 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     # ⛔ THE AUTHORITY THE BROWSER SEES, before `urljoin` has its say: for a
     # two-or-more-slash spelling the two resolvers disagree (see `_whatwg_authority`).
     authority = _whatwg_authority(target)
-    if authority is not None and _browser_origin(f"https://{authority}") != page_origin:
-        return None
+    if authority is not None:
+        # …with the href's OWN scheme, so `http://host:80/…` is its own default port
+        # rather than compared against https's (an `https://` probe would read :80 as
+        # non-default and refuse a spelling the browser accepts — #14073 review).
+        probe_scheme = (urlparse(target).scheme or "https").lower()
+        if _browser_origin(f"{probe_scheme}://{authority}") != page_origin:
+            return None
     resolved = urlparse(urljoin(canonical, target))
     if _browser_origin(resolved._replace(fragment="").geturl()) != page_origin:
         return None
@@ -2242,6 +2257,11 @@ _SAME_PAGE_TOC_SPELLINGS = (
     # element's id, so this entry does reach `#quickstart`; comparing the raw
     # fragment dropped it (the same false-red family).
     ("a percent-encoded fragment", ' href="#quick%73tart"'),
+    # ⛔ PINNED IN THE OTHER DIRECTION TOO: a scheme downgrade is a navigation onto
+    # this page (a browser upgrades or redirects it), so it advertises. Normalizing
+    # the scheme here was a silent reversal until this row existed.
+    ("scheme downgrade", ' href="http://premiselabs.co/tortoise/docs#quickstart"'),
+    ("scheme downgrade, explicit port", ' href="http://premiselabs.co:80/tortoise/docs#quickstart"'),
 )
 
 #: Entries that do NOT name a heading on THIS page — a browser leaves this document, or
@@ -2253,6 +2273,17 @@ _FOREIGN_TOC_SPELLINGS = (
     ("a foreign host", ' href="//evil.example/docs#quickstart"'),
     ("a foreign host with a scheme", ' href="https://evil.example/docs#quickstart"'),
     ("a non-http scheme", ' href="mailto:team@premiselabs.co#quickstart"'),
+    ("a non-web scheme", ' href="ftp://premiselabs.co/tortoise/docs#quickstart"'),
+    # ⛔ A PATH PARAMETER IS PART OF THE PATH A BROWSER REQUESTS (`urlsplit` keeps it,
+    # `urlparse` moves it to `.params`), so `/tortoise/docs;x` is a 404 the middleware
+    # answers, not this page: resolving it to `docs.html` made a dead URL read as live
+    # and advertised a boundary from it (#14073 review, measured).
+    ("path parameters", ' href="/tortoise/docs;x#quickstart"'),
+    # ⛔ AND A BROKEN AUTHORITY MUST REFUSE, NOT RAISE: `///[::1` puts an invalid IPv6
+    # literal where `urlparse` cannot parse it, and an uncaught `ValueError` out of
+    # `_docs_section` is an ERROR naming no cause. Measured: `None` before the
+    # authority probe existed, then `ValueError("Invalid IPv6 URL")` (#14073 review).
+    ("an invalid IPv6 authority", ' href="///[::1#quickstart"'),
     # ⛔ THE SEPARATE PAGES PROJECT. `app.premiselabs.co` serves no docs at all, and
     # `_document_for_loc` is host-blind below the site root, so a path-only rule
     # accepted it (`https://app.premiselabs.co/docs#quickstart` → this document).
@@ -2264,7 +2295,7 @@ _FOREIGN_TOC_SPELLINGS = (
     ("a mis-rooted relative path", ' href="tortoise/docs#quickstart"'),
     # ⛔ THE WHATWG/RFC-3986 SPLIT. `urljoin` reads the third slash as a PATH character
     # and keeps this page's host; a browser SKIPS the extra slashes and parses the next
-    # segment as the AUTHORITY, so these four leave the site (`///docs#q` is
+    # segment as the AUTHORITY, so these five leave the site (`///docs#q` is
     # `https://docs/#q`, verified against Node's WHATWG resolver). The two `https:///…`
     # spellings were ACCEPTED by the previous revision of this function (#14073 review,
     # measured) — the authority is parsed the way the browser does now, not the way
@@ -4671,7 +4702,12 @@ def _served_relative(path: str) -> str:
 
 def _document_for_loc(url: str) -> Path | None:
     """The document a page <loc> points at, resolved the way Pages serves it."""
-    parsed = urlparse(url)
+    # ⛔ `urlsplit`, NOT `urlparse`: urlparse splits the LAST segment's `;params`
+    # into `.params`, so `/tortoise/docs;x` would resolve as `/tortoise/docs` and a
+    # path the middleware 404s (`PRODUCT_PAGES.has("/docs;x")` is false) would read
+    # as live — a dead `<loc>`/a phantom TOC boundary (#14073 review, measured).
+    # `urlsplit.path` is the browser's `pathname`.
+    parsed = urlsplit(url)
     path = parsed.path
     if path in ("", "/"):
         name = HOST_ROOT_PAGE.get(parsed.netloc)
