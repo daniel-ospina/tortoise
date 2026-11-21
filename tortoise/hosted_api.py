@@ -22901,31 +22901,55 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # this change exists to avoid.
     _grace = _capture_ack_grace_s(request)
     _joined = _NO_JOIN
-    if _grace > 0.0:
-        try:
-            # `shield`, because a timeout must NOT cancel the work: the extraction
-            # is real, the record already landed, and cancelling it would be the
-            # one thing worse than answering late (the #2988 doctrine — the bound
-            # abandons the AWAIT, never the worker).
-            _joined = await asyncio.wait_for(asyncio.shield(task), _grace)
-        except (TimeoutError, asyncio.TimeoutError):
-            _joined = _NO_JOIN
+    # ⛔ WHO RELEASES THE SLOT is decided ONCE, below, and the `finally` here is
+    # what makes it true on every exit — including the two the happy path never
+    # reaches. The extraction can RAISE inside the window (a provider that blew up,
+    # measured: `test_raise_shape_repost_replays_keeps_actor`, where the pre-change
+    # inline call raised into the same 500), and the caller's await can be
+    # CANCELLED (client gone, shutdown). In both cases the endpoint's own
+    # `slot.release()` no longer decrements anything — `hand_off()` moved the slot
+    # to the completion — so releasing only there would leave the session's
+    # in-flight key set forever and the next re-POST of that session getting a 409
+    # in place of the documented replay.
+    _handed_over = False
+    try:
+        if _grace > 0.0:
+            try:
+                # `shield`, because a timeout must NOT cancel the work: the
+                # extraction is real, the record already landed, and cancelling it
+                # would be the one thing worse than answering late (the #2988
+                # doctrine — the bound abandons the AWAIT, never the worker).
+                _joined = await asyncio.wait_for(asyncio.shield(task), _grace)
+            except (TimeoutError, asyncio.TimeoutError):
+                _joined = _NO_JOIN
+            except asyncio.CancelledError:
+                # The REQUEST went away mid-join. Today that abandoned the
+                # extraction, and this keeps that shape exactly: drop the work,
+                # release below, and let the endpoint's `CancelledError` arm write
+                # the abandoned marker (it keys on `attempted and not finalized`,
+                # which is this state). Continuing the extraction under a
+                # cancelled request would race the marker against the terminal
+                # write, and the marker would land second.
+                task.cancel()
+                raise
 
-    if _joined is not _NO_JOIN:
-        # Completion arrived inside the window: the caller gets today's receipt,
-        # built by today's code, on the same coroutine — the half that keeps this
-        # change additive for every client that reads the body. The REQUEST owns
-        # the slot here, exactly as it does on the non-extracting lanes.
-        try:
+        if _joined is not _NO_JOIN:
+            # Completion arrived inside the window: the caller gets today's
+            # receipt, built by today's code, on the same coroutine — the half that
+            # keeps this change additive for every client that reads the body. The
+            # REQUEST owns the slot here, exactly as it does on the non-extracting
+            # lanes.
             return await _report_capture(_joined)
-        finally:
+
+        # Completion did not arrive (or the window was already spent): answer, and
+        # finish behind the answer.
+        _schedule_capture_completion(task, _report_capture, slot,
+                                     proj, session_id, state)
+        _handed_over = True
+    finally:
+        if not _handed_over:
             slot.worker_done()
             slot.complete_tail()
-
-    # Completion did not arrive (or the window was already spent): answer, and
-    # finish behind the answer.
-    _schedule_capture_completion(task, _report_capture, slot,
-                                 proj, session_id, state)
 
     # ── THE ACK ───────────────────────────────────────────────────────────
     # Built from the RECORD-phase facts only. ⛔ `extracted: 0` here is not a
