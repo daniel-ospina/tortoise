@@ -2008,6 +2008,50 @@ def test_archiving_a_PLAIN_py_whose_body_is_now_a_DOCSTRING_is_refused(tree: Pat
     ), "and the removal stays a red — declining to write the record must not read as written"
 
 
+def test_a_module_reduced_to_a_NO_OP_statement_is_not_a_body(tree: Path) -> None:
+    """`pass` / `...` are not code a caller can reach — in BOTH directions (round-16 review, P2).
+
+    Measured before the fix: `_init_carries_a_body("pass\\n")` -> True. Two consequences, and
+    this row pins both:
+      (a) the WRITER accepted `pass` as a module's source of record (`archived_from =
+          tortoise/gone.py`), and `shrink_violations` then credited the row on its EXISTENCE —
+          every arm green while the deleted body was in no file under `archive/` (the same false
+          PASS the docstring row above closed, one shape over);
+      (b) the mirror: a `pass`-only `__init__.py` counted as CONTENT, so deleting a scaffolding
+          package went RED — a correct-looking red that blocked a legitimate cleanup.
+    One predicate answers both, which is why the fix is in `_init_carries_a_body` and not at the
+    call site. Only TOP-LEVEL bare no-ops are dropped: a `def`/`class`/`if` whose body is `pass`
+    is still a statement, and a `.pyi` stub's `def f() -> int: ...` is a FunctionDef.
+
+    Mutation: drop the `ast.Pass`/Ellipsis filter -> RED (both halves).
+    """
+    # (a) the writer must refuse a no-op body, and the removal must stay a RED without a record.
+    (tree / "tortoise" / "gone.py").write_text("def f1():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    (tree / "tortoise" / "gone.py").write_text("pass\n", encoding="utf-8")
+    _commit(tree, ".")
+    with pytest.raises(arch.ArchiveRefused, match=r"no body of its own"):
+        arch.archive_symbol(arch.MODULE, "tortoise.gone", "b1", "r", root=tree)
+    assert any(
+        p.startswith("tortoise.gone: MODULE") and "REMOVED" in p
+        for p in arch.shrink_violations(tree, base_ref="HEAD~1")
+    ), "a body reduced to `pass` is a removal, and declining to write the record must not green it"
+
+    # (b) …and a package whose `__init__.py` is ONLY `pass` is scaffolding: deleting it removes
+    # nothing, because the body lives in its siblings.
+    (tree / "tortoise" / "pkg").mkdir()
+    (tree / "tortoise" / "pkg" / "__init__.py").write_text("pass\n", encoding="utf-8")
+    (tree / "tortoise" / "pkg" / "sub.py").write_text("Y = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/pkg")
+    _commit_drop(tree, "tortoise/pkg/__init__.py")
+    assert not [
+        p for p in arch.shrink_violations(tree, base_ref="HEAD~1") if "tortoise.pkg" in p
+    ], (
+        "a `pass`-only `__init__.py` carries no statement of its own, so deleting it removes "
+        "nothing and must not red the scaffolding cleanup"
+    )
+
+
 def test_the_CLI_refuses_to_freeze_a_leftover_scaffold(
     tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
