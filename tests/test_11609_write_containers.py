@@ -757,6 +757,13 @@ def test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver(name):
 #: refused, whatever its source looks like.
 _DOOR_PROBE_SENTINEL = object()
 
+#: The subject name the probe ASKS FOR. The pin requires the door to forward it
+#: unchanged, so the double records the argument and the verdict compares it: a door
+#: that calls `_create_subject` exactly once under a name its caller never asked for is
+#: a door that seeds the WRONG subject, however right its call count and return value
+#: look. Named here so the probe and its arms cannot drift apart.
+_DOOR_PROBE_SUBJECT = "pin-probe-subject"
+
 
 class _RecordingDoorSdk:
     """A recording double for the ONE private call a seed door is allowed to make.
@@ -850,7 +857,17 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
          returns the wrong object, and one that raises is caught by (1), so without its
          own arms this branch decides NO verdict (`96cee6ba9cc` review finding 1).
          `test_the_pin_requires_EXACTLY_ONE_delegation` is that arm;
-      3. it RETURNS what `<delegated>` returned, by identity — a door that throws the
+      3. it forwards the CALLER'S OWN subject name — ⛔ A CALL COUNT IS NOT A
+         PASSTHROUGH. Without this branch a door that calls `_create_subject` once with
+         a name the caller never asked for (a hard-coded name, a `name + '-seed'`
+         template) satisfies (1), (2) and (4) while the seed writes a subject nobody
+         requested: MEASURED at `e0da30d3a5`, `_door_problems` answered `[]` for both
+         shapes. `test_the_pin_forwards_the_CALLER_NAME_to_the_delegated_call` is its
+         arm. The record-and-assert contract for this is CPython's own: `unittest.mock`
+         exists to "make assertions about which methods/attributes were used and
+         ARGUMENTS they were called with", and its canonical entrance is
+         `assert_called_once_with(...)` — count and arguments in one assertion;
+      4. it RETURNS what `<delegated>` returned, by identity — a door that throws the
          subject away gives its caller nothing.
 
     Reachability, ordering and dead branches are settled by CPython, not modelled here.
@@ -859,7 +876,7 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
     recorder = _RecordingDoorSdk()
     surface._sdk = recorder
     try:
-        returned = cls.__dict__[name](surface, "pin-probe-subject")
+        returned = cls.__dict__[name](surface, _DOOR_PROBE_SUBJECT)
     except Exception as exc:               # any raise IS the finding
         return [f"the runtime `{name}` RAISED {type(exc).__name__}: {exc} — the "
                 f"seed's own `surface.{name}(...)` call would fail, so the exemption "
@@ -869,6 +886,13 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
                 f"call(s) in ONE execution, not exactly 1 — a door that delegates "
                 "nowhere (dead code, a branch it does not take) or more than once is "
                 "not the passthrough the exemption claims"]
+    forwarded = [call[0] for call in recorder.calls]
+    if forwarded != [_DOOR_PROBE_SUBJECT]:
+        return [f"the runtime `{name}` forwarded {forwarded!r} to `{delegated}`, not "
+                f"[{_DOOR_PROBE_SUBJECT!r}] — the subject is created under a name its "
+                "caller did not ask for (hard-coded, templated, re-derived), so the "
+                "door is not the passthrough the exemption claims and the seed would "
+                "write the wrong subject"]
     if returned is not _DOOR_PROBE_SENTINEL:
         return [f"the runtime `{name}` did not RETURN what `{delegated}` returned "
                 f"(got {returned!r}) — the door's caller does not receive the "
@@ -943,9 +967,10 @@ def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_priv
     2. its `__qualname__` is `"<Class>.create_subject"`, i.e. the class body's own
        function and not a closure a decorator returned;
     3. it carries no `__wrapped__` — a `functools.wraps` mask is refused, not unwrapped;
-    4. it does not RAISE when called, it makes EXACTLY ONE `_create_subject` call, and
-       it RETURNS what that call returned — measured by CALLING the runtime door
-       against a recording double, not by reading its text.
+    4. it does not RAISE when called, it makes EXACTLY ONE `_create_subject` call, it
+       forwards the CALLER'S OWN name to that call, and it RETURNS what the call
+       returned — measured by CALLING the runtime door against a recording double, not
+       by reading its text.
 
     A wrapper is refused rather than unwrapped on purpose: an `@functools.cache` or an
     instrumentation decorator around a write door is a change to the write path that
@@ -1123,6 +1148,78 @@ def test_the_pin_requires_EXACTLY_ONE_delegation():
             "the right object, so only the 'exactly one' refusal can stop it. A GREEN "
             "here means that branch decides nothing (MEASURED at 96cee6ba9cc: deleting "
             "it left all 15 other rows green)", problems)
+
+
+#: Door bodies whose ONLY fault is WHICH name they forward: each does not raise, makes
+#: EXACTLY ONE `_create_subject` call, and RETURNS the recorded sentinel, so the RAISED,
+#: EXACTLY-ONE and identity refusals all pass them and only the NAME check can refuse
+#: them. MEASURED at `e0da30d3a5`, before that branch existed: `_door_problems` answered
+#: `[]` (pin GREEN) for BOTH shapes — a call count is not a passthrough.
+_MISFORWARDED_NAME = {
+    # A RE-DERIVED name: the shape of a door that "templates" or normalises the
+    # caller's name before writing.
+    "suffixed": (
+        "        return self._sdk._create_subject(name + '-seed')\n"),
+    # The caller's name DROPPED entirely: every seed then writes the SAME subject
+    # whatever it asked for, and the caller still receives a plausible object.
+    "hardcoded": (
+        "        return self._sdk._create_subject('the-seeded-subject')\n"),
+}
+
+
+def test_the_pin_forwards_the_CALLER_NAME_to_the_delegated_call():
+    """The pin's THIRD requirement has its own arms — a call count is not a passthrough.
+
+    Without the name branch, `_seed_door_behaviour_problems` is satisfied by a door that
+    calls `_create_subject` exactly once with a name its caller never asked for: the call
+    COUNT, the absence of a raise, and the identity of the RESULT all look right while
+    the seed creates a subject nobody asked for. MEASURED at `e0da30d3a5` on both arms
+    below — `_door_problems` answered `[]`, i.e. the pin was GREEN over a door that seeds
+    the wrong subject.
+
+    The reference for why the ARGUMENTS belong to the claim (rather than being a stronger
+    form of the count) is CPython's own record-and-assert contract: `unittest.mock`
+    exists to "make assertions about which methods/attributes were used and arguments
+    they were called with" (`docs.python.org/3/library/unittest.mock.html`), and its
+    canonical entrance is `assert_called_once_with(...)` — count and arguments in ONE
+    assertion.
+
+    Each arm therefore proves the fixture cannot be refused by RAISED (it does not
+    raise), by EXACTLY-ONE (it makes exactly one call) or by identity (it returns the
+    sentinel), and that the pin refuses it NAMING what was forwarded.
+
+    ⛔ EVERY arm of this test comes from `_MISFORWARDED_NAME`, so an emptied table would
+    leave the loop with nothing to iterate and the test GREEN — the same "decides NO
+    verdict" shape the sibling `EXACTLY_ONE` test guards against. The table is therefore
+    guarded by name, as this file already does for its other table-driven pins.
+    """
+    assert _MISFORWARDED_NAME, (
+        "no fixtures — every arm of this test comes from the table, so an empty one "
+        "would decide no verdict at all (vacuity is a red, not an empty loop)")
+    for label, body in sorted(_MISFORWARDED_NAME.items()):
+        fixture = _exec_door_class(body)
+
+        recorder = _RecordingDoorSdk()
+        surface = object.__new__(fixture)
+        surface._sdk = recorder
+        returned = fixture.__dict__["create_subject"](surface, _DOOR_PROBE_SUBJECT)
+        assert returned is _DOOR_PROBE_SENTINEL, (
+            f"the `{label}` fixture must RETURN the sentinel, or the identity refusal "
+            "would be what fires and this arm would pin nothing")
+        assert len(recorder.calls) == 1, (
+            f"the `{label}` fixture must make exactly 1 `_create_subject` call, or the "
+            "count refusal would be what fires and this arm would pin nothing")
+        assert recorder.calls[0][0] != _DOOR_PROBE_SUBJECT, (
+            f"the `{label}` fixture must forward a DIFFERENT name, or there is nothing "
+            "for the name branch to refuse and this arm would pin nothing")
+
+        problems = _door_problems(fixture)
+        assert problems and "forwarded" in problems[0], (
+            f"the `{label}` door forwards a name its caller never asked for while "
+            "delegating exactly once and returning the right object, so only the name "
+            "refusal can stop it. A GREEN here means the pin measures the call count "
+            "and calls that a passthrough (MEASURED at e0da30d3a5: `[]` on both arms)",
+            problems)
 
 
 #: A delegating `def create_subject` in the class body, followed by a class-body form
