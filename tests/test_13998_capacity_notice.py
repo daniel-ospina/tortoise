@@ -1728,7 +1728,15 @@ def test_every_idempotency_key_claim_names_the_providers_retention_window():
         swallow a real notice claim (three such sentences are graded as cases
         below);
       * a real but UNRELATED `24 h` in the claim's own sentence — the bound is
-        matched by shape, not by referent.
+        matched by shape, not by referent;
+      * ⛔ THE DOMINANT LIMIT, and the one that hid for three cycles: the VERB SET
+        (`_COLLAPSE`) is an enumeration. A claim phrased with a verb outside it
+        — measured misses are "means the duplicate cannot be issued twice",
+        "makes the concurrent duplicate harmless", "guarantees one email per
+        org", "stops the duplicate reaching the customer", "neutralises the
+        duplicate", "closes the crash window entirely" — names the key and a
+        delivery object and is still not graded. That is why the four artifacts'
+        prose is read in review as well as graded here.
     Every wording a review used to defeat a cut of this row is a case in
     `test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim`.
     """
@@ -1744,11 +1752,11 @@ def test_every_idempotency_key_claim_names_the_providers_retention_window():
             "a key for the last 24 hours, so a replay after that window sends "
             "again and the bare claim is false:\n  "
             + "\n  ".join(s[:300] for s in unbounded))
-    assert graded >= 17, (
+    assert graded >= 18, (
         f"only {graded} sentence(s) were graded — this row is vacuous if the "
-        "claim's homes stop being found. Seventeen are what the detector reads "
-        "across the four files at this head; dropping below that floor means the "
-        "scan lost a site, not that the site was fixed")
+        "claim's homes stop being found. Eighteen is EXACTLY what the detector "
+        "reads across the four files at this head, so the floor has no slack: a "
+        "single claim dropping out of the scan is red, not absorbed")
 
 def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
     """The detector's own discriminating power, pinned on what BEAT earlier cuts.
@@ -1775,10 +1783,16 @@ def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
         "the provider Idempotency-Key prevents the duplicate send",
         "the provider Idempotency-Key avoids a second email",
         "the provider Idempotency-Key removes the duplicate notice",
+        "the provider Idempotency-Key eliminates the duplicate notice",
+        "the provider Idempotency-Key blocks the duplicate notice",
         "the provider Idempotency-Key makes the duplicate send safe",
         # verbatim, so the code comment above cannot claim it while the sample is
         # a near-miss: "replay" is a delivery word in its own right
         "the provider Idempotency-Key makes a replay safe",
+        # the "exactly-once" alternative had NO sample once a rewrite dropped it,
+        # so the comment certifying full coverage was false for exactly this row
+        "the provider Idempotency-Key collapsed the duplicate send; outcome is "
+        "still exactly-once",
         "the provider Idempotency-Key ensures the notice is sent at most once",
         # the runtime log STRING that cut 2 never read (the full message, since a
         # claim is judged in its real sentence, not as a fragment)
