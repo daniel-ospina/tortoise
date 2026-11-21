@@ -517,9 +517,9 @@ SWEEP_NAMES = 66
 #: ⛔ RE-CUT on the REBASED tree (`#14087` rebased onto `main` `e022fc935b`):
 #: (11839, "0a7e60fa05aa31b9") → (11838, "de5664dc98549d56"). Two commits landed on `main` after
 #: `2fe01fc775` (`1b82cc7063` = `#14108`, `e022fc935b` = `#14100`), and `#14108` re-cut the residue
-#: itself: its `_capture` helper in `tests/test_13337_cache_graph_declaration.py` recorded calls
-#: through `seen.update(…)` and now APPENDS them, and `update` is a SWEPT NAME, so that rewrite
-#: REMOVED one residue row (`seen.update` 102 → 101 — `main`'s own attribution, re-read here). The
+#: itself: its test replaced a `seen.update(…)` accumulator with a `_capture` helper that APPENDS
+#: every call (`update` is a SWEPT NAME, and the helper did not exist before that commit), so the
+#: rewrite REMOVED one residue row (`seen.update` 102 → 101 — `main`'s own attribution, re-read here). The
 #: pair above is `--repin`'s output ON THIS TREE, never arithmetic on the last pin: the pre-rebase
 #: head derived 11839 and this one derives 11838, the whole difference being `main`'s row — this
 #: branch contributes ZERO receiver rows of its own. `--check` on this tree: `typed references still
