@@ -312,18 +312,23 @@ READERS: tuple[dict[str, Any], ...] = (
     {
         "file": "tortoise/hosted_backup.py",
         "line": "1333",
-        "reader": "whole-graph export (dump side)",
+        "reader": "whole-graph scan (restore's dirty-target pre-check)",
         "snippets": ("MATCH (n) RETURN labels(n), properties(n)",),
         "min_occurrences": 2,
-        "needs": "a full label-agnostic dump",
+        "needs": "a full label-agnostic read of the target graph",
         "class": "maintenance",
-        "why": "the export carries `:GraphEvent` rows because it carries everything; "
-               "it names no label and needs no capability. ⚠️ It is censused because "
-               "a re-home must decide what the export does with the shape, not "
-               "because it reads one. ⚠️ This statement occurs FOUR times in the file "
-               "and the two censused sites are byte-identical, so `min_occurrences` "
-               "proves only that the file still carries at least two of them — it "
-               "cannot prove BOTH censused sites survive (a named residual; the "
+        "why": "this is `restore_graph`'s pre-check (`hosted_backup.py:1333`, inside "
+               "`def restore_graph` at `:1098`), NOT the export: it refuses a dirty target "
+               "before the rebuild, so a re-home must keep it reading every node whatever "
+               "shape it carries. ⚠️ It is censused because the restore must decide what "
+               "it does with a `:GraphEvent` node, not because it reads one. ⚠️ THE DUMP "
+               "SIDE IS NOT CENSUSED — the export's own node reader is "
+               "`_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, paged, not whole-graph) "
+               "and no row carries it; this row's earlier label said \"export (dump "
+               "side)\", which was false (#14204). ⚠️ This statement occurs FOUR times in "
+               "the file and the two censused sites are byte-identical, so "
+               "`min_occurrences` proves only that the file still carries at least two of "
+               "them — it cannot prove BOTH censused sites survive (a named residual; the "
                "`line` is the address).",
     },
     {
