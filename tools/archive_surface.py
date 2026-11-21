@@ -1685,7 +1685,32 @@ def shrink_violations(
         # `candidates` is the BASE's carrier set for this module, so it answers both "did the base
         # hold RUNTIME code (not a `.pyi` stub only)?" and the `where` in the violation below.
         candidates = base_carriers.get(module, [])
-        runtime_carrier = next((path for path in candidates if not path.endswith(".pyi")), None)
+        # ⛔ THE CARRIER WHOSE CODE WAS LOST, asked by CONTENT — not the first non-`.pyi` path
+        # (round-23 residual, measured). Both readers below make a claim about THIS file: the
+        # `_record_froze_a_stub` verdict that the row credited the wrong source, and the
+        # `where` that tells the operator which file the removed statements were in. The suffix
+        # test answered with a leftover docstring `tortoise/x.py`, so a base of `x.py` (scaffold)
+        # + `x.pyi` (the module's only code) with a row that correctly froze the `.pyi` was
+        # graded RED ("THE RECORD FROZE A STUB … carried the module's statements in
+        # `tortoise/x.py`"): a false violation AND a false stated fact about the same file, in
+        # the arm whose job is to catch a row that holds nothing — which is why the answer must
+        # be the carrier that actually holds code, and `None` when no non-stub one does (the row
+        # that froze the stub IS the record there).
+        runtime_carrier = next(
+            (
+                path
+                for path in candidates
+                if not path.endswith(".pyi") and _carrier_carries_a_body(root, sha, path)
+            ),
+            None,
+        )
+        # …and the file named in a `MODULE REMOVED` is the carrier the code was IN: with a
+        # scaffolding `.py` beside a body-carrying `__init__.py`, `candidates[0]` pointed the
+        # reader at the file that held nothing.
+        lost_carrier = runtime_carrier or next(
+            (path for path in candidates if _carrier_carries_a_body(root, sha, path)),
+            candidates[0] if candidates else f"{module.replace('.', '/')}.py",
+        )
         # ⛔ SCAFFOLDING AT THE BASE IS NOT A REMOVAL (round-17 P2, measured). Arm 1b already
         # grades the IN-PLACE shape by content, but this arm graded the DELETION shape by PATH: a
         # base `tortoise/doc.py` that was a docstring alone (or 0 bytes) landed in `base_modules`,
@@ -1727,7 +1752,7 @@ def shrink_violations(
         if key in waivers:
             used.add(key)
             continue
-        where = candidates[0] if candidates else f"{module.replace('.', '/')}.py"
+        where = lost_carrier
         out.append(
             f"{module}: MODULE REMOVED — {base_label} carries it and this tree does not, and "
             "`archive/MANIFEST.json` has no `module` entry for it. A module is the largest "

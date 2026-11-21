@@ -2252,6 +2252,68 @@ def test_a_waiver_over_a_BODY_LESS_py_base_does_not_send_the_reader_to_history(
     )
 
 
+def test_a_row_that_froze_the_STUB_beside_a_SCAFFOLD_py_is_a_RECORD(tree: Path) -> None:
+    """The mirror of the fail-open: a CORRECT stub row must not be redded (round-23 residual).
+
+    Same carrier set as the row above — base `stubby.py` = a docstring, `stubby.pyi` = the stub —
+    but taken to the end of the writer's own route: freeze the stub, then delete BOTH files. The
+    module is now `base - head`, so it lands in arm 1, and arm 1's stub check asked
+    `next(non-.pyi carrier)` — the SUFFIX question, one carrier over from the one this branch
+    just fixed. It answered `tortoise/stubby.py`, so the row that records the only code the
+    module ever had was reported as "THE RECORD FROZE A STUB … carried the module's statements in
+    `tortoise/stubby.py`" — a false violation AND a false stated fact about the same file (the
+    statements were in the `.pyi`), which is why the residual is worth a row rather than a note.
+
+    Mutation: `runtime_carrier = next((p for p in candidates if not p.endswith(".pyi")), None)`
+    -> RED here (the false `THE RECORD FROZE A STUB` returns).
+    """
+    (tree / "tortoise" / "stubby.py").write_text('"""Placeholder shim."""\n', encoding="utf-8")
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py", "tortoise/stubby.pyi")
+
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review", root=tree)
+    assert entry["archived_from"] == "tortoise/stubby.pyi", entry
+    _commit(tree, ".")
+    _commit_drop(tree, "tortoise/stubby.py")
+    _commit_drop(tree, "tortoise/stubby.pyi")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~3")
+    assert not [p for p in problems if "THE RECORD FROZE A STUB" in p], (
+        "the row froze the module's ONLY code, so it is the record — redding it sends the "
+        f"operator to re-freeze what is already frozen: {problems}"
+    )
+    assert problems == [], problems
+
+
+def test_a_MODULE_REMOVED_names_the_carrier_that_HELD_the_code(tree: Path) -> None:
+    """Two carriers, one symbol: the route must name the file the statements were in.
+
+    `module_name` collapses `tortoise/projection.py` and `tortoise/projection/__init__.py`, and the
+    violation ended with `(the file was {candidates[0]})` — the lexicographically first path, so
+    with a scaffolding `.py` beside the body-carrying `__init__.py` it pointed the operator at the
+    file that held nothing (and at a `git checkout <base> -- tortoise/projection.py` that restores
+    the scaffold). The message is the only guide the operator has here, and a wrong one is the
+    class rounds 19-23 removed from the sibling sentences.
+
+    Mutation: `where = candidates[0]` -> RED here (`the file was tortoise/projection.py`).
+    """
+    (tree / "tortoise" / "projection.py").write_text('"""Dead shim."""\n', encoding="utf-8")
+    (tree / "tortoise" / "projection").mkdir()
+    (tree / "tortoise" / "projection" / "__init__.py").write_text(
+        "def real():\n    return 1\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    _commit_drop(tree, "tortoise/projection.py")
+    _commit_drop(tree, "tortoise/projection/__init__.py")
+
+    problems = [
+        p for p in arch.shrink_violations(tree, base_ref="HEAD~2")
+        if p.startswith("tortoise.projection: MODULE REMOVED")
+    ]
+    assert problems, "a deleted body with a body-carrying sibling carrier is a removal"
+    assert "the file was tortoise/projection/__init__.py" in problems[0], problems[0]
+
+
 def test_a_WHITESPACE_only_reason_is_not_a_reason(tree: Path) -> None:
     """A record's `reason` is what a future reader consults — pressing space is not a reason.
 
