@@ -3954,6 +3954,78 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"at all"
         )
 
+    # ⛔ P0, ROUND 11 — MODELLING ONLY `<p>` WAS NOT ENOUGH. The spec closes a whole
+    # family of SIBLINGS on their own start tag, and an `rt`/`rp`/`rb`/`rtc` start tag
+    # runs "generate implied end tags"; an omitted close leaves an `_UNRENDERED`
+    # element above the text and the loud rule then drops painted copy. Measured before
+    # the fix, each of these scanned as `''` while Chrome painted the claim:
+    #   `<ul><li><audio><li>CLAIM` -> `<li><audio></audio></li><li>CLAIM</li>` (23 817 px)
+    #   `<ruby><rp><rt>CLAIM`      -> `<ruby><rp></rp><rt>CLAIM</rt></ruby>` (5 997 px)
+    # Driven per member, because the family is the test: one shape proves one rule.
+    for label, markup in (
+        ("li closes li", "<ul><li><audio><li>FalkorDB permanently deletes it</li></audio></li></ul>"),
+        ("dd closes dd", "<dl><dd><audio><dd>FalkorDB permanently deletes it</dd></audio></dd></dl>"),
+        ("dt closes dt", "<dl><dt><progress><dt>FalkorDB permanently deletes it</dt></progress></dt></dl>"),
+        ("rt implies rp closed", "<ruby><rp><rt>FalkorDB permanently deletes it</rt></rp></ruby>"),
+        ("rb implies rp closed", "<ruby><rp><rb>FalkorDB permanently deletes it</rb></rp></ruby>"),
+        ("rtc implies rp closed", "<ruby><rp><rtc>FalkorDB permanently deletes it</rtc></rp></ruby>"),
+        ("option closes option", "<select><option><audio>FalkorDB permanently deletes it"
+                                 "</option></audio></select>"),
+        ("optgroup closes optgroup", "<select><optgroup><video>FalkorDB permanently deletes it"
+                                     "</optgroup></video></select>"),
+    ):
+        sibling = section.replace("</h2>", "</h2>" + markup, 1)
+        assert sibling != section, f"the {label} control could not inject"
+        assert "falkor" in _banned_vocabulary(sibling), (
+            f"{label}: the spec's own start-tag step closes the earlier sibling AND "
+            f"whatever was opened inside it, so a browser paints the claim — leaving "
+            f"the unrendered wrapper on this stack drops text the reader meets"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(sibling)
+
+    # ⛔ P0, ROUND 11 — A FOSTER-PARENTED ELEMENT IS NOT AN ANCESTOR OF THE CELL. The
+    # "in table" mode moves an element opened there OUT, in front of the table, so a
+    # `<td>` that follows inherits the TABLE's render flag, not the discarded
+    # element's. Measured: `<table><audio><td>CLAIM</td></audio></table>` renders
+    # `<audio></audio><table><tbody><tr><td>CLAIM</td>…` (`td.closest('audio')` is
+    # null, 34 735 dark px) while this stack had `audio` between the table and the
+    # `td` and dropped the claim.
+    for unrendered in ("audio", "video", "canvas", "datalist", "meter", "progress", "rp"):
+        for structure in ("td", "caption", "tr><td"):
+            table_cell = section.replace(
+                "</h2>",
+                f"</h2><table><{unrendered}><{structure}>FalkorDB permanently deletes it"
+                f"</{structure.split('>')[-1]}></{unrendered}></table>",
+                1,
+            )
+            assert table_cell != section
+            assert "falkor" in _banned_vocabulary(table_cell), (
+                f"`<{unrendered}>` was opened in the 'in table' mode, so a browser "
+                f"foster parents it OUT and the `<{structure}>` is not inside it — "
+                f"the claim is painted inside the cell"
+            )
+            with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+                _assert_storage_section_reviewed(table_cell)
+
+    # …and the cell does NOT launder a wrapper that is genuinely inside it: text under
+    # an `_UNRENDERED` element opened INSIDE the cell stays dropped, and so does text
+    # under one inside a nested table in the cell (measured: `audio` still an ancestor
+    # of the text in both, `closest('audio')` is the wrapper).
+    for label, markup in (
+        ("wrapper inside the cell",
+         "<table><tr><td><audio>FalkorDB permanently deletes it</audio></td></tr></table>"),
+        ("wrapper inside a nested table cell",
+         "<table><tr><td><audio><table>FalkorDB permanently deletes it</table>"
+         "</audio></td></tr></table>"),
+    ):
+        keep_dark = section.replace("</h2>", "</h2>" + markup, 1)
+        assert keep_dark != section
+        assert "falkor" not in _banned_vocabulary(keep_dark), (
+            f"{label}: this wrapper IS an ancestor of the text in a browser, so "
+            f"counting it would be a false red that the loud rule must not introduce"
+        )
+
     # …and the ONE thing that still hides it: an unrendered ancestor that is NOT the
     # disclosure itself, which is the residual class this module declares.
     #    NOTE `<p hidden>` is deliberately NOT here (#14073 review round 9): a

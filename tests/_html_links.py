@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
+from types import MappingProxyType
 from urllib.parse import urlsplit
 
 # Hosts this site may legitimately send a visitor to for the blog. `index.html`
@@ -479,6 +480,15 @@ class _AnchorHrefParser(HTMLParser):
     # and `any(not renders …)` still refuses a heading anywhere under it, so
     # `("summary of a closed details", '<details><summary><h2 id="qs">Q</h2></summary>
     # </details>')` keeps bounding nothing.
+    #: Elements that paint their TEXT CONTENT as a label, whatever wrappers sit inside
+    #: them (#14073 review round 11, measured). `<select><option><audio>CLAIM` renders
+    #: `CLAIM` as the option's label (the label is the option's text content, not its
+    #: children's boxes), while `audio` on its own paints nothing — so the wrapper is
+    #: NOT an unrendered ancestor in the ordinary sense. Guarding on the frame's OWN
+    #: inherited flag is what keeps the exceptions honest: `<div hidden><select>
+    #: <option>` still drops (the option inherited `False`), and so does a `<datalist>`
+    #: option, because `datalist` is `_UNRENDERED` and the option inherits it.
+    _LABEL_RENDERS = frozenset({"option", "optgroup"})
     _RENDERS_WITH_ATTR = frozenset({"details", "dialog"})
     #: Element types whose CHILD HEADINGS must not bound the slice, while their own
     #: DIRECT TEXT may still be counted — the third pair of answers one flag must not
@@ -953,6 +963,104 @@ class _AnchorHrefParser(HTMLParser):
             if open_tag in self._P_SCOPE_BOUNDARY:
                 return
 
+    #: The spec's "generate implied end tags" list (#14073 review round 11, P0).
+    #: These are popped by an `rt`/`rp`/`rb`/`rtc` start tag, and each is ALSO closed
+    #: by a sibling start tag of its own kind. Leaving one on the stack keeps an
+    #: `_UNRENDERED` element above it alive, and `_text_is_painted` then DROPS text a
+    #: browser paints — the fail-open direction, not the loud one.
+    _IMPLIED_END_TAGS = frozenset({"dd", "dt", "li", "optgroup", "option", "p", "rb",
+                                   "rp", "rt", "rtc"})
+
+    def _close_implied(self, tag: str) -> None:
+        """Pop the elements a `tag` start tag implicitly closes.
+
+        ⛔ MODELING ONLY `<p>` WAS NOT ENOUGH (#14073 review round 11, P0, measured).
+        The spec closes a whole family of siblings on their own start tag, and each
+        omission left a painted claim unreadable:
+
+        * `<ul><li><audio><li>CLAIM</li></audio></li></ul>` — the second `<li>` closes
+          the first one AND the `<audio>` inside it (Chrome:
+          `<li><audio></audio></li><li>CLAIM</li>`, 23 817 dark px), so the claim is
+          painted; this stack kept `audio` (`_UNRENDERED`) and dropped it.
+        * `<ruby><rp><rt>CLAIM</rt></rp></ruby>` — `rt`/`rp`/`rb`/`rtc` start tags run
+          "generate implied end tags", which pops the `<rp>` (Chrome:
+          `<ruby><rp></rp><rt>CLAIM</rt></ruby>`, 5 997 dark px), same drop here.
+        * `<dl><dd><audio><dd>CLAIM`, `<ul><li><progress><li>CLAIM` — same shape.
+
+        LOUD WHERE IT CANNOT BE EXACT: the sibling close pops through the NEAREST open
+        element of that kind, whatever is above it, which is what the spec's "pop until
+        an `li` has been popped" does. Over-popping only REMOVES ancestors, so it can
+        turn a drop into a count and never the reverse.
+        """
+        if self._suppress or self.wedged_reason or self._foreign:
+            return
+        targets = {
+            "li": ("li",),
+            "dd": ("dd", "dt"),
+            "dt": ("dd", "dt"),
+            "option": ("option",),
+            "optgroup": ("option", "optgroup"),
+        }.get(tag)
+        if targets:
+            self._close_nearest(targets)
+            return
+        if tag in ("rb", "rp", "rt", "rtc"):
+            # "Generate implied end tags": pop while the CURRENT node is one of them.
+            while self._open_elements and self._open_elements[-1][0] in self._IMPLIED_END_TAGS:
+                self._pop_top()
+
+    #: "Clear the stack back to a table context", and its body/row variants (#14073
+    #: review round 11, P0, measured). A table-structure start tag discards whatever
+    #: the "in table" mode had foster parented out: `<table><audio><td>CLAIM` renders
+    #: `<audio></audio><table><tbody><tr><td>CLAIM</td>…` (Chrome, `td.closest
+    #: ('audio')` is null, 34 735 dark px). Without this pop the `td` INHERITED
+    #: `renders=False` from the `audio` that had already been moved out of the table,
+    #: and the claim was dropped. Each entry maps a start tag to the nodes that may
+    #: stay: everything above the nearest of them is discarded.
+    _TABLE_CONTEXT_STOPS = MappingProxyType({
+        "caption": ("table",),
+        "colgroup": ("table",),
+        "col": ("table",),
+        "tbody": ("table",),
+        "tfoot": ("table",),
+        "thead": ("table",),
+        "tr": ("table", "tbody", "tfoot", "thead"),
+        "td": ("table", "tbody", "tfoot", "thead", "tr"),
+        "th": ("table", "tbody", "tfoot", "thead", "tr"),
+    })
+
+    def _clear_table_context(self, tag: str) -> None:
+        """Pop back to the context a table-structure start tag requires."""
+        stops = self._TABLE_CONTEXT_STOPS.get(tag)
+        if stops is None or self._suppress or self.wedged_reason or self._foreign:
+            return
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            if self._open_elements[index][0] not in stops:
+                continue
+            if index == len(self._open_elements) - 1:
+                return
+            for _open_tag, opened_container, _renders in self._open_elements[index + 1:]:
+                if opened_container and self._open_containers:
+                    self._open_containers.pop()
+            del self._open_elements[index + 1:]
+            return
+
+    def _close_nearest(self, targets: tuple[str, ...]) -> None:
+        """Pop through the nearest open element named in `targets`, if there is one."""
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            if self._open_elements[index][0] in targets:
+                for _open_tag, opened_container, _renders in self._open_elements[index:]:
+                    if opened_container and self._open_containers:
+                        self._open_containers.pop()
+                del self._open_elements[index:]
+                return
+
+    def _pop_top(self) -> None:
+        """Pop the current node, keeping the container index in step."""
+        _open_tag, opened_container, _renders = self._open_elements.pop()
+        if opened_container and self._open_containers:
+            self._open_containers.pop()
+
     def _close_select_scope(self, tag: str) -> bool:
         """Pop an open `<select>` for a token that pops it; `True` when IGNORED.
 
@@ -1267,6 +1375,15 @@ class _AnchorHrefParser(HTMLParser):
         # rule (implied `</p>`) runs before the per-token select rules, and they do
         # not overlap: see `_close_p_scope` and `_close_select_scope`.
         self._close_p_scope(tag)
+        # The sibling/implicit closes the spec's "in body" rules also perform
+        # (an `<li>`/`<dd>`/`<dt>`/`<option>` closes its own kind, and an
+        # `<rt>`/`<rp>`/`<rb>`/`<rtc>` generates implied end tags) — see
+        # `_close_implied`. Before `_open`/`_record_heading`/`_open_extent`, for the
+        # same reason as the `<p>` rule: each pop reads the PRE-tag ancestry.
+        self._close_implied(tag)
+        # And the table contexts: a table-structure tag discards what the "in table"
+        # mode had foster parented out — see `_clear_table_context`.
+        self._clear_table_context(tag)
         # A nested `<select>` is IGNORED whole: no element, no id, no extent (see
         # `_SELECT_POP_IGNORED`).
         if self._close_select_scope(tag):
@@ -1414,7 +1531,12 @@ class _AnchorHrefParser(HTMLParser):
         * any OTHER unrendered ancestor (`hidden`, `_UNRENDERED`, `_FALLBACK_RENDERS`)
           still drops the text, and those are the residuals the module declares.
         """
-        for tag, _container, renders in self._foster_truncated_ancestry():
+        frames = self._foster_truncated_ancestry()
+        # A painted LABEL repaints its whole text content, so no wrapper inside it can
+        # be the thing that decides — see `_LABEL_RENDERS`.
+        if any(tag in self._LABEL_RENDERS and renders for tag, _c, renders in frames):
+            return True
+        for tag, _container, renders in frames:
             if renders:
                 continue
             # The first unrendered ancestor decides, and this is that ancestor.
@@ -1435,10 +1557,13 @@ class _AnchorHrefParser(HTMLParser):
         `_UNRENDERED` inside `table>…>table` reproduced it, `object` the only exception.
 
         Approximating the insertion modes is unnecessary: truncating the ancestry at the
-        innermost open `<table>` is LOUD, because it can only REMOVE ancestors, so it
-        turns a drop into a count and never the reverse. The modes that end foster
-        parenting — "in cell" (`td`/`th`) and "in caption" (`caption`) — are the ones
-        where text stays inside the table, so those stop the truncation.
+        table is LOUD, because it can only REMOVE ancestors, so it turns a drop into a
+        count and never the reverse. The modes that end foster parenting — "in cell"
+        (`td`/`th`) and "in caption" (`caption`) — are the ones where text stays inside
+        the table, so those stop the truncation. FOSTER PARENTED ELEMENTS are the other
+        half and are handled structurally, by `_clear_table_context`: a table-structure
+        start tag discards them, so a `<td>` under a foster-parented `<audio>` inherits
+        the TABLE's render flag and not the discarded element's.
         """
         frames = self._open_elements
         for index, (tag, _container, _renders) in enumerate(frames):
@@ -1446,11 +1571,16 @@ class _AnchorHrefParser(HTMLParser):
                 continue
             # OUTERMOST first, not innermost: a `<table>` start tag in the "in table"
             # mode CLOSES the table already open, so `<table><audio><table>CLAIM`
-            # discards the `audio` and leaves one table at body level (measured). A
-            # nested table inside a CELL is skipped by the check below, which is what
-            # keeps `<td><audio><table>` a genuine drop.
+            # discards the `audio` and leaves one table at body level (measured).
+            #
+            # "In cell"/"in caption" ends foster parenting, so a cell/caption above
+            # the table means the text is inside it and the ancestry is real — the
+            # elements the "in table" mode had already foster parented OUT are popped
+            # by `_clear_table_context`, which is why nothing has to be dropped here.
             if any(frames[k][0] in ("td", "th", "caption") for k in range(index + 1, len(frames))):
                 continue
+            # Text in the "in table" mode itself: foster parented in FRONT of the
+            # table, so the table is not an ancestor either.
             return frames[:index]
         return frames
 
@@ -1858,10 +1988,24 @@ def extract_visible_text(html: str) -> str:
     whether it is being asked about a golden or a fragment.
 
     Raises ValueError when the parse WEDGED, rather than returning the text of a
-    partial tree: the wedge reasons (`frameset`, the script-data escaped states) are
-    exactly the ones where a browser's rendering differs from this model in a way it
-    cannot see, and partial text would read as a SHORTER section — the fail-open
+    partial tree: partial text would read as a SHORTER section — the fail-open
     direction the wording golden exists to close.
+
+    ⛔ THE WEDGE GUARD IS TWO MARKERS, NOT A COMPLETENESS CLAIM (#14073 review round
+    11, P1). It fires on `frameset` and on the script-data escaped states — the
+    divergences this module knows it cannot follow — and returns text for everything
+    else. So a divergence it does not model produces a partial tree rather than a
+    raise, and the pins cannot tell. What keeps that from being the 2026 round-6..11
+    failure mode is that each KNOWN divergence is modelled instead of hoped away, and
+    each has a test that reds when the model is removed: the disclosure family
+    (`_text_is_painted`), the implied `</p>` cascade (`_P_CLOSERS` ->
+    `_close_p_scope`), sibling/implicit closes (`_close_implied`), the table row &
+    cell contexts (`_clear_table_context`), foster parenting
+    (`_foster_truncated_ancestry`), `<select>` scope (`_close_select_scope`), and
+    label rendering (`_LABEL_RENDERS`). The residual, stated rather than implied: an
+    insertion-mode rule NONE of those covers would still return partial text. When one
+    is found, model it and add its test — do not widen the wedge marker list, which
+    would make the guard fire on legal pages and get it deleted.
     """
     parser = _AnchorHrefParser()
     parser.feed(html)
