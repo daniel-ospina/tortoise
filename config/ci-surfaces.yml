@@ -3767,7 +3767,7 @@ surfaces:
   # `inspect.getsource`. No DSN, no graph, no model.
   - test_13829_cache_cap_at_fold.py
   # #14185: the record's projection on its OWN loop — the projection worker, the
-  # four conditions under which a write may be deferred, and the lag metric.
+  # six conditions under which a write may be deferred, and the lag metric.
   # `core` for the same MEASURED reason as the two rows above: the subjects
   # (`tortoise/projection_worker.py` — a new file — and `tortoise/live_write.py`)
   # have no `SOURCE_PATTERNS` entry, so `--changed-files

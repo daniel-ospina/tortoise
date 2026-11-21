@@ -105,8 +105,8 @@ The inline fallback is counted (``inline_fallbacks{reason="queue_full"}``), so
 
 WHAT MAKES A WRITE DEFERRABLE AT ALL
 ====================================
-Five conditions, all of them the caller's (`live_write`), because only the
-chokepoint holds the facts. The three that are CORRECTNESS rather than
+Six conditions, all of them the caller's (`live_write`), because only the
+chokepoint holds the facts. The four that are CORRECTNESS rather than
 configuration:
 
 * ⛔ **A record-only write is never deferred** (``journal_skipped``, #14002).
@@ -118,6 +118,10 @@ configuration:
   ``RecordWrite.applied`` to decide whether the turn lives in the record or must
   be written to the graph. A deferred write has not applied yet, so handing it
   that answer would put the turn in the graph *and* the record.
+* ⛔ **A write whose LOG is not a durable journal is never deferred**
+  (``durable``, #9231). A scratch buffer is declined by the seam itself
+  (``no_durable_journal``), so queueing it buys nothing and only risks the row
+  being filed from a lane that a replay can never reproduce.
 * ⛔ **A write whose TENANT is not carried by value is never deferred**
   (``tenant is None``). ⚠️ A ``threading.Thread`` does not inherit the caller's
   contextvars — this is the one way a hand-off can CHANGE what a write means
@@ -130,9 +134,13 @@ configuration:
   relies on the ambient carrier keeps folding inline, where its resolution
   already worked.
 
-The other two are the flag itself and the queue bound. Read with
-:func:`tortoise.env_truthy.env_flag`, like every other operational knob, so a
-typo leaves the worker OFF rather than half-armed.
+The other two are the two SWITCHES, and they are deliberately separate: whether a
+record is armed at all — a queue on an unarmed record would report a loss
+nothing was ever going to take — and the loop's own flag with its queue bound.
+The loop flag is read with :func:`tortoise.env_truthy.env_flag`, like every other
+operational knob, so a typo leaves the worker OFF rather than half-armed; the
+record's arming is its own DSN (``TORTOISE_RECORD_DSN``) and is never inferred
+from this flag.
 """
 from __future__ import annotations
 
