@@ -187,12 +187,14 @@ the commit door — the `params={"eid": _eid, "oid": _oid},` statement an earlie
 named is the pin's `:23046`, which is not one of them (`main`'s `:22919` is a different line of the same door):
 `sdk.py:22267` (the capture writer) with its read-back `:22390`, and `hosted_api.py:23501` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:23313`. ⚠️ **The `hosted_api.py`
-pair is head-bound, and it has had THREE readings, the last two of them this edition's** — 23082 / 22894 when the
-`#14022`-rot repair `#14059` wrote them, 23503 / 23315 at the base this branch was
-then built on (`72c104bcbb`), and 23501 / 23313 at the head this sentence is
-written at (`main` `1b0db04894`), after `e4acf78705` moved them `−2`. ⛔ **Re-derive by CONTENT: never reuse the delta.** (The pair is
-`:22919`/`:22731` at `ae54df166d` — the head `#13394` was re-cut onto, as the clause above says, and not the
-head `#14059` wrote them on; row 13's note below carries all three readings.) The `+419` all three of this
+pair is head-bound and has FIVE readings on record** — `:22301`/`:22113` at the pin, `:22919`/`:22731` at
+`ae54df166d` (the head `#13394` was re-cut onto, as the clause above says, and not the head `#14059` wrote
+them on), 23082 / 22894 when the `#14022`-rot repair `#14059` wrote them, 23503 / 23315 at the base this
+branch was then built on (`72c104bcbb`), and 23501 / 23313 at the head this sentence is written at (`main`
+`1b0db04894`, after `e4acf78705` moved them `−2`). **This edition took the last two**, and row 13's note
+below repeats the pin's and `ae54df166d`'s — it does not carry the branch-base 23503 / 23315, which no
+longer lands on the door, so this paragraph is the only place that reading appears. ⛔ **Re-derive by CONTENT:
+never reuse the delta.** The `+419` all three of this
 row's and row 15's sites take between `#14059`'s head and this one is **not** one insert: that interval is
 **569 inserted and 59 deleted** lines (`git diff --numstat`), across **25** hunks — and the convention travels with
 that second figure, because `git diff -U0 … | grep -c '^@@'` gives 25 while git's default `-U3` gives 23, which
