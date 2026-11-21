@@ -62,10 +62,13 @@ named test goes RED):
 * **Leave the ATTRIBUTE spelling out of the reachability scan** (drop
   ``_package_root_attributes`` from ``_module_reaches_a_store``) →
   ``test_the_store_reach_scan_sees_the_REDIS_spelling_too`` RED on the synthetic
-  attr-only module — measured, 1 failed / 100 passed, while the coverage row stays
-  GREEN because no tree module reaches a store ONLY that way (the leg flags 0 of
-  305 files). The ban already saw that spelling, so the two directions disagreed
-  about one file — the same defect as the substring, one spelling over.
+  attr-only module — measured at head ``64f3448a``: **2 failed / 99 passed**. The
+  second red is ``…_pins_the_package_root_EXPORT_form``, which calls the same
+  predicate, so a ``1 failed`` figure hid a second gate firing. The coverage row
+  stays GREEN, because no tree module reaches a store ONLY that way (the leg flags
+  0 of 305 files) — that is the gap the two synthetic pins exist to fill. The ban
+  already saw that spelling, so the two directions disagreed about one file — the
+  same defect as the substring, one spelling over.
 * **Forget a root in the ban floor** (drop ``redislite`` from
   ``_FORBIDDEN_GRAPH_ROOTS``) →
   ``test_the_ban_covers_all_three_roots_the_tree_actually_uses`` RED —
@@ -82,17 +85,19 @@ named test goes RED):
 * **Leave the ``from tortoise import __init__`` binding out of the attribute leg**
   (drop the ``ast.ImportFrom`` branch from ``_package_root_attributes``) →
   ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
-  ``from tortoise import __init__ as i`` + ``i.FalkorDB`` — measured, 1 failed /
-  100 passed, every other row green. ``tortoise.__init__`` IS the package and
-  ``_imports_of`` folds it onto the UNBANNED root, so this was the one spelling of
-  the package root no leg saw, in the ban and in the direction scan alike.
+  ``from tortoise import __init__ as i`` + ``i.FalkorDB`` — measured at head
+  ``64f3448a``: 1 failed / 101 passed, every other row green.
+  ``tortoise.__init__`` IS the package and ``_imports_of`` folds it onto the
+  UNBANNED root, so this was the one spelling of the package root no leg saw, in
+  the ban and in the direction scan alike.
 * **Bind only the ABSOLUTE ``from tortoise import __init__`` and leave the
   relative spelling out** (drop the ``relative_root`` arm of the ``ast.ImportFrom``
   branch in ``_package_root_attributes``) →
   ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
-  ``from . import __init__ as i`` + ``i.FalkorDB`` — measured, 1 failed / 100
-  passed. ``ast`` records the relative form as ``module=None, level=1``, so there
-  is no module STRING to compare and an absolute-only branch cannot see it;
+  ``from . import __init__ as i`` + ``i.FalkorDB`` — measured at head ``64f3448a``:
+  1 failed / 101 passed. ``ast`` records the relative form as
+  ``module=None, level=1``, so there is no module STRING to compare and an
+  absolute-only branch cannot see it;
   ``_imports_of`` folds ``tortoise.__init__`` onto the unbanned package root, so
   the ban AND the direction scan were both green on a live reach.
 * **Read the relative arm as ``level == 1`` only** (narrow ``relative_root``, so
@@ -1225,25 +1230,39 @@ def test_no_graph_dependency() -> None:
     # that reaches the client. `test_the_no_graph_guard_names_modules_that_EXIST`
     # and `…_covers_every_module_that_reaches_a_store` hold the set in both
     # directions; this leg inherits whatever they certify.
-    probe = (
-        "import sys;"
-        "from tortoise import usage_signal;"
-        f"forbidden={tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if r not in _PROBE_EXEMPT)!r};"
-        "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
-        "for r in forbidden)];"
-        "print(','.join(sorted(bad)))"
-    )
-    out = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        text=True,
-        cwd=str(Path(__file__).resolve().parent.parent),
-        check=True,
-    )
-    assert out.stdout.strip() == "", (
-        f"importing usage_signal pulled a graph client into sys.modules: "
-        f"{out.stdout.strip()}"
-    )
+    def _probe(import_stmt: str) -> str:
+        """Run the sys.modules walk in a CLEAN interpreter over one import."""
+        src = (
+            "import sys;"
+            f"{import_stmt};"
+            f"forbidden={tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if r not in _PROBE_EXEMPT)!r};"
+            "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
+            "for r in forbidden)];"
+            "print(','.join(sorted(bad)))"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", src],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            check=True,
+        ).stdout.strip()
+
+    # ⛔ AND THIS LEG NEEDS A POSITIVE CONTROL, not only the negative assertion.
+    # Everything above asserts the probe finds NOTHING, so every way of breaking the
+    # detector reads GREEN: an emptied derivation (`forbidden=()`), the historical
+    # hardcoded pair, or the subprocess call replaced by a constant all left the file
+    # at 101 passed (measured). A detector that cannot be shown to detect is not a
+    # detector — the same defect as the substring scan one level up. So the SAME body
+    # runs against a module that DOES pull a store client in (measured: `tortoise.ep`
+    # loads `redis` eagerly) and must come back non-empty.
+    assert "redis" in _probe("import tortoise.ep"), (
+        "the transitive probe cannot detect a store client at all: importing "
+        "tortoise.ep must put a `redis` module in sys.modules, so an empty answer "
+        "here means the probe (not the tree) is broken")
+    leaked = _probe("from tortoise import usage_signal")
+    assert leaked == "", (
+        f"importing usage_signal pulled a graph client into sys.modules: {leaked}")
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
