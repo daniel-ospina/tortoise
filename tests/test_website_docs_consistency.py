@@ -1381,10 +1381,26 @@ def _document_base_url(markup: str, document: Path) -> str:
     heading id EXACTLY when a browser navigating that href lands on this page")
     was unsatisfiable rather than merely wrong.
 
-    ⛔ A BASE THAT CANNOT BE PARSED IS LEFT TO THE PREDICATE, not raised here. An
-    unparsable `<base href>` effect on resolution is for `urljoin` to give, and
-    the predicate already turns its `ValueError` into a refusal; raising here
-    would turn a refused link into an ERROR naming no cause.
+    ⛔ AN UNPARSABLE `<base href>` FALLS BACK TO THIS PAGE, AND THIS `except` IS
+    THE ONLY PLACE THAT FALLBACK IS APPLIED — it is not dead code, and deleting
+    it as unreachable turns one page edit into an ERROR naming no cause. The
+    HTML Standard's "set the frozen base URL" step (`4.2.3 The base element`)
+    sends a `base` whose href FAILS TO PARSE to the document's FALLBACK base
+    URL — this page — so the browser behaves as if no `<base>` were declared:
+    `#storage` still lands here and the heading is still advertised. `urljoin`
+    raises `ValueError` for a bracketed host the stdlib cannot read
+    (`http://[::1/`, measured), which is the parse failure this catches, and a
+    `ValueError` escaping from here would be indistinguishable from a broken
+    helper. The predicate's own `ValueError` arm is for the LINK TARGET, never
+    for the base.
+
+    ⚠️ NOT MODELLED, and the reason not to read this paragraph as "the whole
+    frozen-base-URL step": the same step also sends a `base` whose URL parsed
+    but whose scheme is `data:` or `javascript:`, or which the document's CSP
+    forbids, to that fallback. Those three stay OUT of scope deliberately — no
+    page here declares a `<base>` at all, and each would only ever make this
+    guard refuse a page a browser renders correctly (the fail-closed direction),
+    so they are a note rather than a work item.
     """
     canonical = _canonical_page_url(document)
     declared = extract_first_base_href(markup)
@@ -1936,6 +1952,12 @@ def _assert_storage_section_reviewed(markup: str) -> None:
     The pins, in the order the docstring above gives them: attribute NAMES
     (allowlist), attribute VALUES a reader acts on (`href` destinations), then the
     reviewed WORDING.
+
+    ⛔ THREE PINS, THREE MUTANTS: `test_each_pin_in_the_storage_aggregate_reds_on
+    _its_own_violation` drives each one through THIS callable, so a FOURTH pin
+    added below needs a fourth mutant there. Added without one it is decorative —
+    no existing control sees it, and the suite stays green (that is the vacuity
+    #14073 review round 3 measured for two of these three).
     """
     present = _attributes_outside_allowlist(markup)
     assert not present, (
@@ -2985,8 +3007,16 @@ def test_the_storage_section_destinations_are_pinned_not_just_their_names() -> N
             _assert_storage_section_reviewed(mutant)
 
 
-def test_every_storage_pin_reds_on_its_own_violation() -> None:
-    """Each of the three pins fires on ITS OWN rule, driven through the aggregate.
+def test_each_pin_in_the_storage_aggregate_reds_on_its_own_violation() -> None:
+    """Each pin of the storage AGGREGATE fires on ITS OWN rule, driven through it.
+
+    ⛔ THE NAME IS THE SCOPE. This drives the three asserts inside
+    `_assert_storage_section_reviewed` and nothing else; the file's other storage
+    tests (`_docs_section`'s bound, the named-claims pin, the fixture's own
+    regeneration) are NOT mutants of this aggregate. A name claiming "every
+    storage pin" would tell the next lane that a fourth assert added to the
+    aggregate is already driven — the precise vacuity this test exists to close,
+    reintroduced by its own title (#14073 review round 7).
 
     ⛔ ONE DRIVEN PIN IS NOT A DRIVEN AGGREGATE. `_assert_storage_section_reviewed`
     holds three pins and its docstring promises "remove the pin and the control
@@ -3309,6 +3339,44 @@ def test_no_toc_block_refuses_rather_than_running_to_the_end() -> None:
     assert extract_anchors_within(stripped, tag="div", class_token="toc") == []
     with pytest.raises(AssertionError, match="toc"):
         _docs_section(page=stripped)
+
+
+def test_an_unparsable_base_href_falls_back_to_this_page_instead_of_raising() -> None:
+    """A `<base href>` the stdlib cannot parse is read as NO `<base>`, not as an error.
+
+    ⛔ THE FALLBACK IS A BROWSER RULE, NOT A CONVENIENCE. The HTML Standard's
+    "set the frozen base URL" step (`4.2.3 The base element`) sends a `base`
+    whose href FAILS TO PARSE to the document's fallback base URL — this page —
+    so `#storage` still lands here and the heading is still advertised.
+    `urljoin` raises `ValueError` for a bracketed host the stdlib cannot read,
+    and `_document_base_url`'s `except` is the ONLY place that is caught:
+    deleting it as "unreachable" turns one page edit into a bare `ValueError`
+    naming no cause, in every storage test at once (#14073 review round 7 — the
+    docstring claimed the predicate handled this, and the predicate never sees
+    it: it is never called with an unparsable base).
+    """
+    canonical = _canonical_page_url(DOCS)
+    page = DOCS.read_text(encoding="utf-8")
+    marked = page.replace("<head>", '<head><base href="http://[::1/">', 1)
+    assert marked != page, "website/docs.html has no `<head>` to inject a base into"
+    # The premise, so this cannot go quietly green if the href ever becomes
+    # parseable: this IS a URL `urljoin` refuses, which is what the `except` is for.
+    with pytest.raises(ValueError, match="Invalid IPv6 URL"):
+        urljoin(canonical, "http://[::1/")
+
+    assert _document_base_url(marked, DOCS) == canonical, (
+        "an unparsable `<base href>` must fall back to this page's own URL — the "
+        "browser's fallback base URL — instead of raising out of the helper"
+    )
+    # …and the CONSEQUENCE the predicate contract cares about, not just the
+    # helper's return value: a browser still lands here, so the heading is still
+    # advertised and refusing it would be the false red the fallback prevents.
+    assert _fragment_this_page_advertises(
+        "#storage", DOCS, base=_document_base_url(marked, DOCS)
+    ) == "storage", (
+        "with an unparsable `<base>`, `#storage` still lands on this page, so the "
+        "predicate must still call the heading advertised"
+    )
 
 
 def test_faq_toc_anchors_all_resolve() -> None:
