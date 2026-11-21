@@ -36,7 +36,7 @@ competitor research (`SCALING-ROADMAP.md` §1–§2.5) · trackers `#11081` (rel
 
 ## 2. Diagnosis — seven mechanisms, and how they compound
 
-Each has the evidence, a confidence, and **what would disprove it**.
+Each has the evidence and a confidence.
 
 | # | mechanism | evidence | conf. |
 |---|---|---|---|
@@ -111,7 +111,7 @@ declared per read (`#2952`). *Exit:* all four pair shapes resolve; **the demo ru
 
 ### Track S — build the destination *(starts now; spend only when a gate says so; S = scale)*
 
-Track S is **not** blocked on Track F. Its first three items are free and independent, and doing them now is exactly what
+Track S is **not** blocked on Track F. Its first four items (S1–S4) are free and independent, and doing them now is exactly what
 makes the later spend cheap.
 
 | item | cost | why now |
