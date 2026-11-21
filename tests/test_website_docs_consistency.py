@@ -1310,6 +1310,51 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     return html[start:]
 
 
+def _browser_origin(url: str) -> tuple[str, str, int | None] | None:
+    """`(scheme, host, non-default port)` as a browser normalizes it, or None.
+
+    ⛔ THE SAME-PAGE QUESTION IS AN ORIGIN QUESTION, not a string comparison of
+    `netloc`: `HTTPS://PREMISELABS.CO/tortoise/docs`, `https://premiselabs.co:443/…`
+    and `https://someone@premiselabs.co/…` all reach this page in a browser, and an
+    equality test on the raw netloc refused every one of them — a NEW false red this
+    function introduced, the same family as the relative-href one it was fixing
+    (#14073 review, measured). The default port is dropped, the scheme and host are
+    lowercased, and userinfo is ignored (it does not change the origin) — but a host
+    that differs in MORE than case (a trailing dot, say) is still a different host,
+    because that is what an origin comparison does.
+    """
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "https").lower()
+    try:
+        port = parsed.port
+    except ValueError:  # an unparsable port names no document here
+        return None
+    default = 443 if scheme == "https" else 80
+    return (scheme, (parsed.hostname or "").lower(), None if port == default else port)
+
+
+#: An OPTIONAL scheme followed by TWO OR MORE slashes and the authority text: the shape
+#: WHERE WHATWG AND RFC 3986 DISAGREE.
+_AUTHORITY = re.compile(r"\A(?:[A-Za-z][A-Za-z0-9+.\-]*:)?/{2,}([^/?#]*)")
+
+
+def _whatwg_authority(target: str) -> str | None:
+    """The authority a browser parses out of `target`, or None when it has none.
+
+    ⛔ `urljoin` IS RFC 3986, NOT WHATWG. With THREE or more leading slashes — or
+    `scheme:///path` — the extra slashes are PATH characters to `urljoin`, which then
+    keeps the base's host, while a browser SKIPS them and parses the next segment as
+    the AUTHORITY: `///docs` is `https://docs/`, `https:///tortoise/docs` is
+    `https://tortoise/docs` (verified against Node's WHATWG resolver). Treating the
+    two as agreeing advertised a boundary for an entry that leaves the site — the
+    fail-open direction, and the exact shape this module already had to fix once in
+    `is_blog_entry` (#3962). This parses the authority the way the browser does, so
+    the comparison below cannot be fooled by a slash count.
+    """
+    found = _AUTHORITY.match(target)
+    return found.group(1) if found else None
+
+
 def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     """The heading id `href` advertises ON `document`, or `None`.
 
@@ -1332,14 +1377,19 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
        `docs.html` and `?query#frag` are ONE question instead of a second list of
        spellings that rots at the next route change.
 
-    ⛔ THE HOST IS THE CANONICAL ONE OR NOTHING. `//evil.example/docs#storage-limits`
-    resolves to this document's PATH, so a path-only rule accepts it — and
-    `app.premiselabs.co/tortoise/docs` is a SEPARATE Pages project that serves no
-    docs at all, yet `_document_for_loc` is host-blind below the root. Either would
-    GROW the advertised set: a larger set, a shorter slice, the fail-open direction
-    (#14073 review, both measured). A full-URL entry on a retired host is therefore
-    not advertised — the slice runs long and the golden says so, which is the
-    direction a guard wants to be wrong in.
+    ⛔ THE ORIGIN IS THE CANONICAL ONE OR NOTHING — and an ORIGIN, not a netloc
+    string: `///docs#storage-limits` is `https://docs/` to a browser (extra slashes
+    are skipped and the next segment becomes the HOST) even though `urljoin` reads
+    the third slash as a path character and keeps this page's host; the dashboard
+    host `app.premiselabs.co` is in `SITE_HOSTS` but is a SEPARATE Pages project
+    that serves no docs at all, and `_document_for_loc` is host-blind below the
+    root, so a path-only rule accepts it. Either would GROW the advertised set: a
+    larger set, a shorter slice, the fail-open direction (#14073 review, all
+    measured). Default ports, host case and userinfo are normalized away, because a
+    browser sends those to this page — they are the false-red side. A retired host
+    (`tortoise.premiselabs.co`) or a foreign scheme is therefore not advertised: the
+    slice runs long and the golden says so, which is the direction a guard wants to
+    be wrong in.
     """
     target = href.strip(" \t\n\r\f\v")
     if not target:
@@ -1348,8 +1398,14 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     if not parsed.fragment:
         return None
     canonical = _canonical_page_url(document)
+    page_origin = _browser_origin(canonical)
+    # ⛔ THE AUTHORITY THE BROWSER SEES, before `urljoin` has its say: for a
+    # two-or-more-slash spelling the two resolvers disagree (see `_whatwg_authority`).
+    authority = _whatwg_authority(target)
+    if authority is not None and _browser_origin(f"https://{authority}") != page_origin:
+        return None
     resolved = urlparse(urljoin(canonical, target))
-    if resolved.netloc != urlparse(canonical).netloc:
+    if _browser_origin(resolved._replace(fragment="").geturl()) != page_origin:
         return None
     document_url = resolved._replace(fragment="").geturl()
     return parsed.fragment if _document_for_loc(document_url) == document else None
@@ -2169,6 +2225,12 @@ _SAME_PAGE_TOC_SPELLINGS = (
     # rejected this spelling and ACCEPTED `tortoise/docs` (see the loud rows below).
     ("parent-relative path", ' href="../docs#quickstart"'),
     ("full URL", ' href="https://premiselabs.co/tortoise/docs#quickstart"'),
+    # ⛔ ORIGIN, NOT NETLOC STRING. A browser sends all of these to this page, and a
+    # raw `netloc` equality test refused them — the false-red family this commit is
+    # closing, one spelling over (#14073 review, measured).
+    ("explicit default port", ' href="https://premiselabs.co:443/tortoise/docs#quickstart"'),
+    ("uppercase scheme and host", ' href="HTTPS://PREMISELABS.CO/tortoise/docs#quickstart"'),
+    ("userinfo", ' href="https://someone@premiselabs.co/tortoise/docs#quickstart"'),
 )
 
 #: Entries that do NOT name a heading on THIS page — a browser leaves this document, or
@@ -2189,6 +2251,18 @@ _FOREIGN_TOC_SPELLINGS = (
     # to `/tortoise/tortoise/docs`, which the middleware 404s (`productRest` + the
     # `PRODUCT_PAGES` gate). Rooting it at `/` made it look like this page.
     ("a mis-rooted relative path", ' href="tortoise/docs#quickstart"'),
+    # ⛔ THE WHATWG/RFC-3986 SPLIT. `urljoin` reads the third slash as a PATH character
+    # and keeps this page's host; a browser SKIPS the extra slashes and parses the next
+    # segment as the AUTHORITY, so these four leave the site (`///docs#q` is
+    # `https://docs/#q`, verified against Node's WHATWG resolver). The two `https:///…`
+    # spellings were ACCEPTED by the previous revision of this function (#14073 review,
+    # measured) — the authority is parsed the way the browser does now, not the way
+    # `urljoin` reports it.
+    ("three leading slashes", ' href="///docs#quickstart"'),
+    ("three leading slashes, path", ' href="///tortoise/docs#quickstart"'),
+    ("four leading slashes", ' href="////docs#quickstart"'),
+    ("empty-authority scheme", ' href="https:///docs#quickstart"'),
+    ("empty-authority scheme, path", ' href="https:///tortoise/docs#quickstart"'),
 )
 
 
@@ -2385,11 +2459,60 @@ def test_the_link_set_and_the_boundary_set_answer_different_questions() -> None:
         "the OAuth retry link is no longer INSIDE the hidden banner, so this "
         "control no longer measures a link the page's script reveals"
     )
-    assert "/auth" in extract_anchor_hrefs(product), (
-        "the JS-revealed `/auth` link is missing from `product.html`'s "
-        "rendered-link set: a static `hidden` rule is modelling a page's script"
+    # ⛔ NEITHER A MEMBERSHIP TEST ON `/auth` NOR A SOURCE COUNT IS A CONTROL HERE:
+    # `product.html` carries TEN `href="/auth"` occurrences and only EIGHT are real
+    # anchors (two are inside a `<script>` template string), so membership is inert
+    # and a raw count comparison is simply wrong (both measured, #14073 review).
+    # The discriminating question is the SPLIT ITSELF: the rendered-link set must not
+    # change when the `hidden` attribute on that banner is removed, because that is
+    # what the page's own script does. Under the wide rule the two arrays differed by
+    # exactly this link (7 vs 8).
+    revealed = product.replace(banner_opening, banner_opening.replace(" hidden>", ">"), 1)
+    assert revealed != product, (
+        "could not remove the banner's `hidden` attribute, so this control cannot "
+        "measure the split"
+    )
+    assert extract_anchor_hrefs(product) == extract_anchor_hrefs(revealed), (
+        "`product.html`'s rendered-link set changes when the JS-revealed banner's "
+        "`hidden` attribute is dropped: a static `hidden` rule is modelling a "
+        "page's script"
     )
 
+
+def test_a_nested_or_foreign_suffix_page_is_not_resolved_as_a_product_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `.html` spelling is accepted at the TOP level only, exactly as served (#14073).
+
+    The middleware's `PRODUCT_PAGES` holds `/docs` and `/docs.html` and nothing else —
+    no nested entry, no other suffix. A first attempt at the mirror used
+    `Path(cleaned).stem`, which matches a page name at ANY DEPTH and for ANY extension:
+    with a `docs.html` under a nested directory (or a `docs.tar`), a `<loc>` the
+    middleware 404s resolved to a document, so a dead URL read as live in every sitemap
+    walk (`test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex` reports the
+    dead `<loc>` only when this resolver returns None). Measured on a temp tree.
+    """
+    monkeypatch.setattr(
+        sys.modules[__name__], "WEBSITE", tmp_path, raising=True
+    )
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "docs.html").write_text("<p>not a product page route</p>", "utf-8")
+    (tmp_path / "docs.tar").write_text("not a page at all", "utf-8")
+    assert _document_for_loc("https://premiselabs.co/tortoise/nested/docs") is None, (
+        "a NESTED `/tortoise/nested/docs` resolves to `nested/docs.html`: the "
+        "middleware's `PRODUCT_PAGES` is a set of TOP-LEVEL names, so that URL is a "
+        "404 and a `<loc>` naming it would read as live"
+    )
+    assert _document_for_loc("https://premiselabs.co/tortoise/docs.tar") is None, (
+        "`/tortoise/docs.tar` resolves as a product page: the only suffix the "
+        "middleware serves under the prefix is `.html`"
+    )
+    assert _document_for_loc("https://premiselabs.co/tortoise/docs.html") is None, (
+        "the temp tree has no top-level `docs.html`, so this URL must not resolve — "
+        "otherwise the control above is measuring file existence rather than the "
+        "served-name gate"
+    )
 
 def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
     """The extent helper refuses EVERY container a sibling start tag closes (#14073).
@@ -4509,19 +4632,24 @@ def _document_for_loc(url: str) -> Path | None:
         cleaned_path == PRODUCT_PREFIX or cleaned_path.startswith(PRODUCT_PREFIX + "/")
     )
     # ⛔ THE MIRROR IS THE MIDDLEWARE'S SET, WHICH LISTS BOTH SPELLINGS.
-    # `PRODUCT_PAGES` holds `/docs` AND `/docs.html` for every page, so this gate must
-    # accept a served name with or without its `.html`. Without the stem test,
-    # `/tortoise/docs.html` — served, and what a plain relative `href="docs.html#x"` from
-    # `/tortoise/docs` resolves to — reported None: a false "dangling" red, inherited by
-    # the advertised-set rule in `_docs_section` as a false red on a legal TOC spelling
-    # (#14073 review, measured). `/tortoise/privacy` still fails, because `privacy` is in
-    # `PRODUCT_PAGE_NAMES` neither with nor without the extension.
-    if (
-        under_prefix
-        and cleaned_path != PRODUCT_PREFIX
-        and cleaned not in PRODUCT_PAGE_NAMES
-        and Path(cleaned).stem not in PRODUCT_PAGE_NAMES
-    ):
+    # `PRODUCT_PAGES` holds `/docs` AND `/docs.html` for every page — and only those
+    # two forms, at the TOP level — so this gate accepts exactly `name` and
+    # `name.html` for a name in `PRODUCT_PAGE_NAMES`. Without the `.html` arm,
+    # `/tortoise/docs.html` (served, and what a plain relative `href="docs.html#x"`
+    # from `/tortoise/docs` resolves to) reported None: a false "dangling" red,
+    # inherited by the advertised-set rule in `_docs_section` as a false red on a
+    # legal TOC spelling (#14073 review, measured).
+    #
+    # ⛔ NOT A `Path(cleaned).stem` TEST, which was the first attempt and is too
+    # wide: it matches a page name at ANY DEPTH and for ANY SUFFIX, so
+    # `/tortoise/x/docs` and `/tortoise/docs.tar` would resolve whenever such a file
+    # exists — a 404 `<loc>` reading as live, the exact false PASS the comment above
+    # refuses for `/tortoise/privacy` (#14073 review, measured on a temp tree). The
+    # middleware's set has no nested entry and no other suffix.
+    served_names = PRODUCT_PAGE_NAMES | {
+        f"{name}.html" for name in PRODUCT_PAGE_NAMES
+    }
+    if under_prefix and cleaned_path != PRODUCT_PREFIX and cleaned not in served_names:
         return None
     for candidate in (WEBSITE / cleaned, WEBSITE / f"{cleaned}.html"):
         if candidate.is_file():
