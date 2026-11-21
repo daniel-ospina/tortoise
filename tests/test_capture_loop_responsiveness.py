@@ -2991,14 +2991,17 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
 #:     that leg runs on, so returning it inline would be silent here. The evidence
 #:     is a discriminating count, not a bare list of hits. It EXCLUDES this file,
 #:     which carries the needle five times — twice in code (the dict row and the
-#:     excluded-rows tuple) and three times in this note, the command included,
-#:     which would otherwise count its own text as a hit:
+#:     excluded-rows tuple) and three in prose (the tail test's docstring above,
+#:     this bullet, and the command below), so an unfiltered `grep -ci thread`
+#:     counts this sentence as a hit:
 #:         grep -rn 'posterior_alpha, n.ep_alpha' tests/ --include='*.py' \
 #:             --exclude=test_capture_loop_responsiveness.py | grep -ci thread
-#:         -> 0        (14 rows across 8 files, all cypher string literals in
-#:                      reader/stub tests — none is a thread assertion)
-#:     (the only tests that touch the leg at all assert the non-fatal warning:
-#:     `tests/test_hosted_api.py:4231`, `tests/test_capture_session.py:7428`).
+#:         -> 0        (14 rows across 8 files — 12 cypher literals and 2 prose
+#:                      quotes — and none is a thread assertion)
+#:     The tests that touch the leg assert its ARMS, never its thread: the
+#:     non-fatal warning on failure (`tests/test_hosted_api.py:4231`,
+#:     `tests/test_capture_session.py:7428`) and `ep_updated is True` on success
+#:     (`tests/test_hosted_api.py:3998`).
 #:     Making the fixture reach it needs the extractor stub replaced with a
 #:     realistic extraction, which is a fixture redesign this change does not carry.
 _TAIL_MUST_BE_ISSUED = {
@@ -3016,6 +3019,16 @@ _TAIL_MUST_BE_ISSUED = {
 _SWEEP_STATEMENTS = {
     "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p":
         "the delete-race orphan sweep",
+    # The sweep deletes THREE kinds of orphan, and all three are reachable under
+    # this fixture (measured: all issued on `capture-extract_0`). Pinning only
+    # the Point delete left the Event and Source deletes unwatched by both loops
+    # below, so an on-loop copy of either was silent (#10893 cycle-5 review, P2):
+    # `_SWEEP_EVENT_DELETE_CYPHER` (`hosted_api.py:19785`, appended to the
+    # sweep's own match) and the Source delete.
+    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e":
+        "the delete-race Event sweep",
+    "MATCH (src:Source {url:$url}) DETACH DELETE src":
+        "the delete-race Source sweep",
 }
 
 
