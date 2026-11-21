@@ -2840,12 +2840,27 @@ def test_the_14033_state_question_field_is_recorded():
     assert "MISSED_ROUTE_REASONS" in row["emitted_when"], (
         "the row must point at the CLOSED set by name (tortoise/state_intent.py "
         "MISSED_ROUTE_REASONS), or a reader cannot tell an enumeration from prose")
-    for reason in MISSED_ROUTE_REASONS:
-        assert f"`{reason}`" in row["emitted_when"], (
-            f"the row does not name the `reason` value {reason!r} that "
-            "MISSED_ROUTE_REASONS declares — a caller cannot know which notices "
-            "it has to handle (the value belongs in backticks: prose that merely "
-            "uses the word is not an enumeration)")
+    # ⛔ THE ENUMERATION ITSELF, built FROM the constant — not "the row mentions each
+    # live value", which explanatory prose satisfies (the row's `shape` and `family`
+    # also appear in sentences). A per-value substring check stays green on a row that
+    # CLAIMS AN UNDECLARED value, and on a constant that shrinks while the row keeps
+    # the old set (#14033 review, P3); pinning the `= a|b` form the row uses makes the
+    # two able to disagree in neither direction.
+    #
+    # The enumeration is PARSED out of the row and compared as a TUPLE, because every
+    # substring spelling of it is permissive: `"= shape|family" in row` also holds for a
+    # row that added `|superseded`, and a constant that shrank to `("shape",)` still
+    # matches the un-shrunk row. Only the parsed comparison reds in both directions.
+    match = re.search(r"MISSED_ROUTE_REASONS`?\s*=\s*([a-z|]+)", row["emitted_when"])
+    assert match, (
+        "the row never ENUMERATES the closed `reason` set (`MISSED_ROUTE_REASONS` = "
+        "a|b) — naming the constant is not the same as stating its values")
+    recorded = tuple(v for v in match.group(1).split("|") if v)
+    assert recorded == tuple(MISSED_ROUTE_REASONS), (
+        f"the row enumerates `reason` as {recorded!r} but tortoise/state_intent.py's "
+        f"MISSED_ROUTE_REASONS is {tuple(MISSED_ROUTE_REASONS)!r} — a caller cannot "
+        "know which notices it has to handle (an UNDECLARED value and a SHRUNK constant "
+        "both red here, which no substring check does)")
     assert "which features are deprecated in v3" in row["unchanged_when_off"], (
         "the absence clause must keep the MEASURED exception by naming it — a "
         "CONTENT query that NAMES an ending (`which features are deprecated in "
