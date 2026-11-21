@@ -1451,7 +1451,8 @@ def test_no_graph_dependency() -> None:
         the probe blind to `tortoise.acl_graph_users` and `tortoise.hosted_backup` — the
         measurement the verdict row below states, on the same shape. A PLAIN
         six-literal keep-list was never green once this row and the per-root imports
-        below existed: measured at `647ca930ce`, it is **1 failed / 101**, and the
+        below existed: measured at `b18e33f4c0` — the first head carrying BOTH — it is
+        **1 failed / 101**, and the
         failure is at the injected-everything row rather than at a negative. Both red
         here.
         What remains is only PREDICTION of this test's inputs, the same residual as
@@ -1485,17 +1486,22 @@ def test_no_graph_dependency() -> None:
     # detector answer EMPTY is invisible to it — and the remedy is not "a control
     # that names a root", because such a control cannot see a narrowing that KEEPS
     # the roots it names (the two shapes measured at `e022fc935b` and `ebb479dc60`).
-    # The attribution below is head-scoped on purpose, because the two sub-cases land
-    # on different rows — and they land on different KINDS of row at different heads.
-    # Measured at `8ea62751fb`, the head #14118's table is taken on: emptying the list
-    # (`forbidden=()`) is **1 failed / 101 passed**, red at a POSITIVE control
-    # (`assert "redis" in …`); with that control removed it is **102 passed**, i.e.
-    # every negative row is green by construction. A subprocess replaced by a
-    # NON-EMPTY constant is the other sub-case: on THAT head a NEGATIVE row catches it
-    # (`assert leaked == ""`), while at the PR base the same mutant is caught by a
-    # POSITIVE control instead (`assert "tortoise.ep" in _observed`), because the base
-    # still ran both dotted controls and the `leaked` row sits below them in the same
-    # test. Both are **1 failed / 101 passed**, measured. What pins the predicate HERE
+    # The two sub-cases below are each stated with the HEAD and the MUTANT they were
+    # measured on, because the second one's row depends on the constant, not the head.
+    # Measured at `8ea62751fb`, the head #14118's table is taken on:
+    # emptying the list (`forbidden=()`) is **1 failed / 101 passed**, red at a
+    # POSITIVE control (`assert "redis" in …`); with that control removed it is
+    # **102 passed**, i.e. every negative row is green by construction. A subprocess
+    # replaced by a NON-EMPTY constant is the other sub-case, and WHICH ROW CATCHES IT
+    # IS DECIDED BY THE CONSTANT, NOT BY THE HEAD — so the value is named, because a
+    # sentence that leaves it out is true of one string and false of its neighbours.
+    # Each is **1 failed / 101 passed**, measured at both heads: `'redis'` (record
+    # channel kept) is the ONE value that differs between them (PR base: the dotted
+    # positive control; `8ea62751fb`: `assert leaked == ""`); `'redis,tortoise.ep'`
+    # reds `leaked == ""` at BOTH; `'tortoise.ep'` reds a POSITIVE control at BOTH;
+    # and replacing the whole OUTPUT is a different mutant again — at the PR base it
+    # reds the `_walked` pin first, because that design shipped the record inside the
+    # same output. What pins the predicate HERE
     # is the per-root loop over the WHOLE derivation, below. At this head no list is
     # interpolated into the child at all, and each of those shapes reds: emptying
     # `_probe_forbidden()`, narrowing the child's print to the named controls, and
