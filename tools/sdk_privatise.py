@@ -697,10 +697,10 @@ SWEEP_NAMES = 66
 #: the delta. The three module-level probes likewise contribute no DELTA row (they carry 14 untyped
 #: rows in all — 6 in `test_assembly_sdk.py`, 5 in `test_assembly_fixtures.py`, 3 in
 #: `longmem_eval/test_assembly_arm.py`, identical at both heads; 5/4/3 are the distinct row SHAPES, and
-#: this note states ROWS because that is the unit the paragraph defines and the unit the 80 above uses),
+#: this note states ROWS because that is the unit the paragraph defines and the unit the 80 below uses),
 #: so this re-cut shares none with the `#13994` probe shrink above. ⛔ "contributes no row" was the
-#: earlier wording and it is FALSE for every file named here: a row is what the census COUNTS, so "no
-#: row" would mean the file has no swept-name receiver at all, and
+#: earlier wording and it is FALSE for the files that DO carry swept-name receivers: a row is what the
+#: census COUNTS, so "no row" would mean the file has no swept-name receiver at all, and
 #: `tests/test_7405_update_point_writes.py` alone carries 80 of them.
 #: The 6 are plain untyped receivers in a test (`inst` is built via `TortoiseSDK.__new__`), not typed
 #: references to a swept name, so the SDK population is untouched — `--check` still reports

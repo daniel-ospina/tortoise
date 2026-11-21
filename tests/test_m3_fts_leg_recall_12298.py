@@ -1430,11 +1430,16 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # `:17439` is the code above it), NOT the `("Point", "quote",
     # "FULLTEXT")` entry: that entry was already there at `e0accb8fe6^:21014`,
     # added by #11706 (`d06c001ff9`; its diff carries the `+` row — reachable from
-    # the backup refs, NOT from `main`'s SHALLOW history, whose boundary commit
-    # c2c6d38425 (#13967) ADDS the whole file, 23,875 lines).
+    # the backup refs, NOT from `main`'s SHALLOW history: `.git/shallow` names
+    # `e0accb8fe6` itself as the boundary, and a grafted boundary has NO parents,
+    # so `git show --stat e0accb8fe6` reports the whole file (23,899 lines) as
+    # ADDED by it). ⛔ An earlier cut of this note named `c2c6d38425` (#13967) as
+    # that boundary and 23,875 as its size; measured, `c2c6d38425` edits ONLY
+    # `tests/test_bridge_table.py` (+31/−10), so it is neither the boundary nor
+    # the commit that adds the file.
     # ⛔ Do NOT verify it with `git log -S'("Point", "quote", "FULLTEXT")'` over this
-    # path: a shallow boundary has NO parents, so pickaxe stops at c2c6d38425
-    # (#13967) and never names the origin. An earlier draft credited #13322
+    # path: a shallow boundary has NO parents, so pickaxe stops AT THE BOUNDARY
+    # (`e0accb8fe6`) and never names the origin. An earlier draft credited #13322
     # (`5f6ed5ae6a`), a later one #11706 via that `-S`; both name the wrong commit.
     ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21042`"),
