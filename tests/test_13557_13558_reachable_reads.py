@@ -292,6 +292,29 @@ SELECTED = [
     ("list what we retired", "ended", "imperative_what"),
     ("show me what we archived", "ended", "imperative_what"),
     ("enumerate what we have cancelled", "ended", "imperative_what"),
+    # ── DETERMINER STACKING and COMPOUND-WORD subjects on `is_copula` (round-18
+    # review, P2 — the first cut of round-17's determiner lookahead broke these) ──
+    # `all|both|half|such` are PRE-determiners, so `all the` is ONE noun phrase; and a
+    # hyphen/slash is not a word boundary for this rule, so `how-to`, `what-if`,
+    # `all-hands` and `a/b` are single words. Both were measured SILENT regressions
+    # (routed before round-17, `population=None, signal=None` after it), and each row
+    # here is the spelling that broke. The perfect branch is pinned separately because
+    # it takes the same subject expression.
+    ("is all the data archived", "ended", "is_copula"),
+    ("is all our old plans retired", "ended", "is_copula"),
+    ("is half the exports archived", "ended", "is_copula"),
+    ("is such a report archived", "ended", "is_copula"),
+    ("is both the reports archived", "ended", "is_copula"),
+    ("has all the data been archived", "ended", "is_copula"),
+    ("is the how-to guide archived", "ended", "is_copula"),
+    ("is the what-if scenario archived", "ended", "is_copula"),
+    ("is our all-hands meeting cancelled", "ended", "is_copula"),
+    ("is the a/b test cancelled", "ended", "is_copula"),
+    # …and the PRE-EXISTING twin the same `(?![-/])` repairs on an older token, which
+    # is why it is pinned here rather than left as a comment: it was refused BEFORE
+    # round 17 and nothing reddened then.
+    ("is the when-in-doubt policy archived", "ended", "is_copula"),
+    ("has any how-to guide been archived", "ended", "existence"),
 ]
 
 
