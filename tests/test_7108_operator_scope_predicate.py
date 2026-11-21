@@ -53,6 +53,15 @@ try:
     _probe._get_proj().g.query("RETURN 1")
     _probe.close()
     FALKORDB_AVAILABLE = True
+    # ⛔ ⛔ A rename or typo in a seam this probe touches must NOT be read as
+    #   "storage unavailable": that is exactly how #13899's retirement hid for a
+    #   whole wave — the probe's own `except Exception` turned an AttributeError
+    #   into a SKIP locally and a hard refusal in CI that names no retired door
+    #   (#14114 class 2, #14125). `AttributeError`/`NameError`/`TypeError` are
+    #   PROGRAMMING errors and are re-raised; only genuine transport/driver
+    #   failures fall through to the unavailable arm.
+except (AttributeError, NameError, TypeError):
+    raise
 except Exception:
     pass
 finally:

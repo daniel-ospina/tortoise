@@ -261,6 +261,15 @@ try:  # pragma: no cover - environment probe
             os.environ["TORTOISE_DB_URI"] = _old_uri
         else:
             os.environ.pop("TORTOISE_DB_URI", None)
+    # ⛔ ⛔ A rename or typo in a seam this probe touches must NOT be read as
+    #   "storage unavailable": that is exactly how #13899's retirement hid for a
+    #   whole wave — the probe's own `except Exception` turned an AttributeError
+    #   into a SKIP locally and a hard refusal in CI that names no retired door
+    #   (#14114 class 2, #14125). `AttributeError`/`NameError`/`TypeError` are
+    #   PROGRAMMING errors and are re-raised; only genuine transport/driver
+    #   failures fall through to the unavailable arm.
+except (AttributeError, NameError, TypeError):
+    raise
 except Exception:  # pragma: no cover - no docker lane here
     FALKORDB_AVAILABLE = False
 

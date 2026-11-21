@@ -678,7 +678,22 @@ SWEEP_NAMES = 66
 #: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
-SWEEP_RESIDUE = (11844, "70d6cfdcd8b769e4")
+#:
+#: RE-PINNED DOWN by #14125 → (11842, "e1caacfa6167aa7f") — the #13899-fallout sweep. The −2 is
+#: THIS LANE's own and it is the harmless direction (a residue count that FALLS cannot hide a new
+#: untyped reference), but it is named rather than absorbed:
+#:   * `create_point (unexpected span)` 2 → 0. Both rows were
+#:     `tools/measure_13436_write_costs.py`'s two arm-2 "control" shapes, which still called the
+#:     RETIRED public `sdk.create_point(…)` — the arm could not run at all, because `__getattr__`
+#:     refuses the name. Re-pointed to the private seam `sdk._create_point(…)`, matching the
+#:     `point_ns` rows beside them, which is also what removed the two rows: the attribute is no
+#:     longer in the rename map, so it is no longer counted as residue.
+#: ⛔ ATTRIBUTED BY MEASUREMENT, not arithmetic: the row multisets were derived on `origin/main`
+#: (`e0accb8fe6`, a detached worktree) and on this tree with the SAME walk, then diffed — that one
+#: row, 2 → 0, is the ONLY difference, and 11844 − 2 = 11842 is a cross-check of the measurement,
+#: never its evidence. Both moves are downward, and `typed references still pointing at a public
+#: name: 0` on this tree, so no SDK-typed reference was legitimised by the re-cut.
+SWEEP_RESIDUE = (11842, "e1caacfa6167aa7f")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
