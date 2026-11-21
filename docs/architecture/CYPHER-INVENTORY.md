@@ -983,11 +983,10 @@ them. §1's `rg` reconciliation is re-measured at this tree (door **1,640 / 111*
 **2,376 / 149**, bare **1,646 / 112**), and Appendix A is regenerated with `--markdown` at this head
 — the two new files' six rows are in it, so a reader can resolve every one.
 
-
 ⛔ **RE-CUT AGAIN at the merge with `#14068` (main `2fe01fc775`), and the numbers above are HISTORY,
-not this tree's.** Both parents' records stay (they are each true of their own tree); the pins below
-are what `--repin`'s equivalent — `cypher_inventory.py --json` — prints on the MERGED tree, and the
-merged tree is a THIRD tree:
+not this tree's.** Both parents' records stay (they are each true of their own tree); the figures in
+this table are what `--repin`'s equivalent — `cypher_inventory.py --json` — printed on the tree THIS
+MERGE resolved to, which is a THIRD tree:
 
 | figure | this tree | what moved it |
 |---|---|---|
