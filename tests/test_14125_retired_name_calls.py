@@ -1324,8 +1324,11 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # a legitimate probe. The node is skipped and the ascent continues outward.
             # ⛔ EXCEPT ITS TYPE PARAMETERS, WHICH REACH ONLY THE PARTS OF THE HEADER THAT
             # LIVE IN THE TYPE-PARAMETER SCOPE. PEP 695 gives a header THREE scopes, and
-            # only one of them can see the list's own names — measured on 3.12.3:
-            #   * TYPE-PARAMETER scope: the `bound`/`default_value` of the list itself, a
+            # only one of them can see the list's own names — measured on 3.12.3, and the
+            # list is tagged where a member is newer than that interpreter:
+            #   * TYPE-PARAMETER scope: the `bound` of the list itself (and its PEP 696
+            #     `default_value`, which is a 3.13 SyntaxError here, so it is routed — never
+            #     measured — by the whole `type_params` child), a
             #     parameter/return ANNOTATION, a class BASE and a class KEYWORD. Here a
             #     type parameter named after the import shadows it — `def f[T, S: T]()`
             #     gives `f.__type_params__[1].__bound__ is T`, and in
