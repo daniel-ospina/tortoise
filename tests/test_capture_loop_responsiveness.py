@@ -40,6 +40,7 @@ import os
 import threading
 import time
 from contextlib import suppress
+from pathlib import Path
 
 import httpx
 import pytest
@@ -96,6 +97,8 @@ STALL_START_WAIT_S = 60.0
 # tracked defect — measured at ~4.75s for a max-size 500-turn capture (#3086)
 # — and is deliberately not what this file measures: these tests pin the
 # extraction (unbounded, provider-dependent) and the liveness-pool isolation.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _CONV = [
     {"role": "user",
@@ -2853,6 +2856,23 @@ _PRE_EXISTING_OFFLOAD_LEGS = {
 _SESSION_ALIVE = "MATCH (s:Session {id:$sid}) RETURN count(s)"
 
 
+def _is_a_pre_existing_offload(cypher: str) -> bool:
+    """True when the statement belongs to a leg that ALREADY ran off the loop.
+
+    ⛔ THE EXEMPTION WAS DECLARED AND NOTHING CONSUMED IT (#14086 review, P2).
+    ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's statements,
+    which emit some of this file's tail needles (``SET s.capture_ok=$ok``) on
+    ``asyncio_0`` BY DESIGN — a pre-existing offload, not a tail leg. A
+    prohibition that matches the needle alone therefore accuses the leg that was
+    already fixed; the declaration has to be consulted where the verdict is
+    computed, or it is bookkeeping that reads as protection.
+
+    It is a SUBSTRING test for the same reason prohibition is: the probe's query
+    is assembled around these fragments and its exact spelling moves.
+    """
+    return any(needle in cypher for needle in _PRE_EXISTING_OFFLOAD_LEGS)
+
+
 class _SessionAliveAnswered:
     """The `_session_alive` probe's own result, answered without a graph read.
 
@@ -2942,6 +2962,7 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
     offenders = [
         f"{label}: {c[:110]}"
         for c in on_loop
+        if not _is_a_pre_existing_offload(c)
         for needle, label in _CAPTURE_TAIL_STATEMENTS.items()
         if needle in c
     ]
@@ -3029,6 +3050,17 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
 #:     (`tests/test_hosted_api.py:3998`).
 #:     Making the fixture reach it needs the extractor stub replaced with a
 #:     realistic extraction, which is a fixture redesign this change does not carry.
+#:
+#: ⛔ AND NOT EVERY TAIL LEG CAN BE A NEEDLE AT ALL. The receipt write
+#: (`_update_onboarding_state`, the jsonb CAS + keyed MERGEs the handler's own
+#: comment calls out) keys on an OPERATIONAL field, so it routes to the jsonb
+#: compare-and-set and emits NO Cypher — the `MERGE (n:OnboardingState …)` needle
+#: beside it is satisfied by a DIFFERENT writer, which is why this table read
+#: green over an unwatched third leg (#14086 review, P2). No needle can be added
+#: for it: it is watched by a RECORDER instead
+#: (`test_the_receipt_write_runs_on_the_capture_pool`), on the seam's own
+#: calling thread. Same reason `_PRE_EXISTING_OFFLOAD_LEGS` is consulted by
+#: `_is_a_pre_existing_offload` rather than left as a declaration.
 _TAIL_MUST_BE_ISSUED = {
     k: v for k, v in _CAPTURE_TAIL_STATEMENTS.items()
     if k not in ("s.entity_links_attempted", "n.posterior_alpha, n.ep_alpha")
@@ -3187,3 +3219,234 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins
     assert resp.status_code == 200, resp.text[:300]
     _assert_the_sweep_never_runs_on_the_loop(
         records, arm="re-check (21685)", alive_probes=2)
+
+
+# ── the DISPATCH itself can fail, and it is fail-open ───────────────────────
+
+def test_a_shut_down_capture_pool_is_fail_open_and_not_an_exception():
+    """⛔ A FAILURE MODE THAT DID NOT EXIST WHILE THE LEG WAS INLINE (#14086 review, P2).
+
+    ``_submit_off_loop`` calls ``executor.submit(...)`` IN THE CALLING TASK, so it
+    raises ``RuntimeError`` once the pool is shut down. Inline, the receipt block's
+    four ``_run_off_loop`` awaits could not fail that way — and the block's own
+    promises are that the response still 200s on a committed capture and that a
+    sweep failure never 500s it. ``_run_off_loop_fail_open`` is the arm that keeps
+    those promises now that a dispatch can fail.
+
+    Non-vacuity: the second half is the same pool through the PLAIN seam, which
+    raises — i.e. the exception the arm exists to absorb, demonstrated rather than
+    asserted.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import tortoise.hosted_api as ha_mod
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    pool.shutdown(wait=True)
+
+    out = asyncio.run(
+        ha_mod._run_off_loop_fail_open(lambda: "done", executor=pool))
+    assert out is ha_mod._DISPATCH_FAILED, (
+        "a failed DISPATCH must be a sentinel the arm can choose a direction "
+        f"from, not a value — got {out!r}")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(ha_mod._run_off_loop(pool, lambda: "done"))
+
+
+def test_a_failed_receipt_probe_dispatch_never_500s_a_committed_capture(
+        client, monkeypatch):
+    """The receipt's probe arms are fail-open when their own DISPATCH fails.
+
+    Both ``_session_alive`` probe sites are awaited with ``try``-less
+    ``_run_off_loop`` in the pre-fix body, which turns a shut-down capture pool —
+    a state that can only exist AFTER this change moved them off the loop — into
+    a 500 on a capture whose writes already committed. A failed probe reads as
+    "the session is alive" (the same direction ``_session_alive`` takes on its own
+    failed READ), the receipt is retained, and the failure is announced in
+    ``warnings`` ONCE PER SITE.
+
+    Non-vacuity: reverting either site to a bare ``await _run_off_loop(...)``
+    drops its warning and reds the count below (measured both ways).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    real = ha_mod._run_off_loop_fail_open
+
+    async def _dispatch_fails_for_the_receipt_probes(fn, /, *args, **kwargs):
+        if getattr(fn, "__name__", "") in ("_session_alive",):
+            return ha_mod._DISPATCH_FAILED
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_run_off_loop_fail_open",
+                        _dispatch_fails_for_the_receipt_probes)
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    require_answered(resp, what="POST /v1/sessions answered (failed-dispatch arm)")
+    assert resp.status_code == 200, (
+        "a capture whose probe could not be DISPATCHED 500'd — the arm is not "
+        f"fail-open: {resp.text[:300]}")
+    warnings = resp.json().get("warnings") or []
+    dispatch_warnings = [w for w in warnings if "could not be dispatched" in w]
+    # ⛔ TWO sites, and each says so: the pre-check and the post-write re-check
+    # are separate fail-open arms (the same reason the tail test counts the
+    # `_SESSION_ALIVE` statement instead of merely finding it). Asserting the
+    # COUNT is what makes this row discriminating per site — a revert of either
+    # one leaves a single warning and reds this assertion.
+    assert len(dispatch_warnings) == 2, (
+        "the receipt's two probe arms must EACH report a failed dispatch, so "
+        "neither can be reverted to a bare `await _run_off_loop(...)` silently "
+        f"(saw {len(dispatch_warnings)}: {dispatch_warnings})")
+
+
+# ── the pooled checkpoint must not build a store path (#7500) ───────────────
+
+def test_the_org_projection_is_resolved_on_the_loop_not_in_the_pooled_checkpoint(
+        monkeypatch):
+    """``_make_sdk`` must not run in a POOLED worker (``#7500``).
+
+    The first-capture checkpoint closure runs on ``_CAPTURE_EXECUTOR``, and it
+    called ``_maybe_apply_completion(org_id)``, which resolves the projection
+    itself: ``_org_proj`` → ``_org_sdk`` → ``_org_sdk_from_name`` → ``_make_sdk``.
+    ``_org_sdk_from_name``'s docstring states the rule this crossed, verbatim —
+    *"built in a POOLED worker thread that path comes from the thread's stale
+    inherited test-module stamp once the pool reuses it — the job then writes to a
+    store the test's reader never looks at"* — and two other sites still split the
+    READ off-loop for exactly that reason.
+
+    Non-vacuity: this row reds the moment ``_maybe_apply_completion`` stops
+    honouring a supplied ``proj`` (it calls ``_org_proj``, which raises here).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    # The gate eval returns False for an org with no onboarding node, without
+    # touching the projection at all — which isolates the question this row asks.
+    monkeypatch.setattr(ha_mod._os, "read_onboarding_node",
+                        lambda proj, org_id: None)
+
+    def _forbidden(_org_id):
+        raise AssertionError(
+            "_maybe_apply_completion resolved `_org_proj` — that builds an SDK "
+            "(`_make_sdk`) and this call is reachable from a POOLED worker, "
+            "where the store path comes from a stale inherited stamp (#7500)")
+
+    monkeypatch.setattr(ha_mod, "_org_proj", _forbidden)
+    assert ha_mod._maybe_apply_completion(TEST_ORG_ID, proj=object()) is False
+
+    # …and a caller that supplies nothing keeps the historical shape, so the
+    # seam is additive rather than a behaviour change for the other three sites.
+    resolved: list[str] = []
+
+    def _record(org_id):
+        resolved.append(org_id)
+        return object()
+
+    monkeypatch.setattr(ha_mod, "_org_proj", _record)
+    assert ha_mod._maybe_apply_completion(TEST_ORG_ID) is False
+    assert resolved == [TEST_ORG_ID], (
+        "passing no `proj` must still resolve one — the seam is additive")
+
+
+def test_the_first_capture_checkpoint_hands_its_projection_in():
+    """The wiring half: the closure must PASS the projection, not just support it.
+
+    A seam nobody uses protects nothing, and the closure is the one caller that
+    runs on the pool. Parsed rather than grepped so a reflowed comment cannot
+    satisfy it.
+    """
+    import ast
+
+    src = (_REPO_ROOT / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+    keyword_sets = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == "_first_capture_checkpoint":
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call)
+                        and getattr(sub.func, "id", "") == "_maybe_apply_completion"):
+                    keyword_sets.append({kw.arg for kw in sub.keywords})
+    assert keyword_sets, (
+        "`_first_capture_checkpoint` no longer calls `_maybe_apply_completion` "
+        "— re-point this pin at whatever replaced it")
+    assert all("proj" in kws for kws in keyword_sets), (
+        "the pooled checkpoint resolved its own projection instead of being "
+        "handed one — `_make_sdk` must not construct a store path on a pooled "
+        f"worker (#7500); keyword sets: {keyword_sets}")
+
+
+def test_the_pre_existing_offload_exemption_is_actually_consumed():
+    """A declaration the verdict does not read is bookkeeping, not a gate.
+
+    ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's statements,
+    which emit some tail needles (``SET s.capture_ok=$ok``) on ``asyncio_0`` BY
+    DESIGN. Before this pin, nothing consulted it — the prohibition matched the
+    needle alone and would have accused the leg that was already off the loop
+    (#14086 review, P2). Both directions are pinned: an exempt statement is NOT
+    reported, and the same statement without the exempt fragment IS.
+    """
+    exempt_key = next(iter(_PRE_EXISTING_OFFLOAD_LEGS))
+    tail_needle = "SET s.capture_ok=$ok"
+    assert tail_needle in _CAPTURE_TAIL_STATEMENTS, (
+        "this row picks a needle that must be a tail statement — re-point it")
+
+    exempt = f"MATCH (s:Session {{id:$sid}}) RETURN {exempt_key} {tail_needle}"
+    assert _is_a_pre_existing_offload(exempt), (
+        "the declared exemption was not recognised — the leg-62 probe's own "
+        "statement would be accused by the prohibition")
+    assert not _is_a_pre_existing_offload(f"MERGE (n) {tail_needle}"), (
+        "a tail statement with no pre-existing-offload fragment must NOT be "
+        "exempted — an over-broad exemption is a hole in the prohibition")
+
+    # …and EVERY declared exemption key is recognised, so a new key cannot join
+    # the dict without being consumed.
+    for key in _PRE_EXISTING_OFFLOAD_LEGS:
+        assert _is_a_pre_existing_offload(f"MATCH (x) RETURN {key}"), (
+            f"_PRE_EXISTING_OFFLOAD_LEGS[{key!r}] is declared but not consumed")
+
+
+def test_the_receipt_write_runs_on_the_capture_pool(client, monkeypatch):
+    """The receipt write is a THIRD tail leg, and it is not watched by any needle.
+
+    ⛔ WHY NO NEEDLE CAN SEE IT (#14086 review, P2). The receipt key is an
+    OPERATIONAL key, so the router routes the write to its jsonb compare-and-set
+    rather than to Cypher: the leg emits no statement of its own, and the
+    ``MERGE (n:OnboardingState {org_id: $org_id})`` needle in
+    ``_CAPTURE_TAIL_STATEMENTS`` is satisfied by a DIFFERENT writer. Presence and
+    prohibition are therefore both silent about it, and a test that reads green
+    while this leg sits on the loop is the exact shape ``_TAIL_MUST_BE_ISSUED``
+    exists to prevent.
+
+    So the leg is watched by a RECORDER rather than a needle: the seam is the
+    module global the block passes to ``_run_off_loop``, and its calling THREAD is
+    the observable. Non-vacuity: inlining either receipt call
+    (``await _run_off_loop(_CAPTURE_EXECUTOR, _update_onboarding_state, …)`` →
+    a direct call) records ``MainThread`` and reds this row.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    seen: list[str] = []
+    real = ha_mod._update_onboarding_state
+
+    def _record(*args, **kwargs):
+        # The receipt/clear shape only: `_echo` plus the single receipt key. The
+        # other `_update_onboarding_state` callers (onboarding flows) are not
+        # this leg and are reached on the loop by design.
+        if kwargs.get("_echo") is False and len(kwargs) == 2:
+            seen.append(threading.current_thread().name)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_update_onboarding_state", _record)
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    require_answered(resp, what="POST /v1/sessions answered (receipt-thread arm)")
+    assert resp.status_code == 200, resp.text[:300]
+
+    assert seen, (
+        "the receipt write never ran — this row watches a leg that did not "
+        "execute, so it would prove nothing (the capture path changed?)")
+    on_loop = [name for name in seen if not str(name).startswith(_CAPTURE_POOL_PREFIX)]
+    assert not on_loop, (
+        "the capture receipt write ran on "
+        f"{on_loop} — it is a jsonb CAS + keyed MERGEs and parks the single "
+        "uvicorn worker, which every concurrent `/v1/search` pays as "
+        "`pre_handler` (#10893). No statement needle can see this leg, which is "
+        "why it is recorded here")

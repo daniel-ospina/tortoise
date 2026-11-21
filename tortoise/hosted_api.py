@@ -527,6 +527,43 @@ async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
     return await asyncio.wrap_future(_submit_off_loop(executor, fn, *args, **kwargs))
 
 
+#: Returned by :func:`_run_off_loop_fail_open` when the leg did not RUN at all —
+#: a value no offloaded leg in this module can legitimately return, so an arm can
+#: tell "the work failed" from "the work never started" without a second flag.
+_DISPATCH_FAILED = object()
+
+
+async def _run_off_loop_fail_open(fn, /, *args, executor=None, **kwargs):
+    """`_run_off_loop` on the capture pool, FAIL-OPEN when the leg cannot dispatch.
+
+    ⛔ THIS FAILURE MODE IS NEW, AND IT DID NOT EXIST INLINE (#14086 review, P2).
+    ``_submit_off_loop`` calls ``executor.submit(...)`` IN THE CALLING TASK, so it
+    raises ``RuntimeError`` once the pool is shut down (``_dispose_capture_executor``
+    runs at thread shutdown) and ``BrokenThreadPool`` when a worker cannot start —
+    neither of which a bare synchronous call could raise. Four arms in the capture
+    receipt block await the offload with no ``try``, while the block's own promises
+    are that the response still 200s on a committed capture (*"compensate (the
+    response still 200s; the capture itself was valid)"*) and that *"a sweep
+    failure never 500s the committed capture"* (``_sweep_orphaned_writes``).
+
+    Returns :data:`_DISPATCH_FAILED` instead of raising, so every arm keeps its own
+    fail-open DIRECTION (the receipt's probes read a failure as "alive" — the same
+    direction ``_session_alive`` itself takes on a failed read; a sweep failure is a
+    warning) without four copies of one ``try``/``except``.
+
+    Only for legs that are NON-FATAL by contract: an escaped worker exception is
+    swallowed here too, which is what "fail-open" means for these two closures.
+    """
+    try:
+        return await _run_off_loop(
+            _CAPTURE_EXECUTOR if executor is None else executor,
+            fn, *args, **kwargs)
+    except Exception:
+        _logger.exception(
+            "capture off-loop dispatch failed (fail-open): %s", fn)
+        return _DISPATCH_FAILED
+
+
 def _capture_slot_decrement() -> None:
     """Return one reserved capture slot (capacity only — see _capture_session_release).
 
@@ -21624,7 +21661,23 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # compensation and fail-closed warnings are byte-identical. ⛔ The ATOMICITY
     # is NOT — an awaited thread is a scheduling point, so the pre-check → PATCH
     # window is genuinely open; the post-write re-check below is exactly its arm.
-    if await _run_off_loop(_CAPTURE_EXECUTOR, _session_alive):
+    # ⛔ AND THE DISPATCH IS A NEW FAILURE MODEL, so it gets its own arms:
+    # `_submit_off_loop` submits IN THE CALLING TASK and raises once the pool is
+    # shut down (`_dispose_capture_executor`, at thread shutdown) or a worker
+    # cannot start (`BrokenThreadPool`) — neither could happen to an inline call.
+    # Every await below therefore goes through `_run_off_loop_fail_open`, which
+    # reads a failed dispatch as "alive" for the probes (the same direction
+    # `_session_alive` already takes on a failed read) and as a warning for the
+    # sweep, so a COMMITTED capture still 200s (#14086 review, P2).
+    alive_now = await _run_off_loop_fail_open(_session_alive)
+    if alive_now is _DISPATCH_FAILED:
+        # FAIL-OPEN IN THE SAME DIRECTION AS A FAILED READ: the receipt follows
+        # the committed capture, and the next delete's reconcile self-heals.
+        extraction_warnings.append(
+            "capture receipt probe could not be dispatched (fail-open: the "
+            "receipt is retained)")
+        alive_now = True
+    if alive_now:
         try:
             # #4625: write-only — the return is discarded here, and this is
             # the per-capture hot path (see ``_update_onboarding_state``).
@@ -21644,7 +21697,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             extraction_warnings.append(
                 "session capture receipt write failed (non-fatal)")
         else:
-            if not await _run_off_loop(_CAPTURE_EXECUTOR, _session_alive):
+            still_alive = await _run_off_loop_fail_open(_session_alive)
+            if still_alive is _DISPATCH_FAILED:
+                # A failed probe must NOT be read as "the session is gone":
+                # compensation on a failed dispatch would delete a live
+                # receipt. Retain it, and say so.
+                extraction_warnings.append(
+                    "capture receipt re-check could not be dispatched "
+                    "(fail-open: the receipt is retained)")
+                still_alive = True
+            if not still_alive:
                 # The delete won between the pre-check and the receipt PATCH
                 # — compensate (the response still 200s; the capture itself
                 # was valid). Bucket-aware like the delete-side recompute:
@@ -21682,7 +21744,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     extraction_warnings.append(
                         "session deleted during capture — capture receipt "
                         "retained (sessions remain in this harness bucket)")
-                await _run_off_loop(_CAPTURE_EXECUTOR, _sweep_orphaned_writes)
+                swept = await _run_off_loop_fail_open(_sweep_orphaned_writes)
+                if swept is _DISPATCH_FAILED:
+                    extraction_warnings.append(
+                        "capture orphan sweep could not be dispatched "
+                        "(non-fatal)")
     else:
         # Session deleted mid-capture before the receipt write — never land
         # an orphan receipt (the mutation was already removed). The capture
@@ -21691,7 +21757,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # (exact-ids; best-effort).
         extraction_warnings.append(
             "session deleted during capture — capture receipt not recorded")
-        await _run_off_loop(_CAPTURE_EXECUTOR, _sweep_orphaned_writes)
+        swept = await _run_off_loop_fail_open(_sweep_orphaned_writes)
+        if swept is _DISPATCH_FAILED:
+            extraction_warnings.append(
+                "capture orphan sweep could not be dispatched (non-fatal)")
         # #3520: the unconditional clear that used to sit HERE is gone as well.
         # The per-harness `last_error` is written ONCE, from the capture
         # outcome, above — clearing it here as well would be a second writer of
@@ -21733,7 +21802,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             created = bool(_os.write_completed_step(
                 proj, org["org_id"], "capture-disclosed",
                 status_from_mirror=legacy_mirror)["created"])
-            _maybe_apply_completion(org["org_id"])
+            # ⛔ `proj` is handed in, not resolved here: this closure runs on a
+            # POOLED worker, where `_make_sdk` must not construct a store path
+            # (#7500 — see `_maybe_apply_completion`'s docstring).
+            _maybe_apply_completion(org["org_id"], proj=proj)
             return created
 
         first_capture = await _run_off_loop(
@@ -39129,15 +39201,26 @@ def _org_proj(org_id: str):
     return _org_sdk(org_id)._get_proj()
 
 
-def _maybe_apply_completion(org_id: str) -> bool:
+def _maybe_apply_completion(org_id: str, proj=None) -> bool:
     """Post-write gate eval (scope pin 12): reads the fresh node + step
     edges, evaluates the fork-aware gate, and writes status 'complete' when
     satisfied. MONOTONIC: complete can never regress; a grandfathered org's
     first FLOW write evals to no-op (status stays complete — never
     re-onboarded). Returns True when the org transitioned to complete
-    (the caller invalidates the MCP TTL cache)."""
+    (the caller invalidates the MCP TTL cache).
+
+    ⛔ ``proj`` IS SUPPLIED BY THE CAPTURE CHECKPOINT, and it is load-bearing
+    (#14086 review, P2). Resolving it here means ``_org_proj`` → ``_org_sdk`` →
+    ``_make_sdk``, and ``_org_sdk_from_name``'s own docstring forbids building
+    one in a POOLED worker: the store path comes from the worker thread's stale
+    inherited stamp once the pool reuses it, so the job writes to a store the
+    reader never looks at (``#7500``; measured as 3 reds under ``#4645``). The
+    checkpoint closure RUNS on a pooled worker, so the caller — on the loop —
+    resolves the projection and hands it in. Left as ``None`` the historical
+    behaviour is unchanged for every other caller."""
     try:
-        proj = _org_proj(org_id)
+        if proj is None:
+            proj = _org_proj(org_id)
         node = _os.read_onboarding_node(proj, org_id)
         if node is None:
             return False
@@ -51085,7 +51168,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 202 tracked files (752 distinct
+# ABSOLUTE line number from 202 tracked files (753 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
