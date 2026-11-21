@@ -272,7 +272,13 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 result = resident_pin.pin(
                     graph, args.key,
-                    label=args.label or "Point", key_prop=args.key_prop or "id",
+                    # ⛔ `is None`, NEVER `or`, for an IDENTIFIER too: `--label "$LABEL"` with
+                    # `$LABEL` unset was silently rewritten to `Point`, so the caller was
+                    # answered about a population they never named — the same falsy-default
+                    # substitution the numeric flags below forbid. `""` now reaches
+                    # `bare_identifier`, which refuses it.
+                    label=(args.label if args.label is not None else "Point"),
+                    key_prop=(args.key_prop if args.key_prop is not None else "id"),
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:
@@ -390,7 +396,8 @@ def main(argv: list[str] | None = None) -> int:
                     # nothing and the record complement reported the whole population as
                     # outside, with `complete=True` and exit 0. `None` hands the decision
                     # to the module, which also REFUSES a non-contract property.
-                    label=args.label or "Point", key_prop=args.key_prop,
+                    label=(args.label if args.label is not None else "Point"),
+                    key_prop=args.key_prop,
                     # ⛔ `is None`, NEVER `or`: `--max-keys 0` was silently rewritten to
                     # the DEFAULT — 200,000, the WIDENING direction — which also made the
                     # module's own floor refusal ("a bound of zero cannot read any key",

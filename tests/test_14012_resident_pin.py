@@ -961,3 +961,52 @@ def test_the_weak_assertions_are_now_behavioural():
     assert gate(Candidate(node_id=1, key="p1", population=POPULATION)) is True  # closure
     assert gate(Candidate(node_id=2, key="zz", population=POPULATION)) is False
     assert gate(Candidate(node_id=3, key=None, population=POPULATION)) is False
+
+
+# ── review round 6: the documented correctness rule that had no row ──────────────
+class _LabelledGraph(_FakeGraph):
+    """A fake that HONOURS the label in `OPTIONAL MATCH (n)--(m:{label})`.
+
+    The base fake answers every neighbour regardless of label, so it cannot see the
+    difference between the label-scoped pattern and the unscoped one — which is exactly
+    why the closure's scoping had no coverage.
+    """
+
+    def query(self, statement: str, params=None):
+        if "OPTIONAL MATCH (n)--(m:" in statement:
+            self.statements.append(statement)
+            label = statement.split("OPTIONAL MATCH (n)--(m:", 1)[1].split(")", 1)[0]
+            rows = []
+            for key in (params or {})["keys"]:
+                node_id = self.id_of(key)
+                if node_id is None:
+                    continue
+                nbrs = {i for i in self.neighbours(node_id)
+                        if self.nodes[i].get("label", "Point") == label}
+                rows.append([key, sorted(nbrs),
+                             [self.nodes[i].get("id") for i in sorted(nbrs)]])
+            return _Result(rows)
+        return super().query(statement, params=params)
+
+
+def test_the_closure_is_label_scoped_so_a_foreign_labels_neighbour_is_not_counted():
+    """§7.1 and `read()` both call the label-scoped neighbour a MEASURED correctness fix.
+
+    ⛔ `OPTIONAL MATCH (n)--(m)` collects a neighbour in ANY label, so a `:Point` joined to
+    an `:Object` carrying the same key property was counted into the closure AND gated by
+    that key — an inflated footprint (false budget refusals) over nodes this control cannot
+    protect. Reverting `(m:{label})` -> `(m)` at both sites left every suite green, so the
+    rule was documented in two places and enforced by nothing.
+    """
+    g = _LabelledGraph()
+    g.add("p0")
+    g.add("o1", extra={"label": "Object"})
+    g.link("p0", "o1")
+    g.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+
+    scoped = read(g, budget=PinBudget(max_nodes=1))
+    assert scoped.closure_size == 1, (
+        "the closure counted the :Object neighbour — the label scope is gone, and a "
+        "budget computed from this footprint is inflated"
+    )
+    assert scoped.over_budget() is None

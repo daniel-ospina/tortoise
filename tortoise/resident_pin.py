@@ -669,6 +669,17 @@ def pin(
     declaration is the worst of the three outcomes: the user is told the control worked,
     the budget says otherwise, and nothing in the state distinguishes "you asked for ten
     and got six" from "you asked for six".
+
+    ⛔ PASSING ``budget=`` IS THE LOW-LEVEL DOOR: a ``PinBudget`` built directly may carry no
+    window (its ``window_nodes`` is optional), and a cap that cannot be shown to fit the
+    fast layer is NOT a cap — ``PinBudget.resolve()`` refuses that pair, and this argument
+    bypasses it. What holds either way is the INVARIANT, and it is the sweep's: a
+    declaration whose closure exceeds the window-derived cap refuses the pass rather than
+    letting pins take the cache (measured by
+    ``test_a_declaration_pinned_under_an_unbounded_budget_refuses_the_sweep_not_the_eviction``).
+    So the failure mode of this door is a SAFE one — a pin set every sweep refuses — which
+    is why the door stays open: ``PinBudget(max_nodes=…)`` is how ~30 tests and any embedder
+    spell a budget, and refusing it here would be an API break for a fail-closed state.
     """
     resolved = budget
     if resolved is None:

@@ -778,3 +778,59 @@ def test_unpin_needs_no_budget_even_when_the_cap_cannot_be_checked(
     wired.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
     assert resident.main(["unpin", *BASE, "--key", "p0"]) == resident.EXIT_OK
     assert PINS_META_KEY not in wired.meta
+
+
+# ── review round 6: the identifier twin of the falsy-default bug, and the low door ──
+def test_an_empty_label_is_refused_not_silently_defaulted_to_Point(wired, capsys):
+    """`--label "$LABEL"` with `LABEL` unset used to MEASURE `Point` and report OK.
+
+    ⛔ `args.label or "Point"` is the same falsy-default substitution the numeric flags are
+    documented against fifteen lines above: the caller is answered about a population they
+    never named. `\"\"` must reach `bare_identifier`, which refuses it.
+    """
+    code = resident.main(["pin", *BASE, "--key", "p0", "--window-nodes", "1000",
+                          "--label", ""])
+    assert code == resident.EXIT_REFUSED
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "REFUSED"
+    assert "bare" in out["reason"] or "identifier" in out["reason"], out["reason"]
+    assert PINS_META_KEY not in wired.meta, "a refused pin wrote a declaration"
+
+
+def test_outside_with_an_empty_label_is_a_usage_error_not_a_Point_measurement(
+        wired, capsys, monkeypatch):
+    """The `outside` half of the same door: `\"\"` is not a record label, so it is usage."""
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                       "org_a", "--graph-id", "g_1", "--label", "", "--window-nodes",
+                       "1000"])
+    assert exc.value.code == resident.EXIT_USAGE
+
+
+def test_a_declaration_pinned_under_an_unbounded_budget_refuses_the_sweep_not_the_eviction(
+        sweep, capsys, tmp_path):
+    """The invariant behind `PinBudget`'s low door is the SWEEP's, and it is fail-closed.
+
+    ⛔ `pin(budget=PinBudget(max_nodes=…))` bypasses `resolve()`, so a budget can be
+    declared with no window to bound it. What must hold regardless is that the sweep
+    resolves its OWN budget from the real window and REFUSES rather than deleting a pinned
+    node — the failure is "your pin set is unusable", never "your pins were swept". That
+    invariant had no row.
+    """
+    from tortoise.resident_pin import PinBudget
+
+    graph, calls = sweep
+    # A huge cap with no window: the declaration is legal, the cap proves nothing.
+    graph.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "2"))
+    assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
+    assert calls == [], "the sweep reached `evict` for a pin set its own budget refuses"
+
+    # And the sweep's refusal is about the CAP, not about an unreadable declaration.
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "REFUSED"
+    assert "pinned closure" in out["reason"] or "budget" in out["reason"], out["reason"]
+    # The low door still constructs the value it always did (an API constant, not a claim).
+    assert PinBudget(max_nodes=10).window_nodes is None

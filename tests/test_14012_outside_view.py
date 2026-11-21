@@ -673,3 +673,31 @@ def test_complete_is_false_when_the_RESIDENT_count_alone_fails():
     assert view.resident is None
     assert view.complete is False
     assert "resident figure" in view.reason
+
+
+def test_an_absent_resident_count_cannot_license_the_whole_record_as_outside():
+    """F7 — the guard against "whole population as outside" was disarmed by its own case.
+
+    ⛔ `if not keys and (resident_total or 0) > 0` asks the graph "did you claim
+    residents?" — and `resident_total` is exactly `None` when that read RAISED. So with an
+    empty key read AND a failed count the guard was False, the complement was taken over an
+    empty set, and `SPAN_SQL` returned the ENTIRE record as `outside`: a population count
+    on display, which is the one shape this module says it never produces. `complete=False`
+    and exit 4 do stop the CLI, but `headline` still renders the number.
+    """
+    class _NoCountNoKeys(_Graph):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.statements = []
+
+        def query(self, statement, params=None):
+            if "RETURN count(n)" in statement:
+                raise RuntimeError("count blip")
+            return super().query(statement, params=params)
+
+    rows = _record_rows(["p0", "p1", "p2"])
+    view = _view(_NoCountNoKeys(), _Conn(rows))
+    assert view.resident is None
+    assert view.outside is None, "an unmeasured resident set produced a whole-population count"
+    assert view.complete is False
+    assert "count read failed" in view.reason
