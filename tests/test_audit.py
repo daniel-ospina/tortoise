@@ -181,6 +181,19 @@ def test_check5_naive_impl_word_boundary(sdk):
     assert ch["count"] == 1  # 'tornado' must NOT match any word boundary
     assert ch["samples"][0]["node_id"] == "op1"
     assert "verify semantic contradiction" in ch["samples"][0]["fix"].lower()
+    # ⛔ THE REPAIR MUST NAME THE LIVE DOOR (#11609 P7 review, P2). `fix` is not prose — it is a
+    # fresh statement a caller may paste and run, so a RETIRED MCP name in it is a call that no
+    # longer serves. This block used to emit `tortoise_create_operator(...)`, which this batch
+    # retires; reverting just that word left this whole file GREEN, which is why the assertion
+    # is here rather than in a note. Both halves are asserted: the retired name is ABSENT (a
+    # mutant that restores it reds) and the live verb is present WITH the one-element LIST that
+    # selects the operator arm — a scalar target would take the bare-edge arm and mint a
+    # different write for the same arguments (the #8447 shape).
+    fix_text = ch["samples"][0]["fix"]
+    assert "tortoise_create_operator" not in fix_text, fix_text
+    assert "tortoise_link_entities('NAND'" in fix_text, fix_text
+    assert "['t1']" in fix_text, (
+        f"the repair must pass the target as a LIST so it selects the OPERATOR arm: {fix_text!r}")
 
 
 def test_check6_mitigation_recommended_uses_mitigated_by(sdk):
