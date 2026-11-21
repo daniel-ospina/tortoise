@@ -927,31 +927,31 @@ LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers
 it must not be able to mask whether the harness can fail at all — which is exactly what it did before
 the order was fixed (`#13098` review F8).
 
-<!-- cypher-inventory:sites = 1318 -->
+<!-- cypher-inventory:ast_door_calls = 1580 -->
+<!-- cypher-inventory:candidates = 586 -->
 <!-- cypher-inventory:files = 100 -->
 <!-- cypher-inventory:files_scanned = 303 -->
-<!-- cypher-inventory:unresolved = 103 -->
-<!-- cypher-inventory:candidates = 586 -->
+<!-- cypher-inventory:non_cypher_door_calls = 262 -->
+<!-- cypher-inventory:partial = 318 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
-<!-- cypher-inventory:shape_ddl = 17 -->
-<!-- cypher-inventory:shape_ep = 32 -->
-<!-- cypher-inventory:shape_fulltext = 2 -->
-<!-- cypher-inventory:shape_plain = 868 -->
-<!-- cypher-inventory:shape_traversal = 3 -->
-<!-- cypher-inventory:shape_unresolved = 103 -->
-<!-- cypher-inventory:shape_plain_read = 586 -->
-<!-- cypher-inventory:shape_plain_write = 282 -->
 <!-- cypher-inventory:shape_adjacency_read = 192 -->
 <!-- cypher-inventory:shape_adjacency_write = 101 -->
+<!-- cypher-inventory:shape_ddl = 17 -->
+<!-- cypher-inventory:shape_ddl_ddl = 17 -->
+<!-- cypher-inventory:shape_ep = 32 -->
 <!-- cypher-inventory:shape_ep_read = 21 -->
 <!-- cypher-inventory:shape_ep_write = 11 -->
-<!-- cypher-inventory:shape_ddl_ddl = 17 -->
-<!-- cypher-inventory:shape_traversal_read = 3 -->
+<!-- cypher-inventory:shape_fulltext = 2 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
+<!-- cypher-inventory:shape_plain = 868 -->
+<!-- cypher-inventory:shape_plain_read = 586 -->
+<!-- cypher-inventory:shape_plain_write = 282 -->
+<!-- cypher-inventory:shape_traversal = 3 -->
+<!-- cypher-inventory:shape_traversal_read = 3 -->
+<!-- cypher-inventory:shape_unresolved = 103 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 103 -->
-<!-- cypher-inventory:non_cypher_door_calls = 262 -->
-<!-- cypher-inventory:ast_door_calls = 1580 -->
-<!-- cypher-inventory:partial = 318 -->
+<!-- cypher-inventory:sites = 1318 -->
+<!-- cypher-inventory:unresolved = 103 -->
 
 ---
 
