@@ -43,13 +43,19 @@ output is in the PR body):
   above the ``include_retracted`` filter → the same test RED (`p10` is a retracted
   row the caller is never served; measuring it as read biases `f` HIGH).
 * **Record the HEAD of the scan, or a SHORTER slice, instead of the page** —
-  ``_ledger_record("Point", page[:1], …)`` or ``page[:2]`` → the same test RED,
-  which is why the served page is THREE rows starting at ``offset=1``: a one- or
-  two-row page cannot tell a truncated record from a faithful one.
-* **Gate the record on ``hasMore``** — record only when the page is not the last →
-  the same test RED, because a SECOND call takes the TAIL page: the last page is
-  served too, and leaving it unrecorded is the served-but-uncounted mass `f` must
-  not have.
+  ``_ledger_record("Point", page[:1], …)`` / ``page[:2]`` on the tag door →
+  ``test_the_caller_facing_row_paths_feed_the_ledger`` RED, which is why the served
+  tag page is THREE rows starting at ``offset=1``: a one- or two-row page cannot
+  tell a truncated record from a faithful one.
+* **Gate a record on ``hasMore``** — either door → the same test RED, because BOTH
+  doors take a SECOND, TAIL page: the last page is served too, and leaving it
+  unrecorded is the served-but-uncounted mass `f` must not have (`q5`, `p13`).
+* **Record the CLAIM pool instead of the page** — record what
+  ``_paginated_query`` scanned rather than its ``results`` → the same test RED
+  (`q1`/`q4` are in the pool and in no page), which is why the claim leg is driven
+  as ``offset=1, limit=2`` of five and not as one whole-population page.
+* **Report the page as the population** — replace the ``total``/``hasMore`` envelope
+  with ``len(results)`` → the same test RED (total 2 where the population is 5).
 * **Stop the tag accessor's own default arm recording** — delete the
   ``if _record_reads:`` hook in ``_query_points_by_tag`` →
   ``test_the_tag_accessor_default_arm_records_the_caller_arm`` RED.
@@ -396,9 +402,18 @@ def hooked_sdk(ledger, monkeypatch):
         rows: ClassVar[list] = []
 
         def query(self, cypher, params=None, **kwargs):
+            params = params or {}
             if "count(n)" in cypher:
-                return _Res([[2]])
-            return _Res([(dict(row),) for row in self.rows])
+                # The POPULATION the stub holds — not a constant. A page that is
+                # also the population cannot witness "records the page, not the
+                # pool it was sliced from".
+                return _Res([[len(self.rows)]])
+            rows = self.rows
+            if "SKIP $skip" in cypher:
+                skip = int(params.get("skip") or 0)
+                limit = params.get("limit")
+                rows = rows[skip:(skip + int(limit)) if limit is not None else None]
+            return _Res([(dict(row),) for row in rows])
 
     class _Proj:
         g = _Graph()
@@ -423,18 +438,27 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     * `list_knowledge(kind="claim")` → `_paginated_query` → ONE read event per
       returned key — no fewer (a missed record inflates the never-read mass,
       which flatters the split) and no more (a double record overstates how many
-      reads a key gets, the same class of wrong as a lost one);
+      reads a key gets, the same class of wrong as a lost one). Driven as a REAL
+      PAGE over a bigger population (`offset=1, limit=2` of five), plus a TAIL
+      call where `hasMore` is False, so a record that captures the pool the page
+      was sliced from — or is gated on `hasMore`, leaving the last page uncounted
+      — is visible (`sdk.py:30462`, envelope at `:30464`);
     * `search_knowledge(mode="tag")` → `_query_points_by_tag(_record_reads=False)`
       → ONE event for the page it SERVES: never the tag population it sliced it
       from (#7983: recording the population biases `f` HIGH, the direction that
       removes the split's saving), never a TOMBSTONE it dropped before serving
       (sdk.py:30905-30906 filters `status != "retracted"` BEFORE the slice), and
-      never the HEAD of the scan standing in for the page;
-    * `_get_point` records NOTHING — it is the internal accessor the write paths
-      use, so counting it would mark a written-but-never-read node as read.
-      (Its public spelling `get_point` is gone too: it is `_get_point` on the
-      class, and `retirement_hint` does not answer for it — a bare rename, not a
-      retirement.)
+      never the HEAD of the scan — or a shorter slice — standing in for it;
+    * `_get_point` records NOTHING **on its internal arm** (`served_out is None`,
+      `sdk.py:30567`) — the accessor the write paths use, so counting it would
+      mark a written-but-never-read node as read. ⚠️ Its OTHER arm
+      (`served_out` given — the opt-in caller-facing read, `#12941`) is not
+      driven here, so this test pins the internal arm only.
+      (Its public spelling `get_point` is not on the class at all: it is in
+      `sdk_retired.REMOVED_SDK_METHODS` like the other four, but
+      `retirement_hint` does NOT answer for it — so the interpreter's "Did you
+      mean: '_get_point'" is the only guidance a caller gets, not the registry's
+      migration hint.)
 
     The other hooked SDK paths in §17.4.6 are not exercised here, and neither are
     the two NON-SDK hooks (the session-start read, and the MCP tag tool's served
@@ -447,12 +471,24 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
     # as `unregistered` and there is no row to count on.
-    for key in ("p1", "p2", "p7", "p8", "p9", "p10", "p11", "p12", "p13"):
+    for key in (
+        "q1", "q2", "q3", "q4", "q5",
+        "p7", "p8", "p9", "p10", "p11", "p12", "p13",
+    ):
         record_stock("Point", key, nbytes=100)
 
-    graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    listed = inst.list_knowledge("claim")
-    assert [r["id"] for r in listed["results"]] == ["p1", "p2"]
+    # THE CLAIM LIST IS THE OTHER PAGED DOOR, so it is driven as a REAL PAGE over
+    # a bigger population. `q1` is skipped by `offset`, `q4` is never in a page,
+    # and the SECOND call takes the tail page — where `hasMore` is False.
+    graph.rows = [
+        {"id": "q1"}, {"id": "q2"}, {"id": "q3"}, {"id": "q4"}, {"id": "q5"},
+    ]
+    mid = inst.list_knowledge("claim", offset=1, limit=2)
+    assert [r["id"] for r in mid["results"]] == ["q2", "q3"]
+    assert mid["total"] == 5 and mid["hasMore"] is True
+    tail = inst.list_knowledge("claim", offset=4, limit=2)
+    assert [r["id"] for r in tail["results"]] == ["q5"]
+    assert tail["total"] == 5 and tail["hasMore"] is False
 
     # THE TAG SCAN CARRIES EVERY HAZARD ON PURPOSE:
     #   * `p10` is a TOMBSTONE, ahead of the page in scan order — a door that
@@ -493,12 +529,14 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     counts = {k[2]: row.read_count for k, row in folded.rows.items()}
     # `p7` stays at ZERO: `_get_point` is the internal accessor the write paths
     # use, so it must record NOTHING — if it ever starts recording, a
-    # written-but-never-read node looks read and `f` is biased HIGH. `p10` and
-    # `p11` stay at ZERO for the opposite reason — they were scanned and NOT
-    # served (a tombstone, and the one row the first page skipped). `p13` is 1
-    # even though its page had `hasMore == False`: the LAST page is served.
+    # written-but-never-read node looks read and `f` is biased HIGH. `q1`, `q4`,
+    # `p10` and `p11` stay at ZERO for the opposite reason — they were scanned
+    # and NOT served (a skipped row, a row outside every page, a tombstone, and
+    # the tag row the first page skipped). `q5` and `p13` are 1 even though
+    # their pages closed the walk (`hasMore == False`): the TAIL PAGE IS SERVED.
     assert counts == {
-        "p1": 1, "p2": 1, "p7": 0, "p8": 1, "p9": 1,
+        "q1": 0, "q2": 1, "q3": 1, "q4": 0, "q5": 1,
+        "p7": 0, "p8": 1, "p9": 1,
         "p10": 0, "p11": 0, "p12": 1, "p13": 1,
     }
     assert folded.unresolved_reads == 0
@@ -859,9 +897,10 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     only way this regresses is a caller dropping the keyword at its own call
     site — and those are named and greppable (`sdk.py:45169`, `:47358`,
     `:50681`, and `tortoise/session_continuity.py:24`). ⚠️ NOT the
-    `_tortoise_fts_query(… _record_reads=False)` sites (`sdk.py:44893`, `:50199`,
-    `:50216`, `:50655`, `:58101`, `tortoise/extractor_v2.py:2913`): that is a
-    different accessor with its own pool-versus-served rule.
+    `_tortoise_fts_query(… _record_reads=False)` sites (`sdk.py:38428`, `:44893`,
+    `:45112`, `:50199`, `:50216`, `:50655`, `:50790`, `:58101`, and
+    `tortoise/extractor_v2.py:2913`): that is a different accessor with its own
+    pool-versus-served rule.
     """
     inst, graph = hooked_sdk
     record_stock("Point", "p1", nbytes=100)
