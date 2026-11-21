@@ -763,24 +763,37 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
 _DRIFT_PIN = "ccb49741b2ec"
 
 
-def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
-    """Can this checkout resolve *rev* at all? — the ONLY "cannot run" condition below.
-
-    ⛔ SEPARATED FROM `_pin_blob_lines` ON PURPOSE. `git show <rev>:<path>` exits 128 for TWO
-    different facts: this checkout has no history (a `fetch-depth: 1` clone), and the PATH does not
-    exist at *rev*. The first is about the CHECKOUT and must SKIP, as
-    `tests/test_docs_citation_refs.py` does for `origin/main`. The SECOND is about the ARTIFACT and
-    must be graded — a module created after the pin is exactly the case a file:line census meets
-    first (this PR adds `tortoise/capacity_notice.py`), and folding it into the skip would stop
-    grading the numerator for the whole document while the message blamed CI history
-    (#14038 review, P2). The header already counts that class as "not comparable" rather than
-    hiding it, which is where such a path now lands.
-    """
+def _git_resolves(spec: str) -> bool:
+    """Does *spec* resolve in this checkout's object DB? (`<rev>^{commit}` or `<rev>:<path>`.)"""
     out = subprocess.run(
-        ["git", "rev-parse", "--verify", "-q", f"{rev}^{{commit}}"],
+        ["git", "rev-parse", "--verify", "-q", spec],
         cwd=REPO, capture_output=True, text=True, check=False,
     )
     return out.returncode == 0
+
+
+def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
+    """Can this checkout resolve *rev* at all? — the two "cannot run" conditions, one of two.
+
+    ⛔ SEPARATED FROM `_pin_blob_lines` ON PURPOSE. `git show <rev>:<path>` exits 128 for TWO
+    different facts: this checkout cannot produce the object (no history in a `fetch-depth: 1`
+    clone; a failed lazy fetch in a partial clone; a corrupt object), and the PATH does not exist
+    at *rev* at all. The first is about the CHECKOUT and must SKIP. The SECOND is about the
+    ARTIFACT and must be graded — a module created after the pin is exactly the case a file:line
+    census meets first (this PR adds `tortoise/capacity_notice.py`), and folding it into the skip
+    would stop grading the numerator for the whole document while the message blamed CI history
+    (#14038 review, P2). The header already counts that class as "not comparable", which is where
+    such a path now lands.
+
+    ⛔ HOW EACH CAUSE IS DECIDED, because a commit probe cannot answer a blob question: the commit
+    probe below only establishes that `<rev>` is a commit this checkout holds. The PATH question is
+    asked separately, of the TREE (`<rev>:<path>` resolves or it does not). A path that resolves
+    but still fails to render is neither cause, so it stays in the SKIP class — a partial clone's
+    failed lazy fetch would otherwise be counted as "absent at the pin", inflating the drifter
+    figure and inviting a false correction of a published number, which is this file's own worst
+    case (#14038 review, P3).
+    """
+    return _git_resolves(f"{rev}^{{commit}}")
 
 
 @functools.lru_cache(maxsize=None)
@@ -794,12 +807,16 @@ def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
     """
     if not _rev_is_readable(rev):
         return None
+    if not _git_resolves(f"{rev}:{path}"):
+        # The TREE says the path is not in that revision — an artifact fact, graded not skipped.
+        return []
     out = subprocess.run(
         ["git", "show", f"{rev}:{path}"], cwd=REPO, capture_output=True, text=True, check=False
     )
     if out.returncode != 0:
-        # the rev IS readable, so this is "the path is absent at that rev" — the artifact, not us.
-        return []
+        # The path IS in the tree but the blob would not render: an object this checkout cannot
+        # produce — the cannot-run class, so this arm keeps its SKIP rather than miscounting.
+        return None
     return out.stdout.splitlines()
 
 
