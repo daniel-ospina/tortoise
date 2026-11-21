@@ -1379,18 +1379,35 @@ def test_no_graph_dependency() -> None:
         expectations. That is a rewrite of the SUBJECT, not a narrowing of it, and it
         is the structural reason this arrangement is worth preferring to a two-hop
         one where a narrowed child and a fabricated record could BOTH be green.
+        ⚠️ AND ONE NARROWING SURVIVES THAT IS NOT A REWRITE, stated because it is
+        the same class this row was added to close, one hop further out: the name
+        stream is still parsed in the PARENT (`modules = [… if name]`) before the
+        matcher sees it, so suppressing one name THERE drops a root with every row
+        green — measured at `904a9429`, `… if name and name != 'tortoise.projection'`
+        is **102 passed**. It cannot be closed from this side: some code must read the
+        child's output, and an assert that reads the same output cannot tell a
+        suppressed name from an absent one.
         """
-        # ⚠️ THE PREFIX CLAUSE `or n.startswith(r + '.')` IS DEFENSIVE ONLY, AND
-        # DELIBERATELY UNPINNED — stated so it does not read as a live lever.
-        # Measured: deleting it leaves the whole file at 102 passed. It cannot be the
-        # sole witness of a reach in this probe, because CPython inserts a parent
-        # module whenever a submodule is imported, so any `X.Y` the walk observes
-        # implies `X` is in `sys.modules` too and the `n == r` half already matched.
-        # It is kept rather than deleted as cheap fail-closed insurance for a name
-        # injected into `sys.modules` behind the importer's back, which no import
-        # statement this probe accepts can produce. The file's "no unpinned lever"
-        # doctrine targets levers that can be NARROWED silently; this clause is
-        # inert, so it cannot be narrowed into a hole.
+        # ⚠️ THE PREFIX CLAUSE `or n.startswith(r + '.')` IS DEFENSIVE, AND IT IS
+        # NOW PINNED — this comment used to say "DELIBERATELY UNPINNED … deleting it
+        # leaves the whole file at 102 passed", and the per-root submodule row added
+        # below this docstring made that FALSE: measured at `904a9429` (the commit
+        # that added the row), deleting the clause is **1 failed / 101 passed**, the
+        # failure at exactly that row. That is the #14118 item 2 class one turn on —
+        # a comment naming the wrong reason is what lets a load-bearing line be
+        # deleted on a false premise — so the clause is described by what it is now:
+        # pinned, for EVERY root, by `_matching([_root + '.probe_child'])`.
+        #
+        # Why it is still worth keeping rather than deleting, on its own merits: it
+        # cannot be the SOLE witness of a reach in this probe, because CPython inserts
+        # a parent module whenever a submodule is imported, so any `X.Y` the walk
+        # observes implies `X` is in `sys.modules` too and the `n == r` half already
+        # matched. It is fail-closed insurance for a name injected into `sys.modules`
+        # behind the importer's back, which no import statement this probe accepts can
+        # produce. The file's "no unpinned lever" doctrine targets levers that can be
+        # NARROWED silently; this clause cannot be narrowed into a hole — it is
+        # exercised in one direction by the per-root row and in the other by the
+        # `_matching(['redis_probe', …]) == set()` boundary assert.
         src = (
             "import sys;"
             f"{import_stmt};"
