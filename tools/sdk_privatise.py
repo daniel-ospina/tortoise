@@ -885,7 +885,6 @@ SWEEP_NAMES = 66
 #: cite. `main` at `fbcd24760b` printed `(11831, "b14af0d2db12529b")` for ITS tree; that pair is
 #: recorded here as a measurement of a different tree, NOT carried as this tree's pin.
 #: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
-
 #:
 #: ⛔ MERGED `origin/main` at `ba0eab1d86` — measured on THAT merge tree with `--repin`, never
 #: combined from the two sides' figures: it printed `(11837, "59e8f90d787a0cf8")`. `--report --base 28ca66878d… --top 5000` reads "UNTYPED receivers NOT swept
@@ -908,7 +907,21 @@ SWEEP_NAMES = 66
 #: was absorbed in the other direction. `11837 − 2 = 11835` is a CROSS-CHECK of that measurement,
 #: never its evidence. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11835, "891187f5a4636487")
+#:
+#: RE-CUT UP on `main` AFTER the `#13094` census merge (`f9f480a55a`), and THIS is the pin:
+#: `--repin` printed `(11843, "6aed5368ffa10513")` on this tree. ⛔ THE +8 IS ATTRIBUTED BY A
+#: ROW-BY-ROW DIFF, not by arithmetic: `--report --base 28ca66878d… --top 5000` was run in a
+#: detached worktree at `2c0d66e2ec` AND on this tree, both row sets sorted and diffed, and
+#: EXACTLY TWO rows differ — `g.query` 1492 → 1499 (+7) and `proj.g.query` 3642 → 3643 (+1).
+#: All eight are the census work's MEASUREMENT probes, not product call sites: the four
+#: `g.query(…)` in `docs/evidence/13094-graphevent/measure_graphevent_residency.py`, the three
+#: in `tools/graphevent_home.py` (the census rows/pages through a plain `select_graph` handle —
+#: the ordinary-word receiver this counter exists to REPORT, and not a typed SDK site), and the
+#: single `proj.g.query(…)` in `tests/test_13094_graphevent_home.py`. `11835 + 8 = 11843` is a
+#: CROSS-CHECK of the measurement, never its evidence. The bump was MISSED by the census PR,
+#: which is why `--check` was red on `main` after it merged; `--check` exits 0 on this tree:
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11843, "6aed5368ffa10513")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
