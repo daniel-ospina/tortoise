@@ -38,8 +38,10 @@ output is in the PR body):
   (the method starts at sdk.py:45555; the hook is at sdk.py:46481).
 * **Record the tag POPULATION a door scanned instead of the page it served** — drop
   the ``_record_reads=False`` at the ``search_knowledge(mode="tag")`` call site →
-  ``test_the_caller_facing_row_paths_feed_the_ledger`` RED (``p9`` is scanned and
-  never served, so counting it biases `f` HIGH — measured 1 failed / 67 passed).
+  ``test_the_caller_facing_row_paths_feed_the_ledger`` RED (``p11`` — and the
+  tombstone ``p10`` — are scanned and never served, so counting the population
+  moves them from 0 to 2 and inflates each SERVED row to 3; measured 1 failed /
+  67 passed).
 * **Record the tag scan BEFORE dropping tombstones** — move the ``_ledger_record``
   above the ``include_retracted`` filter → the same test RED (`p10` is a retracted
   row the caller is never served; measuring it as read biases `f` HIGH).
@@ -959,9 +961,9 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     site — and those are named and greppable (`sdk.py:45169`, `:47358`,
     `:50681`, and `tortoise/session_continuity.py:24`). ⚠️ NOT the
     `_tortoise_fts_query(… _record_reads=False)` sites (`sdk.py:38428`, `:44893`,
-    `:45112`, `:50199`, `:50216`, `:50655`, `:50790`, `:58101`, and
-    `tortoise/extractor_v2.py:2913`): that is a different accessor with its own
-    pool-versus-served rule.
+    `:45112`, `:50199`, `:50216`, `:50655`, `:50790`, `:58101`,
+    `tortoise/extractor_v2.py:2913`, and the probe scripts under `tools/`): that
+    is a different accessor with its own pool-versus-served rule.
     """
     inst, graph = hooked_sdk
     record_stock("Point", "p1", nbytes=100)
