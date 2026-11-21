@@ -46,7 +46,10 @@ document.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -364,10 +367,24 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, '`:1292-1300`', _SSM, 1292, '_CONTROL_LEXICON_ROWS = ('),
     # --- #14043 review (finding 1, this cycle): §6.3's own two addresses were in neither list and
     # unpinned, and the header's default resolves them to the PIN — where `sdk.py:16077` is unrelated
-    # prose and `sdk.py:3801` is an EMPTY LINE. Both are one-token spellings already, so no figure
+    # prose and `sdk.py:3801` holds `sdk._graph_write_with_retry(` (the EMPTY line is the OLD `:3777`).
+    # Both are one-token spellings already, so no figure
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
     (_AUDIT, 'sdk.py:16077-16081', _SDK, 16077, '**JSONL event log (#548):** written when *point* is provided'),
     (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    # --- #14038 review cycle 4 (P1): the header's "nine MORE addresses" enumeration names these three
+    # SAME statements as BARE siblings ("`sdk.py`: `:15873`", "§6.3's `sdk.py`: `:16077-16081`",
+    # "and `:3801`"). A bare token is not the string `sdk.py:15873`, so the long-form rows directly
+    # above did NOT grade these three sites: the sentence promised "All nine are pinned by content"
+    # while three of the nine had no row that could redden. The addresses were ALSO stale after the
+    # conflict resolution `4ae073f96e5` — it took `main`'s rows and the branch's paragraph, so the
+    # enumeration kept `:15842`/`:16046-16050`/`:3777` while the rows moved to the spellings that
+    # carry those statements at this head. One ROW per SITE, as this file requires.
+    # NON-VACUOUS: move any of the three by `+1` and the content arm reds while the token arm stays
+    # green — the document still carries the address, which is exactly the re-point this row catches.
+    (_AUDIT, '`:15873`', _SDK, 15873, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
+    (_AUDIT, '`:16077-16081`', _SDK, 16077, '**JSONL event log (#548):** written when *point* is provided'),
+    (_AUDIT, '`:3801`', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -562,6 +579,14 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # `grep -o -F 'sdk.py:16077-16081' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16081'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3801'): 1,
+    # #14038 review cycle 4 (P1): the header's "nine MORE addresses" enumeration names these three
+    # as BARE siblings (one path, then `:NNNN`), which the long-form rows above do NOT cover — a bare
+    # token is not the string `sdk.py:NNNN`, so the three sites could be re-pointed with every
+    # long-form pin green. Measured on this document: `grep -o -F '`:15873`' <doc> | wc -l` -> 1, and
+    # the same for '`:16077-16081`' -> 1 and '`:3801`' -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:15873`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:16077-16081`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3801`'): 1,
 }
 
 
@@ -716,6 +741,88 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         assert falsified not in text, (
             f"the header again describes an address by content it does not carry at the pin ({falsified!r}) "
             "— open the pin's line before describing it."
+        )
+
+
+#: The revision the header's census compares THIS head against — the pin its drift figure is measured to.
+_DRIFT_PIN = "ccb49741b2ec"
+
+
+def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
+    """*path*'s lines at *rev*, or `None` when this checkout cannot read that blob.
+
+    `None` is a fact about the CHECKOUT — a `fetch-depth: 1` clone has no history — never about the
+    artifact. Same distinction, and same reason, as `tests/test_docs_citation_refs.py` draws for
+    `origin/main`: a check that cannot run must be a SKIP, not a failure on a correct document.
+    """
+    out = subprocess.run(
+        ["git", "show", f"{rev}:{path}"], cwd=REPO, capture_output=True, text=True, check=False
+    )
+    if out.returncode != 0:
+        return None
+    return out.stdout.splitlines()
+
+
+def _re_derived_drift(text: str, repo: Path = REPO) -> tuple[int, int, int, int] | None:
+    """(pairs, comparable, drifted, drifters) re-derived from the pin blob — `None` if history is unreadable.
+
+    The header's own rule, as code: a pair is COMPARABLE when its written line exists at the pin, and
+    DRIFTED when that line's text differs at this head; the drifters are the drifted comparable pairs
+    PLUS the ones that cannot be compared at all — which the header counts rather than hides.
+    """
+    _spellings, pairs = _resolved_pairs(text, repo)
+    comparable = drifted = 0
+    for path, line in pairs:
+        pin = _pin_blob_lines(path)
+        head_file = repo / path
+        if pin is None or not head_file.is_file():
+            return None
+        head = head_file.read_text(encoding="utf-8").splitlines()
+        if line > len(pin):
+            continue
+        comparable += 1
+        if line > len(head) or pin[line - 1] != head[line - 1]:
+            drifted += 1
+    return len(pairs), comparable, drifted, drifted + (len(pairs) - comparable)
+
+
+def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> None:
+    """The NUMERATOR is compared against a RECOUNT, not against itself — the `#14038` cycle-4 gap.
+
+    `_figure_problems` re-derives only the DENOMINATOR, and says so in its own docstring. So when a
+    later commit moved the population (231 pairs → 229) and updated the denominator while leaving the
+    numerator alone, every arm stayed GREEN: the header read "159 of this document's 229" and
+    "150 of the 222 comparable" while `222 + 9 = 231` contradicted the `229` beside it — and the stale
+    numerator agreed with the stale comparable count, which is why internal agreement could not see it.
+
+    This arm recomputes all four figures from `git show <pin>:<path> | sed -n '<N>p'` — the rule the
+    header states — so a denominator-only edit reds HERE instead of shipping. That is the same class as
+    the `#13599` finding (a figure nothing re-derived) one level up.
+
+    NON-VACUOUS, measured at this head: restoring the pre-fix "159 of this document's 229" while keeping
+    the corrected `229` reds THIS test. SKIPPED — not failed — when the pin's blobs are unreadable (a
+    shallow clone): that is a fact about the checkout, not about the document.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    derived = _re_derived_drift(text)
+    if derived is None:
+        pytest.skip(
+            f"this checkout cannot read `{_DRIFT_PIN}`'s blobs (shallow clone?), so the drifter "
+            "numerator cannot be re-derived here"
+        )
+    pairs, comparable, drifted, drifters = derived
+    body = _unbolded(text)
+    for claim in (
+        f"{drifters} of this document's {pairs}",
+        f"The drift is {drifters} of those {pairs}",
+        f"all {comparable} comparable ones resolve at BOTH heads",
+        f"{drifted} of the {comparable} comparable",
+    ):
+        assert claim in body, (
+            f"the header does not carry {claim!r}, which is what THIS head measures against the pin "
+            f"`{_DRIFT_PIN}` ({pairs} pairs, {comparable} comparable, {drifted} drifted, {drifters} "
+            "drifters). Re-measure the figure by the header's own rule and update BOTH the numerator "
+            "and its cross-references — never adjust an older number by an offset."
         )
 
 
@@ -1817,7 +1924,7 @@ def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them()
     token carries, so a token naming two unrelated addresses became a range spanning the gap: the
     arm accepted the `58316` neither address names. That is the same false PASS this arm exists to
     refuse — a row asserting an address the document does not carry — so it is refused here rather
-    than recorded as a residual. Measured on the shipped tree: 0 of 96 rows carries more than one
+    than recorded as a residual. Measured on the shipped tree: 0 of 112 rows carries more than one
     address, so no row's verdict moves.
     """
     between = (_AUDIT, "`:58315`/`:58317`", _SDK, 58316, "rows = proj.g.query(")
@@ -1837,7 +1944,7 @@ def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
 
     On the PRE-FIX code `_token_span` returned `None` for a token with no digits and the loop
     `continue`d, so such a row was silently exempt from the arm — the gate vouching for a claim it
-    never read. Measured on the shipped tree: 0 of 96 rows has a token with no address.
+    never read. Measured on the shipped tree: 0 of 112 rows has a token with no address.
     """
     unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37547, "``:Document`` node).")
     assert _rows_outside_their_token((unaddressed,)), (
@@ -1972,7 +2079,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # row) and the LIST endpoint's `actor_user_id` condition (long-form in §2.4, bare twice in the
     # header's comparability clause). Both had rotted to `45028-45045` / `:50935`, both still
     # resolved at `ae26adf963`, and NEITHER had a row that could redden. Same shape again.
-    assert len(_PINS) == 95
+    assert len(_PINS) == 98
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:

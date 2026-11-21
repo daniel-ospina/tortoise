@@ -517,7 +517,7 @@ SWEEP_NAMES = 66
 #: verified is now on the tree" — is NOT triggered; only a count on an already-pinned shape moved.
 #: The SDK population did not move either (`typed references still pointing at a public name: 0`),
 #: so no typed call site is legitimised by this re-cut. `#13998`'s own +7 above survives intact:
-#: `cp.query` **269** and `row.update` **60** carry the seven rows that record enumerates.
+#: `cp.query` **270** and `row.update` **60** carry the seven rows that record enumerates.
 
 #: ⛔ REVERTED BY THE #14038 MERGE: an earlier cut of this file RECORDED a rename of the two
 #: duck-typed onboarding seed surfaces (`_OrgSeedSurface` in `hosted_api.py`, `_SdkSeedSurface` in
