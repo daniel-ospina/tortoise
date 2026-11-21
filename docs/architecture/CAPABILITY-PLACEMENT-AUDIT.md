@@ -111,7 +111,7 @@ the second insert sits on top of the first, so an address's drift is the sum of 
 not the boundary nearest it. That is why the head cannot be recovered by arithmetic and why the rule is
 unchanged rather than relaxed — **an unpinned cite in these two files must be re-opened at the head its
 row names, never read at this one and never repaired by adding a delta.** The proportional maps are
-carried where they are MEASURED — this header's `#14022` paragraph two above for the first insert, and
+carried where they are MEASURED — this header's `#14022` block just above for the first insert, and
 §5's parenthesis in `SUBSTRATE-REBUILD-MAP.md` for the second, which re-points its seven `sdk.py`
 addresses to the lines that carry them at this head; this header states the rule and the fact, not a
 delta to apply.
