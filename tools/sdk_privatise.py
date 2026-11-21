@@ -498,7 +498,7 @@ SWEEP_NAMES = 66
 #:
 #: ⛔ RE-CUT-NOT-NEEDED at the FOURTH merge tree (`#14087` × `main` `2fe01fc775`), and this entry is a
 #: MEASUREMENT that says the pin above is ALREADY this tree's pin — not a re-cut, and not a carry.
-#: This branch's own re-cut (`11833` → `11831`, `4f3afdad7fb13ad7`) recorded the SAME fact as the block
+#: This branch's own re-cut (`11833` → `11831`, measured on the `df0525a7a9` merge tree) recorded the SAME fact as the block
 #: above: `#14071` `df0525a7a9` retired the two `found.update` rows `#14065` added, `12 → 10`. `main`
 #: reached it independently and landed it first; what this branch could not see from `df0525a7a9` is
 #: `#14068`, whose +8 receiver rows are on `main` and account for the whole `11831` vs `11839` gap. So
