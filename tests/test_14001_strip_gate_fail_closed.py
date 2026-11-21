@@ -1278,6 +1278,64 @@ def test_the_oracle_records_a_KEYWORD_handoff_to_the_write_channel():
         "the oracle cannot see a keyword handoff, so every `_write(...)` pin is half-measured")
 
 
+#: ⛔ THE ONLY MODULES WHOSE IMPORT MAY LEGITIMATELY FAIL HERE (`#14001`, measured by the review of
+#: `79673ca8`). `tortoise.sdk`'s `import` pulls third-party packages a DEV venv may not carry
+#: (measured: `ModuleNotFoundError: prometheus_client`), so its keys are the one population the pin
+#: below may skip. EVERY other skip is silent shrinkage of the population the over-refusal claim
+#: rests on — and a shrunk population still satisfied a bare `examined > 0` (measured: 14 of 24),
+#: which is the whole reason this set is DECLARED rather than inferred.
+#: ⛔ AN EXACT MODULE, NOT A PREFIX (`#14099` review of `7c6ad128`). `startswith` would let a future
+#: `tortoise.sdk_v2` inherit the exemption without anyone declaring it, so the match is on the key's
+#: module component alone.
+_UNREADABLE_EXEMPT_MODULES = ("tortoise.sdk",)
+
+
+def _writer_register_population() -> dict[str, list[str]]:
+    """Classify every entity-writer register key by what the pin below could READ of it.
+
+    ⛔ EXTRACTED SO IT CAN BE TESTED (`#14099` review of `310ddeeb7c2`). While this walk lived
+    inline inside its own pin, the assertion that closes the population shrink had NO negative
+    control: deleting it left the file green, so a later refactor could reopen the shrink
+    silently and nothing would say so. The buckets are the contract:
+
+      examined    — read, and its `def` walked for a dynamic-namespace mention;
+      unreadable  — in a DECLARED module, skipped because its import failed for a missing dep;
+      stray       — skipped for any OTHER reason: the population shrank;
+      missing     — the register names a `def` the module does not contain (a renamed writer);
+      offenders   — read, and it mentions a dynamic namespace (what the pin exists to catch).
+
+    ⛔ THE CAUSE IS GRADED ONLY FOR THE DECLARED MODULE. Outside it a skip is `stray` whatever the
+    cause, because no reason makes a writer's gate disappear quietly. Inside it an import failure
+    is treated as the environment; the RESIDUAL — a repo-side `ImportError` (a circular import, a
+    `raise ImportError` guard) inside the declared module reads as environment — is named rather
+    than closed, because that module's ten writers are imported by ten test files which red on
+    such a break independently.
+    """
+    import ast
+
+    from tortoise import embed_writer_register as register
+
+    population: dict[str, list[str]] = {
+        "examined": [], "unreadable": [], "stray": [], "missing": [], "offenders": []}
+    for key in sorted(register.EMBED_WRITER_CLASSES):
+        module_name, _, symbol = key.partition("::")
+        try:
+            source = strip._module_source(module_name)
+        except strip._UnreadableFold as exc:
+            exempt = (module_name in _UNREADABLE_EXEMPT_MODULES
+                      and isinstance(exc.__cause__, ImportError))
+            population["unreadable" if exempt else "stray"].append(key)
+            continue
+        bodies = strip._function_bodies(source)
+        if symbol not in bodies:
+            population["missing"].append(key)   # a renamed writer, not an environment fact
+            continue
+        population["examined"].append(key)
+        if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(bodies[symbol][0])):
+            population["offenders"].append(key)
+    return population
+
+
 def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
     """The blanket dynamic-namespace rule costs ZERO refusals on the real population — PINNED.
 
@@ -1286,65 +1344,95 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
     acceptable while no real writer does it: the day one does, this pin reds, and the fix has to
     argue the trade instead of silently losing a writer's gate. This is the same non-vacuity
     discipline the residual pins use, pointed at the over-refusal side.
-    """
-    import ast
 
+    ⛔ THE POPULATION IS PART OF THE CLAIM. "No declared writer mentions one" is only true of the
+    writers this walk could READ, so a skip that is not the declared environment-optional module
+    reds here (`stray`) and a key the module no longer defines reds too (`missing`). The walk
+    itself is `_writer_register_population`, and it is pinned by
+    `test_the_over_refusal_population_is_itself_pinned`.
+    """
     from tortoise import embed_writer_register as register
 
-    #: ⛔ THE ONLY MODULE WHOSE IMPORT MAY LEGITIMATELY FAIL HERE (`#14001`, measured by the review
-    #: of `79673ca8`). Its `import` pulls third-party packages a DEV venv may not carry (measured:
-    #: `ModuleNotFoundError: prometheus_client`), so its keys are the one population this pin may
-    #: skip. EVERY other skip is silent shrinkage of the population the over-refusal claim rests
-    #: on — and a shrunk population still satisfied a bare `examined > 0` (measured: 14 of 24),
-    #: which is the whole reason this set is declared rather than inferred.
-    #: ⛔ AN EXACT MODULE, NOT A PREFIX (`#14099` review of `7c6ad128`). `startswith` would let a
-    #: future `tortoise.sdk_v2` inherit the exemption without anyone declaring it — the exemption is
-    #: a statement about ONE module, so it is matched on the module component alone.
-    ENV_OPTIONAL_MODULES = ("tortoise.sdk",)
-
-    offenders: list[str] = []
-    examined: list[str] = []
-    unreadable: list[str] = []
-    missing: list[str] = []
-    for key in sorted(register.EMBED_WRITER_CLASSES):
-        module_name, _, symbol = key.partition("::")
-        try:
-            source = strip._module_source(module_name)
-        except strip._UnreadableFold as exc:
-            # ⛔ A MISSING DEPENDENCY IS NOT A LOADER SHAPE CHANGE. The CAUSE is graded: an absent
-            # third party is the environment, anything else is the loader, and the loader refusing
-            # is exactly what must not silently shrink the population this pin covers. `ImportError`
-            # (not the `ModuleNotFoundError` subclass alone) is the honest test: a partially
-            # installed optional package raises the parent, and it is the same environmental fact.
-            cause = exc.__cause__
-            assert isinstance(cause, ImportError), (
-                f"`{key}`: the source loader refused for a reason that is NOT an import failure "
-                f"({type(cause).__name__ if cause is not None else 'no cause'}: {exc}) "
-                "— a loader shape change must red here, not shrink this pin's population")
-            unreadable.append(key)
-            continue
-        bodies = strip._function_bodies(source)
-        if symbol not in bodies:
-            missing.append(key)         # a renamed writer, not an environment fact
-            continue
-        examined.append(key)
-        if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(bodies[symbol][0])):
-            offenders.append(key)
-    stray = [k for k in unreadable if k.partition("::")[0] not in ENV_OPTIONAL_MODULES]
+    population = _writer_register_population()
+    stray, missing = population["stray"], population["missing"]
     assert stray == [], (
         "a writer outside the declared environment-optional modules could not be read, so it "
         f"left this pin's population for a reason that is not the environment: {stray} "
-        f"(examined {len(examined)} of {len(register.EMBED_WRITER_CLASSES)})")
+        f"(examined {len(population['examined'])} of {len(register.EMBED_WRITER_CLASSES)})")
     assert missing == [], (
         "the register names a writer whose `def` the module does not contain — the writer was "
         f"renamed or the key is stale, so it left this pin's population: {missing}")
-    assert examined, (
+    assert population["examined"], (
         "NO writer could be read, so this pin asserts nothing — the register or the source "
         "loader changed shape and the over-refusal cost it guards is unmeasured")
-    assert offenders == [], (
+    assert population["offenders"] == [], (
         "a declared entity writer now mentions a dynamic namespace, so the blanket rule refuses "
         "it: argue the trade (is the writer's stop arm provable another way?) before either "
-        f"narrowing the rule or accepting the refusal: {offenders}")
+        f"narrowing the rule or accepting the refusal: {population['offenders']}")
+
+
+def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
+    """⛔ THE GUARD AGAINST A SILENT SHRINK IS ITSELF GUARDED (`#14099` reviews of 7c6ad128
+    and 310ddeeb).
+
+    Measured before this test existed: deleting `stray` left the file green while a real writer
+    module folded out of the population, and widening `_UNREADABLE_EXEMPT_MODULES` to any other
+    module did the same. Both are the "a pin reports green while it measures less" failure, so
+    each bucket is driven here directly, one cause at a time, through a loader that refuses ONE
+    module and serves the rest.
+    """
+    from tortoise import embed_writer_register as register
+
+    assert _UNREADABLE_EXEMPT_MODULES == ("tortoise.sdk",), (
+        "the set of modules allowed to leave this pin's population changed. That is a "
+        "DECLARATION, not a detail: appending a name buys silence for a whole module's writers, "
+        f"so it has to be argued in review — declared: {_UNREADABLE_EXEMPT_MODULES}")
+    keys = sorted(register.EMBED_WRITER_CLASSES)
+    assert keys, "the register is empty, so this control proves nothing"
+    sources = {k.partition("::")[0]: strip._module_source(k.partition("::")[0]) for k in keys}
+    outsider = next(k for k in keys if k.partition("::")[0] not in _UNREADABLE_EXEMPT_MODULES)
+    declared = next((k for k in keys if k.partition("::")[0] in _UNREADABLE_EXEMPT_MODULES), None)
+
+    def folding(module_name: str, cause: BaseException):
+        def fake(name: str) -> str:
+            if name == module_name:
+                raise strip._UnreadableFold(f"{name} unreadable") from cause
+            return sources[name]
+        return fake
+
+    # baseline: the real loader, nothing shrunk, nothing refused.
+    base = _writer_register_population()
+    assert base["stray"] == [] and base["missing"] == [] and base["examined"]
+
+    # a writer OUTSIDE the declared modules cannot leave the population — and the CAUSE cannot
+    # excuse it: an absent dependency is the environment only where the declaration says so.
+    module = outsider.partition("::")[0]
+    monkeypatch.setattr(strip, "_module_source", folding(module, ModuleNotFoundError("absent")))
+    assert outsider in _writer_register_population()["stray"], (
+        f"`{module}` folded out of the population with no red — the shrink is back")
+    monkeypatch.setattr(strip, "_module_source", folding(module, ValueError("loader changed")))
+    assert outsider in _writer_register_population()["stray"]
+
+    if declared is not None:
+        declared_module = declared.partition("::")[0]
+        # the declared module MAY skip — for a missing dependency, the measured shape.
+        monkeypatch.setattr(
+            strip, "_module_source",
+            folding(declared_module, ImportError("cannot import name 'Counter'")))
+        skipped = _writer_register_population()
+        assert declared in skipped["unreadable"] and skipped["stray"] == []
+        # …but a NON-import cause inside it is a loader change, not the environment.
+        monkeypatch.setattr(
+            strip, "_module_source", folding(declared_module, ValueError("loader changed")))
+        assert declared in _writer_register_population()["stray"], (
+            f"`{declared_module}`'s loader changed shape and the skip was blamed on the "
+            "environment")
+
+    # a renamed writer is `missing`, never silently dropped.
+    blanked = outsider.partition("::")[0]
+    monkeypatch.setattr(
+        strip, "_module_source", lambda name: "" if name == blanked else sources[name])
+    assert outsider in _writer_register_population()["missing"]
 
 
 #: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
