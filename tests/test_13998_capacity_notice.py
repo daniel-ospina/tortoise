@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import functools
+import json
 import pathlib
 import re
 import threading
@@ -129,6 +130,83 @@ class _FlakyCP(_ColumnBlindCP):
         if select:
             return [{k: v for k, v in self.row.items() if k in select}]
         return [dict(self.row)]
+
+
+class _StatusResponse:
+    """One scripted PostgREST answer: a status and the body PostgREST sends.
+
+    A 4xx from PostgREST is NOT an empty body — it is its own error DOCUMENT
+    (`code` / `message`). Scripting that document is what makes the premise test
+    falsifiable: with a real body on the wire, a seam that starts CARRYING it
+    renders `PGRST204` / `does not exist` in the message, and the test that
+    forbids those markers then has something to catch. An empty-body fixture
+    would leave that test green over the very change it names.
+    """
+
+    def __init__(self, status: int, payload: list[dict] | None = None,
+                 rejected_column: str | None = None):
+        self.status_code = status
+        self.headers: dict[str, str] = {}
+        self._payload = payload
+        self._error: dict | None = None
+        if rejected_column is not None:
+            self._error = {
+                "code": "PGRST204",
+                "message": (f"Could not find the '{rejected_column}' column "
+                            f"of 'organizations' in the schema cache"),
+            }
+            self.content = json.dumps(self._error).encode()
+        else:
+            # ``content`` and ``json()`` are two views of ONE body — a double
+            # whose halves disagree would lie to a seam that ever reads either.
+            self.content = b"" if payload is None else json.dumps(payload).encode()
+
+    def json(self):
+        if self._error is not None:
+            return self._error
+        return [] if self._payload is None else list(self._payload)
+
+
+class _RealSeamControlPlane:
+    """The REAL ``SupabaseControlPlane`` over a scripted transport (no network).
+
+    ⛔ THE POINT IS THE ERROR TEXT, NOT THE ROW. What licenses
+    `read_account`'s degrade is what the FAILURE SAYS, and the production seam
+    renders a non-2xx as ``…: HTTP <status>`` while DISCARDING the PostgREST
+    body (`supabase_control.query_with_total`). So `PGRST204` / `42703` /
+    `column … does not exist` are text this seam can never emit, and a fake that
+    raises them pins a shape production does not produce. Measured at
+    `1ad388b5f6`: deleting the one marker that CAN fire in production
+    (`http 400`) left this whole file green (93 passed).
+
+    The rejection is scripted WITH PostgREST's own error document on the wire (a
+    bare ``HTTP 400`` with no body would make that measurable only in one
+    direction — see `_StatusResponse`).
+    """
+
+    def __init__(self, missing: str, status: int = 400):
+        self.missing = missing
+        self.status = status
+        self.calls: list[list[str]] = []
+        self.plane = sc.SupabaseControlPlane(
+            url="https://proj.supabase.co", service_key="svc")
+        # Close the real client before replacing it: this helper never uses it,
+        # and an orphaned `httpx.Client` per instance is a leak with no upside.
+        self.plane._http.close()
+        self.plane._http = self
+
+    def get(self, url, params=None, headers=None, **_kw):
+        cols = [c for c in (params or {}).get("select", "").split(",") if c]
+        self.calls.append(cols)
+        if self.missing in cols:
+            return _StatusResponse(
+                self.status,
+                rejected_column=self.missing if self.status == 400 else None)
+        row = _org_row()
+        return _StatusResponse(200, [{k: row[k] for k in cols if k in row}])
+
+    def query(self, *args, **kwargs):
+        return self.plane.query(*args, **kwargs)
 
 
 class _Reading:
@@ -778,6 +856,71 @@ class TestDriftAndStaleness:
         with pytest.raises(RuntimeError, match="suspended_at"):
             cn.read_account(cp, ORG_ID)
         assert len(cp.calls) == 2
+
+    def test_the_real_seams_bare_400_is_what_licenses_the_degrade(self):
+        """⛔ The marker that fires in PRODUCTION, pinned against the seam itself.
+
+        `query_with_total` turns a non-2xx into ``…: HTTP <status>`` and throws
+        the PostgREST body away, so a rejected projection reaches `read_account`
+        as a bare **HTTP 400** — never as `PGRST204` / `42703` / `does not
+        exist` (#14038 review, P1: "classify the rejection before degrading").
+
+        The other drift cases in this file raise the body text, so on their own
+        they pin a shape the production seam cannot emit: measured at
+        `1ad388b5f6`, deleting `http 400` from `_SCHEMA_REJECTION_MARKERS` left
+        the whole file green while production would lose the degrade entirely —
+        every account on a schema one migration behind reporting
+        `notice-mark-unavailable` on every pass, forever.
+        """
+        cp = _RealSeamControlPlane(missing="suspended_at")
+        account = cn.read_account(cp, ORG_ID)
+        assert account is not None
+        assert account.suspended is False
+        assert len(cp.calls) == 2, f"exactly one drift-soft retry: {cp.calls}"
+        assert "suspended_at" in cp.calls[0]
+        assert "suspended_at" not in cp.calls[1]
+        assert "storage_notice_pct" in cp.calls[1], (
+            "the retry must never drop the ledger column — that is the "
+            "fail-closed half of the split")
+
+    def test_the_seam_renders_a_rejected_projection_as_a_status_only_error(self):
+        """The PREMISE the marker list rests on, pinned where it can change.
+
+        `_SCHEMA_REJECTION_MARKERS` accepts `http 400` *because* the seam
+        discards the body. That is a property of `query_with_total`, not of
+        `capacity_notice`, so it is asserted here: if a future seam carries the
+        PostgREST body (a strictly better error), this reds and the marker list
+        is re-read rather than silently depending on a text that disappeared.
+        The fixture therefore puts PostgREST's OWN error document on the wire —
+        the bodyless version of this test was green over a seam mutated to carry
+        it (#14038 review), which is the same "a claim the code does not make"
+        class the record's finding 3 is about.
+        """
+        cp = _RealSeamControlPlane(missing="suspended_at")
+        with pytest.raises(RuntimeError) as caught:
+            cp.query("organizations", select=list(cn._ACCOUNT_SELECT))
+        text = str(caught.value)
+        assert text.endswith("HTTP 400"), text
+        for body_marker in ("pgrst204", "42703", "does not exist", "column"):
+            assert body_marker not in text.lower(), (
+                f"the seam now carries {body_marker!r}, so the marker list's "
+                f"premise changed — re-read `_SCHEMA_REJECTION_MARKERS` "
+                f"instead of leaving the degrade to depend on the status "
+                f"alone: {text}")
+        assert cn._rejected_the_projection(caught.value) is True
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 409, 422, 500, 502, 503])
+    def test_a_non_400_status_from_the_real_seam_never_licenses_the_degrade(
+            self, status):
+        """The other direction, at the same seam: only a REJECTED PROJECTION is
+        drift. A 401/404/422/5xx must propagate to `notice-mark-unavailable`,
+        never be read as "the schema is older than 0015"."""
+        cp = _RealSeamControlPlane(missing="suspended_at", status=status)
+        with pytest.raises(RuntimeError):
+            cn.read_account(cp, ORG_ID)
+        assert len(cp.calls) == 1, (
+            f"only a rejected projection (HTTP 400) licenses the retry; "
+            f"HTTP {status} must propagate at once: {cp.calls}")
 
     def test_a_stale_gauge_is_not_a_reading(self, monkeypatch):
         """The gate treats a stale gauge as UNARMED; the notice must not state a
