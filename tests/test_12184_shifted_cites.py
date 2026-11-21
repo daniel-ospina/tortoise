@@ -1769,9 +1769,16 @@ def test_a_carried_forward_figure_is_reported() -> None:
         ),
         (
             alt,
-            {2: alt_drifters + 7},
+            {2: _drifters + two_span_uncounted + 1},
             "the alternative basis's numerator is overstated past what its added pairs can contribute — the "
-            "direction a stale figure takes when a denominator moves under it",
+            "direction a stale figure takes when a denominator moves under it. ⛔ DERIVED from the band's "
+            "own edge (`primary + extra_pairs`), not a fixed `+7`: the headroom is a property of the "
+            "document (measured 3 added pairs here, and this branch has already carried 5), so a literal "
+            "offset silently becomes a LEGAL value once the document's uncounted count grows past it — the "
+            "band then correctly stays silent and the band's RULE-2 assertion reds blaming a band that is "
+            "present and right (#14038 review, P3). "
+            "`two_span_uncounted` is graded equal to that count by the `_TWO_SPAN_NEW` arm, so this anchor "
+            "is always exactly one above the upper edge",
         ),
         (
             alt,
@@ -1875,12 +1882,15 @@ def test_a_carried_forward_figure_is_reported() -> None:
             )
         if match is alt and 2 in overrides:
             # ⛔ RULE 2 FOR THE BAND, and it was needed the moment the mention leg landed: the two rows
-            # that mutate the alternative numerator (`+7`, and `_drifters - 1`) now red TWICE, and the
-            # only observation the table makes is `!= []`. MEASURED: with the band arm deleted (`:1542`
-            # -> `if False:`) this control stays GREEN at this head, while the same edit at the pre-leg
-            # `d37d356e2ffd` reds it — so the mention leg had taken over the entire red those two rows
-            # produced, and the band was proven by nothing. That is the `#13599` finding-1 revert: restore
-            # the one-sided lower bound and nothing in this file notices. The red must NAME the band.
+            # that mutate the alternative numerator (`+extra_pairs+1`, and `_drifters - 1`) red TWICE, and
+            # the only observation the table makes is `!= []`. MEASURED at the PRE-FIX head
+            # `9decb729185f` — before the assertion below existed — with the band arm deleted (`:1542`
+            # -> `if False:`) the control stayed GREEN, while the same edit at the pre-leg
+            # `d37d356e2ffd` reds it: the mention leg had taken over the entire red those two rows
+            # produced, so the band was proven by nothing, and reverting it to the one-sided lower bound
+            # (`alt_drifters < drifters`, the `#13599` finding-1 defect) went unnoticed in this file. At
+            # THIS head those edits red, via this assertion — it is the thing that closes them. The red
+            # must therefore NAME the band, not merely exist.
             assert any("drifters against the primary basis's" in problem
                        for problem in _figure_problems(mutated)), (
                 f"the control for {why!r} red for some other reason ({_figure_problems(mutated)}), so the "
