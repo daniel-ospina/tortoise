@@ -830,7 +830,16 @@ SWEEP_NAMES = 66
 #: 11831 + 12 = 11843 is a CROSS-CHECK of the measurement, not the evidence for it: the pair below
 #: is what `--repin` prints on THIS tree, and it is re-derived whenever the branch grows a file (the
 #: CLI suite landed after the first re-cut and moved this pair by exactly its own +1).
-SWEEP_RESIDUE = (11843, "077a6f82c7284536")
+#: RE-CUT → (11844, "066890c3a3b0837a") by the SAME `#14012` lane, one review round later, and the
+#: +1 is ATTRIBUTED rather than inferred: measured by restoring ONLY
+#: `tests/test_14012_outside_view.py` to the previous head's version and re-running `--repin`
+#: (11843, `077a6f82c7284536`), then with this tree's version (11844, the digest below) — every other
+#: file in that round is unchanged in its contribution. The row is the review round's `_NoCount`
+#: fake in `tests/test_14012_outside_view.py`: `def query(...)` + `return super().query(...)`, i.e.
+#: the `super().query` residue shape the suite already used, one more time. It is a fake standing in
+#: for the door it exercises, so it is reported rather than avoided — and `typed references still
+#: pointing at a public name` stays **0**, so no typed site moved and the SDK population is untouched.
+SWEEP_RESIDUE = (11844, "066890c3a3b0837a")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
