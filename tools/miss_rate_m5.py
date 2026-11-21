@@ -1034,7 +1034,15 @@ def run(args: argparse.Namespace) -> int:
         # cannot miss every query (#14162 F5).
         check_arm(kind, n, out["miss"], resident, population_ids)
         # ⛔ INVARIANT 3 — the decomposition ADDS UP.
-        if abs(miss - (fault_in_rate + miss_resident * out["resident_query_share"])) > 1e-6:
+        # The band is 2e-6, not 1e-6, because every operand is already a `round(…, 6)`
+        # result and one of them is a PRODUCT of two of them, so the summed rounding
+        # error can exceed a single operand's half-ulp (#14162 review F5). Measured
+        # worst case over legal states: 4.96e-7 at n=250 (the committed `--sample`),
+        # but 1.41e-6 at n=711 and 1.30e-6 at n=251 — so a 1e-6 band would refuse a
+        # CORRECT run at any `--sample >= 251` with a message that reads like a real
+        # decomposition failure. 2e-6 is twice the operand count's rounding budget and
+        # still catches the ~1e-2 drift a genuinely broken decomposition produces.
+        if abs(miss - (fault_in_rate + miss_resident * out["resident_query_share"])) > 2e-6:
             raise RuntimeError(
                 f"{kind}: miss {miss} != fault_in + miss_resident*resident_share "
                 f"({fault_in_rate} + {miss_resident}*{out['resident_query_share']})")
