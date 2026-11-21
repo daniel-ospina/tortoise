@@ -6773,9 +6773,14 @@ class _ReadWave:
     exact regression ``graph_ops.bind_metering_context`` documents for
     ``degradation_chain``'s legs, so ``submit`` binds it before handing the thunk
     to the pool and no future member can forget it. It is identity when nothing
-    is armed, so the non-capture path is unchanged (measured:
-    ``tests/test_capture_graph_ops.py`` counts the same ops through the wave as
-    through the serial chain).
+    is armed, so the non-capture path is unchanged. MEASURED on a stub graph
+    with the choke point's shape: six ``graph.query`` calls,
+    ``counter.total == 6`` with the binder and ``== 1`` without it, pinned by
+    ``tests/test_14192_beta_variance_sum_bound.py::
+    test_every_wave_read_is_visible_to_the_capture_counter``. It is NOT
+    ``tests/test_capture_graph_ops.py``: an earlier cut of this sentence
+    pointed there, and that file contains no wave at all -- it pins the
+    generic binder for one worker op (``0 -> 1``).
 
     ⛔ ONE BINDER, DELIBERATELY. ``_retrieval_metering.bind_worker_context`` is
     NOT bound here: that tally accounts the retrieval LEGS

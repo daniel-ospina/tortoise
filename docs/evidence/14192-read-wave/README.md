@@ -133,8 +133,12 @@ The changed function in isolation, 9 alternating rounds on the same 12 ids:
    so the whole-batch reset + `decoration_error` labelling (#6971) is unchanged.
    Each member is submitted wrapped in `graph_ops.bind_metering_context` — without
    it the capture's graph-op counter silently missed every read the wave
-   performs (that is exactly what `tests/test_capture_graph_ops.py` measured
-   before the wrapper was added: 6 reads recorded 1). ⛔ `retrieval_metering`
+   performs -- measured on a stub graph: **6 reads recorded 1** counter op.
+   The pin for that number is
+   `tests/test_14192_beta_variance_sum_bound.py::test_every_wave_read_is_visible_to_the_capture_counter`,
+   NOT `tests/test_capture_graph_ops.py` (an earlier cut of this sentence
+   pointed there; that file contains no wave test at all -- it pins the
+   generic binder for one worker op, `0 -> 1`). ⛔ `retrieval_metering`
    is deliberately **NOT** bound: that tally accounts the retrieval LEGS, and
    these are decoration graph ops, not legs (#2952).
 2. **The one query that dominated the wave.** Parallelising five reads only helps

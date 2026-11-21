@@ -134,14 +134,23 @@ def test_the_guard_admits_exactly_the_pairs_the_bound_allows() -> None:
       threshold, and the query's test is strict, so the guard's refusal and the
       twin's exclusion agree there.
 
-    MUTANTS, and the row each reddens:
+    MUTANTS, and what a run actually reds -- stated as MEASURED, because an
+    earlier cut of this block named three arms that never execute:
 
-    - ``beta_variance_sum_bound``'s ``- 1.0`` → ``- 2.0`` (bound 4.25): the
-      admitted arm reddens, because ``5.2 < 4.25`` is false.
-    - ``- 1.0`` → ``+ 2.0`` (bound 8.25): the refused arm reddens, because
-      ``6.0 < 8.25`` is true.
-    - ``- 1.0`` → ``- 0.5`` (bound 5.75): the boundary arm reddens, because the
-      symmetric pair at ``s == 5.25`` is then ADMITTED by the guard.
+    - ``beta_variance_sum_bound``'s ``- 1.0`` to ``- 2.0`` (bound 4.25),
+      ``- 1.0`` to ``+ 2.0`` (bound 8.25), and ``- 1.0`` to ``- 0.5``
+      (bound 5.75): ALL THREE stop at the antecedent pin two lines below
+      (``assert bound == pytest.approx(5.25)``, e.g.
+      ``assert 4.25 == 5.25 +- 5.2e-06``), so no arm below it runs. That is
+      the correct polarity -- the arms are written against the SHIPPED
+      bound, and a changed bound is a changed CONTRACT, not a boundary
+      case -- but it means this test's guard-arithmetic coverage comes from
+      the antecedent, and the per-arm ``<``/``>`` assertions only execute
+      while the bound is 5.25.
+    - A mutant that exercises an ARM has to leave the bound alone and move
+      the PAIR. The end-to-end arm (a contested peer surviving the real
+      query) is
+      ``tests/test_relationships_bounded.py::test_contested_peer_at_the_sum_bound_always_survives``.
 
     OBSERVED at this head (bound ``5.25``): ``(2.6, 2.6)`` → ``5.2``,
     admitted, width ``0.0403225806``; ``(3.0, 3.0)`` → ``6.0``, refused, width
