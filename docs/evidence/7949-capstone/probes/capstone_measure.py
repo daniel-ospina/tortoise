@@ -4236,8 +4236,14 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
         return {}, f"{census_path} is ABSENT from this checkout"
     try:
         artifact = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {}, (f"{census_path} could not be read ({type(exc).__name__}); "
+    except Exception as exc:
+        # ⛔ `Exception`, NOT `(OSError, JSONDecodeError)` (#14060 review round 21, P3, measured):
+        # the nesting depth of the bytes is the INPUT's to choose, and `json.loads` recurses on
+        # it — at depth 20 000 it raised `RecursionError` straight out of `measure_e6`, i.e. the
+        # one shape class the row loop below was made total over (see the invariant there) still
+        # crashed `main` after a run had paid its cost. A well-formed-but-deep artifact is a
+        # hand-edited or generated shape like any other, so the parse is inside the same rule.
+        return {}, (f"{census_path} could not be read ({type(exc).__name__}: {exc}); "
                     f"its `written` cells are UNMEASURED")
     if not isinstance(artifact, dict):
         return {}, (f"{census_path} holds a {type(artifact).__name__}, not a JSON object; "
@@ -4265,7 +4271,10 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
     # surface, and every miss CRASHES `main` after a run has paid its cost — so the invariant is
     # stated once, structurally: this reader never raises. The per-shape guards below still run,
     # because naming WHICH part is malformed is worth more than a bare exception name; this catch
-    # is what makes an unanticipated shape degrade instead of killing the run.
+    # is what makes an unanticipated shape degrade instead of killing the run. ⚠️ The invariant is
+    # the WHOLE function's, not the row loop's: the `json.loads` above carries the same `except
+    # Exception` for the same reason (#14060 review round 21 measured `RecursionError` escaping
+    # from it), because a parse that raises reaches `main` exactly like a shape the loop missed.
     try:
         for pack, block in blocks.items():
             if not isinstance(block, dict):
