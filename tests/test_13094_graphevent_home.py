@@ -188,18 +188,40 @@ def test_no_reader_of_the_change_feed_needs_a_graph_capability():
         "shape is NOT a record_only candidate — re-open #13094's verdict:\n  "
         + "\n  ".join(offenders))
 
-    # The control: the predicate must CATCH a capability that lives only in the
-    # snippet, under a class that claims none. If this stops failing to be clean,
-    # the pin above has gone vacuous again.
-    smuggled = {
-        "file": "tortoise/event_store.py", "line": 992, "reader": "walk_out",
-        "needs": "walks outward from each event to the nodes it touched",
-        "why": "feed enrichment", "class": "maintenance",
-        "snippets": ("MATCH (e:GraphEvent)-[*1..2]->(n) RETURN n",),
-    }
-    assert module.graph_capability(smuggled), (
-        "the capability pin only reads prose, so a traversal filed as "
-        "`maintenance` passes it — the census can go false with every pin green")
+    # The controls: the predicate must CATCH a capability that lives only in the
+    # snippet, under a class that claims none — and it must catch it through the
+    # CYPHER arm, asserting the arm identity rather than bare truthiness (a prose
+    # word that happened to be in the fixture would otherwise satisfy a
+    # `assert truthy` while the Cypher arm went untested).
+    for label, cypher in (
+        # variable-length
+        ("variable-length", "MATCH (e:GraphEvent)-[*1..2]->(n) RETURN n"),
+        # FIXED-length adjacency — the audit's own definition of the capability,
+        # and the one shape a `-[*`-only detector cannot see.
+        ("fixed-length adjacency",
+         "MATCH (e:GraphEvent)-[r:TOUCHED]->(p:Point) RETURN p"),
+        # the live EP / belief walk, verbatim from CAPABILITY-PLACEMENT-AUDIT.md
+        ("EP walk",
+         "MATCH (a:GraphEvent) WHERE a.id IN $ids WITH * MATCH (a)-[r:IMPL|NAND]-(b)"),
+        # a typed variable-length pattern (no `-[*` literal)
+        ("typed var-length", "MATCH (e:GraphEvent)-[r:NEXT*]->(n)"),
+        # an edge-existence predicate and an adjacency aggregate
+        ("edge existence",
+         "MATCH (e:GraphEvent) WHERE EXISTS { (e)-[:TOUCHED]->(:Point) } RETURN e"),
+        ("adjacency aggregate", "MATCH (e:GraphEvent) RETURN size((e)-->())"),
+    ):
+        smuggled = {
+            "file": "tortoise/event_store.py", "line": 992, "reader": "walk_out",
+            "needs": "walks outward from each event",
+            "why": "feed enrichment", "class": "maintenance",
+            "snippets": (cypher,),
+        }
+        caught = module.graph_capability(smuggled)
+        assert caught == f"cypher:{next(t for t in module.GRAPH_CAPABILITY_CYPHER
+                                        if t in cypher.lower())}", (
+            f"the {label} case is not caught by the CYPHER arm (got {caught!r}) — "
+            "a capability reader filed as `maintenance` passes this pin, and the "
+            "census can go false with every pin green")
 
 
 def test_the_census_has_exactly_one_row_producing_reader():
@@ -765,3 +787,25 @@ def test_the_reader_census_is_json_serialisable_and_states_its_verdict():
     assert report["counts"] == {"serving": 1, "maintenance": 15}
     assert len(report["readers"]) == 16
     assert report["graph_capability_readers"] == []
+
+
+def test_the_committed_census_is_the_verbs_own_output():
+    """`readers.json` is EVIDENCE, so it must be the verb's bytes, not a memory.
+
+    The doc cites `readers.json` as the run that produced its table. A committed
+    copy that a later edit to `READERS` does not carry would let the artifact and
+    the code disagree while every other pin stayed green — the drift class this
+    census exists to expose, applied to the census itself.
+    """
+    module = _tool()
+    committed = json.loads(
+        (REPO_ROOT / "docs" / "evidence" / "13094-graphevent" / "readers.json"
+         ).read_text(encoding="utf-8"))
+    # Round-trip the report through JSON before comparing: `READERS` holds tuples
+    # where the file holds lists, and that is a serialisation detail rather than
+    # drift. Comparing the SERIALISED form is what makes this a pin on the
+    # artifact rather than on a Python container type.
+    assert committed == json.loads(json.dumps(module.readers_report())), (
+        "`readers.json` no longer matches the verb — regenerate it with "
+        "`uv run python tools/graphevent_home.py readers > "
+        "docs/evidence/13094-graphevent/readers.json` rather than hand-editing")

@@ -143,12 +143,21 @@ mixing the two (*"No share is derived from mixing them … only the second state
 the projection below uses the node COUNT from that census and multiplies it by the measured slope — it
 never divides by a node total — and 42 % is corrected to 61 % only as arithmetic on the brief's pair.
 
+⚠️ **Provenance of the two numbers in that ratio — they are not the same artifact.** `72,488` is
+committed and traceable: `#13880`'s 2026-11-19 label census, recorded in
+`graph-scripts/business_map_13880/`. **`118,755` is not in the repo at all** — its only source is the
+`#13094` dispatch brief itself, and the export label census the 72,488 comes from *states no
+denominator* (`business_map.json`: "only the second states a denominator"). So the 61 % is arithmetic
+over the brief's pair, stated because the brief's own percentage is wrong, **not** a figure reproducible
+from a committed artifact. Nothing downstream depends on it — the projection is 72,488 × the slope, not
+a share — so it is disclosed rather than leaned on.
+
 ⛔ **Do not mix the two censuses**, which is why the share is stated twice with its own denominator:
 `#13880`'s **label census over the graph EXPORTS** (2026-11-19) counts **72,488**; a **live Falkor read a
 day later** (2026-11-20) counts **76,610 of 126,908** = **60 %**. `graph-scripts/business_map_13880/
 business_map.json` records both and the rule (*"No share is derived from mixing them … only the second
-states a denominator"*). The projection above uses the label census's count against the label census's
-denominator, which is why it is computed as 72,488 × the slope and not as a share of anything.
+states a denominator"*). The projection above uses the label census's count (72,488) against the slope,
+never against a denominator taken from the other surface.
 
 ### 2.2 What this measurement is NOT
 
