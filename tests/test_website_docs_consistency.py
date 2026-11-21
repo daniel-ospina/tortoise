@@ -3873,6 +3873,44 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         )
         with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
             _assert_storage_section_reviewed(no_p)
+    # 3e. …and the FOREIGN-BREAKOUT family (#14073 review round 10, P1, measured). A
+    #    breakout start tag inside `<svg>`/`<math>` is NOT foreign content: the spec pops
+    #    back to the HTML namespace and reprocesses the token under the "in body" rules,
+    #    which is where the close-a-`<p>` step lives. `_close_p_scope` is called FIRST in
+    #    `handle_starttag`, before `_open` clears `_foreign`, so gating it on `_foreign`
+    #    skipped exactly the tags that DO close the `<p>`. The `<p>` then stayed on the
+    #    stack carrying an `_UNRENDERED` child, `renders=False` inherited, and every
+    #    following text node was dropped — measured, the parser returned `''` while
+    #    Chrome built `<p><datalist><svg></svg></datalist></p><h2>…</h2>` and painted
+    #    the claim at 1264×27. Driven over every `_UNRENDERED` child and several
+    #    breakout tags, and through the real aggregate, because the fail-open was in the
+    #    ANCESTRY and not in any one tag.
+    for unrendered in ("datalist", "rp", "meter", "canvas", "video", "audio", "progress"):
+        for breakout in ("h2", "div", "table"):
+            escaped = section.replace(
+                "</h2>",
+                "</h2><p><" + unrendered + "><svg><" + breakout + ">FalkorDB permanently "
+                "deletes your least-used items after thirty days",
+                1,
+            )
+            assert escaped != section, f"the `<{unrendered}><svg><{breakout}>` control could not inject"
+            assert "falkor" in _banned_vocabulary(escaped), (
+                f"`<{breakout}>` breaks out of `<svg>`, so it is processed \"in body\" "
+                f"where the implied `</p>` runs: the stale `<p>` and its `<{unrendered}>` "
+                f"child must not survive to drop the following text. Dropping it is a "
+                f"claim a browser paints and no pin reads"
+            )
+            with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+                _assert_storage_section_reviewed(escaped)
+    # …and the parser row directly, because the end-to-end rows above can only fail
+    # through the golden text and this names the seam that broke.
+    for unrendered in ("datalist", "rp", "meter", "canvas", "video", "audio", "progress"):
+        shape = f"<p><{unrendered}><svg><h2>CLAIMXYZ"
+        assert "CLAIMXYZ" in extract_visible_text(shape), (
+            f"`extract_visible_text({shape!r})` dropped a claim Chrome paints: the "
+            f"breakout `<h2>` is HTML content, so it closes the `<p>` and the "
+            f"`<{unrendered}>` with it, and the text after it is rendered"
+        )
     # …and the NEGATIVE that stops the carve-out becoming "skip anything": an element
     # the browser DOES keep between them (`<div>`, `<section>`) means the summary is not
     # the details' child, and a closed details paints no body.

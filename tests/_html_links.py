@@ -929,7 +929,7 @@ class _AnchorHrefParser(HTMLParser):
         """
         return any(open_tag == "select" for open_tag, _, _ in self._open_elements)
 
-    def _close_p_scope(self, tag: str) -> None:
+    def _close_p_scope(self, tag: str, attrs: list[tuple[str, str | None]] | None = None) -> None:
         """Close an open `<p>` when `tag`'s start tag closes one.
 
         Spec "in body", `summary` (among others, see `_P_CLOSERS`) — *"If the stack
@@ -953,10 +953,31 @@ class _AnchorHrefParser(HTMLParser):
         The same three guards the rest of the ancestry reads use: a token inside a
         suppressed region is template content or raw text, a wedged parse is already
         refusing, and foreign content is not "in body" at all.
+
+        ⛔ "FOREIGN CONTENT IS NOT IN BODY" IS TRUE OF THE CONTENT, NOT OF A BREAKOUT
+        TAG (#14073 review round 10, P1, measured). A breakout start tag — `<div>`,
+        `<h2>`, `<table>`, … — is NOT processed as foreign content: the spec pops back
+        to the HTML namespace and reprocesses the token under the "in body" rules,
+        which is where the close-a-`<p>` step lives. This walk runs FIRST in
+        `handle_starttag`, before `_open` clears `_foreign`, so gating it on `_foreign`
+        skipped exactly the tags that DO close the `<p>`. Measured:
+
+            extract_visible_text('<p><datalist><svg><h2>CLAIM')  ->  ''
+
+        while Chrome builds `<p><datalist><svg></svg></datalist></p><h2>CLAIM</h2>` —
+        the `<h2>` breaks out, pops the `<p>` and the `<datalist>` with it, and paints
+        the claim at 1264×27. The stale `<p>` kept the `_UNRENDERED` `<datalist>` on the
+        stack, so `renders=False` inherited and every following text node was dropped:
+        the same painted-and-invisible fail-open, through all four `#storage` pins.
+        Any `_UNRENDERED` child reproduces it (`<rp>`, `<meter>`, `<canvas>`, `<video>`,
+        `<progress>`, `<audio>`).
         """
         if tag not in self._P_CLOSERS:
             return
-        if self._suppress or self.wedged_reason or self._foreign:
+        if self._suppress or self.wedged_reason:
+            return
+        # A breakout tag leaves the foreign namespace, so the guard must not stop it.
+        if self._foreign and not self._breaks_out(tag, attrs or []):
             return
         for open_tag, _container, _renders in reversed(self._open_elements):
             if open_tag == "p":
@@ -1007,9 +1028,36 @@ class _AnchorHrefParser(HTMLParser):
             self._close_nearest(targets)
             return
         if tag in ("rb", "rp", "rt", "rtc"):
-            # "Generate implied end tags": pop while the CURRENT node is one of them.
+            # "Generate implied end tags": pop while the CURRENT node is one of them —
+            # but ONLY when a `ruby` element is in scope. The spec's rule for these
+            # four tokens is *"If the stack of open elements has a `ruby` element in
+            # scope, then generate implied end tags"*, and the precondition is
+            # load-bearing (#14073 review round 11, P1, measured): without a
+            # `<ruby>` an `rp`/`rt` start tag pops NOTHING, so `<p><rp><h2>CLAIM`
+            # keeps its `<p>`, the `<h2>` then closes that `<p>` (and the `<rp>`
+            # with it), and the claim is painted — Chrome: `<h2>` parent `DIV`, rect
+            # 1264×27, `innerText` contains it. Dropping the precondition popped the
+            # `<p>` at the `<rp>` instead, left the `_UNRENDERED` `<rp>` on the stack,
+            # and dropped every following text node through all four `#storage` pins.
+            if not self._ruby_in_scope():
+                return
             while self._open_elements and self._open_elements[-1][0] in self._IMPLIED_END_TAGS:
                 self._pop_top()
+
+    def _ruby_in_scope(self) -> bool:
+        """Is a `ruby` element in scope? The precondition on `_close_implied`'s
+        implied-end-tag branch (spec, `<rb>`/`<rp>`/`<rt>`/`<rtc>` start tags).
+
+        "In scope" uses the ordinary scope-boundary list, so the walk stops at a
+        `table`/`td`/`template`/`object`/… — a `ruby` above one of those is not in
+        scope and does not license the implied close.
+        """
+        for open_tag, _container, _renders in reversed(self._open_elements):
+            if open_tag == "ruby":
+                return True
+            if open_tag in self._P_SCOPE_BOUNDARY:
+                return False
+        return False
 
     #: "Clear the stack back to a table context", and its body/row variants (#14073
     #: review round 11, P0, measured). A table-structure start tag discards whatever
@@ -1376,7 +1424,7 @@ class _AnchorHrefParser(HTMLParser):
         # the PRE-tag ancestry the browser's own step reads. The spec's block-start
         # rule (implied `</p>`) runs before the per-token select rules, and they do
         # not overlap: see `_close_p_scope` and `_close_select_scope`.
-        self._close_p_scope(tag)
+        self._close_p_scope(tag, attrs)
         # The sibling/implicit closes the spec's "in body" rules also perform
         # (an `<li>`/`<dd>`/`<dt>`/`<option>` closes its own kind, and an
         # `<rt>`/`<rp>`/`<rb>`/`<rtc>` generates implied end tags) — see
