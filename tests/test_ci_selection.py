@@ -10354,6 +10354,13 @@ ROWED_BY_THIS_FOLD = (
     # reported it — the same defect `#13110`'s own comment records surviving a round, which is
     # the reason this ENTRY-RULE tuple is explicit rather than derived.
     "test_13422_object_subject_dense_leg.py",
+    # #14011 — the fold that adds `tortoise/usage_signal.py` (SEARCH-ARCHITECTURE.md §7's
+    # window-local counter). A file this fold ADDED and registered on `core` for the same
+    # reason as the two rows above: `tortoise/usage_signal.py` matches no `SOURCE_PATTERNS`
+    # entry, so it falls through to `core` and a module-only diff selects nothing narrower.
+    # The first cut shipped NO row and NO surface entry at all — the manifest-integrity
+    # drift the reviewer caught, which is exactly what this ENTRY-RULE tuple exists for.
+    "test_usage_signal.py",
     # #13610 — the fold that retires the graph-stored `:Object`/`:Subject` copy per deployment,
     # once the record's coverage count proves it. A file this fold ADDED and registered on
     # `core` for the same reason as the row above: `tortoise/record_vector.py`,
@@ -10460,6 +10467,16 @@ ROWED_BY_THIS_FOLD = (
     # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
     # which re-derives the set from a real URI-less collection.
     "test_evictor_invalidates_fallback_snapshot_13123.py",
+    # #14070 — `tests/test_usage_signal.py` was ADDED by #14065 and the ENTRY-RULE pin
+    # iterates this EXPLICIT tuple, so it could not see the file: dropping its `durations:`
+    # row was silent. The `config/ci-surfaces.yml` half of #14070 is NOT carried here —
+    # #14072 (merged) already landed the `core` member row and the `durations:` row, and
+    # carrying it again unions a duplicate `core` scalar and a duplicate `durations:` key
+    # that `tools/ci_selection.py`'s `_NoDuplicateKeyLoader` and `tools/registry_integrity.py`
+    # refuse (#5373's `merge=union` shape, #10790/#10717). What is still missing on `main` —
+    # measured: `grep test_usage_signal origin/main:tests/test_ci_selection.py` → empty — is
+    # exactly this tuple entry, which is the half that reds when the row is dropped.
+    "test_usage_signal.py",
     # #10893 (second cycle) — the `pre_handler` decomposition's two falsifier files, ADDED by
     # this fold. The surface rows for both landed in `10aa68693c` and the `durations:` rows did
     # NOT, which is the residual half of the cycle-2 review's F1: `--integrity` is a 0.90 RATIO
