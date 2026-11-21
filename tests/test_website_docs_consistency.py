@@ -51,6 +51,7 @@ if str(REPO_ROOT) not in sys.path:  # tools/ is not an installed package
 # so an import added above it is what breaks the suppression).
 from tests._html_links import (  # noqa: E402
     _AnchorHrefParser,
+    _script_data_state,
     blog_entry_hrefs,
     extract_anchor_hrefs,
     extract_anchors_within,
@@ -2658,6 +2659,33 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
     ) == ["#y"], (
         "the select-pop rule widened the link set for a genuinely open select"
     )
+    # ── IN SCOPE IS THE PRECONDITION: a boundary between select and token ──
+    # ⛔ "IS ANY `<select>` OPEN?" IS NOT THE SPEC'S QUESTION (#14073 review round 14,
+    # P2, measured). The rule reads *"If the stack of open elements has a select
+    # element in scope"*, and §13.2.2.4 puts `table`/`td`/`th`/`caption`/`object`/
+    # `template` in the scope-boundary list — so a cell between the current node and
+    # the select makes the answer NO and NO POP happens, exactly as for the implied
+    # `</p>`. Measured in Chrome: `aInSelect` true and `innerText` empty (the anchor
+    # is INSIDE the still-open select, i.e. no link), while the control below has
+    # `aInSelect` false and `innerText` 'x'.
+    assert extract_anchor_hrefs(
+        '<select><table><td><input><a href="/blog">x'
+    ) == [], (
+        "the `<input>` popped a `<select>` it is not IN SCOPE of: the table cell is a "
+        "scope boundary, so a browser keeps the select open and the anchor is no "
+        "link — reporting it advertises a 'way in' no browser exposes"
+    )
+    assert extract_anchor_hrefs('<select><input><a href="/blog">x') == ["/blog"], (
+        "premise: with nothing between them the `<input>` IS in the select's scope "
+        "and the pop must still happen (Chrome: `aInSelect` false, `innerText` 'x')"
+    )
+    assert extract_heading_positions(
+        '<select><table><td><input><h2 id="qs">Q</h2>'
+    ) == [], (
+        "a `<h2>` after an `<input>` that never popped the select was BOUNDED: the "
+        "cell is a scope boundary so the select survives, and a heading inside it is "
+        "one no reader meets — bounding at it is the fail-open escape"
+    )
     # ── NEGATIVE CONTROL: the pop must not fire from inside an inert `<template>` ──
     # A browser processes that token against the template's own fragment stack,
     # which never holds the outer select — so the select survives it.
@@ -3498,6 +3526,28 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
         "a `<base>` inside an inert `<template>` is not one a browser applies, so "
         "honouring it would move the base to a page no reader navigates from"
     )
+    # ⛔ AND A FOREIGN `<base>` IS NOT THE `base` ELEMENT (#14073 review round 14, P2,
+    # measured). Inside `<svg>`/`<math>` a start tag is inserted *"as a foreign element,
+    # in the SVG/MathML namespace"* (§13.2.6.5), and the document base URL is defined by
+    # the HTML `base` element only — so a `<svg><base href>` moves nothing. Measured on
+    # this box's Chrome against a `file://` page: `<base href>` moves `baseURI` to
+    # `https://evil.example/`, while `<svg><base href>` and `<math><base href>` leave it
+    # at the document's own URL. `_record_heading` carries the same guard; this record
+    # was simply missed, and the direction is the fail-open one on this question.
+    for foreign in ("svg", "math"):
+        assert extract_first_base_href(
+            f'<head><{foreign}><base href="https://evil.example/"></{foreign}>'
+        ) is None, (
+            f"a `<base>` inside `<{foreign}>` is a foreign element, not the HTML "
+            f"`base`, so a browser does not apply it — honouring it moves every "
+            f"fragment-only link off the page"
+        )
+    assert extract_first_base_href(
+        '<head><base href="https://evil.example/" target="_blank">'
+    ) == "https://evil.example/", (
+        "premise: an HTML `<base href>` IS applied, so the rows above measure the "
+        "foreign half and not a broken seam"
+    )
 
     # ⛔ AND THE FIRST ONE WINS. A later `<base href>` is ignored, so honouring it
     # would compute a base no browser uses — a fail-open on this very question.
@@ -4093,6 +4143,13 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
                                  "</option></audio></select>"),
         ("optgroup closes optgroup", "<select><optgroup><video>FalkorDB permanently deletes it"
                                      "</optgroup></video></select>"),
+        # ⛔ ROUND 14 — the implied close asks the ORDINARY scope question, and a
+        # token a browser IGNORES is not a boundary. Both were measured fail-opens
+        # through all four `#storage` pins before the fix.
+        ("rt implies rp closed through a button",
+         "<ruby><button><rp><rt>FalkorDB permanently deletes it</rt></rp></button></ruby>"),
+        ("a stray `<td>` does not stop the implied close",
+         "<p><td><rp><div>FalkorDB permanently deletes it</div></rp></td></p>"),
     ):
         sibling = section.replace("</h2>", "</h2>" + markup, 1)
         assert sibling != section, f"the {label} control could not inject"
@@ -4240,16 +4297,19 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     ):
         assert " ".join(_visible_text(markup).split()).endswith(expected), (
             f"{label}: a browser closes the script and paints the following text, so "
-            f"this must be READ, not refused — the wedge is 'double-escaped with no "
-            f"`</script` still ahead', not 'a `<script` with no `-->` in this chunk'"
+            f"this must be READ, not refused — the wedge is 'THIS CHUNK ends "
+            f"double-escaped', not 'a `<script` with no `-->` in it'"
         )
 
-    # …and the ONE shape that STAYS refused, because it is a genuine divergence: from
-    # double-escaped a `</script` only drops to ESCAPED, so the element really closes at
-    # the SECOND `</script` and everything between the two is script text a browser does
-    # not paint — while this parse re-reads it as markup. That is also the module's
-    # existing promise (an `<a href>` inside such a region must not count), so refusing
-    # is correct here and refusing the rows above was not.
+    # …and ONE shape STAYS refused, and it is a DECLARED FALSE RED rather than a
+    # divergence: from double-escaped a `</script` only returns the tokenizer to
+    # ESCAPED, so the element really closes at the SECOND `</script` and a browser paints
+    # what follows it (measured on this box's Chrome: `1` script element, `innerText`
+    # `SWALLOWED`). This parse's chunk ends at the FIRST `</script`, so it never sees the
+    # `-->` that returns the tokenizer to data — see `handle_data` for why a look-ahead
+    # does not settle it, and what implementing the real rule would take. The refusal is
+    # the loud side, and `test_the_script_data_wedge_states_its_own_rule` states the rule
+    # the code actually implements so this comment cannot drift from it again.
     with pytest.raises(ValueError, match="wedged"):
         extract_visible_text("<script><!--<script></script>--></script><p>SWALLOWED</p>")
 
@@ -5364,6 +5424,21 @@ def test_extract_anchors_within_reads_the_parsed_tree() -> None:
         '<a href="#after">B</a>'
     )
     assert extract_anchors_within(nested, tag="div", class_token="toc") == [["#a"]]
+    # ⛔ AND A CONTAINER THE ADOPTION AGENCY RELOCATES SURVIVES ITS FORMATTING PARENT
+    # (#14073 review round 14, P2, measured). An `<a>` start tag runs the AAA against
+    # the open `<a>`, which RELOCATES a block rather than closing it: Chrome keeps
+    # `<div class="toc">` as a child of `<body>` holding the second anchor
+    # (`tocParent` `BODY`, `[null, '#a']`). Truncating the stack at the outer `<a>`
+    # closed the container too and this recording came back `[[]]` — an advertised set
+    # SHRUNK by a close the browser never performed, which is the escape `_docs_section`
+    # cuts on.
+    assert extract_anchors_within(
+        '<a><div class="toc"><a href="#a">A</a></div></a>', tag="div", class_token="toc"
+    ) == [["#a"]], (
+        "a container inside a formatting element was CLOSED by the AAA: a browser keeps "
+        "the div and puts the next anchor inside it, so this is an advertised set the "
+        "section bound must be able to see"
+    )
     # A CLASS TOKEN, not a substring, and one of several tokens.
     assert extract_anchors_within(
         '<div class="toc wide"><a href="#a">A</a></div>', tag="div", class_token="toc"
@@ -7319,3 +7394,144 @@ def test_the_sitemap_index_alias_redirects() -> None:
         f"{redirects.get('/sitemap.xml')!r}. Pages follows a _redirects row BEFORE serving "
         "the matching asset, so the conventional sitemap path would 301 off the real file "
         "and #11615 is back — drop the row; the index is a static file at the site root")
+
+
+def test_the_ruby_implied_close_asks_the_ordinary_scope_question() -> None:
+    """`button` is NOT an ordinary scope boundary, so it cannot block a ruby close.
+
+    ⛔ THE PRECONDITION ON "GENERATE IMPLIED END TAGS" IS *"If the stack of open
+    elements has a `ruby` element in scope"*, and the scope-boundary list at
+    §13.2.2.4 does not contain `button` — that member is added only for BUTTON scope.
+    This module asked the button-scope question, and the off-by-one-set was a fail-open
+    (#14073 review round 14, P1, measured): `<ruby><button><rp>P<rt>CLAIM` kept the
+    `<rp>` (a `display: none` `_UNRENDERED` element) on the stack, so every following
+    text node dropped the claim — while Chrome makes the `<rt>` a child of the
+    `<button>` (`rt.parentElement` `BUTTON`) and paints the claim (`innerText`).
+
+    The control is a `table`: it is a boundary in BOTH lists, so a `ruby` above one is
+    out of scope and the implied close must NOT run. That is what keeps this fix pinned
+    to `button` alone instead of to "any ancestor".
+    """
+    assert (
+        _AnchorHrefParser._P_SCOPE_BOUNDARY - {"button"}
+    ) == _AnchorHrefParser._SCOPE_BOUNDARY, (
+        "`_SCOPE_BOUNDARY` is no longer the button-scope list MINUS `button`: "
+        "the two lists differ in exactly that member (spec 13.2.2.4), and using the "
+        "button-scope one for a rule that asks the ordinary question is the fail-open "
+        "this test exists for"
+    )
+
+    # ── the mechanism, driven directly: `button` must not stop the walk, `table` must ──
+    through_button = _AnchorHrefParser()
+    through_button.feed("<ruby><button><rp>")
+    assert through_button._ruby_in_scope() is True, (
+        "a `<button>` between the current node and the `<ruby>` stopped the scope "
+        "walk: `button` only belongs to BUTTON scope, so the `<ruby>` is still in "
+        "scope and licenses the implied close"
+    )
+    through_table = _AnchorHrefParser()
+    through_table.feed("<ruby><table><rp>")
+    assert through_table._ruby_in_scope() is False, (
+        "a `<table>` between the current node and the `<ruby>` did not stop the scope "
+        "walk: `table` is a boundary in BOTH lists, so the implied close must not run "
+        "and this is the control that keeps the fix pinned to `button`"
+    )
+
+    # ── and end to end, through the recording the wording pin reads ──
+    assert "CLAIM" in extract_visible_text("<ruby><button><rp>P<rt>CLAIM"), (
+        "the claim the browser paints inside a `<button>`-wrapped ruby was dropped: "
+        "the `<rp>` is `display: none`, so leaving it above the text hides it from "
+        "the wording golden through every `#storage` pin"
+    )
+
+
+def test_the_table_structure_tokens_a_browser_ignores_insert_nothing() -> None:
+    """A table-structure start tag outside a table is IGNORED, not inserted.
+
+    Spec 13.2.6.4.7: *"A start tag whose tag name is one of: 'caption', 'col',
+    'colgroup', 'frame', 'head', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr' — Parse
+    error. Ignore the token."* Pushing one invented an ancestor the tree does not have,
+    and several members are `_P_SCOPE_BOUNDARY`, so a stray one stopped the implied
+    `</p>` walk and left an `_UNRENDERED` sibling above the text. Measured:
+    `extract_visible_text('<p><td><rp><div>CLAIM')` was `''` while Chrome ignores the
+    `<td>`, lets the `<div>` close the `<p>` (popping the `<rp>` with it) and paints the
+    claim. End-to-end through `_assert_storage_section_reviewed` that shape left the
+    allowlist, the destinations, the vocabulary scan and the golden ALL green.
+
+    The ignore is CONTEXTUAL, and both halves are pinned here: the same tokens inside a
+    `<table>` are inserted by the table modes, which is what the foster-parenting rows
+    depend on.
+    """
+    assert set(_AnchorHrefParser._IGNORED_OUTSIDE_TABLE) == {
+        "caption", "col", "colgroup", "frame", "head", "tbody", "td", "tfoot",
+        "th", "thead", "tr",
+    }, (
+        "`_IGNORED_OUTSIDE_TABLE` changed: it is the spec's ignore list verbatim, and "
+        "every member is a token a browser drops outside a table — widening or "
+        "narrowing it moves an element in or out of the ancestry the text question "
+        "reads"
+    )
+    assert "CLAIM" in extract_visible_text("<p><td><rp><div>CLAIM"), (
+        "a stray `<td>` outside a table was inserted and stopped the implied `</p>`: "
+        "a browser ignores the token, the `<div>` closes the `<p>` and the claim is "
+        "painted — this is the fail-open the row above exists for"
+    )
+    for stray in ("th", "caption", "tbody", "tr", "colgroup", "col", "frame", "head"):
+        assert "CLAIM" in extract_visible_text(f"<p><{stray}><rp><div>CLAIM"), (
+            f"a stray `<{stray}>` outside a table was inserted: a browser ignores the "
+            f"token (Parse error), so it cannot be the boundary that hides the claim"
+        )
+    outside = _AnchorHrefParser()
+    assert outside._ignored_token("td") is True, (
+        "`<td>` was not ignored with no table open"
+    )
+    inside = _AnchorHrefParser()
+    inside.feed("<table><tr>")
+    assert inside._ignored_token("td") is False, (
+        "`<td>` was ignored WITH a table open: the table modes insert it, and the "
+        "foster-parenting rows depend on the cell being in the tree"
+    )
+
+
+def test_the_script_data_wedge_states_its_own_rule() -> None:
+    """The wedge fires when THIS chunk ends double-escaped — and the module says so.
+
+    ⛔ THREE ARTIFACTS DESCRIBED A RULE THE CODE DID NOT HAVE (#14073 review round 14,
+    P2). `_script_data_state`'s docstring, both comments in `handle_data` and the
+    refusal row in the wording test each described a "no `</script` still ahead"
+    look-ahead; the code consults the STATE OF THE CHUNK and nothing else, and the chunk
+    ENDS at the first `</script` because `HTMLParser`'s CDATA mode has no escape states.
+    The look-ahead is also not implementable as a refinement: from double-escaped a
+    `</script` only returns the tokenizer to ESCAPED, so the shape has to be resolved by
+    CONTINUING the state machine past the stdlib's close point and SKIPPING the bytes
+    between the two tokens.
+
+    So this pins the implemented rule from both sides, and names the cost: one LEGAL
+    shape is refused. That is the loud direction, and it is declared rather than
+    discovered by the next reader.
+    """
+    assert _script_data_state("<!--<script>") == "double", (
+        "the state machine no longer reports double-escaped for the chunk shape the "
+        "wedge reads — the rule this module documents would then be about something "
+        "else"
+    )
+    assert _script_data_state("<!--<script>-->") == "data", (
+        "a `-->` must return the tokenizer to plain data: that is the round-12 fix, "
+        "and without it the wedge fires on a document a browser reads normally"
+    )
+    # ── what must NOT wedge: three shapes a browser paints (each measured) ──
+    for markup in (
+        "<script><!--<script>--></script><p>SEE THIS</p>",
+        "<script><!--x--><script></script><p>SEE THIS</p>",
+        "<script><!--<script>--><script></script><p>SEE THIS</p>",
+    ):
+        assert "SEE THIS" in extract_visible_text(markup), (
+            f"legal markup was refused: {markup!r} — a browser closes the script and "
+            f"paints the following text, so the wedge must not fire"
+        )
+    # ── and the DECLARED COST: legal markup whose element closes at the SECOND ──
+    # `</script`. Chrome paints SWALLOWED (`1` script element, `innerText`), and this
+    # refuses because its chunk ends at the FIRST `</script` and therefore never sees
+    # the `-->` that returns the tokenizer to data. Loud, not silently wrong.
+    with pytest.raises(ValueError, match="wedged"):
+        extract_visible_text("<script><!--<script></script>--></script><p>SWALLOWED</p>")
