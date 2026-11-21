@@ -871,7 +871,10 @@ class _AnchorHrefParser(HTMLParser):
         # WHOLE DOCUMENT", which is the false premise that produced round 26's P1). Measured,
         # and matching the living standard:
         #   * `body` — its attributes merge into the body element (`[hidden]` is global), so it
-        #     hides everything and no stack state changes the answer;
+        #     hides everything — EXCEPT inside an open `<select>`, where the token is
+        #     COUNTED instead (a `_in_select()` read of this very stack; see the root-token
+        #     arm below, which takes the loud side because the two parsing models disagree
+        #     there);
         #   * `html` — the attributes merge into the **TOP ELEMENT OF THE STACK**, so
         #     `<div><html hidden>` hides the DIV and `<p>ONE<div><html hidden>D</div><p>TWO`
         #     still paints `'ONE TWO'`; only an `html` token with NOTHING OPEN reaches the root
