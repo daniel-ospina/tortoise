@@ -895,10 +895,10 @@ SWEEP_NAMES = 66
 #: commit they belong to, because `(11844, "70d6cfdcd8b769e4")` is `origin/main` `e0accb8fe6`'s OWN
 #: tree, a DIFFERENT commit, and an earlier cut of this paragraph attributed it to this merge
 #: (#14038 review, P3). The row composition is read off `--report --base 28ca66878d… --top 5000` AT
-#: THIS HEAD, not inferred — and it is NOT this named tree's own pair: an earlier cut dropped the
-#: `AT THIS HEAD` scope, so the figures below read as `74fdd9e922`'s, and a reader re-deriving them at
-#: that rev gets a different pair for two of the three rows. `proj.g.query` 3642 and `g.query` 1492 are
-#: this PR's own rows, unchanged by the merge, and
+#: THIS HEAD, not inferred — and not as a property of the rev named above: an earlier cut dropped the
+#: head scope entirely, so the figures below read as `74fdd9e922`'s own, and a reader re-deriving them
+#: at that rev gets a different reading for two of the three rows. `proj.g.query` 3642 and `g.query` 1492
+#: are this PR's own rows, unchanged by the merge, and
 #: `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch's DIFF does not touch.
 #: ⛔ NO ARITHMETIC ON THE PARENTS IS OFFERED AS EVIDENCE: the merge tree's pair is what `--repin`
