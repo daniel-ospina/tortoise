@@ -420,11 +420,20 @@ SWEEP_NAMES = 66
 #: (8) == net delta (11833 − 11825), which is the cross-check that NO row was silently absorbed in the
 #: other direction.
 #: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three spellings
-#: are already pinned rows on this tree: `graph.query` (274 residue rows), `client.delete` (43
+#: are already pinned rows on this tree: `graph.query` (276 residue rows — 274 when this block was
+#: first written, and the +2 is the pair the block ABOVE already attributes by file: `#14068`'s own
+#: `docs/evidence/12943-cache-leg/orgwide_two_graphs.py` and
+#: `tests/test_13337_cache_graph_declaration.py` rows, both carried into the pin below), `client.delete` (43
 #: residue rows — 48 text occurrences tree-wide,
 #: `git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py' | sort | uniq -c`, so five of them
 #: are typed receivers and were never residue) and `super().query` (68, already carried by
-#: `tests/test_supabase_control.py` and `tortoise/cypher_guard.py`). So the
+#: `tests/test_supabase_control.py` and `tortoise/cypher_guard.py`). ⛔ RE-DERIVE THESE SHAPE COUNTS,
+#: NEVER TRUST THEM: a count moves whenever ANY tree adds one row of that shape, and nothing
+#: recomputes a figure written in prose — `python3 tools/sdk_privatise.py --report --base <SWEEP_BASE>
+#: --top 100000` prints exactly the rows the pin is taken over (the `UNTYPED receivers NOT swept`
+#: total must equal `SWEEP_RESIDUE[0]`, and each shape row is the number quoted here). What the pin
+#: itself guarantees is the ROW SET, not these three figures: only a shape that was NOT here at the
+#: re-cut can red `--check`. So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
