@@ -1208,7 +1208,7 @@ def _heading_lines_carrying_extra_attributes(html: str) -> set[int]:
     ITSELF, which is exactly the part a static guard can read.
 
     The remaining residual — a `class` a stylesheet rule hides — is unchanged and is
-    declared on `effective_heading` in `tests/_html_links.py`. Read out of the parsed
+    declared on `_unmet_by_reader` in `tests/_html_links.py`. Read out of the parsed
     tree (`extract_element_attributes`), never the source, so an attribute inside a
     comment or an inert `<template>` is not counted.
     """
@@ -1216,11 +1216,6 @@ def _heading_lines_carrying_extra_attributes(html: str) -> set[int]:
         line
         for tag, name, line in extract_element_attributes(html)
         if tag == "h2" and name in _STATIC_HIDING_ATTRIBUTES
-    }
-    return {
-        line
-        for tag, name, line in extract_element_attributes(html)
-        if tag == "h2" and name != "id"
     }
 
 
@@ -1380,9 +1375,12 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
             href, DOCS, base=_document_base_url(html, DOCS),
         )) is not None
     }
-    # ⛔ THE BOUND PREMISE, MEASURED (round 7): a heading carrying any attribute other
-    # than `id` may be INVISIBLE (`style="display:none"`, a `class` a rule hides), so
-    # it cannot decide what a reader at the anchor meets. Computed once, before the
+    # ⛔ THE BOUND PREMISE, MEASURED (round 7): a heading that HIDES ITSELF by the
+    # markup's own rule (`style`, `hidden`, `aria-hidden`) cannot decide what a reader
+    # at the anchor meets. `class` is deliberately NOT in that set — it hides only
+    # through a stylesheet rule this parser cannot compute, and refusing it would red
+    # the round-5 control that moves `class` in front of `id` on a correct page. See
+    # `_heading_lines_carrying_extra_attributes`. Computed once, before the
     # loop, so this is one parse of the page rather than one per candidate.
     extra_attribute_lines = _heading_lines_carrying_extra_attributes(html)
     for heading_id, offset in headings:
@@ -2382,6 +2380,34 @@ def test_a_css_invisible_advertised_heading_does_not_bound_the_storage_slice() -
     )
     with pytest.raises(AssertionError, match="<h2 style>"):
         _assert_storage_section_reviewed(caught)
+
+
+def test_raw_text_directives_are_recorded_exactly_where_a_reader_meets_them() -> None:
+    """`extract_raw_text_elements`' contract, one row per rendering fact.
+
+    ⛔ THE DOCSTRING OVER-PROMISED "every `<style>`/`<script>`" AND NOTHING TESTED IT
+    (#14229 review): the foreign branch returns BEFORE the HTML raw-text branch, so
+    `<svg><style>` was silently unrecorded — even though SVG's stylesheet applies
+    DOCUMENT-WIDE, which is precisely the question the caller asks. Driven directly
+    rather than through `_attributes_outside_allowlist`, because that consumer's single
+    answer ("this section carries <style>") cannot tell these cases apart.
+    """
+    for label, markup, expected in (
+        ("plain style", "<style>p{color:red}</style>", [("style", 1)]),
+        ("plain script", "<script>x()</script>", [("script", 1)]),
+        # A FOREIGN directive is a real stylesheet and applies document-wide, so a
+        # caller asking "is this statically reviewable?" must be told no.
+        ("svg style", "<svg><style>p{}</style></svg>", [("style", 1)]),
+        ("math style", "<math><style>p{}</style></math>", [("style", 1)]),
+        # Inert content renders in no mode, and a comment is not markup at all — the
+        # caller is already cleared to read these, so reporting them would be a false
+        # red on a correct page.
+        ("inert template", "<template><style>p{}</style></template>", []),
+        ("comment", "<!-- <style>p{}</style> -->", []),
+        ("plain markup", '<h2 id="x">T</h2><p>body</p>', []),
+    ):
+        got = extract_raw_text_elements(markup)
+        assert got == expected, f"{label}: got {got}, want {expected}"
 
 
 def test_the_storage_slice_bound_catches_the_heading_it_exists_for() -> None:
@@ -6787,6 +6813,15 @@ def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
             extract_anchors_within(f"{toc}<frameset>", tag="div", class_token="toc"),
         ),
         ("text", text_parser.text),
+        # ⛔ `raw_text` NEEDS ITS OWN ROW, and its absence was the exact drift this
+        # test's docstring warns about (#14229 review): adding the name to
+        # `_RECORDINGS` satisfies the SET ratchet, so without a row here the clear
+        # could stop being OBSERVED while the test stayed green. A `<style>` is the
+        # directive a frameset-replaced document must forget.
+        (
+            "raw_text",
+            extract_raw_text_elements("<style>p{}</style><frameset>"),
+        ),
     ):
         assert got == [], (
             f"`{label}` still reports entries from a document an honored "

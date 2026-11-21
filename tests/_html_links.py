@@ -2033,6 +2033,14 @@ class _AnchorHrefParser(HTMLParser):
             # renders its children and a foreign `<script>` holds markup, not text
             # (review finding, #3962, Chromium-verified).
             self.foreign_tags.append(tag)
+            if tag in self._RAW_TEXT_DIRECTIVES:
+                # ⛔ A FOREIGN `<style>` IS STILL A STYLESHEET, and SVG's applies
+                # DOCUMENT-WIDE — so a caller asking "is this markup statically
+                # reviewable?" must be told no. Recorded here rather than left to the
+                # HTML branch, which this early return never reaches (#14229 review).
+                # No gate here on `_suppress`: foreign content is not suppressed, and
+                # an inert `<template>` never reaches this branch at all.
+                self.raw_text.append((tag, self.getpos()[0]))
             return False
         if tag == "body":
             # Only a body that is actually IN the document counts: `<body>` inside an
@@ -3103,7 +3111,7 @@ def extract_element_attributes(html: str) -> list[tuple[str, str, int]]:
 
 
 def extract_raw_text_elements(html: str) -> list[tuple[str, int]]:
-    """``(tag, line)`` for every ``<style>``/``<script>`` in ``html``'s tree.
+    """``(tag, line)`` for every RENDERING DIRECTIVE a reader could meet.
 
     A rendering DIRECTIVE is not copy: a ``<style>`` block whose ``content:`` property
     paints a sentence, or a ``<script>`` that writes a node, contributes no text node
@@ -3115,8 +3123,15 @@ def extract_raw_text_elements(html: str) -> list[tuple[str, int]]:
     A caller asking "is this markup statically reviewable?" must therefore REFUSE a
     region whose answer is a directive, not clear it — the same shape as
     ``extract_mode_dependent_regions``. An empty result is the only answer that clears
-    the markup for that question. A directive inside an inert ``<template>`` is NOT
-    reported: template content renders in no mode, so the inert rule already answers it.
+    the markup for that question.
+
+    ⛔ THE EXACT CONTRACT, because the first version of this docstring over-promised
+    "every ``<style>``/``<script>``" and a review caught the gap (#14229 review):
+    reported at any depth in HTML content and in FOREIGN content (``<svg>``/``<math>``,
+    where a ``<style>`` is a real stylesheet that applies document-wide), and NOT
+    reported inside an inert ``<template>`` — template content renders in no mode, so
+    the inert rule already answers it — nor inside another raw-text or mode-dependent
+    region, whose own guard refuses it first.
     """
     parser = _AnchorHrefParser()
     parser.feed(html)
