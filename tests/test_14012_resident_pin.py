@@ -1620,3 +1620,54 @@ def test_a_later_RECORD_hold_does_not_report_an_EARLIER_pass_lease():
         f"operator to re-run here is an instruction that cannot converge. "
         f"reason={report.reason!r}"
     )
+
+
+def test_a_window_wholly_held_at_plan_time_names_the_PIN_not_the_read():
+    """The plan-time `not local` stop-reason arm honours the same pin-before-lease order.
+
+    ⛔ The last-hop arm and this one exist for the same reason — the buckets route the
+    operator to the remedy that CLEARS the state — but only the last-hop arm was graded:
+    swapping the order here left 52/52 in this file (and 170 passed across that commit's own
+    five-file set) while the report said "2 node(s) are held by an in-flight READ … re-run
+    when those reads finish" for a window that was half PINNED. That remedy does not
+    converge: a re-run re-asks the same pin at the same budget and stops in the same place.
+    The comment at `cache_evictor.py:1160` claims this arm "cannot disagree" with the
+    last-hop one, which is exactly what this row pins.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+    leases = ReadLeases()
+
+    # ⛔ PLAN TIME, not the last hop: the predicate answers True on the FIRST ask, so gate 6
+    # holds these before anything is planned...
+    pinned_keys = {"p0", "p3"}
+
+    def pinned(candidate: Candidate) -> bool:
+        return candidate.key in pinned_keys
+
+    # ...and the other two are already held by readers when the sweep starts.
+    for key in ("p1", "p2"):
+        leases.acquire(g.id_of(key))
+
+    report = evict(
+        # a budget below the live population, so `over` > 0 and the sweep starts; the
+        # WINDOW is then saturated by its own size, and the nodes it takes are all held.
+        _assessment(nodes=4), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pinned,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=2),
+    )
+
+    assert report.deleted == (), "a wholly held-back window deleted something"
+    assert "are PINNED" in report.reason, (
+        "a window holding BOTH a pin and a reader did not name the pin, so the operator is "
+        f"offered a re-run for a pin it cannot clear. reason={report.reason!r}"
+    )
+    assert "in-flight READ" not in report.reason, (
+        f"the lease was reported as the binding hold over the pin. reason={report.reason!r}"
+    )
+    assert report.metric()["pass_budget_exhausted"] is False
