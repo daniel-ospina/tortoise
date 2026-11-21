@@ -3446,43 +3446,71 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         "must not reach the visible-text scan"
     )
 
-    # 3c. …and the FALLBACK SLOTS, which `_UNRENDERED` used to drop from this recording
-    #    (#14073 review round 7, P2, measured). The set answers the BOUNDARY question,
-    #    not this one: a browser paints a fallback slot whenever its own condition
-    #    fails, and the page controls several of those conditions itself. `<object>` is
-    #    the page-controlled extreme — with no `data` the spec never enters the resource
-    #    branch and the children ARE the rendering (HTML Standard 4.8.7) — but a page
-    #    that offers no supported `<source>` decides the same thing for `<video>`, and
-    #    a browser without canvas support paints a `<canvas>`'s children. Dropping them
-    #    was the QUIET side; counting can only over-count, i.e. the loud one.
-    #    Driven per element, with the premise asserted so the allowlist and the
-    #    destination pin provably cannot be what catches it.
-    for fallback_tag in (
-        "object", "video", "audio", "canvas", "meter", "progress", "datalist",
-    ):
-        fallback_claim = section.replace(
+    # …and the two refusals that must SURVIVE the wider carve-out, or "painted" would
+    # mean "everything under a `<summary>`": a `hidden` element INSIDE the summary,
+    # and a `hidden` ANCESTOR above the `<details>`, both hide the text.
+    assert " ".join(_visible_text(
+        "<details><summary><span hidden>GHOST claim</span>shown</summary></details>"
+    ).split()) == "shown", (
+        "a `hidden` element INSIDE the summary is not painted; admitting the whole "
+        "summary subtree unshaded would count it"
+    )
+    assert "GHOST" not in _visible_text(
+        "<div hidden><details><summary>GHOST claim</summary></details></div>"
+    ), (
+        "a `hidden` ANCESTOR above the `<details>` hides the summary too, so the rule "
+        "must read the elements above the summary/`<details>` pair as well"
+    )
+    # 3c. …and the `<object>` FALLBACK, which `_UNRENDERED` used to drop from this
+    #    recording (#14073 review round 7, P2, measured). `<object>` without a usable
+    #    `data` is page-controlled rather than a support condition — HTML Standard 4.8.7
+    #    enters the resource branch only "If the `data` attribute is present and its
+    #    value is not the empty string", otherwise "The object element represents the
+    #    element's children" — so its children ARE the rendering in every browser, and
+    #    the `#storage` allowlist can never refuse it (a bare `<object>` adds no
+    #    attribute). Measured before the fix: the allowlist, the destination pin, the
+    #    vocabulary scan and the golden were ALL green.
+    object_claim = section.replace(
+        "</h2>",
+        "</h2><object><p>FalkorDB permanently deletes your record once the allowance "
+        "for your tier is reached</p></object>",
+        1,
+    )
+    assert object_claim != section, "the `<object>` control could not inject"
+    assert _attributes_outside_allowlist(object_claim) == [], (
+        "premise: a bare `<object>` adds no attribute, so the allowlist cannot be what "
+        "catches this"
+    )
+    assert sorted(set(extract_anchor_hrefs(object_claim))) == list(
+        _REVIEWED_SECTION_HREFS
+    ), "premise: `<object>` adds no href, so the destination pin cannot catch this"
+    assert "falkor" in _banned_vocabulary(object_claim), (
+        "an `<object>` with no usable resource paints its children, so its copy is one "
+        "a reader meets; `_UNRENDERED` answers the BOUNDARY question and dropping the "
+        "text here hides the claim from the pin that exists to catch it"
+    )
+    with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+        _assert_storage_section_reviewed(object_claim)
+
+    # …and the SIX the measurement does NOT admit stay dropped, so admitting "a
+    # fallback slot" wholesale cannot pass the row above: a supporting browser paints
+    # none of their fallback text (measured, see `_FALLBACK_RENDERS`), so counting it
+    # would red the golden on copy no reader meets. The set is pinned from BOTH sides —
+    # add a member and this loop reds; remove one and the `<object>` row above reds.
+    for undrawn in ("video", "audio", "canvas", "meter", "progress", "datalist"):
+        undrawn_claim = section.replace(
             "</h2>",
-            f"</h2><{fallback_tag}><p>FalkorDB permanently deletes your record once "
-            f"the allowance for your tier is reached</p></{fallback_tag}>",
+            f"</h2><{undrawn}><p>FalkorDB permanently deletes your record</p></{undrawn}>",
             1,
         )
-        assert fallback_claim != section, f"the `<{fallback_tag}>` control could not inject"
-        assert _attributes_outside_allowlist(fallback_claim) == [], (
-            f"premise: a bare `<{fallback_tag}>` adds no attribute, so the allowlist "
-            f"cannot be what catches this"
+        assert undrawn_claim != section, f"the `<{undrawn}>` control could not inject"
+        assert "falkor" not in _banned_vocabulary(undrawn_claim), (
+            f"a supporting browser paints no fallback text of `<{undrawn}>`, so counting "
+            f"it reddens the golden on legal markup; it is `_FALLBACK_RENDERS` that "
+            f"separates it from `<object>`"
         )
-        assert sorted(set(extract_anchor_hrefs(fallback_claim))) == list(
-            _REVIEWED_SECTION_HREFS
-        ), f"premise: `<{fallback_tag}>` adds no href, so the destination pin cannot catch this"
-        assert "falkor" in _banned_vocabulary(fallback_claim), (
-            f"a `<{fallback_tag}>` paints its children whenever its own condition fails "
-            f"and the page controls several of those conditions, so its copy is one a "
-            f"reader may meet; `_UNRENDERED` answers the BOUNDARY question, and dropping "
-            f"the text here hides the claim from the pin that exists to catch it"
-        )
-        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
-            _assert_storage_section_reviewed(fallback_claim)
-    # …and what a browser genuinely never paints STAYS dropped, at depth, or "count
+
+    # …and what a browser genuinely never paints STAYS dropped at depth, or "count
     # everything" would pass the rows above: a closed `<details>` body, a `hidden`
     # subtree, and a `<dialog>` without `open`.
     for name, unreadable in (
@@ -3521,6 +3549,38 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     ), (
         "a `<textarea>` inside an inert `<template>` is template content: admitting "
         "the raw-text family must not reach into a subtree no reader meets"
+    )
+
+    # 5. …and the FALLBACK slot is the same over-drop for exactly ONE element,
+    #    measured rather than assumed (Chromium 1255, opaque-pixel delta of the same
+    #    text with and without the children): `<object>` paints its children when no
+    #    resource loads (delta 1677), while `<video>`/`<canvas>`/`<audio>`/`<datalist>`/
+    #    `<meter>`/`<progress>` paint none of it (delta 0). `_UNRENDERED` therefore
+    #    refuses all of them for the BOUNDARY question (by tag) but only the
+    #    non-object ones for the TEXT question — otherwise a claim parked in an
+    #    `<object>` fallback is painted by the browser and invisible to this pin.
+    for name, element, visible in (
+        ("object", "<object>{claim}</object>", True),
+        ("video", "<video>{claim}</video>", False),
+        ("datalist", "<datalist><option>{claim}</option></datalist>", False),
+    ):
+        mutant = section.replace(
+            "</h2>",
+            "</h2>" + element.replace("{claim}", "ghost claim about allowance"),
+            1,
+        )
+        assert mutant != section, f"the {name} fallback control could not inject"
+        got = "ghost claim about allowance" in " ".join(_visible_text(mutant).split())
+        assert got is visible, (
+            f"`{name}` fallback text measured '''{'painted' if visible else 'not painted'}"
+            f"''' in Chromium; the wording pin must agree with the measurement, and "
+            f"dropping painted text is the fail-open direction"
+        )
+    # PREMISE: an `<object>` ancestor still does NOT bound the slice, so admitting
+    # its text did not leak into the boundary question (that check is by TAG).
+    assert extract_heading_positions("<object><h2 id='qs'>Q</h2></object>") == [], (
+        "a heading in an `<object>` fallback must not bound the slice: the boundary "
+        "question refuses fallback slots, and that refusal is by tag"
     )
 
 
