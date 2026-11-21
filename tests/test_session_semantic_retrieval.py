@@ -297,6 +297,11 @@ def test_real_embedder_paraphrase_retrieves_the_captured_turn(sdk, monkeypatch):
     EmbeddingModel._reset()
     try:
         model = EmbeddingModel.get()
+    # #14125 class 2 (review of `cd75ec7144`, P1): a swallowed AttributeError or
+    # TypeError from `EmbeddingModel.get()` is a MOVED SEAM, not an unavailable
+    # model — reporting it as "{model} unavailable" hides a rename behind a skip.
+    except (AttributeError, NameError, TypeError):
+        raise
     except Exception:
         model = None
     if model is None:

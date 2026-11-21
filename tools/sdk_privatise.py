@@ -982,7 +982,18 @@ SWEEP_NAMES = 66
 #: merge, so the two numbers above are stated as what they are — two other trees' pins — and not as
 #: a decomposition of this one.
 #: `--check` on this tree: exit 0, `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11844, '544521652dca0209')
+#: ── RE-CUT AT THE NINTH MERGE TREE (`#13998` × `main` `69908d006b`) ──────────────
+#: ⛔ BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE — each is true of the tree it names, and a merged
+#: tree is a THIRD tree, so this pair is RE-DERIVED with `--repin` on the merge tree, never combined
+#: from either parent's: it prints **(11852, '52e4a15116d6f32b')**. The two parents' own pairs are
+#: (11844, '544521652dca0209') (this branch's eighth merge tree) and (11835, "891187f5a4636487")
+#: (`main` at `69908d006b`, the pair its OWN copy of this file pins). Neither the count nor the
+#: digest is either parent's, which is the field that proves a third tree rather than a sum. ⛔ NO
+#: ROW-BY-ROW ATTRIBUTION IS TYPED HERE: the difference against `main` was not diffed row for row for
+#: THIS merge, so the two numbers above are stated as what they are — two other trees' pins — and
+#: not as a decomposition of this one.
+#: `--check` on this tree: exit 0, `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
 
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
