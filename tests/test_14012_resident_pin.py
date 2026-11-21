@@ -1117,14 +1117,21 @@ def test_a_pinned_node_held_by_a_reader_is_reported_pinned_not_leased():
     )
 
 
-def test_a_pin_declared_between_planning_and_the_delete_still_wins():
-    """Gate 6's second half — the same window the lease already re-checks.
+def test_the_last_hop_re_asks_the_pin_predicate_before_the_delete():
+    """Gate 6's second half — the SEAM is at the last hop; the SCOPE is the snapshot.
 
     ⛔ `final` re-asks `leases.held()` immediately before `_delete_nodes` because "a read can
-    start between planning and the statement". The pin is the STRONGER promise ("a pinned
-    node is NEVER deleted, whatever the selector offered") and had no equivalent re-ask, so
-    a declaration written in that window let the nodes be deleted AND reported in `deleted`
-    — the report could not even show that it happened.
+    start between planning and the statement". Gate 6 gets the same re-ask, so a caller
+    whose predicate is LIVE is consulted immediately before the DELETE rather than only at
+    plan time.
+
+    ⛔ BUT THAT IS ALL IT BUYS, and the row used to claim more. `tools/cache_evict.py`
+    wires `pinned=read(...).gate()`, a lambda over the frozenset ONE read computed, so
+    re-asking it returns the same answer: a `pin` issued mid-sweep is NOT seen, and the
+    header's "NEVER deleted" was a promise the code could not keep (corrected there; the
+    live re-ask costs a declaration query per candidate and is filed as #14214, not improvised).
+    The stateful fake below is exactly the LIVE-predicate case the interface permits —
+    which is what this row is entitled to assert.
     """
     g = _FakeGraph(["p0", "p1"])
 

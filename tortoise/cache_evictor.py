@@ -87,10 +87,16 @@ is not the trigger, and this header said it was until #11709 corrected it.
    the assessment and the handle together. A handle that names no graph, or a
    different one, is a REFUSAL.
 6. **The pin** (#14012) — a candidate the caller's ``pinned`` predicate reports as
-   resident is NEVER deleted, whatever the selector offered. Like the record probe
-   this is a SEAM, not a policy: what is pinned belongs to the user's declaration
-   (``tortoise/resident_pin.py``), and this module only asks. ⛔ It is checked BEFORE
-   the lease and BEFORE the record probe, because a pin is the one answer the score
+   resident **as of the reading the caller took** is not deleted, whatever the selector
+   offered. Like the record probe this is a SEAM, not a policy: what is pinned belongs to
+   the user's declaration (``tortoise/resident_pin.py``), and this module only asks. ⚠️ THE
+   SCOPE IS THE SNAPSHOT, and an earlier revision of this bullet said "NEVER deleted",
+   which the code cannot deliver: ``tools/cache_evict.py`` passes ``read(...).gate()``, a
+   lambda over the frozenset one read computed, so re-asking it at the last hop re-answers
+   the same reading. A ``pin`` issued DURING a sweep is therefore not honoured by that
+   sweep — the window is narrowed to the caller's own read, not closed (filed as #14214: the live
+   re-ask needs one declaration query per candidate at the last hop). ⛔ It is checked
+   BEFORE the lease and BEFORE the record probe, because a pin is the one answer the score
    may not overrule, and a node reported as "pinned" must not be reported as held for
    a reader or for an unservable record instead. A predicate that RAISES holds the
    node back: *could not ask* and *not pinned* are opposite findings, and the safe
@@ -1179,12 +1185,23 @@ def evict(
         # plan-time check is not enough: a read can start between planning and the
         # statement, which is exactly the window a lease exists to close.
         #
-        # ⛔ AND GATE 6 GETS THE SAME SECOND HALF, FOR THE SAME WINDOW. The header's promise
-        # ("a pinned node is NEVER deleted, whatever the selector offered") is the STRONGER
-        # one, so it cannot be the weaker one that goes un-re-asked: a `pin` declaration
-        # written between planning and the DELETE used to let those nodes be deleted AND
-        # reported in `deleted`, so the report could not even show that it happened. The
-        # polarity is gate 6's own — anything truthy holds, and a predicate that RAISES
+        # ⛔ AND GATE 6 IS RE-ASKED HERE, BUT ONLY OVER THE CALLER'S OWN SNAPSHOT — say
+        # that plainly, because an earlier revision of this comment (and the header bullet
+        # it points at) claimed the WINDOW was closed and it is not. `pinned` is whatever
+        # the caller passed: `tools/cache_evict.py` passes `resident_pin.read(...).gate()`,
+        # a lambda closing over the frozenset that ONE read computed, so asking it again is
+        # a pure function of the same snapshot and answers the same thing. Measured: with
+        # the real wiring, `pin(g, ["p1"])` issued after that read leaves `gate(p1)` False,
+        # while a fresh `read(g).gate()(p1)` is True — so a declaration written mid-sweep
+        # is NOT seen at the last hop. What this loop DOES buy is that a caller whose
+        # predicate is live (the interface allows it, and the row that exercises it passes
+        # a stateful fake) is consulted immediately before the DELETE rather than only at
+        # plan time, so the seam is in the right place for the day the caller re-reads.
+        # Closing the window itself needs a re-read per ask in `tools/cache_evict.py`,
+        # which costs a declaration query per candidate — a design decision, filed as #14214.
+        # Until then the honest statement is the header's: pinned-as-of-the-read.
+        #
+        # The polarity is gate 6's own — anything truthy holds, and a predicate that RAISES
         # holds too (unanswerable is not "unpinned"), reported apart because the remedies
         # differ.
         holds = leases.held()
