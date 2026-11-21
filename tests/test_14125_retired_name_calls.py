@@ -1115,13 +1115,22 @@ def _collect_binding(node: ast.AST, out: set[str]) -> None:
     flag over (measured: ``()`` exempt before, graded after).
 
     ⛔ TWO §4.2.1 FAMILIES ARE NOT COLLECTED BY THIS HELPER, and neither is an
-    omission: where they bind is decided by SCOPE, so each is collected by the walk that
-    owns that scope. A COMPREHENSION's iteration target binds in the comprehension's own
-    scope (``_module_scope_bindings``); a TYPE PARAMETER LIST — ``def f[T](…)``,
+    omission: where they bind is decided by SCOPE, so each is collected where its own
+    scope's USE is resolved, not by a flat walk. A COMPREHENSION's iteration target
+    binds in the comprehension's own scope, so BOTH the module walk and the
+    probe-holding-function walk refuse it, and `_enclosing_bindings` collects it at the
+    CALL NODE — the only granularity that gets both directions right: a call INSIDE such
+    a comprehension is graded (`((4, (), True, False, True),)` for
+    `[torch.query(…) for torch in clients]` over a non-own import), while a call AFTER
+    it stays exempt (`()`). An earlier version of this sentence credited
+    ``_module_scope_bindings`` with the collection, and NO walk collects it there — that
+    walk SKIPS the target and keeps only the walrus, which binds in the CONTAINING scope
+    (review of this PR, P2). A TYPE PARAMETER LIST — ``def f[T](…)``,
     ``class C[T]``, ``type X[T] = …`` — binds in the GENERIC's scope and IS visible in
     its body (``f.__code__.co_freevars == ('T',)``, measured on 3.12.3), so it is
     collected per function by ``_type_param_names``. A flat node-kind walk cannot
-    express either, which is why "complete the list of node kinds" is the wrong fix.
+    express either place a scope owns, which is why "complete the list of node kinds" is
+    the wrong fix.
     """
     if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
         out.add(node.id)
@@ -1429,11 +1438,18 @@ def _reaches_capability_seam(
     NOTHING, and a swallowed rename reads as "storage unavailable" again — the
     class-2 false PASS this file exists to catch (review of 90a0e9e8b20c, finding
     3). So the receiver decides, on EVIDENCE: a receiver whose root name a NON-own
-    import binds is that optional extra and is skipped — UNLESS that name is re-bound
-    anywhere in the module, in which case it no longer denotes the import where the
-    probe uses it (`_third_party_receivers`); every other receiver — a
-    parameter (`def _probe(proj)` … `proj.g.query`), a client assigned at module
-    scope, `FalkorProjection.from_uri(…)` — is still graded. `receiver_is_sdk`
+    import binds is that optional extra and is skipped — UNLESS a binding for that name
+    can REACH the call site (§4.2.2), in which case it no longer denotes the import
+    there. ⛔ TWO DIFFERENT SETS IMPLEMENT THAT, and an earlier version of this paragraph
+    said "re-bound anywhere in the module", which is false in BOTH directions (review of
+    this PR, P2): module scope comes from `_third_party_receivers`
+    (`_module_scope_bindings` + `_global_scope_bindings`), and the probe's OWN enclosing
+    scopes come per probe from `_enclosing_bindings`. Measured with this file's own
+    `_probe_blocks_from_source`: a parameter of a NEIGHBOURING function does NOT cancel
+    the exemption (`()` exempt), a parameter of the probe's own function DOES
+    (`((4, (), True, False, True),)`), and a module-scope rebind does. Every other
+    receiver — a parameter (`def _probe(proj)` … `proj.g.query`), a client assigned at
+    module scope, `FalkorProjection.from_uri(…)` — is still graded. `receiver_is_sdk`
     (tools/sdk_privatise.py) was considered for this and rejected: it answers from
     annotations and stand-ins, so it cannot see the `PROJ = _make_proj()` shape the
     finding names, and gating on it would break the pinned parameter-client witness
@@ -3782,8 +3798,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     (`tests/test_8870_version_anchor_write_order.py:138`). Instead the arm is back
     #     in every branch and NARROWED: `_reaches_capability_seam(block, third_party, _parents)`
     #     skips an ATTRIBUTE call only when the receiver's ROOT name is bound by a
-    #     NON-own import AND is not re-bound anywhere in the module
-    #     (`_third_party_receivers`) — the `some_optional_dep.query` false red — and
+    #     NON-own import AND no binding for it REACHES the call site — module scope
+    #     (`_third_party_receivers`) or the probe's own enclosing scopes
+    #     (`_enclosing_bindings`), NOT "anywhere in the module" (a rebind in a
+    #     neighbouring function cannot reach it: measured `()` exempt — review of this
+    #     PR, P2) — the `some_optional_dep.query` false red — and
     #     grades everything else. `4k+` below is the POSITIVE witness
     #     for this exact document; deleting the arm again reds it, which is the
     #     guarantee the `()` pin could never give.
@@ -3791,7 +3810,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so it
     #     must not admit a third-party-only probe: at the module body, nor in either
     #     helper branch. That holds for a receiver whose ROOT NAME an import bound and
-    #     that is NOT re-bound anywhere — not for every third-party-looking receiver:
+    #     that no binding REACHES — not for every third-party-looking receiver:
     #     `CLIENT = make_client(); CLIENT.query(…)` IS graded (the name is not an
     #     import), and so is a collection handle from
     #     `client.get_or_create_collection(...)`; this comment used to deny that (review
