@@ -134,8 +134,8 @@ written line sits past the pin's `sdk.py` (56,415 lines there; `git show ccb4974
 past it — written as two code spans so they are resolved but not counted twice), `sdk.py:58923`,
 `:58265` and `:58274` (three reader cites re-derived at this head, which sits past the pin's `sdk.py`
 end), and `search_engine.py`'s `:7196`/`:7198`, whose written lines sit past the pin's `search_engine.py`
-(7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — and `hosted_api.py`'s `:51087` (the `s.actor_user_id = $uid` condition, whose written line sits past the pin's `hosted_api.py`, 49,851 lines there) — all nine re-derived at
-a head that has since grown. So the drift is **128 of the 222 comparable, plus six of those nine pairs** (the three that do not exist at `main` either are `sdk.py`'s `:61594`/`:61614` and `hosted_api.py`'s `:51087`), and
+(7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid` condition, whose written line sits past the pin's `hosted_api.py`, 49,851 lines there) — all nine re-derived at
+a head that has since grown. So the drift is **128 of the 222 comparable, plus six of those nine pairs** (the three that do not exist at `main` either are `sdk.py`'s `:61594`/`:61614` and `hosted_api.py`'s `:50935`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 **The drift is 134 of those 231.** ⚠️ **These counts are a parsing decision, and this header states which
@@ -581,7 +581,7 @@ MIXED set, and precision here is the point — it is not one claim:
   the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:24929`) and in the
   session-detail endpoint's OWN point lookup, which has no `CONTAINS` walk either
   (`hosted_api.py:25148-25167`, `s.turn_count, s.actor_user_id, s.harness,` at `:25151`), a filter
-  in the **LIST** endpoint's own conditions (`hosted_api.py:51087`, `s.actor_user_id = $uid`) and carries its own `:Session` index
+  in the **LIST** endpoint's own conditions (`hosted_api.py:50935`, `s.actor_user_id = $uid`) and carries its own `:Session` index
   (`projection/__init__.py:21185`) — sibling, filter, index, and no walk, so `none` like its neighbours;
   `entity_links_attempted` is a sibling column of the entity-link walk
   (`session_schema.py:916-917`); `value_nodes_created` and `value_nodes_held` are BOTH named by the commit-path
