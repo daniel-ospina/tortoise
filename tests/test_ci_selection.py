@@ -7384,6 +7384,32 @@ def test_docs_only_skips_slow_and_carve_out():
         assert r["slow_selected"] == []
 
 
+def test_the_p7_how_to_selects_its_reader_and_declares_the_cost():
+    """#14237 round-2 review (P2): the ONE declared exception to
+    `test_docs_only_skips_slow_and_carve_out`'s property.
+
+    Registering the P7 how-to against `sdk` is what makes the guard that READS it run on
+    the doc-only diff it exists for — and `sdk` carries the slow leg and the carve-out
+    pool, so this one path sets both. That cost is declared here, measured, instead of
+    being left for whoever wonders why one markdown edit woke 64 slow files; every
+    OTHER docs-only path still skips both legs, which is what the pin above says.
+    """
+    doc = "docs/how-to/provision-a-graph-per-end-user.md"
+    r = _sel([doc])
+    assert r["surfaces"] == ["sdk"], (
+        f"{doc} no longer selects the surface its reader guard lives in: "
+        f"{r['surfaces']}")
+    assert "test_11609_door_retirement.py" in r["test_files"], (
+        "the doc no longer selects tests/test_11609_door_retirement.py — the guard "
+        "that asserts every retired name in it is labelled, i.e. the whole point of "
+        "the registration")
+    assert r["full"] is False, (
+        "a docs-only diff must not fall through to the whole matrix")
+    assert r["slow_run"] is True and r["carve_out_run"] is True, (
+        "the declared cost of this registration moved — re-measure it and say so in "
+        "the comment in tools/ci_selection.py, or move the registration")
+
+
 def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
     """#2147/#2148: push/schedule/unknown-path/shared-module -> full:
     test-slow AND test-carve-out run, and slow_selected is the whole
