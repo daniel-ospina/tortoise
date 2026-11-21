@@ -531,6 +531,15 @@ NOT_SELECTED = [
     "has anyone asked whether the old plan has been archived",
     "has anyone said that our launch plan has been withdrawn",
     "has anyone noted which endpoint has been deprecated",
+    # …and the FREE-RELATIVE spellings the list still omitted (round-17 review, P2):
+    # `why`/`how` are complements exactly like `whether`, and neither was a member, so
+    # both ROUTED. The one-word-NP sibling (`… why the data has been archived`) was
+    # caught by the determiner+noun+active-verb+`been` lookahead instead, which is why
+    # nothing reddened — the hole was invisible to every pinned row and open only on a
+    # MULTI-word noun phrase. Pinned in BOTH lists: the cue is real, the clause guard
+    # refuses it, so it reports as `existence_unguarded`.
+    "has anyone asked why the old plan has been archived",
+    "has anyone asked how the old plan has been archived",
     # …and the `is_copula` twin of the same defect (round-14 review, P3): a
     # subordinator INSIDE the four-word subject bound, which the stated justification
     # claimed could not fit. The question's predicate is the relative clause's
@@ -539,6 +548,21 @@ NOT_SELECTED = [
     # refuses to report a subject that carries a subordinator (`_COPULA_LONG_SUBJECT`),
     # so this row's remedy is the unchanged relevance read and nothing else.
     "is the plan that the board archived",
+    # ── the FREE-RELATIVE and REDUCED-RELATIVE class on `is_copula` (round-17
+    # review, P1) ──────────────────────────────────────────────────────────
+    # The subordinator list did not name `what`, and no member is needed for a REDUCED
+    # relative, so a subject holding either routed. Measured at the pre-fix head: all
+    # four `population='ended', shape='is_copula', signal=None` — the caller's own
+    # predicate dropped AND no notice, which is the #14033 defect itself. The guard now
+    # adds the free-relative pronouns to the list and refuses a DETERMINER AFTER A WORD
+    # (a second noun phrase, which is what a reduced relative needs). Pinned in
+    # NOT_SELECTED and NOT in NOTICE_ONLY on purpose: measured `signal is None` for all
+    # four, so the remedy is the unchanged relevance read — the recall given up is
+    # stated on `_COPULA_SUBJECT` rather than discovered here.
+    "is that what the board archived",
+    "is it what we archived",
+    "is that the endpoint we deprecated",
+    "is the report the board archived",
     # …the same class on the `which` shape, which is the row the pre-fix detector
     # also served (round-3 review, P1: *"`which claims were retracted by legal`
     # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP
@@ -641,6 +665,9 @@ NOTICE_ONLY = [
     "has anyone asked whether the old plan has been archived",
     "has anyone said that our launch plan has been withdrawn",
     "has anyone noted which endpoint has been deprecated",
+    # …and the FREE-RELATIVE (round-17 review, P2) rows pinned in NOT_SELECTED above.
+    "has anyone asked why the old plan has been archived",
+    "has anyone asked how the old plan has been archived",
 ]
 
 

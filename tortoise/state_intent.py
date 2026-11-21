@@ -379,9 +379,12 @@ _BLOCKED_TAIL = (
 #:   `has anything changed since the old pricing has been deprecated`
 #:
 #: Each was answered with the WHOLE ended population and the caller's own predicate
-#: (`complained`, `changed`) silently dropped. Two lookaheads close it: a SUBORDINATOR
-#: in the window, or an ASYNDETIC second clause — a determiner + noun followed by
-#: `has|have|had been`. The unguarded expression is kept as its own SIGNAL row below,
+#: (`complained`, `changed`) silently dropped. Four lookaheads close it: a SUBORDINATOR in
+#: the window (or a FREE-RELATIVE PRONOUN, `why`/`how` included — round-17 review, P2, below), a
+#: RELATIVIZER with a word before it, an ASYNDETIC second clause — the NEGATIVE
+#: lookahead below that reads it as any determiner + noun followed by a finite verb and
+#: `been` — or a PRONOUN subject with that same predicate shape. The unguarded
+#: expression is kept as its own SIGNAL row below,
 #: so a question that fails only on this guard is still REPORTED rather than silenced.
 #:
 #: ⛔ AND THE SECOND LOOKAHEAD WAS THREE TIMES WIDER THAN THAT CLASS (round-9 review,
@@ -437,6 +440,21 @@ _BLOCKED_TAIL = (
 #: closed for `since`/`because`, in the spelling the list did not carry. They are
 #: pinned in `NOT_SELECTED` + `NOTICE_ONLY` so this cannot re-open quietly.
 #:
+#: ⛔ AND IT STOPPED TWO SPELLINGS SHORT (round-17 review, P2, measured). `why` and
+#: `how` are free-relative complements like `whether`, and neither was a member:
+#:
+#:   `has anyone asked why the old plan has been archived`
+#:   `has anyone asked how the old plan has been archived`
+#:
+#: Both ROUTED to the whole ended population with the caller's predicate (`asked`)
+#: dropped. The one-word-NP sibling (`… why the data has been archived`) WAS caught,
+#: which is why nothing reddened: it fails on the determiner+noun+finite verb+`been`
+#: lookahead instead, and only a MULTI-word noun phrase (`old plan`) slips that shape.
+#: So the hole was invisible to every pinned row, and the fix is the list, not the
+#: other lookahead — a guard whose coverage depends on how many words the noun phrase
+#: happens to have is a guard that fails open on the longer spelling. Both rows are
+#: pinned in `NOT_SELECTED` + `NOTICE_ONLY` (they report as `existence_unguarded`).
+#:
 #: ⛔ THE RELATIVIZERS (`that|which|who|whom|whose`) ARE GUARDED, NOT LISTED, and the
 #: difference is measured rather than stylistic: a relative clause on the head IS the
 #: documented legitimate content of this window (`:176`), so
@@ -451,7 +469,7 @@ _EXISTENCE_HEAD = (
 )
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
-    r"as|where|so|but|although|though|until|whether|once|whereas)\b)"
+    r"as|where|so|but|although|though|until|whether|once|whereas|why|how)\b)"
     r"(?![^?]{0,60}?\b[a-z0-9][a-z0-9'’._/-]*\s+(?:that|which|who|whom|whose)\b)"
     r"(?![^?]{0,60}?\b(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
     r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
@@ -591,9 +609,37 @@ _COPULA_SUBJECT = (
     # on `is that endpoint deprecated` and refused a legitimate state question. A
     # subordinator cannot open a noun phrase, so a word before it is the
     # discriminator — the same rule the `existence` relativizer guard states.
+    # ⛔ AND THE LIST OMITTED THE FREE-RELATIVE PRONOUNS, THEN A WHOLE REDUCED-RELATIVE
+    # CLASS (round-17 review, P1, measured — the PR's OWN regression, absent on main).
+    # `what` was not a member and no member is needed for the REDUCED relative, so a
+    # subject that contains either routed:
+    #
+    #   `is that what the board archived`      <- free relative (`what`)
+    #   `is it what we archived`               <- free relative, no subordinator at all
+    #   `is that the endpoint we deprecated`   <- reduced relative (NP + clause)
+    #   `is the report the board archived`     <- reduced relative, the participle is
+    #                                             the relative clause's verb
+    #
+    # Every one was answered with the WHOLE ended population with the caller's own
+    # predicate dropped, and `signal` stayed None — so it was not even REPORTED. That
+    # is the #14033 defect itself, in the direction this module rates worst.
+    # ⛔ TWO FIXES, each anchored on a grammatical role rather than a vocabulary:
+    # (a) `what|how|why` join the list — a free relative's pronoun CAN follow a word
+    #     (`that what`, `it what`), so the existing preceding-word rule keeps
+    #     `is what archived`-shaped subjects alone;
+    # (b) a DETERMINER AFTER AT LEAST ONE WORD is a SECOND NOUN PHRASE, which is what a
+    #     reduced relative needs (`report the board`, `endpoint we`): a noun phrase
+    #     cannot contain a second determiner, so the same preceding-word discriminator
+    #     applies — the subject's OWN determiner opens the span and is untouched, which
+    #     is what keeps `is that endpoint deprecated` and `is the v3 export deprecated`
+    #     routing. The recall given up is the subject whose tail is another NP
+    #     (`is our v3 export the one archived`), which is a yes/no about ONE record and
+    #     is now REPORTED rather than routed.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
-    r"where|whereas|after|before|now)\b)"
+    r"where|whereas|after|before|now|what|how|why)\b)"
+    r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
+    r"(?:the|a|an|our|my|its|their|these|those|this|that|all|your)\b)"
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     r"[a-z0-9][a-z0-9'’._/-]*(?:\s+[a-z0-9][a-z0-9'’._/-]*){0,3}"
 )
