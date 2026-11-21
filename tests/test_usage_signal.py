@@ -873,21 +873,32 @@ def _imports_of(source: str) -> set[str]:
                     for alias in node.names
                     if alias.name != "*"
                 }
-                if node.level == 0 and any(a.name == "*" for a in node.names):
-                    # ⛔ `from <pkg> import *` BINDS THE PACKAGE'S PUBLIC NAMES, and
-                    # the bare `*` recorded above matches no root. For a root the
-                    # guard deliberately does not ban (`tortoise` itself), that made
-                    # the star form TRIPLY blind: the AST ban saw the literal `*`,
-                    # the direction scan saw no store root (`_imports_of` contains
-                    # none), and the probe cannot see `embedded_lifecycle` (it is
-                    # probe-exempt AND already in `sys.modules`). Measured: a
-                    # module-level `from tortoise import *` in the real
-                    # `usage_signal.py` bound `embedded_lifecycle` — the module that
-                    # owns the embedded store — with every row green. Emitting every
-                    # reachable name under that prefix is a SUPERSET (a star import
-                    # may bind fewer), which is this helper's stated contract and
-                    # fails CLOSED.
-                    star_prefix = f"{node.module}."
+                # ⛔ `from <pkg> import *` BINDS THE PACKAGE'S PUBLIC NAMES, and
+                # the bare `*` recorded above matches no root. For a root the guard
+                # deliberately does not ban (`tortoise` itself), that made the star form
+                # TRIPLY blind: the AST ban saw the literal `*`, the direction scan saw
+                # no store root (`_imports_of` contains none), and the probe cannot see
+                # `embedded_lifecycle` (it is probe-exempt AND already in `sys.modules`).
+                # Measured: a module-level `from tortoise import *` in the real
+                # `usage_signal.py` bound `embedded_lifecycle` — the module that owns
+                # the embedded store — with every row green. Emitting every reachable
+                # name under that prefix is a SUPERSET (a star import may bind fewer),
+                # which is this helper's stated contract and fails CLOSED.
+                #
+                # ⛔ AND THE `.__init__` SPELLING OF THE SAME STAR, absolute or
+                # relative. `_fold_init` is documented as "applied to every name this
+                # module derives", but this prefix was built from the RAW module: the
+                # absolute `from tortoise.__init__ import *` derived
+                # `tortoise.__init__.`, which matches no entry of
+                # `_REACHABLE_FROM_ROOT`, and the relative `from .__init__ import *`
+                # did not enter this arm at all (it required `level == 0`). Both
+                # returned a set holding only `tortoise.__init__`, so `_offending` was
+                # EMPTY and the scan saw no reach, while their non-star siblings are
+                # banned and pinned reachable (measured: the star forms bind `FalkorDB`
+                # through `tortoise.__init__`'s cached globals with every leg green).
+                # The fold is what makes the package-root spelling the same spelling.
+                if any(alias.name == "*" for alias in node.names):
+                    star_prefix = f"{_fold_init(node.module if node.level == 0 else f'tortoise.{node.module}')}."
                     found |= {
                         name
                         for name in _REACHABLE_FROM_ROOT
@@ -1095,6 +1106,20 @@ def _getattr_reaching_a_store(
     return found
 
 
+def _probe_forbidden() -> tuple[str, ...]:
+    """The transitive probe's root list, DERIVED from the ban set and pinned.
+
+    ⛔ WHY THIS IS A NAMED FUNCTION AND NOT AN INLINE EXPRESSION. The probe is the
+    one leg no AST re-reads, so its list is the only input that has no second
+    observer: replacing the inline derivation with the historical hardcoded pair
+    (`tortoise.manager`, `tortoise.graph_connection`) left the whole file GREEN
+    (measured, 102 passed), because every assertion around it only requires the
+    probe to find NOTHING. Naming it is what lets `test_no_graph_dependency` pin
+    it — a restated pair drops `redis`/`redislite` and now reds a row.
+    """
+    return tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if r not in _PROBE_EXEMPT)
+
+
 def _fold_init(name: str) -> str:
     """`tortoise.__init__.X` -> `tortoise.X`, `tortoise.__init__` -> `tortoise`.
 
@@ -1236,7 +1261,7 @@ def test_no_graph_dependency() -> None:
         src = (
             "import sys;"
             f"{import_stmt};"
-            f"forbidden={tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if r not in _PROBE_EXEMPT)!r};"
+            f"forbidden={_probe_forbidden()!r};"
             "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
             "for r in forbidden)];"
             "print(','.join(sorted(bad)))"
@@ -1257,10 +1282,23 @@ def test_no_graph_dependency() -> None:
     # detector — the same defect as the substring scan one level up. So the SAME body
     # runs against a module that DOES pull a store client in (measured: `tortoise.ep`
     # loads `redis` eagerly) and must come back non-empty.
-    assert "redis" in _probe("import tortoise.ep"), (
+    assert "redis" in _probe("import tortoise.ep").split(","), (
         "the transitive probe cannot detect a store client at all: importing "
-        "tortoise.ep must put a `redis` module in sys.modules, so an empty answer "
-        "here means the probe (not the tree) is broken")
+        "tortoise.ep must put a `redis` module in sys.modules, so a missing exact "
+        "name here means the probe (not the tree) is broken. Matched as an EXACT "
+        "entry, not a substring — `\"redis\" in \"redislite.falkordb_client\"` is "
+        "True, which is the substring class this file removes everywhere else")
+    # ⛔ AND THE LIST ITSELF IS PINNED, because it is the one input no AST sees.
+    # A restated pair (the historical `tortoise.manager`/`tortoise.graph_connection`)
+    # left every row green (measured: 102 passed) while the probe stopped seeing any
+    # banned root outside the pair.
+    assert set(_STORE_CLIENT_ROOTS) <= set(_probe_forbidden()), (
+        f"the probe's root list dropped a declared store-client root: "
+        f"{sorted(set(_STORE_CLIENT_ROOTS) - set(_probe_forbidden()))} — a restated "
+        f"pair cannot see a transitive leak through that root")
+    assert set(_probe_forbidden()) == set(_FORBIDDEN_GRAPH_ROOTS) - set(_PROBE_EXEMPT), (
+        "the probe's list must be DERIVED from the ban set minus its exemptions, "
+        "never restated")
     leaked = _probe("from tortoise import usage_signal")
     assert leaked == "", (
         f"importing usage_signal pulled a graph client into sys.modules: {leaked}")
