@@ -378,23 +378,31 @@ def hooked_sdk(ledger, monkeypatch):
     return inst, _Graph
 
 
-def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
+def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
-    ⛔ THIS PINS THREE OF THE HOOKED SDK METHODS, and its name says so. The other
-    SDK methods recorded in §17.4.6 are not exercised here, and neither are the
-    two NON-SDK hooks (the session-start read, and the MCP tag tool's served
-    page): deleting any of those calls leaves this file green, no test drives
-    them, and §17.4.6 names the set. The former name
+    ⛔ THIS PINS THE PUBLIC ROW PATHS THAT SURVIVE THE #4282 RETIREMENT, and its
+    name says so. `query()`, `paginated_query()` and `query_points_by_tag()` were
+    retired in the #13899 batch, and the retirement table gives each of them the
+    DESTINATION this body now drives: `list_knowledge` (the first two) and
+    `search_knowledge(mode="tag")` (the third). The previous version still called
+    the retired names, so it died on line 1 of its body — taking the p3/p7/p8/p9
+    pins with it — while its own docstring claimed all of them were exercised
+    (#14184). A pin on a name that no longer exists is not a pin.
+
+    The other SDK methods recorded in §17.4.6 are not exercised here, and neither
+    are the two NON-SDK hooks (the session-start read, and the MCP tag tool's
+    served page): deleting any of those calls leaves this file green, no test
+    drives them, and §17.4.6 names the set. The former name
     (`test_every_row_returning_read_path_feeds_the_ledger`) promised coverage it
     did not have, so the claim is narrowed to what the body drives rather than
     the guard being trusted on its title.
 
-    Each of `query()`, `paginated_query()` and `query_points_by_tag()` returns
-    Point rows to a CALLER, so each must record exactly ONE read event per
-    returned key — no fewer (a missed record inflates the never-read mass, which
-    flatters the split) and no more (a double record overstates how many reads a
-    key gets, which is the same class of wrong as a lost one).
+    Each door returns Point rows to a CALLER, so each must record exactly ONE
+    read event per returned key — no fewer (a missed record inflates the
+    never-read mass, which flatters the split) and no more (a double record
+    overstates how many reads a key gets, which is the same class of wrong as a
+    lost one).
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
@@ -402,18 +410,36 @@ def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     for key in ("p1", "p2", "p3", "p7", "p8", "p9"):
         record_stock("Point", key, nbytes=100)
 
+    # `query()` / `paginated_query()` both retired into this ONE method, so it is
+    # the ``{results, total, hasMore}`` envelope (not a bare list) that is read here.
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    got = inst.query()
-    assert [r["id"] for r in got] == ["p1", "p2"]
+    got = inst.list_knowledge()
+    assert [r["id"] for r in got["results"]] == ["p1", "p2"]
 
-    graph.rows = [{"id": "p3"}]
-    assert inst.paginated_query()["results"] == [{"id": "p3"}]
+    # `query_points_by_tag()` retired into the tag MODE of the search door; that
+    # arm reads the whole tag population with `_record_reads=False` and records the
+    # PAGE it serves (#7983). The stub population is TWO rows and the call asks for
+    # ONE, so the p9 row proves the distinction: it is read by the accessor and must
+    # stay at ZERO until a door actually SERVES it.
+    graph.rows = [{"id": "p3"}, {"id": "p9"}]
+    assert inst.search_knowledge(mode="tag", tag="t", limit=1)["results"] == [{"id": "p3"}]
+    assert {k[2]: row.read_count for k, row in fold().rows.items()
+            if k[2] in ("p3", "p9")} == {"p3": 1, "p9": 0}, (
+        "the tag arm records the page it SERVES, not the population it read")
 
     graph.rows = [{"id": "p7"}]
-    assert inst.get_point("p7") == {"id": "p7"}
+    # `get_point` retired in the #12901 FINAL batch (its ledger row names `get_entity`
+    # as the approved reader, a DIFFERENT contract) — but the pin here is not the
+    # public name, it is the SDK's INTERNAL accessor, which is where the write paths
+    # read by id and which must record NOTHING (#7983, argued at `_get_point`).
+    # ⛔ AND IT CARRIES NO MIGRATION HINT: a name retired with an EMPTY ledger row
+    # emits none at all, so grepping the retirement table for a destination misses
+    # it — this migration stopped here once, which is why it is migrated by RUNNING
+    # this body after each swap rather than by reading the table (#14184).
+    assert inst._get_point("p7") == {"id": "p7"}
 
     graph.rows = [{"id": "p8"}, {"id": "p9"}]
-    inst.query_points_by_tag("t")
+    inst.list_knowledge(limit=2)
 
     folded = fold()
     counts = {k[2]: row.read_count for k, row in folded.rows.items()}
@@ -741,23 +767,27 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
-    They call `query()` to do it, so recording them would mark every Point read
-    after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
-    `get_point` prevented, and it would silently invalidate the one-directional
-    "the gaps bias `f` LOW" caveat the docs rest on.
+    They read through the `_query` ACCESSOR with `_record_reads=False` (its own
+    docstring, #7983: `_query`, `_paginated_query` and `_query_points_by_tag` each
+    record at their own level and each take the flag) — the retired public
+    `query()` was only the caller-facing skin over it, and #13899 removed the skin,
+    not the flag. Recording such a scan would mark every Point read after one
+    `recall_gaps()` call — `f` → ~1, the exact contamination excluding `get_point`
+    prevented, and it would silently invalidate the one-directional "the gaps bias
+    `f` LOW" caveat the docs rest on.
     """
     inst, graph = hooked_sdk
     record_stock("Point", "p1", nbytes=100)
     record_stock("Point", "p2", nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    assert [r["id"] for r in inst.query(_record_reads=False)] == ["p1", "p2"]
+    assert [r["id"] for r in inst._query(_record_reads=False)] == ["p1", "p2"]
     assert {row.read_count for row in fold().rows.values()} == {0}, (
         "an internal scan must record NOTHING"
     )
 
     graph.rows = [{"id": "p1"}]
-    inst.query()
+    inst.list_knowledge()
     counts = {k[2]: row.read_count for k, row in fold().rows.items()}
     assert counts == {"p1": 1, "p2": 0}, "the caller-facing default still records"
 
