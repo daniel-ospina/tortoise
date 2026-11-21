@@ -441,12 +441,26 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     review cycle 7 of #14160 — a NARROW arm naming one of `_RAISED`, because narrowing
     `except Exception:` to the four names and KEEPING the drop is the substitution a lane
     is most likely to make when this gate reds, and it swallows the rename exactly as
-    before. `ImportError` is DELIBERATELY excluded from that widening: it is the one name
-    whose purpose here can be a legitimate skip — `from tortoise.embeddings import …`
-    raises `ImportError` when the `embeddings` extra (numpy) is absent, and dropping it is
-    the correct optional-extra probe (`_OWN_CODE_ROOTS`). Charging that spelling made the
-    documented-legitimate skip unescapable, there being no class-2 allowance, so the
-    `ImportError` decision stays with `_probe_blocks_with_an_uncovered_import_seam`.
+    before. `ImportError` is INCLUDED: excluding it (cycle 8 of #14160) opened a hole in
+    BOTH gates at once, because the seam gate is conditioned on this predicate — with
+    `swallows=False`, `except ImportError: FLAG = False` around `from tortoise.sdk import …`
+    read green in `_unarmed_probe_blocks` AND in
+    `_probe_blocks_with_an_uncovered_import_seam`, i.e. the exact module-rename seam this
+    file exists to catch (measured, cycle 9 of #14160). The legitimate skip it was
+    protecting is the optional-extra import — `from tortoise.embeddings import …` raises
+    `ImportError` when numpy is absent — and this predicate cannot tell the two apart: the
+    ARM is identical, only the imported MODULE differs, so the decision belongs to a gate
+    that knows the import. Until one carries it, that shape is a DECLARED RESIDUAL below.
+
+    ⛔ DECLARED RESIDUAL (issue #14125): an OWN-CODE import that genuinely needs an
+    optional extra — `from tortoise.embeddings import …`, where numpy ships only in the
+    `embeddings` extra — is legitimately dropped by `except ImportError:`, and this
+    predicate charges it. There is no allowance for it: the shape has 0 instances in the
+    tree, and a module-keyed allowance would be machinery for a population that does not
+    exist. Charging it is the fail-closed direction (a false red on a latent shape is
+    recoverable; a rename hidden behind an `ImportError` arm is not), and the repair the
+    gates print — re-raise the programming errors, keep the broad arm — is what real code
+    should do. Re-read this paragraph before adding the first live instance.
 
     Whether the handler re-raises is part of the question, not a separate one:
     the property is *"the programming error never reaches the caller"*, and a
@@ -462,39 +476,16 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
         #: swallowing, i.e. invisible to BOTH gates while the rename stayed swallowed
         #: (review of #14160, cycle 7, P2-3; pre-existing at `origin/main`, LATENT: the tree
         #: holds 0 instances, so the census row set is unchanged).
-        #: …and COVERAGE is read from `_reraises` (the last statement), not from
-        #: `_reraises_its_own` (any `raise` anywhere in the body): a handler that raises on
+        #: …and COVERAGE is read from `_reraises` (the handler's LAST statement), not from
+        #: a walk for any `raise` anywhere in the body: a handler that raises on
         #: one path and DROPS on the default path — `except Exception: if _STRICT: raise;
         #: FLAG = False` — drops the programming error, and the walking predicate called it
         #: "re-raises, drops nothing" while `_reraises` called it "no coverage", so the block
         #: was green in BOTH gates (review of #14160, cycle 8, P2-2). `_reraises` accepts all
         #: three propagation forms, so nothing real is lost.
-        (names == {"<bare>"} or names & (_BROAD | (_RAISED - {"ImportError"})))
-        and not _reraises(h)
+        (names == {"<bare>"} or names & (_BROAD | _RAISED)) and not _reraises(h)
         for h, names in ((h, _handler_names(h)) for h in handlers)
     )
-
-
-def _reraises_its_own(handler: ast.ExceptHandler) -> bool:
-    """Whether the handler's body re-raises the exception it caught.
-
-    Wider than `_reraises` (which reads the handler's LAST statement — the only
-    shape that counts as COVERAGE): for swallowing, `raise` and `raise exc` are
-    the same outcome, so nothing is dropped.
-    """
-    caught = _handler_names(handler) | ({handler.name} if handler.name else set())
-    for node in ast.walk(handler):
-        if not isinstance(node, ast.Raise):
-            continue
-        if node.exc is None:
-            return True
-        if isinstance(node.exc, ast.Name) and node.exc.id in caught:
-            return True
-        # `raise ProbeError(…) from e` chains the caught exception; the caller
-        # still sees a raise, which is the property.
-        if isinstance(node.cause, ast.Name) and node.cause.id in caught:
-            return True
-    return False
 
 
 def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
@@ -548,14 +539,14 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     _last = handler.body[-1]
     if isinstance(_last, ast.Raise) and _last.exc is not None:
         # `raise exc` re-raises THE SAME object, so nothing is dropped and the clause is
-        # coverage — `_reraises_its_own` has always read it that way, and a lane following
+        # coverage — `_reraises` reads it that way too, and a lane following
         # this gate's own repair instruction ("insert the re-raise arm") in that idiomatic
         # spelling was redded for having fixed it (review of #14160, cycle 6, P2-6).
         _caught = _handler_names(handler) | ({handler.name} if handler.name else set())
         if isinstance(_last.exc, ast.Name) and _last.exc.id in _caught:
             return True
         # PEP 3134's CHAINED form is the same propagation with a nicer message, and
-        # `_reraises_its_own` has always counted it — reading the two halves differently
+        # `_covered` already counts it — reading the two halves differently
         # made ONE handler simultaneously "no coverage" and "re-raises, drops nothing", so a
         # block written per this gate's own repair instruction read UNARMED (review of
         # #14160, cycle 7, P2-2). `raise X from None` discards the cause and is not coverage.
@@ -1335,7 +1326,16 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # Skipping them here turned that silent drop into an exemption (review of this
             # PR, P2); contributing them keeps the legitimate row exempt and grades the
             # shadowing one.
-            out |= _type_param_names(node)
+            #: BUT NOT EVERY HEADER POSITION: a DEFAULT and a DECORATOR evaluate BEFORE
+            #: the type-parameter scope exists, so a call there resolves the module import
+            #: — measured, `def f[torch](x=torch.query("S"))` returns the module object and
+            #: `@deco(torch.query("S")) def g[torch]()` passes it, while the same call in an
+            #: ANNOTATION, a class BASE or a type-parameter BOUND raises `AttributeError:
+            #: 'typing.TypeVar' object has no attribute 'query'`. Contributing the type
+            #: parameters for every header position graded a legitimate probe in the two
+            #: eager positions (review of #14160, cycle 9, P2-1).
+            if not _in_eager_header_position(node, seen):
+                out |= _type_param_names(node)
             previous = node
             node = parents.get(id(node))
             continue
@@ -1491,6 +1491,23 @@ def _header_expressions(node: ast.AST) -> list[ast.AST]:
     # so no module that imports can hold one — `ast.parse` accepting it would only let a
     # grader measure a shape that cannot exist (review of #14160, cycle 4).
     return out
+
+
+def _in_eager_header_position(node: ast.AST, seen: set[int]) -> bool:
+    """Whether the call reached `node` through a DEFAULT or a DECORATOR.
+
+    Those two evaluate BEFORE the definition's own scope exists — including its PEP 695
+    type parameters — so a call there resolves the enclosing scope and must not be charged
+    with the type parameters. An annotation, a class base and a type-parameter bound all
+    evaluate INSIDE that annotation scope (measured: each reads the `TypeVar`), which is why
+    this asks about two positions rather than about the header as a whole.
+    """
+    args = getattr(node, "args", None)
+    if args is not None:
+        for expression in (*args.defaults, *(d for d in args.kw_defaults if d is not None)):
+            if id(expression) in seen:
+                return True
+    return any(id(decorator) in seen for decorator in getattr(node, "decorator_list", ()) or ())
 
 
 def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
@@ -4409,6 +4426,51 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"{_body_after_header}"
     )
 
+    # 4j-pentavicesimus. A TYPE PARAMETER IS NOT IN SCOPE IN A DEFAULT OR A DECORATOR —
+    #     those evaluate BEFORE the type-parameter scope exists, so a call there resolves the
+    #     MODULE import, while an ANNOTATION, a class BASE and a type-parameter BOUND all
+    #     evaluate inside that scope and read the `TypeVar` (measured: the first two return
+    #     the module object, the last three raise `AttributeError: 'typing.TypeVar' object
+    #     has no attribute 'query'`). Contributing the parameters at every header position
+    #     graded a legitimate probe in the two eager ones (review of #14160, cycle 9, P2-1);
+    #     the three lazy positions are the controls and must stay graded.
+    _generic_header_probe = (
+        "import torch\n\nTORCH_AVAILABLE = False\ntry:\n    {header}\n"
+        "    TORCH_AVAILABLE = True\nexcept Exception:\n    TORCH_AVAILABLE = False\n"
+    )
+    for _label, _header, _want in (
+        (
+            "a default",
+            'def _f[torch](x=torch.query("SELECT 1")):\n        pass',
+            False,
+        ),
+        (
+            "a decorator",
+            '@_reg(torch.query("SELECT 1"))\n    def _f[torch]():\n        pass',
+            False,
+        ),
+        (
+            "an annotation",
+            'def _f[torch](x: torch.query("SELECT 1")):\n        pass',
+            True,
+        ),
+        (
+            "a class base",
+            'class _C[torch](torch.query("SELECT 1")):\n        pass',
+            True,
+        ),
+        (
+            "a type-parameter bound",
+            'def _f[torch: torch.query("SELECT 1")]():\n        pass',
+            True,
+        ),
+    ):
+        _generic_row = roots(_generic_header_probe.format(header=_header))
+        assert (len(_generic_row) == 1) == _want, (
+            f"a generic's {_label} must be {'GRADED (the TypeVar is in scope)' if _want else 'EXEMPT (the module import is)'}"
+            f": {_generic_row}"
+        )
+
     # 4j-quadrovicesimus. `type Y[torch] = torch.query(…)` — THE TYPE PARAMETER IS BOUND IN
     #     THE ALIAS VALUE. Measured on 3.12.3: `__value__` raises `AttributeError:
     #     'typing.TypeVar' object has no attribute 'query'`, i.e. the receiver resolved to
@@ -4435,9 +4497,8 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"on the TypeVar and must be graded: {_type_alias_probe}"
     )
 
-    # 4j-quinvicesimus. `raise exc` IS COVERAGE. `_reraises` read only a BARE `raise`, while
-    #     `_reraises_its_own` has always treated `raise exc` as propagating the same object —
-    #     so a lane following this gate's own repair instruction ("insert the re-raise arm")
+    # 4j-quinvicesimus. `raise exc` IS COVERAGE. `_reraises` read only a BARE `raise`, so a
+    #     lane that followed this gate's own repair instruction ("insert the re-raise arm")
     #     in that idiomatic spelling was redded for having fixed it (review of #14160, cycle
     #     6, P2-6). The handler is parsed directly, because the coverage rule is a predicate
     #     over the handler and a fixture block would test the admission machinery instead.
@@ -4547,12 +4608,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "except (AttributeError, NameError, TypeError, ImportError):\n    raise\n",
             False,
         ),
-        #: `ImportError` ALONE is NOT a swallow charge: it is the legitimate
-        #: optional-extra skip (`from tortoise.embeddings import …` raises it when the
-        #: extra is absent), and turning it into a drop-charge redded the very probe this
-        #: file documents as correct with no way to allow it (review of #14160, cycle 8).
-        #: Its own gate is `_probe_blocks_with_an_uncovered_import_seam`.
-        ("an ImportError-only arm that drops", "except ImportError:\n    FLAG = False\n", False),
+        #: `ImportError` IS charged, and this row is the P1 of cycle 9: excluding it left
+        #: `except ImportError: FLAG = False` around `from tortoise.sdk import …` green in
+        #: BOTH gates, because the seam gate is conditioned on this predicate. The
+        #: legitimate optional-extra skip it was protecting is a DECLARED RESIDUAL on
+        #: `_swallows_everything` (0 instances in the tree; module-keyed allowance would be
+        #: machinery for a population that does not exist).
+        ("an ImportError-only arm that drops", "except ImportError:\n    FLAG = False\n", True),
         #: …but a handler that raises on ONE path and drops on the default path DOES
         #: swallow, and reading coverage from the walking predicate made it green in both
         #: gates (review of #14160, cycle 8, P2-2).
@@ -4578,7 +4640,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         )
 
     # 4j-octovicesimus. A CHAINED re-raise — `raise RuntimeError(…) from exc` — propagates the
-    #     caught error just as `raise exc` does (PEP 3134), and `_reraises_its_own` has always
+    #     caught error just as `raise exc` does (PEP 3134), and `_covered` has always
     #     counted it. `_reraises` read only a bare `raise` or `raise exc`, so ONE handler was
     #     simultaneously "no coverage" and "re-raises, drops nothing", and a block written per
     #     this gate's own repair instruction read UNARMED (review of #14160, cycle 7, P2-2).
