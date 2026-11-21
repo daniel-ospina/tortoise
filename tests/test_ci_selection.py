@@ -10354,6 +10354,13 @@ ROWED_BY_THIS_FOLD = (
     # reported it — the same defect `#13110`'s own comment records surviving a round, which is
     # the reason this ENTRY-RULE tuple is explicit rather than derived.
     "test_13422_object_subject_dense_leg.py",
+    # #14011 — the fold that adds `tortoise/usage_signal.py` (SEARCH-ARCHITECTURE.md §7's
+    # window-local counter). A file this fold ADDED and registered on `core` for the same
+    # reason as the two rows above: `tortoise/usage_signal.py` matches no `SOURCE_PATTERNS`
+    # entry, so it falls through to `core` and a module-only diff selects nothing narrower.
+    # The first cut shipped NO row and NO surface entry at all — the manifest-integrity
+    # drift the reviewer caught, which is exactly what this ENTRY-RULE tuple exists for.
+    "test_usage_signal.py",
     # #13610 — the fold that retires the graph-stored `:Object`/`:Subject` copy per deployment,
     # once the record's coverage count proves it. A file this fold ADDED and registered on
     # `core` for the same reason as the row above: `tortoise/record_vector.py`,
