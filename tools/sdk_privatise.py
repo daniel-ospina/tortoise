@@ -526,8 +526,9 @@ SWEEP_NAMES = 66
 #: BROKE the product: `onboarding/seed.py` calls `surface.create_subject(...)` and
 #: `surface.create_edge(...)` (three sites), neither surface defines `__getattr__`, so every hosted
 #: AND self-hosted seed raised `AttributeError` and the REST seed route 500'd — measured at
-#: `93ada9cece`, where `tests/test_onboarding_selfhost_w12.py` was **13 failed** and
-#: `tests/test_onboarding_seed.py` **2 failed**. The public doors are RESTORED (the surfaces again
+#: `93ada9cece`: `tests/test_onboarding_selfhost_w12.py` alone was **11 failed** (17 passed),
+#: `tests/test_onboarding_seed.py` **2 failed**, and **13** is the total across BOTH files — the
+#: two figures are not additive pieces of one number. The public doors are RESTORED (the surfaces again
 #: declare `create_subject`/`create_edge` and delegate to the SDK's private ones), and the eight
 #: test-double call sites in `tests/test_9572_discriminator_not_clobbered.py` were restored with
 #: them. ⛔ THIS IS THE SHAPE THE BLOCK BELOW FORBIDS, reached anyway: *"the alternative — giving a
