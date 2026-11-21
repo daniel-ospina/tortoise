@@ -967,9 +967,14 @@ SWEEP_NAMES = 66
 #: `inst.query` 3, `inst.get_point` 1, `inst.paginated_query` 1, `inst.query_points_by_tag` 1 —
 #: SIX references between those four rows, which is the `11843 → 11837` the pair above records:
 #: the stale retired doors that commit stopped driving, a residue FALL caused by fixing the tests
-#: #14184 names. THREE references are then ADDED by later `main` commits between `67dc298ec3` and
-#: `1b0db04894` (`cur['proj'].g.query` 2 → 4 and a new `terms.update` row, `11837 + 3 = 11840`);
-#: both are untyped dict receivers already inside this sweep's documented edge, so no new SHAPE
+#: #14184 names. THREE references are then ADDED by the ONE later `main` commit `1b0db04894`
+#: (#14162, which adds `tools/miss_rate_m5.py` and `tests/test_miss_rate_m5.py`), not by several
+#: (`cur['proj'].g.query` 2 → 4 and a new `terms.update` row, `11837 + 3 = 11840`);
+#: ⛔ NEITHER ADDED ROW IS A DICT RECEIVER, and that is what keeps them inside this sweep's
+#: documented edge rather than making them a new shape: `cur['proj'].g` is a FalkorDB `Graph`
+#: (`cur["proj"] = sdk._get_proj()` → `.g`; `tools/miss_rate_m5.py:946`, `:973`, `:1072`) and
+#: `terms` is a `set` (`tests/test_miss_rate_m5.py:1029`, mutated at `:1031`). A `Graph` and a
+#: `set` are both never the SDK, so no new SHAPE
 #: was absorbed. The net −3 is those two MEASURED moves and nothing else (`11843 − 6 + 3 =
 #: 11840`, a CROSS-CHECK of the pairs above, never their evidence). This branch's surviving edit
 #: (`tests/test_de2e7_gates_mcp.py`, the half #14194 did NOT touch) adds and removes NOTHING: the
