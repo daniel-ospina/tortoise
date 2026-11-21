@@ -819,9 +819,11 @@ surfaces:
   # (#1349/#2938/#3154 silent-drop class; registered at BOTH or
   # `ci_selection --integrity` reds the required `manifest-integrity` check and
   # the file drops out of tier-2 selection). DB-FREE legs run everywhere; the
-  # store-backed acceptance legs skip without `TEST_RECORD_DB_URI` +
-  # `TORTOISE_DB_URI` and are ARMED in `test-record-postgres`, where a job that
-  # supplies both must run them (exactly one set is a failure, not a skip).
+  # store-backed acceptance legs skip without `TEST_RECORD_DB_URI` and are ARMED
+  # in `test-record-postgres`, which exports BOTH variables and must run them: a
+  # record DSN with no cache URI is a FAILURE there (so a deleted FalkorDB
+  # provision reds instead of skipping), while a cache URI with no record DSN is
+  # the ordinary docker lane and SKIPS.
   - test_13337_cache_graph_declaration.py
   # #10620: the record stopped dropping every point that carried search keys
   # (`point.search_keys` was `jsonb`, the producer emits the graph's flat string),
