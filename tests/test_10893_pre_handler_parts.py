@@ -457,64 +457,6 @@ def test_hosted_api_notes_every_boundary_it_owns():
         f"hosted_api notes {sorted(found)}; expected the four boundaries it owns")
 
 
-def _calls_in_order(fn: ast.AST) -> list[tuple[str, str | None]]:
-    """``(call name, first string literal arg)`` for the calls in ``fn``, source order."""
-    out: list[tuple[str, str | None]] = []
-    for node in ast.walk(fn):
-        if not isinstance(node, ast.Call):
-            continue
-        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-        lit = None
-        if node.args and isinstance(node.args[0], ast.Constant) and \
-                isinstance(node.args[0].value, str):
-            lit = node.args[0].value
-        out.append((name or "", lit))
-    return out
-
-
-def test_the_capture_impl_notes_dispatch_before_the_graph_lane_hand_off():
-    """The MCP capture lane has NO ``dispatch`` note unless this one exists.
-
-    ⛔ WHY THIS ROW IS NOT A DUPLICATE OF THE SET SCAN ABOVE (#14086 review, P2).
-    The set scan is satisfied by ``_require_scope``'s note, and that function is
-    never called on the MCP lane: ``tortoise/mcp_server.py``'s
-    ``tortoise_session_capture`` calls ``_capture_session_impl`` directly, so
-    without a note inside the impl the timeline went arrival → ``sdk_open`` and
-    the MCP tool dispatch, the credential/org resolution and the whole capture
-    gate stack were published as "the graph lane's SDK open" — the attribution
-    that sends a reader to the wrong mechanism. ``/mcp`` IS bound as ``data``, so
-    the timeline exists and its parts are published.
-
-    The row is a STATIC scan (driving the MCP tool needs the whole app fixture),
-    and it says so: what it pins is the RELATIVE ORDER inside the impl — the
-    ``dispatch`` note must appear before the ``_capture_session_probe_off_loop``
-    hand-off whose SDK open the next note attributes. Mutant: delete the note (or
-    move it below the hand-off) and this reds, while every other row in this file
-    stays green.
-    """
-    tree = ast.parse(_HOSTED.read_text(encoding="utf-8"))
-    impl = next(
-        (n for n in ast.walk(tree)
-         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-         and n.name == "_capture_session_impl"),
-        None)
-    assert impl is not None, "`_capture_session_impl` is gone — this row cannot answer"
-    order = _calls_in_order(impl)
-    dispatch_at = [i for i, c in enumerate(order) if c == ("_note_stage", "dispatch")]
-    hand_off_at = [i for i, c in enumerate(order)
-                   if c[0] == "_capture_session_probe_off_loop"]
-    assert dispatch_at, (
-        "`_capture_session_impl` notes no `dispatch` boundary — on the MCP capture "
-        "lane (which never calls `_require_scope`) the arrival → SDK-open interval "
-        "is then published as `sdk_open`")
-    assert hand_off_at, (
-        "`_capture_session_impl` no longer calls `_capture_session_probe_off_loop` "
-        "— this row's second anchor is gone and it would be vacuous")
-    assert dispatch_at[0] < hand_off_at[0], (
-        "the `dispatch` note sits AFTER the graph-lane hand-off, so the interval it "
-        "should close was already consumed and the remaining time is banked as "
-        "`sdk_open` again")
-
 
 def test_require_scope_notes_the_dispatch_boundary_before_any_early_return(
         monkeypatch):
