@@ -367,7 +367,40 @@ SWEEP_NAMES = 66
 #: (`typed references still pointing at a public name: 0` on this tree).
 #: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
 #: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
-SWEEP_RESIDUE = (11825, "539914480e400722")
+#:
+#: made it URGENT is that the pin is graded only on PULL REQUESTS — `main`'s `d4a8dddc4e` carries 12
+#: check-runs and none of them is `surface-guard` — so main drifted 1 row off the pin and every open
+#: PR then graded main's row as its own: #14045 measured `observed: (11822, …)` against the 11821 pin
+#: on a tree that itself derived 11821, while `main` at `38086c1bc5` derived 11822. A stale pin on
+#: main is a red gate on every PR that touches nothing in this population (#14062).
+#: ⛔ THIS RECORD CARRIES NO ASSIGNMENT, deliberately: merging two re-cuts left BOTH
+#: `SWEEP_RESIDUE` lines in this file, and Python binds the LAST one, so the earlier value was
+#: dead text that still read as the pin. ONE assignment, at the end of the records, cannot be
+#: shadowed by a second re-cut.
+#: ── #13998's own cut, on the tree that carries BOTH records ────────────────────────────────
+#: This PR adds SEVEN rows of its own on top of the above — SIX `cp.query` plus ONE `row.update`,
+#: which is why it cannot be summarised as "seven `cp.query` rows":
+#:
+#:   * `cp.query` — `capacity_notice.read_account`'s orgs read and its drift-soft retry (2),
+#:     `supabase_control.org_storage_notice_pct` and `set_org_storage_notice_pct` (2), and
+#:     `tests/test_13998_capacity_notice.py`'s save/restore pair on the `_ColumnBlindCP` fake (2);
+#:   * `row.update` — `tests/test_13998_capacity_notice.py`'s `_org_row` helper (1).
+#:
+#: None is an SDK accessor (`cp` is the PostgREST client or a fake for it; `row` is a plain DICT),
+#: and `typed references still pointing at a public name: 0` on this tree says no typed site became
+#: untyped: seven NEW read/write calls did, which a typed-reference count cannot distinguish.
+#: ⛔ MEASURED, NOT CARRIED — and every number below was printed by `--repin`, on the tree it
+#: names, in the lane that wrote this line. The pre-rebase branch tree derived
+#: (11838, "89ae27f32ee0f28a"); the two trees on either side of the conflict are that one and
+#: `main`, so neither number is this pin. After the squash-rebase onto `origin/main` `ad79129cb59`,
+#: `--repin` printed (11840, "9f1b8cff93b3a480") on the resolved tree and (11833,
+#: "addee5ad564bd9bc") on `ad79129cb59`'s own tree — a delta of **+7**, which is the SEVEN rows
+#: enumerated above and nothing else, so the attribution in this record is measured rather than
+#: inherited. ⛔ The `#14001` block's (11825, …) is NOT the baseline to subtract from: it was
+#: measured on `f392bb67d5`'s tree, and the four commits that landed between that tree and
+#: `ad79129cb59` moved it to 11833. Subtracting 11825 here would invent a +15 that no diff
+#: supports. A doc edit moves a counted row, so only the reading at the final tree is the pin.
+SWEEP_RESIDUE = (11840, "9f1b8cff93b3a480")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

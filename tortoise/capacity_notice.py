@@ -1,0 +1,927 @@
+"""The two working-set capacity notices — 80 % and 100 % (#13998).
+
+WHAT THIS IS. One email template, two thresholds of the **fast-search (graph)
+capacity included in the account's plan**. `{n}` and the TENSE of the status
+lines are the only differences between the two sends (see
+:func:`demotion_status` — at 80 % nothing has been demoted yet, so the two
+sentences that describe demotion are FUTURE tense there and PRESENT at 100 %,
+because stating them in the present at 80 % would describe a state the account
+is not in).
+
+⛔ THE COPY IS THE OWNER'S, VERBATIM (approved 2026-11-20, `#13998`). A lane may
+not re-word it: :data:`SUBJECT` and the paragraph constants below are transcribed
+from the issue, and `tests/test_13998_capacity_notice.py` renders them into
+golden files so an edit to the wording reds CI instead of shipping silently. The
+vocabulary guard in that test also reds on `allowance reached`,
+`Upgrade your plan`, `exact-word`, `may miss` and any number that is not `{n}` —
+the words the pre-destination drafts used, and the ones this whole thread exists
+to keep out.
+
+⛔ THE CTA OFFERS CAPACITY, NEVER A TIER. `[ Add capacity ]` opens a capacity
+REQUEST (:func:`add_capacity_url` → the published support mailbox, subject
+pre-filled). A plan-tier link is deliberately absent: a tier change is the wrong
+answer to a capacity need (#13989 policy 4 — *"Capacity (overage/add-on) is
+offered first; tier changes are for **feature** needs only"*), and offering it
+here is the defect this thread fixes. ⚠️ The first cut used the dashboard's
+`#/billing` tab, which is a real deep link AND the plan-tier chooser — a guard
+pins a URL string, so that reached review before anyone read what the page
+renders (#14038 review, P1).
+
+⚠️ THE REPORTED GAP, STATED RATHER THAN GLOSSED: there is **no storage add-on
+purchase surface in the product today** — `product/pricing.json` carries the
+rates (`billing.storage.dimensions.graph_storage.overage_price_usd_per_gb_month`
+= $85.00/GB-mo and `postgres_storage` = $0.30/GB-mo) and
+`metering.storage_overage_cost_usd` prices a bill, but nothing sells a top-up.
+So the CTA asks a human for capacity, which is what the product can actually
+fulfil; the missing purchase flow is filed separately rather than papered over
+here (see the PR body). The URL is one function on purpose: when the add-on flow
+lands, this file changes and nothing else does.
+
+WHERE THE NUMBER COMES FROM — the gate's own instruments, never this module's
+arithmetic (#13998 requirement 5):
+
+* the ALLOWANCE is `quota.resolve_org_limits(org_id)["max_graph_storage_mb"]` —
+  the per-ACCOUNT hot-window figure from `product/pricing.json`, armed on the
+  resolved limits dict by `quota._arm_graph_storage` (#11758: the storage shape
+  is per account only, so there is no per-user and no per-graph variance here);
+* the READING is `allowance_gate.read_dimension("graph_storage", org_id)` — the
+  same meter the write gate refuses on, so the email cannot disagree with what
+  happens to the account;
+* ⛔ IF EITHER CANNOT BE READ, NOTHING IS SENT AND THE PASS LOGS IT
+  (:func:`evaluate` returns a named reason instead of a percentage). A guessed
+  percentage in a customer's inbox is worse than no email.
+  ⚠️ The reading is an ESTIMATE that under-reports (it excludes the HNSW index —
+  `graph_storage.VECTOR_INDEX_EXCLUDED`), so this notice errs LATE, never early.
+
+EXACTLY ONE SEND PER THRESHOLD PER ACCOUNT, EVER. The durable ledger is
+`organizations.storage_notice_pct`, an integer HIGH-WATER MARK of the highest threshold
+ever notified, stamped only after the provider accepts. A high-water mark rather
+than one column per threshold, because two independent markers let the emails
+land OUT OF ORDER (a 100 % notice, then a stale 80 % pass emailing "at 80 %"
+afterwards); with a mark the send is legal only when `threshold > mark`, so the
+**LEDGER** is monotone by construction. ⛔ THE INBOX IS NOT — the two are not the
+same claim, and only the first one is structural (#14038 review cycle 2). The send
+precedes the stamp (send-then-stamp is what makes a failure retryable), so two
+CONCURRENT passes can both read `mark=None`, both pass the re-read, and deliver in
+the wrong order — "at 100 %" then "at 80 %". The pre-send re-read (:func:`notify_account`)
+narrows that to one round trip; it does not close it, and closing it would need a
+pre-send reservation (a stamp-first protocol with a compensating unset), which is
+recorded on the PR rather than improvised here. Reachable only with N>1 workers,
+which `worker_topology.assert_multi_worker_admissible` refuses BY DEFAULT (it
+warns instead when `TORTOISE_MULTI_WORKER=1` is acknowledged), and with the gauge
+moving ≥20 pp between two near-simultaneous reads. The stamp itself is a
+compare-and-swap on the value this pass read (:func:`claim_notice`), so two
+processes cannot interleave into a LOWER mark, and the provider Idempotency-Key
+(`capacity-notice:{org_id}:{pct}`) collapses the cross-process replay that
+survives a crash between send and stamp.
+
+BLAST CONTROL. The send budget (#1138/#3631, `email_notify.reserve_send_slot`)
+is the limiter for the first fleet-wide pass: past the daily cap the remaining
+accounts are SKIPPED, and a skipped send never stamps the mark, so they are
+retried on a later pass — a ramp, not a blast, and never a duplicate.
+"""
+from __future__ import annotations
+
+import asyncio
+import html
+import logging
+import math
+from dataclasses import dataclass
+from typing import Any
+
+from . import allowance_gate, quota
+
+logger = logging.getLogger(__name__)
+
+#: The two thresholds, as PERCENTAGES of the account's `max_graph_storage_mb`.
+THRESHOLD_EIGHTY = 80
+THRESHOLD_FULL = 100
+THRESHOLDS: tuple[int, ...] = (THRESHOLD_EIGHTY, THRESHOLD_FULL)
+
+#: The allowance dimension these notices are about. Named once: the email, the
+#: meter and the pricing dimension must be the same storage dimension, and a
+#: second spelling is how a notice drifts onto a figure the gate never reads.
+DIMENSION = "graph_storage"
+
+#: `GET /v1/team` / pricing key the allowance is read from.
+ALLOWANCE_KEY = allowance_gate.ALLOWANCE_KEYS[DIMENSION]
+
+#: The public page that explains the model in the same voice (#14013 owns its
+#: content — this module only links it).
+#:
+#: ⛔ MEASURED 2026-11-20, not assumed: `https://premiselabs.co/tortoise/docs`
+#: answers 200 with **0 redirect hops**; both `premiselabs.co/docs` and
+#: `tortoise.premiselabs.co/docs` answer **301 → that same URL**, so either of
+#: those spellings would cost the one hop this link exists to avoid (the same
+#: 0-hop rule `email_notify.email_link_base` records for #11767).
+#: ⚠️ The `#storage` SECTION lands with `#14013`; until it does, the link still
+#: resolves to the docs page itself, so it is never a dead link.
+STORAGE_DOCS_URL = "https://premiselabs.co/tortoise/docs#storage"
+
+# ── The approved copy (owner, 2026-11-20) — VERBATIM, in one place ──────────
+# ⛔ Do not re-word. `tests/test_13998_capacity_notice.py` pins the rendered
+# output against golden files AND guards the vocabulary; an edit here that is not
+# the owner's reds both.
+SUBJECT = "Your search layer is at {n}% — nothing is lost"
+
+GREETING = "Hi {first name},"
+STATUS_LINE = ("Your workspace is using {n}% of the fast-search capacity "
+               "included in your plan.")
+SHORT_VERSION = ("Short version: **nothing is lost or deleted.** Everything "
+                 "you've saved stays searchable. {changes}")
+ADD_CAPACITY_CTA = "Add capacity"
+WHY_HEADING = "Why it works this way"
+WHY_POSTGRES = ("Tortoise keeps your data in a Postgres database. That's "
+                "inexpensive, so we can store everything you give us without "
+                "charging you for it twice.")
+WHY_GRAPH = ("On top of that we run a graph database. It mirrors a slice of "
+             "your data and makes search faster and better at following "
+             "connections — finding things by meaning, and tracing how they "
+             "relate to each other.")
+WHY_RESERVED = ("That graph is expensive to run, so we reserve it for what "
+                "matters most: your highest-value and most frequently searched "
+                "items. Everything else stays in Postgres.")
+NOTICE_HEADING = "What you'll notice"
+KEEPS_WORKING = "Search keeps working across everything. {fetched}"
+CAN_ADD = ("If you want everything in the fast layer, you can add capacity at "
+           "any time.")
+DOCS_LINK = "How Tortoise stores and searches your data →"
+
+
+def demotion_status(threshold: int) -> tuple[str, str]:
+    """``(changes, fetched)`` — the two sentences whose TENSE depends on the
+    threshold, and nothing else does.
+
+    The issue's rule is *"only `{n}` and the tense of the status line change (at
+    80 % the items have not yet been demoted)"*. These are the two sentences that
+    make a claim about demotion, so at 80 % both are FUTURE (the account is not
+    in that state yet) and at 100 % both are PRESENT — the approved wording.
+
+    ⛔ WHY THE PRESENT TENSE IS NOT SIMPLY REUSED AT 80 %: telling an account one
+    sentence away from its cap that "what changes is how quickly some older items
+    come back" describes a change that has not happened. That is the gloss #2952
+    forbids — a degraded (here: a *pre*-degraded) state declared as if it were
+    already in force. The tense is the honest minimum, and it is the only
+    latitude this module takes with the owner's copy.
+
+    Raises ``ValueError`` for any threshold outside :data:`THRESHOLDS` — an
+    unknown threshold has no approved wording, and inventing one is exactly the
+    drift this module exists to prevent.
+    """
+    if threshold == THRESHOLD_EIGHTY:
+        return (
+            "What will change is how quickly some older items come back.",
+            ("Items outside the fast layer will be fetched when you search for "
+             "them, so they may take a moment longer."),
+        )
+    if threshold == THRESHOLD_FULL:
+        return (
+            "What changes is how quickly some older items come back.",
+            ("Items outside the fast layer are fetched when you search for "
+             "them, so they can take a moment longer."),
+        )
+    raise ValueError(f"no approved copy for threshold {threshold!r} "
+                     f"(the approved set is {THRESHOLDS})")
+
+
+def capacity_pct(used: float, allowance: float) -> int | None:
+    """The account's used share of its allowance, as a whole percentage.
+
+    ``None`` when the pair cannot produce one: a non-finite or negative figure, or
+    a non-positive allowance (an UNARMED tier — `free`/`anon` carry no hot window,
+    so there is nothing for a percentage to be a percentage OF).
+
+    ⛔ FLOOR, AND CAPPED BELOW 100 UNTIL THE RATIO REACHES IT — the same
+    discipline `website/apps/dashboard/src/nodeUsage.js` pins for the node nudge
+    (#4331): the DISPLAYED percentage may not cross a threshold the level has
+    not, so 79.6 % may not read "80 %" (a notice the account has not earned) and
+    99.6 % may not read "100 %" while the account is still under its allowance.
+    """
+    for value in (used, allowance):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        if not math.isfinite(float(value)):
+            return None
+    if used < 0 or allowance <= 0:
+        return None
+    ratio = float(used) / float(allowance)
+    if ratio >= 1.0:
+        return 100
+    return min(99, math.floor(ratio * 100))
+
+
+def threshold_reached(pct: int | None) -> int | None:
+    """The HIGHEST threshold this percentage reaches, or ``None``.
+
+    Highest rather than first-unclaimed: an account that jumps from 60 % to 105 %
+    between passes gets the 100 % notice only. Sending the 80 % one as well would
+    be two emails in one pass, and sending it *afterwards* is the out-of-order
+    case :func:`claim_notice` makes impossible.
+    """
+    if pct is None:
+        return None
+    for threshold in sorted(THRESHOLDS, reverse=True):
+        if pct >= threshold:
+            return threshold
+    return None
+
+
+@dataclass(frozen=True)
+class Notice:
+    """A threshold this account has reached — the decision to render a notice."""
+
+    org_id: str
+    threshold: int
+    used_mb: float
+    allowance_mb: float
+
+    @property
+    def pct(self) -> int:
+        return self.threshold
+
+
+@dataclass(frozen=True)
+class Copy:
+    """The rendered notice — what a sender hands to the provider."""
+
+    subject: str
+    html: str
+    text: str
+
+
+#: Kill switch + cadence for the scheduled pass. Default ON, ``env_flag``
+#: semantics: unset/blank/garbage resolve to the default so a typo can never
+#: silently disarm the only trigger these notices have (the webhook sweep's own
+#: reading of the same knob, `webhook_delivery.sweep_enabled`). A deployment that
+#: wants them off says ``0`` explicitly.
+#:
+#: ⚠️ WHY A FLEET-WIDE DEFAULT PASS IS SAFE TO ARM: the notice is gated on THREE
+#: real facts — a measured gauge row, an armed allowance, and a threshold — so a
+#: tenant with no reading (every tenant until the sweep has measured it) gets
+#: nothing, and the free/anon tiers carry no window so they get nothing. The
+#: first pass over a fleet already above 80 % is bounded by the shared Resend
+#: send budget (#1138), and a budget-skipped account is retried on a later pass
+#: rather than dropped.
+NOTICE_ENABLED_ENV = "TORTOISE_CAPACITY_NOTICE"
+NOTICE_INTERVAL_ENV = "TORTOISE_CAPACITY_NOTICE_INTERVAL"
+#: 6 h: the gauge is a periodic estimate whose gate staleness bound is 24 h
+#: (`allowance_gate.STALE_AFTER_SECONDS`), so a cadence well inside it means a
+#: threshold crossing is noticed the same day without a per-write cost.
+NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
+#: How many notices ONE pass may SEND (default). Not an enumeration cap — see
+#: ``sweep_pass``'s docstring — a burst guard on the SHARED Resend budget.
+#:
+#: ⛔ WHY IT EXISTS (#14038 review, P2). The budget is one counter across every
+#: send on an install (``email_notify``: "every Resend send on this budget is
+#: counted — invite, OTP, onboarding … and billing", default 100/day). A first
+#: fleet-wide ramp would otherwise reserve whatever remains in one burst, and a
+#: budget-exhausted INVITE/OTP is dropped with no retry — while a capacity notice
+#: that is skipped is simply retried on the next pass.
+#:
+#: ⛔ THE NUMBER IS A DAILY ONE, DIVIDED BY THE DAY'S PASSES (#14038 review, P2).
+#: A per-pass figure nobody multiplied out is the trap this constant used to be: 25
+#: at a pass every 6 h is FIVE passes a day (one at boot plus four scheduled), i.e.
+#: 125 notices against a 100/day budget — the ramp would take the whole counter and
+#: the INVITE/OTP drop it is supposed to prevent would follow. A quarter of the
+#: 100/day budget is 25, so at 6 h this cap is 25 // 5 = 5, and the day's notices
+#: stay inside the quarter the guard promises. ``NOTICE_MAX_SENDS_ENV`` is still an
+#: absolute override for a deployment that deliberately shortens the interval or
+#: raises the send budget — recompute the quotient if you do either.
+NOTICE_MAX_SENDS_PER_PASS_DEFAULT = 5
+NOTICE_MAX_SENDS_ENV = "TORTOISE_CAPACITY_NOTICE_MAX_SENDS"
+
+#: Ops cap on accounts PROCESSED per pass.
+#:
+#: ⛔ REMOVED (#14038 review, P2). It forwarded to `_enumerate_billed_orgs`,
+#: whose truncation is `candidates[:limit]` over a keyset walk ordered by id — a
+#: DETERMINISTIC lowest-id prefix, so the same first N accounts were re-processed
+#: (as cheap no-ops) on every pass and the rest of the fleet was never reached. It
+#: re-created, one layer up, exactly the silent-partial-pass failure the
+#: docstring above says the certified walk exists to prevent, and the send-budget
+#: guard (#1138) is the real limiter for a large first pass anyway.
+
+
+def notices_enabled() -> bool:
+    """Is the scheduled capacity-notice pass armed? (default ON)."""
+    from .env_truthy import env_flag
+
+    return env_flag(NOTICE_ENABLED_ENV, True)
+
+
+def sweep_interval_s() -> int:
+    """Validate ``TORTOISE_CAPACITY_NOTICE_INTERVAL`` to a positive int.
+
+    Same contract as `webhook_delivery.sweep_interval_s` and
+    `monitoring.event_retention_interval`: a non-numeric value falls back to the
+    default with a warning, and ``0``/negative is REFUSED rather than accepted,
+    because ``asyncio.sleep(0)`` returns immediately and would turn the pass into
+    a busy loop against every tenant's gauge.
+    """
+    import os
+
+    raw = os.environ.get(NOTICE_INTERVAL_ENV)
+    if raw is None or not str(raw).strip():
+        return NOTICE_INTERVAL_DEFAULT_S
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not a whole number of seconds — using %ds",
+                       NOTICE_INTERVAL_ENV, raw, NOTICE_INTERVAL_DEFAULT_S)
+        return NOTICE_INTERVAL_DEFAULT_S
+    if value < 1:
+        logger.warning(
+            "%s=%r is not a positive number of seconds — using %ds (a "
+            "zero/negative interval would re-evaluate the fleet in a busy loop)",
+            NOTICE_INTERVAL_ENV, raw, NOTICE_INTERVAL_DEFAULT_S)
+        return NOTICE_INTERVAL_DEFAULT_S
+    return value
+
+
+def max_sends_per_pass() -> int:
+    """How many notices one pass may SEND — ``NOTICE_MAX_SENDS_ENV`` or the default."""
+    import os
+
+    raw = os.environ.get(NOTICE_MAX_SENDS_ENV)
+    if raw is None or not str(raw).strip():
+        return NOTICE_MAX_SENDS_PER_PASS_DEFAULT
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not a whole number — using %d",
+                       NOTICE_MAX_SENDS_ENV, raw,
+                       NOTICE_MAX_SENDS_PER_PASS_DEFAULT)
+        return NOTICE_MAX_SENDS_PER_PASS_DEFAULT
+    if value < 1:
+        logger.warning(
+            "%s=%r is not positive — using %d (0 would disable the notices "
+            "entirely, which is what TORTOISE_CAPACITY_NOTICE=0 is for)",
+            NOTICE_MAX_SENDS_ENV, raw, NOTICE_MAX_SENDS_PER_PASS_DEFAULT)
+        return NOTICE_MAX_SENDS_PER_PASS_DEFAULT
+    return value
+
+
+#: Where a capacity request goes TODAY: the published support address.
+#:
+#: ⛔ THIS IS NOT A TIER LINK, AND THE SHIPPED FORM IS A DELIBERATE CHOICE
+#: (#14038 review, P1). The first cut pointed the CTA at the dashboard's
+#: `#/billing` tab. That IS a real deep link, but the page it opens is a
+#: current-plan card followed by a `<h3>Plans</h3>` grid whose every other card
+#: renders an upgrade button — so the only action in an email about a CAPACITY
+#: need landed the customer on the plan-tier chooser. #13998 requirement 2 and
+#: #13989 policy 4 (owner, 2026-11-20 — *"Capacity (overage/add-on) is offered
+#: first; tier changes are for feature needs only"*) forbid exactly that, and no
+#: test can catch it: a guard pins the URL string, not what the string renders.
+#:
+#: No add-on/overage PURCHASE surface exists yet (there is no route, no SKU
+#: checkout — the rates are in `product/pricing.json`, the fulfilment is a human),
+#: so the honest destination is the human path that can actually add capacity.
+#: When the add-on flow lands, this ONE function changes; nothing else does.
+CAPACITY_REQUEST_EMAIL = "support@premiselabs.co"
+
+
+def add_capacity_url() -> str:
+    """Where `[ Add capacity ]` goes: a capacity REQUEST, never a tier page.
+
+    A `mailto:` rather than an app route, for the reason in
+    ``CAPACITY_REQUEST_EMAIL``: the app has no capacity-purchase surface, and the
+    surface it does have is the one thing this email must not offer. The subject
+    is pre-filled so the request arrives already classified, which is the whole
+    benefit of routing it to a mailbox rather than to a page.
+    """
+    from urllib.parse import quote
+
+    subject = quote("Add capacity to my Tortoise workspace")
+    return f"mailto:{CAPACITY_REQUEST_EMAIL}?subject={subject}"
+
+
+def render(threshold: int, first_name: str | None) -> Copy:
+    """Render the approved copy for ``threshold``. Never sends anything.
+
+    ``first_name`` is cosmetic (the #2406 greeting heuristic's output); an empty
+    or missing name falls back to ``there`` so the email never reads "Hi ,".
+    """
+    name = (first_name or "").strip() or "there"
+    changes, fetched = demotion_status(threshold)
+    pct = str(threshold)
+    subject = SUBJECT.format(n=pct)
+    text = _text(name, pct, changes, fetched)
+    return Copy(subject=subject, html=_html(name, pct, changes, fetched),
+                text=text)
+
+
+def _text(name: str, pct: str, changes: str, fetched: str) -> str:
+    # ⛔ BOTH DESTINATIONS ARE IN THE TEXT HALF, not only in the HTML one
+    # (#14038 fix lane, P2). The two labels are the owner's words; a label with
+    # no address is a dead action, and until this line existed the plain-text
+    # alternative shipped `[ Add capacity ]` and the docs label with NO
+    # destination at all — so a text-only client, a screen reader on the text
+    # part, or any gateway that strips HTML received an email whose only action
+    # went nowhere. #13998 requirement 2 is that the CTA *resolves* and
+    # requirement 4 that the docs page is *linked*; neither the wording nor the
+    # destination changes here, only the half of the message that was missing it.
+    #
+    # The URLs come from the same two functions the HTML half uses
+    # (`add_capacity_url()` / `STORAGE_DOCS_URL`), so the halves cannot drift
+    # onto different pages, and `<…>` is the plain-text convention for a bare
+    # URI (RFC 6068 §2 for the mailto) that mail clients auto-link. The sibling
+    # emails in `email_notify` do the same: `_invite_text` renders
+    # `Accept: {link}` and `_onboarding_text` renders `book a call {link}`.
+    return (
+        f"Hi {name},\n\n"
+        f"{STATUS_LINE.format(n=pct)}\n\n"
+        f"{SHORT_VERSION.format(changes=changes).replace('**', '')}\n\n"
+        f"[ {ADD_CAPACITY_CTA} ]\n"
+        f"<{add_capacity_url()}>\n\n"
+        "---\n\n"
+        f"{WHY_HEADING}\n\n"
+        f"{WHY_POSTGRES}\n\n"
+        f"{WHY_GRAPH}\n\n"
+        f"{WHY_RESERVED}\n\n"
+        f"{NOTICE_HEADING}\n\n"
+        f"{KEEPS_WORKING.format(fetched=fetched)}\n\n"
+        f"{CAN_ADD}\n\n"
+        f"[ {DOCS_LINK} ]\n"
+        f"<{STORAGE_DOCS_URL}>\n"
+    )
+
+
+def _html(name: str, pct: str, changes: str, fetched: str) -> str:
+    # Same shell as the invite / OTP / onboarding emails (#307, #2406) so every
+    # transactional mail from this product looks like one product.
+    #
+    # ⛔ ONLY THE DYNAMIC VALUE IS ESCAPED. The paragraphs are OUR copy (the
+    # owner's, transcribed above), so they are interpolated literally — escaping
+    # them would turn every apostrophe into `&#x27;` and make the golden file
+    # unreadable at exactly the place a reviewer must read it. `name` is the one
+    # value that comes from data, and it is escaped.
+    nm = html.escape(name)
+    capacity = html.escape(add_capacity_url(), quote=True)
+    docs = html.escape(STORAGE_DOCS_URL, quote=True)
+    short = SHORT_VERSION.format(changes=changes).replace(
+        "**nothing is lost or deleted.**",
+        "<strong style=\"color:#cbd5e1;\">nothing is lost or deleted.</strong>")
+    return f"""\
+<div style="background:#060b14;padding:32px 16px;font-family:Helvetica,Arial,sans-serif;">
+  <div style="max-width:520px;margin:0 auto;background:#0d1a2d;border:1px solid #1e293b;border-radius:12px;padding:28px;">
+    <p style="color:#e2e8f0;font-size:16px;margin:0 0 16px;">Hi {nm},</p>
+    <p style="color:#e2e8f0;font-size:16px;font-weight:600;margin:0 0 16px;">{STATUS_LINE.format(n=pct)}</p>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 20px;">{short}</p>
+    <a href="{capacity}" style="display:inline-block;background:#06b6d4;color:#04121a;text-decoration:none;font-weight:600;padding:12px 24px;border-radius:8px;">{ADD_CAPACITY_CTA}</a>
+    <hr style="border:none;border-top:1px solid #1e293b;margin:24px 0;">
+    <h3 style="color:#e2e8f0;font-size:15px;margin:0 0 12px;">{WHY_HEADING}</h3>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 12px;">{WHY_POSTGRES}</p>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 12px;">{WHY_GRAPH}</p>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 12px;">{WHY_RESERVED}</p>
+    <h3 style="color:#e2e8f0;font-size:15px;margin:20px 0 12px;">{NOTICE_HEADING}</h3>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 12px;">{KEEPS_WORKING.format(fetched=fetched)}</p>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 12px;">{CAN_ADD}</p>
+    <p style="margin:20px 0 0;"><a href="{docs}" style="color:#06b6d4;font-size:13px;text-decoration:none;">{DOCS_LINK}</a></p>
+  </div>
+</div>"""
+
+
+def evaluate(org_id: str, *, limits: dict | None = None,
+             reading: Any = None) -> tuple[Notice | None, str | None]:
+    """Decide whether this account is over a threshold — from the GATE's figures.
+
+    Returns ``(notice, None)`` when a notice is due, else ``(None, reason)`` with
+    a named reason (``no-allowance`` / ``no-reading`` / ``below-threshold`` / …).
+    The reason is the log line's whole content, so an operator can tell "not near
+    the cap" from "the gauge is broken" without a second probe.
+
+    ⛔ NOTHING IS GUESSED. A missing allowance (the `free`/`anon` tiers carry no
+    hot window — `quota._arm_graph_storage` deliberately leaves them unarmed), an
+    unreadable allowance, and a reading the meter could not produce all resolve to
+    NO EMAIL. `reading`/`limits` exist as seam parameters for tests and for a
+    caller that has already paid for the resolution; the production default reads
+    both from the gate's own instruments.
+    """
+    if limits is None:
+        limits = quota.resolve_org_limits(org_id)
+    allowance = limits.get(ALLOWANCE_KEY)
+    if allowance is None:
+        # An UNARMED tier: no hot window, so the email's sentence ("…included in
+        # your plan") has no figure behind it. Nothing to notify.
+        return None, "no-allowance"
+    try:
+        allowance_mb = float(allowance)
+    except (TypeError, ValueError):
+        return None, "unreadable-allowance"
+    if not math.isfinite(allowance_mb) or allowance_mb <= 0:
+        return None, "no-allowance"
+    if reading is None:
+        reading = allowance_gate.read_dimension(DIMENSION, org_id)
+    if reading is None:
+        # ABSENT (never measured) or a METER FAULT — indistinguishable to a caller
+        # that must not guess, and both mean "no percentage". The pass logs this.
+        return None, "no-reading"
+    used = getattr(reading, "used", reading)
+    pct = capacity_pct(used, allowance_mb)
+    if pct is None:
+        return None, "unreadable-reading"
+    threshold = threshold_reached(pct)
+    if threshold is None:
+        return None, "below-threshold"
+    return Notice(org_id=org_id, threshold=threshold, used_mb=float(used),
+                  allowance_mb=allowance_mb), None
+
+
+def claim_notice(cp, org_id: str, threshold: int,
+                 previous: int | None) -> bool:
+    """Stamp the high-water mark — TRUE only when THIS call moved it.
+
+    A compare-and-swap on the value the caller READ (``previous``): ``None``
+    claims a row whose mark is still unset, and a read ``80`` claims only a row
+    still holding ``80``. Two passes that both saw ``None`` therefore cannot
+    interleave into a lower mark, and a concurrent 100 % stamp is not overwritten
+    by a lagging 80 % one.
+
+    ⛔ SEND-THEN-STAMP, like the #2406 onboarding marker: the stamp follows a
+    provider ACCEPT, so a failed send leaves the mark alone (retryable) and the
+    provider Idempotency-Key collapses the duplicate a crash between the two
+    produces. The opposite order would permanently swallow the notice on any
+    send failure — the customer would never learn, which is the failure mode this
+    email exists to prevent.
+    """
+    from .supabase_control import set_org_storage_notice_pct
+
+    return set_org_storage_notice_pct(cp, org_id, threshold, previous=previous)
+
+
+# ── the per-account decision, and the pass over the fleet ────────────────────
+
+#: The org-row facts one notice needs. `deleted_at`/`suspended_at` are read for
+#: the LIVENESS predicate, not for display: the fleet enumeration
+#: (`billing._enumerate_billed_orgs`) deliberately does NOT filter soft-deleted
+#: orgs — "a soft-deleted org can still be BILLED, and excluding it would hide a
+#: live charge" (`billing.py`) — which is the right predicate for a Stripe mirror
+#: and the WRONG one for a customer email. The copy says "nothing is lost or
+#: deleted. Everything you've saved stays searchable", and the stamp is once-ever,
+#: so mailing an account inside its deletion grace window would both state
+#: something false and burn the one notice it can ever get (#14038 review, P2 —
+#: found independently by two reviewers). #1853's suspension is the same class:
+#: the org's calls 403 but its inbox is still open to us.
+#:
+#: ⛔ ONE RAW SELECT, and the two failure directions are DIFFERENT (#14038 review
+#: cycle 2): `storage_notice_pct` and `deleted_at` must FAIL CLOSED (an unreadable
+#: ledger must not re-send; a deletion column is never additive — see
+#: `_ACCOUNT_DRIFT_SOFT`), while `suspended_at` is tier 0015 and must DEGRADE.
+_ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
+                   "suspended_at")
+
+#: Columns in `_ACCOUNT_SELECT` whose ABSENCE must DEGRADE, not stop the pass.
+#: `suspended_at` is migration **0015** — an additive tier (`_ORG_ADDITIVE_0015_TIER`),
+#: NOT a base column, so the #1096 doctrine applies: a schema one migration behind
+#: reads it as NULL and stays un-suspended instead of taking the feature down.
+#:
+#: ⛔ `storage_notice_pct` and `deleted_at` are DELIBERATELY NOT here: the mark is
+#: the LEDGER, and an unreadable ledger must refuse to send
+#: (`notice-mark-unavailable`) rather than mean "never notified" — the provider
+#: idempotency key collapses only a replay of the SAME threshold, so an unledgered
+#: pass re-sends the one-shot notice every interval forever. Deletion is the
+#: fail-closed direction too (#1096: a deletion column is never an additive tier).
+#: A single PostgREST 400 does not say WHICH column it rejected, which is why
+#: `read_account` retries without these and re-raises when the retry also fails.
+_ACCOUNT_DRIFT_SOFT = ("suspended_at",)
+
+#: What a REJECTED PROJECTION looks like from this seam (#14038 review, P1).
+#:
+#: The rejection is what licenses the degrade in `read_account`, so it must be
+#: told apart from a TRANSIENT read failure — retrying without `suspended_at`
+#: after a timeout or a 5xx would read a suspended org as un-suspended, mail it
+#: and burn its once-ever stamp (the stamp is not retryable).
+#:
+#: PostgREST answers an unknown column in `select` with **HTTP 400**: Postgres'
+#: `42703` (`column organizations.suspended_at does not exist`) when the column
+#: reaches SQL, or `PGRST204` when it came through a `columns=` parameter
+#: (Supabase's PostgREST error-code reference). `SupabaseControlPlane.query`
+#: renders only the STATUS and discards the body, so a bare `HTTP 400` from this
+#: one-row, `id`-filtered GET is the drift shape — a PATCH/POST body rejection or
+#: a bad filter cannot produce one here, and if a 400 has any other cause the
+#: retry 400s too and the ORIGINAL error is re-raised. A transport failure or a
+#: 5xx states a different text and is NOT drift: it propagates at once.
+_SCHEMA_REJECTION_MARKERS = ("pgrst204", "42703", "does not exist",
+                             "undefined column", "http 400")
+
+
+def _rejected_the_projection(err: BaseException) -> bool:
+    """True only for a read whose error STATES a rejected column.
+
+    Fails CLOSED on anything it does not recognise: an unknown error is treated
+    as transient, so the account reports `notice-mark-unavailable` and is retried
+    on the next pass instead of being mailed as if it were un-suspended.
+    """
+    text = str(err).lower()
+    return any(marker in text for marker in _SCHEMA_REJECTION_MARKERS)
+
+
+@dataclass(frozen=True)
+class Account:
+    """The org-row facts one notice needs."""
+
+    org_id: str
+    email: str | None
+    name: str | None
+    notice_pct: int | None
+    deleted: bool = False
+    suspended: bool = False
+
+
+def read_account(cp, org_id: str) -> Account | None:
+    """Read one account's address, mark and liveness columns; ``None`` if gone.
+
+    ONE select, so the mark, the address and the two liveness columns are one
+    snapshot. The retry exists because those columns carry DIFFERENT failure
+    contracts (#1096): a schema missing `suspended_at` (0015, additive) must
+    degrade to "not suspended" and keep the pass alive, while a schema missing
+    `storage_notice_pct` (the ledger) or `deleted_at` (base, fail-closed) must
+    stop this account's send. A single 400 does not say which, so the retry
+    without the drift-soft columns separates the two — and its failure re-raises
+    the original error into `notify_account`'s ``notice-mark-unavailable`` path.
+
+    ⛔ BUT THE RETRY IS LICENSED ONLY BY A REJECTION (#14038 review, P1). The
+    first read may also fail for a reason that has nothing to do with the schema
+    — a connection reset, a 5xx, a timeout — and retrying THAT without
+    `suspended_at` succeeds, so a suspended org reads as un-suspended, is mailed
+    (the copy offers a capacity purchase to an account that cannot use it) and
+    has its once-ever stamp burnt. So the degrade happens only when the first
+    error states a rejected column (`_rejected_the_projection`); anything else
+    propagates to `notice-mark-unavailable` and is retried next pass.
+    """
+    try:
+        rows = cp.query("organizations", select=list(_ACCOUNT_SELECT),
+                        filters=[("id", "eq", org_id)])
+    except Exception as first:
+        if not _rejected_the_projection(first):
+            raise
+        soft_select = [c for c in _ACCOUNT_SELECT if c not in _ACCOUNT_DRIFT_SOFT]
+        try:
+            rows = cp.query("organizations", select=soft_select,
+                            filters=[("id", "eq", org_id)])
+        except Exception:
+            raise first from None
+        logger.warning(
+            "capacity notice: the orgs read for %s rejected %s (schema older "
+            "than 0015) — retried without %s and treating the account as not "
+            "suspended; the ledger/base columns are still required (%s)",
+            org_id, list(_ACCOUNT_DRIFT_SOFT), list(_ACCOUNT_DRIFT_SOFT),
+            type(first).__name__)
+    if not rows:
+        return None
+    row = rows[0]
+    mark = row.get("storage_notice_pct")
+    try:
+        mark = int(mark) if mark is not None else None
+    except (TypeError, ValueError):
+        # An unreadable mark is NO MARK — see supabase_control's reader for why
+        # the extra-send direction is the safe one.
+        mark = None
+    return Account(org_id=org_id, email=row.get("email"),
+                    name=row.get("name"), notice_pct=mark,
+                    deleted=bool(row.get("deleted_at")),
+                    suspended=bool(row.get("suspended_at")))
+
+
+async def notify_account(org_id: str, *, cp=None, account: Account | None = None,
+                         limits: dict | None = None, reading: Any = None,
+                         send=None) -> dict:
+    """Decide + send + stamp for ONE account. Never raises for a mail problem.
+
+    ``send`` is the awaitable used to deliver the rendered copy; production
+    leaves it ``None`` and uses ``email_notify.send_notice_email`` — the ONE
+    Resend path, budget-guarded and idempotency-keyed. Tests pass a fake.
+
+    Returns ``{"status": …}`` with one of: ``sent``, ``already-notified``,
+    ``no-email``, ``deleted-org``, ``suspended-org``, ``notice-mark-unavailable``
+    (the account ROW could not be read — the ledger column has not been migrated,
+    or a base column is missing; the log line names which), ``below-threshold``/
+    ``no-reading``/``no-allowance`` (the
+    evaluate reasons are passed through verbatim so the caller can aggregate
+    them), ``skipped`` (send budget), ``failed`` (provider), ``unknown-account``.
+
+    ⛔ EVERY EXIT EXCEPT ``sent`` LEAVES THE MARK ALONE. That is what makes the
+    ledger mean "the customer received this", never "we tried".
+
+    ⛔ NO BLOCKING I/O ON THE EVENT LOOP (#14038 review, P1). The gauge pair
+    (`quota.resolve_org_limits` + the meter) and the marker CAS are synchronous
+    PostgREST/Redis calls; a serial pass over the fleet on the loop would stall
+    every request. Both go through `asyncio.to_thread` — the same discipline the
+    enumeration uses.
+    """
+    from . import email_notify
+
+    if cp is None:
+        from .supabase_control import get_control_plane
+
+        cp = get_control_plane()
+    if account is None:
+        try:
+            account = await asyncio.to_thread(read_account, cp, org_id)
+        except Exception as e:
+            # ⛔ NO SEND WITHOUT A READABLE LEDGER. A missing `storage_notice_pct`
+            # column (code deployed before its migration) raises PostgREST 204/
+            # 400 here; sending anyway would re-send the same one-shot notice on
+            # EVERY pass, and the provider key only collapses a replay of the
+            # SAME threshold — it cannot make a 6-hourly re-send safe. So the
+            # account is reported, loudly and by name, and nothing is sent until
+            # the migration applies (see the migration's deploy-order note).
+            logger.error(
+                "capacity notice: the account row for team %s is unreadable "
+                "(%s) — nothing is sent for this account. `suspended_at` already "
+                "degrades on its own (0015, additive — read_account retries "
+                "without it), so what reaches here is either a FAIL-CLOSED "
+                "column (the ledger storage_notice_pct / 20261120000001, or the "
+                "base deleted_at) or a TRANSIENT read failure, which "
+                "`read_account` refuses to read as schema drift (#14038 review, "
+                "P1). Both are retried on the next pass; neither sends.",
+                org_id, type(e).__name__)
+            return {"status": "notice-mark-unavailable", "org_id": org_id}
+    if account is None:
+        return {"status": "unknown-account", "org_id": org_id}
+    if account.deleted:
+        # Inside the deletion grace window (or cancelled). The stamp is
+        # once-EVER, so mailing here would spend the account's only notice on a
+        # workspace whose data is on its way out — and the copy would tell it
+        # "nothing is lost or deleted" while it is (see `_ACCOUNT_SELECT`).
+        return {"status": "deleted-org", "org_id": org_id}
+    if account.suspended:
+        # #1853: a suspended org's calls 403 but its inbox is still open to us.
+        # The notice offers a capacity purchase; offering it to an account that
+        # cannot use the capacity is noise at best, and the stamp is once-ever.
+        return {"status": "suspended-org", "org_id": org_id}
+    if not account.email:
+        # A registry/agent-minted org carries no address; the copy greets a
+        # PERSON, so there is nobody to greet.
+        return {"status": "no-email", "org_id": org_id}
+    if account.notice_pct is not None and account.notice_pct >= max(THRESHOLDS):
+        # The high-water mark is already at the TOP threshold: no threshold can
+        # be left to send, so skip the fleet's most expensive step (two sync
+        # gauge reads) entirely — the fast path the note below refers to.
+        return {"status": "already-notified", "org_id": org_id,
+                "notified": account.notice_pct}
+    # ⛔ OFF THE EVENT LOOP. ``evaluate`` is sync and performs TWO blocking
+    # control-plane reads (`quota.resolve_org_limits` → `_orgs_row_fail_soft` →
+    # `cp.query`, and `allowance_gate.read_dimension` → `cp.query`), and this
+    # module's pass runs as an asyncio task INSIDE the API process
+    # (`hosted_api._capacity_notice_sweep_loop`, armed by default). Called
+    # inline, every account's two round-trips stalled the whole event loop for
+    # the length of a fleet pass — the very thing `_cp_offload` exists for
+    # (#3498). The two reads beside it (`read_account`, `claim_notice`) were
+    # already offloaded; the decision between them was not.
+    #
+    # ⛔ AND AN ACCOUNT ALREADY AT THE TOP THRESHOLD NEVER GETS HERE: no threshold
+    # can be left to send, so the two gauge reads are skipped entirely (the fast
+    # path above). Before it, a fully-notified account paid both reads on every
+    # pass, forever (#14038 review, P1 aggravator).
+    notice, reason = await asyncio.to_thread(
+        evaluate, org_id, limits=limits, reading=reading)
+    if notice is None:
+        return {"status": reason, "org_id": org_id}
+    if account.notice_pct is not None and notice.threshold <= account.notice_pct:
+        # The high-water mark already covers this threshold — the ledger's whole
+        # job, and the check that makes a re-run of a finished pass free.
+        return {"status": "already-notified", "org_id": org_id,
+                "threshold": notice.threshold,
+                "notified": account.notice_pct}
+    copy = render(notice.threshold,
+                  email_notify.recipient_first_name(None, account.email,
+                                                   account.name))
+    # Re-read the mark ONCE more immediately before the send (#14038 review, P2):
+    # another process may have stamped while this one was reading the gauge, and
+    # a send is irreversible. This narrows the cross-process window to one round
+    # trip; it does not close it — closing it needs a pre-send reservation (a
+    # stamp-first protocol with a compensating unset), which is a design decision
+    # rather than a tidy-up, and it is recorded on the PR rather than improvised.
+    try:
+        from .supabase_control import org_storage_notice_pct
+
+        fresh = await asyncio.to_thread(org_storage_notice_pct, cp, org_id)
+    except Exception:
+        fresh = account.notice_pct
+    if fresh is not None and notice.threshold <= fresh:
+        return {"status": "already-notified", "org_id": org_id,
+                "threshold": notice.threshold, "notified": fresh}
+    sender = send
+    if sender is None:
+        async def sender(c: Copy) -> dict:
+            return await email_notify.send_notice_email(
+                account.email, c.subject, c.html, c.text,
+                idempotency_key=f"capacity-notice:{org_id}:{notice.threshold}",
+                label=f"capacity notice {notice.threshold}%")
+    result = await sender(copy)
+    status = result.get("status") if isinstance(result, dict) else None
+    if status != "sent":
+        logger.warning(
+            "capacity notice: %s for team %s at %s%% (%s MB of %s MB) — mark "
+            "left unset, retryable",
+            status or "failed", org_id, notice.threshold, notice.used_mb,
+            notice.allowance_mb)
+        return {"status": status or "failed", "org_id": org_id,
+                "threshold": notice.threshold}
+    stamped = await asyncio.to_thread(
+        claim_notice, cp, org_id, notice.threshold, fresh)
+    if not stamped:
+        # Another pass moved the mark between our read and our stamp. The email
+        # went out; the provider key collapses only a replay of the SAME
+        # threshold (the key names it), so it bounds a duplicate of this send and
+        # says nothing about a different one. The log states exactly that rather
+        # than overclaiming.
+        logger.warning(
+            "capacity notice: sent to team %s at %s%% but the mark moved "
+            "concurrently (replaying this threshold is collapsed by the "
+            "provider key; a DIFFERENT threshold's notice is not)",
+            org_id, notice.threshold)
+    return {"status": "sent", "org_id": org_id, "threshold": notice.threshold,
+            "message_id": (result or {}).get("message_id")}
+
+
+async def sweep_pass(*, cp=None, send=None, enumerate_orgs=None,
+                     max_sends: int | None = None) -> dict:
+    """One pass over the fleet: at most ONE notice per account per pass.
+
+    ``enumerate_orgs`` defaults to ``billing._enumerate_billed_orgs`` — the seam
+    that CERTIFIES its enumeration complete (`query_all` keyset walk) and RAISES
+    rather than publish a partial page. That matters here for the same reason it
+    matters to the billing reconcile: a truncated read is not an error, it is a
+    shorter list, and a pass that quietly covers half the fleet looks exactly
+    like a pass with nothing to do.
+
+    Per-account isolation: one account's unreadable gauge, missing address or
+    provider failure costs that account's notice, never the pass.
+
+    ⛔ NO PER-PASS ACCOUNT CAP. An earlier revision forwarded a
+    ``TORTOISE_CAPACITY_NOTICE_LIMIT`` to the enumerator, whose truncation is a
+    lowest-id PREFIX — so the same first N accounts were re-processed on every
+    pass and the fleet's suffix was never notified, recreating one layer up the
+    silent-partial-pass this docstring forbids (#14038 review, P2).
+
+    There IS a per-pass SEND cap (``max_sends`` / ``TORTOISE_CAPACITY_NOTICE_MAX_SENDS``,
+    default 25) and it cannot have that defect: it walks the WHOLE enumeration and
+    stops SENDING, and a send that did not happen leaves its account's mark unset,
+    so the next pass starts with a SMALLER unstamped population and the fleet
+    ramps. The difference is per-pass PROCESSING (a stuck prefix) against
+    per-pass SENDING (a moving frontier) — see ``NOTICE_MAX_SENDS_ENV``'s why.
+
+    ⛔ A PRECONDITION THIS PASS CANNOT SUPPLY: the gauge it reads has ONE
+    production writer, the backup sweep (``BACKUP_SWEEP_ENABLED``, off unless the
+    deploy's secret conjunction is present). With it off, every account reads
+    ``ABSENT`` → ``no-reading`` and NOTHING is ever sent, silently. The summary
+    therefore always carries a ``no-reading`` count and is logged at INFO when the
+    whole pass agrees on it.
+    """
+    if max_sends is None:
+        max_sends = max_sends_per_pass()
+    summary: dict[str, Any] = {"checked": 0, "sent": 0, "statuses": {},
+                               "max_sends": max_sends}
+    if cp is None:
+        from .supabase_control import get_control_plane
+
+        cp = get_control_plane()
+    if enumerate_orgs is None:
+        from .billing import _enumerate_billed_orgs
+
+        enumerate_orgs = _enumerate_billed_orgs
+    try:
+        orgs = await asyncio.to_thread(enumerate_orgs)
+    except Exception as e:
+        logger.warning("capacity notice sweep: enumeration failed (%s) — no "
+                       "notices this pass", type(e).__name__)
+        return {**summary, "error": "enumeration-failed"}
+    for row in orgs:
+        org_id = row.get("id") if isinstance(row, dict) else None
+        if not org_id:
+            continue
+        summary["checked"] += 1
+        if summary["sent"] >= max_sends:
+            # The burst guard: the pass has spent its share of the shared Resend
+            # budget. Count what it did not reach, so a capped pass is visible as
+            # a capped pass rather than as a small fleet.
+            summary["statuses"]["deferred"] = (
+                summary["statuses"].get("deferred", 0) + 1)
+            continue
+        try:
+            result = await notify_account(org_id, cp=cp, send=send)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "capacity notice sweep: team %s failed (%s) — continuing",
+                org_id, type(e).__name__)
+            result = {"status": "error"}
+        status = str(result.get("status") or "error")
+        summary["statuses"][status] = summary["statuses"].get(status, 0) + 1
+        if status == "sent":
+            summary["sent"] += 1
+    other = summary["statuses"].keys() - {"below-threshold"}
+    if summary["sent"] or other:
+        logger.info("capacity notice sweep %s", summary)
+    elif summary["checked"]:
+        # Every account answered `below-threshold`, OR -- the state worth naming --
+        # every account answered `no-reading`, which is what a stopped gauge
+        # (BACKUP_SWEEP_ENABLED off) looks like. It must not read as "nobody is
+        # near capacity".
+        logger.info("capacity notice sweep: %s accounts checked, nothing sent (%s) "
+                    "-- if `no-reading` dominates, the graph-storage gauge is not "
+                    "being written (BACKUP_SWEEP_ENABLED)", summary["checked"],
+                    summary["statuses"])
+    return summary

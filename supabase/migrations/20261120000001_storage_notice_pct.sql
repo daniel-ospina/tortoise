@@ -1,0 +1,92 @@
+-- ============================================================================
+-- Migration 20261120000001: capacity-notice high-water mark (#13998)
+-- ----------------------------------------------------------------------------
+-- The 80 % / 100 % working-set capacity notices
+-- (`tortoise/capacity_notice.py`) may be sent AT MOST ONCE PER THRESHOLD PER
+-- ACCOUNT, EVER. This column is that ledger.
+--
+--   organizations.storage_notice_pct  (integer, nullable) — the HIGHEST threshold ever
+--     notified for this account (80 or 100), stamped only after the provider
+--     ACCEPTS the send.
+--
+-- ⛔ The table is `organizations`, NOT `teams`. `teams` was renamed by
+-- 20260915000001_tenancy_team_to_org.sql:50 (`ALTER TABLE public.teams RENAME
+-- TO organizations`), and no compatibility view named `teams` is created
+-- anywhere — so a migration written against `teams` fails with
+-- `relation "public.teams" does not exist` and this column never exists. The
+-- `teams` spelling in older additive migrations (e.g. 20260907000001) predates
+-- that rename; copying its TABLE name is what this header used to do and it was
+-- wrong. Verified by `schema-drill` (`supabase/tests/pglite/validate.mjs`
+-- enumerates every migration on disk).
+--
+-- ⛔ ONE mark, not two columns. Two independent markers (one per threshold) let
+-- a lagging pass email "at 80 %" AFTER the 100 % notice has gone out — the
+-- out-of-order case the copy makes unacceptable — because each marker is
+-- checked on its own. With a high-water mark the only legal send is
+-- `threshold > mark`, so the LEDGER is monotone by construction, and an account
+-- that jumps from 60 % to 105 % between passes gets the 100 % notice alone (no
+-- second email in the same pass).
+--
+-- ⛔ THE INBOX IS NOT THE LEDGER. The send precedes the stamp (so a failure stays
+-- retryable), so two CONCURRENT passes can both read NULL, both pass the pre-send
+-- re-read, and deliver 100 % then 80 %. The re-read narrows that to one round trip
+-- and the Idempotency-Key below dedupes only the SAME threshold; closing the order
+-- window needs a pre-send reservation, which is a design decision recorded on the
+-- PR, not a property this column gives you (#14038 review cycle 2).
+--
+-- The stamp is a compare-and-swap on the value the caller READ
+-- (`set_org_storage_notice_pct`, rowcount-gated: `WHERE id AND
+-- storage_notice_pct IS NULL` for a first stamp, `= previous` afterwards), so
+-- two processes cannot interleave into a lower mark and two passes that both
+-- saw NULL cannot both claim the first send. The provider Idempotency-Key
+-- `capacity-notice:{org_id}:{pct}` collapses the one duplicate a crash between
+-- the provider accept and the stamp can produce.
+--
+-- A SKIPPED OR FAILED SEND NEVER STAMPS — so the mark never swallows a notice
+-- the customer has not received. That is also what makes the send-budget guard
+-- (#1138) a graceful ramp on the first fleet-wide pass: past the daily cap the
+-- remaining accounts are skipped, unstamped, and retried on a later pass, and the
+-- per-pass send cap (TORTOISE_CAPACITY_NOTICE_MAX_SENDS, default 25) keeps the
+-- sweep from spending the whole shared budget in one burst ahead of
+-- customer-blocking mail.
+--
+-- Additive + idempotent (IF NOT EXISTS) — the same `ALTER TABLE … ADD COLUMN IF
+-- NOT EXISTS` pattern as 20260907000001, applied to the post-rename table name
+-- (20260918000001_metering_period_window.sql is the recent precedent for
+-- `ALTER TABLE public.organizations`).
+-- Nullable, no default, no NOT NULL — a schema missing it (drift, one migration
+-- behind) fails soft: the #1096 ladder drops the mark's OWN tier
+-- (_ORG_ADDITIVE_STORAGE_NOTICE_TIER, newest dropped first) so only the mark
+-- degrades to unset. The control plane reads/writes via service_role, so no new
+-- grants are needed (precedent: 20260817000001 / 20260907000001).
+--
+-- An INTEGER, deliberately: the derived-column registry that
+-- `tests/test_...`-level pins assert against the migrations covers timestamptz
+-- columns, and a nullable int carries no instant at all (this mark is a policy
+-- watermark, not a clock reading).
+--
+-- ⛔ A PRECONDITION THIS MIGRATION CANNOT PROVIDE: the gauge the notices read has
+-- ONE production writer, the backup sweep (`backup_sweep.py` →
+-- `record_graph_storage`), which `BACKUP_SWEEP_ENABLED` leaves OFF unless the
+-- deploy's secret conjunction is present. With it off every account reads
+-- `no-reading` and no notice is ever sent — silently, except for the pass's own
+-- INFO line, which counts `no-reading` for exactly this reason.
+--
+-- ⚠️ Deploy ORDER: this migration must apply BEFORE the capacity-notice sweep
+-- ships. If the column is absent:
+--   · the orgs-row readers (`supabase_control.resolve_api_key` / `org_by_id`,
+--     `quota.resolve_org_limits`, and BOTH `hosted_api` ladders) read the mark
+--     as unset — the #1096 ladder drops `_ORG_ADDITIVE_STORAGE_NOTICE_TIER`
+--     (newest first) and every older additive column stays readable. No 500.
+--   · `capacity_notice.read_account` selects the mark DIRECTLY (one read, so the
+--     mark and the address are one snapshot) and therefore raises; the account is
+--     reported as `notice-mark-unavailable` — a NAMED status, not a silent skip —
+--     and NOTHING is sent. That is deliberate: sending without a ledger would
+--     re-send the same one-shot notice on every pass, and the provider key only
+--     collapses a replay of the SAME threshold.
+-- Nothing here is a licence to ship without applying it: the sweep is the ONLY
+-- path that tells a customer they are near their cap.
+-- ============================================================================
+
+ALTER TABLE public.organizations
+    ADD COLUMN IF NOT EXISTS storage_notice_pct integer;
