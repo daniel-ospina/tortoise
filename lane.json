@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-13036-surface-1795200598-p3588842-7bbd2b0e",
+  "_sha": "574f9080256c88807849b721abd855ff6daa0a34",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/13036-surface.log"
+    },
+    {
+      "kind": "branch",
+      "value": "chore/13036-verify-surface"
+    },
+    {
+      "kind": "sha",
+      "value": "f10546118b6e190356eaf2fbd1888cfcd3f61245"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/13036-surface"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 20757,
+  "ended_at": 1795221355,
+  "exit_code": 1,
+  "heartbeat_at": 1795221355,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-13036-surface-1795200598-p3588842-7bbd2b0e",
+  "lease_until": 1795257955,
+  "pid": 3588842,
+  "reason": "exit:1",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795200598,
+  "state": "FAILED",
+  "tag": "13036-surface",
+  "worktree": "/home/cmux/tortoise/.worktrees/13036-surface"
+}
