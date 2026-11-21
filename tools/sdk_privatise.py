@@ -448,9 +448,10 @@ SWEEP_NAMES = 66
 #: this block already counts above, `seen.update` 1 in the `+2` against
 #: `tests/test_13337_cache_graph_declaration.py`). ⛔ THAT TREE IS NAMED BY SHA, because the issue
 #: number cannot name it: `#14108`
-#: resolves to `refs/pull/14108/head`, a ref that TRACKS the branch's head — so a sha written
-#: beside it is a MEASUREMENT, not an address: it resolved to `d523c9be8c` when the figures
-#: below were measured, and `83e94826a8a` is the
+#: resolved to `refs/pull/14108/head`, and that ref TRACKED the branch's head while the PR was open
+#: — ⛔ IT TRACKS NOTHING NOW: `#14108` MERGED (`1b82cc7063`), its head branch is deleted, so the
+#: ref is FROZEN at `d523c9be8c` and no longer moves at all. It resolved to `d523c9be8c` when the
+#: figures below were measured, and `83e94826a8a` is the
 #: OLDEST of the EIGHT commits between `2fe01fc775e` and it (`git log --oneline
 #: 2fe01fc775e..d523c9be8c`). On that head this sentence does not drift, it INVERTS: `aee14c5ceb`
 #: DELETES the `seen.update` line and puts `calls.append(…)` in that position (`git diff

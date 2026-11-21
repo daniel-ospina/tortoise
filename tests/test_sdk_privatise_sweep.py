@@ -935,17 +935,19 @@ def _moving_pointer_violations(block: str) -> list[str]:
 def test_the_pr_head_refs_target_is_a_measurement_never_a_present_tense_address():
     """Review round 12 (P3): `refs/pull/14108/head` moves; a sha beside it must be dated.
 
-    ⛔ NON-VACUITY IN BOTH DIRECTIONS. Deleting the sentence is not the fix (a PR head ref
-    tracking a branch's head is WHY the block names a sha at all), so the first assert
-    requires the tracking claim to survive; the second refuses only the unqualified
-    present-tense binding. `test_the_moving_pointer_arm_accepts_dated_forms` pins the other
-    side: an honest rewrite must not red.
+    ⛔ NON-VACUITY IN BOTH DIRECTIONS. Deleting the sentence is not the fix (the ref's relation
+    to a branch head is WHY the block names a sha at all), so the first assert requires that
+    relation to survive — ⛔ **EITHER TENSE** (review, round 17, P2): `#14108` has since MERGED
+    and its head branch is deleted, so `refs/pull/14108/head` is now FROZEN at `d523c9be8c` and
+    tracks nothing. Requiring the PRESENT tense forced the stale wording to stay and made the
+    truthful correction a RED, which is the stale-on-arrival class this block polices. The
+    second assert still refuses only the unqualified present-tense binding.
     """
     block = _residue_block()
     flow = re.sub(r"\n#:\s?", " ", block)
-    assert re.search(r"(?i)tracks\b[^.]{0,80}\bhead", flow), (
-        "non-vacuity: the block still says the PR head ref tracks a branch head — that is why "
-        "it names a sha rather than the issue number")
+    assert re.search(r"(?i)\btrack(?:s|ed)\b", flow) and re.search(r"(?i)\bhead", flow), (
+        "non-vacuity: the block still relates the PR head ref to a branch head, in either tense "
+        "— that is why it names a sha rather than the issue number")
     violations = _moving_pointer_violations(block)
     assert not violations, (
         "a sha bound to a MOVING ref must be dated, not asserted in the present tense: "
@@ -1031,6 +1033,42 @@ def _parent_claims(flow: str) -> list[str]:
     """The pre-rebase DRAFT presented as the capture rewrite's PARENT (review, round 13, P2)."""
     return [flow[m.start():m.end()] for m in _PARENT_CLAIM.finditer(flow)
             if not _refuted(flow, m.start())]
+
+
+#: The `#14058` note's ORIGINAL, refuted reason for citing a pre-rebase commit by issue number.
+_PREFIX_REASON_RE = re.compile(
+    r"(?i)reachable from no ref|disappears on the next\s*`?gc`?|unreproducible address")
+
+
+def test_the_14058_notes_reason_is_the_measured_one_never_the_refuted_one():
+    """§3 of this PR: the `#14058` note's stated REASON, graded — it was ungraded before.
+
+    ⛔ THIS IS THE ARM THE PR BODY CLAIMED EXISTED AND DID NOT (review, round 17, P2, measured):
+    restoring the pre-fix reason — "a pre-rebase commit is reachable from no ref and disappears
+    on the next `gc`" — left every other arm green, because the three arms the body named grade
+    three OTHER sentences (the "outside every branch history" clause, the whole-tree conditional,
+    the PR-head dating), and the premise arms read no block text at all. Deleting the corrected
+    narrow fact was likewise invisible. Both are graded here, object-free, so this runs in the
+    sharded `test` job.
+
+    Two honest shapes, as elsewhere in this file: the refuted reason may be QUOTED as refuted
+    (that is how the block records it), and the measured narrow fact must be present.
+    """
+    block = _residue_block()
+    flat = re.sub(r"\n#:\s?", " ", block)
+    # ⛔ NON-VACUITY — the CORRECTED fact must survive: deleting it is not a fix for a wrong reason.
+    assert re.search(r"(?i)no\s+remote\s+BRANCH|no\s+REMOTE\s+branch", flat), (
+        "non-vacuity: the note still publishes the MEASURED narrow fact (`no remote BRANCH`) — "
+        "deleting it leaves the reason unstated, which is not the same as it being right")
+    assert re.search(r"(?i)not on\s+`main`", flat), (
+        "non-vacuity: and the other half of that measurement (`not on `main``)")
+    # ⛔ AND THE REFUTED SHAPE MAY NOT COME BACK UNREFUTED.
+    for hit in _PREFIX_REASON_RE.finditer(flat):
+        before = flat[max(0, hit.start() - 220):hit.start()]
+        assert re.search(r"(?i)false|refut\w*|wrong|NOT |never ", before), (
+            "the `#14058` note's ORIGINAL reason is honest only as a QUOTED, refuted draft — "
+            "`83e94826a8a` IS an ancestor of `refs/pull/14108/head`, so `git gc` does not prune "
+            f"it: {flat[max(0, hit.start() - 60):hit.end() + 60]!r}")
 
 
 def test_the_14068_attribution_names_its_tree_by_sha_never_by_the_pr_ref():
