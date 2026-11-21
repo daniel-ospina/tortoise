@@ -31,7 +31,7 @@ import re
 import sys
 import types
 from collections.abc import Callable
-from functools import partial
+from functools import lru_cache, partial
 
 import pytest
 
@@ -1354,6 +1354,34 @@ def _is_absent_third_party_distribution(cause: BaseException | None) -> bool:
     return not (name == "tortoise" or name.startswith("tortoise."))
 
 
+@lru_cache(maxsize=64)
+def _module_writer_facts(source: str) -> tuple[frozenset[str], frozenset[str]]:
+    """``(every def name, the names whose ANY definition mentions a dynamic namespace)``.
+
+    ⛔ THIS EXISTS BECAUSE `_function_bodies` IS A PURE FUNCTION THAT WAS BEING RE-EVALUATED PER
+    KEY (measured #14099: shard `(d)`'s watchdog killed the leg — `exit 137`, no pytest summary,
+    `job-unreadable` — and `python-ci-gate` red-ed with it). The population walk asked
+    `_function_bodies(source)` once per REGISTER KEY, so a 9-module population re-`ast.parse`d
+    5.5 MB of source (3.75 MB of it `tortoise/sdk.py`) on every key of every call: profiled at
+    this head, ONE test made **275** `_function_bodies` calls and **14.2 M** `ast.walk` yields —
+    111 s of its 118 s — for a walk whose input had not changed once. The file went 15.8 s on
+    main to 250 s here, and it is packed into shard `(d)`, whose watchdog is 24 min: ~4.2 min of
+    that budget spent re-deriving the same answer. Cached by SOURCE TEXT, which is the function's
+    only input, so this changes no verdict — the arms below monkeypatch `strip._module_source`,
+    and a folded module never yields a source here at all.
+
+    Only NAME SETS are retained, never the trees: a `bodies` cache would pin the AST of every
+    module (hundreds of MB for `sdk.py`) for the life of the run. `maxsize=64` is well above the
+    register's module count and bounded.
+    """
+    bodies = strip._function_bodies(source)
+    offenders = frozenset(
+        name for name, definitions in bodies.items()
+        if any(strip._is_dynamic_namespace_reference(node)
+               for definition in definitions for node in ast.walk(definition)))
+    return frozenset(bodies), offenders
+
+
 def _writer_register_population() -> dict[str, list[str]]:
     """Classify every entity-writer register key by what the pin below could READ of it.
 
@@ -1392,8 +1420,8 @@ def _writer_register_population() -> dict[str, list[str]]:
                       and _is_absent_third_party_distribution(exc.__cause__))
             population["unreadable" if exempt else "stray"].append(key)
             continue
-        bodies = strip._function_bodies(source)
-        if symbol not in bodies:
+        defined, offenders = _module_writer_facts(source)
+        if symbol not in defined:
             population["missing"].append(key)   # a renamed writer, not an environment fact
             continue
         population["examined"].append(key)
@@ -1404,8 +1432,7 @@ def _writer_register_population() -> dict[str, list[str]]:
         # Grading `bodies[symbol][0]` therefore reported `offenders == []` — pin GREEN — while the
         # gate refused a writer whose SECOND definition mentions `globals`; that blind spot was
         # measured, and it is exactly the over-refusal cost this pin exists to surface.
-        if any(strip._is_dynamic_namespace_reference(node)
-               for definition in bodies[symbol] for node in ast.walk(definition)):
+        if symbol in offenders:
             population["offenders"].append(key)
     return population
 
