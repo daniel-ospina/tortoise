@@ -324,12 +324,20 @@ def _availability_targets(stmt: ast.stmt) -> list[ast.expr]:
     return []
 
 
+#: The module-level flag names this tree resolves a capability into. A second
+#: SPELLING is not a second defect: the flag is the availability DECISION either
+#: way, and two `_probe(…)` families resolve `_AVAILABLE, _WORKING_URI = _probe(…)`
+#: — so a census keyed on one spelling graded NOTHING in the other, which is how
+#: those two kept the swallowing shape through two repair rounds (review F3).
+_AVAILABILITY_FLAGS = frozenset({"FALKORDB_AVAILABLE", "_AVAILABLE"})
+
+
 def _names_availability(targets: list[ast.expr]) -> bool:
-    """Whether any target binds `FALKORDB_AVAILABLE`, including in a tuple target
+    """Whether any target binds an availability flag, including in a tuple target
     (`FALKORDB_AVAILABLE, _WORKING_URI = _probe([…])`)."""
     for target in targets:
         for node in ast.walk(target):
-            if isinstance(node, ast.Name) and node.id == "FALKORDB_AVAILABLE":
+            if isinstance(node, ast.Name) and node.id in _AVAILABILITY_FLAGS:
                 return True
     return False
 
@@ -362,12 +370,42 @@ def _resolver_functions(tree: ast.Module) -> set[str]:
     return names
 
 
+def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
+    """The `try` blocks in a helper body, descending through control flow.
+
+    A probe's guard is not always a DIRECT child of its helper: the two
+    `_AVAILABLE, _WORKING_URI = _probe([…])` families put it inside
+    `for uri in candidates:`, so reading only `stmt.body` graded nothing there
+    and their missing arm was invisible to the census (review F3(b)).
+
+    Stops at a NESTED `try`: a `try: _proj.close() / except Exception: pass`
+    cleanup is not the availability decision, and it is graded on its own pass
+    where it is a root's descendant.
+    """
+    out: list[ast.Try] = []
+    stack: list[ast.stmt] = list(body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Try):
+            if node.handlers:
+                out.append(node)
+            continue
+        if isinstance(node, (ast.If, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor,
+                             ast.While)):
+            stack.extend(node.body)
+            stack.extend(getattr(node, "orelse", []) or [])
+        elif isinstance(node, ast.ExceptHandler):
+            stack.extend(node.body)
+    return out
+
+
 def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     """The `try` blocks that DECIDE availability — two shapes in this tree.
 
-      * a module-body `try` that assigns `FALKORDB_AVAILABLE`;
-      * the probe `try` at the top of a module-level helper the flag is resolved
-        by (`FALKORDB_AVAILABLE = _falkordb_available()`).
+      * a module-body `try` that assigns an availability flag;
+      * the probe `try` inside a module-level helper the flag is resolved by
+        (`FALKORDB_AVAILABLE = _falkordb_available()`), reached through the
+        control flow of that helper — the guard may sit inside a `for`.
 
     Nested `try`s inside a probe body are not roots: a `try/_proj.close()/except
     Exception: pass` cleanup is not the availability decision. The import-seam
@@ -383,7 +421,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
             and stmt.name in resolvers
         ):
-            roots.extend(s for s in stmt.body if isinstance(s, ast.Try) and s.handlers)
+            roots.extend(_control_flow_tries(stmt.body))
     return roots
 
 
@@ -473,7 +511,11 @@ def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool],
             src = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        if "FALKORDB_AVAILABLE" not in src:
+        # A cheap text prefilter, not the rule: `_AVAILABLE` is a substring of
+        # `FALKORDB_AVAILABLE`, so this admits both spellings (58 tracked
+        # tests/ + tools/ files carry one, at ~11 more `ast.parse` calls than
+        # the flag-name filter did).
+        if "_AVAILABLE" not in src:
             continue
         try:
             rows = _probe_blocks_from_source(src)
@@ -680,6 +722,29 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     )
     assert "ImportError" not in optional[0][1], "no arm is claimed where there is none"
 
+    # A probe guard that is NOT a direct child of its helper — inside a `for`
+    # over candidate URIs — and resolved through the `_AVAILABLE` spelling. Two
+    # families in this tree are exactly this shape, and reading only the
+    # helper's direct children graded NOTHING there (review F3(b)).
+    looped = rows(
+        """
+        _AVAILABLE = False
+        def _probe(candidates):
+            for uri in candidates:
+                try:
+                    from tortoise.projection import FalkorProjection
+                    return True, uri
+                except Exception:
+                    continue
+            return False, None
+        _AVAILABLE, _WORKING_URI = _probe(["docker://x"])
+        """
+    )
+    assert looped == ((5, (), True, True, True),), (
+        "a probe guard inside a `for` in a `_AVAILABLE`-resolved helper must be "
+        f"graded as a ROOT, not skipped: {looped}"
+    )
+
     # The tree must still hold probe rows and importing probes — otherwise the
     # census is grading nothing and every row above is theatre.
     report = _probe_report()
@@ -693,3 +758,18 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
         f"only {importing} probes import own code inside their `try` — the seam "
         "census has stopped seeing the population it grades"
     )
+
+    # And the two `_AVAILABLE`-spelled families must be IN the population: they
+    # were the ones the `FALKORDB_AVAILABLE`-only census could not see, so
+    # narrowing the flag set back would silently stop grading the fix that
+    # landed in them (review F3(a)/(b)). Pinned by presence, not by a count.
+    graded = {row[0] for row in report}
+    for rel in (
+        "tests/test_13302_ended_read.py",
+        "tests/test_13557_13558_reachable_reads.py",
+    ):
+        assert rel in graded, (
+            f"{rel} is absent from the probe census — its `_AVAILABLE, … = "
+            "_probe([…])` flag spelling has fallen out of `_AVAILABILITY_FLAGS`, "
+            "so the arm in it is unobservable"
+        )

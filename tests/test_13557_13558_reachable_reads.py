@@ -86,6 +86,14 @@ def _probe(candidates):
             proj = FalkorProjection.from_uri(uri, graph_name=probe_graph)
             proj.g.query("RETURN 1")
             return True, uri
+        # ⛔ A moved or renamed seam — including an import of a moved module — is a
+        #   PROGRAMMING error, not "no server": it must not read as "storage
+        #   unavailable" (#14114 class 2, #14125). Without this arm an
+        #   `AttributeError` on `proj.g.query` (or a `ModuleNotFoundError` on the
+        #   import above) fell through to the broad arm and the family SKIPPED
+        #   green over a broken tree.
+        except (AttributeError, NameError, TypeError, ImportError):
+            raise
         except Exception:
             if uri == env_uri:
                 break
