@@ -150,7 +150,7 @@ def _script_data_state(data: str) -> str:
                 # machine's own rule.
                 nxt = i + 8
                 if nxt >= n:
-                    # UNDECIDED: the delimiter is in the next chunk. Staying double is
+                    # DECIDED BY POLICY: the delimiter is in the next chunk. Staying double is
                     # the loud side — it wedges rather than guessing that the element
                     # closed and re-reading script text as markup. ⛔ THIS is the branch
                     # `handle_data` actually reaches: `HTMLParser`'s CDATA mode ends the
@@ -494,10 +494,16 @@ class _AnchorHrefParser(HTMLParser):
     #: The spec's "special" category (13.2.4.2), transcribed from the WHATWG
     #: parsing spec text. AAA's relocation arm is only reachable when the element it
     #: lifts is a SPECIAL element, so this — not `_P_CLOSERS` — is the set the
-    #: relocation hazard must test against. `_P_CLOSERS` is a strict SUBSET of it
-    #: (`button`, `select`, `marquee`, `applet`, `object`, `td`, `th`, … are special
-    #: and are not `</p>`-closers), which is how round 13's first cut let
-    #: `<strong><canvas><button>CLAIM</canvas></strong>` through with every pin green.
+    #: relocation hazard must test against. `_P_CLOSERS` is ALMOST a subset of it:
+    #: every member except `dialog`, which the spec closes a `<p>` for and does NOT
+    #: classify as special (fetched from the spec, RUNG 3 — the special list reads
+    #: `… details, dir, div …`, no `dialog`; in-code, measured:
+    #: `_P_CLOSERS - _SPECIAL == {'dialog'}`). This paragraph said "strict SUBSET"
+    #: until #14073's review checked it. The membership difference is two-sided and
+    #: that is the point: `button`, `select`, `marquee`, `applet`, `object`, `td`,
+    #: `th`, … are special and are NOT `</p>`-closers, which is how round 13's first
+    #: cut let `<strong><canvas><button>CLAIM</canvas></strong>` through with every
+    #: pin green.
     #:
     #: `option`/`rt`/`rp` are not in this snapshot's list, and do not need to be: an
     #: `<option>` can only sit inside a `<select>`, which IS special and sits above
@@ -1105,8 +1111,11 @@ class _AnchorHrefParser(HTMLParser):
         an anchor parked there are the same escape (an advertised boundary, or an
         advertised entry, that the pins cannot verify).
 
-        Four reasons, all of them "the pins cannot see what the reader also cannot
-        see" — refusing is what keeps the slice LONG, i.e. the loud direction:
+        Four reasons, in TWO directions — and the split matters, because the fourth
+        is not "the reader cannot see it": three of them are "the pins cannot see
+        what the reader also cannot see", and the fourth is "the pins see it at a
+        position the reader does not". Refusing either way keeps the slice LONG,
+        i.e. the loud direction:
 
         * an open `_UNBOUNDABLE_ANCESTORS` ancestor — an open `<select>` (the
           conservative side of a spec change, for the reason `_record_heading` states
@@ -1501,6 +1510,47 @@ class _AnchorHrefParser(HTMLParser):
             self._open_elements.extend(relocated)
             return
 
+    def _formatting_in_scope(self, tag: str) -> bool:
+        """Is an element named `tag` already open IN SCOPE? The START-tag precondition.
+
+        Spec 13.2.6.4.7 "in body" runs the adoption agency algorithm on two START
+        tags, and NEITHER runs it unconditionally:
+
+        * `<a>` — *"if there is no `a` element in the list of active formatting
+          elements … then reconstruct the active formatting elements, insert an
+          HTML element for the token … Otherwise, this is a parse error; let
+          `existingA` be that `a` element, **run the adoption agency algorithm for
+          the token**"* — i.e. only while an `a` is already in the formatting list;
+        * `<nobr>` — *"reconstruct the active formatting elements, **if the stack of
+          open elements has a `nobr` element in scope** … run the adoption agency
+          algorithm"*.
+
+        So the pattern `_aaa_would_relocate_a_painted_block` looks for is the
+        consequence, not the precondition: it accepts ANY `_FORMATTING` member in
+        its bottom slot. Called from the START-tag site without this test, an
+        arriving `<a>` fires on a `<b>` that is already open — measured
+        (#14073 review, P1): `<b><canvas><div>CLAIM<a href="/blog">x` refused the
+        whole page while Chrome paints nothing at all (text rect 0x0, link 0x0,
+        `innerText` empty). Same shape with an `a` already open —
+        `<a><canvas><div>CLAIM<a href="/blog">x` — IS painted (52x17 px) and must
+        keep refusing, so the call site cannot simply be deleted or widened.
+
+        The walk is TOP-DOWN and stops at the spec's ordinary scope boundary
+        (`_SCOPE`, which includes `template`), which is also AAA's own early
+        return: *"if the formatting element is not in the stack of open elements,
+        or is not in scope, then … return"*. That is what keeps an `<a>` inside an
+        inert `<template>` (a scope boundary) from firing against the outer tree —
+        measured (#14073 review, P2):
+        `<a><canvas><div>MARK<template><a href="/x">INNER</a></template></div></canvas></a>`
+        refused, while Chrome relocates nothing (0 ink px).
+        """
+        for name, _container, _renders in reversed(self._open_elements):
+            if name == tag:
+                return True
+            if name in self._SCOPE:
+                return False
+        return False
+
     def _aaa_would_relocate_a_painted_block(self, tag: str) -> bool:
         """Does the stack hold the shape AAA relocates a painted block OUT of?
 
@@ -1546,6 +1596,18 @@ class _AnchorHrefParser(HTMLParser):
             for j in range(i + 1, len(self._open_elements)):
                 unrendered = self._open_elements[j][0]
                 if unrendered not in self._UNRENDERED and unrendered not in self._RAW:
+                    continue
+                # ⛔ EXCEPT the members whose FALLBACK a browser paints
+                # (`_FALLBACK_RENDERS`). `_text_is_painted` already COUNTS their
+                # text, so nothing was discarded at arrival and AAA lifting a block
+                # out of them recovers no hidden claim — refusing there is a FALSE
+                # BLOCK, measured (#14073 review, P2d):
+                # `<a><object><div>CLAIM<a href="/blog">y</a></div></object></a>`
+                # extracts `'CLAIM y'` (renders=True for `object`) yet this pattern
+                # refused the whole page, so the guard contradicted the seam it is
+                # built on. The `object` ancestor still refuses a HEADING through
+                # `_unmet_by_reader`, which is a TAG test and unaffected.
+                if unrendered in self._FALLBACK_RENDERS:
                     continue
                 if any(
                     self._open_elements[k][0] in self._SPECIAL
@@ -2003,7 +2065,20 @@ class _AnchorHrefParser(HTMLParser):
         # `_FORMATTING` here OVER-fires. Measured: `<b><canvas><div>CLAIM<b>` is 0x0
         # inside the canvas, i.e. the text really is unrendered and dropping it is
         # correct; a `_FORMATTING`-wide check refused that page.
-        if tag in ("a", "nobr") and self._aaa_would_relocate_a_painted_block(tag):
+        # ⛔ AND ONLY UNDER THE SPEC'S OWN PRECONDITION (round 19, P1, measured).
+        # The pattern accepts ANY formatting element below, but AAA runs for an `<a>`
+        # only while an `a` is already in the formatting list, and for a `<nobr>`
+        # only while a `nobr` is in scope — see `_formatting_in_scope`. Without this
+        # gate the check fired on `<b><canvas><div>CLAIM<a href="/blog">x` (an
+        # ALREADY-OPEN `b`, an arriving `a`), which Chrome paints nothing of.
+        # `not self._suppress` mirrors the end-tag path: inside `<template>`/raw text
+        # the content is inert, so a shape there relocates nothing a reader meets.
+        if (
+            tag in ("a", "nobr")
+            and not self._suppress
+            and self._formatting_in_scope(tag)
+            and self._aaa_would_relocate_a_painted_block(tag)
+        ):
             self.wedged_reason = "adoption-agency-relocation"
         # The sibling/implicit closes the spec's "in body" rules also perform
         # (an `<li>`/`<dd>`/`<dt>`/`<option>` closes its own kind, and an

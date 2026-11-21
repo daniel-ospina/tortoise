@@ -1261,12 +1261,7 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     html = _read(DOCS) if page is None else page
     headings = extract_heading_positions(html)
     start = _h2_offset(html, anchor)
-    assert start >= 0, (
-        f"website/docs.html has no `<h2 id=\"{anchor}\">`. "
-        f"`capacity_notice.STORAGE_DOCS_URL` (#13998) points at "
-        f"`/tortoise/docs#{anchor}`, so moving or renaming this section silently "
-        f"breaks the notices' link text."
-    )
+    assert start >= 0, _missing_heading_diagnosis(html, anchor)
     # ⛔ THE INDEX IS THE TOC BLOCK, not every `href="#…"` in the document. Read
     # off the whole page, one inline cross-reference anywhere (a "see also", a
     # footer jump) promotes a heading to a slice boundary without a deliberate
@@ -1597,6 +1592,56 @@ def _h2_offset(html: str, anchor: str) -> int:
         if heading_id == anchor:
             return offset
     return -1
+
+
+def _missing_heading_diagnosis(html: str, anchor: str) -> str:
+    """Why `_docs_section` has no bound — said truthfully, not as "the heading is gone".
+
+    `_h2_offset` answers `-1` in TWO different worlds, and they are not the same
+    defect (#14073 review, P2):
+
+    * the heading is really ABSENT from the document — it was renamed or moved, so
+      the notices' link text is broken and re-adding it is the fix;
+    * the heading is PRESENT in the source and the reader model REFUSED it — a wedged
+      document, an ancestor a reader does not meet, or a `<table>` whose foster
+      parenting reorders the tree against the source (`_unmet_by_reader`).
+
+    Reporting the second as "has no `<h2 id=…>`" sends the next lane hunting for a
+    deleted heading that is right there in the file — and it is exactly the state
+    this guard's own loud rules are designed to produce (an over-refusal keeps the
+    slice LONG). The two states are therefore named separately.
+    """
+    in_source = re.search(
+        rf"<h2\b[^>]*\bid\s*=\s*([\"']?){re.escape(anchor)}\1(?![\w-])", html
+    )
+    if in_source is None:
+        return (
+            f"website/docs.html has no `<h2 id=\"{anchor}\">`. "
+            f"`capacity_notice.STORAGE_DOCS_URL` (#13998) points at "
+            f"`/tortoise/docs#{anchor}`, so moving or renaming this section silently "
+            f"breaks the notices' link text."
+        )
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    if parser.wedged_reason:
+        why = (
+            f"the document WEDGED ({parser.wedged_reason}), so no rendered position "
+            f"is knowable from here"
+        )
+    else:
+        why = (
+            "an open ancestor makes it unmeetable (`_unmet_by_reader`: an unrendered "
+            "ancestor, an open `<select>`/`<option>`, or a `<table>` whose foster "
+            "parenting reorders the tree against the source)"
+        )
+    return (
+        f"website/docs.html HAS `<h2 id=\"{anchor}\">` in its source "
+        f"(at offset {in_source.start()}), but this model records no rendered "
+        f"position for it: {why}. The heading is not missing — the bound REFUSED it, "
+        f"which keeps the slice long on purpose. Fix the markup (or the refusal); "
+        f"do not re-add a heading that is already there."
+    )
 
 
 def _banned_vocabulary(markup: str) -> list[str]:
@@ -3641,6 +3686,47 @@ def test_a_second_toc_block_refuses_rather_than_picking_one() -> None:
         _docs_section(page=two_tocs)
 
 
+def test_a_refused_section_heading_is_not_reported_as_a_missing_one() -> None:
+    """A PRESENT but refused `<h2 id="storage">` must not be diagnosed as absent.
+
+    `_h2_offset` answers `-1` in two different worlds (#14073 review, P2): the
+    heading was renamed/moved (the notices' link is broken — re-adding it is the
+    fix), or it is right there in the source and the reader model REFUSED it. The
+    old message named only the first, so an over-refusal — exactly what this
+    guard's loud rules are built to produce — sent the next lane hunting for a
+    deleted heading that was never deleted. Both worlds are driven below.
+    """
+    page = DOCS.read_text(encoding="utf-8")
+    assert '<h2 id="storage">' in page, "premise: the reviewed page carries the heading"
+
+    # (a) PRESENT but REFUSED: an open `<select>` above it is an `_UNBOUNDABLE_ANCESTORS`
+    # ancestor, so `_unmet_by_reader` refuses the heading and nothing bounds the slice.
+    refused = page.replace('<h2 id="storage">', '<select><h2 id="storage">', 1)
+    assert refused != page
+    with pytest.raises(AssertionError) as refused_error:
+        _docs_section(page=refused)
+    message = str(refused_error.value)
+    assert 'HAS `<h2 id="storage">` in its source' in message, (
+        "the diagnosis blamed a MISSING heading for one the model refused, which is "
+        f"the misleading report #14073 review named: {message}"
+    )
+    assert 'has no `<h2 id="storage">`' not in message, (
+        f"the absent-heading wording must not survive on a refused heading: {message}"
+    )
+
+    # (b) GENUINELY ABSENT: rename the id, and the message must still say so — the
+    # fix for a refused heading must not turn a real deletion into a refusal.
+    renamed = page.replace('<h2 id="storage">', '<h2 id="storage-renamed">', 1)
+    assert renamed != page
+    with pytest.raises(AssertionError) as absent_error:
+        _docs_section(page=renamed)
+    absent = str(absent_error.value)
+    assert 'has no `<h2 id="storage">`' in absent, (
+        f"a heading that really is gone must be reported as missing: {absent}"
+    )
+    assert "HAS `" not in absent
+
+
 def test_a_base_element_moves_what_the_section_advertises() -> None:
     """A `<base href>` changes which document a fragment-only link lands on.
 
@@ -3882,7 +3968,13 @@ def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() 
             "must not bound (`_unmet_by_reader`), which keeps the slice long and "
             "reds the golden on the claim instead of hiding it."
         )
-        with pytest.raises(AssertionError):
+        # ⛔ WHICH assert, not just ANY assert: without `match=` this row passes on a
+        # broken setup assert (a manifest reload, a fixture count) and proves nothing
+        # about the pin it names (#14073 review, P2b — every sibling row pins its own).
+        # MEASURED, not guessed: on this route the DESTINATIONS pin fires first (the
+        # foster-parented claim drags the section's link set), so pinning the wording
+        # golden here would have been a false claim about which pin the row drives.
+        with pytest.raises(AssertionError, match="the #storage section links to"):
             _assert_storage_section_reviewed(section)
 
     # ⛔ AND THE FALSE-RED DIRECTION: a table that opens AND closes strictly inside
@@ -4399,7 +4491,7 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         #   (ii) `</canvas>` ABSENT  → the formatting end tag is the only arrival.
         # Round 14 measured (i) and (ii) as SEPARATE escapes: a check keyed to one
         # end tag alone leaves the other green over a painted claim.
-        for shape, body in (
+        for _shape, body in (
             ("closed", f"<strong><{unrendered}><div>{{claim}}</{unrendered}></strong>"),
             ("unclosed", f"<strong><{unrendered}><div>{{claim}}</strong>"),
             # AAA's furthestBlock must be a SPECIAL element; `button` is special and
@@ -4414,7 +4506,7 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             )
             assert escaped != section
             with pytest.raises(ValueError, match="adoption-agency-relocation"):
-                _visible_text(escaped), shape
+                _visible_text(escaped)
         # control 1: no formatting element below → AAA cannot lift it, the text really
         # is inside the unrendered element, and the seam keeps dropping it.
         control = section.replace(
@@ -4485,6 +4577,52 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             1,
         )
         _visible_text(wellformed)
+
+    # ⛔ P1 OVER-FIRE — THE START-TAG CALL SITE NEEDS THE SPEC'S PRECONDITION
+    # (#14073 review, measured). The pattern's bottom slot accepts ANY `_FORMATTING`
+    # member, but the spec runs AAA on an `<a>` start tag only while an `a` is
+    # ALREADY in the formatting list, and on a `<nobr>` only while a `nobr` is in
+    # scope — see `_formatting_in_scope`. Without that gate the check fired on an
+    # already-open `b` in front of an arriving `a`. Chrome, measured on this box:
+    # text rect 0x0, link 0x0, `innerText` '' — the page paints NOTHING, so refusing
+    # it is a false block.
+    for over_fire in (
+        '<b><canvas><div>FalkorDB permanently deletes it<a href="/blog">x',
+        '<strong><video><div>FalkorDB permanently deletes it<nobr>',
+        # …and `<template>` is a SCOPE BOUNDARY, so the OUTER `a` is not in scope for
+        # the inner one and no AAA runs. Chrome: 0 ink px.
+        '<a><canvas><div>MARK<template><a href="/x">INNER</a></template>'
+        "</div></canvas></a>",
+    ):
+        assert "falkor" not in _banned_vocabulary(_visible_text("<p>x</p>" + over_fire)), (
+            "no formatting element of the ARRIVING tag's own name is open in scope, so "
+            "the spec runs no adoption agency algorithm here and a browser paints "
+            "nothing — refusing the page is a false block"
+        )
+    # …while the shapes the rule DOES name still refuse, so the gate above cannot be
+    # "fixed" by deleting the call site (which would reopen the round-15 P0).
+    for still_refuses in (
+        '<a><canvas><div>FalkorDB permanently deletes it<a href="/blog">x',
+        "<nobr><canvas><div>FalkorDB permanently deletes it<nobr>",
+    ):
+        with pytest.raises(ValueError, match="adoption-agency-relocation"):
+            _visible_text("<p>x</p>" + still_refuses)
+
+    # ⛔ P2d — `object` IS a `_FALLBACK_RENDERS` member, not an unrendered middle
+    # link (#14073 review, measured). The paint seam COUNTS an `<object>`'s text
+    # (`renders=True`), so nothing was discarded on arrival and AAA lifting a block
+    # out of it recovers no hidden claim — yet the pattern refused a page whose own
+    # seam had already read that text. Driven through the END-tag arrival, which is
+    # the path the scope gate does not already cover.
+    for object_aaa in (
+        "<a><object><div>FalkorDB permanently deletes it</a>",
+        '<a><object><div>FalkorDB permanently deletes it'
+        '<a href="/blog">y</a></div></object></a>',
+    ):
+        assert "falkor" in _banned_vocabulary(_visible_text("<p>x</p>" + object_aaa)), (
+            "an `<object>` without a usable resource renders its children, so the seam "
+            "counts that text; refusing the page contradicts the seam it is built on"
+        )
 
     # ⛔ P1, ROUND 12 — FOSTER PARENTING IS PER TABLE. A cell belonging to a NESTED
     # table must not end the OUTER table's truncation. Measured:
@@ -4733,7 +4871,7 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         "premise: a `<noscript>` region is refused by the mode-dependent allowlist rule, "
         "so the next assertion measures THAT pin and not the wording golden"
     )
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="carries attribute"):
         _assert_storage_section_reviewed(noscript_label)
     # ── the three controls that keep the rule from over-admitting ──
     for label, markup in (
