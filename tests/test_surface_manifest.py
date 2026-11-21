@@ -2878,7 +2878,7 @@ def test_the_14033_state_question_field_is_recorded():
         "the row does not document `routed: false` as the payload's shape — `routed: "
         "false` IS the contract (the notice reports a cue that did NOT route); a row "
         "that says `true`, or drops the key, describes a different response")
-    from tortoise.state_intent import missed_route_payload, StateQuestion
+    from tortoise.state_intent import StateQuestion, missed_route_payload
     probe = missed_route_payload(
         StateQuestion(population="ended", cue="c",
                       signal="wh_whole_question", signal_cue="what ended"))
