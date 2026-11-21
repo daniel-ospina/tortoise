@@ -1248,3 +1248,86 @@ def test_a_node_pinned_and_leased_at_the_delete_statement_is_reported_pinned():
     assert report.skipped_leased == (), (
         "the last-hop re-check asks the LEASE before the PIN, inverting gate 6's ordering"
     )
+
+
+def test_a_held_back_pass_cannot_refund_more_licence_than_it_spent():
+    """The refund must be exactly what was debited — an over-credit deletes unproven nodes.
+
+    ⛔ The refund exists so a pass that takes nothing does not starve the next one to
+    `budget=0`. But the licence is the CENSUS's proof of how many nodes may be evicted at
+    all, so refunding MORE than the pass was charged lets a later pass delete a node nothing
+    proved — the exact over-deletion shape the licence exists to prevent, on the one line
+    where the refund now happens. Nothing pinned the amount: mutating the refund to
+    `+= len(local) * 2` left this file, `test_14012_outside_view.py`,
+    `test_14012_resident_cli.py` and `test_cache_evict_cli.py` all green.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(6)])
+    asks: dict[int, int] = {}
+
+    def pin_appears_late(candidate: Candidate) -> bool:
+        if candidate.key != "p0":
+            return False
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=2), _FakeClient(), g,          # the census proves 2, not 4
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_appears_late,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=6),
+    )
+
+    assert asks.get(g.id_of("p0")), "the held-back pass never happened — this row grades nothing"
+    assert len(report.deleted) <= 2, (
+        f"the sweep evicted {len(report.deleted)} node(s) on a census that proved 2 — a "
+        f"held-back pass refunded more licence than it spent, so a node nothing proved was "
+        f"deleted"
+    )
+
+
+def test_running_out_of_passes_after_a_held_back_pass_names_the_pin_not_a_rerun():
+    """The stop reason must carry the hold diagnosis out of the loop.
+
+    ⛔ A pass whose whole window is held back at the DELETE STATEMENT does not end the loop —
+    it widens and tries again. So when `max_passes` then runs out, `stop_reason` is still its
+    `"pass_budget"` initial value, and that arm tells the operator to RE-RUN. That cannot
+    converge: the window does not survive the call and the selector is deterministic, so the
+    same nodes are held at the same asks — while the answer that works ("unpin these") sits
+    in the arm this path never reaches. Measured at this shape: `PARTIAL`, `deleted=0`,
+    `budget_exhausted=True`, reason "…re-run to continue…", for a sweep that was stopped by
+    a pin the user can clear in one command.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(8)])
+    asks: dict[int, int] = {}
+
+    def pin_appears_at_every_delete(candidate: Candidate) -> bool:
+        # Each node is planned once (ask 1) and held at the delete statement (ask 2).
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=8), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_appears_at_every_delete,
+        dry_run=False,
+        # max_passes=3 keeps `reach` (1 x 2^2 = 4) ABOVE the 3 nodes the passes hold, so
+        # this lands on the branch that used to say "re-run to continue".
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=3),
+    )
+
+    assert report.deleted == ()
+    assert "re-run to continue" not in report.reason, (
+        "the report told the operator to re-run a sweep that was stopped by a pin — that "
+        "instruction cannot converge, because the next call holds the same nodes at the "
+        f"same asks. reason={report.reason!r}"
+    )
+    assert "PINNED" in report.reason or "unpin" in report.reason, (
+        "the reason did not name the pin as what stopped the sweep, so the one working "
+        f"remedy is unreachable from it. reason={report.reason!r}"
+    )
+    assert report.metric()["pass_budget_exhausted"] is False, (
+        "the binding constraint was the pin, not the pass budget"
+    )

@@ -971,6 +971,14 @@ def evict(
     #: The selector window, carried across passes so it can GROW (see below). Starts at
     #: 0; the first pass sets it from `budget` alone.
     window = 0
+    #: ⛔ CARRIED OUT OF THE LOOP, because a pass that ends with its whole window held
+    #: back at the DELETE STATEMENT does not end the loop — it widens and tries again. When
+    #: `max_passes` then runs out, `stop_reason` is still its `"pass_budget"` initial value,
+    #: and that arm tells the operator to RE-RUN — which cannot converge: the window restarts
+    #: at `budget`, the selector is deterministic, and the same nodes are held at the same
+    #: asks. The actionable reply (`unpin …`, or wait for the reader) lives in the pin/lease
+    #: arms, so the diagnosis is carried here and applied after the loop.
+    hold_reason: str | None = None
 
     for _ in range(resolved.max_passes):
         over = after_nodes - resolved.max_nodes
@@ -1227,10 +1235,15 @@ def evict(
             # written for: a pin that becomes visible only at the delete statement would
             # abandon the remaining passes and report zero evictions while the identical
             # declaration, seen one ask earlier, would have delivered them. Break only when
-            # there is nothing left to widen (`window >= after_nodes`) or when the hold
-            # sets did not grow (every candidate was already held — continuing would spin).
-            held_grew = (len(held_leased_ids), len(held_pinned_ids)) != held_before[1:]
-            if window >= after_nodes or not held_grew:
+            # there is nothing left to widen (`window >= after_nodes`); `max_passes` is the
+            # loop's own bound, so this cannot spin. ⛔ There is deliberately NO
+            # "did the hold sets grow" disjunct: every node in `local` was provably absent
+            # from both sets (the plan-time gate discards stale entries immediately before
+            # adding it), so the last-hop loop always adds each of them to exactly one
+            # bucket and the counts always differ — a disjunct that can never be false is a
+            # guard that guards nothing, which is worse than no guard because it reads as
+            # one.
+            if window >= after_nodes:
                 # ⛔ WHICH hold-back stopped this pass is REPORTED, not assumed. The PIN
                 # arms come first: the pin is the control a reader can clear themselves
                 # (`unpin`), whereas a lease is a reader that was live at statement time,
@@ -1243,8 +1256,17 @@ def evict(
                 else:
                     stop_reason = "leased"
                 break
-            # The window grew but this pass found nothing new to take: keep widening.
+            # The window is not yet the whole graph: widen and try the next pass, carrying
+            # the diagnosis in case this is the last pass the budget allows.
+            hold_reason = (
+                "pin-unanswerable" if late_pinned_unanswerable
+                else "pinned" if late_pinned
+                else "leased"
+            )
             continue
+        # A pass that reached the delete statement is taking nodes, so an earlier pass's
+        # hold no longer explains why the sweep stopped.
+        hold_reason = None
         # ⛔ `snapshot_out` IS HOW THE ABORT PATH LEARNS WHAT THE INVALIDATION DID. On a
         # raise the tuple below never arrives, so without this channel the report would
         # have to say `None` — "not applicable" — about a statement whose effect is
@@ -1343,6 +1365,15 @@ def evict(
         if removed == 0:
             stop_reason = "population"
             break
+
+    # ⛔ CARRY THE HOLD DIAGNOSIS OUT OF THE LOOP. The last pass may have been entirely
+    # held back at the delete statement and then run out of `max_passes`, leaving
+    # `stop_reason` at its initial `"pass_budget"`. That arm advises a RE-RUN, which cannot
+    # converge here (the window does not survive the call and the selector is deterministic,
+    # so the same nodes are held at the same asks) — while the answer the operator needs
+    # ("unpin these", "wait for those readers") is in the arms this mapping selects.
+    if stop_reason == "pass_budget" and hold_reason is not None:
+        stop_reason = hold_reason
 
     # ⛔ A refusal reached AFTER an earlier pass already deleted something must not
     # report "nothing was deleted" — the metric would be false and the only record of
