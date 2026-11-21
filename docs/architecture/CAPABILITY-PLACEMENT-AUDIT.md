@@ -142,11 +142,12 @@ text; **all 222 comparable ones resolve at BOTH heads** — every written path r
 exists at `ccb49741b2ec` — and **the nine that are NOT comparable are this branch's own**: `sdk.py:58056`, whose
 written line sits past the pin's `sdk.py` (56,415 lines there; `git show ccb49741b2ec:tortoise/sdk.py
 | wc -l`), `sdk.py` `:61956`/`:61976` (the `:Meta` read and its `_config_reset_state` delegate, likewise
-past it — written as two code spans so they are resolved but not counted twice), `sdk.py:58923`,
+past it — the read is also written as two code spans in the list below, so it is resolved but not counted
+twice, while the delegate appears one-token only), `sdk.py:58923`,
 `:58272` and `:58274` (three reader cites re-derived at this head, which sits past the pin's `sdk.py`
 end), and `search_engine.py`'s `:7196`/`:7198`, whose written lines sit past the pin's `search_engine.py`
 (7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — and `hosted_api.py`'s `:50979` (the `s.actor_user_id = $uid` condition, whose written line sits past the pin's `hosted_api.py`, 49,851 lines there) — all nine re-derived at
-this head. So the drift is **128 of the 222 comparable, plus six of those nine pairs** (the three with no counterpart anywhere in the pin's tree, whose content sits at those same lines on `main` — `sdk.py`'s `:61956`/`:61976` and `hosted_api.py`'s `:50979`), and
+this head. So the drift is **128 of the 222 comparable, plus six of those nine pairs** (the three that do not exist at `main` `ae54df166d` either — its `sdk.py` ends at 60,566 lines and its `hosted_api.py` at 50,724 — are `sdk.py`'s `:61956`/`:61976` and `hosted_api.py`'s `:50979`, so what those three lack at BOTH earlier heads is the line, not the content: the pin carries it at its own `sdk.py` lines 55,647/55,667 and `hosted_api.py` line 49,836), and
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 **The drift is 134 of those 231.** ⚠️ **These counts are a parsing decision, and this header states which
