@@ -10,9 +10,13 @@ that asserted them together would stay green while one of them regressed.
 3. a deliberately STALLED projection does not slow a read
    (`test_a_stalled_projection_does_not_slow_a_read`), and the read DECLARES the
    lag instead of returning a confident short answer (#2952's class);
-4. the four correctness conditions that decide whether a write may be deferred at
-   all — a journal line exists, no door reads the outcome, the log is a journal,
-   and the loop is armed — each of which must answer INLINE when it fails.
+4. the four CORRECTNESS conditions that decide whether a write may be deferred at
+   all — a journal line exists, no door reads the outcome, the log is a durable
+   journal, and the tenant is carried BY VALUE — plus the RECORD's own arming,
+   which is a SWITCH rather than a correctness rule (`_record_armed`, condition 5
+   of six). Each must answer INLINE when it fails. ⛔ This list previously named
+   "the loop is armed" as one of the four and omitted the tenant condition — the
+   same membership drift `.env.example` carried (cycle-2 review, finding 2).
 
 DB-free by design: the fold is represented by a callable, which is exactly the
 boundary this module owns (it decides *when* a fold runs, never *what* it does).
@@ -613,7 +617,7 @@ def test_the_write_path_stays_live_while_the_fold_is_wedged(armed):
     assert projection_worker.stats().projected == 10
 
 
-# ── 4. the four correctness conditions ──────────────────────────────────────
+# ── 4. the four correctness conditions (+ the armed switch) ────────────────
 
 
 def test_a_record_only_write_is_never_deferred(armed, monkeypatch):

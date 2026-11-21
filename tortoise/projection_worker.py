@@ -408,23 +408,33 @@ class ProjectionWorker:
     def submit(self, item: PendingProjection) -> bool:
         """Queue one projection. ``True`` queued, ``False`` ⇒ fold it inline.
 
-        ⛔ IT RAISES NOTHING THE CALLER DOES NOT ALREADY CATCH — and the precise
-        wording is load-bearing (#14222 review, finding 6). It is called on the
-        write path after the journal has committed, so a failure here would hand
-        the producer an exception for a write that persisted, leaving the record
-        short with no inline fallback. Two arms DO raise by design:
+        ⛔ ONE ARM RAISES, AND THE PRECISE WORDING IS LOAD-BEARING (#14222 review
+        findings 6 and cycle 2-1). It is called on the write path after the
+        journal has committed, so a failure here would hand the producer an
+        exception for a write that persisted, leaving the record short with no
+        inline fallback. :meth:`_ensure_started` calls ``thread.start()``
+        unguarded, so a ``RuntimeError: can't start new thread`` (fd/thread
+        exhaustion) propagates from the line below; that is answered INLINE by
+        :func:`tortoise.live_write._submitted_to_worker`, which wraps this call in
+        ``except Exception: return False``.
 
-        * :meth:`_ensure_started` calls ``thread.start()`` unguarded, so a
-          ``RuntimeError: can't start new thread`` (fd/thread exhaustion)
-          propagates from the line below;
-        * :meth:`_publish` is a foreign call and may raise.
+        ⛔ ``_publish`` is NOT a raising arm, and an earlier revision of this
+        docstring named it — that was wrong: ``_publish_queue_state`` reaches the
+        metrics writer only through :func:`_emit`, whose
+        ``contextlib.suppress(Exception)`` covers the module lookup AND the call.
+        It is deliberately unable to raise.
 
-        Both are answered INLINE by :func:`tortoise.live_write._submitted_to_worker`,
-        which wraps this call in ``except Exception: return False``. The queue's
-        own declines (a full bound, a stopping/closed instance) are the only
-        verdicts returned as ``False`` from HERE. A future DIRECT caller must wrap
-        this the same way; do not read "never raises" into either arm above —
-        only an exception at the seam is guaranteed to fold inline.
+        ⚠️ THE TWO HAZARDS ARE NOT THE SAME, which is why only one folds inline. An
+        exception from ``_ensure_started`` happens BEFORE the item is enqueued, so
+        the caller's inline fold is the ONLY fold. ``_publish`` runs AFTER the item
+        is enqueued and counted, so folding inline there would be a SECOND fold of
+        the same record — the two-consumer, out-of-order shape this module's
+        docstring calls a correctness hazard — not the "record short" hazard
+        above. The queue's own declines (a full bound, a stopping/closed instance)
+        are the only verdicts returned as ``False`` from HERE.
+
+        A future DIRECT caller must wrap this the same way, and must not read
+        "never raises" into it.
         """
         self._ensure_started()
         with self._cond:
