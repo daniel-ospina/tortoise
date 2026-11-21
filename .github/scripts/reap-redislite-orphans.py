@@ -489,7 +489,7 @@ def _iter_proc_inventory() -> ProcInventory | None:
     so the caller can report it rather than silently dropping it. Excluding a
     process from the candidate list is only ever for a STATED reason: the
     `no unix socket in argv` arm (a plain TCP `redis-server` is not redislite
-    litter), counted in `excluded_no_socket` so the census reconciles.
+    litter), counted in `census_excluded` so the census reconciles.
 
     `None` — not an empty inventory — when the inventory could not be read AT
     ALL: /proc unlistable, or absent with `ps` unavailable or exiting non-zero.

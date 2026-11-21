@@ -609,6 +609,73 @@ def test_a_ps_that_runs_and_fails_is_exit_2_too(reaper, monkeypatch):
     assert reaper.main([]) == 2, "the documented failure signal must reach the exit code"
 
 
+def test_the_ps_branch_identifies_by_comm_and_parses_every_shape(reaper, monkeypatch):
+    """The non-`/proc` branch (macOS) has the SAME identity rule and the same census.
+
+    No CI job runs on macOS, so this branch can only be pinned at the seam: the
+    real `/proc` probe is forced off and `ps` is answered with a synthetic
+    snapshot. What is pinned here is exactly what the branch's own parsing decides
+    — a wrapper's `comm` is the identity, a plain TCP server is an excluded census
+    member, a process with no args is KEPT and accounted for, and (for `ps`
+    snapshots whose `comm` field contains a space, which shifts the argv boundary)
+    nothing crashes and no gap is invented.
+    """
+    snapshot = (
+        "\n".join(
+            [
+                # 1: wrapper-exec'd server — argv[0] is the WRAPPER, so only
+                # the kernel's `comm` field can identify it
+                f"101 redis-server /opt/gh-runner/bin/python3 {REDIS_BIN} "
+                "unixsocket:/tmp/tt_ab/tmpcd/redis.socket",
+                # 2: plain TCP server — excluded, counted
+                "102 redis-server redis-server --port 6379",
+                # 3: a server with no args at all — kept and accounted for
+                "103 redis-server",
+                # 4: not a server, and its argv merely NAMES the binary
+                f"104 python3 /usr/bin/python3 -m pytest {REDIS_BIN}",
+                # 5: a `setproctitle` server — `ps` prints its `comm` with a space
+                # in it, so the argv boundary shifts by one token; must not crash,
+                # must stay a census member, and must not invent a gap
+                "105 redis-server *: redis-server *:6379",
+            ]
+        )
+        + "\n"
+    )
+
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(
+        reaper.os.path,
+        "isdir",
+        lambda p: False if str(p) == "/proc/self" else real_isdir(p),
+    )
+
+    def _fake_ps(*_a, **_k):
+        return subprocess.CompletedProcess(
+            args=["ps", "-eo", "pid=,comm=,args="], returncode=0, stdout=snapshot, stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_ps)
+    monkeypatch.setattr(reaper, "_process_age", lambda _pid: 60.0)
+
+    inventory = reaper._iter_proc_inventory()
+    assert inventory is not None, "a `ps` that answered must never read as unmeasured"
+    assert inventory.source == "ps"
+    rows = {row["pid"]: row for row in inventory.rows}
+    assert set(rows) == {101, 103}, sorted(rows)
+    assert rows[101]["identified_by"] == "comm"
+    assert rows[101]["socket_dir"] == "/tmp/tt_ab/tmpcd"
+    assert rows[103]["socket_dir"] is None, "no argv is not authority to kill"
+    assert inventory.census == 4, (
+        "101, 102, 103 and 105 are named redis-server by the kernel (105 through "
+        "the first field of its space-containing `comm`, even though the shifted "
+        "argv boundary loses it as a candidate); 104 is not"
+    )
+    assert inventory.unaccounted == 0, (
+        "every census member must be a row or a stated exclusion — a non-zero here "
+        "on a well-formed snapshot would be a false census gap"
+    )
+
+
 def test_a_measured_empty_host_is_still_exit_0(reaper, tmp_path):
     """The other direction: an inventory that WAS read and held no litter is exit 0."""
     inventory = tmp_path / "proc.json"
