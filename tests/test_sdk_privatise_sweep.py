@@ -264,12 +264,50 @@ def _ref_sha(ref: str) -> str | None:
 
     `refs/pull/*` is not in a normal clone's refspec, so its absence is the ORDINARY
     case — the address is still graded through the constant the block prints, and only
-    the drift arm is UNCHECKED. No network: a `git ls-remote` here would trip the
-    suite-wide egress guard, and an arm that needs the network is not a test.
+    the drift arm is UNCHECKED. No network, and ⛔ NOT because of the egress guard:
+    that guard patches only the two CONCRETE httpx transports (`tests/conftest.py`,
+    "SCOPE: the httpx transports only"), so a `git` subprocess is not intercepted by it
+    — an earlier draft of this docstring claimed it would be, which is a mechanism that
+    does not exist (review, round 12, P3). The reason is the ordinary one: a test that
+    needs the network is not a test here, and an unpinned remote read would make this
+    arm's verdict a function of GitHub's uptime rather than of the tree.
     """
     done = subprocess.run(
         ["git", "rev-parse", "--verify", "-q", ref], cwd=ROOT, capture_output=True, text=True)
     return done.stdout.strip() if done.returncode == 0 else None
+
+
+#: Where each addressed rev is FETCHABLE from — the refspec a skip's re-arm line prints.
+#:
+#: ⛔ A RE-ARM THAT CANNOT RUN IS NOT A RE-ARM (review, round 12, P2): the skip printed
+#: `git fetch origin <the missing revs>`, and every rev this block addresses is an
+#: ELEVEN-character abbreviation — which git cannot `want` (`fatal: couldn't find remote
+#: ref 83e94826a8a`, and this block's own prose says so at `tools/sdk_privatise.py:378`).
+#: So the printed remedy contradicted the sentence it exists to explain, and an operator
+#: who followed it would believe the guard was re-armed while it stayed UNCHECKED — in a
+#: PR whose thesis is falsifiability. A REFSPEC pulls the objects (`_rev_present` reads
+#: the object DB, not a ref), and `refs/pull/14108/head` carries every interval commit
+#: while `main` carries the rest.
+_ARM_REFSPECS: dict[str, str] = {
+    RESIDUE_ABBREV: "refs/pull/14108/head",
+    RESIDUE_REWRITE_PARENT: "refs/pull/14108/head",
+    RESIDUE_DELETING_COMMIT: "refs/pull/14108/head",
+    RESIDUE_INTERVAL_END: "refs/pull/14108/head",
+    RESIDUE_PR_HEAD: "refs/pull/14108/head",
+    "origin/main": "main",
+}
+
+
+def _rearm_command(missing) -> str:
+    """The `git fetch` a skip prints: REFSPECS only — an abbreviation is not a `want`.
+
+    ⛔ `_ARM_REFSPECS[rev]` RAISES on an unmapped rev rather than falling back to the rev
+    itself, because the fallback is exactly the inert command this replaces: a new
+    constant added without a fetchable address would otherwise re-introduce the defect
+    silently. `test_every_addressed_rev_names_a_fetchable_refspec` is the non-vacuity
+    arm for the map.
+    """
+    return f"git fetch origin {' '.join(sorted({_ARM_REFSPECS[rev] for rev in missing}))}"
 
 
 def _requires(*revs: str) -> None:
@@ -278,7 +316,7 @@ def _requires(*revs: str) -> None:
         pytest.skip(
             f"{', '.join(missing)} absent from this clone — a `fetch-depth: 1` checkout "
             "lacks them by construction, so the block's addresses are UNCHECKED here, not "
-            f"wrong. Re-arm with `git fetch origin {' '.join(missing)}`.")
+            f"wrong. Re-arm with `{_rearm_command(missing)}`.")
 
 
 def _quoted(block: str, start: int) -> bool:
@@ -301,8 +339,37 @@ def test_the_residue_block_is_a_real_block_and_publishes_its_addresses():
         assert literal in block, f"{literal} is one of the block's published addresses"
 
 
+def _abbreviation_length_claims(block: str) -> list[tuple[str, int]]:
+    """`(printed figure, offset)` for every figure stated as THIS abbreviation's length.
+
+    ⛔ KEYED ON THE OBJECT, NOT ON ONE PHRASE (review, round 12, P3). The arm used to
+    require the literal words `<N>-character ABBREVIATION`, so an honest rewording —
+    `11-char abbreviation`, or the literal placed AFTER the figure — turned it RED while
+    the claim said exactly what the repository measures. That is the over-specified
+    assertion this file complains about elsewhere, and the standard shape of the fix is
+    to assert the CONTRACT (a figure, and the object it describes) instead of the prose
+    that happens to express it.
+
+    The contract, as graded: a length figure whose ±80-character window carries
+    `RESIDUE_ABBREV` — either side of it, so word order is free — and which is NOT a
+    claim about a different object of the same shape. The block also says a FULL
+    `40-character sha` IS served; that figure is about a sha, not about the
+    abbreviation, so it is excluded by the noun that follows it rather than by distance
+    (distance would either admit it or make an honest `11-character sha-prefix` red).
+    """
+    claims: list[tuple[str, int]] = []
+    for figure in re.finditer(r"(\d+)[-\s]?char(?:acter)?s?\b", block, re.IGNORECASE):
+        window = block[max(0, figure.start() - 80):figure.end() + 80]
+        if RESIDUE_ABBREV not in window:
+            continue
+        if re.match(r"\s*sha\b", block[figure.end():figure.end() + 24], re.IGNORECASE):
+            continue  # a length claim about a SHA, not about the abbreviation literal
+        claims.append((figure.group(1), figure.start()))
+    return claims
+
+
 def test_the_abbreviation_length_claim_reproduces():
-    """Finding 1: `<N>-character ABBREVIATION` must equal the literal standing beside it.
+    """Finding 1: `<N>-character` must equal the length of the literal it describes.
 
     The block printed `13-character` while `83e94826a8a` — the literal in the same
     sentence — is ELEVEN characters: a figure that does not reproduce against the object
@@ -312,20 +379,39 @@ def test_the_abbreviation_length_claim_reproduces():
     # ⛔ GRADED ON EVERY OCCURRENCE, NOT THE FIRST (review, round 9): `re.search` graded one match,
     # so a second, FALSE figure appended anywhere in the block left this arm green — the same
     # one-occurrence blindness the negative arms below already avoid by using `finditer`.
-    claims = list(re.finditer(r"(\d+)-character ABBREVIATION", block))
+    claims = _abbreviation_length_claims(block)
     assert claims, "non-vacuity: the block states the abbreviation's length"
-    for claim in claims:
-        # ⛔ GRADED AGAINST THE CONSTANT **AND** THE WINDOW (review, round 6): grading only the
-        # nearest backticked token let a decoy literal of a different length satisfy a WRONG figure
-        # (`the `83e94826a8abc` 13-character ABBREVIATION` went green). The abbreviation this claim
-        # is about is the one the block prints, so it must be the literal in the window, and the
-        # printed count must equal its length.
-        window = block[max(0, claim.start() - 200):claim.start()]
-        assert RESIDUE_ABBREV in window, (
-            f"non-vacuity: the claim at offset {claim.start()} stands beside the literal")
-        assert int(claim.group(1)) == len(RESIDUE_ABBREV), (
-            f"the block says {claim.group(1)} characters; `{RESIDUE_ABBREV}` is "
-            f"{len(RESIDUE_ABBREV)}")
+    for printed, offset in claims:
+        assert int(printed) == len(RESIDUE_ABBREV), (
+            f"the block says {printed} characters at offset {offset}; `{RESIDUE_ABBREV}` "
+            f"is {len(RESIDUE_ABBREV)}")
+
+
+def test_the_abbreviation_arm_does_not_red_an_honest_rewording():
+    """Review round 12 (P3): the figure's arm must grade the CLAIM, not its wording.
+
+    Each string below states the SAME true figure in a different honest form; every one of
+    them must be accepted, and the two dishonest ones must still be refused. Without this
+    arm, a phrase-keyed check can be re-narrowed by a later edit with nothing to notice.
+    """
+    accepted = [
+        "`git fetch origin 83e94826a8a` fails on the 11-character ABBREVIATION, NOT on the sha.",
+        "`git fetch origin 83e94826a8a` fails on the 11-char abbreviation.",
+        "the abbreviation `83e94826a8a` is 11 characters long, measured.",
+        "it is 11 characters: `83e94826a8a` is not a `want`.",
+    ]
+    refused = [
+        "`git fetch origin 83e94826a8a` fails on the 13-character ABBREVIATION.",
+        "the abbreviation `83e94826a8a` is 7 characters long.",
+    ]
+    for text in accepted:
+        claims = _abbreviation_length_claims(text)
+        assert claims, f"non-vacuity: this form states the figure — {text!r}"
+        assert all(int(printed) == len(RESIDUE_ABBREV) for printed, _ in claims), text
+    for text in refused:
+        claims = _abbreviation_length_claims(text)
+        assert claims, f"non-vacuity: the figure is found even when it is wrong — {text!r}"
+        assert any(int(printed) != len(RESIDUE_ABBREV) for printed, _ in claims), text
 
 
 def test_whole_tree_movement_is_only_ever_stated_as_a_conditional():
@@ -577,6 +663,20 @@ def test_the_history_clause_is_only_quoted_as_falsified():
                 "a quoted earlier draft is acceptable only BESIDE the narrow fact that replaced it")
 
 
+def _already_counted_anchors(block: str) -> list[int]:
+    """Offsets of every place the block says the row is ALREADY counted elsewhere.
+
+    ⛔ SHAPE, NOT PHRASE (review, round 12, P3): the lookup was the literal `already count`,
+    so `counted already`, `counts it already` or `is already accounted for by the bullet`
+    red the pointer arm below while the pointer was intact — the same false-block shape the
+    abbreviation arm was fixed for in the same round. Either word order is accepted; the
+    arm still grades where the pointer LANDS (row and file in its forward window), which is
+    the part that carries the meaning.
+    """
+    return [m.start() for m in re.finditer(
+        r"already[^.\n]{0,40}count|count\w*[^.\n]{0,40}already", block, re.IGNORECASE)]
+
+
 def test_the_reindent_reference_points_at_the_bullet_that_counts_it():
     """Finding 4: "the re-indented `seen.update` above" has no referent above it.
 
@@ -597,11 +697,12 @@ def test_the_reindent_reference_points_at_the_bullet_that_counts_it():
     # `already counted` paraphrase further down the block sits next to the test file's name (as
     # a path in a `git show <rev>:tests/…` command) but never beside `seen.update` 1, so it
     # cannot satisfy this arm, and deleting the pointer sentence cannot pass it.
+    anchors = _already_counted_anchors(block)
+    assert anchors, "non-vacuity: the block states the row is counted elsewhere"
     pointer = [
-        anchor for anchor in re.finditer(r"already count", block)
-        if row.search(block[anchor.start():anchor.start() + 320])
-        and "tests/test_13337_cache_graph_declaration.py"
-        in block[anchor.start():anchor.start() + 320]
+        anchor for anchor in anchors
+        if row.search(block[anchor:anchor + 320])
+        and "tests/test_13337_cache_graph_declaration.py" in block[anchor:anchor + 320]
     ]
     assert pointer, (
         "the sentence must POINT AT the bullet that counts the `seen.update` row, naming "
@@ -616,3 +717,133 @@ def test_the_reindent_reference_points_at_the_bullet_that_counts_it():
         assert _quoted(block, dangling.start()), (
             "no `seen.update` re-indent is described above that sentence — point at the bullet "
             "that counts the row instead of pointing 'above'")
+
+
+def test_the_pointer_arm_does_not_red_an_honest_rewording():
+    """Review round 12 (P3): the pointer may be phrased either way round, and must be found."""
+    row = "`seen.update` 1 in the `+2` against `tests/test_13337_cache_graph_declaration.py`"
+    for text in (
+        f"the row this block already counts above, {row}",
+        f"this row is counted already: {row}",
+        f"the bullet counts it already — {row}",
+    ):
+        anchors = _already_counted_anchors(text)
+        assert anchors, f"non-vacuity: this form states the pointer — {text!r}"
+        assert any("`seen.update` 1" in text[a:a + 320]
+                   and "tests/test_13337_cache_graph_declaration.py" in text[a:a + 320]
+                   for a in anchors), text
+
+
+#: A past-tense / measurement qualifier: what turns "the ref IS `d523c9be8c`" into
+#: "the ref WAS `d523c9be8c` when this was measured".
+_PAST_OR_MEASURED = re.compile(
+    r"(?i)\b(?:was|were|resolved|measured|at\s+the\s+time|when\s+measured)\b")
+
+
+def _moving_pointer_violations(block: str) -> list[str]:
+    """Sentences that bind a sha to the PR head ref's CURRENT target in the PRESENT tense.
+
+    ⛔ SAME RELATIVITY CLASS THE BLOCK FIXES FOR `main` (review, round 12, P3): the block
+    scopes `e022fc935b` to "`origin/main` when this was written" and re-derives every figure
+    it states about `main`, but its own `#14108` sentence said the ref "tracks the branch's
+    CURRENT head, `d523c9be8c`" — a present-tense address for a pointer that moves on the
+    next push to #14108, and the only arm that re-measures it runs solely where
+    `refs/pull/14108/head` was fetched by hand (never in CI). A sha bound to a moving ref in
+    the present tense rots into a false statement with nothing red.
+
+    The shape graded: a sha within 40 characters after `CURRENT head` with no qualifier that
+    marks it as a measurement. Word order and the surrounding words are free, so an honest
+    rewrite (`… as measured`, `… it resolved to `d523c9be8c` when these figures were
+    measured`) is accepted; what is refused is the unqualified present-tense binding.
+    """
+    flow = re.sub(r"\n#:\s?", " ", block)
+    violations: list[str] = []
+    for claim in re.finditer(r"(?i)current\s+head", flow):
+        window = flow[claim.end():claim.end() + 40]
+        if not re.search(r"`[0-9a-f]{7,40}`", window):
+            continue  # no sha bound here at all — nothing to relativise
+        if _PAST_OR_MEASURED.search(window):
+            continue
+        violations.append(flow[claim.start():claim.end() + 40])
+    return violations
+
+
+def test_the_pr_head_refs_target_is_a_measurement_never_a_present_tense_address():
+    """Review round 12 (P3): `refs/pull/14108/head` moves; a sha beside it must be dated.
+
+    ⛔ NON-VACUITY IN BOTH DIRECTIONS. Deleting the sentence is not the fix (a PR head ref
+    tracking a branch's head is WHY the block names a sha at all), so the first assert
+    requires the tracking claim to survive; the second refuses only the unqualified
+    present-tense binding. `test_the_moving_pointer_arm_accepts_dated_forms` pins the other
+    side: an honest rewrite must not red.
+    """
+    block = _residue_block()
+    flow = re.sub(r"\n#:\s?", " ", block)
+    assert re.search(r"(?i)tracks\b[^.]{0,80}\bhead", flow), (
+        "non-vacuity: the block still says the PR head ref tracks a branch head — that is why "
+        "it names a sha rather than the issue number")
+    violations = _moving_pointer_violations(block)
+    assert not violations, (
+        "a sha bound to a MOVING ref must be dated, not asserted in the present tense: "
+        f"{violations[0]!r} — say it `resolved to` the sha `when these figures were measured`, "
+        "the way the block already scopes `origin/main`")
+
+
+def test_the_moving_pointer_arm_accepts_dated_forms():
+    """The other half: dated forms pass, the present-tense binding does not.
+
+    Written because a negative-only arm can be satisfied by deleting the sentence, and
+    because a phrase-keyed ban would red an honest rewrite — the two false-block shapes
+    this file already rejects elsewhere.
+    """
+    dated = [
+        "`#14108` resolves to `refs/pull/14108/head`, which tracks the branch's CURRENT head; "
+        "it resolved to `d523c9be8c` when these figures were measured.",
+        "`#14108` tracks the branch's CURRENT head — `d523c9be8c` as measured — so name the sha.",
+        "`#14108` tracks the branch's head, and the sha it pointed at was `d523c9be8c`.",
+    ]
+    for text in dated:
+        assert not _moving_pointer_violations(text), text
+    undated = ("`#14108` resolves to a ref that tracks the branch's CURRENT head, "
+               "`d523c9be8c`, and `83e94826a8a` is the OLDEST of the eight.")
+    assert _moving_pointer_violations(undated), (
+        "the PRE-FIX sentence must be refused — this arm is what makes the fix falsifiable")
+
+
+def test_every_addressed_rev_names_a_fetchable_refspec():
+    """Review round 12 (P2): every rev a skip names must be FETCHABLE, or the skip is a lie.
+
+    `_rearm_command` indexes `_ARM_REFSPECS` directly, so an unmapped rev raises instead of
+    printing an inert `git fetch origin <abbreviation>`. This arm keeps the map honest for
+    the revs a skip can name today.
+    """
+    for rev in (RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
+                RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"):
+        assert rev in _ARM_REFSPECS, f"{rev} has no fetchable address — a skip naming it is inert"
+        assert not re.fullmatch(r"[0-9a-f]{7,39}", _ARM_REFSPECS[rev]), (
+            f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
+
+
+def test_the_skip_instruction_is_a_command_git_can_actually_run(monkeypatch):
+    """Review round 12 (P2): the printed re-arm used to be `git fetch origin 83e94826a8a …`.
+
+    Measured: `fatal: couldn't find remote ref 83e94826a8a` — git cannot `want` an
+    abbreviation, and the block says so itself at `tools/sdk_privatise.py:378`. An operator
+    who followed the old line would believe the two repo-state arms were re-armed while they
+    stayed UNCHECKED, in a PR whose thesis is falsifiability.
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_rev_present", lambda rev: False)
+    with pytest.raises(BaseException) as caught:  # `pytest.skip` raises `Skipped`, not `Exception`
+        _requires(RESIDUE_ABBREV, RESIDUE_PR_HEAD, "origin/main")
+    message = str(caught.value)
+    assert "git fetch" in message, message
+    command = re.search(r"git fetch origin [^`\n]+", message)
+    assert command, f"the skip must print the command that re-arms it: {message!r}"
+    tokens = command.group(0).split()[3:]
+    assert tokens, command.group(0)
+    for token in tokens:
+        assert not re.fullmatch(r"[0-9a-f]{7,39}", token), (
+            f"`git fetch` cannot `want` {token!r}: it is an abbreviation, and the skip must "
+            "name a REFSPEC (`refs/pull/14108/head` / `main`) instead")
+    assert "refs/pull/14108/head" in tokens, (
+        f"the interval commits are carried by `refs/pull/14108/head`: {command.group(0)}")
