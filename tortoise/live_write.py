@@ -257,7 +257,7 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
     ``True`` ⇒ the fold is QUEUED and this write must not wait for it. ``False``
     ⇒ the caller folds inline, exactly as before the worker existed.
 
-    ⛔ THE FOUR CONDITIONS ARE CORRECTNESS, NOT CONFIGURATION, and each is a fact
+    ⛔ THE FIVE CONDITIONS ARE CORRECTNESS, NOT CONFIGURATION, and each is a fact
     only this chokepoint holds:
 
     1. **A journal LINE exists** (``not journal_skipped``). On a cut-over graph
@@ -275,7 +275,20 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
        seam itself (``no_durable_journal``), so queueing it buys nothing and only
        risks the row being filed from a lane that a replay can never reproduce
        (#9231).
-    4. **An operator armed the loop and the queue accepted the item.** Unset or
+    4. **The tenant is carried BY VALUE** (``tenant is not None``). ⛔ THIS ONE
+       IS NOT PARANOIA: a ``threading.Thread`` does not inherit the caller's
+       contextvars, so a write whose tenant would be resolved AMBIENTLY
+       (``record_writer.record_tenant_effective``: carried > scope > env pair) is
+       resolved AGAIN in the worker — and a ``contextvars``-carried tenant is
+       simply ABSENT there, leaving the env pair to answer. That is either a
+       ``no_tenant`` refusal (fail-closed, safe) or, on a single-tenant box, a row
+       filed under the env tenant rather than the request's — the #9192
+       mis-scoping class, reached through a thread instead of a parameter. So a
+       door that does not pass its tenant cannot be deferred; it folds inline,
+       which is where its tenant resolution already worked. The SDK door passes
+       ``tenant=self._record_tenant`` and defers; ``api.EventAPI._emit`` does not
+       and does not.
+    5. **An operator armed the loop and the queue accepted the item.** Unset or
        typo'd reads OFF (:func:`tortoise.env_truthy.env_flag`), which keeps every
        unarmed deployment byte-identical to the pre-#14185 inline fold.
 
@@ -287,6 +300,8 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
     this worker existed.
     """
     if journal_skipped or record_sink is not None or not durable:
+        return False
+    if tenant is None:
         return False
     try:
         from . import projection_worker

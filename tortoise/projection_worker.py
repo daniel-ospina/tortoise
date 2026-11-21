@@ -91,8 +91,8 @@ The inline fallback is counted (``inline_fallbacks{reason="queue_full"}``), so
 
 WHAT MAKES A WRITE DEFERRABLE AT ALL
 ====================================
-Four conditions, all of them the caller's (`live_write`), because only the
-chokepoint holds the facts. The two that are CORRECTNESS rather than
+Five conditions, all of them the caller's (`live_write`), because only the
+chokepoint holds the facts. The three that are CORRECTNESS rather than
 configuration:
 
 * ⛔ **A record-only write is never deferred** (``journal_skipped``, #14002).
@@ -104,6 +104,17 @@ configuration:
   ``RecordWrite.applied`` to decide whether the turn lives in the record or must
   be written to the graph. A deferred write has not applied yet, so handing it
   that answer would put the turn in the graph *and* the record.
+* ⛔ **A write whose TENANT is not carried by value is never deferred**
+  (``tenant is None``). ⚠️ A ``threading.Thread`` does not inherit the caller's
+  contextvars — this is the one way a hand-off can CHANGE what a write means
+  rather than only when it lands. A tenant resolved ambivalently at fold time
+  (``carried > scope > env pair``) is resolved AGAIN on the worker, where a
+  ``contextvars``-carried pair is ABSENT, leaving the env pair to answer: a
+  ``no_tenant`` refusal on a multi-tenant box, or a row under the WRONG tenant on
+  a single-tenant one (#9192's class, reached through a thread). `live_write`
+  therefore defers only what arrives with ``tenant=`` supplied; a door that
+  relies on the ambient carrier keeps folding inline, where its resolution
+  already worked.
 
 The other two are the flag itself and the queue bound. Read with
 :func:`tortoise.env_truthy.env_flag`, like every other operational knob, so a
@@ -483,10 +494,18 @@ def wait_for_drain(timeout: float | None = None) -> bool:
 
 def shutdown(*, drain: bool = True,
              timeout: float = DRAIN_ON_EXIT_SECONDS) -> None:
-    """Stop the process worker (and clear the singleton, so a later submit restarts it)."""
+    """Stop the process worker and CLEAR the singleton.
+
+    Clearing it (rather than only stopping the thread) is what lets the next
+    :func:`worker` honour a CHANGED :data:`ENV_QUEUE_MAX`: the bound is read once,
+    at construction. A restart through :meth:`ProjectionWorker._ensure_started`
+    would otherwise revive the old bound silently, which is precisely the class of
+    "the flag I set did not take" this module's docs promise not to produce.
+    """
     global _WORKER
     with _WORKER_LOCK:
         current = _WORKER
+        _WORKER = None
     if current is not None:
         current.stop(drain=drain, timeout=timeout)
 

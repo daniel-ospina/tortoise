@@ -3766,6 +3766,22 @@ surfaces:
   # the gate's own `meters=` seam, and the door halves are SOURCE-order pins via
   # `inspect.getsource`. No DSN, no graph, no model.
   - test_13829_cache_cap_at_fold.py
+  # #14185: the record's projection on its OWN loop — the projection worker, the
+  # four conditions under which a write may be deferred, and the lag metric.
+  # `core` for the same MEASURED reason as the two rows above: the subjects
+  # (`tortoise/projection_worker.py` — a new file — and `tortoise/live_write.py`)
+  # have no `SOURCE_PATTERNS` entry, so `--changed-files
+  # tortoise/projection_worker.py` resolves `['core']` and a diff to the loop or
+  # to the chokepoint's deferral gate collects this file only through a `core`
+  # row. ⛔ The `tortoise/monitoring.py` half is covered by the same fallback
+  # (`--changed-files tortoise/monitoring.py` -> `['core']`, the #10893 row's own
+  # measurement at the head of this list).
+  # ⛔ NO CASE COUNT IN THIS COMMENT: derive it
+  # (`grep -c '^def test_' tests/test_14185_projection_worker.py`).
+  # DB-FREE: the fold is represented by a callable — the exact boundary the
+  # worker owns (it decides WHEN a fold runs, never WHAT it does) — and the
+  # stall is a `threading.Event`, not a sleep. No DSN, no graph, no model.
+  - test_14185_projection_worker.py
   # #13034: the ONE currency rule (lifecycle word AND position axis) and its
   # five consumers. `core` for the same reason as the rows above —
   # `tortoise/live.py`, `tortoise/pipeline.py` and
