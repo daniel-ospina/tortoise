@@ -22353,10 +22353,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # text before persistence — always present (0 when nothing
             # matched), byte-parity with the SDK receipt.
             "capture_redactions": _capture_redactions,
-            # #2002 (W6): first_capture=true exactly once per org — the
-            # trigger for the in-conversation announcement (SKILL.md §8 copy
-            # contract; the wording renders from
-            # tortoise/config/capture_disclosure.json — #3517).
+            # #2002 (W6): first_capture=true exactly once per org — for a credential
+            # whose OWN graph IS the org default (a CUSTOM-bound key never sets it,
+            # #14131) — the trigger for the in-conversation announcement (SKILL.md
+            # §8 copy contract; the wording renders from capture_disclosure.json, #3517).
             "first_capture": bool(first_capture)}
     # #10180: NAME THE GRAPH THIS CAPTURE LANDED IN. A capture must be
     # answerable with "which graph did this land in?" — shown, never inferred
