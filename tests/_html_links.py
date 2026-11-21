@@ -293,6 +293,16 @@ class _AnchorHrefParser(HTMLParser):
         carrying a reader-facing claim the visible-text golden cannot see
         (#14073 review). The tag is kept alongside the name because an allowlist
         is per-element in practice and it costs nothing to keep.
+
+        ⛔ ONE DECLARED DIVERGENCE, and it is the right answer for the anchor
+        question, not this one: `<noscript>` is raw text because `self.scripting`
+        is True (line 180), so an attribute on an element INSIDE `<noscript>` is
+        not recorded. A browser with JS — the mode this repo's guards ask in —
+        does not render it either, so no claim reaches a reader; a browser with
+        JS DISABLED would render it, and a `title` there is a reader-facing claim
+        this allowlist cannot see. Not fixed here: the anchor contract needs the
+        no-JS-only anchor to stay invisible, and the two questions cannot both
+        have `<noscript>` their own way in one pass.
         """
         if self._suppress or self.wedged_reason:
             return
