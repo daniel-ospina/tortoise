@@ -1087,12 +1087,24 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     `RedisError`, not a `TypeError`, so the legitimate skip is untouched while a
     moved door or a changed call shape now fails loudly instead of being recorded
     as "this engine has no FTS" (see `tests/test_index_surfacing.py:269`).
-    Measured blast radius of the widening on the real tree: **5** new roots in 3 files
-    — `tests/test_index_surfacing.py:269` (the declared-residual instance),
-    `tests/test_indexes.py:1422`, `tests/test_11682_quote_indexed.py:438` and `:656`,
-    and `tests/test_session_semantic_retrieval.py:298`. Population pin moves
-    64 rows / 56 roots / 54 files → **70 / 62 / 58**, and `UNARMED` stays `()`
-    because all four previously-unarmed blocks are ARMED in the same change.
+    Measured blast radius of the widening, and the two baselines are DIFFERENT, so
+    both are stated (an earlier version of this paragraph mixed them and named the
+    wrong set — review of `2046456825`, P1, which is exactly the "silent drop is a
+    fail" class this census forbids):
+
+      * vs the commit that introduced it (`b41afcdd0c`): 5 new roots in 4 files —
+        `tests/test_indexes.py:1422`, `tests/test_11682_quote_indexed.py:438` and
+        `:656`, `tests/test_extractor_reliability.py:898`, and
+        `tests/test_session_semantic_retrieval.py:298`;
+      * vs `origin/main`: 6 new roots in 5 files — the five above plus
+        `tests/test_index_surfacing.py:269`, which the ARGUMENT-ONLY first attempt had
+        already graded and which the guard-half fix therefore did not re-add.
+
+    Population: `origin/main` 64 rows / 56 roots / 54 files → **70 / 62 / 58**, and
+    `UNARMED` stays `()` because every previously-unarmed block is ARMED in the same
+    change. One of the five is not charged (`test_extractor_reliability.py:898`
+    already re-raises, `swallows=False`); it is graded because its `pytest.xfail`
+    guard reads names the `try` binds.
 
     ⛔ THE SENTINEL IS USUALLY CARRIED BY A GUARD, NOT BY THE MESSAGE (review of
     `cd75ec7144`, P1). The first version of this widening keyed only on the skip
@@ -1100,8 +1112,12 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     procedure")` — where the decision plainly reads `dropped` — contributed
     NOTHING and the residual was closed for interpolated messages only. It keys on
     the `if`/`assert` GUARD now (`_skip_call_read_names`), which is also what
-    surfaced the four unarmed blocks above; that is why the blast radius grew from
-    the 1 measured against the argument-only rule to 5.
+    surfaced the four unarmed blocks above; against the argument-only rule the blast
+    radius grew BY the 5 named above, i.e. from the 1 `test_index_surfacing.py:269`
+    it already graded to **6** new roots in total vs the pre-widening census. (This
+    sentence said "to 5" until a reviewer of `2046456825` measured it — 1 + 5 = 6, and
+    a total that contradicts the bullet list two paragraphs up is the same
+    baseline-mixing this section exists to stop.)
 
     ⛔ DECLARED RESIDUAL — THE SKIP CALLED INSIDE THE BROAD HANDLER is graded by
     NOTHING. The fifth rule admits a `try` only when the skip decision READS a name
@@ -2631,8 +2647,16 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"{test_body_probe_feeding_skip}"
     )
     # ...but the arm is conditional on the SKIP BINDING, not a blanket grading of
-    # every `try` in every function: the identical block with no skip decision must
-    # stay ungraded, or 4p would be satisfied by grading the whole tree.
+    # every `try` in every function. ⚠️ THIS ROW DOES NOT WITNESS THE BINDING GATE,
+    # even though an earlier comment here said it did (review of `2046456825`, P2):
+    # the block below has no `skip`/`xfail` call AT ALL, so it leaves one gate
+    # earlier (`if not skip_read: continue`), and deleting the binding gate leaves
+    # this row green. What holds that gate is the CENSUS — measured: under the
+    # deletion the population goes 70 → 78 rows, `UNARMED` becomes six blocks, and
+    # `test_every_availability_probe_re_raises_a_programming_error` plus
+    # `test_a_probe_that_imports_inside_its_try_covers_the_import_seam` red. This row
+    # is the NEGATIVE for "a `try` with no skip decision is not the decision", which
+    # is a different (and still load-bearing) claim.
     test_body_probe_without_skip = roots(
         """
         def test_b_unrelated():
