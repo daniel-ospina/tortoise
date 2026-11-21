@@ -498,8 +498,18 @@ def test_the_two_chokepoints_strip_a_caller_seq_that_bypasses_intake(env,
     # ORDINAL `_carried_position` reads. Captured, not asserted against a fake
     # writer, so the strip is what the assertion is about.
     captured: list[dict] = []
-    monkeypatch.setattr(sdk, "_write_record_projection",
-                        lambda event, seq=None: captured.append(dict(event)))
+    # The stand-in must honour the REAL seam's signature —
+    # `_write_record_projection(record, seq, *, journal_skipped=False)` (#14002),
+    # which `live_write` calls with that keyword on EVERY arm. A narrower fake
+    # raises `TypeError` inside the record `try`; `live_write` correctly
+    # swallows it as a NAMED projection fault, and this leg then asserts over an
+    # EMPTY capture — i.e. it reports "the strip is unproven" instead of testing
+    # the strip. The sibling suites' fakes already take it
+    # (`tests/test_13829_cache_cap_at_fold.py:239,255`) — #14111.
+    monkeypatch.setattr(
+        sdk, "_write_record_projection",
+        lambda event, seq=None, *, journal_skipped=False:
+            captured.append(dict(event)))
     sdk._emit_event("PointRevised", id="p-extra", seq=44, content="x")
     assert captured, (
         "the emit produced no record payload to inspect — this leg proves "

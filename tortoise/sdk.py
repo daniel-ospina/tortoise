@@ -5713,8 +5713,20 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #: the parameter and silently suppress the outcome (the capture would then treat
 #: every turn as unrecorded and fall back to the graph — the safe direction, but
 #: a silent one), so it is reserved like the rest.
+#: ``write_sink`` (#14111) is the third PER-CALL object the signature owns, and
+#: it is the one that is a WRITE TARGET rather than a report: `live_write`
+#: fills it with the chokepoint's own store verdict so a caller can NAME which
+#: store holds the write (see this method's docstring). A caller prop of that
+#: name binds the parameter at the call — after the live write — and would let
+#: the destination of the write be supplied from OUTSIDE the chokepoint, the
+#: same class as the `aboutLinks` collision above (silent, and after the
+#: mutation has already landed). `_emit_event` cannot see it from inside for the
+#: same reason it cannot see any of these: the binding happens at the caller's
+#: splat, one frame up. Reserved here so the derivation in
+#: `tests/test_2296_document_created_journal.py` (which asserts the reserved
+#: sets COVER this signature) and the strip both stay true.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
-                            "record_sink")
+                            "record_sink", "write_sink")
 
 
 def _drop_reserved_emit_props(props: dict) -> list[str]:
