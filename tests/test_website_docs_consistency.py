@@ -1934,6 +1934,19 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
     does not emit — `title = "…"`, `data-30day="…"`, `data_del="…"` all carried a
     claim past the previous pattern (#14073 review; the fail-open is pinned by
     `test_the_storage_attribute_allowlist_catches_every_legal_spelling`).
+
+    ⛔ DECLARED RESIDUAL — A RENDERING DIRECTIVE IS NOT COPY, SO NO PIN HERE READS IT.
+    Every pin above judges the section's MARKUP and the text a browser paints FROM it;
+    a `<style>` block inside the section whose `content:` property paints a claim (or a
+    `<script>` that writes one) is neither text nor an attribute, and measured on this
+    tree such a block leaves the allowlist, the destination pin, the vocabulary scan
+    and this golden ALL green. Not closed here on purpose: doing it properly means
+    either modelling the CSS cascade or refusing every `<style>`/`<script>` in the
+    section, and the second one is a false red on the `application/ld+json` block a docs
+    page legitimately carries — and a directive is not how page copy is written, so this
+    is the tail of the class rather than a route a copy edit takes. Named so the next
+    reader does not have to discover it; a page that adds one makes the review manual
+    again, which is the honest cost.
     """
     markup = _docs_section()
     _assert_storage_section_reviewed(markup)
@@ -3387,29 +3400,55 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     )
     assert " ".join(_visible_text(body_only).split()) == reviewed
 
-    # ⛔ AND THE SAME CLAIM ONE ELEMENT DEEPER — the ordinary spelling, and the one a
-    #    carve-out keyed on DIRECT text under the `<summary>` still dropped (measured
-    #    against the first version of this fix: `<summary><strong>…</strong></summary>`
-    #    returned `''`, i.e. the same P1, reached through inline markup). A claim is
-    #    written bolded or emphasised, so this is not a corner: the walk must find the
-    #    `<summary>` anywhere below the top, not only at `stack[-2:]`.
-    nested = section.replace(
+    # 3b. …and the SAME claim one INLINE ELEMENT DEEPER inside that summary, which the
+    #    direct-child version of the carve-out could not see (#14073 review round 7,
+    #    P1, measured): the painted slot is the whole `<summary>` SUBTREE, so a claim
+    #    inside a `<span>`/`<b>`/`<em>` there is painted too, and the first version of
+    #    `_text_is_painted` asked whether the CURRENT element was the summary — true
+    #    only while the text was the summary's direct child. Measured before the fix:
+    #    the allowlist, the destination pin, the vocabulary scan and the wording golden
+    #    were ALL green while Chromium painted the span. Driven for three wrappers, so
+    #    the row tests the depth-independence rather than one tag.
+    for wrapper in ("span", "b", "em"):
+        nested_claim = section.replace(
+            "</h2>",
+            "</h2><details><summary><" + wrapper + ">FalkorDB permanently deletes your "
+            "least-used items after thirty days</" + wrapper + "></summary>Tap to "
+            "read more.</details>",
+            1,
+        )
+        assert nested_claim != section, f"the `<{wrapper}>`-in-summary control could not inject"
+        assert _attributes_outside_allowlist(nested_claim) == [], (
+            f"premise: a bare `<{wrapper}>` adds no attribute, so the allowlist cannot "
+            f"be what catches this"
+        )
+        assert sorted(set(extract_anchor_hrefs(nested_claim))) == list(
+            _REVIEWED_SECTION_HREFS
+        ), f"premise: the `<{wrapper}>` adds no href, so the destination pin cannot catch this"
+        assert "falkor" in _banned_vocabulary(nested_claim), (
+            f"the `<summary>` slot is painted as a SUBTREE, so a claim inside a "
+            f"`<{wrapper}>` there reaches the reader; the visible-text scan must see "
+            f"its words, and the direct-child carve-out did not"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(nested_claim)
+    # …and the closed BODY stays dropped one element deeper too, or "admit everything
+    # under a `<details>`" would pass the rows above.
+    nested_body = section.replace(
         "</h2>",
-        "</h2><details><summary><strong>FalkorDB permanently deletes your "
-        "least-used items</strong> <em>after thirty days</em></summary>Tap to read "
-        "more.</details>",
+        "</h2><details><summary>Tap to read more.</summary><div><span>FalkorDB "
+        "permanently deletes everything</span></div></details>",
         1,
     )
-    assert nested != section, "the nested-summary control could not inject"
-    assert "falkor" in _banned_vocabulary(nested), (
-        "inline markup inside a painted `<summary>` is painted too, so the scan must "
-        "see the claim written in `<strong>`/`<em>`"
+    assert nested_body != section
+    assert "falkor" not in _banned_vocabulary(nested_body), (
+        "the closed BODY of a `<details>` is not painted at any depth, so its words "
+        "must not reach the visible-text scan"
     )
-    with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
-        _assert_storage_section_reviewed(nested)
-    # …and the two refusals that must SURVIVE the wider walk, or "painted" would be
-    # "everything under a `<summary>`": a `hidden` element inside the summary, and a
-    # `hidden` ancestor ABOVE the `<details>`, both hide the text.
+
+    # …and the two refusals that must SURVIVE the wider carve-out, or "painted" would
+    # mean "everything under a `<summary>`": a `hidden` element INSIDE the summary,
+    # and a `hidden` ANCESTOR above the `<details>`, both hide the text.
     assert " ".join(_visible_text(
         "<details><summary><span hidden>GHOST claim</span>shown</summary></details>"
     ).split()) == "shown", (
@@ -3419,7 +3458,7 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     assert "GHOST" not in _visible_text(
         "<div hidden><details><summary>GHOST claim</summary></details></div>"
     ), (
-        "a `hidden` ANCESTOR above the `<details>` hides the summary too, so the walk "
+        "a `hidden` ANCESTOR above the `<details>` hides the summary too, so the rule "
         "must read the elements above the summary/`<details>` pair as well"
     )
 

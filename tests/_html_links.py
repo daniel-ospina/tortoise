@@ -1131,37 +1131,41 @@ class _AnchorHrefParser(HTMLParser):
         dropped a claim written in a summary and left every `#storage` pin green while
         Chromium painted it.
 
-        The flag on `<details>` describes its BODY. So one case is carved out: while
-        the stack is inside a `<summary>` whose immediate parent is a `<details>`, the
-        answer is whatever the ancestors ABOVE that pair say (a `hidden` div around
-        the `<details>` still hides both, and a `hidden` element between the summary
-        and here still hides its own text). A second `<summary>` is treated the same —
-        the over-count is the loud direction, and the "first only" distinction needs
-        a per-`<details>` counter this stack does not carry.
+        The flag on `<details>` describes its BODY. So one case is carved out: a closed
+        `<details>` whose NEXT open element is its `<summary>`. That `<details>` flag is
+        skipped and the answer is whatever the ancestors ABOVE the pair say (a `hidden`
+        div around the `<details>` still hides both). A second `<summary>` is treated the
+        same — the over-count is the loud direction, and the "first only" distinction
+        needs a per-`<details>` counter this stack does not carry.
 
-        ⛔ THE PAIR IS FOUND ANYWHERE BELOW THE TOP, not only at `stack[-2:]`
-        (measured, #14073 review round 6, the same P1 this method closes): a claim is
-        written in INLINE MARKUP — `<summary><strong>tier limits…</strong></summary>`
-        is the ordinary spelling — so a carve-out that only recognised direct text
-        under a `<summary>` still dropped every painted claim one element down. The
-        walk therefore looks for the NEAREST `<summary>` in the stack and requires
-        only that its parent is the `<details>`; the elements between it and here are
-        inline children of the summary and inherit its flag.
+        ⛔ THE CARVE-OUT IS PER `<details>`, NOT PER "CURRENT ELEMENT" (#14073 review
+        round 7, P1, measured). The first version of this method asked whether the
+        CURRENT element was a `<summary>` whose immediate parent was the `<details>`,
+        which only holds while the text is a DIRECT child of the summary. One inline
+        element deeper — `<details><summary><span>…</span></summary></details>`, and
+        equally `<b>`, `<a>`, `<em>` — the current element is the `<span>`, the
+        carve-out did not fire, and the painted claim was dropped: measured through the
+        `#storage` aggregate, the attribute allowlist, the destination pin, the
+        vocabulary scan AND the wording golden all stayed green while a browser painted
+        the span. Skipping the FLAG (rather than matching the current tag) makes depth
+        irrelevant, which is the property the browser's rendering has.
         """
-        stack = self._open_elements
-        if all(renders for _tag, _container, renders in stack):
-            return True
-        for index in range(len(stack) - 1, 0, -1):
-            if stack[index][0] != "summary" or stack[index - 1][0] != "details":
+        for index, (tag, _container, renders) in enumerate(self._open_elements):
+            if renders:
                 continue
-            # Above the pair: a `hidden` ancestor still hides the summary. From the
-            # summary inward: its own flag is inherited from the closed `<details>`
-            # (the exception in `_open_extent` sets it True), so what this half
-            # actually catches is a `hidden` element INSIDE the summary.
-            return all(
-                renders for _tag, _container, renders in stack[: index - 1]
-            ) and all(renders for _tag, _container, renders in stack[index:])
-        return False
+            # A closed `<details>` hides its BODY, not its `<summary>` slot. The
+            # summary is the element OPENED DIRECTLY INSIDE it, so its presence at
+            # `index + 1` is what makes this flag describe a hidden body rather than
+            # a hidden subtree. Everything above keeps its own inherited flags, so a
+            # `hidden` ancestor above the pair still answers False.
+            if (
+                tag == "details"
+                and index + 1 < len(self._open_elements)
+                and self._open_elements[index + 1][0] == "summary"
+            ):
+                continue
+            return False
+        return True
 
     def parse_comment(self, i: int, report: bool = True) -> int:
         """End an empty comment where the spec does (review finding, #3962).
