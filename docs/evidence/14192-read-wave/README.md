@@ -8,18 +8,31 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 > directory, not from an earlier run. If a number is not in a JSON here, it is
 > not claimed here.
 >
-> ⛔ **The one deliberate exception, because silence about it is how this file
-> drifted before:** the bullet pair under "Result — `ab-full-read.json`" (NOT
-> under "What the first measurement found", whose bullets are artifact cells)
-> quotes the FIRST measurement's `159 ms` / `231 ms` / `167 ms`. Those are **not**
-> cells of either JSON — they are kept because this file's history records them,
-> and they are marked there as such. ⚠️ **No other PERFORMANCE figure here is
-> outside the JSONs.** The corpus row's `5000` operator edges is a harness input,
-> and the `26,463` / `14,732` character counts are **git** artifacts, not JSON
-> cells — they are the Q2-crit statement's length before and after
-> `7d276aa07a`, readable with
-> `git show 5c9cfe5407:tortoise/search_engine.py` vs `git show 7d276aa07a:…`,
-> and they are named here rather than left to look like artifact cells.
+> ⛔ **That rule governs the TABLES. Figures in the prose are a different class,
+> and this file has drifted on exactly that boundary before** — so the rule is
+> **every prose figure names its source where it stands**, and these are the
+> sources in use:
+>
+> - the `159 ms` / `231 ms` / `167 ms` bullet pair under "Result —
+>   `ab-full-read.json`" (NOT under "What the first measurement found", whose
+>   bullets are artifact cells) is the FIRST measurement's, and says so there.
+> - `5000` operator edges (corpus row) is a harness INPUT — `grep -c 5000` over
+>   both JSONs is `0`.
+> - the `26,463` / `14,732` character counts are **git** artifacts, not JSON
+>   cells: the Q2-crit statement's length before and after `7d276aa07a`, readable
+>   with `git show 5c9cfe5407:tortoise/search_engine.py` vs
+>   `git show 7d276aa07a:…`.
+> - `retrieval 1199 ms` is the **named external production record** in the
+>   paragraph below (`grep -c 1199` over both JSONs is `0` — it is not ours).
+> - `embed_get` bimodal `0 ms / ~330 ms`, and the `−68.6` / `−48.4` / `−43.5 ms`
+>   variance list, are **this box's own earlier runs**, labelled as such where
+>   they appear; only `−43.479` (`verdict.total_delta_p50_ms`) is an artifact
+>   cell.
+>
+> ⚠️ Earlier cuts of this note twice claimed a stronger form — that every number
+> was an artifact cell, then that no other *performance* figure was outside the
+> JSONs. Both were falsified by their own file, which is what a global claim in a
+> document this long always is. Hence the per-figure rule above instead.
 
 ## What was measured, and on what
 
@@ -51,7 +64,6 @@ tests tools` is EMPTY, so those trees are identical to `1c07761e69`; but
 `1c07761e69` is **not the merged head**. Against the merged head (`94d75667dc`)
 the same paths differ in 46 files. So the sha pins the measured code only relative
 to a discard-point ancestor, which is not a statement anyone should rely on.
-artifact edited to look resolvable is worse than one that says what it is.
 
 What IS verifiable from the artifacts, and is what the claims below rest on: both
 arms ran in ONE process against ONE corpus (`points: 2000`, `corpus_seed: 42`,
