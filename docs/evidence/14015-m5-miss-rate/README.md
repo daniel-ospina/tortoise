@@ -43,9 +43,14 @@ actually use (`F ≈ 0.5`), ordering residency by usage instead of at random rem
 criterion 1 is worth three times the tariff.
 
 - **Artifact:** [`measurement.json`](./measurement.json)
-- **Instrument:** `tools/miss_rate_m5.py` · **git head:** `3343599d9847` (the head the run
-  was performed at; the artifact's `git_head`, pinned against this line and against the
-  instrument's bytes at that commit)
+- **Instrument:** `tools/miss_rate_m5.py` · **git head:** `3343599d9847` — the head these
+  figures are ANCHORED to: the artifact's `git_head`, pinned against this line and against
+  the instrument's bytes at that commit. ⛔ **It is not the head the run ran at.** The run
+  was performed at `5cc6bad05cf2` (the artifact's `provenance.run_git_head`, with the bytes
+  that ran in `provenance.run_tool_sha256`); the only change since then is INVARIANT 3's
+  refusal band, which decides whether a run is refused and cannot move a computed number.
+  A pin checks the pair: the run head's commit time is not after `generated_at`, so an
+  anchor can never again be substituted for a run head unnoticed.
 - **Corpus:** `~/.tortoise/session-events/*.jsonl` — 27 files, 738 lines
 - **Labels measured:** `:Point` (711 nodes, 250 queries per weighting) and `:Object` (1000 nodes,
   250 per weighting). **No aggregate across labels is published anywhere** (`#13989`'s rule).
