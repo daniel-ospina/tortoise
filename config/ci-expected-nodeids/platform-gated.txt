@@ -24,3 +24,74 @@ tests/test_fork_safety_3845.py::test_embedded_choke_point_runs_at_the_proven_for
 tests/test_fork_safety_3845.py::test_env_override_is_honoured_and_loud
 tests/test_fork_safety_3845.py::test_fork_child_does_not_hang_with_the_production_config
 tests/test_fork_safety_3845.py::test_without_the_fix_the_same_race_hangs_a_child
+#
+# #10502: the reaper's decision-table pins. The file is registered in
+# tests/test_markers.py::PLATFORM_GATED_TESTS (two of its tests carry a
+# `sys.platform` skipif — they read `/proc/<pid>/comm` from a REAL child), so
+# the registry's runtime half must observe it (#4215): the file is routed to
+# the URI-unset carve-out lane (`config/ci-surfaces.yml:carve_out:`) and the
+# nodeids below are that lane's `--collect-only` for THIS file.
+# No `allow-skipped` budget: on the ubuntu runners both `/proc` tests RUN, so a
+# skip here is a gate evasion and must red rather than be absorbed.
+# PROVENANCE: `pytest tests/test_reap_redislite_orphans.py --collect-only -q
+#   -m 'not track_b and not live and not integration'` (the carve-out job's own
+#   marker filter, .github/workflows/python-ci.yml) at this head; 58 nodeids.
+tests/test_reap_redislite_orphans.py::test_a_census_the_inventory_cannot_account_for_is_exit_3
+tests/test_reap_redislite_orphans.py::test_a_dry_run_never_signals
+tests/test_reap_redislite_orphans.py::test_a_live_peers_young_server_is_kept
+tests/test_reap_redislite_orphans.py::test_a_measured_empty_host_is_still_exit_0
+tests/test_reap_redislite_orphans.py::test_a_non_utf8_process_name_cannot_kill_the_run
+tests/test_reap_redislite_orphans.py::test_a_plain_tcp_redis_is_excluded_with_a_stated_reason
+tests/test_reap_redislite_orphans.py::test_a_process_that_only_NAMES_the_binary_is_not_a_server
+tests/test_reap_redislite_orphans.py::test_a_ps_that_runs_and_fails_is_exit_2_too
+tests/test_reap_redislite_orphans.py::test_a_real_argv0_wrapper_process_is_enumerated
+tests/test_reap_redislite_orphans.py::test_a_server_whose_socket_dir_is_gone_is_reaped
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv0-redis-server-/opt/gh-runner/_work/_tool/Python/3.12.15/x64/lib/python3.12/site-packages/redislite/bin/redis-server-/tmp/tt_pcfpx8kg/tmpjo77yr86-argv[0]-1]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv1-redis-server-None-/tmp/tt_ab/tmpcd-comm-1]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv2-redis-server:6379-/opt/gh-runner/_work/_tool/Python/3.12.15/x64/lib/python3.12/site-packages/redislite/bin/redis-server-/tmp/tt_ab/tmpcd-comm-1]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv3-None-None-/tmp/tt_ab/tmpcd-argv[0]-0]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv4-some-renamed-name-/opt/gh-runner/_work/_tool/Python/3.12.15/x64/lib/python3.12/site-packages/redislite/bin/redis-server-/tmp/tt_ab/tmpcd-exe-0]
+tests/test_reap_redislite_orphans.py::test_an_accounted_census_is_not_a_gap
+tests/test_reap_redislite_orphans.py::test_an_aged_server_is_reaped
+tests/test_reap_redislite_orphans.py::test_an_expression_valued_carve_out_is_admitted
+tests/test_reap_redislite_orphans.py::test_an_unlistable_proc_is_exit_2_too
+tests/test_reap_redislite_orphans.py::test_an_unmeasurable_age_on_a_live_dir_is_kept
+tests/test_reap_redislite_orphans.py::test_an_unreadable_inventory_is_exit_2_not_a_silent_zero
+tests/test_reap_redislite_orphans.py::test_apply_signals_exactly_the_reapable_rows
+tests/test_reap_redislite_orphans.py::test_every_cleaning_job_invokes_the_scoped_reaper
+tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test-carve-out]
+tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test-concurrency-falkor]
+tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test-slow]
+tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test]
+tests/test_reap_redislite_orphans.py::test_every_reaper_call_site_states_the_real_population
+tests/test_reap_redislite_orphans.py::test_no_ci_step_duplicates_its_tempdir_cleanup
+tests/test_reap_redislite_orphans.py::test_no_ci_step_reaps_embedded_redis_by_process_name
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv0-/tmp/tt_ab/tmpcd]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv1-/tmp/tt_ab/tmpcd]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv2-/tmp/tt_ab/tmpcd]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv3-/tmp/tt_ab/tmpcd]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv4-None]
+tests/test_reap_redislite_orphans.py::test_socket_dir_from_argv_covers_every_emitter_shape[argv5-None]
+tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_every_embedded_lane_job_outer_timeout
+tests/test_reap_redislite_orphans.py::test_the_age_arm_clears_the_widest_permitted_leg_watchdog
+tests/test_reap_redislite_orphans.py::test_the_census_fires_when_the_identity_gate_matches_nothing
+tests/test_reap_redislite_orphans.py::test_the_cli_reads_its_inventory_from_the_proc_json_seam
+tests/test_reap_redislite_orphans.py::test_the_derivation_block_names_the_dir_floor_as_open_risk
+tests/test_reap_redislite_orphans.py::test_the_embedded_lane_scan_reads_every_workflow_extension
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[-False]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[Redis-Server-False]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[not-redis-server-False]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-cli-False]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-sentinel-False]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-serve-False]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server *:-True]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server *:6379-True]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server-True]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server-x-False]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-server:6379-True]
+tests/test_reap_redislite_orphans.py::test_the_kernel_name_predicate_accepts_only_redis_server[redis-serverish-False]
+tests/test_reap_redislite_orphans.py::test_the_pre_fix_identity_filter_is_what_dropped_the_measured_shape
+tests/test_reap_redislite_orphans.py::test_the_ps_branch_identifies_by_comm_and_parses_every_shape
+tests/test_reap_redislite_orphans.py::test_the_seeded_wrapper_row_reaches_the_decision_table
+tests/test_reap_redislite_orphans.py::test_undeterminable_ownership_is_kept
+

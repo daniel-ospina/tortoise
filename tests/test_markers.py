@@ -923,6 +923,13 @@ def test_no_redirect_stems_registry_exact():
         "test_ops_safety",
         "test_pre_migration_safety",
         "test_projection_lifecycle",
+        # #10502: the reaper's PINNED-platform pins. Two read `/proc/<pid>/comm`
+        # from a REAL child, so they carry a `sys.platform` skipif and the file is
+        # registered in `PLATFORM_GATED_TESTS`; a registered file must be run by
+        # the lane that owns `platform-gated.txt` (#4215), so it joins the
+        # carve-out. Registered in all three homes: ci-surfaces.yml:carve_out,
+        # TEST_NO_REDIRECT_STEMS, and here.
+        "test_reap_redislite_orphans",
         "test_reaper",
         "test_reaper_orphan",
         # #2814: authoritative-config durability across rebuild_all (embedded
@@ -2252,6 +2259,22 @@ def test_ci_runs_the_embedded_only_marker_selection():
 # there is covered.) Those are recorded here rather than guessed at — the
 # registry is a floor, not a proof.
 PLATFORM_GATED_TESTS: dict[str, str] = {
+    "test_reap_redislite_orphans.py": (
+        "#10502. Two tests here are Linux-only (`sys.platform` skipif) because "
+        "they read `/proc/<pid>/comm` and `/proc/<pid>/cmdline` from a REAL child "
+        "process — that is how the wrapper-exec'd `argc == 1` shape is proved "
+        "end-to-end (`test_a_real_argv0_wrapper_process_is_enumerated`) and how a "
+        "non-UTF-8 `comm` is proved not to abort the scan "
+        "(`test_a_non_utf8_process_name_cannot_kill_the_run`). Every CI job is "
+        "ubuntu-latest, so CI DOES execute both; what no CI job executes is the "
+        "same two shapes on a host without `/proc`, i.e. the `ps -eo "
+        "pid=,comm=,args=` identity branch. That branch has seam-level tests only "
+        "(`test_the_ps_branch_identifies_by_comm_and_parses_every_shape`, which "
+        "forces `_iter_proc_inventory` onto it with a synthetic `ps` snapshot): "
+        "the parsing and the census arithmetic are pinned, but the real macOS "
+        "observation is not, so a green Linux leg says nothing about a macOS "
+        "runner's view of the same servers."
+    ),
     "test_fork_safety_3845.py": (
         "#3845 producer + MUTATION PROOF. `_build_holder()` skips unless "
         "sys.platform == 'darwin', and every CI job is Linux (11 `ubuntu-latest`, "

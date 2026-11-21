@@ -885,7 +885,6 @@ SWEEP_NAMES = 66
 #: cite. `main` at `fbcd24760b` printed `(11831, "b14af0d2db12529b")` for ITS tree; that pair is
 #: recorded here as a measurement of a different tree, NOT carried as this tree's pin.
 #: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
-
 #:
 #: ⛔ MERGED `origin/main` at `ba0eab1d86` — measured on THAT merge tree with `--repin`, never
 #: combined from the two sides' figures: it printed `(11837, "59e8f90d787a0cf8")`. `--report --base 28ca66878d… --top 5000` reads "UNTYPED receivers NOT swept
@@ -909,30 +908,43 @@ SWEEP_NAMES = 66
 #: never its evidence. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
 #:
+#: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on this branch: `f9f480a55ab3` (#14164, the
+#: #13094 change-feed reader census + measured residency) added untyped `Graph` receivers and
+#: re-pinned nothing, so `--check` reds on `origin/main` `69908d006b3d` itself — measured with
+#: `--repin` in a detached worktree at that commit: `(11843, "6aed5368ffa10513")`, the SAME pair
+#: this branch's tree prints, which is why it is the branch that is red rather than the change
+#: (its diff is `docs/infra-runbook.md` + `tests/test_fly_secret_drift.py` and adds no row).
+#: THE +8 IS ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: `--repin` was run in one detached worktree
+#: at `2c0d66e2ec07` (the previous pin's commit) → `(11835, "891187f5a4636487")`, at
+#: `dc92b0eecc15` → the same, and at `f9f480a55ab3` → `(11843, "6aed5368ffa10513")`, so exactly
+#: ONE commit moved it; and `--report --base 28ca66878d… --top 5000` was run at the pre-move commit
+#: AND at `f9f480a55ab3`, both row sets sorted and diffed — EXACTLY TWO rows differ,
+#: `g.query` 1492 → 1499 and `proj.g.query` 3642 → 3643, with the row SHAPE set unchanged on both
+#: sides (858 rows). Both are FalkorDB `Graph` receivers, which is this sweep's documented edge (a
+#: `Graph` is never the SDK), so no shape was absorbed and no defect is hidden — the direction the
+#: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
+#: re-pin, with `typed references still pointing at a public name: 0`.
+#:
 #: RE-CUT on the #13094 round-2 branch, and THIS is the pin: `--repin` printed
-#: `(11846, "af4be7eb196a5773")` on this tree. ⛔ ATTRIBUTED BY A ROW-BY-ROW DIFF, not by
+#: `(11846, "af4be7eb196a5773")` on this merged tree. ⛔ ATTRIBUTED BY A ROW-BY-ROW DIFF, not by
 #: arithmetic: `--report --base 28ca66878d… --top 5000` was run in a detached worktree at
-#: `origin/main` (`69908d006b`) AND on this tree, both row sets sorted and diffed, and EXACTLY
-#: TWO rows differ — `g.query` 1499 → 1501 (+2) and `super().query` 68 → 69 (+1). All three are
-#: the change-feed walk's END-PROOF, which is the point of the change: the two `g.query(…)` in
+#: `origin/main` (`72c104bcbb`, which `--check` exits 0 on at `(11843, "6aed5368ffa10513")`) AND on
+#: this tree, both row sets sorted and diffed, and EXACTLY TWO rows differ — `g.query`
+#: 1499 → 1501 (+2) and `super().query` 68 → 69 (+1). All three are the change-feed walk's
+#: END-PROOF, which is the point of the change: the two `g.query(…)` in
 #: `tools/graphevent_home.py` (the NULL-`seq` count and the total count that make "reached the
 #: end" distinguishable from "the read stopped early") and the one `super().query(…)` in the
 #: `tests/test_13094_graphevent_home.py` stub that stands in for a FalkorDB connection. They are
 #: the ordinary-word receiver this counter exists to REPORT, not typed SDK call sites.
-#: `11843 + 3 = 11846` is a CROSS-CHECK of that measurement, never its evidence.
-#:
-#: ⚠️ #14180 pins `(11843, "6aed5368ffa10513")` for the tree WITHOUT this branch. That is correct
-#: for its tree and stale for this one — **whichever of the two lands second must re-measure with
-#: `--repin`**, never carry this line across. `--check` exits 0 on this tree:
-#: `typed references still pointing at a public name: 0`.
+#: `11843 + 3 = 11846` is a CROSS-CHECK of that measurement, never its evidence. `--check` exits
+#: 0 on this tree: `typed references still pointing at a public name: 0`.
 #:
 #: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed
-#: on it. `origin/main` (`69908d006b`) still commits `(11835, "891187f5a4636487")` while its tree
-#: MEASURES `(11843, "6aed5368ffa10513")` — `--check` exits 1 there, and #14180 owns that re-pin.
-#: So `11843 + 3 = 11846` reads correctly only when 11843 comes from `--report` on that tree;
-#: a reader who takes the committed 11835 as the base concludes this pin is off by 8 and that a
-#: green `--check` is false. It is not: re-measured here, `--check` exits 0 and `--repin` prints
-#: `(11846, "af4be7eb196a5773")` (#14183 review round 5, finding 2 — falsified by measurement).
+#: on it. Read the committed line instead of measuring and a stale pin looks like proof the pin
+#: below is off by 8 — which is exactly how #14183's round-5 review reported this pair as false
+#: while `--check` was green (#14183 review round 5, finding 2 — falsified by measurement). When
+#: main's own pin drifts, the drift belongs to main (#14180 re-pinned it there); the branch's
+#: figure stays its own `--repin` output, taken on the merged tree.
 SWEEP_RESIDUE = (11846, "af4be7eb196a5773")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
