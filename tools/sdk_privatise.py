@@ -936,51 +936,6 @@ SWEEP_NAMES = 66
 #: never its evidence. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
 #:
-#: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on this branch: `f9f480a55ab3` (#14164, the
-#: #13094 change-feed reader census + measured residency) added untyped `Graph` receivers and
-#: re-pinned nothing, so `--check` reds on `origin/main` `69908d006b3d` itself — measured with
-#: `--repin` in a detached worktree at that commit: `(11843, "6aed5368ffa10513")`, the SAME pair
-#: this branch's tree prints, which is why it is the branch that is red rather than the change
-#: (its diff is `docs/infra-runbook.md` + `tests/test_fly_secret_drift.py` and adds no row).
-#: THE +8 IS ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: `--repin` was run in one detached worktree
-#: at `2c0d66e2ec07` (the previous pin's commit) → `(11835, "891187f5a4636487")`, at
-#: `dc92b0eecc15` → the same, and at `f9f480a55ab3` → `(11843, "6aed5368ffa10513")`, so exactly
-#: ONE commit moved it; and `--report --base 28ca66878d… --top 5000` was run at the pre-move commit
-#: AND at `f9f480a55ab3`, both row sets sorted and diffed — EXACTLY TWO rows differ,
-#: `g.query` 1492 → 1499 and `proj.g.query` 3642 → 3643, with the row SHAPE set unchanged on both
-#: sides (858 rows). Both are FalkorDB `Graph` receivers, which is this sweep's documented edge (a
-#: `Graph` is never the SDK), so no shape was absorbed and no defect is hidden — the direction the
-#: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
-#: re-pin, with `typed references still pointing at a public name: 0`.
-#:
-#: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on THIS branch — the SECOND occurrence of the
-#: class the block above records, and the same rule applies: the pin is `--repin`'s output on the
-#: merged tree, never a figure carried forward. `origin/main` at `1b0db04894` prints
-#: `(11840, "b7eb08ff3acdcce4")`, and THIS merged tree prints the SAME pair, so the branch
-#: contributes ZERO rows — which is what makes this a measurement of `main` rather than of this
-#: diff. THE NET −3 FROM 11843 IS ATTRIBUTED BY MEASUREMENT AND BY COMMIT, never by arithmetic:
-#: `--repin` was run on the pin's own tree `f9f480a55ab3` → `(11843, "6aed5368ffa10513")` (the pin
-#: reproduces there), on `67dc298ec3`'s OWN PARENT `72c104bcbb` → the same pair, and on
-#: `67dc298ec3` → `(11837, "52e9a205697f528f")`, so ONE commit moved the row SET: `67dc298ec3`
-#: (#14194, the read-ledger half of #14184, merged two minutes after this lane's last fetch). The
-#: row sets were sorted and diffed, and EXACTLY four rows differ, all of them going to ZERO —
-#: `inst.query` 3, `inst.get_point` 1, `inst.paginated_query` 1, `inst.query_points_by_tag` 1 —
-#: SIX references between those four rows, which is the `11843 → 11837` the pair above records:
-#: the stale retired doors that commit stopped driving, a residue FALL caused by fixing the tests
-#: #14184 names. THREE references are then ADDED by the ONE later `main` commit `1b0db04894`
-#: (#14162, which adds `tools/miss_rate_m5.py` and `tests/test_miss_rate_m5.py`), not by several
-#: (`cur['proj'].g.query` 2 → 4 and a new `terms.update` row, `11837 + 3 = 11840`);
-#: ⛔ NEITHER ADDED ROW IS A DICT RECEIVER, and that is what keeps them inside this sweep's
-#: documented edge rather than making them a new shape: `cur['proj'].g` is a FalkorDB `Graph`
-#: (`cur["proj"] = sdk._get_proj()` → `.g`; `tools/miss_rate_m5.py:946`, `:973`, `:1072`) and
-#: `terms` is a `set` (`tests/test_miss_rate_m5.py:1029`, mutated at `:1031`). A `Graph` and a
-#: `set` are both never the SDK, so no new SHAPE
-#: was absorbed. The net −3 is those two MEASURED moves and nothing else (`11843 − 6 + 3 =
-#: 11840`, a CROSS-CHECK of the pairs above, never their evidence). This branch's surviving edit
-#: (`tests/test_de2e7_gates_mcp.py`, the half #14194 did NOT touch) adds and removes NOTHING: the
-#: sorted row sets of `origin/main`'s tree and of this merged tree are IDENTICAL, 855 keys on both
-#: sides. `--check` exits 0 on this tree after the re-pin, with
-#: `typed references still pointing at a public name: 0`.
 #: ⛔ MERGED `origin/main` (`2c0d66e2ec`) INTO THIS BRANCH — the resolution of the ONE conflict this
 #: merge had. Both sides had edited ONLY this pin line (verified: with the `#:` blocks stripped, the
 #: three-way diff is a single `SWEEP_RESIDUE` replacement on each side and nothing else), so the
@@ -1067,27 +1022,6 @@ SWEEP_NAMES = 66
 #: `super().query` 74 → 75, the `_EventGraph` fake in `tests/test_14012_outside_view.py` delegating to
 #: its parent for the statements it does not answer (the end-to-end per-label timestamp row).
 #: `typed references still pointing at a public name` stays **0**.
-#: ⛔ MERGED `origin/main` `e74cf1d13da7` INTO THIS BRANCH — the resolution of the ONE conflict this
-#: merge had, and a SEVENTH tree, so the pair below is `--repin`'s output on THIS tree and NEITHER
-#: side's figure is carried: this branch's own pre-merge tree `5cb12528df` committed
-#: `(11840, "b7eb08ff3acdcce4")` (the block directly above), and the block above that records
-#: `(11857, "ed40203dbbf32b87")` for the `#14012` lane's tree. Both sides edited ONLY this pin line
-#: and the `#:` run above it (verified: with every `#:` line stripped, the three-way diff is one
-#: `SWEEP_RESIDUE` replacement per side and nothing else), so the resolution is not "pick a side":
-#: EVERY block above is carried, because each is a true measurement of the tree it NAMES, and the
-#: pin is re-measured on the MERGED tree, which is what all of those blocks' own prose requires of a
-#: new tree.
-#: ⛔ THIS BRANCH CONTRIBUTES **ZERO** ROWS, AND THAT IS A MEASUREMENT, NOT A CLAIM: `--repin` was
-#: run in a detached worktree at `origin/main` `e74cf1d13da7`, which printed
-#: `(11857, "ed40203dbbf32b87")`, and on THIS merged tree, which printed the SAME pair, digest
-#: included. An identical digest is an identical sorted row set, so the branch's surviving edit —
-#: `tests/test_de2e7_gates_mcp.py`, two expected-string literals plus the comment above them — adds
-#: and removes no residue row. Every row of the +17 between this branch's own 11840 and the merged
-#: 11857 therefore belongs to `main` (`1b0db04894` → `e74cf1d13d`, the #14161 merge), none to this
-#: diff; that reconciliation is a CROSS-CHECK of the two measurements, never their evidence.
-#: ⛔ The other lane's 11857 is not carried either: it agrees because `main` now CONTAINS that lane's
-#: work (#14161 is its merge), and the figure below is this tree's own `--repin` output.
-#: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
