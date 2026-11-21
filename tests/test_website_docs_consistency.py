@@ -1422,15 +1422,22 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
         return None
     if not parsed.fragment:
         return None
-    # ⛔ A BACKSLASH BEFORE THE FRAGMENT IS REFUSED, NOT INTERPRETED. In a special URL
-    # a browser treats `\` as `/` — it TERMINATES the authority and delimits the path
-    # — so `https://evil.example\@premiselabs.co/tortoise/docs#x` has HOST
-    # `evil.example` to a browser while every Python parser reads `premiselabs.co`
-    # (as userinfo). The two disagree about what the URL IS, so there is no honest
-    # translation: refusing keeps the slice long (the loud direction), and accepting
-    # let a foreign host advertise a heading on this page (#14073 review, measured
-    # end-to-end with the pinned `storage-limits` shape).
-    if "\\" in target.split("#", 1)[0]:
+    # ⛔ A BACKSLASH IN THE AUTHORITY OR THE PATH IS REFUSED, NOT INTERPRETED. In a
+    # special URL a browser treats `\` as `/` there — it TERMINATES the authority and
+    # delimits the path — so `https://evil.example\@premiselabs.co/tortoise/docs#x`
+    # has HOST `evil.example` to a browser while every Python parser reads
+    # `premiselabs.co` (as userinfo). The two disagree about what the URL IS, so there
+    # is no honest translation: refusing keeps the site out of the advertised set, and
+    # accepting let a foreign host advertise a heading on this page (#14073 review,
+    # measured end-to-end with the pinned `storage-limits` shape).
+    #
+    # ⛔ AND IT STOPS AT THE `?`, for the same reason the `;` rule below tests the PATH:
+    # WHATWG converts `\` only in the authority and path states, so a backslash in the
+    # QUERY is left verbatim and both parsers agree the document is this one —
+    # `/tortoise/docs?q=a\b#quickstart` DOES land on `#quickstart`. Refusing the whole
+    # pre-fragment text refused that spelling: a false red, the family this function
+    # exists to close (#14073 review, measured).
+    if "\\" in target.split("#", 1)[0].split("?", 1)[0]:
         return None
     # ⛔ AND A `;` IN THE PATH IS REFUSED BEFORE RESOLUTION, because `urljoin` itself
     # loses a trailing `;` (it round-trips through `urlparse`, whose `.params` is not
@@ -2311,6 +2318,10 @@ _SAME_PAGE_TOC_SPELLINGS = (
     # the scheme here was a silent reversal until this row existed.
     ("scheme downgrade", ' href="http://premiselabs.co/tortoise/docs#quickstart"'),
     ("scheme downgrade, explicit port", ' href="http://premiselabs.co:80/tortoise/docs#quickstart"'),
+    # ⛔ A BACKSLASH IN THE QUERY IS NOT A SEPARATOR TO ANY PARSER — WHATWG converts `\`
+    # only in the authority and path states — so this href does reach `#quickstart`.
+    # The backslash refusal is scoped to authority+path for exactly this row.
+    ("backslash in the query", ' href="/tortoise/docs?q=a\\b#quickstart"'),
 )
 
 #: Entries that do NOT name a heading on THIS page — a browser leaves this document, or
