@@ -1751,6 +1751,46 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # the probe is what decides `@_docker_only`.
     "test_13557_13558_reachable_reads.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
+    # ── #13994 base-red triage (`main` @ `e0accb8fe6`): two modules landed with
+    #    live `TORTOISE_DB_URI` mutations and NO register row, so this gate reds
+    #    on `main` for files that are correct — the same shape as the #9664 and
+    #    #13036 rows above ("declared here because the module landed without its
+    #    entry, which reds this gate on `main`"). Measured on a PRISTINE
+    #    `origin/main` worktree at that commit: `1 failed` naming only these two
+    #    files, so the rows below are a base-red triage, not a licence for the
+    #    lane that added them.
+    #
+    # `test_measure_4211_session_hierarchy.py` (#13919) pins the #4211
+    # RE-MEASUREMENT INSTRUMENT's own guards, and its module docstring states the
+    # property that makes every site below DELIBERATE_URI: "Nothing here opens a DB,
+    # a socket or a model — the arms are faked at the ``_open_live`` /
+    # ``measure_*`` seams the tool itself uses." The URI is therefore the INPUT to a
+    # target/refusal predicate, never a connection: `db.example` does not resolve,
+    # `localhost:1` cannot accept, and `127.0.0.1:16379` is the legacy lane's port
+    # that these arms only ever hand to `_writer_target` / the refusal path. Each arm
+    # pins the WHOLE stripped line, value included, so a future site with a different
+    # host is a different site and must be triaged rather than ride along (#11083).
+    "test_measure_4211_session_hierarchy.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:hunter2@db\.example:6379/tortoise"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@db\.example:6379/tortoise"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:16379/m4211_hierarchy"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@localhost:1/m4211_r10_fake"\)$',
+    ],
+    # `test_13337_cache_graph_declaration.py` pins the ASYMMETRY between the two
+    # stores' misconfiguration arms, and its own docstring says why neither site
+    # reaches a lane: "An earlier cut failed ``TORTOISE_DB_URI``-without-a-record
+    # too — which is the ordinary docker lane, so it redded `test (f)` …". Both sites
+    # are the ENV CONTROL that drives the `_both_stores()` presence predicate, which
+    # only compares env presence and raises `skip`/`fail` — it constructs nothing.
+    # The `setenv` is DELIBERATE_URI (the docker-shaped value whose presence must
+    # SKIP when the record env is absent); the `delenv` is DELIBERATE_EMBEDDED_LANE
+    # (the cache-less half of the pair). Both use the `monkeypatch` fixture param, so
+    # pytest restores them and the sibling restoration guard is satisfied with no
+    # save/restore pair of their own.
+    "test_13337_cache_graph_declaration.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://localhost:6379"\)$',
+        r'^monkeypatch\.delenv\("TORTOISE_DB_URI", raising=False\)$',
+    ],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
