@@ -357,6 +357,46 @@ def test_hosted_api_notes_every_boundary_it_owns():
         f"hosted_api notes {sorted(found)}; expected the four boundaries it owns")
 
 
+def test_require_scope_notes_the_dispatch_boundary_before_any_early_return(
+        monkeypatch):
+    """Boundary 2 must be noted ABOVE ``_require_scope``'s early returns.
+
+    The set-equality row above is a STATIC scan, so it stays green when
+    ``_note_stage("dispatch")`` is moved below
+    ``if org.get("legacy_full_access") or org.get("key_id") is None: return``
+    (``hosted_api.py:10532``): the literal is still in the file, while the note
+    never runs for the repo's own fixture org (``tests/test_hosted_api.py:82-90``
+    sets ``legacy_full_access: True``). The whole arrival → SDK-open interval is
+    then published as ``sdk_open`` — a six-second loop wait reads as a
+    six-second graph call, and the fix that follows is the wrong one (#10893).
+    This row DRIVES the boundary instead of scanning for it.
+    """
+    from tortoise import hosted_api as ha
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+
+    stages = begin(started_at=990.0)
+    clock["t"] += 0.010
+    with request_stages(stages):
+        # The legacy/session-auth arm is the FIRST return, so a note placed
+        # after it is unreachable for every legacy key.
+        ha._require_scope({"legacy_full_access": True}, "graphs:read",
+                           "search")
+    stages.mark(STAGE_EMBED_GET)
+
+    parts = stages.parts_ms()
+    assert "dispatch" in parts, (
+        "`_require_scope` returned without noting the `dispatch` boundary — a "
+        "note placed below its legacy/session-auth early return never runs, so "
+        "every legacy-key request's arrival → SDK-open wait is published as "
+        "`sdk_open` (the attribution that picks the wrong fix)")
+    # Not merely PRESENT: `note()` closes the interval that ENDED, so this part
+    # carries the whole arrival → dispatch gap (10 s) plus the 10 ms below. A
+    # note fired at any other boundary leaves the magnitude wrong.
+    assert parts["dispatch"] == pytest.approx(10_010.0, abs=0.5)
+
+
 def test_the_analytics_prop_is_allowlisted():
     """An unregistered prop is stripped in silence (#3821)."""
     from tortoise import hosted_api as ha
