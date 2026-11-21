@@ -8491,10 +8491,10 @@ def test_the_document_roots_a_browser_ignores_insert_nothing() -> None:
             raise AssertionError(
                 f"`{never_an_extent}` was accepted as a container tag and returned a "
                 "silent ZERO containers: the tag inserts no element, so it can never be "
-                "an extent, and the tags this helper REFUSES (`_IMPLICITLY_CLOSED`, plus "
-                "`image`) refuse rather than answer zero. ⛔ NOT a universal over the "
-                "ignored-token class: `head` and `frame` are members of "
-                "`_IGNORED_OUTSIDE_TABLE` and still answer a silent `[]` (#14073 review, P3)"
+                "an extent. ⛔ Do not read this as a claim about the OTHER un-extentable "
+                "tags: the helper does not refuse them all — `head` and `frame` still "
+                "answer a silent `[]` — so a non-refusal is not evidence that a tag is "
+                "extentable, and a refusal is not evidence that it is not (#14073 review)"
             )
 
 
