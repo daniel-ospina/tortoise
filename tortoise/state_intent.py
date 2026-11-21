@@ -307,9 +307,10 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #:
 #: ⛔ WHAT THE NOTICE COVERS, STATED SO IT IS NOT OVERREAD. It is the expression-level
 #: complement of the shapes — a cue whose shape matched but whose GUARD refused it
-#: (an appended qualifier from :data:`_BLOCKED_TAIL`) — plus three named rows for the
+#: (an appended qualifier from :data:`_BLOCKED_TAIL`) — plus FOUR named rows for the
 #: recall the shapes give up on purpose: an attributive `which` phrase
-#: (``which_names_an_ending``), a MODIFIED `which` head noun
+#: (``which_names_an_ending``), the unguarded `existence` expression whose clause guard
+#: refused it (``existence_unguarded``), a MODIFIED `which` head noun
 #: (``which_modified_noun``) and an over-long copula subject
 #: (``is_copula_long_subject``). It is NOT "every question that mentions an ending":
 #: an over-long `has … been <participle>` subject and a qualifier outside the closed

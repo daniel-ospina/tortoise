@@ -903,11 +903,14 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     declines_head = "DOES NOT ROUTE — you get the relevance rows"
     boundary_head = "SO A STATE QUESTION THAT DOES NOT ROUTE"
     # ⛔ THE THREE HEADS ARE PRESENT **AND IN THIS ORDER**. A bare `head in doc` loop is
-    # tautological — each head is a verbatim substring of `ROUTING_NOTE`, which the
-    # assertion above already requires `in doc`, so it holds under any mutation at all
-    # (#14033 review, P3). The ORDER is the claim that carries weight: the slicing below
-    # reads ROUTES, then DOES NOT ROUTE, then the boundary, and a reordered or merged
-    # section would silently file phrasings under the wrong heading.
+    # tautological as a CLAIM — each head is a verbatim substring of `ROUTING_NOTE`, which
+    # the assertion above already requires `in doc`, so it holds under any mutation of the
+    # recogniser (#14033 review, P3). The ORDER is the claim that carries weight: the
+    # slicing below reads ROUTES, then DOES NOT ROUTE, then the boundary. ⛔ NOT NEW
+    # COVERAGE — a better DIAGNOSIS: a reorder also reds the per-phrasing loop below (the
+    # slice collapses to `""` and every routed row reads as mis-filed; measured at
+    # `6b5e46c7`, at the row assertion rather than here). What this buys is the CAUSE on
+    # the first failing line instead of a row-by-row mis-filing report.
     _heads = [doc.index(head) for head in
               (routes_head, declines_head, boundary_head)]
     assert _heads == sorted(_heads) and len(set(_heads)) == 3, (
