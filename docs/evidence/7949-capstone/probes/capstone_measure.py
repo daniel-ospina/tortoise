@@ -4461,6 +4461,11 @@ def measure_e6(*, packs_dir: Path | str | None = None,
             written[value if value in ("direct", "mediated", "none") else "unmeasured"] += 1
     except TypeError:  # an unhashable key field: the column reads NOTHING, never a crash
         written = {"direct": 0, "mediated": 0, "none": 0, "unmeasured": len(rows)}
+        # ⛔ AND IT IS NAMED, like the artifact side's `could not be read (TypeError: …)`: a
+        # benign `(generated_by: …)` here would claim a read the column did not do, which is the
+        # defect the EMPTY-`packs` guard above exists to stop (round 7, P3, same wording).
+        source = (f"{census_path} could not be matched (an unhashable row key); its `written` "
+                  f"cells are UNMEASURED")
     measurement["written"] = written
     measurement["written_source"] = source
     return measurement

@@ -1536,7 +1536,7 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
             why, e6["written"], e6["declared"])
     # …a row whose KEY field is a COLLECTION, which raised `TypeError: unhashable type: 'list'`
     # from the beside column's lookup — on the live path, outside every `try` — and, on the
-    # artifact path, from `_e6_key`'s dict key. `_e6_field` makes it a NON-MATCH instead.
+    # artifact path, from `_e6_key`'s dict key. The beside lookup's `except TypeError` reads it NOTHING.
     key_collection_rows = (({"predicate": ["a", "b"]}, "list predicate"),
                            ({"from_kind": ["x"]}, "list from_kind"),
                            ({"to_kind": {"a": 1}}, "object to_kind"))
@@ -1557,6 +1557,8 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         # The column reads NOTHING for this shape (the artifact path degrades the same way),
         # and — the property that failed — it does not raise out of a paid run.
         assert e6["written"]["unmeasured"] == e6["declared"], (why, e6["written"], e6["declared"])
+        # …and the provenance NAMES it, rather than claiming the artifact was read.
+        assert "UNMEASURED" in e6["written_source"].upper(), (why, e6["written_source"])
     # …and an EMPTY `packs` object, the one shape the fault did not cover: it read as a normal
     # read, so the beside column claimed to have read an artifact it covered none of.
     empty = tmp_path / "empty.json"
