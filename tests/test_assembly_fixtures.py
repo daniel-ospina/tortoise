@@ -50,9 +50,30 @@ _URI = os.environ.get(
 FALKORDB_AVAILABLE = False
 _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
+
+#: The doors this probe calls, ASSERTED before the storage try (#14114).
+#: A capability probe must never read a PROGRAMMING error as "no storage".
+#: When #13899 renamed `create_point` -> `create_entity("point", …)` the broad
+#: `except Exception` below swallowed the `AttributeError` into
+#: `FALKORDB_AVAILABLE = False`, so this suite SKIPPED locally and HARD-FAILED in
+#: CI (where `TORTOISE_TEST_EXPECT_URI=1` refuses the skip) with a message that
+#: named no door. Naming them here makes a future rename fail loudly instead.
+#: Keep in step with `_PROBE_WRITE_DOORS` in
+#: `tests/test_8057_probe_embedder_mask.py`.
+_PROBE_DOORS = ("create_entity", "_tortoise_fts_query")
+_probe = None
 try:
     os.environ["TORTOISE_DB_URI"] = _PROBE_GRAPH
     from tortoise.sdk import TortoiseSDK as _ProbeSDK
+
+    _missing = [d for d in _PROBE_DOORS if not hasattr(_ProbeSDK, d)]
+    if _missing:
+        raise AttributeError(
+            "the storage probe calls TortoiseSDK."
+            + ", TortoiseSDK.".join(_missing)
+            + " — a RENAMED/REMOVED door, not missing storage (#14114). "
+            "Update _PROBE_DOORS here and _PROBE_WRITE_DOORS in "
+            "tests/test_8057_probe_embedder_mask.py.")
     # #8057: the probe WRITES a point, and `create_point` derives an embedding
     # (`encode_for_store` -> `EmbeddingModel.get`). This runs at MODULE IMPORT,
     # so the `_no_embedder` fixture below cannot reach it — and a cold
@@ -72,14 +93,20 @@ try:
             "zzqfulltext roundtrip token", entity_type="point", limit=3)
         if _hits and _hits[0].get("id") == "pProbe":
             FALKORDB_AVAILABLE = True
+except (AttributeError, TypeError, NameError):
+    # ⚠️ A PROGRAMMING error, never "storage unavailable" (#14114). Re-raised so
+    # a renamed door or a changed signature fails at import, loudly, instead of
+    # silently turning this whole module into a skip (and a CI hard-fail).
+    raise
 except Exception:
     FALKORDB_AVAILABLE = False
 finally:
-    with contextlib.suppress(Exception):
-        _probe._get_proj().db.select_graph(
-            _PROBE_GRAPH.rsplit("/", 1)[-1]).delete()
-    with contextlib.suppress(Exception):
-        _probe.close()
+    if _probe is not None:
+        with contextlib.suppress(Exception):
+            _probe._get_proj().db.select_graph(
+                _PROBE_GRAPH.rsplit("/", 1)[-1]).delete()
+        with contextlib.suppress(Exception):
+            _probe.close()
     if _OLD_URI is not None:
         os.environ["TORTOISE_DB_URI"] = _OLD_URI
     else:

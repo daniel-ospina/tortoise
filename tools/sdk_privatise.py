@@ -678,7 +678,22 @@ SWEEP_NAMES = 66
 #: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
-SWEEP_RESIDUE = (11844, "70d6cfdcd8b769e4")
+#: RE-CUT for the #14114 fallout repair → (11838, "749ca38af677eba4"), a **SHRINK of 6** and every
+#: row is named, because a shrink is not evidence on its own (see the −1 and −6 above). The six rows
+#: are ALL in `tests/test_read_ledger.py`, and they are the RETIRED PUBLIC SPELLINGS that test drove on
+#: a real `TortoiseSDK`: `inst.query` −3, `inst.paginated_query` −1, `inst.get_point` −1,
+#: `inst.query_points_by_tag` −1. #13899 retired all four names (→ `list_knowledge` / `get_entity`), so
+#: the module raised the migration hint; it now drives the doors the retirement kept INTERNAL
+#: (`_query`, `_paginated_query`, `_get_point`, `_query_points_by_tag`), which are not swept names and
+#: therefore leave no row. ⛔ ATTRIBUTED BY BISECTION ON THE REAL GATE, not by arithmetic: reverting
+#: that ONE file to the parent head restores `--check` to the pinned (11844, "70d6cfdcd8b769e4") and
+#: exiting 0, while reverting `tests/test_7405_update_point_writes.py` alone leaves it at 11844 — so
+#: the whole delta is that file's six sites. `probe` files: reverting the three module-level probes
+#: also leaves 11844, so this re-cut shares no row with the `#13994` probe shrink above.
+#: The 6 are plain untyped receivers in a test (`inst` is built via `TortoiseSDK.__new__`), not typed
+#: references to a swept name, so the SDK population is untouched — `--check` still reports
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11838, "749ca38af677eba4")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
