@@ -241,7 +241,7 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
             err = None
             try:
                 return fn(*a, **kw)
-            except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            except BaseException as exc:  # recorded, then re-raised unchanged
                 err = f"{type(exc).__name__}: {exc}"
                 raise
             finally:
@@ -271,7 +271,7 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
             continue
         saved[name] = attr
         probe = _wrap(name, raw)
-        setattr(TortoiseSDK, name, probe if kind is None else kind(probe))
+        setattr(TortoiseSDK, name, probe)  # MUTANT rv5
 
     try:
         r = client.post("/v1/sessions", json={"conversation": _CONV})
