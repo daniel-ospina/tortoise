@@ -201,9 +201,11 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    the writer a further +25 lines past it while its three cites still said `21336` — 54 SHORT of
    where the writer actually sat, i.e. stale at its own head, which is the drift this note
    exists to catch (`tests/test_7949_capstone_measure.py`'s reconcile-cite arm is what reds on
-   it). FOUR statements move together and never one alone: the prose cite above, the bare
-   parenthetical here, the `sed` below, and `probes/capstone_measure.py:281`'s docstring, which
-   carried that same short number. The bare
+   it). FIVE statements move together and never one alone: the prose cite above, the bare
+   parenthetical here, the `sed` below, `probes/capstone_measure.py:281`'s docstring, which
+   carried that same short number, and `README.md:453`, which names the same call and was the
+   statement an earlier cut of this note left out of its own enumeration — and an omission is
+   exactly what a completeness claim hides. The bare
    parenthetical is the statement no `sdk.py:` token and no `sed` covers, so it is the one that rots silently. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 286 lines into `tortoise/sdk.py`, 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. Then `#12882` (`2dfbb5d455`) inserted 379 lines and deleted 29 in `tortoise/sdk.py` (`git show --numstat 2dfbb5d455 -- tortoise/sdk.py` → `379 29`, net `+350`; an earlier cut of this note said “inserted 408”, which is the CHURN, not the insertions) and `#12904` (`5cc36a42d4`) added 8 and deleted 2 in `tortoise/hosted_api.py` (`8 2`, net `+6`, not “added 10”), and a third re-derivation moved all three together again, by the same +20 net band, off the same grep. Then `#13084` inserted its own RAM-cap seam into `tortoise/sdk.py` above this writer, and a fourth re-derivation moved all three together off the same grep. Then at the `#14060`
    review head the writer sat at `tortoise/sdk.py:22440`, so the figure recorded one round earlier
    (`22385`) was 55 short — measured at the head that wrote it: `sed -n '22385p'` reads `#   * this
@@ -212,7 +214,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    behind its own head while asserting it was taken there; that sentence is corrected here rather
    than left standing. The mint range was short by the same 55 and is now `21158-21182`
    (`_ekind = _payload_entity_kind(e)` at `21158`, the `-A 24` window ending the mint block). This
-   lane re-derived the FOUR capture-path statements and the three mint-range cites off
+   lane re-derived the FIVE capture-path statements and the three mint-range cites off
    `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py` and
    `grep -n '_ekind = _payload_entity_kind(e)' tortoise/sdk.py` on THIS tree. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second

@@ -1509,7 +1509,13 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
     A truncated or hand-edited artifact is the shape this column exists to survive, so every
     direction of the shape fault is armed — including the one the first cut missed: a surface value
     that is not a LIST (`"relations": 42` raised `TypeError: 'int' object is not iterable`),
-    measured after the guard was written for the two coarser shapes.
+    measured after the guard was written for the two coarser shapes. Round 16's review found two
+    of the function's per-shape guards still unarmed — `pack {pack!r} is a …` (a NON-OBJECT pack
+    block) and `carries a … row` (a NON-OBJECT row) were reached by no payload here — and measured
+    it: dropping either `faults.append(...)` left this whole case green (1 passed), i.e. the
+    wording named a breadth nothing held. Both shapes are payloads below now, and the MIXED
+    artifact after the loop arms the fourth direction the wording claims — the cells this reader
+    COULD read returned beside the fault.
     """
     for payload, why in (("[]", "a LIST"),
                          ("{\"packs\": \"x\"}", "non-object packs"),
@@ -1518,12 +1524,36 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
                          ("{\"packs\": {\"dev\": {\"relations\": 42}}}", "non-LIST surface"),
                          ("{\"packs\": {\"dev\": {\"hierarchies\": true}}}", "bool surface"),
                          ('{"packs": {"dev": {"relations": [{"predicate": ["a", "b"]}]}}}',
-                          "unhashable row id")):
+                          "unhashable row id"),
+                         ('{"packs": {"dev": 5}}', "non-OBJECT pack block"),
+                         # ⛔ the SIBLING SURFACE must be a list here, or the `hierarchies` guard
+                         # fires first and this payload never reaches the row guard it is written
+                         # for — measured: with `hierarchies` absent, dropping the row fault left
+                         # the case green (the `NoneType` surface fault supplied the UNMEASURED).
+                         ('{"packs": {"dev": {"relations": [5], "hierarchies": []}}}',
+                          "NON-OBJECT row")):
         bad = tmp_path / "census.json"
         bad.write_text(payload)
         cells, source = measure._e6_write_cells(str(bad))
         assert cells == {}, (why, cells)
         assert "UNMEASURED" in source.upper(), (why, source)
+    # …and the MIXED direction, where the fault costs CELLS rather than the whole column: a
+    # readable pack beside a non-object one must still contribute its rows AND say what it could
+    # not read (`_e6_write_cells`' own wording: "the cells it could read are returned beside the
+    # fault"). Measured before this case: no payload reached that branch — every artifact above
+    # loses every cell, so `return cells, "… MALFORMED …"` and `return {}, "… MALFORMED …"` were
+    # indistinguishable and the beside-column claim was armed by nothing.
+    mixed = tmp_path / "mixed.json"
+    mixed.write_text(json.dumps({"packs": {
+        "dev": {"relations": [{"predicate": "p", "from_kind": "a", "to_kind": "b"}],
+                "hierarchies": []},
+        "bad": 5}}))
+    cells, source = measure._e6_write_cells(str(mixed))
+    assert len(cells) == 1, f"the readable pack's row must survive its neighbour's fault: {cells!r}"
+    assert ("dev", "relations", "p", "a", "b") in cells, cells
+    assert "MALFORMED" in source.upper(), source
+    assert "bad" in source, f"the fault must NAME the pack it could not read: {source}"
+    assert "UNMEASURED" in source.upper(), source
     # …and through the run's own path, where an escape is fatal rather than merely wrong.
     bad = tmp_path / "census.json"
     bad.write_text("[]")
