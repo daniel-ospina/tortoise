@@ -369,21 +369,38 @@ SWEEP_NAMES = 66
 #: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
 #: RE-CUT UP (11825, "539914480e400722") → (11833, "addee5ad564bd9bc") by the `#13874` lane. The
 #: pasted pair is `--repin`'s output measured on THIS tree, never arithmetic on the last pin.
-#: The +8 is ONE merge's rows, attributed by measurement and not by count: over the whole range
-#: `1956b3431f` (the `#14058` re-cut) → this tree, the `.py` diff carries EIGHT added receiver rows
-#: and ONE removed receiver line that is the SAME statement re-indented (it is re-added, so nothing
-#: was deleted) — `git diff … -- '*.py' | grep -E '^[+-]' | grep -E '\.(query|update|delete)\b'`.
-#: SEVEN of the eight are `graph.query`, all inside the file `ad79129cb5` (`#14067`, "invalidate the
-#: degraded snapshot on the eviction path") ADDS,
-#: `tests/test_evictor_invalidates_fallback_snapshot_13123.py`; the eighth is `client.delete`, in
-#: `tortoise/cache_evictor.py`, from that same commit. Added rows (8) == net delta (11833 − 11825),
-#: which is the cross-check that NO row was silently absorbed in the other direction.
+#: The +8 is ONE commit's, and it is attributed by the ROW SET, not by a line count. `ad79129cb5`
+#: (`#14067`, "invalidate the degraded snapshot on the eviction path") has `1956b3431f` — the `#14058`
+#: re-cut that pinned 11825 — as its DIRECT PARENT (`git rev-parse ad79129cb5^`), so the whole change
+#: is that one commit's and needs no range scoping. Diffing the residue row sets, measured on each
+#: tree through this module (`rename_map(rev=SWEEP_BASE)` → `edits_for(...)` → `residue` over
+#: `py_files()`), the complete set of changed rows is THREE, and every one of them is in a file that
+#: commit ADDS:
+#:
+#:   * `tests/test_evictor_invalidates_fallback_snapshot_13123.py` — `graph.query` +6 (268 → 274)
+#:   * `tests/test_evictor_invalidates_fallback_snapshot_13123.py` — `client.delete` +1 (42 → 43)
+#:   * `tests/test_cache_eviction_evictor_pins.py` — `super().query` +1 (67 → 68), a stub overriding
+#:     the client's own method, so its receiver is `super()` and this sweep cannot type it
+#:
+#: Six and one and one is eight, which is the net delta (11833 − 11825) — so no row was silently
+#: absorbed in the other direction.
+#: ⛔ THE FIRST EDITION OF THIS BLOCK ATTRIBUTED THE ROWS FROM A LINE DIFF, AND IT WAS WRONG IN THREE
+#: PLACES — "seven `graph.query`", "the eighth is `client.delete` in `tortoise/cache_evictor.py`", and
+#: no mention of `super().query` at all. That method (`git diff … -- '*.py' | grep -E '^[+-]' | grep
+#: -E '\.(query|update|delete)\b'`) counts LINES that look like a receiver; the pin is a digest over
+#: ROWS, and the two are not the same population: a line inside a multi-line receiver is not a row,
+#: and a file whose `client.delete` call the sweep cannot type is. The counts happened to total eight
+#: either way, which is exactly why an arithmetic cross-check cannot catch this — the attribution has
+#: to be measured with the same measure the pin uses. Corrected here by the row-set diff above, run on
+#: both trees, with each row's file and count named.
 #: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. Both spellings are
 #: already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
 #: occurs 46 times across the tracked tree
 #: (`git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py' | sort | uniq -c`). So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
+#: All three rows are ordinary-word receivers (`query` and `delete` are retired SDK names) on a plain
+#: `graph` / `client` of no declared type, which is exactly what this pin counts beside `g.query`.
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
 #: so no typed call site is legitimised by this re-cut.
 #: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8. Its whole diff is figure literals: stripping every digit
