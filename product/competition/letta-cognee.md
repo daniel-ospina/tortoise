@@ -377,7 +377,7 @@ Two releases, in sequence:
 
 - ❌ **Axioms are never enforced**, even in `owl_rl` — the ontology cannot catch "this entity is both a Person and a Company", a violated cardinality, or disjoint classes. It only *matches and annotates*
 - ❌ **Ontology is a retrieval router, not a reasoning substrate** — by their own description its job is *"to find relevant entities before retrieving"*
-- ⚠️ **Business rules are described as the reason for an ontology but are not modelled as rules** — the "15% discount only before March" example lands as a type plus a description, not an evaluable constraint
+- ⚠️ **Business rules are described as the reason for an ontology but are not modelled as rules** — the 15%-discount-before-March example lands as a type plus a description, not an evaluable constraint
 - ⚠️ **Conflict resolution does not propagate** — a human pick is local; nothing downstream of the rejected fact is revised
 - ⚠️ **Auto-ontology is Premium-cloud gated** and (per the docs gap above) its output format and its relationship to the OSS grounding path are unstated
 - ⚠️ **`strict` mode prunes inconsistently** — the graph prunes, chunk/RAG retrieval does not
@@ -486,7 +486,7 @@ Two releases, in sequence:
 | GitHub forks / contributors | **3,543 forks** / 304 contributors (forks read 2026-11-21; contributors are the 2026-09-11 read) |
 | GitHub open issues | **1,112 open issues including PRs** (`open_issues_count`, 2026-11-21 — GitHub's counter includes PRs; the 2026-09-11 read was 221 issues / 520 incl. PRs) |
 | PyPI downloads | **151,729/month**, 20,016/week, 3,127/day (`cognee`) |
-| SDK runs | **5M+ SDK runs/month** (homepage) |
+| SDK runs | **10M+ SDK runs/month** (homepage, read 2026-11-21; the 2026-09-11 read recorded 5M+) |
 | Pipeline volume growth | ~2,000 runs → 1M+ runs (per seed announcement) |
 | Discord | 4,078 members, 270 online |
 | Funding | $7.5M Seed (Feb 2026), led by Pebblebed; ~$9M total |
@@ -529,7 +529,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 | Main site | `cognee.ai` — pricing, benchmarks, cost calculator, case studies, academy, newsroom, brand resources, events |
 | Docs | `docs.cognee.ai` — Mintlify; ships `llms.txt`, `llms-full.txt` (3.9 MB), per-surface shards (`llms-core.md`, `llms-mcp.md`, `llms-api.md`) |
 | Content strategy | **Benchmark + comparison + migration + ontology thought-leadership**, now with a **biweekly "memo" newsletter** (memos 001–009, 2026-07-29 → 2026-11-19) that sequences product narrative — a release-cadence drumbeat rather than a blog. Pages: "AI Memory Benchmarks: The Complete Guide (2026)", "Cognee vs Zep/mem0/Supermemory", "Migrating from …", "Best Platforms to Build an AI Company Brain in 2026", case studies, cost calculator, academy |
-| Cost as content | A **cost calculator** plus a dedicated argument that extraction should be **LLM-free** (GLiNER on CPU, "~30× faster per chunk", "avoids an estimated $570 of API charges per gigabyte"). Cost is treated as a first-class product surface, not a footnote. The argument is anchored in a customer story (verbatim): one user *"burned through ~€10 in about 90 minutes just ingesting a 728 MB drive"* |
+| Cost as content | A **cost calculator** plus a dedicated argument that extraction should be **LLM-free** (GLiNER on CPU, "about 30× faster per chunk", "avoiding an estimated $570 of API charges per gigabyte of text"). Cost is treated as a first-class product surface, not a footnote. The argument is anchored in a customer story (verbatim): one user *"burned through ~€10 in about 90 minutes just ingesting a 728 MB drive"* |
 | GEO play | Homepage prompt to ask ChatGPT/Perplexity/Claude about Cognee — deliberate LLM-answer optimization |
 | ⚠️ Traffic / DA | No public data |
 
@@ -696,7 +696,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - ⚠️ **Cloud default LLM conflict:** the pricing-page footer says Cloud runs on `gpt-oss-120b`; the 2026-11-19 post names `gpt-5.6-luna` as "cognee's default LLM" when computing its 35 s baseline. Both recorded; unresolved which is the live default.
 - ⚠️ **The `$570/GB` and `30×` figures are Cognee's own estimates** against an *"estimated"* LLM baseline on a single Apple M4 Pro, not a reproduced measurement. Treated as vendor claims.
 - ⚠️ **The OSS extractor is not the accurate one:** Cognee states the open-source LLM-free extractor is *"a demo you can experiment with, while the production extractor, which offers higher accuracy and broader label coverage, is available through Enterprise"* — so the headline local-extraction numbers describe the less accurate tier. Do not read "LLM-free and 30× faster" as "as good as the LLM path".
-- ⚠️ **"500+ companies"** is Cognee's own claim on its 2026-11-19 post; no independent confirmation (the older "70+ deployments incl. Bayer" single-source note still stands as a separate, smaller figure).
+- ⚠️ **"500+ companies"** is Cognee's own claim on its 2026-11-19 post; no independent confirmation (the older "70+ company deployments including Bayer" single-source note still stands as a separate, smaller figure).
 - ⚠️ **No public ARR, headcount, or churn** after the Premium launch; the $99 price is published but attach rate is unknown.
 - ⚠️ **Auto-ontology accuracy unmeasured:** no published evaluation of the generated taxonomy (precision/recall of type assignment), and no third-party review found.
 
