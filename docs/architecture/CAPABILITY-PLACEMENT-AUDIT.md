@@ -200,14 +200,15 @@ did not change between those heads — only the offsets above it did), so this p
 that reading appears. ⛔ **Re-derive by CONTENT:
 never reuse the delta.** The `+419` that all three of this
 row's and row 15's sites take between that squash (`32441c280d`) and this one is **not** one insert: that
-interval is **577 inserted and 63 deleted** lines in `tortoise/hosted_api.py`
-(`git diff --numstat 32441c280d HEAD -- tortoise/hosted_api.py`), across **27** hunks — and the convention,
+interval is **569 inserted and 59 deleted** lines in `tortoise/hosted_api.py`
+(`git diff --numstat 32441c280d 1b0db04894 -- tortoise/hosted_api.py`), across **25** hunks — and the convention,
 the pathspec and the endpoint all travel with that second figure, because
-`git diff -U0 32441c280d HEAD -- tortoise/hosted_api.py | grep -c '^@@'` gives 27 while git's default `-U3`
-gives 25 (and `--numstat` prints no hunk count at all; without the pathspec both commands describe the whole
+`git diff -U0 32441c280d 1b0db04894 -- tortoise/hosted_api.py | grep -c '^@@'` gives 25 while git's default `-U3`
+gives 23 (⛔ the head is named LITERALLY, not `HEAD`: a `HEAD` here re-breaks all three figures at the
+next merge, which is exactly how they came to disagree with the `+419` / `+91` split below; and `--numstat` prints no hunk count at all; without the pathspec both commands describe the whole
 repo instead — every file in the interval, not this row's — and the repo-wide totals are **deliberately not
 quoted here**, because they depend on the commits you run the command at; re-run it rather than read a figure
-here). `+419` of the growth sits above the three sites (20 hunks, largest net `+157`)
+here). `+419` of the growth sits above the three sites (19 hunks, largest net `+157`)
 and `+91` below them, and at the same two heads a cite at old 10500 moved `+97` while one at 40000
 moved `+499`. The three share a delta because **no hunk between them changes the count** — the cumulative
 shift is `+419` for every old address from 21885 to 38986, and that is a BAND, not a property of the file — a lane
