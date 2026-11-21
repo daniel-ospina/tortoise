@@ -328,17 +328,24 @@ def test_the_abbreviation_length_claim_reproduces():
             f"{len(RESIDUE_ABBREV)}")
 
 
-def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
-    """Finding 2: WHICH commit deleted the line, and over which span the claim holds.
+def test_the_seen_update_deletion_premises_hold_in_this_clone():
+    """The REPO-STATE half of finding 2 — the premises the prose arm below is graded against.
 
-    The block credited the interval's HEAD (`d523c9be8c`) with the deletion, and said the
-    re-indent was true "ONLY on `83e94826a8a`". Measured: the deleting commit is
-    `aee14c5ceb`, and SIX of the eight interval commits still carry the line — so the
-    claim is interval-scoped, not tree-unique.
+    ⛔ THIS IS A SEPARATE TEST FROM THE PROSE ARM ON PURPOSE (review, round 10, P2). It used
+    to be the other half of `test_the_seen_update_deletion_is_attributed_to_the_commit_that_
+    made_it`, behind one `_requires(...)` at the top — so on a `fetch-depth: 1` checkout the
+    SKIP took the prose assertions with it, and the block could be edited back to crediting
+    `d523c9be8c` with the deletion while the sharded `test` job stayed GREEN. A guard that a
+    gating job cannot run is not a guard; the prose arm now runs in CI and this one verifies
+    the facts it is graded against wherever the objects are present.
+
+    ⛔ IT ASSERTS THE INTERVAL THE BLOCK DESCRIBES, so it reds if `refs/pull/14108/head` gains
+    a commit or a history is rewritten — deliberately: that is the premise changing, and the
+    block's own figures then have to be re-derived. It is not a prose guard and cannot
+    falsify prose; the prose arm below it does that, and runs everywhere.
     """
     _requires(RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT, RESIDUE_INTERVAL_END,
               RESIDUE_PR_HEAD)
-    block = _residue_block()
     revs = _git("rev-list", "--reverse", f"{RESIDUE_REWRITE_PARENT}..{RESIDUE_PR_HEAD}").split()
     assert len(revs) == 8, "premise: `83e94826a8a` is the OLDEST of the EIGHT interval commits"
     assert revs[0].startswith(RESIDUE_ABBREV), "premise: the interval opens on that commit"
@@ -357,6 +364,23 @@ def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
     assert len(carriers) == 6, "premise: SIX of the eight trees carry the line, not one"
     assert carriers[-1].startswith(RESIDUE_INTERVAL_END), (
         "premise: the last carrier is the deleting commit's parent")
+
+
+def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
+    """Finding 2: WHICH commit deleted the line, and over which span the claim holds.
+
+    The block credited the interval's HEAD (`d523c9be8c`) with the deletion, and said the
+    re-indent was true "ONLY on `83e94826a8a`". Measured: the deleting commit is
+    `aee14c5ceb`, and SIX of the eight interval commits still carry the line — so the
+    claim is interval-scoped, not tree-unique.
+
+    ⛔ EVERY ASSERTION HERE IS GRADED ON THE BLOCK'S OWN TEXT, so it needs no git object and
+    runs in the sharded `test` job's `fetch-depth: 1` checkout. The facts it is graded against
+    are the module-level `RESIDUE_*` constants, and
+    `test_the_seen_update_deletion_premises_hold_in_this_clone` verifies those against the
+    repository wherever the objects exist.
+    """
+    block = _residue_block()
 
     # ⛔ THE GAP MAY NOT INVERT, RELATIVISE OR DELEGATE THE ATTRIBUTION (review, rounds 6-8):
     # a 60-char gap alone accepted `is one commit before the one that deletes …`, `does not
@@ -404,15 +428,18 @@ def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
             "not for one sha")
 
 
-def test_the_history_clause_is_only_quoted_as_falsified():
-    """Finding 3: the commit IS inside a history a reader browses.
+def test_the_history_clause_premises_hold_in_this_clone():
+    """The REPO-STATE half of finding 3 — the premises the prose arm below is graded against.
 
-    `83e94826a8a` is an ancestor of the tree the block names as `refs/pull/14108/head`
-    (`d523c9be8c`), and a PR head ref survives a merge, so "outside every history a reader
-    browses" was false as an assertion. What is measured is narrower: no remote BRANCH
-    contains it, and `main` does not. The arm accepts either honest form — the narrow claim
-    stated outright, or the false one quoted as false — and refuses the unqualified version,
-    which is where the finding landed.
+    ⛔ SEPARATE FROM THE PROSE ARM ON PURPOSE (review, round 10, P2). It used to sit inside
+    `test_the_history_clause_is_only_quoted_as_falsified`, behind one `_requires(...)`, so a
+    `fetch-depth: 1` checkout SKIPPED the prose assertions too — and "outside every history a
+    reader browses" could be reinstated with the sharded `test` job green.
+
+    It grades `83e94826a8a`'s ancestry of the tree the block names as
+    `refs/pull/14108/head` (`d523c9be8c`), and a PR head ref survives a merge, so "outside
+    every history a reader browses" was false as an assertion. What is measured is narrower:
+    no remote BRANCH contains it, and `main` does not.
 
     ⛔ TWO DIFFERENT MEASUREMENTS, NAMED SEPARATELY (review cycle 1): the ancestry below is
     against the CONSTANT `d523c9be8c`, so its message must not claim the REF was measured —
@@ -421,11 +448,10 @@ def test_the_history_clause_is_only_quoted_as_falsified():
     CURRENT head": the moment #14108 gains a commit the address moves and every interval
     claim written against it goes stale without a red.
 
-    ⛔ THE CLAUSE IS MATCHED BY SHAPE, NOT BY ONE SENTENCE (review, rounds 5-8): the block has
-    already been reworded twice under this arm ("a reader browses" → "the repo PUBLISHES"), and
-    a phrase-keyed lookup turned each honest rewording into a red while letting a dishonest
-    one through. What must not vary is *a claim about every history* with no measured
-    qualifier in it.
+    ⛔ IT READS THE CLONE'S REMOTE-TRACKING REFS, so a clone whose `refs/remotes/origin/*` are
+    stale (a deleted branch never pruned) reds the `branch -r --contains` arm until
+    `git fetch origin --prune`. That is the premise being stale, not the block being wrong —
+    which is why it lives here and not in the prose arm, which runs everywhere.
     """
     _requires(RESIDUE_ABBREV, RESIDUE_PR_HEAD, "origin/main")
     head_ref = _ref_sha("refs/pull/14108/head")
@@ -450,7 +476,29 @@ def test_the_history_clause_is_only_quoted_as_falsified():
     assert _git("branch", "-r", "--contains", RESIDUE_ABBREV).strip() == "", (
         "premise: no remote BRANCH contains it — which is the only part of the block's "
         "narrow claim that is about branches",)
+
+
+def test_the_history_clause_is_only_quoted_as_falsified():
+    """Finding 3: the commit IS inside a history a reader browses.
+
+    `83e94826a8a` is an ancestor of `refs/pull/14108/head`, and a PR head ref survives a
+    merge, so "outside every history a reader browses" was false as an assertion. What is
+    measured is narrower: no remote BRANCH contains it, and `main` does not. The arm accepts
+    either honest form — the narrow claim stated outright, or the false one quoted as false —
+    and refuses the unqualified version, which is where the finding landed.
+
+    ⛔ THE CLAUSE IS MATCHED BY SHAPE, NOT BY ONE SENTENCE (review, rounds 5-8): the block has
+    already been reworded twice under this arm ("a reader browses" → "the repo PUBLISHES"), and
+    a phrase-keyed lookup turned each honest rewording into a red while letting a dishonest
+    one through. What must not vary is *a claim about every history* with no measured
+    qualifier in it.
+
+    ⛔ EVERY ASSERTION HERE IS GRADED ON THE BLOCK'S OWN TEXT, so it runs in the sharded `test`
+    job's `fetch-depth: 1` checkout. `test_the_history_clause_premises_hold_in_this_clone`
+    verifies the facts it is graded against wherever the objects exist.
+    """
     block = _residue_block()
+
     # ⛔ EVERY OCCURRENCE IS GRADED (review, round 9): a single `re.search` let the exact false
     # clause be appended a second time while the first, honest one was the only thing graded.
     clauses = list(re.finditer(r"outside every[^.]{0,80}history", block))
