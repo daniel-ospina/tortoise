@@ -186,10 +186,13 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #:   `do we have any archived reports` are content lookups in which `archived` is
 #:   a modifier. With an OPTIONAL auxiliary the participle could sit straight
 #:   after the quantifier, where it can only be attributive, and all of those
-#:   were answered with the whole ended population. Requiring
-#:   `been|already|ever` immediately before the participle is the predicative
-#:   test: the participle is then the head of the verb phrase, not a modifier of
-#:   the noun that follows the quantifier.
+#:   were answered with the whole ended population. Requiring `been` immediately
+#:   before the participle is the predicative test: the participle is then the head
+#:   of the verb phrase, not a modifier of the noun that follows the quantifier.
+#:   ⛔ AND IT IS `been` ALONE — an earlier cut of this paragraph said
+#:   `been|already|ever`, and that form is the round-7 hijack this file now refuses
+#:   (`already`/`ever` admit the ACTIVE reading); see the note below
+#:   :data:`_EXISTENCE_WINDOW`, which is the one statement of the rule.
 #:   ⛔ AND THE PARTICIPLE MUST END THE QUESTION (round-5 review, P1). This was
 #:   the one ending shape with no tail anchor, so a caller's appended CONSTRAINT
 #:   was silently dropped: `have any claims been retracted in Q3`, `have any of
@@ -390,10 +393,13 @@ _BLOCKED_TAIL = (
 #: holds.
 #:
 #: Narrowed, because only `<aux> been` can supply the token the window requires
-#: (:data:`_EXISTENCE_WINDOW` needs the literal `been`): the class it protects is
-#: exactly `<det> <noun> has|have|had been`, the asyndetic hijack
-#: `have any users reported the vendor has been deprecated`. Both classes are pinned
-#: now, and each in the direction it belongs.
+#: (:data:`_EXISTENCE_WINDOW` needs the literal `been`): as narrowed then, the class
+#: it protected was exactly `<det> <noun> has|have|had been`, the asyndetic hijack
+#: `have any users reported the vendor has been deprecated`. ⛔ THE CLASS IS WIDER
+#: NOW, by the follow-up note below: the guard protects any FINITE VERB from a closed
+#: list followed by an optional `not`/`have` and then `been` (19 spellings, incl. the
+#: modal passive `will have been`), because bounding it to `has|have|had been` left
+#: that class open. Both classes are pinned, and each in the direction it belongs.
 #:
 #: ⛔ RESIDUAL, STATED RATHER THAN LEFT TO BE DISCOVERED: a RELATIVE clause whose head
 #: is preceded by a determiner and whose own verb is `has|have|had been` — `has
@@ -455,6 +461,14 @@ _WHICH_PREFIX = (
     # `which v3 features are deprecated`), which this shape still refuses and
     # `which_modified_noun` below reports. A widening whose only justification is a
     # comment is a rule nothing holds.
+    # ⛔ AND THE LIMIT IS A SILENCE, NOT A REPORT (round-12 review, P2, measured): a
+    # SINGLE-Token digit-bearing head noun is neither routed nor reported —
+    # `which v3 was deprecated` and `which soc2 was archived` both come back with no
+    # population and no signal, while `which v3 feature was deprecated` reports
+    # (`which_modified_noun` needs TWO head words). So the modifier sentence above
+    # holds for the multi-word form only; the one-word form is recall given up
+    # SILENTLY, which is a gap of the same class #14033 closes and is recorded here
+    # rather than promised as coverage.
     rf"[a-z][a-z'’._/-]*\s+"
     rf"(?:is|are|was|were|has|have|had)\s+"
     rf"(?:been\s+)?(?:{_ENDING_WORDS})\b"
@@ -610,11 +624,16 @@ _WHICH_MODIFIED_NOUN = re.compile(
 #: state, so it is reported instead of silent.
 #: ⛔ THE NEGATIVE LOOKAHEAD IS THE DISCRIMINATOR, and it is the same rule the bound
 #: enforces structurally: if the subject carries a SUBORDINATOR (`because`, `that`,
-#: `given`, `since`, `when`, `if`, …) OR A SECOND FINITE VERB (`is`, `was`, `has`,
-#: `did`, `will`, …) then the ending participle is that clause's predicate, not the
-#: question's, so nothing is reported. The second-verb half is measured, not
-#: defensive: `is there any chance the release was cancelled` contains no
-#: subordinator and was reported without it.
+#: `given`, `since`, `when`, `if`, …) OR A SECOND AUXILIARY/COPULA FROM THE LIST
+#: BELOW (`is`, `was`, `has`, `did`, `will`, …) then the ending participle is that
+#: clause's predicate, not the question's, so nothing is reported. The second-verb
+#: half is measured, not defensive: `is there any chance the release was cancelled`
+#: contains no subordinator and was reported without it. ⛔ IT IS A CLOSED LIST, NOT
+#: "every finite verb" (round-12 review, P3, measured): a LEXICAL second verb is not
+#: in it, so `is it possible the feature got archived` still reports
+#: `is_copula_long_subject`. That leak is a notice on a content question — the safe
+#: direction (a report, never a route) — and it is recorded rather than claimed
+#: closed.
 _COPULA_LONG_SUBJECT = re.compile(
     rf"^(?:is|are|was|were)\s+"
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
@@ -843,9 +862,12 @@ class StateQuestion:
     population: str | None = None
     shape: str | None = None
     cue: str | None = field(default=None)
-    #: The strong cue that was seen when NO shape fired (:data:`_ENDING_SIGNALS`),
-    #: naming the shape whose guard refused the question. ``None`` when a shape
-    #: fired, or when nothing state-like was seen at all. ⛔ It NEVER changes
+    #: The strong cue that was seen when NO shape fired, naming the SIGNAL ROW that
+    #: reported it (:data:`_ENDING_SIGNALS`) — a shape's own name, or one of the four
+    #: hand-written recall rows that have no shape (`which_names_an_ending`,
+    #: `existence_unguarded`, `which_modified_noun`, `is_copula_long_subject`), so a
+    #: consumer must not assume the value is a :data:`_ENDING_SHAPES` name. ``None``
+    #: when a shape fired, or when nothing state-like was seen at all. ⛔ It NEVER changes
     #: ``population``: a signal is a REPORT, not a route, which is what keeps the
     #: precision contract ("where a shape could go either way it does not fire")
     #: intact while removing the silence #14033 is about.
