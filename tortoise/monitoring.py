@@ -948,12 +948,26 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   `stop()` does not clear its thread after a timed-out join).
 #:
 #: ``PROJECTION_WORKER_FAILURE_COUNT`` is separate from both: it counts deferred
-#: folds that RAISED. Unlike a lagging queue that is a real gap the journal heals
-#: (`tools/record_runner.py apply`), and unlike the inline path's failures it is
-#: counted by the LOOP rather than by `write_live_record`'s own door — the seam
-#: swallows its own armed failures and reports them through
-#: ``record_write_failures``, so a projection raising out of the loop is the one
-#: shape only the worker can see. ``reason`` vocabulary: ``projection_raised``.
+#: folds that did not write a row. Unlike a lagging queue that is a real gap the
+#: journal heals (`tools/record_runner.py apply`), and unlike the inline path's
+#: failures it is counted by the LOOP rather than by `write_live_record`'s own
+#: door — the seam swallows its own armed failures and reports them through
+#: ``record_write_failures``, so a projection failing out of the loop is the one
+#: shape only the worker can see. ``reason`` vocabulary is CLOSED at two:
+#:
+#:   ``projection_raised``        the fold raised. The journal holds the line.
+#:   ``record_unarmed_at_fold``   the fold answered ``None``, which is
+#:                                `write_live_record`'s UNARMED verdict — and on
+#:                                this arm `live_write` PROVED the record armed
+#:                                before queueing (#14222 review cycle 2), so the
+#:                                arming changed between the ack and the fold. It
+#:                                is counted HERE because the seam's unarmed arm
+#:                                is deliberately SILENT (no counter, no log —
+#:                                §2.0's byte-identical deployment), so without
+#:                                this the row would vanish with nothing observably
+#:                                wrong. A lane that scopes `TORTOISE_RECORD_DSN`
+#:                                for one run and restores it in a `finally` is
+#:                                the live shape.
 #:
 #: Single writers: ``record_projection_queue_state``,
 #: ``record_projection_worker_failure`` and ``record_projection_inline_fallback``,
@@ -3017,7 +3031,7 @@ def record_projection_queue_state(*, depth: int, pending_positions: int,
 
 
 def record_projection_worker_failure(reason: str) -> None:
-    """Count one DEFERRED record projection that raised (#14185).
+    """Count one DEFERRED record projection that did not write a row (#14185).
 
     Single writer: ``tortoise.projection_worker.ProjectionWorker._run``. ⛔ It is
     NOT a value in ``RECORD_WRITE_FAILURE_COUNT``: the seam counts its own armed
@@ -3025,7 +3039,14 @@ def record_projection_worker_failure(reason: str) -> None:
     double-count one record, and a raise that the seam swallowed
     (``write_live_record`` never raises for its own refusals) would never appear
     at all — this counter is the only surface that sees the LOOP's own failures,
-    which is a different fact. ``reason`` vocabulary: ``projection_raised``.
+    which is a different fact.
+
+    ``reason`` vocabulary is CLOSED at ``projection_raised`` (the fold raised) and
+    ``record_unarmed_at_fold`` (the fold answered ``None`` — the record was armed
+    when the write was acknowledged and is not armed now). ⛔ The second one
+    exists because `write_live_record`'s unarmed arm is deliberately silent, so
+    this is the only surface that can see a deferred fold that wrote nothing
+    (#14222 review cycle 2).
     """
     PROJECTION_WORKER_FAILURE_COUNT.labels(reason=reason).inc()
 

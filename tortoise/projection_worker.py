@@ -288,17 +288,26 @@ class ProjectionWorker:
                 queued = self._depth_locked()
                 positions = self._pending_positions_locked()
                 oldest = self._oldest_age_locked()
+                # ⛔ PUBLISHED UNDER THE LOCK THE VALUES WERE READ UNDER (#14222
+                # review cycle 2, NEW-1). Publishing after the release let a
+                # slower thread overwrite a NEWER snapshot with an OLDER one — a
+                # backlog of 2 exporting 1, or a drained queue exporting 1, until
+                # the next transition. That is the same lie cycle 1's P1-1 was
+                # filed for, reachable from the other side. `Gauge.set` takes only
+                # prometheus' own value lock and no path here holds that while
+                # acquiring this Condition, so the order is safe.
+                _publish_queue_state(self._depth_locked(), positions, oldest)
                 self._cond.notify()
         if declined:
             _publish_inline_fallback(declined)
             return False
-        _publish_queue_state(queued, positions, oldest)
         return True
 
     # ── the read side (never blocks on the fold) ───────────────────────────
 
     def stats(self) -> ProjectionStats:
         """A consistent snapshot for the metrics surface. Holds NO lock the fold holds."""
+        self._ensure_not_inherited()
         with self._cond:
             return ProjectionStats(
                 running=self._thread is not None and self._thread.is_alive(),
@@ -322,9 +331,17 @@ class ProjectionWorker:
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
+            self._ensure_not_inherited()
             with self._cond:
-                if not self._pending and self._projected + self._failures \
-                        >= self._submitted:
+                # ⛔ "EMPTY AND NOTHING IN FLIGHT" IS THE EXACT PREDICATE
+                # (#14222 review cycle 2, NEW-3). The counter form
+                # (`projected + failures >= submitted`) was an APPROXIMATION that
+                # a forked child could never satisfy — it inherits the parent's
+                # high-water marks with an empty queue, so its exit drain burned
+                # the full timeout on a worker that had nothing to do. The loop
+                # pops and clears `_inflight` under this same lock, so this is
+                # exact rather than approximate.
+                if not self._pending and self._inflight is None:
                     return True
                 remaining = (IDLE_WAIT_SECONDS if deadline is None
                              else deadline - time.monotonic())
@@ -346,17 +363,31 @@ class ProjectionWorker:
         self._ensure_started()
 
     def stop(self, *, drain: bool = True,
-             timeout: float = DRAIN_ON_EXIT_SECONDS) -> None:
-        """Stop the loop, optionally letting the queue empty first."""
+             timeout: float = DRAIN_ON_EXIT_SECONDS) -> bool:
+        """Stop the loop, optionally letting the queue empty first.
+
+        RETURNS whether the consumer is GONE, and the answer is load-bearing at
+        the one production caller :func:`shutdown` — see its own note. ``False``
+        means a fold is still running on a thread that would not join, so this
+        object must be kept: replacing it would put a SECOND consumer beside the
+        wedged one.
+        """
+        self._ensure_not_inherited()
         if drain:
             self._quietly(lambda: self.wait_for_drain(timeout))
         with self._cond:
             self._stopping = True
             thread = self._thread
             self._cond.notify_all()
-        joined = True
+        # ⛔ LIVENESS DECIDES, NEVER A DEFAULT (#14222 review cycle 2, NEW-5). The
+        # `joined = True` default was wrong on the REENTRANT path — a `project`
+        # callable that stops its own worker skips the join entirely and then
+        # cleared `_thread` while the consumer (itself) was still alive, which is
+        # the double-consumer hazard this method was just fixed for, back again.
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
+        gone = thread is None or not thread.is_alive()
+        if not gone:
             # ⛔ A TIMED-OUT JOIN LEAVES THE CONSUMER ALIVE (#14222 review P2-2).
             # Clearing `_thread` anyway let the next `submit`'s `_ensure_started`
             # start a SECOND consumer on the same deque — the exact shape the
@@ -365,45 +396,95 @@ class ProjectionWorker:
             # absolute per row). Keeping `_thread` set makes `_ensure_started` a
             # no-op instead; submits then DECLINE and fold inline, which is the
             # honest answer for a loop that is still wedged.
-            joined = not thread.is_alive()
-        if not joined:
-            return
+            return False
         with self._cond:
             self._thread = None
             self._pid = None
+        return True
 
     def _ensure_started(self) -> None:
-        # ⛔ THE FORK RESET COMES FIRST, AND BEFORE THE LOCK IS TAKEN
-        # (#14222 review P2-3). A forked child inherits the parent's Thread
-        # object, its QUEUE, its IN-FLIGHT item and its Condition — and a
-        # Condition inherited while the parent's consumer held it is a lock with
-        # no owner in the child, which would block `submit` (the WRITE path)
-        # forever. The three facts are replaced here: a fresh Condition, an
-        # emptied queue (those items belong to the parent, who still holds them)
-        # and no in-flight item (the child can never clear the parent's, so
-        # leaving it would report one permanently pending position and a
-        # monotonically growing lag).
-        if self._pid is not None and self._pid != os.getpid():
-            self._cond = threading.Condition()
-            self._pending = collections.deque()
-            self._inflight = None
-            self._thread = None
-            self._pid = os.getpid()
-            self._stopping = False
-        with self._cond:
-            if self._thread is not None and self._thread.is_alive() \
-                    and self._pid == os.getpid():
+        while True:
+            cond = self._cond
+            with cond:
+                # ⛔ A PEER REPLACED THE CONDITION WHILE THIS THREAD WAITED: it is
+                # holding the old one, which nobody else can see, so the only
+                # correct move is to re-enter on the current object (#14222
+                # review cycle 2, NEW-4).
+                if cond is not self._cond:
+                    continue
+                if self._inherited_locked():
+                    self._reset_for_fork_locked()
+                    continue
+                if self._thread is not None and self._thread.is_alive():
+                    return
+                self._thread = None
+                self._pid = os.getpid()
+                self._stopping = False
+                thread = threading.Thread(target=self._run, name=self._name,
+                                          daemon=True)
+                self._thread = thread
+                thread.start()
+                if not self._atexit_installed:
+                    self._atexit_installed = True
+                    self._quietly(lambda: atexit.register(_drain_at_exit, self))
                 return
-            self._thread = None
-            self._pid = os.getpid()
-            self._stopping = False
-            thread = threading.Thread(target=self._run, name=self._name,
-                                      daemon=True)
-            self._thread = thread
-            thread.start()
-            if not self._atexit_installed:
-                self._atexit_installed = True
-                self._quietly(lambda: atexit.register(_drain_at_exit, self))
+
+    def _ensure_not_inherited(self) -> None:
+        """Reset this object for a NEW PROCESS, before anyone takes its lock.
+
+        ⛔ EVERY ENTRY POINT CALLS THIS, not only :meth:`_ensure_started`
+        (#14222 review cycle 2, NEW-7). A forked child inherits the parent's
+        Condition — and a Condition inherited while the parent's consumer held it
+        is a lock with no owner here, so `stats()`, `wait_for_drain()` and the
+        `atexit` drain would block on it forever, wedging the child's exit path
+        or a health read. A child that never performs a deferred write never
+        reached `_ensure_started`, which is why the reset cannot live only there.
+        """
+        while True:
+            cond = self._cond
+            with cond:
+                if cond is not self._cond:
+                    continue
+                if self._inherited_locked():
+                    self._reset_for_fork_locked()
+                    continue
+                if self._pid is None:
+                    # Stopped (or never started) IN THIS PROCESS: adopt the pid
+                    # so `stats()`/`stop()` stop re-checking, and leave the
+                    # counters alone — they are this process's observations and a
+                    # stop does not unmake them.
+                    self._pid = os.getpid()
+                return
+
+    def _inherited_locked(self) -> bool:
+        """Was this object inherited from ANOTHER process?
+
+        ⚠️ ``_pid is None`` (a worker that was stopped, or never started) is NOT
+        "not inherited": the Condition is still the parent's object. It is
+        therefore treated as stale and reset — the reset is idempotent and cheap,
+        and guessing the other way leaves the inherited lock in place.
+        """
+        return self._pid is not None and self._pid != os.getpid()
+
+    def _reset_for_fork_locked(self) -> None:
+        """Replace the state a fork copies, holding the lock being replaced.
+
+        The parent still owns the queue, so the child must not fold those items a
+        second time; the in-flight item can never be cleared by the child, so
+        leaving it would report one permanently pending position and a
+        monotonically growing lag; and the COUNTERS go too, because they are
+        per-process observations and an inherited `submitted=3, projected=1` with
+        an empty queue made `wait_for_drain` unsatisfiable (NEW-3).
+        """
+        self._cond = threading.Condition()
+        self._pending = collections.deque()
+        self._inflight = None
+        self._thread = None
+        self._stopping = False
+        self._submitted = 0
+        self._projected = 0
+        self._failures = 0
+        self._pid = os.getpid()
 
     # ── the loop ───────────────────────────────────────────────────────────
 
@@ -420,12 +501,12 @@ class ProjectionWorker:
             # ⛔ THE FOLD RUNS WITH NO LOCK HELD. That single fact is what makes
             # `stats()` / `submit()` — and therefore any reader that asks the
             # lag question — independent of how long this projection takes.
-            failed = False
+            failure = None
             try:
-                item.project(item.record, item.seq,
-                             journal_skipped=item.journal_skipped)
+                result = item.project(item.record, item.seq,
+                                      journal_skipped=item.journal_skipped)
             except Exception as exc:  # noqa: BLE001 — the loop must survive
-                failed = True
+                failure = "projection_raised"
                 LOGGER.warning(
                     "projection_worker: the deferred record projection RAISED "
                     "(%s: %s) for journal position %s — the journal holds the "
@@ -434,6 +515,28 @@ class ProjectionWorker:
                     "`tools/record_runner.py apply` heals it idempotently "
                     "(#14185)",
                     type(exc).__name__, exc, item.seq)
+            else:
+                # ⛔ A FOLD THAT DID NOTHING IS NOT A PROJECTION (#14222 review
+                # cycle 2, NEW-2). `write_live_record` returns ``None`` ONLY when
+                # the record is unarmed — and on this arm `live_write` PROVED it
+                # armed before queueing, so the answer means the arming changed
+                # between the ack and the fold (an in-process lane that scopes
+                # `TORTOISE_RECORD_DSN` for one run and restores it in a
+                # `finally` does exactly that). Counting it as `projected` made
+                # the loop's own success counter report a fold that wrote
+                # nothing, and the seam's unarmed arm is deliberately silent (no
+                # counter, no log — §2.0's byte-identical deployment), so this is
+                # the only surface that could see it.
+                if result is None:
+                    failure = "record_unarmed_at_fold"
+                    LOGGER.warning(
+                        "projection_worker: the deferred record projection for "
+                        "journal position %s did NOTHING — the record was armed "
+                        "when the write was acknowledged and is NOT armed now, so "
+                        "no row was written and no error was raised. The journal "
+                        "holds the line; `tools/record_runner.py apply` folds it "
+                        "idempotently once the record is armed again (#14185)",
+                        item.seq)
             # ⛔ ALL THREE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
             # never from a value captured at POP time (#14222 review P1-1). The
             # pop-time depth counts the item that is about to be folded, so
@@ -443,17 +546,16 @@ class ProjectionWorker:
             # one, while `stats()` said the opposite.
             with self._cond:
                 self._inflight = None
-                if failed:
+                if failure is not None:
                     self._failures += 1
                 else:
                     self._projected += 1
-                depth = self._depth_locked()
-                pending = self._pending_positions_locked()
-                oldest = self._oldest_age_locked()
+                _publish_queue_state(self._depth_locked(),
+                                     self._pending_positions_locked(),
+                                     self._oldest_age_locked())
                 self._cond.notify_all()
-            _publish_queue_state(depth, pending, oldest)
-            if failed:
-                _publish_failure("projection_raised")
+            if failure is not None:
+                _publish_failure(failure)
 
     # ── internals ──────────────────────────────────────────────────────────
 
@@ -549,7 +651,12 @@ def submit(*, record: Mapping[str, Any], seq: int | None,
     try:
         snapshot = copy.deepcopy(record)
     except Exception:  # noqa: BLE001 — never fail a committed write over a copy
-        snapshot = record
+        # ⛔ DECLINE, DO NOT FALL BACK TO THE REFERENCE (#14222 review cycle 2,
+        # NEW-8). The reference is the very aliasing this copy exists to remove,
+        # and taking it would restore the undetectable divergence SILENTLY. Fold
+        # inline instead: byte-identical to the pre-#14185 write, with no window
+        # at all, and the caller pays only the fold it always used to pay.
+        return False
     return worker().submit(PendingProjection(
         record=snapshot, seq=seq, tenant=tenant,
         journal_skipped=journal_skipped, project=project,
@@ -580,8 +687,20 @@ def shutdown(*, drain: bool = True,
     with _WORKER_LOCK:
         current = _WORKER
         _WORKER = None
-    if current is not None:
-        current.stop(drain=drain, timeout=timeout)
+    if current is None:
+        return
+    if not current.stop(drain=drain, timeout=timeout):
+        # ⛔ PUT IT BACK (#14222 review cycle 2, NEW-6). `stop()` returns ``False``
+        # when a fold would not join, so the consumer is STILL RUNNING. Dropping
+        # the reference anyway made the next `worker()` build a fresh instance
+        # with its own thread and deque — two consumers folding one tenant's
+        # records at once, which is the ordering hazard this module names (the
+        # record's mutations are absolute per row, so out-of-order folds are a
+        # correctness problem, not a delay). The retained instance already
+        # DECLINES submits with `worker_stopping` and the caller folds inline,
+        # which is the honest answer while a consumer is wedged.
+        with _WORKER_LOCK:
+            _WORKER = current
 
 
 def _drain_at_exit(instance: ProjectionWorker) -> None:

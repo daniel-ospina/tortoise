@@ -22,6 +22,7 @@ Postgres cannot run in every lane.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import types
@@ -659,6 +660,135 @@ def test_the_fold_runs_in_journal_order(armed):
     release.set()
     assert projection_worker.wait_for_drain(10) is True
     assert order == [1, 2, 3, 4, 5]
+
+
+# ── 4b. the loop's own bookkeeping tells the truth ───────────────────────────
+
+
+def test_a_fold_that_wrote_NOTHING_is_a_failure_not_a_projection(armed):
+    """⛔ #14222 review cycle 2, NEW-2: the loop's success counter must not lie.
+
+    `write_live_record` returns ``None`` ONLY when the record is unarmed — and on
+    this arm `live_write` PROVED it armed before queueing, so the answer means the
+    arming changed between the ack and the fold (a lane that scopes
+    `TORTOISE_RECORD_DSN` for one run and restores it in a `finally` is the live
+    shape). Counting that as `projected` reported a fold that wrote nothing, and
+    the seam's unarmed arm is deliberately SILENT — no counter, no log — so the
+    loop is the only surface that could see it.
+    """
+    before = monitoring.projection_worker_failure_counts().get(
+        "record_unarmed_at_fold", 0)
+
+    def project(event, seq, *, journal_skipped=False):
+        return None  # exactly what `write_live_record` answers when unarmed
+
+    live_write.write({"type": "PointAdded"}, log=_Log(), project=project,
+                     tenant=_TENANT)
+    assert projection_worker.wait_for_drain(10) is True
+
+    stats = projection_worker.stats()
+    assert stats.projected == 0, "a fold that wrote nothing is not a projection"
+    assert stats.failures == 1, "…and it is the loss signal the caller reads"
+    assert (monitoring.projection_worker_failure_counts().get(
+        "record_unarmed_at_fold", 0) - before) == 1
+
+
+def test_a_drain_predicate_is_exact_even_after_a_fork(armed):
+    """⛔ #14222 review cycle 2, NEW-3: an inherited high-water mark is not work.
+
+    The counter form (`projected + failures >= submitted`) was an approximation a
+    forked child can never satisfy — it inherits the parent's counters with an
+    EMPTY queue, so a drained worker reported undrained and every child's exit
+    drain burned the full timeout. `empty AND nothing in flight` is exact, because
+    the loop pops and clears the in-flight item under this same lock.
+    """
+    worker = projection_worker.worker()
+    worker._submitted, worker._projected = 9, 1   # an inherited high-water mark
+    worker._pending.clear()
+    worker._inflight = None
+    worker._pid = os.getpid() + 1_000_000          # pretend another process
+
+    start = time.perf_counter()
+    assert projection_worker.wait_for_drain(2) is True
+    assert (time.perf_counter() - start) < 0.2, (
+        "a drained worker must not wait out the timeout")
+    assert projection_worker.stats().submitted == 0, (
+        "the child's counters are its own — the parent's are not its work")
+
+
+def test_stopping_from_the_consumer_itself_does_not_clear_a_live_consumer(armed):
+    """⛔ #14222 review cycle 2, NEW-5: liveness decides, never a default.
+
+    A `project` callable that stops its own worker skips the join, and the old
+    `joined = True` default then cleared `_thread` while the consumer (itself) was
+    still running — so the next `submit` started a second consumer on the same
+    deque. That is the ordering hazard the earlier fix removed, reachable on the
+    reentrant path.
+    """
+    stopped: list = []
+    worker = projection_worker.worker()
+
+    def project(event, seq, *, journal_skipped=False):
+        stopped.append(worker.stop(drain=False, timeout=0.05))
+        return types.SimpleNamespace(applied=True, refusal=None,
+                                     outcome="applied")
+
+    live_write.write({"type": "A"}, log=_Log(), project=project, tenant=_TENANT)
+    assert projection_worker.wait_for_drain(10) is True
+    assert stopped == [False], (
+        "stop() must report that the consumer it could not join is still alive")
+
+    live = [t for t in threading.enumerate()
+            if t.name == "tortoise-projection-worker"]
+    assert len(live) <= 1, f"a second consumer started: {live!r}"
+
+
+def test_shutdown_keeps_the_instance_whose_consumer_would_not_join(armed):
+    """⛔ #14222 review cycle 2, NEW-6: don't drop the reference to a live consumer.
+
+    `shutdown()` used to clear the singleton unconditionally, so the next
+    `worker()` built a FRESH instance with its own thread and deque beside the
+    wedged one — two consumers folding one tenant's records at once.
+    """
+    slow = _SlowProjector()
+    live_write.write({"type": "A"}, log=_Log(), project=slow, tenant=_TENANT)
+    assert slow.in_flight.wait(5)
+
+    before = projection_worker.worker()
+    projection_worker.shutdown(drain=False, timeout=0.05)
+    assert projection_worker.worker() is before, (
+        "a worker whose fold would not join must be kept, not replaced")
+
+    slow.gate.set()
+    assert projection_worker.wait_for_drain(10) is True
+    projection_worker.shutdown(drain=True, timeout=10)
+
+
+def test_a_record_that_cannot_be_copied_folds_inline_rather_than_aliasing(armed):
+    """⛔ #14222 review cycle 2, NEW-8: the fallback must not reintroduce the bug.
+
+    The deep snapshot exists because the fold reads the caller's dict AFTER the
+    caller resumed, and the envelope shares nested values. Falling back to the
+    reference on a copy failure would restore exactly the undetectable divergence
+    the copy removes — so the honest answer is to decline and fold inline, which
+    is byte-identical to the pre-#14185 write and has no window at all.
+    """
+    class _Uncopyable(dict):
+        def __deepcopy__(self, memo):
+            raise TypeError("this value refuses to be copied")
+
+    called = []
+    event = _Uncopyable({"type": "PointAdded"})
+    write = live_write.write(
+        event, log=_Log(), tenant=_TENANT,
+        project=lambda e, s, journal_skipped=False: (
+            called.append(s),
+            types.SimpleNamespace(applied=True, refusal=None,
+                                  outcome="applied"))[1])
+
+    assert write.deferred is False, "an uncopyable record must fold inline"
+    assert called == [1], "…and it must still be folded"
+    assert projection_worker.stats().submitted == 0
 
 
 # ── 5. the flag itself ──────────────────────────────────────────────────────
