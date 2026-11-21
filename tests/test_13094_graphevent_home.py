@@ -156,8 +156,9 @@ CAPABILITY_CONTROLS = (
      "cypher:shortestpath"),
     # ⛔ BACKTICK-QUOTED PROCEDURE NAMES (`#14183` round-8 review, P2/P3). The engine
     # accepts ``CALL `algo.pageRank`(…)``, and this repo's own write gate documents
-    # that spelling as valid Cypher (`tortoise/projection/__init__.py:3570` carries
-    # the explicit `` `? ``). While the match was whitespace-only a backticked graph
+    # that spelling as valid Cypher (`tortoise/projection/__init__.py:3572` carries
+    # the explicit `` `? `` in `_CALL_PROC_RE`; `:3594` states the validity). While
+    # the match was whitespace-only a backticked graph
     # algorithm returned `None` — a capability reader past every check, the
     # FALSE-PASS direction this guard exists to close. These two rows are the pin
     # for the backtick half of `_NO_WS`: the first proves `call algo` is not a miss,
@@ -201,10 +202,15 @@ ARMS_NO_SNIPPET_CAN_DECIDE = {
     # ORDERING — the completeness pin asserts this set and the control rows are a
     # PARTITION, so a token that a row decides cannot stay declared.
     "size((",        # a pattern aggregate needs a relationship → `-[` or `--`
-    # Every real spelling of these is a `CALL`: the operator spells the procedure
-    # with its `call ` prefix, and the `call db.idx.*` arm is ordered before the
-    # bare name, so the bare arm only ever decides in a fragment that quotes the
-    # procedure name alone (which is not a snippet a reader carries).
+    # Every realistic spelling of these is a `CALL`: the operator spells the
+    # procedure with its `call ` prefix (backticked or not — the strip makes
+    # `` `db.idx… `` the same text as `db.idx…`), and the `call db.idx.*` arm is
+    # ordered before the bare name. ⛔ Measured limit of this claim (`#14183`
+    # round-9 review, P3): an engine-accepted COMMENT between the two —
+    # `CALL /*idx*/ db.idx.fulltext.queryNodes(…)` — makes the BARE arm decide
+    # instead. That is not a hole (the row is still REFUSED, which is the safe
+    # direction, and no reader in the tree spells it that way), so the two bare
+    # arms stay declared rather than gaining rows for a form nothing carries.
     "db.idx.fulltext",
     "db.idx.vector",
 }

@@ -744,7 +744,8 @@ def superset(graph_rows: list[dict[str, Any]],
 #: `-[r]->` are one shape rather than two, and `` CALL `algo.pageRank`(…) `` is the
 #: same shape as `CALL algo.pageRank(…)` — the engine accepts all three spellings
 #: (this repo's own write gate documents the backticked procedure name as valid
-#: Cypher; `tortoise/projection/__init__.py:3570` carries the explicit `` `? ``).
+#: Cypher; `tortoise/projection/__init__.py:3572` carries the explicit `` `? ``
+#: in `_CALL_PROC_RE`, and `:3594` states that a backtick-quoted name is valid).
 #:
 #: ⛔ THE BACKTICK IS THE FALSE-PASS DIRECTION, which is why it is STRIPPED rather
 #: than declared away (`#14183` round-8 review, P2/P3). A contiguous arm sees
