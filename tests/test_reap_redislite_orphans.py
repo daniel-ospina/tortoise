@@ -790,6 +790,23 @@ def _seed_proc_scan(
             0,
         ),
     ],
+    # ⛔ EXPLICIT ids, not the auto-generated ones (PR #14182 CI red). The auto-id
+    # for a row embeds the PARAM VALUES, so it embedded `REDIS_BIN` — and what
+    # pytest renders for a long string parameter is a PYTEST-VERSION decision, not
+    # a fact about this repo: pytest 9.1.1 printed the whole path, pytest 9.2.0
+    # (what CI installs) prints `exe{idx}`. That silently changed 3 nodeids between
+    # the lane's `--collect-only` manifest and the run's junit, and
+    # `config/ci-expected-nodeids/platform-gated.txt` is a FROZEN set of nodeids —
+    # so the mismatch reads as "these tests never ran" (which is exactly what the
+    # #4215 guard exists to catch, and what it caught here). Literal ids make the
+    # nodeids a property of THIS file, stable across pytest upgrades.
+    ids=[
+        "argc1-measured",  # the measured wrapper shape: ONE argv element
+        "wrapper-comm",  # argv[0] is the wrapper; only `comm` identifies
+        "renamed-comm",  # `comm` renamed to a setproctitle form
+        "direct-argv0",  # fast path unchanged: argv[0] IS the binary
+        "renamed-exe",  # `comm` renamed and unreadable -> resolved `exe`
+    ],
 )
 def test_a_wrapper_execd_server_is_enumerated(
     reaper, monkeypatch, argv, comm, exe, expected_socket_dir, identified_by, census

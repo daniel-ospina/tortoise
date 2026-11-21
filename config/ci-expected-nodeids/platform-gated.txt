@@ -25,6 +25,15 @@ tests/test_fork_safety_3845.py::test_env_override_is_honoured_and_loud
 tests/test_fork_safety_3845.py::test_fork_child_does_not_hang_with_the_production_config
 tests/test_fork_safety_3845.py::test_without_the_fix_the_same_race_hangs_a_child
 #
+# ⛔ ids in this file must be STABLE ACROSS PYTEST UPGRADES. A frozen expected set
+# that embeds pytest's AUTO-generated param ids embeds a pytest-version decision:
+# `test_a_wrapper_execd_server_is_enumerated` embedded its `exe` value, which
+# pytest 9.1.1 rendered as the whole path and 9.2.0 rendered as `exe{n}` — so 3
+# nodeids matched the lane's --collect-only and not the run's junit, and the
+# guard reported them as tests that never ran (PR #14182 CI red, caught by this
+# very guard). That parametrization now carries explicit `ids=`, which is the
+# pattern to follow: pin the id in the TEST, not in this snapshot.
+#
 # #10502: the reaper's decision-table pins. The file is registered in
 # tests/test_markers.py::PLATFORM_GATED_TESTS (two of its tests carry a
 # `sys.platform` skipif — they read `/proc/<pid>/comm` from a REAL child), so
@@ -46,11 +55,11 @@ tests/test_reap_redislite_orphans.py::test_a_process_that_only_NAMES_the_binary_
 tests/test_reap_redislite_orphans.py::test_a_ps_that_runs_and_fails_is_exit_2_too
 tests/test_reap_redislite_orphans.py::test_a_real_argv0_wrapper_process_is_enumerated
 tests/test_reap_redislite_orphans.py::test_a_server_whose_socket_dir_is_gone_is_reaped
-tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv0-redis-server-/opt/gh-runner/_work/_tool/Python/3.12.15/x64/lib/python3.12/site-packages/redislite/bin/redis-server-/tmp/tt_pcfpx8kg/tmpjo77yr86-argv[0]-1]
-tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv1-redis-server-None-/tmp/tt_ab/tmpcd-comm-1]
-tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv2-redis-server:6379-/opt/gh-runner/_work/_tool/Python/3.12.15/x64/lib/python3.12/site-packages/redislite/bin/redis-server-/tmp/tt_ab/tmpcd-comm-1]
-tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv3-None-None-/tmp/tt_ab/tmpcd-argv[0]-0]
-tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argv4-some-renamed-name-/opt/gh-runner/_work/_tool/Python/3.12.15/x64/lib/python3.12/site-packages/redislite/bin/redis-server-/tmp/tt_ab/tmpcd-exe-0]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[argc1-measured]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[direct-argv0]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[renamed-comm]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[renamed-exe]
+tests/test_reap_redislite_orphans.py::test_a_wrapper_execd_server_is_enumerated[wrapper-comm]
 tests/test_reap_redislite_orphans.py::test_an_accounted_census_is_not_a_gap
 tests/test_reap_redislite_orphans.py::test_an_aged_server_is_reaped
 tests/test_reap_redislite_orphans.py::test_an_expression_valued_carve_out_is_admitted
