@@ -1402,18 +1402,25 @@ def _row_froze_a_stub(entry: dict) -> bool:
     separated them:
 
       * the archived FILE's suffix — DEAD CODE. `archive_rel` always emits
-        `archive/modules/<batch>/<mirror>.py` (`:2224-2235`, "one symbol, one path, always"),
+        `archive/modules/<batch>/<mirror>.py` ("one symbol, one path, always"),
         so no row the writer produces could satisfy it, and the fixtures that "covered" it
         hand-wrote a `.pyi` path `archive_rel` cannot produce.
       * `archived_from` — SPOOFABLE. It is bound only to the frozen file's own `ARCHIVED_FROM`
         header, i.e. to a string the same hand-splicing author writes; this file already records
-        that limit at `:1357-1361` ("bound to nothing else on this path … so a consistent lie
-        passed both"), and hand-splicing is what `MEMORY.md` recommends. Measured: a spliced row
-        saying `tortoise/x.py` over frozen STUB bytes was credited, with `shrink_violations` AND
-        `file_violations` both empty.
+        that limit in `_reanchor_is_verified`'s "EVERY OTHER CLAIM FIELD IS FIXED" note ("bound
+        to nothing else on this path … so a consistent lie passed both"), and hand-splicing is
+        what `MEMORY.md` recommends. Measured: a spliced row saying `tortoise/x.py` over frozen
+        STUB bytes was credited, with `shrink_violations` AND `file_violations` both empty.
       * `blocks[0].path` — the field `file_violations` ties to the path baked into the frozen
-        file's verbatim banner AND to that body's sha256 (`:829-834`), so it cannot be re-pointed
-        without the bytes following. This is the one asked below.
+        file's verbatim banner AND to that body's sha256, so it cannot be re-pointed without the
+        bytes following. This is the one asked below.
+
+    ⛔ THESE CITATIONS NAME SYMBOLS, NOT LINE NUMBERS, ON PURPOSE. Each of the three cuts above
+    was once described by a line-number anchor and every one of them rotted: the `archive_rel`
+    cite said line 2177, then 2224-2235 at a head where the definition sat at 2314, and the
+    re-anchor note's 1357-1361 was correct when written and was 15 lines off after a merge that
+    INSERTED above it. `MEMORY.md` `[pin-defensive-claim]` states the rule ("re-derive from the
+    SYMBOL … never key a needle to a loop variable"); comments are held to it here too.
 
     ⛔ AND FAIL CLOSED ON AN ABSENT SOURCE. An entry recording no block path proves nothing
     about what it holds, so it is refused WITH the stub, never credited: hence
@@ -1528,10 +1535,11 @@ def shrink_violations(
             # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
             # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
             # head carrier at all, so it is `base - head` that lands in this arm while the row's
-            # existence silences it. `_row_froze_a_stub` reads the SOURCE the row recorded —
-            # `archived_from`, never the archived file's suffix (the archived file is always
-            # `.py`; see its docstring for the measured false PASS that made the suffix-keyed
-            # first cut dead code).
+            # existence silences it. `_row_froze_a_stub` asks `blocks[].path` — the field
+            # `file_violations` binds to the frozen banner AND the body's sha256 — and falls back
+            # to `archived_from` only for a row carrying no block list. Never the archived file's
+            # suffix (the archived file is always `.py`; see its docstring for the measured false
+            # PASS that made the suffix-keyed first cut dead code).
             if runtime_carrier is not None and _row_froze_a_stub(working[key]):
                 out.append(
                     _record_froze_a_stub(
@@ -1608,8 +1616,9 @@ def shrink_violations(
         if key in working:
             # ⛔ A ROW THAT FROZE THE STUB IS NOT A RECORD (fresh-context review of PR #14039,
             # P0). `stubbed` keeps the legit stub-only module (a `.pyi` carrier on BOTH sides)
-            # out of this branch; `_row_froze_a_stub` asks the SOURCE the row recorded — see its
-            # docstring for why the archived file's suffix is a dead question.
+            # out of this branch; `_row_froze_a_stub` asks `blocks[].path` (falling back to
+            # `archived_from` for a row with no block list) — see its docstring for why the
+            # archived file's suffix is a dead question.
             if stubbed and _row_froze_a_stub(working[key]):
                 out.append(
                     _record_froze_a_stub(
