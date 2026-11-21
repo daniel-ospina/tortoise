@@ -183,31 +183,35 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # bare-token row with count 2 (header + §2.5). This row and its count are the site the re-derived
     # §2.5 row left behind.
     (_AUDIT, "`:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
-    # 1 -> 3 at the #13991 merge of `origin/main` `0656b056d7`: the branch's OWN prose adds two more
-    # BARE sites of this same address, so the bare-token row DIRECTLY ABOVE (`` `:11590` ``, count
-    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11590` row above it (count 1,
-    # unchanged — the row whose token carries the path, not a bare `:NNNN`) covers only the §2.5
-    # one-token spelling. Deliberately no "N lines above": that distance moved twice on this branch
-    # already, and a stated count is the defect class this file exists to catch. Measured on the merged document
+    # 1 -> 4 at the #13998 head: the branch's OWN prose adds three more BARE sites of this same
+    # address (the #13991 merge added two; the non-comparable enumeration in the drift header is the
+    # third, added when `5bb3b32518` re-pointed this address and moved the pair past the pin's
+    # `mcp_server.py`), so the bare-token row DIRECTLY ABOVE (`` `:11590` ``, count 1 -> 4) can no
+    # longer see every spelling of it; the `mcp_server.py:11590` row above it (count 1, unchanged —
+    # the row whose token carries the path, not a bare `:NNNN`) covers only the §2.5 one-token
+    # spelling. Deliberately no "N lines above": that distance moved twice on this branch already,
+    # and a stated count is the defect class this file exists to catch. Measured on the merged document
     # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
-    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11590`"))'` -> 3), with the site
+    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11590`"))'` -> 4), with the site
     # lines RE-MEASURED on this document rather than carried — `grep -n '`:11590`' on the MERGED
-    # document gives `:173` / `:186` / `:592`. They have moved twice since the pre-merge `:182`/`:585`
-    # edition: `main`'s merge `0656b056d7` shifted two of them, the P2 fix above (which sits BETWEEN
-    # them) added +2 to the third, and the two-line "five pairs as two code spans" correction
-    # (#13991 review P2-A, which sits ABOVE all three) then shifted every one of them by +2 again —
-    # which is why this block states the MEASUREMENT and not a delta:
-    #   :173  the header trio above — main's site, the one this row was created for;
-    #   :186  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    # document gives `:139` / `:203` / `:222` / `:647`. They have moved repeatedly: `main`'s merge
+    # `0656b056d7` shifted two of them, the P2 fix above added +2 to a third, the two-line "five pairs
+    # as two code spans" correction (#13991 review P2-A) shifted every one of them by +2, and this
+    # PR's own edits above them shifted all four again — which is why this block states the
+    # MEASUREMENT and not a delta:
+    #   :139  the drift header's non-comparable enumeration, which names this address among the ten
+    #         that resolve past the pin's copy of their file (added by #13998; see the count above);
+    #   :203  the header trio above — main's site, the one this row was created for;
+    #   :222  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :592  the same branch's §2.5 provenance sentence, `:11280` -> `:11590`.
+    #   :647  the same branch's §2.5 provenance sentence, `:11280` -> `:11590`.
     # Re-derive with `grep -n '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
     # trusting this list on a later head: a line number in prose is exactly the claim this file pins
     # for the document, and it drifts the same way.
-    # All three name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
+    # All four name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
     # addresses for one reader). The count is kept at the measured number rather than deleting a
-    # spelling: re-pointing any one of the three now reds here, which is the discrimination the row
+    # spelling: re-pointing any one of the four now reds here, which is the discrimination the row
     # exists for.
     (_AUDIT, "`:5720`", _MCP, 5720, "entity_type=entity_type"),
     (_AUDIT, "`:8515`", _MCP, 8515, "entity_type=entity_type"),
@@ -503,7 +507,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # itself adds (§2.5's five-address enumeration and its `:11280` -> `:11590` provenance sentence) —
     # see the row's own comment for the three line numbers. Measured on the merged document:
     # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 3.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 4,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5720`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8515`'): 2,
     # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
