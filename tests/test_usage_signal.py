@@ -902,8 +902,7 @@ def _package_root_attributes(source: str) -> set[str]:
         f"tortoise.{node.attr}"
         for node in nodes
         if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id in bound
+        and _dotted_base(node.value) in bound
         and f"tortoise.{node.attr}" in _REACHABLE_FROM_ROOT
     } | _getattr_reaching_a_store(nodes, bound)
 
@@ -944,15 +943,14 @@ def _getattr_reaching_a_store(
         # "FalkorDB")` — the PEP-562 hook itself, called with a literal name. Same
         # reasoning as `getattr` above: the name is a string constant in the source,
         # and `tortoise.__getattr__` really is a module attribute that returns the
-        # guarded client (`__init__.py:373`). The KEYWORD form is accepted because
+        # guarded client (`__init__.py:372`). The KEYWORD form is accepted because
         # the hook is `def __getattr__(name: str)` — unlike the builtin, it does not
         # reject it.
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "__getattr__"
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in bound
+            and _dotted_base(node.func.value) in bound
         ):
             argument = None
             if len(node.args) >= 1:
@@ -982,8 +980,7 @@ def _getattr_reaching_a_store(
             continue
         base, attribute = node.args[0], node.args[1]
         if (
-            isinstance(base, ast.Name)
-            and base.id in bound
+            _dotted_base(base) in bound
             and isinstance(attribute, ast.Constant)
             and isinstance(attribute.value, str)
         ):
@@ -993,9 +990,40 @@ def _getattr_reaching_a_store(
     return found
 
 
+def _fold_init(name: str) -> str:
+    """`tortoise.__init__.X` -> `tortoise.X`, `tortoise.__init__` -> `tortoise`.
+
+    ⛔ `from tortoise.__init__ import FalkorDB` and `tortoise.__init__.FalkorDB` are
+    the SAME reach as the two forms `_FORBIDDEN_CLIENT_EXPORTS` exists to catch, and
+    they were missed by every leg: the resolved name is `tortoise.__init__.FalkorDB`,
+    which matches no banned root and no export entry, the attribute leg only fired on
+    `Attribute(value=Name)` so the chained base was invisible, and the probe is blind
+    to the function-body placement (`redislite` is not loaded until the read runs).
+    `tortoise.__init__` is a spelling of the package root, so the fold is applied to
+    every name this module derives rather than to one call site.
+    """
+    return name.replace(".__init__", "")
+
+
+def _dotted_base(source: ast.AST) -> str | None:
+    """The dotted name an attribute read is rooted at, folded — or None.
+
+    Follows a CHAIN (`tortoise.__init__.FalkorDB` roots at `tortoise`), which a
+    reader that insists on `Attribute(value=Name)` cannot do.
+    """
+    parts: list[str] = []
+    while isinstance(source, ast.Attribute):
+        parts.append(source.attr)
+        source = source.value
+    if not isinstance(source, ast.Name):
+        return None
+    parts.append(source.id)
+    return _fold_init(".".join(reversed(parts)))
+
+
 def _offending(source: str) -> set[str]:
     """Every name in `source` that reaches a store client — modules AND exports."""
-    imported = _imports_of(source)
+    imported = {_fold_init(name) for name in _imports_of(source)}
     return (
         {
             name
@@ -1243,6 +1271,22 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending('import tortoise\nc = getattr(tortoise, "sdk")\n') == {
         "tortoise.sdk"
     }
+    # ⛔ AND THE `.__init__` SPELLING OF THE PACKAGE ROOT, which is the SAME reach as
+    # the two forms above and was missed by every leg: the base of the attribute is
+    # itself an Attribute, so a reader that only matches `Attribute(value=Name)` saw
+    # nothing, and the import form resolved to a name matching no root and no export.
+    assert _offending("from tortoise.__init__ import FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending("import tortoise.__init__\nc = tortoise.__init__.Tortoise\n") == {
+        "tortoise.Tortoise"
+    }
+    assert _offending("def f():\n    from tortoise.__init__ import Tortoise\n") == {
+        "tortoise.Tortoise"
+    }
+    assert _offending(
+        'import tortoise.__init__\nc = getattr(tortoise.__init__, "FalkorDB")\n'
+    ) == {"tortoise.FalkorDB"}
     # A NON-literal name stays out of scope (and is named as such in the docstring).
     assert _offending("import tortoise\nc = getattr(tortoise, NAME)\n") == set()
     # ⛔ AND THE STAR IMPORT, which was TRIPLY blind: the bare `*` matched no root,
