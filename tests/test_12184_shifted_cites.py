@@ -352,8 +352,21 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # unpinned, and the header's default resolves them to the PIN — where `sdk.py:15958` is unrelated
     # prose and `sdk.py:3777` is an EMPTY LINE. Both are one-token spellings already, so no figure
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
-    (_AUDIT, 'sdk.py:16046-16050', _SDK, 16046, '**JSONL event log (#548):** written when *point* is provided'),
+    (_AUDIT, 'sdk.py:16046-16051', _SDK, 16046, '**JSONL event log (#548):** written when *point* is provided'),
     (_AUDIT, 'sdk.py:3777', _SDK, 3777, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    # --- #14087 fix lane's OWN sweep at `7f57eb2a46` — ⛔ NOT a reviewer finding, and the difference
+    # is the point: both reviews graded this address by its DELTA (`:15991-95` -> `:16046-50`, +55 on
+    # both ends), which stays consistent while the SPAN itself is wrong, so neither could see it. TWO
+    # defects on the one address, both measured at this head:
+    # (1) ONE ROW PER SITE. The header enumerates this address BARE (`sdk.py`: `:16046-16051`) while
+    # §6.3 spells it, so the spelled pin above did not reach the header site. Measured: re-point the
+    # BARE span to `:16046-16099` with this row ABSENT -> 24 passed; with this row PRESENT -> 2 failed
+    # (the token arm and the content arm).
+    # (2) The range END was one line short at BOTH heads. The paragraph's last line is
+    # `turns`` list is that same requirement for the record-held lane.` — `:16051` here, `:15996` at
+    # `d4a8dddc4e` — so the cited `:16050` / `:15995` truncated it MID-CLAUSE. The end was DELTA-moved
+    # (+55) with its start rather than re-derived, which preserved the truncation across the insert.
+    (_AUDIT, '`:16046-16051`', _SDK, 16046, '**JSONL event log (#548):** written when *point* is provided'),
     # --- #14087 review round 1, finding 1 (F1) — the address that review CAUGHT, now GUARDED. The
     # correction itself landed at `e8bacc656c` (`:58265` -> `:58272`); the review's other half —
     # "add the token to `_TOKEN_OCCURRENCES` so the next sweep cannot move it silently" — did not, so the
@@ -546,8 +559,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1300`'): 2,
     # #14043 review (finding 1): one site each in §6.3. Measured on this document:
     # `grep -o -F 'sdk.py:15958-15962' <doc> | wc -l` -> 1, `... 'sdk.py:3777' ...` -> 1.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16046-16050'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16046-16051'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3777'): 1,
+    # #14087 fix lane's own sweep: the header's BARE spelling of the same JSONL span, one site.
+    # Measured: `grep -o -F '`:16046-16051`' <the document> | wc -l` -> 1 (the spelled site's backtick
+    # sits BEFORE `sdk.py`, so it is not a substring match for the bare token).
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:16046-16051`'): 1,
     # #14087 review round 1, F1: the header's BARE `:58272` reader cite, pinned so a re-point cannot
     # hide behind its `:58272-58296` / `:58274` family (those are one-token keys of their own, in
     # `_REDEFINED_13854`, and none of them sees a bare span). Measured:
@@ -1808,7 +1825,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 83 -> 84 at the SAME review's finding 1 (F1): the `:58272` correction `e8bacc656c` made was
     # itself unguarded — the review asked for the pin and only the address landed. Same shape, same
     # reason: a bare span with no pin is coverage this file only APPEARED to have.
-    assert len(_PINS) == 84
+    # 84 -> 85 at the fix lane's own sweep: the header's BARE `:16046-16051` spelling of the JSONL
+    # contract — the same bare-span gap F1 closed for `:58272`, on a range whose END was also one short
+    # (16050 -> 16051, the paragraph's real last line at this head and at `d4a8dddc4e`).
+    assert len(_PINS) == 85
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:

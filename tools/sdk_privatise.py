@@ -435,10 +435,14 @@ SWEEP_NAMES = 66
 #: both trees, with each row's file and count named.
 #: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three spellings
 #: are already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
-#: occurs 50 times across the tracked tree at this head
-#: (`git grep -hoE '\bclient\.(query|update|delete)\b' HEAD -- '*.py' | sort | uniq -c` → 50
-#: `client.delete`, 45-50 on the heads either side; the residue ROW this pin counts is 43, a different
-#: number again). So the
+#: occurs 45 times across the tracked tree at this head EXCLUDING this file's own prose
+#: (`git grep -hoE '\bclient\.(query|update|delete)\b' HEAD -- '*.py' ':!tools/sdk_privatise.py' |
+#: sort | uniq -c` → 45). ⛔ The UNFILTERED form of that same command prints **50** at this head —
+#: 45 plus the token's five mentions in this file's own prose (four `#:` lines above, and the
+#: `sdk_typing` docstring below), 45 + 5 = 50. That is the property to distrust: the figure is not a
+#: measurement of the tree alone, it moves whenever this prose is edited — it read 51 one revision of
+#: this comment ago, because the prose carried one more mention then. The residue ROW this pin counts
+#: is 43, a different number again. So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: All three rows are ordinary-word receivers (`query` and `delete` are retired SDK names) on a plain
