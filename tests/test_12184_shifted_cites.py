@@ -1769,34 +1769,40 @@ def test_a_carried_forward_figure_is_reported() -> None:
             {1: alt_pairs - 1},
             "the alternative basis is one pair short of what the two-code-span form measures, not level with it",
         ),
+        # ⛔ WHY THIS MUTANT IS DERIVED FROM THE BAND'S EDGE, AND NOT A FIXED OFFSET — kept here because
+        # the loop's assertion messages interpolate `why`, and a measurement table inside one of them
+        # buries the mismatch a failing row is trying to report (`#14038` review). The row shipped a
+        # literal `{2: alt_drifters + 7}` and the two distances it needs — the band's SLACK, and how far the
+        # literal sits above it — are properties of the DOCUMENT.
+        # ⛔ TWO different distances, named here so they are not swapped again: the band's SLACK below its
+        # edge is `extra_pairs - (alt - primary)` — MEASURED 0 or 1 over every edition reachable from this
+        # head (44 of them touch the document; `extra_pairs` is 1, 3 or 4 there against a gap of 1 or 3) —
+        # and the `+7` literal sits ABOVE the edge by `7 - slack`, i.e. 6 or 7, which is the figure this
+        # rationale once published under the slack's name (0 is not 6). So the literal never went legal here.
+        # ⛔ TWO counts must not be confused: 3 UNCOUNTED added pairs here (the `_TWO_SPAN_NEW` arm's
+        # numeral, `**three**`), and 5 two-code-span pairs IN TOTAL — the document writes that total
+        # UNBOLDED, `The document also writes five pairs as two code spans` (its only `**five**` is
+        # unrelated, §2.5's `:Tag` count), so grep the sentence, not the marker — that `5` is
+        # `3 uncounted + 2 already counted`, so it is neither the band's slack nor the literal's distance
+        # above the edge, and must not be read as either. That misreading is how this rationale first
+        # claimed the branch 'had already carried 5'; the uncounted count on those 44 editions is 1, 3 or
+        # 4, and the only editions carrying 5 are on `feat/13971-point-strip`, which is not an ancestor
+        # here. ⚠️ Those are ONE scope with ONE set of values: an earlier form of this block printed
+        # `extra_pairs` `1..4` in one sentence and "never left 3..4" eight lines later for the same
+        # quantity (`:1586` grades the two equal), so a reader got two ranges under one heading.
+        # A fixed `+offset` therefore goes legal when `extra_pairs - (alt_drifters - drifters) >= offset`,
+        # which is `extra_pairs >= 10` at this head, NOT `>= 7`: at extra_pairs=8 the band is `155..163`
+        # and the `+7` value 165 is still outside it, and at 9 it is `155..164` against 165 — both
+        # measured — and only at 10 does the band reach 165 and fall silent, leaving the band's RULE-2
+        # assertion to red blaming a band that is present and right (#14038 review, P3).
         (
             alt,
             {2: _drifters + two_span_uncounted + 1},
             "the alternative basis's numerator is overstated past what its added pairs can contribute — the "
             "direction a stale figure takes when a denominator moves under it. ⛔ DERIVED from the band's "
-            "own edge (`primary + extra_pairs`), not a fixed `+7`. ⛔ TWO different distances, named here so they "
-            "are not swapped again: the band's SLACK below its edge is `extra_pairs - (alt - primary)` — "
-            "MEASURED 0 or 1 over every edition reachable from this head (the doc has 44 there; "
-            "`extra_pairs` is 1, 3 or 4 there against a gap of 1 or 3) — and the `+7` literal sits ABOVE "
-            "the edge by `7 - slack`, i.e. 6 or 7, which is the "
-            "figure this sentence used to publish under the slack's name (0 is not 6). So the literal never "
-            "went legal here. "
-            "⛔ TWO counts must not be confused: 3 UNCOUNTED added pairs here (the `_TWO_SPAN_NEW` arm's "
-            "numeral, `**three**`), and 5 two-code-span pairs IN TOTAL — the document writes that total UNBOLDED, "
-            "`The document also writes five pairs as two code spans` (its only `**five**` is unrelated, "
-            "§2.5's `:Tag` count), so grep the sentence, not the marker — that `5` is "
-            "`3 uncounted + 2 already counted`, so it is neither the band's slack nor the literal's "
-            "distance above the edge, and must not be read as either. "
-            "That misreading is how this comment first claimed the branch 'had already carried 5'; the "
-            "uncounted count on those 44 editions is 1, 3 or 4, and the only editions carrying 5 are on "
-            "`feat/13971-point-strip`, which is not an ancestor here. "
-            "A fixed `+offset` goes legal when `extra_pairs - (alt_drifters - drifters) >= offset`, which is "
-            "`extra_pairs >= 10` at this head, NOT `>= 7`: at extra_pairs=8 the band is `155..163` and the "
-            "`+7` value 165 is still outside it, and at 9 it is `155..164` against 165 — both measured — "
-            "and only at 10 does the band reach 165 and fall silent, leaving the band's RULE-2 assertion "
-            "to red blaming a band that is present and right (#14038 review, P3). "
-            "`two_span_uncounted` is graded equal to `extra_pairs` by the `_TWO_SPAN_NEW` arm, so this "
-            "anchor is always exactly one above the upper edge",
+            "own edge (`primary + extra_pairs`), not a fixed `+7`; `two_span_uncounted` is graded equal "
+            "to `extra_pairs` by the `_TWO_SPAN_NEW` arm, so this anchor is always exactly one above the "
+            "upper edge (the measurements behind it are in the comment above)",
         ),
         (
             alt,
