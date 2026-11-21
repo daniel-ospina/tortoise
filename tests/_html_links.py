@@ -245,6 +245,21 @@ class _AnchorHrefParser(HTMLParser):
         "rb", "rp", "rt", "rtc", "select", "table", "tbody", "td", "tfoot",
         "th", "thead", "tr",
     })
+    #: The `_RAW` members whose CONTENT a reader DOES meet, so the visible-text
+    #: recording must not drop it with the rest of the raw-text family.
+    #:
+    #: `<textarea>` renders its text as the control's value, and `<xmp>`/`<plaintext>`
+    #: render theirs as preformatted content (13.2.5.2 RCDATA / 13.2.5.5 PLAINTEXT
+    #: are tokenizer states, not rendering rules). Dropping them is the FAIL-OPEN
+    #: direction for the wording golden — a contradicting sentence inside a
+    #: `<textarea>` would be invisible to the pin that exists to catch exactly that,
+    #: and the regex body this recording replaced DID count it (#14073 review).
+    #:
+    #: The rest of `_RAW` stays dropped, and for the opposite reason: `<script>`,
+    #: `<style>`, `<title>` and `<noscript>` (under scripting) are never rendered in
+    #: the page, and `<noembed>`/`<noframes>`/`<iframe>` hold FALLBACK content — the
+    #: same supporting-browser convention as `_UNRENDERED` below.
+    _RAW_RENDERS = frozenset({"textarea", "xmp", "plaintext"})
     #: Elements whose CHILD CONTENT a browser does not RENDER UNCONDITIONALLY, by
     #: ELEMENT TYPE — the second half of "does a reader meet this heading/link",
     #: after raw text, inert `<template>` content and the `in select` rule.
@@ -287,6 +302,7 @@ class _AnchorHrefParser(HTMLParser):
     #: entries from a tree a browser has thrown away.
     _RECORDINGS = (
         "hrefs", "ids", "attrs", "headings", "containers", "mode_dependent",
+        "text",
     )
     #: Diagnostic ratchets, NOT document recordings: they describe what the PARSE met
     #: (`foreign_tags` is the declared-limits watchdog), so an honored `<frameset>`
@@ -321,6 +337,14 @@ class _AnchorHrefParser(HTMLParser):
         # SCRIPTING MODE — see `_MODE_DEPENDENT`. The attribute allowlist's input:
         # it must refuse such a region instead of clearing it (#14073 review).
         self.mode_dependent: list[tuple[str, int]] = []
+        # The TEXT NODES a reader meets, in document order — one entry per text node
+        # in the rendered tree, tags gone and entities decoded by the tokenizer. A
+        # DOCUMENT-TREE recording (declared in `_RECORDINGS`, so an honoured
+        # `<frameset>` clears it with the rest): the wording golden's input, and the
+        # one question in this module that has to be answered by the tree rather than
+        # by the source, because the source cannot distinguish `<<` from a tag
+        # (#14073 review, P0 — see `extract_visible_text`).
+        self.text: list[str] = []
         # The `href` value of the FIRST `<base>` the browser parses, or None. The
         # document's BASE URL is not its own URL once a `<base href>` is present,
         # and every relative/fragment-only link resolves against it — so a
@@ -937,6 +961,29 @@ class _AnchorHrefParser(HTMLParser):
             and _SCRIPT_IN_SCRIPT.search(data)
         ):
             self.wedged_reason = "script-data-escaped"
+        # The text a reader MEETS: outside every suppressed region (raw text, inert
+        # `<template>` content, `<noscript>` under scripting) and inside a subtree
+        # that renders (`_open_elements`' inherited flag: `hidden`, `_UNRENDERED`
+        # element types, a `_RENDERS_WITH_ATTR` element before its attribute
+        # arrives).
+        #
+        # ⛔ `_RAW_RENDERS` IS THE OTHER HALF, and it is a fail-open if dropped: the
+        # raw-text family is suppressed for the TOKENIZER's sake, and three of its
+        # members (`<textarea>`, `<xmp>`, `<plaintext>`) render their text anyway —
+        # so "suppressed" is not "unreadable" for this question, and the recording
+        # admits those and only those. A `<textarea>` inside an inert `<template>` is
+        # still dropped, because `template` is in the stack too.
+        #
+        # ⛔ NOT `self._foreign`-gated, unlike the anchor and heading recordings: text
+        # inside `<svg>`/`<math>` IS rendered (only markup inside it is read by
+        # different rules), and dropping it here would be the fail-open direction for
+        # the wording golden.
+        if (
+            not self.wedged_reason
+            and all(tag in self._RAW_RENDERS for tag in self._suppress)
+            and all(renders for _tag, _container, renders in self._open_elements)
+        ):
+            self.text.append(data)
 
     def parse_comment(self, i: int, report: bool = True) -> int:
         """End an empty comment where the spec does (review finding, #3962).
@@ -1288,3 +1335,54 @@ def extract_first_base_href(html: str) -> str | None:
     parser.feed(html)
     parser.close()
     return parser.base_href
+
+
+def extract_visible_text(html: str) -> str:
+    """The TEXT a reader sees in ``html``, tags removed and entities decoded.
+
+    ⛔ A REGEX OVER THE SOURCE CANNOT ANSWER THIS, and the difference is a fail-open
+    on any wording golden built on it (#14073 review, P0, measured). ``<`` starts a
+    tag ONLY when the next character begins a tag name (an ASCII letter), ``/``,
+    ``!`` or ``?``; for anything else the WHATWG tokenizer's tag-open state takes its
+    ``anything else`` branch and emits the ``<`` as TEXT (13.2.5.6). So
+
+        < FalkorDB holds a slice of the record; above the allowance for your tier … >
+
+    is a line a reader meets, and ``re.sub(r"<[^>]+>", " ", …)`` deletes it whole —
+    the golden matched while the page had grown a contradicting claim. Measured:
+    inserting exactly that line into the `#storage` section left the wording golden,
+    the vocabulary scan (which reads this same text) and the attribute allowlist all
+    green.
+
+    It fails in the OTHER direction too, which is why this is not a one-line patch to
+    the pattern: a regex counts text a reader never meets as visible — a `<script>`
+    body inside the section reddened the golden on legal markup (measured). Both
+    directions come from the same mistake, so the answer comes from the same tree the
+    rest of this module reads: raw-text and inert regions are dropped by `_suppress`,
+    and any subtree a reader does not meet is dropped by the inherited render flag
+    (`hidden`, `_UNRENDERED`, a closed `<details>`/`<dialog>` — see
+    `_unmet_by_reader`).
+
+    Text nodes are returned joined by a single space, in document order, so an inline
+    element still separates words the way the tags it replaced did. Whitespace is NOT
+    folded here: the caller decides how to compare, and this module does not know
+    whether it is being asked about a golden or a fragment.
+
+    Raises ValueError when the parse WEDGED, rather than returning the text of a
+    partial tree: the wedge reasons (`frameset`, the script-data escaped states) are
+    exactly the ones where a browser's rendering differs from this model in a way it
+    cannot see, and partial text would read as a SHORTER section — the fail-open
+    direction the wording golden exists to close.
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    if parser.wedged_reason:
+        raise ValueError(
+            f"the document wedged ({parser.wedged_reason}), so its rendered text is "
+            f"not knowable from here: this model cannot tell which of the remaining "
+            f"bytes a browser renders. Refusing rather than returning a partial "
+            f"section, which would read as missing text and not as an unreadable "
+            f"page. Re-shape the markup so the tree is unambiguous."
+        )
+    return " ".join(parser.text)

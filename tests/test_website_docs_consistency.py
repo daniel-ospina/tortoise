@@ -59,6 +59,7 @@ from tests._html_links import (  # noqa: E402
     extract_first_base_href,
     extract_heading_positions,
     extract_mode_dependent_regions,
+    extract_visible_text,
     is_blog_entry,
 )
 from tools.ci_selection import load_manifest, select  # noqa: E402
@@ -1787,9 +1788,9 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
     (#14073 review). Widening the allowlist later means re-widening this scan in
     the same change.
     """
-    section = re.sub(r"[^a-z0-9]+", " ", _visible_text(_docs_section()).lower())
+    caught = _banned_vocabulary(_docs_section())
     for word, why in _BANNED_VOCABULARY.items():
-        assert word not in section, (
+        assert word not in caught, (
             f"the #storage section contains {word!r}: {why}. Keep it in the "
             f"same voice as the capacity notices (#13998/#14013)."
         )
@@ -1824,15 +1825,31 @@ _REVIEWED_SECTION_HREFS = ("mailto:hello@premiselabs.co",)
 
 
 def _visible_text(markup: str) -> str:
-    """What a reader sees: tags to spaces, entities decoded, whitespace folded.
+    """What a reader sees: the rendered tree's text, entities decoded, whitespace folded.
 
-    The two punctuation fixes exist so the golden reads like prose and its diff
-    is reviewable: stripping an inline `<strong>`/`<a>` leaves a space before the
-    following `.` or `,` (`your record</strong> ,`), which is not what is on the
-    page.
+    ⛔ NOT A REGEX OVER THE SOURCE, and the difference was a fail-open on this very
+    golden (#14073 review, P0, measured). The previous body was
+    `re.sub(r"<[^>]+", " ", markup)`, which deletes everything from ANY `<` to the
+    next `>` — but a `<` starts a tag only when the next character is an ASCII
+    letter, `/`, `!` or `?`; otherwise the tokenizer emits it as TEXT (WHATWG
+    13.2.5.6, tag-open state). So a line added inside `#storage` —
+    `< FalkorDB holds a slice of the record; above the allowance for your tier the
+    least-used items are permanently deleted after thirty days >` — was rendered by
+    every browser and DELETED by this function: the wording golden, this module's
+    own vocabulary scan and the attribute allowlist all reported the section clean
+    while a reader met a contradicting claim. A `<script>` body counted the other
+    way, reddening the golden on markup no reader sees.
+
+    The answer therefore comes from `extract_visible_text`, the render-fidelity
+    seam the rest of this PR already uses: suppression (raw text, inert
+    `<template>`, `<noscript>` under scripting) and the inherited render flag
+    (`hidden`, unrendered element types, a closed `<details>`) decide what exists to
+    be read. The two punctuation fixes below stay here because they are about
+    PRESENTATION of the compared string, not about the tree: stripping an inline
+    `<strong>`/`<a>` leaves a space before the following `.` or `,`, which is not
+    what is on the page.
     """
-    text = html_unescape(re.sub(r"<[^>]+>", " ", markup))
-    text = " ".join(text.split())
+    text = " ".join(extract_visible_text(markup).split())
     for spaced in (" .", " ,", " ;", " :"):
         text = text.replace(spaced, spaced[1])
     return text
@@ -3079,6 +3096,170 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
         "a `<base>` inside an inert `<template>` is not one a browser applies, so "
         "honouring it would move the base to a page no reader navigates from"
     )
+
+    # ⛔ THE FIRST ONE WINS (#14073 review round 5, P2). The predicate takes the
+    # FIRST `<base href>` a browser parses, because a later one is ignored —
+    # keeping the LAST instead would resolve every TOC entry against a base no
+    # browser uses, which is a fail-open on the same-page question this test
+    # exists to close. Measured: reverting `_record_base` to keep the last base
+    # left the whole suite green, because every other row injects exactly ONE.
+    two_bases = page.replace(
+        "<head>",
+        '<head><base href="https://evil.example/"><base href="/">',
+        1,
+    )
+    assert two_bases != page
+    assert extract_first_base_href(two_bases) == "https://evil.example/", (
+        "with two `<base href>` elements a browser applies the FIRST and ignores "
+        "the second; taking the last means the bound resolves links against a "
+        "base no reader navigates from"
+    )
+    # …and BOTH directions: the second base must not be read when the first IS the
+    # page, or "take the first" could be satisfied by "take whichever is foreign".
+    assert extract_first_base_href(
+        page.replace("<head>", '<head><base href="/"><base href="https://evil.example/">', 1)
+    ) == "/", (
+        "the first `<base>` is authoritative even when a LATER one is foreign; "
+        "preferring the foreign one would red a page a browser renders fine"
+    )
+
+
+def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
+    """The golden compares what a browser RENDERS, not a regex over the source.
+
+    ⛔ THIS WAS A P0 FAIL-OPEN (#14073 review round 5, measured). `_visible_text`
+    was `re.sub(r"<[^>]+", " ", markup)`, which deletes everything from ANY `<` to
+    the next `>` — but a `<` starts a tag only when the next character is an ASCII
+    letter, `/`, `!` or `?`; otherwise the tokenizer emits it as TEXT (WHATWG
+    13.2.5.6, tag-open state, "anything else"). So this ONE LINE added inside the
+    section was rendered by every browser and deleted by the pin:
+
+        < FalkorDB holds a slice of the record; above the allowance for your tier
+        the least-used items are permanently deleted after thirty days >
+
+    and the wording golden, the vocabulary scan (same text) and the allowlist all
+    reported the section clean. The same mistake fails in the loud direction too: a
+    `<script>` body counted as visible text and reddened the golden on markup no
+    reader meets.
+
+    Both directions are driven below, each asserting its own premise so a mutant
+    that trips a different pin cannot be read as covering this one.
+    """
+    section = _docs_section()
+    reviewed = " ".join(STORAGE_SECTION_GOLDEN.read_text(encoding="utf-8").split())
+
+    # 1. Rendered-but-not-markup: a `<` that begins no tag. The other two pins are
+    #    asserted UNCHANGED, so only the wording/vocabulary half can catch it.
+    claim = (
+        "< FalkorDB holds a slice of the record; above the allowance for your tier "
+        "the least-used items are permanently deleted after thirty days >"
+    )
+    escaped = section.replace("</h2>", f"</h2>\n{claim}", 1)
+    assert escaped != section, "the control could not insert the claim"
+    assert _attributes_outside_allowlist(escaped) == [], (
+        "premise: the claim adds no attribute, so the allowlist pin cannot be what "
+        "catches it"
+    )
+    assert sorted(set(extract_anchor_hrefs(escaped))) == list(_REVIEWED_SECTION_HREFS), (
+        "premise: the claim adds no href, so the destination pin cannot catch it"
+    )
+    assert _banned_vocabulary(escaped) == [
+        "allowance", "falkor", "tier",
+    ], (
+        "the vocabulary scan reads visible text too, so it must see the claim — the "
+        "regex body did not and reported []"
+    )
+    with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+        _assert_storage_section_reviewed(escaped)
+
+    # ⛔ THE MECHANISM, pinned: the text the pin now reads really is the text the old
+    #    regex deleted. Without this the two assertions above would also pass on a
+    #    page whose claim happened to be inside a tag, and nothing would record WHY
+    #    the regex was wrong.
+    assert claim in _visible_text(escaped), (
+        "a `<` followed by a non-tag character is TEXT to a browser; the wording "
+        "pin must read it"
+    )
+    assert re.sub(r"<[^>]+>", " ", escaped).find(claim) == -1, (
+        "premise no longer holds: the raw-source stripper this replaced DOES keep "
+        "the claim, so this control is no longer demonstrating the defect"
+    )
+
+    # 2. The loud direction: text a reader never meets must not move the golden.
+    for name, injected in (
+        ("script", "<script>var q='nothing is lost';</script>"),
+        ("style", "<style>.x::after{content:'tier'}</style>"),
+        ("hidden", "<p hidden>ghost claim about allowance and tier</p>"),
+        ("closed details", "<details><summary>summary</summary>ghost claim</details>"),
+        ("noscript", "<noscript>ghost claim about allowance</noscript>"),
+        ("iframe fallback", "<iframe>ghost claim about allowance</iframe>"),
+    ):
+        mutant = section.replace("</h2>", f"</h2>{injected}", 1)
+        assert mutant != section, f"the {name} control could not inject"
+        assert " ".join(_visible_text(mutant).split()) == reviewed, (
+            f"a {name} region holds text no reader meets; counting it reddens the "
+            f"golden on legal markup, which is what the regex body did"
+        )
+
+    # 3. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
+    #    element whose content a reader DOES meet must be counted. `_RAW` is
+    #    suppressed for the TOKENIZER's sake, so "suppressed" is not "unreadable" —
+    #    dropping `<textarea>`/`<xmp>`/`<plaintext>` text would hide a contradicting
+    #    sentence from the very pin that exists to catch it (fail-OPEN), and the
+    #    regex body this replaced counted it. Driven for each, one at a time.
+    for name, element in (
+        ("textarea", "<textarea>ghost claim about allowance</textarea>"),
+        ("xmp", "<xmp>ghost claim about allowance</xmp>"),
+        ("plaintext", "<plaintext>ghost claim about allowance</plaintext>"),
+    ):
+        mutant = section.replace("</h2>", f"</h2>{element}", 1)
+        assert mutant != section, f"the {name} control could not inject"
+        assert "ghost claim about allowance" in " ".join(_visible_text(mutant).split()), (
+            f"`{name}` renders its text, so a claim written there is one a reader "
+            f"meets; a recording that drops the whole raw-text family hides it"
+        )
+    # PREMISE for the three rows above: the suppression is real, so "renders" is
+    # the thing being tested and not an artefact of the element never suppressing.
+    assert "ghost claim" not in _visible_text(
+        section.replace("</h2>", "</h2><template><textarea>x</textarea></template>", 1)
+    ), (
+        "a `<textarea>` inside an inert `<template>` is template content: admitting "
+        "the raw-text family must not reach into a subtree no reader meets"
+    )
+
+
+def test_the_toc_block_count_is_pinned_in_both_directions() -> None:
+    """Zero TOC blocks and two TOC blocks must each red, not just "at least one".
+
+    `_docs_section` requires EXACTLY ONE rendered `<div class="toc">`: with none
+    nothing bounds the slice and it becomes the rest of the page; with two, which
+    block is the index is undecidable and the second could advertise a heading the
+    reviewed one does not. That assertion was the ONE guard in the bound that no
+    control drove — weakening `len(tocs) == 1` to `>= 1` left the whole suite green
+    (#14073 review round 5, P2, measured), so a decoy block above the real TOC
+    would silently become the index.
+    """
+    page = DOCS.read_text(encoding="utf-8")
+
+    # PREMISE: the real page has exactly one, and the bound resolves.
+    assert len(extract_anchors_within(page, tag="div", class_token="toc")) == 1
+    assert _docs_section(page=page) == _docs_section()
+
+    # A second RENDERED block above the real one: the index is now ambiguous.
+    first_toc = page.index('<div class="toc"')
+    decoy = '<div class="toc"><a href="#storage-limits">Limits</a></div>'
+    two = page[:first_toc] + decoy + page[first_toc:]
+    assert len(extract_anchors_within(two, tag="div", class_token="toc")) == 2
+    with pytest.raises(AssertionError, match="block\\(s\\) in the document tree"):
+        _docs_section(page=two)
+
+    # …and NONE: nothing bounds the slice, so it would run to the end of the page.
+    stripped = page.replace('class="toc"', 'class="toc-removed"')
+    assert stripped != page
+    assert extract_anchors_within(stripped, tag="div", class_token="toc") == []
+    with pytest.raises(AssertionError, match="block\\(s\\) in the document tree"):
+        _docs_section(page=stripped)
+
 
 
 def test_faq_toc_anchors_all_resolve() -> None:
