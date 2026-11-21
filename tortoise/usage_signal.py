@@ -87,17 +87,35 @@ from zero and produces the same reading — the invariant
 ``test_incremental_equals_cold_replay`` and
 ``test_restart_survives_on_the_checkpoint_alone`` hold it to.
 
-⚠️ **ONE RESIDUAL, NAMED RATHER THAN IMPLIED.** A rotation that rewrites the
-stream's already-folded bytes IN PLACE at the SAME SIZE (a `copytruncate` whose new
-content is exactly as long as the old) is undetectable to any incremental fold: the
-inode, the size and the consumed prefix all still match, so there is nothing to
-notice. The stream's contract is APPEND-ONLY (`O_APPEND`); a `copytruncate`
-rotation must delete the checkpoint, and the alternative — re-hashing the whole
-consumed prefix every call — is the full replay this module exists to avoid. A
-SHRINK is detected (`st_size < offset` ⇒ cold replay), and so is a replacement
-(`dev`/`ino`), including an inode recycled by `rm` + recreate (the prefix
-fingerprint, which is now taken from the descriptor that folded the bytes rather
-than from a fresh `open`).
+⚠️ **ONE RESIDUAL, NAMED RATHER THAN IMPLIED — and its mechanism stated exactly,
+because a reader who believes the prefix check is redundant will remove it.**
+Detected: a replacement (``dev``/``ino``), an inode recycled by ``rm`` + recreate
+(the prefix fingerprint), a SHRINK anywhere (`st_size < offset + folded`), and a
+rewrite that lands in the read→save window (the checkpoint keeps the OLD prefix's
+digest, so the NEXT refresh mismatches and replays from cold).
+**NOT detected:** a rewrite confined entirely BEYOND ``HEAD_FINGERPRINT_BYTES``
+(8192) of an already-folded prefix — the fingerprint cannot see it and re-hashing
+the whole consumed prefix every call is the full replay this module exists to
+avoid. The stream's contract is APPEND-ONLY (``O_APPEND``); a `copytruncate`
+rotation must delete the checkpoint.
+
+⚠️ **A SECOND RESIDUAL, ON THE FROZEN-COUNTER TRACE — named for the same reason.**
+The door refuses an INCOMPLETE counter, and ``lines_skipped`` catches the shape that
+leaves a COMPLETE unparseable line behind. Two shapes leave no such line, so nothing
+in the stream's content can reveal them: a TORN final fragment (never consumed, and
+``_tail_of_bytes_is_capped`` reads an unparseable tail as "not capped" — the next
+write attempt heals it, so that window is one write attempt wide), and a marker
+write that FAILED OUTRIGHT (``ENOSPC`` is both the likeliest cause and correlated
+with hitting the byte cap: serves are dropped, no marker exists, ``capped`` stays
+``False`` and ``lines_skipped`` stays ``0``, so the pass would rank live nodes
+cold). Both need the stream ROTATED; deleting the checkpoint cannot help. Tracked
+in #14084.
+
+⚠️ **A CHECKPOINT IS KEYED BY PARTITION, NOT BY WINDOW.** Two callers alternating
+``window_days`` therefore mismatch the checkpoint on every switch and replay from
+cold — correct (the mismatch is fail-closed, and it is exactly what the identity is
+for), but O(stream) per switch, up to ``USAGE_MAX_BYTES``. One window per stream is
+the shape this module is built for.
 
 ⚠️ **AN EMPTY READING IS NOT "NOTHING IS HOT".** A freshly armed signal reports
 ``served_total == 0`` because nothing has been *observed* yet, not because
@@ -111,10 +129,12 @@ recency, and the reading still looks healthy.
 FAIL DIRECTION
 ==============
 A read never fails because the signal did. Every write failure is swallowed and
-warned once; ``refresh`` returns the last good reading (marked ``stale``) or an
-empty one rather than raising into the caller that wanted a search result. A
-checkpoint that cannot be read is a CACHE MISS, not an error: the stream is
-replayed from cold.
+warned once, and ``refresh`` NEVER raises into the caller that wanted a search
+result: a failure returns an **EMPTY, ``stale`` reading whose** ``error`` **names
+the failure** (it does not return a remembered earlier fold — there is no cached
+in-process reading, deliberately, because the stream is appended by a different
+process). A checkpoint that cannot be read is a CACHE MISS, not an error: the
+stream is replayed from cold.
 
 OFF BY DEFAULT, AND OFF MEANS NOT IMPORTED
 ==========================================
@@ -172,7 +192,17 @@ EVENT_UNRESOLVED = "unresolved"
 #: Checkpoint format version. A checkpoint written by another version is IGNORED
 #: (replayed from cold), never migrated: it is a cache, and a cache that cannot
 #: be read is a miss.
-CHECKPOINT_VERSION = 1
+#:
+#: ⛔ BUMPED TO 2 TOGETHER WITH the `window_days` fold identity, because the bump
+#: is not cosmetic: a version-1 checkpoint carries NO `window_days` field, and
+#: `_deserialise` reads a missing field as ``None`` — which `_checkpoint_matches`
+#: then compared successfully against an UNBOUNDED caller's ``None``. The pre-PR
+#: writer DID prune (when `refresh(window_days=…)` or the env set a window) and
+#: persisted the pruned `entries`, so on upgrade an unbounded read silently
+#: EXTENDED a fold another window had already destroyed — permanently, because
+#: the checkpoint kept matching. Without the bump the fix is not retroactive and
+#: the very defect it removes survives the upgrade it ships with.
+CHECKPOINT_VERSION = 2
 
 #: A single event line longer than this is dropped, for the ledger's reason: the
 #: bound is not what prevents interleaving (one `O_APPEND` write per batch is) —
@@ -408,7 +438,23 @@ def _tail_is_capped(target: Path) -> bool:
             chunk = fh.read()
     except OSError:  # pragma: no cover
         return False
-    for raw in reversed(chunk.split(b"\n")):
+    return _tail_of_bytes_is_capped(chunk)
+
+
+def _tail_of_bytes_is_capped(chunk: bytes) -> bool:
+    """Is the LAST non-empty line of `chunk` our `capped` marker?
+
+    ⛔ THE READ SIDE USES THIS ONE, over the bytes THIS REFRESH ALREADY READ, not
+    a fresh open of the path. `_checkpoint_matches` insists the fold is described
+    by the one descriptor it read and nothing else; a by-path tail read can
+    describe a file the fold never saw (a rotation between the read and the
+    check), so the reader would certify a `capped` verdict about another file.
+    The tail is bounded exactly as the writer's is, so this stays O(1).
+    """
+    if not chunk:
+        return False
+    back = min(len(chunk), MAX_LINE_BYTES + 64)
+    for raw in reversed(chunk[-back:].split(b"\n")):
         line = raw.strip()
         if not line:
             continue
@@ -660,7 +706,6 @@ class _State:
     """The checkpoint's payload — a CACHE of a fold, never the record."""
 
     offset: int = 0
-    source_size: int = 0
     source_dev: int | None = None
     source_ino: int | None = None
     head_sha: str | None = None
@@ -668,6 +713,15 @@ class _State:
     #: The tenant filter this fold was built under. A checkpoint built for one
     #: partition may not be incrementally extended under another.
     partition: str | None = None
+    #: The pruning window this fold was built under — the SAME kind of fold
+    #: parameter as `partition`, and it needs the same binding. Pruning DESTROYS
+    #: entries, so a windowed fold written into the shared cache was inherited by
+    #: the next UNBOUNDED caller with no replay and no signal: `serve_count`
+    #: returned 0 for a coordinate whose serve was still in the stream, and
+    #: `coldest_first` omitted it — so the node read as "no opinion" and the
+    #: caller's creation-recency tie-break took over. That is the failure class
+    #: this module exists to remove, delivered silently by a tuning knob.
+    window_days: float | None = None
     lines_read: int = 0
     lines_skipped: int = 0
     served_total: int = 0
@@ -773,9 +827,28 @@ class UsageReading:
         ``False`` for a CAPPED counter (frozen — ordering it would rank live
         nodes as cold and evict the hottest), for a POOLED one (more than one
         tenant's traffic in one roll-up — ordering it scores one tenant on
-        another's reads), and for a STALE one (no stream).
+        another's reads), for a STALE one (no stream), for one that has observed
+        NO serve yet, for one whose roll-up has NO SURVIVING ENTRIES (the pruning
+        window emptied it — `served_total` is cumulative and cannot see that), and
+        for an INCOMPLETE one (a line it could not read).
         """
-        return not (self.capped or self.pooled or self.stale)
+        return not (
+            self.capped
+            or self.pooled
+            or self.stale
+            or self.served_total == 0
+            # ⛔ A ROLL-UP WITH NO SURVIVING ENTRIES HAS NOTHING TO SPEAK FOR, and
+            # `served_total` cannot see that: it is CUMULATIVE and `prune()` never
+            # decrements it. A window wider than the stream's age therefore left
+            # `entries == {}` with `served_total > 0`, so the door opened over an
+            # empty roll-up and `unserved_keys` declared EVERY candidate unserved
+            # — the creation-recency fallback this module exists to remove,
+            # reached through the documented tuning knob instead of through never
+            # observing. `window_days=0` is refused for exactly this reason; a
+            # window this wide now reaches the same refusal.
+            or not self.entries
+            or self.lines_skipped > 0
+        )
 
     def refusal_reason(self) -> str | None:
         """Why :attr:`orderable` is False, in words a caller can log."""
@@ -792,6 +865,40 @@ class UsageReading:
                 f"{self.tenants} tenant partition(s) are folded together — order one "
                 f"tenant at a time (`refresh(tenant=...)`), or a node looks hot "
                 f"because a different tenant read it"
+            )
+        if self.lines_skipped > 0:
+            # ⛔ WHAT THIS GUARD COVERS, STATED NO WIDER THAN IT IS: a COMPLETE
+            # line that no longer parses — which is what a torn write leaves
+            # behind once the writer's newline repair has turned the fragment into
+            # a line of its own. It does NOT cover two neighbouring shapes, and
+            # saying otherwise is what would stop the next reader from looking:
+            # a TORN final fragment (never consumed, so it never reaches this
+            # counter, and `_tail_of_bytes_is_capped` reads an unparseable tail as
+            # "not capped" — the next write attempt heals it), and a marker write
+            # that FAILED OUTRIGHT (the cap branch's `except Exception` warns once
+            # and returns 0, so ENOSPC — correlated with hitting the byte cap —
+            # drops serves with no marker and no trace at all). Both are named as
+            # a residual in the module docstring and tracked in #14084.
+            return (
+                f"{self.lines_skipped} unreadable stream line(s) — the counter is "
+                f"INCOMPLETE, and a lost `capped` marker is indistinguishable from a "
+                f"stream that never capped. Rotate the stream to clear it: deleting "
+                f"the checkpoint does not, because a cold replay re-reads the same "
+                f"line"
+            )
+        if self.served_total == 0:
+            return (
+                "no serves observed yet — an armed-but-quiet counter has no opinion, "
+                "and treating every candidate as unserved is the creation-recency "
+                "fallback this signal exists to remove"
+            )
+        if not self.entries:
+            return (
+                f"no surviving roll-up entries — {self.pruned:,} entr(ies) last "
+                f"served at or before {self.pruned_before} were pruned by the "
+                f"{USAGE_WINDOW_DAYS_ENV} window, so this reading cannot speak for "
+                f"any coordinate, and treating every candidate as unserved is the "
+                f"creation-recency fallback this signal exists to remove"
             )
         return None
 
@@ -926,8 +1033,18 @@ class UsageReading:
         ⛔ ``[]`` on a refused reading. On a STALE one this would otherwise declare
         **every** candidate unserved — precisely the creation-recency fallback this
         module exists to remove, delivered with no marker at all.
+
+        ⛔ ``[]`` ALSO ONCE ANYTHING HAS BEEN PRUNED, and for the same reason:
+        pruning DELETES the entry ("not served since :attr:`pruned_before`", which
+        is not "unserved"), and it leaves nothing behind to tell the two apart — a
+        candidate absent from ``entries`` may have been pruned or may never have
+        been served, and no field of this reading distinguishes them. Certifying
+        either answer would be a claim the stream does not support, so the honest
+        answer is that this signal declines to certify any of them; the caller
+        keeps its own tie-break, which is the safe direction (an unfilled
+        candidate is not ordered cold).
         """
-        if not self.orderable:
+        if not self.orderable or self.pruned:
             return []
         if label is None:
             seen = {key for (_t, _lbl, key) in self.entries}
@@ -981,7 +1098,7 @@ def _serialise(state: _State) -> dict[str, Any]:
     return {
         "version": CHECKPOINT_VERSION,
         "offset": state.offset,
-        "source_size": state.source_size,
+        "window_days": state.window_days,
         "source_dev": state.source_dev,
         "source_ino": state.source_ino,
         "head_sha": state.head_sha,
@@ -1007,8 +1124,8 @@ def _deserialise(payload: Any) -> _State | None:
 
     ⛔ EVERY FIELD IS VALIDATED, INCLUDING THE ONE CROSS-FIELD INVARIANT the
     prefix check depends on: ``head_len == min(offset, HEAD_FINGERPRINT_BYTES)``.
-    A version-1 checkpoint whose fields are each individually valid but which
-    says ``head_len = 0`` makes ``_state_matches_stream`` short-circuit and
+    A checkpoint whose fields are each individually valid but which says
+    ``head_len = 0`` makes ``_state_matches_stream`` short-circuit and
     disable prefix verification entirely — the only check that catches an
     in-place, same-size replacement. Verified: without that invariant, editing
     only the checkpoint's ``head_len`` merged a replaced stream's history onto
@@ -1034,9 +1151,17 @@ def _deserialise(payload: Any) -> _State | None:
         partition = payload.get("partition")
         if partition is not None and not isinstance(partition, str):
             return None
+        raw_window = payload.get("window_days")
+        if raw_window is not None:
+            try:
+                raw_window = float(raw_window)
+            except (TypeError, ValueError):
+                return None
+            if not raw_window > 0:
+                return None
         state = _State(
             offset=offset,
-            source_size=int(payload.get("source_size") or 0),
+            window_days=raw_window,
             source_dev=(
                 int(payload["source_dev"]) if payload.get("source_dev") is not None else None
             ),
@@ -1138,8 +1263,14 @@ def _save_checkpoint(target: Path, state: _State) -> bool:
         # 0600 stream.
         blob = json.dumps(_serialise(state), separators=(",", ":"), sort_keys=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(blob)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1  # fdopen owns it now
+                fh.write(blob)
+        finally:
+            if fd != -1:  # pragma: no cover — fdopen itself failed
+                with contextlib.suppress(OSError):
+                    os.close(fd)
         os.replace(tmp, target)
         return True
     except Exception as e:  # pragma: no cover — a full disk, an odd path
@@ -1181,28 +1312,6 @@ def _file_lock(target: Path) -> Iterator[None]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             with contextlib.suppress(Exception):
                 handle.close()
-
-
-def _head_sha_from(fh: Any, nbytes: int) -> str | None:
-    """sha256 of the first `nbytes` bytes of an OPEN descriptor (position restored).
-
-    Reading through the caller's descriptor is what makes the fingerprint describe
-    the bytes actually folded — see `_checkpoint_matches`.
-    """
-    if nbytes <= 0:
-        return None
-    try:
-        here = fh.tell()
-        fh.seek(0)
-        head = fh.read(nbytes)
-        fh.seek(here)
-    except (OSError, ValueError):  # pragma: no cover — a closed/odd handle
-        return None
-    if len(head) < nbytes:
-        # The stream is shorter than the prefix it was fingerprinted over — it was
-        # truncated. A short read is not a partial match.
-        return None
-    return hashlib.sha256(head).hexdigest()
 
 
 def _stream_exists(target: Path) -> bool:
@@ -1377,28 +1486,37 @@ def _consume(state: _State, chunk: bytes, *, partition: str | None) -> tuple[int
 
 def _checkpoint_matches(
     state: _State,
-    fh: Any,
+    head_bytes: bytes,
     st: os.stat_result,
     *,
     partition: str | None,
+    window: float | None,
 ) -> bool:
     """Is this checkpoint a fold of THIS stream's consumed prefix? (see refresh)
 
-    Four independent checks, each of which alone would miss a real rotation: the
-    partition the fold was built under, the device/inode pair (a replaced file),
-    the size (a truncated one), and the head fingerprint over a FIXED prefix
-    length (an inode RECYCLED by `rm` + recreate — the size check would pass if
-    the new file happened to be longer).
+    Five independent checks, each of which alone would miss a real rotation or a
+    real fold-parameter change: the tenant partition and the PRUNING WINDOW the
+    fold was built under (both destroy or select entries, so neither may be
+    incrementally extended under a different value), the device/inode pair (a
+    replaced file), the size (a truncated one), and the head fingerprint over a
+    FIXED prefix length (an inode RECYCLED by `rm` + recreate — the size check
+    would pass if the new file happened to be longer).
 
-    ⛔ **THE HEAD COMES FROM THE CALLER'S ONE DESCRIPTOR**, never from a fresh
-    `open`. Reading the prefix by path let the fingerprint certify bytes the fold
-    never saw: a `copytruncate` (SAME inode) between the read and the save was
-    invisible to the device/inode check, `_head_sha(target, …)` then hashed the
-    NEW content, and the checkpoint persisted a fold describing a file that no
-    longer existed — reported `stale=False, replayed=False`, and never
-    self-healing because the inode had not changed.
+    ⛔ **THE PREFIX IS THE BYTES THE CALLER READ *BEFORE* THE BODY**, never a
+    re-read from the descriptor after folding. Taking it afterwards let the
+    fingerprint certify bytes the fold never saw: an in-place rewrite landing in
+    the read→save window was hashed as the NEW content, the checkpoint persisted a
+    fold describing a file that no longer existed, and nothing ever re-checked
+    (inode, size and the re-read prefix all agreed with themselves). Measured: 4
+    coordinates the stream did not contain reported as current, `orderable=True`,
+    permanently, while a cold replay of the same file showed a different set.
+    Capturing BEFORE the body read means such a rewrite leaves the OLD prefix's
+    digest in the checkpoint, the next refresh mismatches, and the fold replays
+    from cold — fail-closed and self-healing.
     """
     if state.partition != partition:
+        return False
+    if state.window_days != window:
         return False
     if state.source_dev is not None and st.st_dev != state.source_dev:
         return False
@@ -1410,9 +1528,16 @@ def _checkpoint_matches(
         # Nothing was consumed, so there is no prefix to compare — the size and
         # inode checks above are the whole test.
         return True
-    if state.head_sha is None:
+    if state.head_sha is None or len(head_bytes) < state.head_len:
         return False
-    return _head_sha_from(fh, state.head_len) == state.head_sha
+    return hashlib.sha256(head_bytes[: state.head_len]).hexdigest() == state.head_sha
+
+
+#: ``refresh(window_days=…)``'s "resolve it from the environment" sentinel. A
+#: plain ``None`` default could not distinguish "not given" from "no window", so
+#: an env-set window could not be turned OFF per call — the documented tuning knob
+#: in one direction only.
+ENV_WINDOW = "env"
 
 
 def refresh(
@@ -1420,7 +1545,7 @@ def refresh(
     *,
     tenant: str | None = ALL_TENANTS,
     now: datetime | None = None,
-    window_days: float | None = None,
+    window_days: float | str | None = ENV_WINDOW,
     force: bool = False,
 ) -> UsageReading:
     """Bring the roll-up up to date and return the reading. NEVER raises.
@@ -1435,21 +1560,22 @@ def refresh(
     **Recomputed from cold when it must be.** The checkpoint is a cache. It is
     discarded and the stream replayed from zero when it is missing, unreadable,
     written by another :data:`CHECKPOINT_VERSION`, built under a different
-    ``tenant`` filter, or when the stream is not the one it was built from — a
-    different device/inode, a shorter file (truncated or rotated), or a
-    fingerprint mismatch on the consumed prefix (an inode recycled by ``rm`` +
-    recreate). Replay must produce the SAME reading as the incremental path; that
-    is the invariant the tests hold it to, and it is what makes the signal derived
-    rather than authoritative.
+    ``tenant`` filter or ``window_days``, or when the stream is not the one it was
+    built from — a different device/inode, a shorter file (truncated), or a
+    fingerprint mismatch on the prefix read before the body (an inode recycled by
+    ``rm`` + recreate, or a rewrite during the previous refresh). Replay must
+    produce the SAME reading as the incremental path; that is the invariant the
+    tests hold it to, and it is what makes the signal derived rather than
+    authoritative.
 
     ⚠️ **The invariant is over the SURVIVING SET, not over every cumulative
-    counter.** With ``window_days`` pruning ON, a cold replay sees events an
-    incremental fold already pruned away, so ``pruned`` and a re-served key's
-    ``serve_count`` legitimately differ between the two paths: pruning is
-    history-dependent by design, and claiming otherwise would be a claim the code
-    does not make. ``test_replay_matches_the_surviving_set_under_a_window`` pins
-    what IS guaranteed; with pruning off (the default) the whole reading is
-    identical, which is what the other replay tests assert.
+    counter.** With pruning ON, a cold replay sees events an incremental fold
+    already pruned away, so ``pruned`` and a re-served key's ``serve_count``
+    legitimately differ between the two paths: pruning is history-dependent by
+    design, and claiming otherwise would be a claim the code does not make.
+    ``test_replay_matches_the_surviving_set_under_a_window`` pins what IS
+    guaranteed; with pruning off the whole reading is identical, which is what the
+    other replay tests assert.
 
     ``tenant`` defaults to :data:`ALL_TENANTS`, which folds every partition and
     then reports ``pooled`` when it saw more than one — so the ordering door
@@ -1457,15 +1583,32 @@ def refresh(
     id (or ``None`` for the unpartitioned namespace) to order one tenant.
 
     ``window_days`` prunes entries whose last serve is older than the window,
-    bounding the roll-up's memory. ``None`` (default) keeps every entry, so
-    ``serve_count`` is exact. Pruning is a separate, opt-in bound and it is
-    reported (:attr:`UsageReading.pruned`, :attr:`UsageReading.pruned_before`).
+    bounding the roll-up's memory. The default ``"env"`` reads
+    ``TORTOISE_USAGE_SIGNAL_WINDOW_DAYS``; ``None`` means NO window (and, unlike
+    the env var's absence, can turn an env-set window off per call). Pruning is a
+    separate, opt-in bound and it is reported (:attr:`UsageReading.pruned`,
+    :attr:`UsageReading.pruned_before`). A non-positive value is refused as
+    unbounded, never treated as "prune everything".
     """
     target = Path(path) if path is not None else usage_path()
     ref = now or datetime.now(UTC)
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=UTC)
-    window = window_days if window_days is not None else _window_days()
+    if window_days == ENV_WINDOW:
+        window = _window_days()
+    else:
+        window = window_days if isinstance(window_days, int | float) else None
+        if window is not None and not window > 0:
+            # ⛔ ZERO IS NOT "PRUNE EVERYTHING". A bound of zero would empty the
+            # roll-up, which is never the intended reading of a tuning knob, and
+            # `_window_days()` already refuses it from the env.
+            _warn_once(
+                "window-zero",
+                "usage signal: window_days=%r is not positive — the roll-up is "
+                "running UNBOUNDED for this call",
+                window_days,
+            )
+            window = None
     window_started: str | None = None
     if window is not None:
         window_started = (ref - timedelta(days=window)).isoformat(timespec="seconds")
@@ -1477,24 +1620,19 @@ def refresh(
         return _empty_reading(target, replayed=True, stale=True, error="no stream")
 
     # ⛔ A PATH THAT CANNOT NAME A CHECKPOINT MUST NOT RAISE OUT OF HERE. This
-    # function is documented "NEVER raises" and it is on the armed consumer's
-    # path (a per-pass scorer), not the unarmed writer's. `with_suffix` raises
+    # function is documented "NEVER raises" and it is on the armed consumer's path
+    # (a per-pass scorer), not the unarmed writer's. `with_suffix` raises
     # `ValueError` for an empty name — `TORTOISE_USAGE_SIGNAL_PATH=.` reaches it
-    # from configuration alone — and `checkpoint_path` was computed outside every
-    # guard, so one env typo took down the reader while the writer degraded
-    # correctly and said nothing.
+    # from configuration alone — and it was computed outside every guard, so one
+    # env typo took down the reader while the writer degraded correctly.
     try:
         ckpt = checkpoint_path(target, tenant=tenant)
     except (ValueError, TypeError, OSError) as e:
         return _empty_reading(target, replayed=True, stale=True, error=f"bad path: {e}")
 
     with _REFRESH_LOCK, _file_lock(ckpt):
-        # ⛔ ONE DESCRIPTOR FOR THE WHOLE REFRESH — stat, prefix, and body. Every
-        # check below and the fingerprint that CERTIFIES the fold must describe the
-        # same bytes; reading any of them by path reopens the window a
-        # same-inode replacement slips through.
         try:
-            fh = open(target, "rb")  # noqa: SIM115 — closed below
+            fh = open(target, "rb")  # noqa: SIM115 — closed in the finally
         except OSError as e:
             return _empty_reading(target, replayed=True, stale=True, error=str(e))
         try:
@@ -1512,17 +1650,25 @@ def refresh(
                     target, replayed=True, stale=True, error="empty stream"
                 )
 
+            # ⛔ THE PREFIX IS READ FIRST, BEFORE THE BODY, FROM THIS DESCRIPTOR.
+            # See `_checkpoint_matches`: a fingerprint taken after the fold
+            # certifies bytes the fold never saw.
+            try:
+                head_bytes = fh.read(HEAD_FINGERPRINT_BYTES)
+            except OSError as e:  # pragma: no cover
+                return _empty_reading(target, replayed=True, stale=True, error=str(e))
+
             state: _State | None = None if force else _load_checkpoint(ckpt)
             replayed = False
             if state is not None and not _checkpoint_matches(
-                state, fh, st, partition=tenant
+                state, head_bytes, st, partition=tenant, window=window
             ):
                 # The stream is not the one this checkpoint describes. A cache
                 # built over a different prefix is worse than no cache: it would
                 # fold new bytes onto another file's history.
                 state = None
             if state is None:
-                state = _State(partition=tenant)
+                state = _State(partition=tenant, window_days=window)
                 replayed = True
             start = state.offset
 
@@ -1531,31 +1677,42 @@ def refresh(
                 chunk = fh.read()
             except OSError as e:  # pragma: no cover — an unreadable stream
                 return _empty_reading(target, replayed=replayed, stale=True, error=str(e))
-            # A `copytruncate` DURING the read leaves the descriptor on the same
-            # inode with a shorter body: the offset we folded from describes a file
-            # that no longer exists. Re-fstat and, if it moved, fold from zero on
-            # what is actually there.
-            try:
-                after = os.fstat(fh.fileno())
-            except OSError as e:  # pragma: no cover
-                return _empty_reading(target, replayed=replayed, stale=True, error=str(e))
-            if (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino) or after.st_size < start:
-                state = _State(partition=tenant)
-                replayed = True
-                start = 0
-                try:
-                    fh.seek(0)
-                    chunk = fh.read()
-                except OSError as e:  # pragma: no cover
-                    return _empty_reading(target, replayed=True, stale=True, error=str(e))
-                st = after
-
             # ⛔ CONSUME ONLY COMPLETE LINES. A torn tail (a crash mid-write, or a
             # writer whose batch we raced) is left UNCONSUMED, so the next refresh
             # re-reads it once it is whole — and is folded exactly once, not zero
             # times and not twice.
             cut = chunk.rfind(b"\n")
             whole = chunk[: cut + 1] if cut >= 0 else b""
+
+            # A rotation DURING the read leaves us holding bytes of a file that no
+            # longer exists. `st_size < start + len(whole)` — not `< start`, which
+            # let a truncation INTO the freshly-read window through and folded
+            # vanished bytes as current.
+            try:
+                after = os.fstat(fh.fileno())
+            except OSError as e:  # pragma: no cover
+                return _empty_reading(target, replayed=replayed, stale=True, error=str(e))
+            if (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino) or (
+                after.st_size < start + len(whole)
+            ):
+                state = _State(partition=tenant, window_days=window)
+                replayed = True
+                start = 0
+                try:
+                    fh.seek(0)
+                    head_bytes = fh.read(HEAD_FINGERPRINT_BYTES)
+                    fh.seek(0)
+                    chunk = fh.read()
+                except OSError as e:  # pragma: no cover
+                    return _empty_reading(target, replayed=True, stale=True, error=str(e))
+                cut = chunk.rfind(b"\n")
+                whole = chunk[: cut + 1] if cut >= 0 else b""
+                try:
+                    after = os.fstat(fh.fileno())
+                except OSError as e:  # pragma: no cover
+                    return _empty_reading(target, replayed=True, stale=True, error=str(e))
+                st = after
+
             lines_folded = 0
             serves_folded = 0
             if whole:
@@ -1564,19 +1721,38 @@ def refresh(
             pruned_now = False
             if window is not None:
                 pruned_now = state.prune(ref - timedelta(days=window))
+            # ⛔ `capped` IS RE-DERIVED FROM THE FILE'S TAIL, never latched. The
+            # remedy the warning names ("rotate it or raise the bound") demonstrably
+            # works — recording resumes — and a latched flag then refused for ever
+            # with a message that had become FALSE (measured: entries 1 → 2 after
+            # raising the cap, `orderable` still False, "STOPPED recording" still
+            # printed). The writer already re-decides its marker from the tail for
+            # the same reason.
+            if whole:
+                # ⛔ RE-DERIVED, not OR-ed into a latch. `or` kept `capped` True
+                # for ever after the bound was raised — while the stream
+                # demonstrably recorded again — and printed "STOPPED recording", a
+                # message that had become false. Derived from the bytes READ from
+                # this refresh's own descriptor (`chunk` runs to EOF), never from a
+                # fresh open of the path: the paragraph above `_checkpoint_matches`
+                # insists the fold is described by the one descriptor it read, and
+                # a by-path tail read can describe a file the fold never saw.
+                state.capped = _tail_of_bytes_is_capped(chunk)
             # An idle refresh — no new bytes and nothing pruned — leaves the
             # checkpoint alone: rewriting the whole entry map on a no-op made a
             # per-pass scorer pay O(entries) for nothing.
             if whole or pruned_now or replayed:
-                state.source_size = st.st_size
                 state.source_dev = st.st_dev
                 state.source_ino = st.st_ino
                 # A FIXED-length prefix (see HEAD_FINGERPRINT_BYTES): the stream is
                 # append-only, so the consumed prefix can never change without the
-                # file being replaced. Read from THIS descriptor, so the fingerprint
-                # certifies exactly the bytes folded above.
+                # file being replaced. Hashed from the bytes read BEFORE the body.
                 state.head_len = min(state.offset, HEAD_FINGERPRINT_BYTES)
-                state.head_sha = _head_sha_from(fh, state.head_len)
+                state.head_sha = (
+                    hashlib.sha256(head_bytes[: state.head_len]).hexdigest()
+                    if len(head_bytes) >= state.head_len and state.head_len
+                    else None
+                )
                 _save_checkpoint(ckpt, state)
             return _to_reading(
                 state,
@@ -1641,7 +1817,7 @@ def _main(argv: list[str] | None = None) -> int:
     # UNPARTITIONED namespace. With `default=None` the last was unreachable from
     # this door, so an operator whose stream went `pooled` had no way to inspect
     # the `None` partition at all.
-    if a.tenant is _CLI_ALL:
+    if a.tenant == _CLI_ALL:
         got = refresh(target)
     elif a.tenant == "":
         got = refresh(target, tenant=None)
@@ -1686,17 +1862,20 @@ def _main(argv: list[str] | None = None) -> int:
         )
     if got.refusal_reason():
         # ⛔ NOT A SUCCESS EXIT. A cron/check reading only the exit code saw 0 on a
-        # capped or pooled counter in the human path while `--json` returned 2 —
-        # and `served_total > 0` short-circuited the guard below, so the two doors
-        # disagreed about the same reading.
+        # capped or pooled counter in the human path while `--json` returned 2, so
+        # the two doors disagreed about the same reading. Both now key on
+        # `refusal_reason()` — which is non-`None` exactly on the complement of
+        # `orderable` — so this door and `--json` cannot drift apart again.
         print(f"⛔ NOT ORDERABLE : {got.refusal_reason()}")
         return 2
-    if not got.served_total:
-        print(
-            "⚠️ no serves folded yet — an armed-but-quiet signal measures nothing. This "
-            "is a MEASUREMENT WINDOW, not a finding about the corpus."
-        )
-        return 2
+    # ⛔ NO `if not got.served_total:` BRANCH HERE ANY MORE. It was unreachable and
+    # its rationale was inverted: `refusal_reason()` refuses a zero-serve reading
+    # (`served_total == 0` is one of its branches), so the human door returned 2 on
+    # the line above and never reached it. Deleting it loses no message — the
+    # "armed-but-quiet counter has no opinion" sentence IS the refusal text printed
+    # by the branch above — and it also stops the note from claiming a
+    # measurement window over a MISSING or EMPTY stream, which a bare
+    # `served_total == 0` test could not tell apart.
     order = got.coldest_first(a.label)
     shown = order[: max(0, a.top)]
     print(f"\ncoldest first ({len(shown)} of {len(order):,}):")

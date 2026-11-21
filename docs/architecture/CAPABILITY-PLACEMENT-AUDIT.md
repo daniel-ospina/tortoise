@@ -73,28 +73,39 @@ HALF — read it, because it changes what the number under each row means.** The
 outside the enumeration whose value was the pin's PLUS this branch's own insert delta: they opened on
 unrelated code at BOTH heads, because a delta is not a re-derivation. Every one of them was then re-taken
 the way the review asked — by opening the line that carries the row's own quoted fragment, never by
-applying an offset — but **where it opens is THIS head, not the pin**: an outside address here now names
-the line that holds its fragment on the tree this document is written against, while the enumeration
-above still names `main` `ae54df166d`. So the census below compares two bases **on purpose** — pin text
-against this head's text, one line per cite — and the drift figure is exactly that comparison, not a claim
-that the document is written at the pin. ⚠️ A reader who opens an outside address at `ccb49741b2ec` will
-land on the wrong line; open it at the head `#13854` names. The alternative — repointing the whole
+applying an offset — but **where it opens is THIS head, not the pin**: an address `#13854` re-derived
+now names the line that holds its fragment on the tree this document is written against, while the
+enumeration above still names `main` `ae54df166d`. So the census below compares two bases **on purpose** — pin
+text against this head's text, one line per cite — and the drift figure is exactly that comparison, not a
+claim that the document is written at the pin. ⚠️ A reader who opens one of THOSE re-derived addresses at
+`ccb49741b2ec` will land on the wrong line; open that set at THIS head. ⛔ That is not a rule for every
+outside address — the `#14022` paragraph below measures the unpinned `sdk.py` cites splitting BOTH ways,
+six of the nine it names exact at the pin. The alternative — repointing the whole
 document back to pin addresses — is the per-row pass the review recommended as its own doc lane, and it is
 NOT done here.
 
 ⚠️ **`#14022` (`d4a8dddc4e`, "take the JSONL off the hosted write path") landed immediately after this
 document's last re-derivation and moved `sdk.py` and `hosted_api.py` under it — so for those two files "the
-tree this document is written against" means the tree BEFORE that commit, and its outside addresses are not
-at this head.** The inserts are NON-UNIFORM, measured per file with `git diff -U0 9bff7c8555 d4a8dddc4e --
+tree this document is written against" means the tree BEFORE that commit: its outside addresses at or after
+the first line it inserts at (the `:15905` in `sdk.py`, `:22606` in `hosted_api.py`) moved under it, and are
+not at this head unless this edition re-derived them (`#14055`), while the ones above those two lines were
+not moved by it at all and still open here.** The inserts are NON-UNIFORM, measured per file with `git diff -U0 9bff7c8555 d4a8dddc4e --
 tortoise/sdk.py tortoise/hosted_api.py`: `sdk.py` `+33` from `:15935`, `+88` from `:16573`, `+100` from
 `:18632` and `+105` from `:53431`; `hosted_api.py` `+36` from `:22695` and `+44` from `:23134`. Only the
 addresses `tests/test_12184_shifted_cites.py` PINS are re-derived at this head (`#14055`) — that set is
 what the guard grades, and it is the only set this edition re-opened — so **an unpinned `sdk.py` cite at or
-after one of those boundaries is stale by the delta in force above it**; re-open it at `9bff7c8555`, the
-head its row was measured against, rather than reading it here. ⛔ Do not repair one by adding the delta:
-that is the false correction `test_12184_shifted_cites.py` was written for.
+after one of those boundaries cannot be resolved to a head by any rule, and the only way is to OPEN the
+line**. It is SPLIT, measured in both directions: §2.3's six `:Event` whole-node reads (`:40752`,
+`:41271`, `:52042`, `:52143`, `:52149`, `:53744`) are exact at the PIN `ccb49741b2ec` and land on a comment
+or a different statement at `9bff7c8555` — every one of the six — while §2.4's `:3716` and row 2b's
+`:3132-3135` and `:19956-19958` are the REVERSE: their fragment is at `9bff7c8555`, the pre-`#14022` tree
+this census was written against, and a comment or different code at the pin. An address in the header's
+`main` group opens at `main` `ae54df166d`. ⛔ A hit on either base is a hypothesis until the line carries
+the fragment the row quotes, and a cite in NEITHER list has an **UNDECLARED** head — the pin is where the
+census USUALLY wrote it, not where it provably is — resolved by opening, never by inference. ⛔ Do not
+repair one by adding the delta: that is the false correction `test_12184_shifted_cites.py` was written for.
 ⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
-(`record_serve.py:468` is in THIS revision's group above; `projection/__init__.py:14169` is in neither list, so it is at the pin),
+(`record_serve.py:468` is in THIS revision's group above; `projection/__init__.py:14169` is in neither list, and opening it there confirms the pin),
 and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
 ratio below is a **whole-document** measurement — every `path.py:NNNN` pair in this file, the `main`-set
 addresses above included — so it is the count of how much of a document written at the pin has since
