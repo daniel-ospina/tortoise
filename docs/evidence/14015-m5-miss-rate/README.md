@@ -47,8 +47,9 @@ criterion 1 is worth three times the tariff.
   figures are ANCHORED to: the artifact's `git_head`, pinned against this line and against
   the instrument's bytes at that commit. ⛔ **It is not the head the run ran at.** The run
   was performed at `5cc6bad05cf2` (the artifact's `provenance.run_git_head`, with the bytes
-  that ran in `provenance.run_tool_sha256`); the only change since then is INVARIANT 3's
-  refusal band, which decides whether a run is refused and cannot move a computed number.
+  that ran in `provenance.run_tool_sha256`); the only change to the instrument since then is
+  INVARIANT 3's refusal band, which decides whether a run is refused and cannot move a
+  computed number.
   A pin checks the pair: the run head's commit time is not after `generated_at`, so an
   anchor can never again be substituted for a run head unnoticed.
 - **Corpus:** `~/.tortoise/session-events/*.jsonl` — 27 files, 738 lines
@@ -378,4 +379,4 @@ re-derive a run — only a re-run can — and nothing here claims otherwise.
 | populations | `:Point` 711 built (funnel recorded: 900 requested, 481 too short, 74 no span, 1 sanitised out, 114 duplicate span), `:Object` 1000 from the `#11901` harvest |
 | harvest | `definite` 156,510 · `ident` 14,494 · `path` 6,031 names |
 | windows | `product/pricing.json` → solo 77 · pro 102 · team 615 MB |
-| generated | see the artifact's `generated_at` / `git_head` |
+| generated | see the artifact's `generated_at`; the commit the run ran at is `provenance.run_git_head`, and `git_head` is the ANCHOR the digest is pinned to |

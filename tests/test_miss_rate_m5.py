@@ -670,13 +670,24 @@ def test_the_run_head_is_a_commit_that_could_have_produced_this_artifact():
     artifact generated 1 h 36 m before its own instrument bytes existed, published
     in a record whose README said "the head the run was performed at". The digest
     pin above cannot see that, because it only ever compares (a) the sha printed in
-    the README with (b) the blob at that sha — both members of the
-    `generated_at`/`git_head` pair were unguarded, and that pair is the one thing
-    that proves a hand re-cut.
+    the README with (b) the blob at that sha — `git_head` WAS guarded against
+    `tool_sha256` one commit earlier, but NOTHING compared the two members of the
+    `generated_at`/`git_head` PAIR, and that pair is the one thing that proves a
+    hand re-cut.
 
     Two halves, both from the run side, so an anchor can never satisfy them:
     the run commit's instrument bytes must hash to `run_tool_sha256`, and its commit
     time must not be AFTER `generated_at`.
+
+    ⛔ **The never-later half is checked WITHOUT git, on purpose** (#2148 review):
+    CI checks out at depth 1 (`python-ci.yml:968`), so no historical commit is in
+    the clone, and a pin whose only home is a git probe SKIPS on the one surface
+    that runs it — measured: with the record's run head replaced by `0`*40 the
+    git-only version still reported `1 skipped`. So `provenance.run_committed_at`
+    carries the run commit's own `%ct` and is compared to `generated_at`
+    unconditionally, and the README half — which needs no history at all — runs
+    BEFORE the skip, exactly as the sibling pin above does it. The git probes then
+    CORROBORATE the recorded timestamp where history exists; they never gate it.
     """
     art = _artifact()
     prov = art["provenance"]
@@ -684,13 +695,36 @@ def test_the_run_head_is_a_commit_that_could_have_produced_this_artifact():
     assert re.fullmatch(r"[0-9a-f]{40}", run_head), (
         f"run_git_head is not a commit sha: {run_head!r}")
 
+    generated = int(datetime.strptime(
+        art["generated_at"], "%Y-%m-%dT%H:%M:%SZ")
+        .replace(tzinfo=UTC).timestamp())
+
+    # ---- UNCONDITIONAL HALF: no git needed, so CI cannot skip past it ----------
+    committed = prov["run_committed_at"]
+    assert isinstance(committed, int) and not isinstance(committed, bool), (
+        f"provenance.run_committed_at must be an integer epoch, got {committed!r}")
+    assert committed <= generated, (
+        f"provenance.run_git_head {run_head[:12]} was committed "
+        f"{committed - generated} s AFTER generated_at ({art['generated_at']}) — an "
+        f"artifact cannot be produced by instrument bytes that did not exist yet, so "
+        f"this field names an ANCHOR substituted for the run")
+
+    # The record must SAY this, not only encode it: the README distinguishes the two
+    # heads, so a reader quoting the figures is not told the anchor is the run.
+    text = README.read_text()
+    assert f"`{run_head[:12]}`" in text, (
+        f"the record never prints the run head `{run_head[:12]}` — it prints only the "
+        f"anchor, which is the substitution this pin exists to forbid")
+
+    # ---- CORROBORATING HALF: only where the history is actually present --------
     exists = subprocess.run(
         ["git", "cat-file", "-e", f"{run_head}^{{commit}}"],
         cwd=ROOT, capture_output=True, text=True)
     if exists.returncode != 0:
         pytest.skip(
-            f"run_git_head {run_head[:12]} is not in this clone (a rebased history "
-            f"or a shallow checkout), so the run anchor cannot be verified here")
+            f"the UNCONDITIONAL half ran and passed; only the git corroboration is "
+            f"unavailable — run_git_head {run_head[:12]} is not in this clone (CI "
+            f"checks out at depth 1, and this branch was rebased)")
 
     ran = subprocess.run(
         ["git", "show", f"{run_head}:tools/miss_rate_m5.py"],
@@ -700,24 +734,13 @@ def test_the_run_head_is_a_commit_that_could_have_produced_this_artifact():
         "provenance.run_tool_sha256 — run_git_head does not name the instrument "
         "that produced these figures")
 
-    committed = int(subprocess.run(
+    actual = int(subprocess.run(
         ["git", "show", "-s", "--format=%ct", run_head],
         cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip())
-    generated = int(datetime.strptime(
-        art["generated_at"], "%Y-%m-%dT%H:%M:%SZ")
-        .replace(tzinfo=UTC).timestamp())
-    assert committed <= generated, (
-        f"provenance.run_git_head {run_head[:12]} was committed "
-        f"{committed - generated} s AFTER generated_at ({art['generated_at']}) — an "
-        f"artifact cannot be produced by instrument bytes that did not exist yet, so "
-        f"this field names an ANCHOR substituted for the run")
-
-    # And the record must SAY this, not only encode it: the README distinguishes the
-    # two heads, so a reader quoting the figures is not told the anchor is the run.
-    text = README.read_text()
-    assert f"`{run_head[:12]}`" in text, (
-        f"the record never prints the run head `{run_head[:12]}` — it prints only the "
-        f"anchor, which is the substitution this pin exists to forbid")
+    assert actual == committed, (
+        f"provenance.run_committed_at says {committed} but {run_head[:12]} was "
+        f"committed at {actual} — the hand-set timestamp does not name that commit's "
+        f"time, so the unconditional half would be checking a number somebody typed")
 
 
 def test_the_artifact_declares_the_graphs_it_leaves_behind():
