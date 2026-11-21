@@ -774,6 +774,42 @@ def test_the_seeded_wrapper_row_reaches_the_decision_table(reaper, monkeypatch, 
     assert "1 candidate(s)" in out, out
 
 
+@pytest.mark.parametrize(
+    "name,is_server",
+    [
+        # Accepted: the kernel name of a redis server, in the forms redis and the
+        # kernel actually produce — including the `setproctitle` title and the
+        # 15-byte `comm` truncation of it.
+        ("redis-server", True),
+        ("redis-server *:6379", True),
+        ("redis-server *:", True),
+        ("redis-server:6379", True),
+        # Refused: other Redis binaries, and names that merely START the same.
+        # A widening here would make the reaper classify `redis-cli` /
+        # `redis-sentinel` as servers and hand them to the kill decision.
+        ("redis-cli", False),
+        ("redis-sentinel", False),
+        ("redis-serverish", False),
+        ("redis-server-x", False),
+        ("redis-serve", False),
+        ("not-redis-server", False),
+        ("Redis-Server", False),
+        ("", False),
+    ],
+)
+def test_the_kernel_name_predicate_accepts_only_redis_server(reaper, name, is_server):
+    """A widening here is a WRONG-KILL class, so it is pinned in both directions.
+
+    Identity is now taken from `comm`/`exe`, which means this predicate decides
+    which processes reach `classify()`. Peer review flagged that only the positive
+    shapes were pinned: a future `^redis` would start feeding `redis-cli` and
+    `redis-sentinel` to the kill decision with no test going red. Same class as
+    the pre-fix bug — an identity predicate that admits the wrong population —
+    just in the other direction.
+    """
+    assert bool(reaper._REDIS_KERNEL_NAME.search(name)) is is_server, name
+
+
 def test_the_pre_fix_identity_filter_is_what_dropped_the_measured_shape(reaper):
     """The root cause, pinned as a FACT about the two predicates.
 
