@@ -1400,9 +1400,12 @@ def _modules_reaching_a_store() -> frozenset[str]:
 
     ⚠️ NOT the whole ban set. `_FORBIDDEN_GRAPH_ROOTS` also lists modules that are
     ORDINARY imports (`tortoise.sdk`, `tortoise.ep`, `tortoise.retry`, …) and
-    matching those would demand a ban on every importer of the public SDK —
-    measured, that flags most of the package, and a direction scan that flags
-    everything protects nothing.
+    matching those would demand a ban on every importer of the public SDK — a large
+    share of the tree, and a direction scan that flags everything protects nothing.
+    ⛔ No count is quoted: this sentence previously said "measured, that flags most
+    of the package", and the measurement is 61 of 305 tree files (20%) — "most"
+    was wrong where a reader would take it as the reason the design is right. The
+    reason is the mechanism, not the size, so the size is gone.
 
     ⚠️ AND THIS SCAN DOES NOT SEE A TREE-RELATIVE REACH: `from .projection import
     FalkorProjection` written in ANOTHER tree module is one hop from the client, and
@@ -1493,6 +1496,18 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
             f"reachability guard is narrower than the roots it declares: "
             f"found={sorted(found)!r}"
         )
+    # ⛔ AND THE SUBPACKAGE WALK — the one narrowing that loses the module this
+    # guard EXISTS because of. `tortoise.projection` reaches the client from
+    # `tortoise/projection/__init__.py`, so it is in `found` ONLY because the walk
+    # descends into subpackages. Narrowing `rglob` to `glob` keeps every row above
+    # green (measured: 100 passed) while dropping it — it is BANNED, so `uncovered`
+    # cannot move either, and the loss is invisible in both directions. Asserted
+    # positively here, on the module whose slip the coverage row's docstring says
+    # must never happen again.
+    assert "tortoise.projection" in found, (
+        f"tortoise.projection reaches the store from a SUBPACKAGE and is not in "
+        f"the scan — the walk does not descend, so every subpackage module is "
+        f"invisible: found={sorted(found)!r}")
     # ⛔ AND THE EXPORT HALF OF THE PREDICATE, synthetically. No module in the tree
     # reaches a store ONLY through an export spelling, so tree data could never hold
     # this branch — reverting it left the whole file green (measured: 100 passed).
