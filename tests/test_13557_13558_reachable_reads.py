@@ -902,10 +902,18 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     routes_head = "ROUTES — answered from the ended population"
     declines_head = "DOES NOT ROUTE — you get the relevance rows"
     boundary_head = "SO A STATE QUESTION THAT DOES NOT ROUTE"
-    for head in (routes_head, declines_head, boundary_head):
-        assert head in doc, (
-            f"the MCP description no longer carries {head!r} — a caller can no "
-            f"longer predict which phrasings route (#14033)")
+    # ⛔ THE THREE HEADS ARE PRESENT **AND IN THIS ORDER**. A bare `head in doc` loop is
+    # tautological — each head is a verbatim substring of `ROUTING_NOTE`, which the
+    # assertion above already requires `in doc`, so it holds under any mutation at all
+    # (#14033 review, P3). The ORDER is the claim that carries weight: the slicing below
+    # reads ROUTES, then DOES NOT ROUTE, then the boundary, and a reordered or merged
+    # section would silently file phrasings under the wrong heading.
+    _heads = [doc.index(head) for head in
+              (routes_head, declines_head, boundary_head)]
+    assert _heads == sorted(_heads) and len(set(_heads)) == 3, (
+        f"the routing block's three sections are not in ROUTES → DOES NOT ROUTE → "
+        f"boundary order (at {_heads}) — a caller reading them in order can no longer "
+        f"predict which phrasings route (#14033)")
     routes = doc[doc.index(routes_head):doc.index(declines_head)]
     declines = doc[doc.index(declines_head):doc.index(boundary_head)]
 
@@ -1421,15 +1429,24 @@ def test_an_ending_question_on_a_family_with_no_lifecycle_keeps_the_text_read(
     # two claims, not on whether the word "event" appears.
     from tortoise.state_intent import MISSED_ROUTE_FAMILY_HINT, MISSED_ROUTE_HINT
 
-    # ⛔ ONE assertion, because the two text probes this replaced could not fail
-    # independently (#14033 review, P3): `hint` is a module CONSTANT on both arms, so
-    # `"no state-question shape applied" not in …` and `"lifecycle" in …` only re-said
-    # what the identity below says, and a mutant that deletes the family arm reds the
-    # `reason == "family"` assertion above before either line is reached. The IDENTITY is
-    # the claim: a shape DID apply here, so this arm must not be handed the shape hint.
+    # ⛔ THE IDENTITY **AND** THE CONTENT, because they pin different things (#14033
+    # review, P3): the identity pins WHICH constant the family arm is handed; it says
+    # nothing about what that constant says. Turning `MISSED_ROUTE_FAMILY_HINT` back into
+    # the shape remedy — the round-7 runaround, "ask it as a whole question", the string
+    # the caller already asked — keeps the identity green (measured at `0f5bfbe6`: the
+    # whole file passed), so the arm must be pinned on its content too. A review at that
+    # head falsified an earlier revision of this comment, which claimed the probes below
+    # "could not fail independently" of the identity; they can.
     assert notice["hint"] == MISSED_ROUTE_FAMILY_HINT != MISSED_ROUTE_HINT, (
         f"the family refusal was answered with the wrong hint ({notice['hint']!r}) — "
         f"the shape arm's remedy tells a caller to re-ask a form they already used")
+    assert "no state-question shape applied" not in notice["hint"].lower(), (
+        f"the family arm is serving the SHAPE remedy ({notice['hint']!r}): a shape DID "
+        f"apply here, so \"no state-question shape applied\" is false and its remedy is "
+        f"the runaround the caller already tried (#14033 round 7)")
+    assert "lifecycle" in notice["hint"].lower(), (
+        f"the family remedy no longer names WHY the population was refused "
+        f"({notice['hint']!r}) — the caller cannot tell this from a shape miss")
 
     # POSITIVE CONTROL — the same question, on a family that HAS a lifecycle: the
     # population IS reached, and there is no notice to report.
