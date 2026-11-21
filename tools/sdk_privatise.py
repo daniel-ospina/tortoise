@@ -344,6 +344,26 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on this tree says no typed site replaced it.
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
 #:
+#: RE-CUT UP (11821, "abf4a5c65f380206") → (11829, "f0301da129c0c584") by the #14062 lane on
+#: `origin/main` `d4a8dddc4e`. ⛔ This one moves the WRONG WAY, so it is justified row by row rather
+#: than by the delta: the pin is a SET digest and a residue that SHRINKS cannot hide a new reference
+#: shape, but an INCREASE can absorb one, so every added row is named. All eight are ordinary-name
+#: rows in three files merged by OTHER lanes — `update` and `query` are retired SDK names, so a plain
+#: mapping spread on an untyped receiver is counted as residue beside `g.query`:
+#:
+#:   * `tools/strip_graph_entity_vectors.py` — +6 `poisoned.update`
+#:   * `docs/evidence/7949-capstone/probes/capstone_measure.py` — +1 `measurement.update`
+#:   * `tests/test_14002_record_only_journal.py` — +1 `sdk._get_proj().g.query`
+#:
+#: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
+#: which is what makes this safe to take: no typed call site is being legitimised by the re-cut. What
+#: made it URGENT is that the pin is graded only on PULL REQUESTS — `main`'s `d4a8dddc4e` carries 12
+#: check-runs and none of them is `surface-guard` — so main drifted 1 row off the pin and every open
+#: PR then graded main's row as its own: #14045 measured `observed: (11822, …)` against the 11821 pin
+#: on a tree that itself derived 11821, while `main` at `38086c1bc5` derived 11822. A stale pin on
+#: main is a red gate on every PR that touches nothing in this population (#14062).
+#: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
+#:
 #: RE-CUT AGAIN → (11833, "c115acaf5bbb4163") by the two onboarding-seed PINS this branch adds
 #: (`tests/test_onboarding_seed.py`, `#13971` review round 8): they call
 #: `surface.create_subject(...)` and `surface.create_edge(...)` on the seed surface, which are
@@ -388,7 +408,13 @@ SWEEP_NAMES = 66
 #: `main`'s number to fix, and this pin takes the MEASUREMENT (11829) rather than `main`'s stale pin,
 #: so none of that drift is attributed to this PR. `--check` on this tree exits 0 with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11841, "53273cee50de5834")
+#:
+#: MERGED AGAIN (`origin/main` `f392bb67d55`, #14059/#14056/#14026) — RE-MEASURED on the merged
+#: tree with `--repin`, never computed from either side's figure: this tree prints
+#: (11843, "a361d47714e2e864"). ⛔ The +2 over the previous merge's 11841 is NOT attributed here by
+#: subtraction; it is a reading of the tree that now carries both sides, and the row-level
+#: attribution for our own +12 stands in the paragraph above.
+SWEEP_RESIDUE = (11843, "a361d47714e2e864")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
