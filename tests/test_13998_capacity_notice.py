@@ -3043,6 +3043,34 @@ def test_a_stale_non_address_on_the_first_rung_does_not_shadow_a_deliverable_one
         assert cp.tables["organizations"][0]["storage_notice_pct"] == 80
 
 
+@pytest.mark.parametrize("junk", ["api", "8f14e45f-ceea-467a-9f0c-2a1b2c3d4e5f"])
+def test_a_non_address_on_the_owner_rung_is_no_email_not_a_failed_send(junk):
+    """⛔ THE GATE APPLIES TO RUNG 3 TOO, where a wrong answer is PERMANENT.
+
+    `_deliverable_address` gates all three rungs, but only rungs 1-2 are exercised
+    end to end above. Rung 3 is the one that matters most: the owner lookup can
+    answer a non-address (the same writers that put `"api"`/UUIDs into
+    `organizations.email` write them here), the ledger stamps ONCE after the
+    provider accepts, and a refused send is never retried — so a non-address
+    reaching the mailer is the notice that is silently never delivered. It must
+    read as `no-email` (the same state as an account with no address at all), not
+    as a `failed` send against an undeliverable string.
+
+    Non-vacuous: with the gate dropped on this rung only, the row still resolves a
+    truthy address and the pass reports `failed`, so both assertions red.
+    """
+    cp = _fake_cp(email=None, customer_email=None)
+    send = _Sender()
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)), \
+         patch("tortoise.supabase_control.owner_email", lambda cp, org_id: junk):
+        out = _pass(cp=cp, send=send, enumerate_orgs=lambda limit=None: [
+            _org_row(email=None, customer_email=None)])
+    assert out["statuses"] == {"no-email": 1}, out
+    assert send.calls == [], "a non-address must never reach the provider"
+
+
 def test_an_account_with_no_address_on_any_rung_is_reported_by_name():
     """The residual, pinned: nothing mailed, and the status says `no-email`."""
     cp = _fake_cp(email=None, customer_email=None)
