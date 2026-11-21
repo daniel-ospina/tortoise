@@ -1125,13 +1125,15 @@ SWEEP_NAMES = 66
 #: receivers (`g.query` ×2 in `tools/graphevent_home.py`, `super().query` ×1 in the test stub), which
 #: is why `--repin` on the tree this branch resolved prints `(11860, "267dce26b4191743")` and not the
 #: `(11857, "ed40203dbbf32b87")` that `main` pins at `e74cf1d13d`. Both readings are measurements of
-#: different trees; read the block at the END for the live pin. ⛔ THE
-#: COINCIDENCE IS NOT THE EVIDENCE — the evidence is that `--repin` run. What makes it expected
-#: rather than lucky is MEASURED too, not assumed: `git diff origin/main` on the resolved tree
-#: touches exactly TWO files, and every line it adds is either `#:`-prefixed prose or the single
-#: docstring figure in `tests/test_sdk_privatise_sweep.py` — not one executable line. `edits_for`
-#: walks the AST and cannot see a comment, and a docstring is a `Constant`, not an `Attribute`, so
-#: this branch can move no row in either direction, which is why the two readings agree.
+#: different trees; read the block at the END for the live pin. ⛔ THE "NO EXECUTABLE LINE" REASONING
+#: THAT ONCE STOOD HERE IS DELETED, not reworded: it argued the resolved tree's diff against
+#: `origin/main` touched "exactly TWO files" and added "not one executable line", so "this branch
+#: can move no row in either direction, which is why the two readings agree". Measured at the tree
+#: this branch actually resolved: `git diff --numstat origin/main HEAD` is FIFTEEN files and
+#: `tools/graphevent_home.py` alone is 215/47 — executable, and the two readings do NOT agree (11860
+#: against 11857). ⛔ A REASON REFUTED BY ITS OWN NUMBERS IS WORSE THAN NO REASON, and it is the
+#: shape this run exists to police: the +3 attribution two blocks below is the evidence, and a
+#: reader who took the deleted sentence would have concluded the pin must NOT have moved.
 #: ⛔ NEITHER SIDE'S FIGURE IS INHERITED BY ARITHMETIC: this branch's own tree `1b0db04894` measured
 #: `(11840, "b7eb08ff3acdcce4")` (the block above), and the `#14012` block above independently
 #: reports the SAME 11840 for that commit — "`--check` on a detached worktree of `1b0db0489408`
@@ -1269,22 +1271,16 @@ SWEEP_NAMES = 66
 #: exists to REPORT, not typed SDK call sites. `11857 + 3 = 11860` is a CROSS-CHECK of the two
 #: measurements, never their evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
-#: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed on
-#: it. `origin/main` `1b0db0489408` COMMITS `(11843, "6aed5368ffa10513")` while its tree MEASURES
-#: `(11840, "b7eb08ff3acdcce4")` — measured, not asserted: `--repin` in a worktree at that commit
-#: prints the second pair, so `--check` exits 1 on main itself. (The pair `(11835,
-#: "891187f5a4636487")` named here previously is committed at `2c0d66e2ec`, where the committed line
-#: and the tree DO agree — it was the wrong example for this rule, not a wrong rule.) So a reader who
-#: takes the committed line as the base concludes a live pin is off
-#: by rows it is not off by, and that a green `--check` is false. It is not: re-measured on the tree
-#: `--check` is pointed at, the pair is the one that tree prints (#14183 review round 5, finding 2 —
-#: a pair CALLED FALSE while `--check` was green, falsified by measurement rather than argument).
+#: ⛔ AN ERRATUM ON THAT ILLUSTRATION, then the rule this run lives by. (The pair `(11835,
+#: "891187f5a4636487")` named in an earlier cut of the block above is committed at `2c0d66e2ec`,
+#: where the committed line and the tree DO agree — it was the wrong EXAMPLE for the rule, not a
+#: wrong rule; `1b0db0489408` above is the instance where they genuinely disagree. Two lanes restored
+#: this block concurrently, which is why it says the rule once, above, and only the erratum here.)
 #: ⛔ AND THE GROUND RULE FOR EVERY BLOCK IN THIS RUN: all blocks above are KEPT, because each is a
 #: true measurement of the tree it NAMES — including the ones no tree on this branch prints any more,
 #: which is what a measurement log is for. A later merge re-measures the pin rather than deleting a
 #: previous reading; if a block conflicts with the live pin, the block is HISTORY and the last one is
-#: the PIN. (This paragraph itself was dropped by a merge resolution and is restored here on review,
-#: together with the round-5 record above, because neither is duplicate prose.)
+#: the PIN.
 #: ⛔ RESTORED AT THE RE-CUT — the resolution that merged `origin/main` `9f83a63bfab7` into this
 #: branch kept EVERY `main` block and dropped THREE OF THIS BRANCH'S OWN: the "SECOND cut" block,
 #: the "RE-MEASURED AGAIN after merging `origin/main` `e74cf1d13da7`" block, and the "THE BASE
