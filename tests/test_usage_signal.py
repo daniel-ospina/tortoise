@@ -1443,10 +1443,17 @@ def test_no_graph_dependency() -> None:
         must report the module that import put in `sys.modules`. That row is what
         closes the keep-list class for good — a filter keyed on `set(injected)` (empty
         there) or on any fixed list of roots has to carry the WHOLE derivation, i.e.
-        the whole ban set, which is no narrowing at all. Measured on the previous head:
-        a six-literal keep-list (the three named controls plus `tortoise.cypher_guard`,
-        `tortoise.projection`, `tortoise.retry`) was **102 passed** and left the probe
-        blind to `tortoise.acl_graph_users` and `tortoise.hosted_backup`; it reds here.
+        the whole ban set, which is no narrowing at all. ⛔ THE TWO SHAPES LAND ON
+        DIFFERENT ROWS, so naming the wrong one is how a load-bearing row gets deleted
+        — the #14118 item 2 class. `set(injected) | <six literals>` (the three named
+        controls plus `tortoise.cypher_guard`, `tortoise.projection`, `tortoise.retry`)
+        was **102 passed** on a head carrying the injected-witness rows ALONE, and left
+        the probe blind to `tortoise.acl_graph_users` and `tortoise.hosted_backup` — the
+        measurement the verdict row below states, on the same shape. A PLAIN
+        six-literal keep-list was never green once this row and the per-root imports
+        below existed: measured at `647ca930ce`, it is **1 failed / 101**, and the
+        failure is at the injected-everything row rather than at a negative. Both red
+        here.
         What remains is only PREDICTION of this test's inputs, the same residual as
         above, and a narrowed child now reds BY ITSELF instead of merely being
         undetectable.
@@ -1642,6 +1649,24 @@ def test_no_graph_dependency() -> None:
         "the matcher is not observing this run at all (it answers empty for the "
         "subject's own import, which is the leak this leg exists to detect), and an "
         "EXTRA name is that leak (#14118 item 1)")
+
+    # ⛔ AND THE INJECTED ROWS ABOVE TAKE THEIR EXPECTATION FROM THE SAME TUPLE THEY
+    # HAND IN — so a `_probe` that DERIVES its answer from `injected` satisfies all
+    # three BY CONSTRUCTION. Measured: short-circuiting `_probe` to
+    # `_matching(injected)` when `injected` is non-empty leaves `_all_roots`, `_sub`
+    # and `leaked` every one of them green (**102 passed**), and so does intersecting
+    # the real result with `set(injected)`. That is an ECHO pin, not a witness, and no
+    # row above can tell the difference because each supplies one input and asks for
+    # it back. The row below demands a REAL root back in the SAME run as the injected
+    # witness, which neither shape can fake: `tortoise.hosted_backup` is a banned root
+    # that no injected name implies, so an answer built from `injected` loses it.
+    _mixed = _probe("import tortoise.hosted_backup", "falkordb")
+    assert _mixed == {"tortoise.hosted_backup", "falkordb"}, (
+        f"a run that both imports a real root and carries an injected witness must "
+        f"report BOTH: got {sorted(_mixed)}. A missing injected name means injection "
+        "is not reaching the child; a missing REAL root means the answer was derived "
+        "from `injected` instead of from what the child printed, which satisfies every "
+        "injected row above by construction and witnesses nothing (#14118 item 1)")
 
     # ⛔ AND THE VERDICT IS ALSO GRADED ACROSS TWO IMPORTS THROUGH `_probe` ITSELF, so a
     # filter placed INSIDE the production path is graded here too, because the injected witness
