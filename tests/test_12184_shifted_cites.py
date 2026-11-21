@@ -679,9 +679,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "159 of this document's 231",
-        "dedupes the **345** as-written spellings to 231 — **114**",
-        "345 written spellings → 231 pairs → 114 collisions → 159 drifters of the 231",
+        "159 of this document's 229",
+        "dedupes the **345** as-written spellings to 229 — **116**",
+        "345 written spellings → 229 pairs → 116 collisions → 159 drifters of the 229",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -2338,12 +2338,12 @@ def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
 #: convention `_PINS` states), and `test_..._range_anchors_are_inside_their_range` below proves the anchor is
 #: in the range the token names — without it a range row could pin a line the range does not cover.
 _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
-    ("sdk.py:18035", "tortoise/sdk.py", 18035, "\"MATCH (p:Point {id:$id})-[:extractedFrom]->\"", 2),
+    ("sdk.py:18035", "tortoise/sdk.py", 18035, "\"MATCH (p:Point {id:$id})-[:extractedFrom]->\"", 1),
     ("sdk.py:41728", "tortoise/sdk.py", 41728, "\"MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NUL", 3),
     ("sdk.py:42486", "tortoise/sdk.py", 42486, "\"MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url\",", 1),
     ("sdk.py:58966", "tortoise/sdk.py", 58966, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
-    ("sdk.py:20141-20144", "tortoise/sdk.py", 20144, "\"AND coalesce(n.is_episodic, false) <> true \")", 1),
-    ("sdk.py:20149", "tortoise/sdk.py", 20149, "_stamp_capture_provenance(", 1),
+    ("sdk.py:20141-20144", "tortoise/sdk.py", 20144, "\"AND coalesce(n.is_episodic, false) <> true \")", 2),
+    ("sdk.py:20149", "tortoise/sdk.py", 20149, "_stamp_capture_provenance(", 2),
     ("sdk.py:58315-58339", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
     ("sdk.py:58317-58339", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
     ("sdk.py:58317", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 3),
@@ -2358,7 +2358,7 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     (":28699", "tortoise/sdk.py", 28699, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
     (":30357", "tortoise/sdk.py", 30357, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\",", 3),
     (":30453", "tortoise/sdk.py", 30453, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\"", 3),
-    (":30552", "tortoise/sdk.py", 30552, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
+    (":30552", "tortoise/sdk.py", 30552, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 4),
     (":44181", "tortoise/sdk.py", 44181, "\"RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim\",", 3),
     ("entities.py:1292", "tortoise/projection/entities.py", 1292, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
     ("entities.py:2068-2076", "tortoise/projection/entities.py", 2068, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
