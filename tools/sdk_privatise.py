@@ -790,6 +790,20 @@ SWEEP_NAMES = 66
 #: is the direction which has to be declared deliberately rather than absorbed silently. Adding an
 #: SDK-holding receiver still requires this same step, with its own reason.
 #:
+#: RE-PINNED DOWN by #14125 → (11842, "e1caacfa6167aa7f") — the #13899-fallout sweep. The −2 is
+#: THIS LANE's own and it is the harmless direction (a residue count that FALLS cannot hide a new
+#: untyped reference), but it is named rather than absorbed:
+#:   * `create_point (unexpected span)` 2 → 0. Both rows were
+#:     `tools/measure_13436_write_costs.py`'s two arm-2 "control" shapes, which still called the
+#:     RETIRED public `sdk.create_point(…)` — the arm could not run at all, because `__getattr__`
+#:     refuses the name. Re-pointed to the private seam `sdk._create_point(…)`, matching the
+#:     `point_ns` rows beside them, which is also what removed the two rows: the attribute is no
+#:     longer in the rename map, so it is no longer counted as residue.
+#: ⛔ ATTRIBUTED BY MEASUREMENT, not arithmetic: the row multisets were derived on `origin/main`
+#: (`e0accb8fe6`, a detached worktree) and on this tree with the SAME walk, then diffed — that one
+#: row, 2 → 0, is the ONLY difference, and 11844 − 2 = 11842 is a cross-check of the measurement,
+#: never its evidence. Both moves are downward, and `typed references still pointing at a public
+#: name: 0` on this tree, so no SDK-typed reference was legitimised by the re-cut.
 #: RE-CUT DOWN (11844, "70d6cfdcd8b769e4") → (11833, "4358280454f50b14") by the SEED-SURFACE DOOR
 #: RENAME (`tortoise/onboarding/selfhost.py`, `tortoise/hosted_api.py`, `tortoise/onboarding/seed.py`,
 #: #13971): the two duck-typed seed surfaces published `create_subject`, which is a RETIRED SDK name
@@ -804,14 +818,32 @@ SWEEP_NAMES = 66
 #: (`typed references still pointing at a public name: 0`). `create_subject_anchor` is NOT a swept
 #: name, so the renamed call sites stop being residue at all — they are not "guessed at", they are
 #: simply not references to a privatised method. Re-measured with `--repin` on THIS tree.
+#: RE-CUT AT THE MERGE TREE (`#14125` × `main` `fbcd24760b`), and BOTH blocks above are carried
+#: because BOTH facts are true of THIS tree: this branch's −2 (the two arm-2 `create_point` controls
+#: re-pointed at `sdk._create_point`) AND `main`'s −11 (the seed-surface door rename). ⛔ Neither
+#: block's pin is this tree's pin — each was measured on ITS OWN tree, and a merged tree is a THIRD
+#: tree — so the pair below was RE-DERIVED with `--repin` on the MERGE tree, which is the rule both
+#: blocks cite. (11842 − 11 = 11831 would be the arithmetic guess; the merged tree's `--repin`
+#: printed exactly that count — the two row sets are DISJOINT, which the arithmetic cannot know and
+#: is a cross-check of the measurement, never its evidence. The digest is the field that proves the
+#: tree: it differs from BOTH sides' digests, as a third tree's must.)
+#: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
 #:
-#: MERGED `origin/main` (`ba0eab1d866c`, #14124) — both sides' pins above are kept as HISTORY, and the
-#: pin below is RE-MEASURED on the MERGE tree with `--repin`, never combined arithmetically. That rule
-#: is the reason this merge is not `11833 + 3 = 11836`: `main`'s −11 (`#13971`'s seed-door rename) and
-#: this branch's +3 (the two new `dict` sinks) were each measured on a tree the other had not
-#: reached, so their sum describes no tree that ever existed. `--repin` on THIS tree prints the pair
-#: below and `--check` exits 0 on it with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11836, "c8450474130f2bae")
+#: …AND THIS BRANCH'S OWN +3, so the pin below is the SECOND re-derivation on a merge tree and not
+#: `main`'s block just carried forward: `_state_route_out.update` is a NEW row (**2** references —
+#: `tortoise/sdk.py` `_state_route_out.update(_state_notice)` and
+#: `tests/test_13557_13558_reachable_reads.py` `_state_route_out.update(payload)`) and
+#: `_truncation_out.update` goes **1 → 2** (`tests/test_13557_13558_reachable_reads.py`
+#: `_truncation_out.update({"truncated": False})` in the same `_FakeSDK`). Both receivers are the
+#: `dict | None` sinks #8447/#14033 thread out so a CALLER sees a truncation or a state cue; neither
+#: spelling says SDK and neither HOLDS the SDK surface, so no typed call site is legitimised. The move
+#: is UPWARD, which is the direction that has to be declared deliberately rather than absorbed
+#: silently; adding an SDK-holding receiver still requires this same step, with its own reason.
+#:
+#: ⛔ THREE MERGES, THREE TREES, THREE PINS (`ba0eab1d866c` #14124, then `05d218fcafc5` #14129 ×
+#: this branch): no side's pin is this tree's pin, which is why the pair below is `--repin` output
+#: and never arithmetic on any of them.
+SWEEP_RESIDUE = (11834, "980f878cba85243f")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

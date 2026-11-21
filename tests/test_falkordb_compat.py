@@ -605,6 +605,12 @@ try:
         _LIVE_AVAILABLE = True
     finally:
         _probe.close()
+# ⛔ A moved or renamed seam is a PROGRAMMING error, not "no server": without
+#   this arm an `AttributeError` on the projection seam fell through to the
+#   broad arm, `_LIVE_AVAILABLE` became False, and the whole live class SKIPPED
+#   green over a broken tree (#14114 class 2, #14125).
+except (AttributeError, NameError, TypeError, ImportError):
+    raise
 except Exception:
     _LIVE_AVAILABLE = False
 

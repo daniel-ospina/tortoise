@@ -1417,12 +1417,20 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # both carry the +14, put there by #13807 (`9cd31e8227`) — so this commit changes
     # NO locator, it only records WHY the numbers are where they are. The pin asserts
     # the brief's own number, so the two cannot drift apart.
-    ("tortoise/projection/__init__.py", 21018, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21018`"),
-    ("tortoise/projection/__init__.py", 21461, "def _create_fulltext_index(",
-     "`:21461`"),
-    ("tortoise/projection/__init__.py", 21903,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21903`"),
+    #
+    # ⛔ RE-DERIVED ONCE MORE (main-red, the lane that owns no projection change):
+    # #13994 (`e0accb8fe63`) inserted lines ABOVE all three rows of
+    # `tortoise/projection/__init__.py`, so the pin and §1 of the brief were uniformly
+    # +24 behind the tree and `test (a)` reddened repo-wide. Re-derived against the
+    # live file with `sed -n "<n>p"`, never nudged by a constant — the three rows did
+    # move by the same delta this time, which is a measurement, not an assumption.
+    # The SYMBOLS are unchanged; only the numbers moved.
+    ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21042`"),
+    ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
+     "`:21485`"),
+    ("tortoise/projection/__init__.py", 21927,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21927`"),
 )
 
 
