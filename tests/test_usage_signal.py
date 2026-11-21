@@ -765,21 +765,6 @@ def _imports_of(source: str) -> set[str]:
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
                 found |= {f"tortoise.{alias.name}" for alias in node.names}
-        elif (
-            isinstance(node, ast.Attribute)
-            # ⛔ THE ATTRIBUTE FORM IS NOT AN IMPORT STATEMENT, so this walk used to
-            # record nothing for it: `tortoise.FalkorDB` inside a function body was
-            # green on every leg — the AST ban (no match), the subprocess probe (the
-            # access never runs at import) and the direction scan (no new module).
-            # At MODULE scope the probe happens to catch it (the access loads
-            # redislite), which is exactly what made the function-body spelling the
-            # surviving hole. Recorded as `tortoise.<attr>` so the existing
-            # `_FORBIDDEN_CLIENT_EXPORTS` intersection in `_offending` sees it.
-            and f"tortoise.{node.attr}" in _FORBIDDEN_CLIENT_EXPORTS
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "tortoise"
-        ):
-            found.add(f"tortoise.{node.attr}")
     return found
 
 
@@ -797,19 +782,46 @@ def _package_root_attributes(source: str) -> set[str]:
     Deliberately over-reports rather than under-reports: a local that shadows the
     package name can only produce a FALSE POSITIVE here, and a guard that reddens
     spuriously is recoverable while one that stays green is not.
+
+    ⛔ THE ATTRIBUTE FORM LIVES HERE, NOT IN `_imports_of`. That helper's contract
+    is "every MODULE this source imports", and its other consumers
+    (`_modules_reaching_a_store`, the relative-import pin) read it that way; making
+    it also emit export names put a non-module in a module set and left the
+    attribute leg unpinned (deleting it reddened nothing). One owner per spelling.
     """
     import ast
 
     tree = ast.parse(source)
+    nodes = list(ast.walk(tree))
     bound: set[str] = set()
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "tortoise" or alias.name.startswith("tortoise."):
                     bound.add(alias.asname or "tortoise")
+    # ⛔ FOLLOW THE REBINDING, not just the `import … as` hop. `t = tortoise` then
+    # `t.FalkorDB` is the SAME spelling one assignment over, and a walk that stops
+    # at the import statement records nothing for it — which is how closing the
+    # alias hop can leave the identical hole one line further along. Iterated to a
+    # FIXPOINT because the chain can be any length (`f = tortoise; g = f`).
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            if isinstance(node, ast.Assign):
+                targets: list[ast.expr] = list(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if isinstance(node.value, ast.Name) and node.value.id in bound:
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in bound:
+                        bound.add(target.id)
+                        changed = True
     return {
         f"tortoise.{node.attr}"
-        for node in ast.walk(tree)
+        for node in nodes
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Name)
         and node.value.id in bound
@@ -996,6 +1008,15 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending("import tortoise as t\nc = t.FalkorDB\n") == {
         "tortoise.FalkorDB"
     }
+    # ⛔ AND THE REBINDING, which is the alias hop one assignment over: a walk that
+    # stops at the `import` statement sees nothing here, so closing `import … as`
+    # alone leaves the identical hole. Chained once to prove the fixpoint.
+    assert _offending("import tortoise\nf = tortoise\nc = f.FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending("import tortoise as t\nf = t\ng = f\nc = g.Tortoise\n") == {
+        "tortoise.Tortoise"
+    }
     # …and `import tortoise.sdk` binds `tortoise` too, so it is both a banned
     # module AND the handle the attribute form is read through.
     assert _offending("import tortoise.sdk\nc = tortoise.FalkorDB\n") == {
@@ -1003,9 +1024,12 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
         "tortoise.FalkorDB",
     }
     # …and the harmless spellings stay clean, so the ban is not a blanket. Bare
-    # `import tortoise` and an unrelated attribute must not redden.
+    # `import tortoise` and an unrelated attribute must not redden, and neither
+    # must an attribute read on a name that was never bound to the package root
+    # (it would `NameError` at runtime, so flagging it is a pure false positive).
     assert _offending("from tortoise import usage_signal\n") == set()
     assert _offending("import tortoise\nx = tortoise.__version__\n") == set()
+    assert _offending("c = tortoise.FalkorDB\n") == set()
 
 
 def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
