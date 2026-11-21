@@ -1160,3 +1160,91 @@ def test_a_pin_declared_between_planning_and_the_delete_still_wins():
         "the node was held but not reported as pinned, so the operator cannot see that a "
         "declaration written mid-sweep is what kept it"
     )
+
+
+def test_a_window_held_back_late_does_not_abandon_the_remaining_passes():
+    """A pin visible only at the delete statement must not cost the whole sweep.
+
+    ⛔ The `if not final:` arm exists to hold nodes back, not to end the run: the window is
+    recomputed from the held sets on the NEXT pass, so breaking there means the widening
+    never applies in the case it was written for. Measured shape: a declaration seen at plan
+    time still lets the sweep take two nodes; the SAME declaration landing one ask later
+    took zero — the sweep returned `deleted: []` over a graph it was two nodes over budget,
+    and both remedies the reason named (`unpin`, raise the pin budget) were wrong.
+    """
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+    asks: dict[int, int] = {}
+
+    def pin_appears_late(candidate: Candidate) -> bool:
+        if candidate.key != "p0":
+            return False
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=2), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_appears_late,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=4),
+    )
+
+    assert "p0" in g.node_keys(), "the node pinned mid-sweep was deleted"
+    assert len(report.deleted) == 2, (
+        "a window held back at the last hop ended the sweep — the remaining passes never "
+        "ran, so the cache stays over budget and the report blames the population"
+    )
+    assert report.metric()["passes"] > 1, (
+        "the sweep stopped on its first pass; the widening rule for a fully held-back "
+        "window is not applied here"
+    )
+
+
+def test_a_node_pinned_and_leased_at_the_delete_statement_is_reported_pinned():
+    """The last-hop re-check must ask the PIN before the LEASE, as gate 6 itself does.
+
+    ⛔ The buckets exist to route the operator to the remedy that clears the state, and only
+    `unpin` clears a pin. Asked in the other order, a node that became pinned AND was taken
+    by a reader in the same plan→statement window is reported `skipped_leased`, so the
+    reason tells the operator to wait for a read that is not what keeps it resident.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph(["p0", "p1"])
+    leases = ReadLeases()
+    asks: dict[int, int] = {}
+
+    def pinned_late(candidate: Candidate) -> bool:
+        if candidate.key != "p0":
+            return False
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    def record_probe_and_lease_starts(candidate: Candidate) -> bool:
+        # ⛔ The reader must start AFTER the plan-time gates and BEFORE the delete, or the
+        # plan-time lease gate holds the node and the last hop is never reached. The record
+        # probe is exactly that seam: it runs at plan time, after gate 6 and gate 4.
+        if candidate.key == "p0":
+            leases.acquire(candidate.node_id)
+        return True
+
+    report = evict(
+        _assessment(nodes=1), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=record_probe_and_lease_starts,
+        pinned=pinned_late,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=10, max_passes=2),
+    )
+
+    assert "p0" in g.node_keys()
+    assert {c.key for c in report.skipped_pinned} == {"p0"}, (
+        "a node that is pinned AND leased at the delete statement was not reported as "
+        "pinned — the last hop asks the lease first, so the operator is sent to wait for "
+        "a reader instead of unpinning"
+    )
+    assert report.skipped_leased == (), (
+        "the last-hop re-check asks the LEASE before the PIN, inverting gate 6's ordering"
+    )
