@@ -6500,6 +6500,38 @@ def _real_fly_toml() -> dict:
     return tomllib.loads(REAL_FLY_TOML.read_text(encoding="utf-8"))
 
 
+def _services_region(text: str) -> str:
+    """Everything before the `[[vm]]` TABLE — i.e. the `[[services]]` block.
+
+    Split on the table's OWN LINE, not on the bare token: the COST note mentions
+    `` `[[vm]]` `` inline, so a bare-token split cuts inside that comment and
+    keeps the label only by paragraph ordering (re-ordering the note would
+    false-RED a correct file). Shared by the pin and its non-vacuity probe.
+    """
+    return re.split(r"(?m)^\[\[vm\]\]\s*$", text)[0]
+
+
+def _priced_shapes(services_region: str) -> set[int]:
+    """Core counts the note PRICES — not merely mentions.
+
+    A mention counts only when a figure accompanies it on its own line or the
+    line after it (this file's COST note names the shape on one line and the
+    money on the next). Prose that merely names a shape — "the block declares
+    `shared-cpu-4x`" — therefore cannot satisfy a price and disarm the pin,
+    which a bare mention-based match allowed.
+    """
+    lines = services_region.splitlines()
+    priced: set[int] = set()
+    for i, line in enumerate(lines):
+        if "shared-cpu-" not in line:
+            continue
+        window = line + (lines[i + 1] if i + 1 < len(lines) else "")
+        if "$" not in window:
+            continue
+        priced |= {int(n) for n in re.findall(r"shared-cpu-(\d+)x", line)}
+    return priced
+
+
 def test_vm_block_declares_the_four_core_shape():
     """A revert of `cpus` to 2 — the #13665 regression — must redden this."""
     vm = _real_fly_toml()["vm"]
@@ -6531,15 +6563,12 @@ def test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so():
     """
     text = REAL_FLY_TOML.read_text(encoding="utf-8")
     declared_cpus = _real_fly_toml()["vm"][0]["cpus"]
+    services_region = _services_region(text)
 
-    # Everything before the `[[vm]]` TABLE is the `[[services]]` block, which is
-    # where the COST note lives. Split on the table's own line, not on the bare
-    # token: the COST note itself MENTIONS `` `[[vm]]` `` inline (twice), so a
-    # bare-token split cuts inside that comment and only happens to keep the
-    # label by paragraph ordering — re-ordering the note would false-RED a
-    # correct file.
-    services_region = re.split(r"(?m)^\[\[vm\]\]\s*$", text)[0]
-    priced = {int(n) for n in re.findall(r"shared-cpu-(\d+)x", services_region)}
+    # A PRICE, not a MENTION: `priced` comes from lines that carry a figure, so
+    # the pin does not disarm the moment the note names the shape it declares
+    # (e.g. writing "declares `shared-cpu-4x`").
+    priced = _priced_shapes(services_region)
     assert priced, (
         "the [[services]] COST note names no `shared-cpu-Nx` shape any more, so "
         "this pin can no longer see what it prices — re-derive it against the "
@@ -6587,8 +6616,8 @@ def test_the_cost_note_pin_reds_when_the_historical_label_is_stripped(monkeypatc
     added — exactly the state a reader acted on before #14156.
     """
     text = REAL_FLY_TOML.read_text(encoding="utf-8")
-    services_region, separator, vm_region = text.partition("[[vm]]")
-    assert separator, "fly.toml has no `[[vm]]` table — the probe is stale"
+    services_region = _services_region(text)
+    assert "[[vm]]" in text, "fly.toml has no `[[vm]]` token — the probe is stale"
     stripped = re.sub(r"(?i)pre-#13665", "historical", services_region)
     assert stripped != services_region, (
         "the `[[services]]` region carries no pre-#13665 label to strip — the "
@@ -6597,7 +6626,10 @@ def test_the_cost_note_pin_reds_when_the_historical_label_is_stripped(monkeypatc
     monkeypatch.setattr(
         sys.modules[__name__],
         "REAL_FLY_TOML",
-        _fixture("fly-cost-note-unlabelled.toml", stripped + separator + vm_region),
+        _fixture(
+            "fly-cost-note-unlabelled.toml",
+            stripped + text[len(services_region):],
+        ),
     )
     with pytest.raises(AssertionError):
         test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so()
