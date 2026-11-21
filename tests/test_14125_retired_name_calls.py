@@ -911,25 +911,53 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     regression (two fresh reviewers, same finding; control unchanged on both heads).
 
     So an imported name that is re-bound anywhere in the module is not evidence of the
-    import at a call site and buys no exemption. An import binds through its ALIAS, not
-    an ``ast.Name`` Store, so ``import x`` alone never removes ``x``; and the
-    whole-module walk can only make the gate grade MORE, never less. The
-    parameter / passed-in-client witnesses are unaffected, because those receiver names
-    are not in the import set to begin with.
+    import at a call site and buys no exemption. ⛔ "RE-BOUND" IS PYTHON'S OWN LIST OF
+    BINDING CONSTRUCTS (Language Reference §4.2.1), NOT A SUBSET OF IT: the ``ast.Name``
+    Store contexts (assignment, walrus, ``for``, ``with … as``, comprehension, and
+    ``type X = …``, which is a Store on its ``name`` field), FORMAL PARAMETERS
+    (``ast.arg``), ``def`` / ``class`` names, ``except`` / ``except*`` ``as`` targets,
+    and the structural-pattern captures ``MatchAs`` / ``MatchStar`` /
+    ``MatchMapping.rest``. Only the Store contexts are ``ast.Name`` nodes; the rest are
+    ``ast.arg`` or plain ``str`` fields, so a walk that read only ``ast.Name`` missed
+    every other family — and each of those re-bindings then still bought the exemption,
+    which is this function's own defect one construct family over (review P2; each
+    family has its own witness row below). An import binds through its ALIAS, not an
+    ``ast.Name`` Store, so ``import x`` alone never removes ``x``; and because every
+    term below only ADDS to ``rebound``, the whole-module walk can only make the gate
+    grade MORE, never less. The parameter / passed-in-client witnesses are unaffected,
+    because those receiver names are not in the import set to begin with.
     """
     bound = _non_own_imported_names(tree.body)
     if not bound:
         return set()
-    rebound = {
-        node.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-    }
+    rebound: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            # Every Store context: assignment, walrus, `for`, `with … as`,
+            # comprehension targets, and `type X = …`.
+            rebound.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # Formal parameters — always `ast.arg`, never an `ast.Name` — plus the
+            # def's own name, which is a `str` field (a lambda binds no name).
             args = node.args
             rebound |= {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
             rebound |= {a.arg for a in (args.vararg, args.kwarg) if a is not None}
+            if not isinstance(node, ast.Lambda):
+                rebound.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            rebound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+            # `case {**rest}:`
+            rebound.add(node.rest)
+        elif isinstance(node, ast.MatchAs) and node.name is not None:
+            # `case name:` (`None` for `case _`)
+            rebound.add(node.name)
+        elif isinstance(node, ast.MatchStar) and node.name is not None:
+            # `case [*name]:` (`None` for `[*_]`)
+            rebound.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+            # `except E as name` / `except* E as name`
+            rebound.add(node.name)
     return bound - rebound
 
 
@@ -2507,6 +2535,56 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"silent drop the narrowing opened: {third_party_name_rebound_to_our_client}"
     )
 
+    # 4j-quater. "RE-BOUND" IS EVERY PYTHON BINDING CONSTRUCT, not only the ones
+    #     `ast.Name` spells. `_third_party_receivers` subtracted names bound by a Store
+    #     target and by formal parameters, so a module that re-bound the third-party
+    #     name with `def` / `class` / `except … as` / a `match` capture still bought the
+    #     exemption for a `.query` on OUR client — the same silent drop 4j-ter pins, one
+    #     construct family over (review P2; the same walk over tests/+tools/ found 0
+    #     live instances in 1,828 files, so this is a LATENT hole the docstring already
+    #     claimed was closed, not a live drop).
+    #     ⛔ ONE ROW PER FAMILY, because 4j-ter pins the Store branch ONLY: a mutation
+    #     that reverts a single family must red ITS row and leave the rest green. The
+    #     trailing control is the other direction — without it these rows would also
+    #     pass if the exemption had been dropped outright (which 4k-/4l- forbid).
+    _rebind_prelude = "import falkordb\n\n"
+    _rebind_guard = textwrap.dedent(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            falkordb.g.query("RETURN 1")
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert roots(_rebind_prelude + _rebind_guard) == (), (
+        "the CONTROL: a non-own import name that is NOT re-bound keeps the third-party "
+        "exemption — without this row the per-family rows below would also pass on "
+        "code that had simply dropped the exemption"
+    )
+    for _family, _rebinding in {
+        # a function definition binds its NAME (a `str` field, not an `ast.Name`)
+        "def": "def falkordb():\n    pass",
+        # …and so does a class definition
+        "class": "class falkordb:\n    pass",
+        # `except E as name` / `except* E as name` bind `ExceptHandler.name`
+        "except-as": (
+            'try:\n    raise RuntimeError("boom")\nexcept Exception as falkordb:\n    pass'
+        ),
+        # structural-pattern captures bind `MatchAs` / `MatchStar` / `MatchMapping.rest`
+        "match-capture": "match None:\n    case falkordb:\n        pass",
+        "match-star": "match (1,):\n    case [*falkordb]:\n        pass",
+        "match-rest": "match {}:\n    case {**falkordb}:\n        pass",
+    }.items():
+        _rebound_row = roots(_rebind_prelude + _rebinding + "\n\n" + _rebind_guard)
+        assert len(_rebound_row) == 1 and _rebound_row[0][1:] == ((), True, False, True), (
+            f"a `{_family}` re-binding of a non-own import name must NOT buy the "
+            "third-party exemption: after it the name no longer denotes the import "
+            "where the probe calls `.query` on OUR client, so leaving it exempt is the "
+            f"silent drop 4j-ter pins, one construct family over: {_rebound_row}"
+        )
+
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
     #     90a0e9e8b20c, P2), so the `()` pin that stood here is DELETED — its own text
     #     instructed exactly that if the coverage was restored. A module-body guard
@@ -2524,8 +2602,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     (`tests/test_8870_version_anchor_write_order.py:138`). Instead the arm is back
     #     in every branch and NARROWED: `_reaches_capability_seam(block, third_party)`
     #     skips an ATTRIBUTE call only when the receiver's ROOT name is bound by a
-    #     NON-own import (`_non_own_imported_names`) — the `some_optional_dep.query`
-    #     false red — and grades everything else. `4k+` below is the POSITIVE witness
+    #     NON-own import AND is not re-bound anywhere in the module
+    #     (`_third_party_receivers`) — the `some_optional_dep.query` false red — and
+    #     grades everything else. `4k+` below is the POSITIVE witness
     #     for this exact document; deleting the arm again reds it, which is the
     #     guarantee the `()` pin could never give.
 
