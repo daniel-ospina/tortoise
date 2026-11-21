@@ -38,7 +38,7 @@ output is in the PR body):
   (the method starts at sdk.py:45555; the hook is at sdk.py:46481).
 * **Record the tag POPULATION a door scanned instead of the page it served** — drop
   the ``_record_reads=False`` at the ``search_knowledge(mode="tag")`` call site →
-  ``test_the_caller_facing_row_paths_feed_the_ledger`` RED (``p11`` — and the
+  ``test_the_list_and_tag_row_paths_feed_the_ledger`` RED (``p11`` — and the
   tombstone ``p10`` — are scanned and never served, so counting the population
   moves them from 0 to 2 and inflates each SERVED row to 3; measured 1 failed /
   67 passed).
@@ -47,7 +47,7 @@ output is in the PR body):
   row the caller is never served; measuring it as read biases `f` HIGH).
 * **Record the HEAD of the scan, or a SHORTER slice, instead of the page** —
   ``_ledger_record("Point", page[:1], …)`` / ``page[:2]`` on the tag door →
-  ``test_the_caller_facing_row_paths_feed_the_ledger`` RED, which is why the served
+  ``test_the_list_and_tag_row_paths_feed_the_ledger`` RED, which is why the served
   tag page is THREE rows starting at ``offset=1``: a one- or two-row page cannot
   tell a truncated record from a faithful one.
 * **Gate a record on ``hasMore``** — either door → the same test RED, because BOTH
@@ -72,7 +72,7 @@ output is in the PR body):
   ``if _record_reads:`` hook in ``_query_points_by_tag`` →
   ``test_the_tag_accessor_default_arm_records_the_caller_arm`` RED.
 * **Count the internal accessor as a caller read** — hook ``_get_point`` →
-  ``test_the_caller_facing_row_paths_feed_the_ledger`` RED (a written-but-never-read
+  ``test_the_list_and_tag_row_paths_feed_the_ledger`` RED (a written-but-never-read
   node reads as read), which is why the write paths may keep calling it.
 
 ⚠️ **The three names this file used to drive are RETIRED** (``query``,
@@ -478,10 +478,15 @@ def hooked_sdk(ledger, monkeypatch):
     return inst, _Graph
 
 
-def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
+def test_the_list_and_tag_row_paths_feed_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
-    ⛔ THE NAMES THIS BODY DRIVES ARE THE DOORS A CALLER ACTUALLY HAS. It used to
+    ⛔ THESE ARE THE ARMS THIS BODY DRIVES — `list_knowledge(kind="claim")`,
+    `search_knowledge(mode="tag")` and `_get_point`'s INTERNAL arm — and NOT the
+    whole caller-facing set. `_ledger_record` is called from twelve sites in
+    `tortoise/sdk.py`, and the paragraph below names the hooked reads left
+    unexercised, so a title claiming "the caller-facing row paths" would claim that
+    complete set; this one names the arms instead (#14073 review, P3). It used to
     drive `query()`, `paginated_query()` and `query_points_by_tag()`, and all
     three were RETIRED outright by `#4282` (`sdk_retired.py`: no alias layer, the
     old names do not resolve) — which is what reddened this file on main. The
