@@ -49,9 +49,23 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
 ============================================================
 1. **The projection consumes the log at its own rate.** One daemon thread per
    process, one FIFO queue, drained by the caller-supplied ``project``. Order is
-   preserved because there is exactly ONE consumer (two consumers would let two
-   records for one tenant overtake each other; the record's writes are absolute
-   per row, so that is a correctness hazard, not only a delay).
+   preserved **within the queue**, because there is exactly ONE consumer (two
+   consumers would let two records for one tenant overtake each other; the
+   record's writes are absolute per row, so that is a correctness hazard, not
+   only a delay). ⛔ **THE INLINE FALLBACK IS OUTSIDE THAT ORDER, and that is
+   stated rather than implied** (#14222 review cycle 5, ISSUE 3): when the queue
+   is FULL (or the worker is stopping) the caller folds its OWN, LATER position
+   on its own thread, at ``live_write``'s inline call, while an EARLIER position
+   is still queued — so with ``TORTOISE_PROJECTION_QUEUE_MAX=1``, or once the
+   default bound saturates, one writer's row can be overwritten by its
+   predecessor. Nothing detects it: both positions are present, so
+   ``journal_coverage`` / ``record-reconcile`` read green. The alternative to
+   that residual is a caller that WAITS on the queue — which is the coupling this
+   module exists to remove — so the honest form is the declared one: the bound's
+   visible cost is a slower ACK **and** a possible same-tenant reorder during the
+   window in which the queue is saturated. Closing it needs an ordering token at
+   the fold seam, which is a change to ``record_projection``, not to this module.
+   ⚠️ ``.env.example`` states the same residual where the bound is documented.
 2. **A write's ack excludes projection time.** :func:`submit` appends to a deque
    under a lock that is held for an append and nothing else — the ``project``
    call always runs **outside** it. The write returns as soon as the append has
@@ -348,6 +362,14 @@ class ProjectionWorker:
         self._inflight: PendingProjection | None = None
         self._thread: threading.Thread | None = None
         self._stopping = False
+        #: ⛔ TERMINAL, unlike ``_stopping``: a shutdown sets it so a concurrent
+        #: ``submit`` cannot RESTART this instance through ``_ensure_started``
+        #: while the slot is being cleared (#14222 review cycle 5, ISSUE 7).
+        #: ``_stopping`` alone is not enough — ``_ensure_started`` clears it when it
+        #: starts a thread, so a submit that arrived between ``stop()`` completing
+        #: and the slot being cleared could start a consumer on an instance nothing
+        #: holds a reference to any more (two consumers, one of them unreachable).
+        self._closed = False
         self._submitted = 0
         self._projected = 0
         self._failures = 0
@@ -367,9 +389,10 @@ class ProjectionWorker:
         """
         self._ensure_started()
         with self._cond:
-            if self._stopping or len(self._pending) >= self.max_queue:
+            unstartable = self._stopping or self._closed
+            if unstartable or len(self._pending) >= self.max_queue:
                 self._inline_fallbacks += 1
-                declined = "worker_stopping" if self._stopping else "queue_full"
+                declined = "worker_stopping" if unstartable else "queue_full"
             else:
                 self._pending.append(item)
                 self._submitted += 1
@@ -398,6 +421,16 @@ class ProjectionWorker:
                 failures=self._failures,
                 inline_fallbacks=self._inline_fallbacks,
             )
+
+    def oldest_pending_seconds(self) -> float:
+        """Just the lag in TIME, read live at collect time (#14222 cycle 5, ISSUE 1).
+
+        A read path: ``_cond`` is only ever held here for a critical section the
+        fold never occupies, so this cannot block on a wedged projection.
+        """
+        self._ensure_not_inherited()
+        with self._cond:
+            return self._oldest_age_locked()
 
     def wait_for_drain(self, timeout: float | None = None) -> bool:
         """Block until the queue is empty. ⛔ FOR TESTS AND SHUTDOWN ONLY.
@@ -493,6 +526,10 @@ class ProjectionWorker:
         return True
 
     def _ensure_started(self) -> None:
+        # ⛔ BEFORE ANY `with self._cond:` — this is the fork-aware reset, and it
+        # must run before the lock it may be replacing is taken (#14222 review
+        # cycle 5, ISSUE 4).
+        self._ensure_not_inherited()
         while True:
             cond = self._cond
             snapshot = None
@@ -503,9 +540,14 @@ class ProjectionWorker:
                 # review cycle 2, NEW-4).
                 if cond is not self._cond:
                     continue
-                if self._inherited_locked():
-                    snapshot = self._reset_for_fork_locked()
-                elif self._thread is not None and self._thread.is_alive():
+                if self._closed:
+                    # ⛔ A CLOSED INSTANCE NEVER RESTARTS (#14222 review cycle 5,
+                    # ISSUE 7). `shutdown()` marks it before it stops the loop, so
+                    # a write that arrives mid-shutdown DECLINES (`worker_stopping`)
+                    # and folds inline instead of resurrecting a consumer the
+                    # singleton is about to drop.
+                    return
+                if self._thread is not None and self._thread.is_alive():
                     return
                 else:
                     self._thread = None
@@ -529,6 +571,17 @@ class ProjectionWorker:
     def _ensure_not_inherited(self) -> None:
         """Reset this object for a NEW PROCESS, before anyone takes its lock.
 
+        ⛔ THE FORK DECISION IS MADE WITHOUT TAKING THE LOCK IT DECIDES ABOUT
+        (#14222 review cycle 5, ISSUE 4). This method used to open with
+        ``with cond:`` and only then ask whether ``cond`` was inherited — so in
+        the one window it exists for, where a peer thread held that Condition at
+        ``fork()`` time, the child blocked on a lock with no owner in this
+        process and never reached the question (executed on 3.12.3: the child's
+        ``acquire(timeout=0.5)`` answered ``False``). ``_inherited()`` is an
+        unsynchronised read of an attribute the child owns alone — only the
+        forking thread survives a fork — so it can be asked FIRST, and the reset
+        replaces the lock instead of waiting for it.
+
         ⛔ EVERY ENTRY POINT CALLS THIS, not only :meth:`_ensure_started`
         (#14222 review cycle 2, NEW-7). A forked child inherits the parent's
         Condition — and a Condition inherited while the parent's consumer held it
@@ -538,19 +591,25 @@ class ProjectionWorker:
         reached `_ensure_started`, which is why the reset cannot live only there.
         """
         while True:
+            if not self._inherited():
+                return
             cond = self._cond
-            snapshot = None
-            with cond:
-                if cond is not self._cond:
-                    continue
-                if not self._inherited_locked():
-                    return
-                snapshot = self._reset_for_fork_locked()
+            if cond is not self._cond or not self._inherited():
+                continue      # a peer reset it in between; nothing left to do
+            snapshot = self._reset_for_fork_locked()
             if snapshot is not None:
                 self._publish(snapshot)
+            return
 
-    def _inherited_locked(self) -> bool:
-        """Is the state in hand stale for THIS process?
+    def _inherited(self) -> bool:
+        """Is the state in hand stale for THIS process? ⛔ ASK WITHOUT THE LOCK.
+
+        This is the only form that is safe BEFORE acquiring ``_cond``: an
+        inherited Condition may be held by a thread that did not survive the fork,
+        so acquiring it first is how the reset becomes unreachable (#14222 review
+        cycle 5, ISSUE 4). ``_cond_pid`` is written only when a Condition is
+        created, so an unsynchronised read either sees this process's own pid (no
+        reset needed) or a dead process's (reset without waiting).
 
         ⛔ THE DISCRIMINATOR IS THE CONDITION'S OWN PID, NOT THE LAST RUN'S
         (#14222 review cycles 3 and 4). ``stop()`` has to clear whatever records
@@ -562,7 +621,7 @@ class ProjectionWorker:
         """
         return self._cond_pid != os.getpid()
 
-    def _reset_for_fork_locked(self) -> tuple[int, int, int, float]:
+    def _reset_for_fork_locked(self) -> tuple[int, int, int]:
         """Replace the state another process left behind, holding the lock being replaced.
 
         Everything is per-process and everything goes:
@@ -598,6 +657,7 @@ class ProjectionWorker:
         self._failures = 0
         self._publish_seq = 0
         self._published_seq = 0
+        self._closed = False
         return self._stamp_locked()
 
     # ── the loop ───────────────────────────────────────────────────────────
@@ -650,26 +710,34 @@ class ProjectionWorker:
             if failure is not None:
                 _publish_failure(failure)
 
-    def _stamp_locked(self) -> tuple[int, int, int, float]:
+    def _stamp_locked(self) -> tuple[int, int, int]:
         """Number this snapshot, in the critical section that READ it.
 
         The number — not the lock — is what orders the publishes: a snapshot that
         reaches `_publish` after a newer one is DROPPED, not applied (#14222
         review cycle 4, P1). A lock would only order the publishes by when they
         queued, which is exactly the inversion that was measured.
+
+        ⛔ IT CARRIES NO AGE (#14222 review cycle 5, ISSUE 1). Depth and positions
+        are EVENT-PUBLISHED — they are facts about a moment. The age is not: it is
+        a function of the clock, so a value stamped here froze at the moment the
+        loop was last able to publish — and the loop cannot publish while it is
+        wedged INSIDE a fold, which is the only state that gauge exists to detect.
+        It is therefore computed at COLLECT time instead (see
+        :func:`oldest_pending_seconds`).
         """
         self._publish_seq += 1
         return (self._publish_seq, self._depth_locked(),
-                self._pending_positions_locked(), self._oldest_age_locked())
+                self._pending_positions_locked())
 
-    def _publish(self, snapshot: tuple[int, int, int, float]) -> None:
+    def _publish(self, snapshot: tuple[int, int, int]) -> None:
         """Apply ONE gauge snapshot, unless a NEWER one is already applied."""
-        seq, depth, positions, oldest = snapshot
+        seq, depth, positions = snapshot
         with self._publish_lock:
             if seq <= self._published_seq:
                 return          # superseded: applying it would go backwards
             self._published_seq = seq
-            _publish_queue_state(depth, positions, oldest)
+            _publish_queue_state(depth, positions)
 
     # ── internals ──────────────────────────────────────────────────────────
 
@@ -780,6 +848,31 @@ def stats() -> ProjectionStats:
     return worker().stats()
 
 
+def oldest_pending_seconds() -> float:
+    """The age of the head of the queue, for the gauge to COMPUTE at collect time.
+
+    ⛔ THE TIME GAUGE CANNOT BE EVENT-PUBLISHED, because the event that matters is
+    the absence of one (#14222 review cycle 5, ISSUE 1): the loop publishes at
+    enqueue and after a fold, so while it is wedged INSIDE ``project`` the
+    exported age stayed at its enqueue value for the whole wedge — quiescent, no
+    new writes, no new publishes — and an ``oldest_pending_seconds > 30`` alert
+    never fired. It only grew when new writes kept arriving, i.e. exactly when it
+    was least needed. A Prometheus gauge is REQUIRED to represent current state,
+    so this is registered through ``Gauge.set_function``: the value is recomputed
+    when the metric is collected.
+
+    0.0 when no worker has been built in this process: nothing is queued, and this
+    accessor must NOT create one (a metrics read is not a write path).
+    """
+    instance = _WORKER
+    if instance is None:
+        return 0.0
+    try:
+        return instance.oldest_pending_seconds()
+    except Exception:      # noqa: BLE001, RUF100 — a metrics read must never raise
+        return 0.0
+
+
 def wait_for_drain(timeout: float | None = None) -> bool:
     """⛔ Tests and shutdown only — see :meth:`ProjectionWorker.wait_for_drain`."""
     return worker().wait_for_drain(timeout)
@@ -796,35 +889,44 @@ def shutdown(*, drain: bool = True,
     "the flag I set did not take" this module's docs promise not to produce.
     """
     global _WORKER
-    # ⛔ THE WHOLE STOP-AND-CLEAR IS ONE CRITICAL SECTION ON THE SINGLETON SLOT
-    # (#14222 review cycle 4, P2). Two windows existed and both produced a second
-    # consumer beside a live one: clearing the slot FIRST let a concurrent
-    # `write()` build a fresh instance while the old one was still draining, and
-    # clearing it AFTER the stop let a `submit` resurrect the retained instance (a
-    # restart clears `_stopping`) and then lose the reference to it. Holding
-    # `_WORKER_LOCK` — which `worker()` already takes — makes a racing write WAIT
-    # for the stop instead of racing it, so `_WORKER is current` is a fact rather
-    # than a hope. The cost is bounded by the drain + join timeouts on a rare,
-    # deliberate path; the alternative was two consumers folding one tenant's
-    # records out of order, which the module docstring calls a correctness hazard.
+    # ⛔ THE SINGLETON SLOT IS TAKEN TWICE, NEVER ACROSS THE STOP (#14222 review
+    # cycle 5, ISSUE 7). Round 4 held `_WORKER_LOCK` across the drain + join, and
+    # `worker()` takes that SAME lock on the WRITE path — so a concurrent
+    # `live_write.write()` blocked for up to `timeout` + the join timeout, against
+    # this module's property 2 ("a write's ack excludes projection time"). The two
+    # hazards the wide lock was introduced for are closed by the CLOSED mark
+    # instead: (a) a concurrent write can no longer build a fresh instance
+    # mid-stop, because the slot is still occupied; (b) it cannot resurrect the
+    # retained instance either, because `_closed` makes `_ensure_started` a no-op
+    # and `submit` decline (`worker_stopping` → the caller folds inline, which is
+    # always safe). Writers therefore only ever wait for the two short takes.
     with _WORKER_LOCK:
         current = _WORKER
         if current is None:
             return
+        current._closed = True
+    joined = current.stop(drain=drain, timeout=timeout)
+    with _WORKER_LOCK:
+        if _WORKER is not current:
+            return            # a peer shut this one down and replaced the slot
         # ⛔ PUT IT BACK WHEN THE CONSUMER IS STILL RUNNING (#14222 review cycle 2,
-        # NEW-6). `stop()` returns ``False`` when a fold would not join. Dropping
+        # NEW-6). `stop()` returns ``False`` when a fold would not join; dropping
         # the reference anyway made the next `worker()` build a fresh instance
         # with its own thread and deque — two consumers folding one tenant's
         # records at once. The retained instance DECLINES submits with
         # `worker_stopping` and the caller folds inline, which is the honest
-        # answer while a consumer is wedged.
-        # A stop that could not join keeps the instance (a live consumer must not
-        # be replaced, NEW-6); a completed one clears the slot, which is what lets
-        # the NEXT `worker()` honour a changed `ENV_QUEUE_MAX` — read ONCE at
-        # construction.
-        _WORKER = (current
-                   if not current.stop(drain=drain, timeout=timeout)
-                   else None)
+        # answer while a consumer is wedged. It is REOPENED so that a later
+        # submit can restart it once the wedged fold finally ends — a permanently
+        # closed instance would push every write onto the inline path for the
+        # life of the process.
+        if joined:
+            _WORKER = None
+        else:
+            current._closed = False
+    # A stop that could not join keeps the instance (a live consumer must not be
+    # replaced, NEW-6); a completed one clears the slot, which is what lets the
+    # NEXT `worker()` honour a changed `ENV_QUEUE_MAX` — read ONCE at
+    # construction.
 
 
 def _drain_at_exit(instance: ProjectionWorker) -> None:
@@ -875,15 +977,20 @@ def _meter():
     return _METRICS or None
 
 
-def _publish_queue_state(depth: int, pending_positions: int,
-                         oldest_age_seconds: float | None = None) -> None:
+def _publish_queue_state(depth: int, pending_positions: int) -> None:
+    """Publish the two EVENT facts. The AGE is computed at collect time instead.
+
+    ⛔ The time gauge is NOT published here (#14222 review cycle 5, ISSUE 1): a
+    published age is only as fresh as the last publish, and the loop cannot
+    publish while it is wedged inside a fold — see
+    :func:`oldest_pending_seconds` and `monitoring`'s `set_function` registration.
+    """
     metrics = _meter()
     if metrics is None:
         return
     with contextlib.suppress(Exception):
         metrics.record_projection_queue_state(
-            depth=depth, pending_positions=pending_positions,
-            oldest_age_seconds=oldest_age_seconds)
+            depth=depth, pending_positions=pending_positions)
 
 
 def _publish_failure(reason: str) -> None:

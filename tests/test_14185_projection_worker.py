@@ -23,6 +23,8 @@ Postgres cannot run in every lane.
 from __future__ import annotations
 
 import os
+import signal
+import sys
 import threading
 import time
 import types
@@ -221,6 +223,39 @@ def test_the_lag_is_measured_in_positions_and_in_time(armed):
     assert settled.failures == 0
 
 
+def test_the_TIME_gauge_keeps_growing_while_the_fold_is_WEDGED(armed):
+    """⛔ #14222 review cycle 5, ISSUE 1: the family that names the stall must move.
+
+    The trio is exported to answer "is the record behind, and by how much". Depth
+    and positions do that for a BACKLOG; only the age distinguishes 500 quick folds
+    from 500 records stuck behind one statement. It was event-published — at
+    enqueue and after a completed fold — so the ONE state it exists to report
+    (a quiescent wedge: one item in flight, no new writes, no publishes) froze it
+    at the enqueue value and an ``oldest_pending_seconds > 30`` alert could never
+    fire. It is now computed when the metric is collected.
+
+    The assertion is two reads ~0.25 s apart with the fold STILL wedged: an
+    event-published age answers the same number twice, a live one grows.
+    """
+    slow = _SlowProjector()
+    live_write.write({"type": "PointAdded"}, log=_Log(), project=slow,
+                     tenant=_TENANT)
+    assert slow.in_flight.wait(5), "the loop never picked the item up"
+
+    first = monitoring.projection_worker_gauges()["oldest_pending_seconds"]
+    time.sleep(0.25)
+    second = monitoring.projection_worker_gauges()["oldest_pending_seconds"]
+
+    assert not slow.finished.is_set(), "the fold finished — nothing was wedged"
+    assert second > first, (
+        f"the time gauge read {first!r} then {second!r} while the fold was wedged: "
+        "a pushed age freezes at its last publish, which is the one reading this "
+        "family exists to make impossible")
+
+    slow.gate.set()
+    assert projection_worker.wait_for_drain(10) is True
+
+
 def test_the_depth_gauge_is_read_AFTER_the_fold_not_at_pop(armed):
     """⛔ #14222 review P1-1: a stale depth is a gate that cannot do its job.
 
@@ -281,6 +316,15 @@ def test_an_OLDER_snapshot_never_overwrites_a_newer_one(armed):
         "an older snapshot overwrote a newer one — the gauge went backwards")
     assert (monitoring.projection_worker_gauges()["queue_depth"]
             == worker.stats().queue_depth)
+
+    # ⛔ PUT THE SINGLETON BACK (#14222 review cycle 5, ISSUE 6). The item was
+    # appended to the PROCESS worker's own deque and nothing consumes it — no
+    # thread is started by `worker()` and `wait_for_drain` does not start one — so
+    # the `armed` fixture's teardown (`shutdown(drain=True, timeout=5)`) waited the
+    # FULL timeout and returned False on every run of this file. The assertions
+    # above need the item still queued; the clean-up belongs after them.
+    with worker._cond:
+        worker._pending.clear()
 
 
 def test_the_metrics_surface_carries_the_lag(armed):
@@ -408,6 +452,44 @@ def test_a_wedged_stop_does_not_let_a_SECOND_consumer_start(armed):
     projection_worker.shutdown(drain=True, timeout=10)
 
 
+def test_a_write_is_NOT_blocked_by_a_shutdown_IN_FLIGHT(armed):
+    """⛔ #14222 review cycle 5, ISSUE 7: `shutdown()` must not hold the write gate.
+
+    Round 4 held `_WORKER_LOCK` across the drain + join to keep two consumers
+    from existing, and `worker()` takes that same lock on the WRITE path — so a
+    concurrent `live_write.write()` blocked for the whole drain timeout, against
+    the module's property 2 ("a write's ack excludes projection time"). The two
+    hazards are closed by marking the instance CLOSED instead: the slot stays
+    occupied for the whole stop, so no fresh instance is built, and a submit that
+    arrives meanwhile DECLINES (`worker_stopping`) instead of restarting the
+    instance the slot is about to drop.
+    """
+    slow = _SlowProjector()
+    live_write.write({"type": "A"}, log=_Log(), project=slow, tenant=_TENANT)
+    assert slow.in_flight.wait(5), "the loop never picked the item up"
+
+    stopper = threading.Thread(
+        target=lambda: projection_worker.shutdown(drain=True, timeout=2.0),
+        name="shutdown-in-flight", daemon=True)
+    stopper.start()
+    time.sleep(0.2)                       # let it reach the drain wait on the wedge
+
+    start = time.perf_counter()
+    write = live_write.write({"type": "B"}, log=_Log(), project=_fast_projector(),
+                             tenant=_TENANT)
+    elapsed = time.perf_counter() - start
+
+    assert write.deferred is False, "a stopping worker must decline, not queue"
+    assert elapsed < 0.5, (
+        f"the write waited {elapsed:.2f} s on a shutdown that is still draining — "
+        "the singleton lock is being held across the stop")
+
+    slow.gate.set()
+    stopper.join(10)
+    assert not stopper.is_alive()
+    assert projection_worker.wait_for_drain(10) is True
+
+
 def test_the_queued_record_is_a_SNAPSHOT_of_what_was_written(armed):
     """⛔ #14222 review P2-4: the fold now reads the dict AFTER the caller resumed.
 
@@ -483,7 +565,14 @@ def test_a_record_only_write_is_never_deferred(armed, monkeypatch):
         return types.SimpleNamespace(applied=True, refusal=None,
                                      outcome="applied")
 
-    write = live_write.write({"type": "PointAdded"}, log=_Log(), project=project)
+    # ⛔ THE TENANT IS SUPPLIED ON PURPOSE (#14222 review cycle 5, ISSUE 2). The
+    # gate order in `live_write._submitted_to_worker` answers "no carried tenant"
+    # BEFORE it looks at `journal_skipped`, so a write with no `tenant=` stayed
+    # inline for the WRONG reason and this row passed even with condition 1
+    # deleted. Every deferral-expecting write in this file carries `_TENANT`; a
+    # condition test that does not is testing the tenant gate instead.
+    write = live_write.write({"type": "PointAdded"}, log=_Log(), project=project,
+                             tenant=_TENANT)
     assert write.appended is False, "the append should have been skipped"
     assert write.deferred is False, "a record-only write must never be deferred"
     assert seen == [(None, True)], "the fold did not run inline"
@@ -504,8 +593,10 @@ def test_a_write_whose_outcome_a_door_reads_is_never_deferred(armed):
     sink: list = []
     outcome = types.SimpleNamespace(applied=True, refusal=None, outcome="applied")
 
+    # `tenant=` as well: without it the tenant gate (`live_write.py:336`) answers
+    # first and the `record_sink` condition is never the reason (ISSUE 2).
     write = live_write.write(
-        {"type": "PointAdded"}, log=_Log(), record_sink=sink,
+        {"type": "PointAdded"}, log=_Log(), record_sink=sink, tenant=_TENANT,
         project=lambda e, s, journal_skipped=False: outcome)
 
     assert write.deferred is False
@@ -564,8 +655,9 @@ def test_a_deferred_write_requires_the_RECORD_to_be_armed_too(armed, monkeypatch
 
 def test_a_scratch_log_is_never_deferred(armed):
     """#9231: a scratch buffer is declined by the seam, so queueing it is pointless."""
+    # `tenant=` as well, or the tenant gate masks `durable=False` (ISSUE 2).
     write = live_write.write({"type": "PointAdded"}, log=_Log(durable=False),
-                             project=_fast_projector())
+                             project=_fast_projector(), tenant=_TENANT)
     assert write.deferred is False
     assert projection_worker.stats().submitted == 0
 
@@ -823,6 +915,59 @@ def test_a_forked_worker_republishes_its_gauges(armed):
     projection_worker.shutdown(drain=True, timeout=5)
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
+def test_the_fork_reset_does_not_wait_on_the_lock_it_REPLACES(armed):
+    """⛔ #14222 review cycle 5, ISSUE 4: decide BEFORE you take the lock.
+
+    `_ensure_not_inherited` opened with `with cond:` — the very Condition it
+    exists to replace — so in the window its own docstring names (a peer thread
+    HOLDING `_cond` at `fork()` time) the child blocked on a lock no thread in that
+    process owns, and never reached the question. `_cond_pid` is now read
+    UNSYNCHRONISED, before any acquire, so the child replaces the lock instead of
+    waiting for it.
+
+    Forked probe, in-suite: the parent holds `_cond` while it forks; the child
+    takes the ordinary lag reading and must answer. A child that hangs is killed
+    by its OWN alarm (a SIGNAL, which the assertions name) rather than hanging the
+    runner.
+    """
+    worker = projection_worker.worker()
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with worker._cond:
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, name="cond-holder", daemon=True)
+    holder.start()
+    assert holding.wait(5), "the peer never took the lock"
+
+    pid = os.fork()
+    if pid == 0:                                   # ── child ──
+        code = 3
+        try:
+            signal.alarm(10)
+            projection_worker.stats()              # the fork-aware READ path
+            code = 0
+        except BaseException:                      # noqa: BLE001, RUF100
+            code = 4
+        finally:
+            os._exit(code)                         # never unwind into pytest
+
+    release.set()
+    holder.join(5)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status), (
+        "the forked child was SIGNALLED, not exited: it was still blocked on the "
+        "Condition its peer held at fork() — the reset never reached its decision")
+    assert os.WEXITSTATUS(status) == 0, (
+        "the forked child could not take a fork-aware reading (exit "
+        f"{os.WEXITSTATUS(status)})")
+
+
 def test_a_STOPPED_worker_still_refreshes_its_condition(armed):
     """⛔ #14222 review cycle 3, P2-1: `stop()` leaves `_pid = None`, and a fork
     taken after it inherits a Condition a peer thread may be HOLDING.
@@ -931,6 +1076,41 @@ def test_a_record_that_cannot_be_copied_folds_inline_rather_than_aliasing(armed)
     assert projection_worker.stats().submitted == 0
 
 
+def test_an_UNIMPORTABLE_loop_folds_inline_instead_of_breaking_the_write(
+        monkeypatch):
+    """The `except ImportError` arm at `live_write.py:340-342`, on its own.
+
+    ⛔ A SEPARATE ROW FROM THE QUEUE FAULT (#14222 review cycle 5, ISSUE 2). The
+    sibling test patches `submit` and therefore never reaches the import, so the
+    `try: from . import projection_worker / except Exception: return False` arm
+    had no assertion at all — deleting it reddened nothing. An import that fails
+    here is not a fault to report: the line has committed, the fold must happen,
+    and folding inline is the pre-#14185 shape.
+
+    Simulated the way the interpreter really fails it: the module is present on
+    the package, `sys.modules` maps its key to ``None`` (the "import halted" arm)
+    and the package attribute is removed so the from-import cannot be satisfied
+    by `getattr` alone.
+    """
+    package = sys.modules["tortoise"]        # the package whose attribute we drop
+
+    monkeypatch.setenv(projection_worker.ENV_WORKER, "1")
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, _RECORD_DSN)
+    monkeypatch.delattr(package, "projection_worker", raising=False)
+    monkeypatch.setitem(sys.modules, "tortoise.projection_worker", None)
+
+    called = []
+    write = live_write.write(
+        {"type": "PointAdded"}, log=_Log(), tenant=_TENANT,
+        project=lambda e, s, journal_skipped=False: (
+            called.append(s),
+            types.SimpleNamespace(applied=True, refusal=None,
+                                  outcome="applied"))[1])
+
+    assert write.deferred is False
+    assert called == [1], "an unimportable loop must fold inline, not skip the fold"
+
+
 # ── 5. the flag itself ──────────────────────────────────────────────────────
 
 
@@ -972,6 +1152,11 @@ def test_a_queue_fault_folds_inline_instead_of_breaking_the_write(monkeypatch):
     inline", which is the pre-#14185 shape and therefore always safe.
     """
     monkeypatch.setenv(projection_worker.ENV_WORKER, "1")
+    # ⛔ BOTH GATES THAT PRECEDE `submit` (#14222 review cycle 5, ISSUE 2). Without
+    # `tenant=` and without the record's own arming, `_submitted_to_worker`
+    # returned False at `:336` / `:338` and this row passed even with the `except`
+    # at `:349` deleted — the queue fault was never exercised.
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, _RECORD_DSN)
 
     def exploding_submit(**kwargs):
         raise RuntimeError("the queue is gone")
@@ -980,7 +1165,7 @@ def test_a_queue_fault_folds_inline_instead_of_breaking_the_write(monkeypatch):
 
     called = []
     write = live_write.write(
-        {"type": "PointAdded"}, log=_Log(),
+        {"type": "PointAdded"}, log=_Log(), tenant=_TENANT,
         project=lambda e, s, journal_skipped=False: (
             called.append(s),
             types.SimpleNamespace(applied=True, refusal=None,

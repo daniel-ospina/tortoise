@@ -936,7 +936,10 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #: * ``PROJECTION_OLDEST_PENDING_SECONDS`` — the lag in TIME: how old the item at
 #:   the head is. Positions alone cannot distinguish a burst of 500 fast folds
 #:   from 500 records stuck behind one wedged statement; this is the number that
-#:   can.
+#:   can. ⛔ It is a CALLBACK gauge (``set_function``, bottom of this module), not
+#:   an event-published one: it is recomputed on collect, because the value drifts
+#:   with the clock and the loop that would push it is the thread a wedge blocks
+#:   (#14222 review cycle 5, ISSUE 1).
 #: * ``PROJECTION_INLINE_FALLBACK_COUNT`` — writes that fell back to folding on
 #:   their own thread because the queue was FULL (or the worker was stopping).
 #:   ⛔ NOTHING IS DROPPED when the bound is reached — a dropped item would be a
@@ -1004,16 +1007,42 @@ PROJECTION_OLDEST_PENDING_SECONDS = Gauge(
 )
 PROJECTION_WORKER_FAILURE_COUNT = Counter(
     "tortoise_record_projection_worker_failures_total",
-    "Deferred record projections that RAISED on the projection worker's loop "
-    "(#14185) — the journal holds the line; a replay heals it",
+    "Deferred record projections that did NOT WRITE A ROW on the projection "
+    "worker's loop (#14185) — raised, answered nothing, or were refused; the "
+    "journal holds the line and a replay heals it",
     ["reason"],
 )
 PROJECTION_INLINE_FALLBACK_COUNT = Counter(
     "tortoise_record_projection_inline_fallbacks_total",
     "Writes that folded the record on their OWN thread because the projection "
-    "queue was full (#14185) — a slower ack, never a dropped record",
+    "queue was FULL or the worker was STOPPING (#14185) — a slower ack, never a "
+    "dropped record",
     ["reason"],
 )
+
+#: ⛔ THE TIME GAUGE IS COMPUTED AT COLLECT, NOT PUSHED (#14222 review cycle 5,
+#: ISSUE 1). ``Gauge.set_function`` makes every other method of this family a
+#: no-op and recomputes the value whenever the metric is collected, which is the
+#: only shape that stays truthful through a wedge: the loop that would push an
+#: update is the very thread that is blocked, and the case the family exists for
+#: — one record wedged behind a 30 s statement with nothing new arriving — is
+#: precisely the case in which no enqueue or completed fold ever happens. The
+#: callback imports lazily because `projection_worker` imports THIS module; the
+#: import is per collect and cheap (a `sys.modules` hit), and any failure answers
+#: 0.0 rather than breaking a scrape.
+def _live_oldest_pending_seconds() -> float:
+    """The age of the queue head, read when the metric is COLLECTED (#14185)."""
+    try:
+        from . import projection_worker
+    except Exception:      # noqa: BLE001, RUF100 — a scrape never fails on this
+        return 0.0
+    try:
+        return projection_worker.oldest_pending_seconds()
+    except Exception:      # noqa: BLE001, RUF100
+        return 0.0
+
+
+PROJECTION_OLDEST_PENDING_SECONDS.set_function(_live_oldest_pending_seconds)
 
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
 #:
@@ -3025,23 +3054,27 @@ def cache_leg_failure_counts() -> dict[str, int]:
     return _collect_by_label(CACHE_LEG_FAILURE_COUNT, "reason")
 
 
-def record_projection_queue_state(*, depth: int, pending_positions: int,
-                                  oldest_age_seconds: float | None = None) -> None:
-    """Publish the projection worker's three GAUGES (#14185).
+def record_projection_queue_state(*, depth: int, pending_positions: int) -> None:
+    """Publish the projection worker's two EVENT gauges (#14185).
 
     Called from ``tortoise.projection_worker`` on every queue transition — an
     enqueue and a completed fold — so the exported numbers are the loop's own
-    state rather than a sampler's guess. Gauges, all three, because all three
-    can go DOWN: a depth, a count of positions, and the age of the head.
+    state rather than a sampler's guess. Both can go DOWN, which is what makes
+    them gauges: a depth and a count of positions.
 
-    ``oldest_age_seconds=None`` leaves that gauge UNTOUCHED rather than writing
-    a zero — the `#13331` "not measured is not measured-zero" rule, applied to a
-    gauge. Depth and pending positions are always written.
+    ⛔ THE THIRD FAMILY IS NOT PUBLISHED HERE ANY MORE (#14222 review cycle 5,
+    ISSUE 1). ``PROJECTION_OLDEST_PENDING_SECONDS`` is a function of the CLOCK, so
+    a pushed value is only as fresh as its last publish — and the loop publishes
+    at exactly the two moments a wedge rules out (it is inside ``project``, with
+    nothing else waking it). It is registered with ``Gauge.set_function`` at the
+    bottom of this module and recomputed on COLLECT instead: the gauge then
+    represents current state, which is what a Prometheus gauge is for and what
+    makes an ``oldest_pending_seconds > N`` alert able to fire on a quiescent
+    wedge. Depths and positions stay event-published because they do not drift
+    with time.
     """
     PROJECTION_QUEUE_DEPTH.set(depth)
     PROJECTION_PENDING_POSITIONS.set(pending_positions)
-    if oldest_age_seconds is not None:
-        PROJECTION_OLDEST_PENDING_SECONDS.set(oldest_age_seconds)
 
 
 def record_projection_worker_failure(reason: str) -> None:
