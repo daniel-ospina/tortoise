@@ -4275,9 +4275,16 @@ jobs:
       # ── THE ARCHIVE'S RESTORE ANCHORS MUST BE PROVABLE (#11609) ─────────────────
       # `archive/` keeps removed code so a removal can be undone, and every entry cites
       # the commit on the DEFAULT BRANCH that held it (not the batch PR's HEAD, which a
-      # squash merge orphans). The ordinary `archive_surface.py check` runs in the `test`
-      # job, which checks out at `fetch-depth: 1` — where the anchored commit is an absent
-      # ancestor by construction, so the anchor arm says nothing and proves nothing. That is the #9075/#11057 shape exactly: a gate that runs only where it
+      # squash merge orphans). ⛔ NO CI JOB RUNS THE BARE `check`, so there is no depth-1
+      # `test`-job arm to keep honest here: the only invocations of this tool in
+      # `.github/workflows/` are the two `run:` lines below (`verify-anchors`, and `check`
+      # with `--require-entries --base-ref`), both inside THIS job. (Round-11 review: this
+      # block used to claim the ordinary `check` ran in the depth-1 `test` job. It did not —
+      # no job invoked it at all, which is why the strict form had to get a caller.)
+      # The depth-1 problem is why the strict arm must live HERE instead: on a
+      # `fetch-depth: 1` checkout the anchored commit is an absent ancestor by construction,
+      # so a bare `check` there would say nothing and prove nothing. That is the #9075/#11057
+      # shape exactly: a gate that runs only where it
       # cannot answer is a no-op gate, and before this step NO workflow invoked the strict
       # form at all (measured: `rg -- '--anchors'` outside the tool → no match).
       # This job already pays for `fetch-depth: 0`, which is what the proof NEEDS.
@@ -4425,7 +4432,9 @@ jobs:
         # cannot answer proves nothing). `--base-ref` with no value means "the default branch",
         # so the step needs no `github.base_ref` interpolation and cannot break on a push run;
         # an unresolvable ref is a REFUSAL (exit 2), never a quiet pass. It is OFF unless given,
-        # which is what keeps the depth-1 `test` job's `check` at its old meaning.
+        # which keeps a bare `check` at its documented shallow-clone meaning: this step is the
+        # tool's only CI caller and it always passes the flag, so no depth-1 checkout reaches an
+        # unresolvable ref through CI (round-11 review corrected the older `test`-job claim).
         #
         # ⚠️ ACCEPTED RESIDUAL, the same one the two steps above name: this runs the CHECKOUT'S
         # OWN `tools/surface_manifest.py`, so a PR that neuters the arm in the same commit that

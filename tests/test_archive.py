@@ -1764,6 +1764,35 @@ def test_a_module_left_behind_as_an_EMPTY_file_is_not_a_return(tree: Path) -> No
     )
 
 
+def test_the_body_carrier_set_decides_when_there_is_no_tree_to_read() -> None:
+    """`root=None` is the ONE place `modules_with_a_body` decides the answer (round-11 review).
+
+    Both other consumers pass `root`, and there `_init_carries_a_body` re-derives the answer from
+    the file, so the carriers guard never changes it — which meant nothing pinned the KEY the
+    fixture writes, and round-10's defect (the fixture writing `modules_with_body`, a key no
+    production code reads) could return silently with every other test still green. With no tree
+    to read, a scaffolding-only carrier is "not the module coming back" and a body-carrying one
+    is.
+
+    Mutation: revert `_surface`'s key to `modules_with_body` -> the FIRST assertion REDs, because
+    `carriers` becomes `None` and `live_return` credits the scaffolding path.
+    """
+    entry = dict(_entry(arch.MODULE, "tortoise.splitmod"), blocks=[], sources=[])
+    scaffolding = {"tortoise/splitmod/__init__.py"}
+
+    assert (
+        arch.live_return(entry, _surface(modules=scaffolding, modules_with_a_body=set()), None)
+        is None
+    ), "the surface says the name resolves and carries no body, so nothing came back"
+
+    assert (
+        arch.live_return(
+            entry, _surface(modules=scaffolding, modules_with_a_body={"tortoise.splitmod"}), None
+        )
+        == "tortoise/splitmod/__init__.py"
+    ), "a carrier the surface names IS the module coming back"
+
+
 def test_the_restore_credit_needs_a_KNOWN_surface(tree: Path) -> None:
     """`surface=None` means liveness UNKNOWN, and that must fail CLOSED (still a violation).
 

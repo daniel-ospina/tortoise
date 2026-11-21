@@ -1388,7 +1388,9 @@ def shrink_violations(
     A DROPPED row is not always a loss. `archive/README.md`'s restore procedure ends by
     deleting the row AND its frozen file, because the code came back to the product — and a
     restore CANNOT keep the row, since direction one reds an archived symbol that is live
-    again. So a drop whose symbol `live_return` finds live is a RESTORE: green, no waiver,
+    again. So a drop whose symbol `live_return` finds live AND whose live body is the one the
+    row recorded (`_live_body_is_the_recorded_one`; `False` on an unreadable or unkeyable file)
+    is a RESTORE: green, no waiver,
     nothing lost (the code is in the product; the frozen bytes stay readable in git history at
     the deletion commit). `surface` is what answers that question, and the same answer
     `surface_violations` reds from its own side. `surface=None` means "liveness UNKNOWN" and
@@ -1666,8 +1668,10 @@ def check(
     a ref to compare against: every other arm here iterates the entries the manifest FINDS, so
     none of them can see an entry that is gone or a module that was deleted. `None` = the arm
     does not run; a string (possibly empty → the default branch) = it runs, and an unresolvable
-    ref is a REFUSAL rather than a silent pass. Arm 2 recognises a RESTORE (the row left AND
-    the symbol is live again) and stays green, so the restore procedure in `archive/README.md`
+    ref is a REFUSAL rather than a silent pass. Arm 2 recognises a RESTORE (the row left, the
+    symbol is live again, AND the live body is the one this row recorded —
+    `_live_body_is_the_recorded_one`; a live NAME alone is not a restore, as `archive/README.md`
+    says) and stays green, so the restore procedure in `archive/README.md`
     is untouched by turning the arm ON — the live surface read for `surface_violations` below is
     the same answer it reads, passed through rather than derived twice.
     """
