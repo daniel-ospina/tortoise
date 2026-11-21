@@ -568,13 +568,11 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: asymmetry is pre-existing and deliberate (see its note above), so it is excluded by
 #: CONSTRUCTION here rather than by somebody remembering to leave it out.
 #:
-#: ⛔ ``which_names_an_ending`` IS THE FIRST OF THE FOUR ROWS THAT ARE NOT A
-#: TAIL-SWAPPED SHAPE — the others are ``existence_unguarded`` (the same cue without
-#: the clause guard), ``which_modified_noun`` and ``is_copula_long_subject`` (both
-#: standalone expressions, not a shape with its tail swapped); the identity test
-#: asserts exactly that set, so a new hand-written row cannot appear silently. It is
-#: the ATTRIBUTIVE case: the ending word immediately followed by the NOUN it
-#: modifies, inside a ``which`` question. That is #14033's fourth row — `which of our withdrawn claims
+#: ⛔ ``which_names_an_ending`` IS ONE OF THE HAND-WRITTEN ROWS — with
+#: ``existence_unguarded``, ``which_modified_noun`` and ``is_copula_long_subject``, the
+#: four the module's notice-scope paragraph names — and it is the ATTRIBUTIVE
+#: case: the ending word immediately followed by the NOUN it modifies, inside a
+#: ``which`` question. That is #14033's fourth row — `which of our withdrawn claims
 #: affected pricing` — whose ending word is a modifier and whose own predicate
 #: (`affected pricing`) the population cannot answer, so it keeps the relevance read
 #: and must still say that it saw a cue.

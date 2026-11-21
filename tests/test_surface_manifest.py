@@ -2866,6 +2866,28 @@ def test_the_14033_state_question_field_is_recorded():
         "CONTENT query that NAMES an ending (`which features are deprecated in "
         "v3`) DOES carry the notice, so a blanket byte-identity claim for content "
         "searches is a promise the code breaks")
+    # ⛔ AND THE PAYLOAD'S CENTRAL PROPERTY, which no other pin sees (#14033 review,
+    # P3): rewriting the documented payload to `{routed: true, population, cue}` and
+    # re-rendering left every gate GREEN — the row still exists, is still anchored, still
+    # enumerates `reason`, and the rendered text is verbatim from the manifest, so a row
+    # that INVERTS the notice's whole meaning (`routed: false` is the contract) was
+    # invisible. The key set is pinned too, because a payload that drops `hint` or `cue`
+    # is a different promise to the caller than the one `missed_route_payload` returns.
+    documented = row["emitted_when"]
+    assert "`{routed: false," in documented, (
+        "the row does not document `routed: false` as the payload's shape — `routed: "
+        "false` IS the contract (the notice reports a cue that did NOT route); a row "
+        "that says `true`, or drops the key, describes a different response")
+    from tortoise.state_intent import StateQuestion, missed_route_payload
+    probe = missed_route_payload(
+        StateQuestion(population="ended", cue="c",
+                      signal="wh_whole_question", signal_cue="what ended"))
+    assert probe is not None, "the probe produced no payload — the key set below is unchecked"
+    for key in probe:
+        assert key in documented, (
+            f"the row never documents the `{key}` key that `missed_route_payload` "
+            f"returns for every notice — a caller cannot know the payload's shape "
+            f"(recorded: {documented[:80]!r}…)")
 
 
 def test_the_14033_state_question_field_is_rendered():
