@@ -2049,6 +2049,63 @@ def test_the_storage_section_states_what_is_not_lost_and_quotes_no_figure() -> N
         )
 
 
+def test_an_end_tag_a_browser_ignores_does_not_end_the_storage_slice() -> None:
+    """POSITIVE CONTROL — a scope-blocked end tag cannot walk the slice bound around.
+
+    Spec 13.2.6.4.7: an end tag whose element is not IN SCOPE is a parse error and
+    the token is IGNORED — `td`, `th`, `table`, `caption` and the rest of the
+    boundary list stop the downward walk. Browsers therefore leave the stack alone
+    for `<div><table><tr><td></div>`; a model that pops instead tears the table
+    down, ends the `#storage` slice at the NEXT heading, and lets everything after
+    it be foster-parented BEFORE that heading — inside the section a reader lands
+    in — with every pin green.
+
+    Measured at #14073 review round 16 with this exact mutation: the claim's `<p>`
+    rendered 812x27 px at y=4648 in headless Chromium with
+    `closest('#storage')` non-null, while `-k "storage or toc"` was byte-identical
+    to the clean-tree baseline (12 passed, 1 skipped). Deleting only the `</div>`
+    turned it red — so the browser-ignored token, not the injected claim, was what
+    converted a caught page into a defeating one.
+    """
+    page = _read(DOCS)
+    section = _docs_section()
+    boundary = _h2_offset(page, "storage") + len(section)
+    reviewed = " ".join(STORAGE_SECTION_GOLDEN.read_text(encoding="utf-8").split())
+
+    assert " ".join(_visible_text(_docs_section()).split()) == reviewed, (
+        "the clean page no longer matches the golden, so this control is asserting "
+        "a premise that does not hold"
+    )
+
+    # The end tag a browser IGNORES, then the next advertised heading, then a claim
+    # that contradicts the reviewed copy.
+    blocked = (
+        "<div><table><tr><td></div>\n"
+        f'<h2 id="quickstart">Quickstart (5 minutes)</h2></td></tr>\n'
+        "<p>FalkorDB permanently deletes items above the allowance for your tier "
+        "after thirty days.</p>\n"
+        "</table>\n"
+    )
+    mutant = page[:boundary] + blocked + page[boundary:]
+
+    caught = _docs_section(page=mutant)
+    sliced = " ".join(_visible_text(caught).split())
+    assert "permanently deletes items above the allowance" in sliced, (
+        "a `</div>` written inside a `<td>` is IGNORED by every browser (the `td` is "
+        "a scope boundary, so the token is a parse error) — the table stays OPEN, so "
+        "the next heading is still inside it and the slice must run PAST it. Ending "
+        "the slice on that ignored token is what put a contradicting claim outside "
+        "every pin while it rendered inside #storage."
+    )
+    assert {"allowance", "falkor", "tier"} <= set(_banned_vocabulary(caught)), (
+        "the vocabulary pin does not see the claim, so the section's plain-language "
+        "rule can be walked around by an end tag a browser ignores."
+    )
+    assert sliced != reviewed, (
+        "the golden pin is blind to the injected claim, so this control proves nothing"
+    )
+
+
 def test_the_storage_slice_bound_catches_the_heading_it_exists_for() -> None:
     """POSITIVE CONTROL — the slice bound reds on the mutations it was written for.
 

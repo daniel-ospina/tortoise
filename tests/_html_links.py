@@ -1863,11 +1863,49 @@ class _AnchorHrefParser(HTMLParser):
         for index in range(len(self._open_elements) - 1, -1, -1):
             if self._open_elements[index][0] != tag:
                 continue
-            for _open_tag, opened_container, _renders in self._open_elements[index:]:
-                if opened_container and self._open_containers:
-                    self._open_containers.pop()
-            del self._open_elements[index:]
+            if self._end_tag_is_in_scope(index, tag):
+                for _open_tag, opened_container, _renders in self._open_elements[index:]:
+                    if opened_container and self._open_containers:
+                        self._open_containers.pop()
+                del self._open_elements[index:]
+                return
+            # ⛔ NOT IN SCOPE — the browser IGNORES this end tag (#14073 review round
+            # 16, P0, measured). Falls through to the next (outer) match, exactly as
+            # the spec's "ignore the token" leaves the stack untouched: an outer
+            # match cannot exist either, because the boundary that stopped us is
+            # below this one.
             return
+
+    #: End tags for a table's own structure are resolved by the spec's TABLE-CELL
+    #: and IN-TABLE rules, not by the generic scope test, so the boundary walk below
+    #: must not swallow them. Without this carve-out `</table>` inside a `<td>`
+    #: would be refused by its own `td`, and every table on the site would stop
+    #: closing.
+    _TABLE_STRUCTURE = frozenset({
+        "caption", "colgroup", "table", "tbody", "td", "tfoot", "th", "thead",
+        "tr",
+    })
+
+    def _end_tag_is_in_scope(self, index: int, tag: str) -> bool:
+        """Can this end tag actually reach `index`? Spec 13.2.6.4.7 "has an element in scope".
+
+        The scope test walks the stack TOP-DOWN and stops at the first boundary
+        element; if the target lies below one, it is not in scope and the token is
+        ignored. MEASURED divergence without it: `<div><table><tr><td></div>` leaves
+        the browser's stack as `[div, table, tbody, tr, td]` — `td` is a scope
+        boundary, so `</div>` is a parse error and nothing pops — while this model
+        popped `div`, `table`, `tr` and `td`, ending the `#storage` slice at the
+        NEXT heading and letting the rest of the section be foster-parented BEFORE
+        it. End to end that put a contradicting claim on the rendered page with all
+        six pins green (round 16 measured 812x27 px at y=4648, `closest('#storage')`
+        non-null, vs a red baseline once the `</div>` was deleted).
+        """
+        if tag in self._TABLE_STRUCTURE:
+            return True
+        return not any(
+            self._open_elements[k][0] in self._P_SCOPE_BOUNDARY
+            for k in range(index + 1, len(self._open_elements))
+        )
 
     def set_cdata_mode(self, elem: str, *args: object, **kwargs: object) -> None:
         """Keep the HTML rules' raw-text tokenizer state out of foreign content.
