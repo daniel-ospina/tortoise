@@ -2818,6 +2818,12 @@ _PRE_EXISTING_OFFLOAD_LEGS = {
 #: a SUBSTRING (a false positive there is a loud test failure, not a silence).
 _SESSION_ALIVE = "MATCH (s:Session {id:$sid}) RETURN count(s)"
 
+#: The thread-name prefix `_run_off_loop(_CAPTURE_EXECUTOR, …)` gives its
+#: workers. The tail must be observed ON one of these, not merely off
+#: `MainThread`: the shared default executor (`asyncio_N`) is the #3060
+#: starvation the dedicated pool exists to prevent.
+_CAPTURE_POOL_PREFIX = "capture-extract"
+
 #: Statements the fixture must issue MORE THAN ONCE, matched by EXACT equality
 #: on the whitespace-normalised cypher.
 #:
@@ -2902,6 +2908,36 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
             f"offloaded (the #4625 leg-62 probe also mentions this statement, "
             f"but as part of a longer query, so it cannot satisfy this): "
             f"{[c[:100] for c in all_cyphers if needle in c]}")
+
+    # ⛔ "not on MainThread" is NECESSARY BUT NOT SUFFICIENT. `asyncio.to_thread`
+    # and any `run_in_executor(None, …)` put the tail on the SHARED default
+    # executor's `asyncio_N` workers — which is exactly the #3060 starvation the
+    # dedicated pool exists to prevent — and that placement satisfies the
+    # prohibition above. So the positive half is pinned too, on the thread NAME
+    # (the same house check `test_10893_capture_off_loop.py` applies to the
+    # mint). The session-alive probe is matched by EXACT equality for the reason
+    # `_TAIL_MUST_BE_ISSUED_N_TIMES` records: the #4625 leg-62 probe CONTAINS it
+    # and runs on `asyncio_0` BY DESIGN — that is `_PRE_EXISTING_OFFLOAD_LEGS`,
+    # not this tail (#14086 cycle-4 review, F3).
+    mispooled = [
+        f"{label}: ran on {name!r}"
+        for name, c, _d in records
+        if not str(name).startswith(_CAPTURE_POOL_PREFIX)
+        for needle, label in _CAPTURE_TAIL_STATEMENTS.items()
+        if needle in c
+    ]
+    mispooled += [
+        f"session-alive probe: ran on {name!r}"
+        for name, c, _d in records
+        if not str(name).startswith(_CAPTURE_POOL_PREFIX) and c == _SESSION_ALIVE
+    ]
+    assert not mispooled, (
+        "the capture's post-write tail ran off the event loop but NOT on the "
+        f"capture pool (expected every tail statement on a "
+        f"`{_CAPTURE_POOL_PREFIX}*` thread). The shared default executor's "
+        "workers are what every other `to_thread` caller waits behind, so a long "
+        "or stalled tail there starves them — `_run_off_loop(_CAPTURE_EXECUTOR, "
+        "…)` is the seam (#3060):\n  " + "\n  ".join(mispooled))
 
 
 #: The tail statements THIS fixture is guaranteed to reach, so their ABSENCE is
