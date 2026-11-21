@@ -5811,10 +5811,19 @@ def beta_variance_sum_bound(threshold: float) -> float:
     above the threshold, so adding it in front of ``beta_variance_cypher(…) >
     $contested_threshold`` cannot change a result set — it only spares the
     division, the coercion CASE and the band checks on the rows that were
-    always going to be rejected. Measured on the #14192 corpus, that read
-    (``get_relationships_bounded``'s Q2-crit) went from ~160 ms to ~58 ms with
-    the row set BYTE-IDENTICAL (79 rows both ways), and it is the single
-    most expensive query on the search read.
+    always going to be rejected. ⛔ NO MILLISECOND FIGURE AND NO ROW COUNT IS
+    QUOTED HERE. The shipped artifacts measure the WHOLE function and its
+    isolated A/B (``docs/evidence/14192-read-wave/``), never this query alone,
+    and this directory's own rule is "if a number is not in a JSON here, it is
+    not claimed here". An earlier cut of this docstring said "~160 ms to ~58 ms
+    with the row set BYTE-IDENTICAL (79 rows both ways)"; neither number nor
+    that row count appears in any committed artifact, so both are WITHDRAWN
+    rather than restated. The property that IS pinned is the one that makes the
+    result set immovable: the guard can only REJECT, never ADMIT
+    (``tests/test_14192_beta_variance_sum_bound.py``), and the closest admitted
+    pair to the bound survives end-to-end
+    (``tests/test_relationships_bounded.py::
+    test_contested_peer_at_the_sum_bound_always_survives``).
 
     It is a bound on the SUM, not on either operand, because the formula's
     only denominator-free quantity is the sum. The Python twin is
@@ -5863,8 +5872,10 @@ def beta_variance_gt_cypher(
     ⛔ IT IS A NECESSARY CONDITION AND NOTHING MORE. A row it rejects was going
     to be rejected by ``width > threshold`` anyway; a row it admits still has to
     clear the division. So the result set is unchanged and only the arithmetic
-    is spared — measured at ~3x on the read's most expensive query, with the
-    decoration byte-identical (``docs/evidence/14192-read-wave/``).
+    is spared. ⛔ No multiplier is claimed: the shipped artifacts measure the
+    FUNCTION, not this query, so this guard's own share is not separately
+    committed (``docs/evidence/14192-read-wave/``). An earlier cut said
+    "measured at ~3x"; that figure is in no artifact and is WITHDRAWN.
     """
     a = numeric_operand_cypher(alpha_operand)
     b = numeric_operand_cypher(beta_operand)
@@ -6717,7 +6728,7 @@ class _InlineMember:
     consuming thread already blocks at ``result()``.
     """
 
-    __slots__ = ("_thunk", "_done", "_value", "_exc")
+    __slots__ = ("_done", "_exc", "_thunk", "_value")
 
     def __init__(self, thunk) -> None:
         self._thunk = thunk
@@ -6730,7 +6741,7 @@ class _InlineMember:
             self._done = True
             try:
                 self._value = self._thunk()
-            except BaseException as exc:  # noqa: BLE001 — re-raised below
+            except BaseException as exc:  # re-raised below, never swallowed
                 self._exc = exc
         if self._exc is not None:
             raise self._exc
@@ -6757,15 +6768,24 @@ class _ReadWave:
 
     ⛔ EVERY MEMBER IS METERED, AND THAT IS NOT OPTIONAL. ContextVars do not
     cross a thread boundary, so a worker that simply calls ``graph.query`` runs
-    with ``graph_ops._ACTIVE`` and ``retrieval_metering._ACTIVE`` unset: the
-    capture's counter and the retrieval tally would silently miss every read
-    the wave performs. That is not hypothetical — it is the exact regression
-    ``graph_ops.bind_metering_context`` documents for ``degradation_chain``'s
-    legs, and ``submit`` therefore binds BOTH context wrappers (the same pair
-    the legs get) before handing the thunk to the pool, so no future member can
-    forget it. Both binders are identity when nothing is armed, so the
-    non-capture path is unchanged (measured: ``tests/test_capture_graph_ops.py``
-    counts the same ops through the wave as through the serial chain).
+    with ``graph_ops._ACTIVE`` unset and the capture's counter would silently
+    miss every read the wave performs. That is not hypothetical — it is the
+    exact regression ``graph_ops.bind_metering_context`` documents for
+    ``degradation_chain``'s legs, so ``submit`` binds it before handing the thunk
+    to the pool and no future member can forget it. It is identity when nothing
+    is armed, so the non-capture path is unchanged (measured:
+    ``tests/test_capture_graph_ops.py`` counts the same ops through the wave as
+    through the serial chain).
+
+    ⛔ ONE BINDER, DELIBERATELY. ``_retrieval_metering.bind_worker_context`` is
+    NOT bound here: that tally accounts the retrieval LEGS
+    (``run_fts_query``/``run_vector_query``/``run_structural_query``) and these
+    are post-fusion decoration graph ops, so binding it would attribute
+    decoration to a figure whose meaning is "the retrieval arms" (#2952). An
+    earlier cut of this docstring said ``submit`` binds "BOTH context wrappers
+    (the same pair the legs get)" — it never did, and the paragraph below has
+    said the opposite in the same breath since the review that narrowed the
+    scope.
 
     ⛔ FAILURES SURFACE WHERE THEY USED TO. ``result()`` re-raises the worker's
     exception in the CONSUMING thread, so a caller's existing ``try/except``
@@ -6846,7 +6866,7 @@ class _ReadWave:
         metered = bind_metering_context(thunk)
         try:
             self._futures[name] = self._pool.submit(metered)
-        except Exception:  # noqa: BLE001 — a scheduler failure is not the read's
+        except Exception:  # a scheduler failure is not the read's to raise
             # ``ThreadPoolExecutor.submit`` starts a thread, and a host that
             # refuses one (thread/FD exhaustion) raises here. ⛔ THE MEMBER IS
             # NOT DROPPED — it runs INLINE on the caller's thread, which is
@@ -7066,19 +7086,20 @@ def get_relationships_bounded(
                 # would put a second spelling of "which alpha/beta pairs can be
                 # contested" beside the formula it guards, which is the #11702
                 # twin-drift class this file has already paid for twice.
-                f"           AND {beta_variance_gt_cypher('coalesce(other.posterior_alpha, other.ep_alpha, 1.0)', 'coalesce(other.posterior_beta, other.ep_beta, 1.0)')} "
-                # #11702 cycle 17: the shared width formula, not a local
-                # re-derivation. FalkorDB RAISES on `string * string` /
-                # `bool * bool` ("Type mismatch: expected Integer, Float, or
-                # Null but was String"), and the raise is not per-row — it took
-                # the WHOLE query down, so `get_relationships_bounded` returned
-                # its fail-open seed with `decoration_error` set and EVERY
-                # requested point lost its relationships. Three shapes this PR
-                # declares must read as ABSENT destroyed the decoration
-                # instead. `beta_variance_cypher` carries the coercion, the
-                # sign guard and the band, so the two twins agree about
-                # whether the shape is readable at all.
-                f"           AND {beta_variance_cypher('coalesce(other.posterior_alpha, other.ep_alpha, 1.0)', 'coalesce(other.posterior_beta, other.ep_beta, 1.0)')} > $contested_threshold)) "
+                # ⛔ ONE EMISSION, NOT TWO. `beta_variance_gt_cypher` already emits
+                # BOTH halves — the necessary sum bound AND the width comparison,
+                # from the same operands and the same `numeric_operand_cypher`
+                # coercion — so a second `beta_variance_cypher(…) >
+                # $contested_threshold` beside it is not a belt-and-braces
+                # duplicate: it is the ~11.7k-char coercion CASE evaluated TWICE
+                # per row on the one query this issue exists to make cheap (measured
+                # before this line was removed: 26,463 chars, `$contested_threshold`
+                # twice, both ANDed inside the contested arm; after: 14,732 chars,
+                # once). `beta_variance_cypher` still carries the #11702 cycle-17
+                # contract — the coercion, the sign guard and the representable
+                # band, so FalkorDB cannot raise on `string * string` and take the
+                # whole query down — it is simply reached through its owner now.
+                f"           AND {beta_variance_gt_cypher('coalesce(other.posterior_alpha, other.ep_alpha, 1.0)', 'coalesce(other.posterior_beta, other.ep_beta, 1.0)')})) "
                 "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
                 "  other.pointKind, other.status, "
                 "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "

@@ -194,6 +194,89 @@ def test_contested_peer_at_the_sum_bound_always_survives(sdk):
     assert peer_state["contested"] is True
 
 
+class _RefusingPool:
+    """A pool whose ``submit`` refuses — the Python-level shape of thread/FD
+    exhaustion. ``ThreadPoolExecutor.submit`` starts the thread EAGERLY, so a
+    host that cannot give one raises from ``submit`` itself."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def submit(self, fn, *a, **k):  # the refusal IS the behaviour under test
+        raise RuntimeError("can't start new thread")
+
+    def shutdown(self, **k):  # nothing to join: no member ever started
+        pass
+
+
+class _CritPeerGraph:
+    """Q1a answers one operator edge; Q2-crit answers one NAND peer.
+
+    DB-free, and shaped for the INLINE path: the crit row carries a NAND edge,
+    so the peer it describes is a cap-exempt D3/D4 critical. If a refused member
+    were dropped (rather than run on the caller's thread), that peer would be
+    gone from the answer with no marker.
+    """
+
+    class _R:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    #: (op.id, et, other_idx, other.id, pointKind, status, a, b, has_ep,
+    #:  created, outdated) + the #11702 raw/mirror tail (11..15).
+    _CRIT_ROW = ("op1", "NAND", 0, "peer1", "statement", "open",
+                 2.0, 2.0, True, "2026-01-01", False,
+                 2.0, 2.0, 2.0, 2.0, None)
+
+    def query(self, cypher, params=None, **kwargs):
+        params = params or {}
+        if "type(r) AS et, r.idx AS n_idx" in cypher:  # Q1a
+            return self._R([["p1", "IMPL", 0, "op1", "mechanism", "pred", None]])
+        if "raw_cap" in params:  # Q2-crit
+            return self._R([list(self._CRIT_ROW)])
+        return self._R([])
+
+
+def test_a_refused_wave_member_runs_inline_and_keeps_its_rows(monkeypatch):
+    """#14192 review P1 — a scheduler REFUSAL must not read as "no relationships".
+
+    ``submit`` never raises on purpose (a raise escaping a member would land in
+    the caller's blanket handler mid-submit), and the FIRST fix for that recorded
+    the member as ABSENT: ``result()`` answered ``[]`` and ``decoration_error``
+    stayed ``''``, so a batch that silently lost its cap-exempt D3/D4 NAND /
+    terminal / contested peers looked exactly like a genuinely sparse one. A
+    disputed claim would have rendered as undisputed, and #6971's marker never
+    fires because nothing raised.
+
+    The repair runs the member INLINE on the caller's thread — the pre-change
+    behaviour, where every ContextVar the graph handle reads is already bound.
+    So the assertion is not "it is labelled"; it is "the rows are still there".
+
+    MUTANT: hand the refused member to ``None`` instead of ``_InlineMember``
+    (the bug this replaces). REDDENED ROW: this one — the NAND peer disappears
+    and ``decoration_error`` stays empty.
+    """
+    import concurrent.futures
+
+    # CONTROL: same graph, a pool that starts its members.
+    control = get_relationships_bounded(_CritPeerGraph(), ["p1"])
+    control_ids = {e["related_id"] for e in control["p1"] if "related_id" in e}
+    assert "peer1" in control_ids, (
+        f"the fixture must produce the NAND peer through the pool first, "
+        f"else the refusal case proves nothing: {control_ids}")
+    assert getattr(control, "decoration_error", "") == ""
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", _RefusingPool)
+    out = get_relationships_bounded(_CritPeerGraph(), ["p1"])
+    ids = {e["related_id"] for e in out["p1"] if "related_id" in e}
+    assert "peer1" in ids, (
+        "a wave member the SCHEDULER refused was dropped: the cap-exempt NAND "
+        "peer is missing and the decoration carries no marker (it must run "
+        f"inline on the caller's thread instead). got {ids}")
+    assert getattr(out, "decoration_error", "") == "", (
+        "the inline fallback SUCCEEDED, so the batch must not be labelled")
+
+
 def test_superseded_peer_always_survives(sdk):
     a = _point(sdk, content="alpha claim target")
     stale = _point(sdk, content="stale superseded peer")
@@ -1432,7 +1515,9 @@ class _WaveMemberRaisingGraph:
             raise RuntimeError("simulated wave-member failure (Q2-crit)")
 
         class _R:
-            result_set = [["p1", "IMPL", 0, "op1", "mechanism", "pred", None]]
+            def __init__(self):
+                self.result_set = [["p1", "IMPL", 0, "op1", "mechanism",
+                                    "pred", None]]
 
         return _R()
 

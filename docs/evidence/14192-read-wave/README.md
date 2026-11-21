@@ -16,7 +16,26 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 | queries | the first 24 of `benchmarks/query_mix.json`, identical in both arms |
 | read | `TortoiseSDK._tortoise_fts_query` — what `/v1/search` and the MCP `tortoise_search` call |
 | arms | pre-change `get_relationships_bounded` out of `e74cf1d13d` vs the working tree, **in one process, alternating** |
-| code measured | the tree at harness commit `381620c407` + the review fixes. `ab-relationships.json` records `0667b5358950`, the PRE-amend/pre-rebase copy of that tree: `git diff 0667b5358950 1c07761e69` touches only `config/ci-surfaces.yml` and this README, so `tortoise/`, `tests/` and `tools/` are byte-identical to the merged head. The pointer is recorded rather than rewritten so a reader can check that claim |
+| code measured | the working tree at the time of measurement — ⛔ **the recorded `git_sha` does not resolve, so this row cannot be checked as written**; see the provenance note below |
+
+⛔ **PROVENANCE: BOTH ARTIFACTS RECORD A `git_sha` THAT DOES NOT EXIST IN THIS
+REPOSITORY.** They carry `git_sha: 0667b5358950`, and `git cat-file -t
+0667b5358950` answers `fatal: Not a valid object name` — checked in this clone
+and in the hub checkout, which share one object DB. So `git diff 0667b5358950
+1c07761e69` cannot be computed at all, and the claim an earlier cut of this table
+made with it ("`tortoise/`, `tests/` and `tools/` are byte-identical to the merged
+head") is **unverifiable and withdrawn**. The sha is what the harness recorded
+(`_git_sha()` is the measuring checkout's `HEAD`); it is a commit a later amend or
+rebase discarded. It is left in the JSONs rather than rewritten, because an
+artifact edited to look resolvable is worse than one that says what it is.
+
+What IS verifiable from the artifacts, and is what the claims below rest on: both
+arms ran in ONE process against ONE corpus (`points: 2000`, `corpus_seed: 42`,
+`queries: 24` in both); each arm recorded **240 order ids, 0 nulls, 0 empty
+pages**; `comparable: true`; and the pre-change arm was materialised with
+`git show e74cf1d13d:tortoise/search_engine.py`, a revision that DOES resolve.
+Read the delta and the rank verdict as measurements of this change on this box.
+Do not read the sha as a pin on a commit.
 
 ⛔ **The absolute numbers are this box's, not production's.** They price the
 *change*, not the read: this container answers a graph query in single-digit
