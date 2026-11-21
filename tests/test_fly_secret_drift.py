@@ -6602,12 +6602,19 @@ def test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so():
         )
 
 
-# ── Non-vacuity, ENCODED (the two pins above are hand-measured otherwise) ────
-# `20f8459795` established both pins and MEASURED that each reds on the pre-fix
+# ── Non-vacuity, ENCODED (the pins above are hand-measured otherwise) ───────
+# `20f8459795` established the pins and MEASURED that each reds on the pre-fix
 # content. A measurement at authoring time is not a guard: if a later refactor
 # softens either assertion, nothing reds and the pin reads green forever — the
 # inert-enforcer class. These probes mutate the real file and require the pin to
 # raise, so the discrimination is itself a test.
+#
+# Each `pytest.raises` is MATCHED against the pin's own message, not bare
+# `AssertionError`: a bare catch stays green if some *other* assertion in the
+# pin starts failing (e.g. `assert priced`), so the probe would then prove a
+# different assertion than the one it names. The patterns below are substrings
+# of the pin's failure text and of nothing the probe itself asserts — the probe's
+# own staleness guards live OUTSIDE the `raises` block and fail loudly.
 
 
 def test_the_shape_pin_reds_when_cpus_reverts(monkeypatch):
@@ -6623,7 +6630,7 @@ def test_the_shape_pin_reds_when_cpus_reverts(monkeypatch):
         "REAL_FLY_TOML",
         _fixture("fly-cpus-reverted.toml", reverted),
     )
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="the box runs 4 cores"):
         test_vm_block_declares_the_four_core_shape()
 
 
@@ -6636,7 +6643,6 @@ def test_the_cost_note_pin_reds_when_the_historical_label_is_stripped(monkeypatc
     """
     text = REAL_FLY_TOML.read_text(encoding="utf-8")
     services_region = _services_region(text)
-    assert "[[vm]]" in text, "fly.toml has no `[[vm]]` token — the probe is stale"
     stripped = re.sub(r"(?i)pre-#13665", "historical", services_region)
     assert stripped != services_region, (
         "the `[[services]]` region carries no pre-#13665 label to strip — the "
@@ -6650,5 +6656,43 @@ def test_the_cost_note_pin_reds_when_the_historical_label_is_stripped(monkeypatc
             stripped + text[len(services_region):],
         ),
     )
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="never labels itself"):
+        test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so()
+
+
+def test_the_cost_note_pin_reds_when_two_shapes_are_priced_unlabelled(monkeypatch):
+    """The round-10 PREDICATE, guarded: one stale claim BESIDE one current one.
+
+    `if priced != {declared_cpus}` is the assertion with no other mutant: revert
+    it to the older `if declared_cpus not in priced:` and both probes above
+    still pass, because the declared shape is then PRESENT in the priced set and
+    the label leg is never evaluated. That state — a stale `shared-cpu-2x` price
+    row left standing next to a genuine `shared-cpu-4x` row, unlabelled — is the
+    one #14156 review F2 is about, so it is reproduced here rather than read.
+
+    Non-vacuity of the mutation itself is asserted first: the two-claims input
+    must really parse as {2, 4}, or the probe would be proving the label leg
+    again under a different name.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    services_region = _services_region(text)
+    stripped = re.sub(r"(?i)pre-#13665", "historical", services_region)
+    assert stripped != services_region, (
+        "the `[[services]]` region carries no pre-#13665 label to strip — the "
+        "probe is stale, so it is proving nothing about the pin"
+    )
+    two_claims = stripped + (
+        "  #   shared-cpu-4x:4096MB =\n"
+        "  #   $25.30/mo running (a second, current claim beside the stale one)\n"
+    )
+    assert _priced_shapes(two_claims) == {2, 4}, (
+        "the mutation did not produce the two-claims state — `_priced_shapes` "
+        "must see BOTH shapes, or this probe is not exercising the predicate"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture("fly-cost-note-two-claims.toml", two_claims + text[len(services_region):]),
+    )
+    with pytest.raises(AssertionError, match="never labels itself"):
         test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so()
