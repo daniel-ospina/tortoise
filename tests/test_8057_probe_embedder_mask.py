@@ -72,8 +72,8 @@ PROBE_MODULES = (
 #: The doors a module-level point-write probe can be spelled with, so the
 #: census below survives an SDK-surface rename instead of reporting the probes
 #: as gone. `create_entity("point", …)` is the consolidated door (#888 W2) and
-#: RELAYS to `create_point` (#13899 retired the public spelling; the private
-#: `_create_point` remains) — both reach `encode_for_store`.
+#: RELAYS to `_create_point` (#13899 retired the public spelling, so there is no
+#: `create_point` left to relay to) — both reach `encode_for_store`.
 #: ⛔ `_create_point` IS IN THE TUPLE (review P2). The comment above already said
 #: the private spelling remains, and it is by far the most common spelling a
 #: migrating lane reaches for (thousands of sites across the suite), so leaving

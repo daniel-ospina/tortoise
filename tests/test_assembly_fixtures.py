@@ -52,7 +52,10 @@ _OLD_URI = os.environ.get("TORTOISE_DB_URI")
 _PROBE_GRAPH = f"{_URI}_probe"
 
 #: The doors this probe calls, ASSERTED before the storage try (#14114).
-#: A capability probe must never read a PROGRAMMING error as "no storage".
+#: A capability probe must never read a RENAMED DOOR or a CHANGED SIGNATURE as
+#: "no storage" (`AttributeError`/`TypeError`/`NameError` are re-raised). It is
+#: not a blanket claim about every `Exception`: the storage step's own failures
+#: still mean "no storage", which is what keeps the probe usable on a bare box.
 #: When #13899 renamed `create_point` -> `create_entity("point", …)` the broad
 #: `except Exception` below swallowed the `AttributeError` into
 #: `FALKORDB_AVAILABLE = False`, so this suite SKIPPED locally and HARD-FAILED in

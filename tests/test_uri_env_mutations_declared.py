@@ -1781,7 +1781,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # reaches a lane: "An earlier cut failed ``TORTOISE_DB_URI``-without-a-record
     # too — which is the ordinary docker lane, so it redded `test (f)` …". Both sites
     # are the ENV CONTROL that drives the `_both_stores()` presence predicate, which
-    # only compares env presence and raises `skip`/`fail` — it constructs nothing.
+    # compares env PRESENCE first and raises `skip`/`fail` before opening anything —
+    # these three arms never reach its `_ensure_record_schema` (the predicate's own
+    # success path does connect and migrate, so "constructs nothing" would be
+    # true only of the arms, not of the predicate).
     # The `setenv` is DELIBERATE_URI (the docker-shaped value whose presence must
     # SKIP when the record env is absent); the `delenv` is DELIBERATE_EMBEDDED_LANE
     # (the cache-less half of the pair). Both use the `monkeypatch` fixture param, so
