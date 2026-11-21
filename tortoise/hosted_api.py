@@ -21692,8 +21692,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # FAIL-OPEN IN THE SAME DIRECTION AS A FAILED READ: the receipt follows
         # the committed capture, and the next delete's reconcile self-heals.
         extraction_warnings.append(
-            "capture receipt probe could not be dispatched (fail-open: the "
-            "receipt is retained)")
+            "capture receipt probe did not complete (dispatch failed or the "
+            "probe raised; fail-open: the receipt is retained)")
         alive_now = True
     if alive_now:
         try:
@@ -21737,8 +21737,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # compensation on a failed dispatch would delete a live
                 # receipt. Retain it, and say so.
                 extraction_warnings.append(
-                    "capture receipt re-check could not be dispatched "
-                    "(fail-open: the receipt is retained)")
+                    "capture receipt re-check did not complete (dispatch "
+                    "failed or the re-check raised; fail-open: the receipt is "
+                    "retained)")
                 still_alive = True
             if not still_alive:
                 # The delete won between the pre-check and the receipt PATCH
@@ -21781,8 +21782,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 swept = await _run_off_loop_fail_open(_sweep_orphaned_writes)
                 if swept is _DISPATCH_FAILED:
                     extraction_warnings.append(
-                        "capture orphan sweep could not be dispatched "
-                        "(non-fatal)")
+                        "capture orphan sweep did not complete (dispatch "
+                        "failed or the sweep raised; non-fatal)")
     else:
         # Session deleted mid-capture before the receipt write — never land
         # an orphan receipt (the mutation was already removed). The capture
@@ -21794,7 +21795,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         swept = await _run_off_loop_fail_open(_sweep_orphaned_writes)
         if swept is _DISPATCH_FAILED:
             extraction_warnings.append(
-                "capture orphan sweep could not be dispatched (non-fatal)")
+                "capture orphan sweep did not complete (dispatch failed or the "
+                "sweep raised; non-fatal)")
         # #3520: the unconditional clear that used to sit HERE is gone as well.
         # The per-harness `last_error` is written ONCE, from the capture
         # outcome, above — clearing it here as well would be a second writer of
@@ -21835,21 +21837,42 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # files org-level onboarding state inside the customer's CUSTOM graph —
         # invisible to every org-level reader, and `first_capture` fires once per
         # GRAPH instead of once per org (#14086 review, P2, both halves).
+        # ⛔ AND A GRAPH-BOUND KEY SKIPS THE WHOLE BLOCK. Both halves are
+        # ORG-LEVEL surfaces, and the sibling checkpoint route REFUSES such a key
+        # outright (`_reject_graph_bound_org_surface(org, "onboarding
+        # checkpoint")` — "a graph-bound key writing it would be a cross-graph
+        # write"). The capture route cannot refuse (it must keep capturing), so it
+        # must not perform the org-level side effect either: handed the default
+        # graph, a per-graph key would mint and could COMPLETE the org's onboarding
+        # — the cross-graph leak that guard exists to prevent — and `first_capture`
+        # would be an org-level fact derived per graph (#14086 review round 3, P2).
+        # `None` means "not an org-level capture": nothing below runs and
+        # `first_capture` stays False, honestly (we do not track an org funnel fact
+        # for a per-graph key).
+        #
         # Constructed HERE, ON the loop: `_make_sdk` must not resolve a store path
         # in a pooled worker (#7500). Only the cold `_get_proj()` attach stays in
-        # the worker, via the handle handed to `_maybe_apply_completion`.
-        completion_sdk = _org_sdk(org["org_id"])
+        # the worker, via the handle handed to `_maybe_apply_completion`. This
+        # construction is ALSO where any `organizations.graph_name` control-plane
+        # read happens (`_org_sdk` -> `_org_default_namespace`) — ON THE LOOP, not
+        # inside the closure, and not in the gate when a handle is supplied
+        # (#14086 review round 3, P3).
+        completion_sdk = (None if org.get("graph_id")
+                          else _org_sdk(org["org_id"]))
 
         def _first_capture_checkpoint():
             """The capture-disclosed checkpoint — synchronous graph work, OFF the loop.
 
             ⛔ #10893 (second cycle): `write_completed_step` takes the per-org
             lock and runs keyed MERGEs, and `_maybe_apply_completion` opens the
-            org's DEFAULT graph and MATCHes its `:OnboardingState` node (plus one
-            `organizations.graph_name` control-plane read for a graph-bound
-            credential); both used to run INLINE here, on the single uvicorn
-            worker, at the end of EVERY first capture. Same callable, same
-            order, same non-fatal arm — only WHERE it runs changes.
+            org's DEFAULT graph and MATCHes its `:OnboardingState` node; both used
+            to run INLINE here, on the single uvicorn worker, at the end of EVERY
+            first capture. Same callable, same non-fatal arm, and the WRITE still
+            precedes the GATE — but the SDK construction now comes BEFORE the
+            write (it must: the write needs the default-graph handle), so a
+            construction failure skips the checkpoint with a warning where `main`
+            still wrote it. That is the ONE ordering difference, stated rather
+            than implied (#14086 review round 3, P3).
             """
             # ⛔ THE WRITE GOES TO THE SAME DEFAULT GRAPH AS THE GATE BELOW.
             # `write_completed_step` mints the `OnboardingState` node, the
@@ -21872,7 +21895,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             _maybe_apply_completion(org["org_id"], sdk=completion_sdk)
             return created
 
-        first_capture = await _run_off_loop(
+        first_capture = False if completion_sdk is None else await _run_off_loop(
             _CAPTURE_EXECUTOR, _first_capture_checkpoint)
     except Exception:
         import logging
@@ -21985,7 +22008,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         ran = await _run_off_loop_fail_open(_capture_ep_pass)
         if ran is _DISPATCH_FAILED:
             extraction_warnings.append(
-                "capture EP pass could not be dispatched (non-fatal)")
+                "capture EP pass did not complete (dispatch failed or the pass "
+                "raised; non-fatal)")
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
     # verb (memory_write_v1) — protocol_version REQUIRED, provenance
     # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
