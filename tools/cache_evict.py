@@ -388,6 +388,42 @@ def main(argv: list[str] | None = None) -> int:
     }
     _emit(body, args.out)
 
+    # ⛔ #13123: THE INVALIDATION THIS PASS DID IS PROCESS-LOCAL, and this verb is the
+    # one that runs in a DIFFERENT process from the API it is sweeping for. The eviction
+    # path drops the degraded-fallback corpus snapshot itself, but that store is
+    # in-memory in the process that holds it — a sweep driven from here cannot reach a
+    # serving process's copy. Saying so is not fatalism: it is the one fact an operator
+    # scheduling this verb needs, because the alternative reading is "the eviction
+    # invalidated the cache".
+    # ⛔ THE SENTENCE IS DERIVED FROM THE METRIC, NOT ASSERTED BESIDE IT (review round 1
+    # P2). The first version printed "the snapshot of THIS process was invalidated
+    # (degraded_snapshot_invalidated=False)" on a FAILED invalidation — prose asserting
+    # the opposite of its own parenthetical, on the one surface an operator reads, for
+    # the one condition the field exists to make visible.
+    if report.deleted:
+        outcome = report.metric()["degraded_snapshot_invalidated"]
+        state = {
+            True: "the degraded snapshot of THIS process WAS invalidated",
+            False: ("the degraded snapshot of THIS process could NOT be invalidated — "
+                    "a node this run removed may still be served here until the "
+                    "snapshot TTL expires"),
+            # `None` is the field's "no node was removed, so no invalidation was
+            # needed" — NOT an unknown. Unreachable with `report.deleted` non-empty on
+            # every path we know of (a pass that removed rows publishes True/False, on
+            # the success route and on the raising one); kept because a future route that
+            # sets neither must not turn this message into a traceback.
+            None: ("no snapshot invalidation was needed for this run (nothing it "
+                   "removed required one)"),
+        }[outcome]
+        print(
+            f"#13123: {len(report.deleted)} node(s) were removed; {state}. The "
+            f"snapshot store is PROCESS-LOCAL: a separate serving process still holds "
+            f"its own copy, bounded only by the snapshot TTL. Run the sweeper in the "
+            f"process that serves degraded reads (#13103) if that bound is not "
+            f"acceptable.",
+            file=sys.stderr,
+        )
+
     # ⛔ EXIT 0 MEANS "NOTHING WAS EVICTED". A completed sweep that DID delete nodes
     # must not share it, or a scheduler cannot tell "nothing to do" from "deleted a
     # batch" — and the destructive half is the half it needs. An UNMEASURED after-count
