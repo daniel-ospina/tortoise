@@ -1407,8 +1407,8 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
     population = _writer_register_population()
     stray, missing = population["stray"], population["missing"]
     assert stray == [], (
-        "a writer outside the declared environment-optional modules could not be read, so it "
-        f"left this pin's population for a reason that is not the environment: {stray} "
+        "a writer could not be read for a reason that is not the environment, so it left this "
+        f"pin's population: {stray} "
         f"(examined {len(population['examined'])} of {len(register.EMBED_WRITER_CLASSES)})")
     assert missing == [], (
         "the register names a writer whose `def` the module does not contain — the writer was "
@@ -1647,7 +1647,8 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         f"the pin reds without naming the population it measured: {red.value}")
 
     monkeypatch.setattr(strip, "_module_source", folding(module, ValueError("loader changed")))
-    with pytest.raises(AssertionError, match="outside the declared environment-optional modules"):
+    with pytest.raises(AssertionError,
+                       match="could not be read for a reason that is not the environment"):
         test_no_declared_entity_writer_mentions_a_dynamic_namespace()
 
     # ⛔ THE EXEMPTION IS AN EXACT MODULE, NOT A PREFIX (`#14099` review of `310ddeeb`, whose fix was
