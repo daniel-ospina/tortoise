@@ -55,6 +55,7 @@ from tests._html_links import (  # noqa: E402
     extract_anchor_hrefs,
     extract_element_attributes,
     extract_element_ids,
+    extract_heading_positions,
     is_blog_entry,
 )
 from tools.ci_selection import load_manifest, select  # noqa: E402
@@ -1188,15 +1189,20 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     reader can only reach through the TOC is a heading that had to be added
     deliberately; one that is not advertised stays inside the pinned text.
 
-    ⛔ THE BOUNDARY IS READ OUT OF THE PARSED TAG, not matched as a literal
-    `<h2 id="x">`. HTML lets a heading carry more attributes, in any order, with
-    or without spaces around `=` — and a matcher that insisted on the bare
-    spelling made the slice run to the end of the page, reddening the golden with
-    a message that blamed the storage copy (#14073 review, non-blocking note).
-    `_h2_id` reads the id out of the attribute text, so a later `<h2
-    id="quickstart" class="qs">` is still a boundary; and the section's OWN
-    opening tag is found the same way, so a class added there is not read as "the
-    section was renamed".
+    ⛔ THE BOUND IS READ OUT OF THE PARSED TREE, not matched in the raw source.
+    A raw `<h2` pattern is wrong in both directions, and the fail-open half is
+    the one that ships a claim nobody reviewed: a heading parked in a comment or
+    in an inert `<template>` is not a heading a reader meets, so cutting the
+    section there left everything after it — `<h2 id="quickstart">` inside a
+    `<template>` plus a paragraph naming `FalkorDB`, the `allowance` and a `tier` —
+    outside the golden, the vocabulary pin and the attribute allowlist at once,
+    all three green (measured, #14073 review). The other direction is the
+    false red this PR's first commit fixed: a heading carrying extra attributes,
+    in any order, with or without spaces around `=`.
+    `extract_heading_positions` is the parser's answer (the same render-fidelity
+    seam `tests/_html_links.py` gives the id and attribute guards), so both
+    halves go away with the raw pattern rather than being patched one spelling at
+    a time.
 
     ⛔ The anchor's absence is asserted BEFORE any offset is used. A bare `index`
     raises `ValueError`, which surfaces as an ERROR in the tests that call this
@@ -1207,6 +1213,7 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     through this real bound rather than through a reimplementation of it.
     """
     html = _read(DOCS) if page is None else page
+    headings = extract_heading_positions(html)
     start = _h2_offset(html, anchor)
     assert start >= 0, (
         f"website/docs.html has no `<h2 id=\"{anchor}\">`. "
@@ -1229,17 +1236,23 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     # pin once one `<a href="#storage-limits">` existed elsewhere (#14066 review
     # round 4).
     advertised = set(re.findall(r'href="#([^"]+)"', toc.group(1)))
-    rest = html[start:]
-    for match in _H2.finditer(rest):
-        if match.start() == 0:
+    for heading_id, offset in headings:
+        if offset <= start:
             continue  # the section's OWN opening tag
-        if _h2_id(match.group(1)) in advertised:
-            return rest[:match.start()]
-    return rest
+        if heading_id in advertised:
+            return html[start:offset]
+    return html[start:]
 
 
-#: An `<h2 …>` opening tag, its attribute text captured whole. The slice bound
-#: parses that text (see `_h2_id`); it never tries to match the tag itself.
+#: An `<h2 …>` opening tag, its attribute text captured whole.
+#:
+#: ⛔ CONTROL-ONLY. `_docs_section` reads headings out of the parsed tree
+#: (`extract_heading_positions`), so nothing on the live path matches a tag in the
+#: raw source. This pattern survives because the mutation controls below must be
+#: able to compute what a RAW-SOURCE bound would have done — which is the whole
+#: point of a control, and the reason this is not the implementation. The id it
+#: feeds to `_h2_id` is parsed too, so a control measures the raw-source BOUND and
+#: not a second, independent pattern defect (#14073 reviews rounds 5 and 6).
 _H2 = re.compile(r"<h2\b([^>]*)>")
 
 #: The words the storage section may not use, and what the notices say instead.
@@ -1257,19 +1270,21 @@ _BANNED_VOCABULARY = {
 def _h2_id(attribute_text: str) -> str | None:
     """The `id` a browser would see on `<h2 {attribute_text}>`, or `None`.
 
-    `<h2 id="quickstart">`, `<h2 class="qs" id="quickstart">` and
-    `<h2 id = 'quickstart'>` are the same heading; a matcher that demanded the
-    first spelling made the slice run to the end of the page the moment a later
-    heading grew an attribute (#14073 review).
-
     ⛔ PARSED, NEVER PATTERN-MATCHED — the same lesson as the attribute allowlist,
     and this was the last place it was not applied. A pattern over the whole
     attribute text also finds an `id=` written INSIDE another attribute's quoted
     VALUE: `<h2 class='see id="quickstart"'>Limits</h2>` has NO id to a browser,
-    yet a pattern reads one and the slice ends at a heading that never bounded
-    anything — reproduced with a contradicting claim underneath it, all six pins
-    green (#14073 review round 6). Feeding the isolated tag to the repo's one
-    render-fidelity parser gives the id a browser would see, or none.
+    yet a pattern reads one and the slice would end at a heading that never
+    bounded anything — reproduced with a contradicting claim underneath it, all
+    six pins green (#14073 review round 6). Feeding the isolated tag to the repo's
+    one render-fidelity parser gives the id a browser would see, or none.
+
+    ⛔ CONTROL-ONLY, like `_H2`: `_docs_section` no longer bounds on attribute text
+    at all, it bounds on parsed `<h2>` positions (`extract_heading_positions`), so
+    a heading in an inert region cannot end the slice either (#14073 review round
+    5). This function now exists so `_slice_bound_by_raw_headings` can reproduce
+    the RAW-SOURCE bound faithfully — with the id parsed, so the control isolates
+    the raw-bound defect instead of re-testing the pattern one.
     """
     ids = [element_id for element_id, _line in
            extract_element_ids(f"<h2 {attribute_text}></h2>")]
@@ -1277,15 +1292,35 @@ def _h2_id(attribute_text: str) -> str | None:
 
 
 def _h2_offset(html: str, anchor: str) -> int:
-    """Offset of the `<h2>` carrying `id="<anchor>"`, or -1 when there is none."""
-    for match in _H2.finditer(html):
-        if _h2_id(match.group(1)) == anchor:
-            return match.start()
+    """Offset of the `<h2>` carrying `id="<anchor>"`, or -1 when there is none.
+
+    Read off the parsed tree, so a `<h2 id="storage">` inside a comment or an
+    inert `<template>` is not this section (#14073 review).
+    """
+    for heading_id, offset in extract_heading_positions(html):
+        if heading_id == anchor:
+            return offset
     return -1
 
 
 def _banned_vocabulary(markup: str) -> list[str]:
-    """The banned words `markup` carries, normalised the way the pin normalises."""
+    """The banned words `markup` carries, normalised the way the pin normalises.
+
+    ⛔ VISIBLE TEXT ONLY, and that is a deliberate narrowing of what the inline
+    version of this pin scanned (#14073 review). Bare markup text matches words
+    inside tag names and attribute values too, and none of those reach the
+    reader: `class="hot-cache"` and `href="#tier"` used to redden the pin for
+    strings no browser renders. What the narrowing does NOT cost is coverage of a
+    claim a reader does meet, because the only attributes that reach a reader
+    (`title`, `aria-*`, `alt`) are not allowed on this section at all —
+    `_attributes_outside_allowlist` refuses every attribute beyond `id`, `class`
+    and `href`, by NAME, whatever its value. So the two pins cannot disagree:
+    either the attribute is allowed and carries no reader-facing text, or it is
+    caught outright. If a fourth attribute is ever admitted
+    (`test_the_storage_section_says_exactly_what_was_reviewed` requires comparing
+    raw markup against a raw fixture instead), the pin that admits it must also
+    re-widen this scan.
+    """
     folded = re.sub(r"[^a-z0-9]+", " ", _visible_text(markup).lower())
     return sorted(word for word in _BANNED_VOCABULARY if word in folded)
 
@@ -1334,6 +1369,55 @@ def _slice_bound_by_page_wide_hrefs(page: str) -> str:
     """
     advertised = set(re.findall(r'href="#([^"]+)"', page))
     rest = page[_h2_offset(page, "storage"):]
+    for match in _H2.finditer(rest):
+        if match.start() == 0:
+            continue
+        if _h2_id(match.group(1)) in advertised:
+            return rest[:match.start()]
+    return rest
+
+
+def _slice_bound_by_literal_tag(page: str) -> str:
+    """The slice the PRE-#14073 implementation computed — the literal-tag defect.
+
+    Control-only. Before this PR the section's own opening tag was the literal
+    string `<h2 id="storage">`, and the end was the next `rest.find('<h2 id=', 1)`
+    — a PREFIX match. Both assume `id` is the tag's FIRST attribute, so the moment
+    a heading grew `class` in front of its `id` the tag stopped matching: at the
+    section's own tag the pre-fix code found nothing (and reddened the anchor pin
+    with a message that blamed the storage copy), and at a LATER heading it ran
+    the slice on past the real boundary.
+
+    ⛔ Not the implementation — `_docs_section` above is. This exists so the
+    control below can show the defect the parsed bound removes, instead of
+    asserting a property that holds for both bounds (#14073 review).
+    """
+    start = page.find('<h2 id="storage">')
+    if start < 0:
+        # The pre-fix code asserted the literal was present, so this is its red —
+        # an empty slice is the faithful answer to "where does the section start".
+        return ""
+    rest = page[start:]
+    end = rest.find("<h2 id=", 1)
+    return rest if end < 0 else rest[:end]
+
+
+def _slice_bound_by_raw_headings(page: str) -> str:
+    """The slice a RAW `<h2` bound computed — the fail-open this PR removes.
+
+    Control-only: `_docs_section` as it was at `2a64b42` — a source pattern over
+    the raw markup, with no notion of whether a browser parses the heading it
+    matched. Exists so the negative control below can show what the parsed bound
+    buys instead of asserting a property both bounds already have (#14073
+    review).
+    """
+    start = _h2_offset(page, "storage")
+    if start < 0:
+        return ""
+    toc = re.search(r'<div class="toc">(.*?)</div>', page, re.S)
+    assert toc is not None, "the control needs the page's `<div class=\"toc\">` block"
+    advertised = set(re.findall(r'href="#([^"]+)"', toc.group(1)))
+    rest = page[start:]
     for match in _H2.finditer(rest):
         if match.start() == 0:
             continue
@@ -1391,6 +1475,17 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
     `hot-cache` all passed a first version of this pin (measured, #14066 review
     round 2). Punctuation collapses to a space and `falkor` subsumes
     `falkordb`, `falkor db` and the bare product name the owner himself uses.
+
+    ⛔ THE SCAN IS OVER VISIBLE TEXT, which is NARROWER than an earlier version of
+    this pin that folded the raw markup — declared here so a reader does not have
+    to infer it from the body (#14073 review, P2). Tag and attribute text left
+    the scan: `class="hot-cache"` and `href="#tier"` used to red this pin for
+    strings no browser renders. What that does NOT cost is coverage of a claim a
+    reader meets, because `_attributes_outside_allowlist` refuses every attribute
+    on the section beyond `id`, `class` and `href` BY NAME — the only attributes
+    that reach a reader (`title`, `aria-*`, `alt`) are rejected outright, so the
+    two pins cannot leave a gap between them. Widening the allowlist later means
+    re-widening this scan in the same change.
     """
     section = re.sub(r"[^a-z0-9]+", " ", _visible_text(_docs_section()).lower())
     for word, why in _BANNED_VOCABULARY.items():
@@ -1594,22 +1689,118 @@ def test_the_storage_slice_bound_catches_the_heading_it_exists_for() -> None:
         "control no longer demonstrates why the TOC block is the index"
     )
 
-    # ── a later heading that grew an attribute is still a boundary ───────────
-    # The literal `<h2 id="x">` matcher ran the slice to the end of the page here,
-    # reddening the golden with a message that blamed the storage copy.
-    following = _H2.search(page[boundary:])
+    # ── a later heading that grew an attribute in FRONT of its id ───────────
+    # The pre-#14073 bound searched for the literal `<h2 id=`, which is only
+    # present when `id` is the tag's FIRST attribute. Reorder a later heading and
+    # that bound loses it: the slice runs on to the next bare tag, so the golden
+    # reds on an edit that does not touch the storage copy. The parsed bound does
+    # not care where `id` sits among the attributes (#14073 review).
+    following = _H2.search(page, boundary)
     assert following is not None, (
         "the #storage section is the last `<h2>` on the page, so this control "
         "cannot run"
     )
-    widened = page[:boundary] + page[boundary:].replace(
-        following.group(0), following.group(0)[:-1] + ' class="qs">', 1
+    tag = following.group(0)
+    reordered = (
+        page[:following.start()]
+        + '<h2 class="qs"' + tag[len("<h2"):]
+        + page[following.end():]
     )
-    assert " ".join(_visible_text(_docs_section(page=widened)).split()) == reviewed, (
-        "adding `class=` to the heading AFTER #storage moved the slice's end, so "
-        "the golden now fails on an edit that does not touch the storage copy "
-        "(#14073 review, non-blocking note)"
+    assert reordered != page, (
+        f"could not move the id out of first position in {tag!r}, so this "
+        "control cannot run"
     )
+    assert " ".join(_visible_text(_docs_section(page=reordered)).split()) == reviewed, (
+        "moving `class` in front of `id` on the heading AFTER #storage moved the "
+        "slice's end, so the golden now fails on an edit that does not touch the "
+        "storage copy — the literal-tag defect is back"
+    )
+    assert " ".join(_visible_text(_slice_bound_by_literal_tag(reordered)).split()) != reviewed, (
+        "the literal `<h2 id=` bound still finds the reordered heading, so this "
+        "control no longer demonstrates the false red the parsed bound removes "
+        "(#14073 review: a control that passes under both bounds pins nothing)"
+    )
+
+    # ── and the section's OWN tag, the same way ─────────────────────────────
+    # BOTH orders are pinned: `class` AFTER `id` is the spelling a writer adds by
+    # hand, and `class` BEFORE `id` is the one that also moves `id` out of first
+    # position. The reviewer named the first; the second is the reordering case.
+    for label, replacement in (
+        ("class AFTER id", '<h2 id="storage" class="s">'),
+        ("class BEFORE id", '<h2 class="storage" id="storage">'),
+    ):
+        own = page.replace('<h2 id="storage">', replacement, 1)
+        assert own != page, f"could not add `class` to the #storage heading ({label})"
+        assert _h2_offset(own, "storage") >= 0, (
+            f"a `class` added to the #storage heading ({label}) made the parsed "
+            "bound stop finding the section, so the anchor pin now reads as 'the "
+            "section was renamed'"
+        )
+        assert " ".join(
+            _visible_text(_docs_section(page=own)).split()
+        ) == reviewed, (
+            f"a `class` on the #storage heading ({label}) moved the slice, so the "
+            "golden reds on an edit that does not touch the copy"
+        )
+        assert _slice_bound_by_literal_tag(own) == "", (
+            f"the literal-tag bound still finds the {label} spelling, so this "
+            "control no longer demonstrates the false red it pins"
+        )
+
+
+def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
+    """NEGATIVE CONTROL — a heading no browser renders must not end the slice.
+
+    The bound used to be a raw `<h2` pattern, so a heading parked where a reader
+    never meets it — inside a comment, inside a `<script>` body, inside an inert
+    `<template>` — still ended the slice. Everything after it then sat outside
+    the golden, the vocabulary pin AND the attribute allowlist, which is the
+    fail-open this test pins: an advertised id in an inert region plus one
+    paragraph carrying `FalkorDB`, the `allowance` and a `tier` passed all three
+    pins (measured at `2a64b42`, #14073 review).
+
+    Both directions are asserted: the parsed bound now keeps the paragraph inside
+    the slice, AND the raw-source bound provably escaped it — otherwise this
+    control would pass against the defect it exists to pin.
+    """
+    page = _read(DOCS)
+    section = _docs_section()
+    boundary = _h2_offset(page, "storage") + len(section)
+    reviewed = " ".join(STORAGE_SECTION_GOLDEN.read_text(encoding="utf-8").split())
+    claim = (
+        "<p>FalkorDB holds a slice of the record; above the allowance for your "
+        "tier, the least-used items are permanently deleted after thirty days.</p>\n"
+    )
+    for label, inert in (
+        ("comment", '<!-- <h2 id="quickstart">Quickstart</h2> -->'),
+        ("inert template", '<template><h2 id="quickstart">Quickstart</h2></template>'),
+        ("script body", '<script>var s = \'<h2 id="quickstart">Quickstart</h2>\';</script>'),
+    ):
+        mutant = page[:boundary] + inert + "\n" + claim + page[boundary:]
+        assert mutant != page, f"could not insert the {label} case"
+
+        # THE PREMISE: `quickstart` is advertised, so a raw bound would cut here.
+        escaped = _slice_bound_by_raw_headings(mutant)
+        assert "permanently deleted" not in _visible_text(escaped).lower(), (
+            f"the claim after a `<h2 id=\"quickstart\">` inside a {label} is now "
+            f"INSIDE the raw-source slice, so this control no longer demonstrates "
+            f"the fail-open it pins"
+        )
+        assert not _banned_vocabulary(escaped), (
+            f"the vocabulary pin sees the claim hidden by the {label} case, so the "
+            f"raw-source bound is not what this control measures"
+        )
+
+        caught = _docs_section(page=mutant)
+        assert {"allowance", "falkor", "tier"} <= set(_banned_vocabulary(caught)), (
+            f"a `<h2 id=\"quickstart\">` inside a {label} ended the #storage "
+            f"slice, so the paragraph after it ships outside the golden, the "
+            f"vocabulary pin and the attribute allowlist at once"
+        )
+        assert " ".join(_visible_text(caught).split()) != reviewed, (
+            f"the golden is blind to the paragraph after a heading inside a "
+            f"{label}: the slice was cut at a heading no reader meets"
+        )
 
     # ── a heading that only QUOTES an advertised id is not a boundary ────────
     # `<h2 class='see id="quickstart"'>` has NO id to a browser. A pattern over

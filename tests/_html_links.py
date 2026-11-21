@@ -187,6 +187,12 @@ class _AnchorHrefParser(HTMLParser):
         # `_record_attributes` for why this is the parser's answer and not a
         # source pattern's.
         self.attrs: list[tuple[str, str, int]] = []
+        # `(id, line, column)` of every `<h2>` a browser would put in the document
+        # tree, in document order — the docs page's section bound's input (#14073
+        # review). A POSITION and not the tag text, because the bound has to cut
+        # the raw SOURCE at a heading; `extract_heading_positions` turns the line
+        # and column into an offset.
+        self.headings: list[tuple[str | None, int, int]] = []
         # Open elements currently suppressing collection. A stack, not a counter,
         # so nested `<template><script>…</script></template>` unwinds correctly.
         self._suppress: list[str] = []
@@ -294,6 +300,39 @@ class _AnchorHrefParser(HTMLParser):
         for name, _value in attrs:
             self.attrs.append((tag, name, line))
 
+    def _record_heading(
+        self, tag: str, attrs: list[tuple[str, str | None]],
+    ) -> None:
+        """The `id` of every `<h2>` the browser puts in the tree, with its position.
+
+        Called AFTER ``_open``, because whether a heading renders depends on where
+        it is: `<template><h2 id="api"></h2></template>` contributes no heading
+        (the template's content is inert), and a `<h2>` written inside a `<script>`
+        body is text, not markup. A raw `<h2` pattern cannot see either, and the
+        section bound built on it cut the section at a heading no reader meets —
+        leaving the text after it outside every pin, measured with the golden, the
+        vocabulary and the attribute allowlist all green (#14073 review).
+
+        ⛔ NOT because foreign content is skipped wholesale — `h1`–`h6` are
+        HTML5's foreign-content BREAKOUT tags (spec 13.2.6.5), so
+        `<svg><h2 id="x">` exits the SVG and IS a rendered heading; `_open`
+        applies that rule before this runs and the heading is recorded, which is
+        the browser's answer. A `<h2>` that is genuinely foreign cannot exist,
+        and the tags that would be (`<svg>`/`<math>` subtrees with no breakout)
+        keep `_foreign` truthy so their `<script>`/`<template>` children stay
+        NON-inert — the opposite of the HTML rule, and #3962's Chromium-verified
+        finding.
+
+        The id is kept rather than the whole tag because the caller asking this
+        question is "which heading does the section end at", which is a question
+        about identity; the position is kept because it is the only way to cut the
+        source at the tag the tokenizer actually parsed.
+        """
+        if tag != "h2" or self._suppress or self.wedged_reason or self._foreign:
+            return
+        heading_id = next((value for name, value in attrs if name == "id"), None)
+        self.headings.append((heading_id, *self.getpos()))
+
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
             return
@@ -400,6 +439,9 @@ class _AnchorHrefParser(HTMLParser):
         self._record_attributes(tag, attrs)
         if not self._open(tag, attrs):
             self._collect(tag, attrs)
+        # After `_open`, so a heading written inside a suppressed region is not
+        # recorded (see `_record_heading`).
+        self._record_heading(tag, attrs)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # In FOREIGN content the self-closing flag IS honored, so `<svg/>`/`<math/>`
@@ -621,6 +663,30 @@ def extract_element_attributes(html: str) -> list[tuple[str, str, int]]:
     parser.feed(html)
     parser.close()
     return parser.attrs
+
+
+def extract_heading_positions(html: str) -> list[tuple[str | None, int]]:
+    """``(id, offset)`` for every rendered ``<h2>`` in ``html``, in document order.
+
+    The docs page's section bound's input (#14073 review): the offset is where the
+    parsed tag STARTS in ``html``, so a caller can slice the source at a heading
+    the browser actually has, instead of at a string that looks like one.
+
+    ``id`` is ``None`` for a heading with no id — such a heading cannot be
+    advertised, but it is still a heading, and dropping it would hide it from a
+    caller that bounds at any heading at all.
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    line_starts = [0]
+    for index, char in enumerate(html):
+        if char == "\n":
+            line_starts.append(index + 1)
+    return [
+        (heading_id, line_starts[line - 1] + column)
+        for heading_id, line, column in parser.headings
+    ]
 
 
 def extract_element_ids(html: str) -> list[tuple[str, int]]:
