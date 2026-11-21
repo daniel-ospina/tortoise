@@ -799,12 +799,20 @@ def _imports_of(source: str) -> set[str]:
                 # ⛔ `from tortoise import sdk` imports the SUBMODULE
                 # `tortoise.sdk`; recording only `tortoise` left that spelling
                 # invisible, which is a third way to reach a store client.
-                if node.level == 0:
-                    found |= {
-                        f"{node.module}.{alias.name}"
-                        for alias in node.names
-                        if alias.name != "*"
-                    }
+                # ⛔ THE ALIAS IS EMITTED FOR THE RELATIVE FORM TOO, and that is
+                # not cosmetic: `from .__init__ import FalkorDB` resolves to
+                # `tortoise.__init__`, which FOLDS onto the deliberately-unbanned
+                # package root, so recording the module alone lost the export and
+                # the spelling reached the client with every leg green. For every
+                # other relative module the alias was redundant because the MODULE
+                # itself is banned — that redundancy is exactly what hid this.
+                prefix = "" if node.level == 0 else "tortoise."
+                found |= {
+                    f"{prefix}{node.module}.{alias.name}"
+                    for alias in node.names
+                    if alias.name != "*"
+                }
+                if node.level == 0 and any(a.name == "*" for a in node.names):
                     # ⛔ `from <pkg> import *` BINDS THE PACKAGE'S PUBLIC NAMES, and
                     # the bare `*` recorded above matches no root. For a root the
                     # guard deliberately does not ban (`tortoise` itself), that made
@@ -818,13 +826,12 @@ def _imports_of(source: str) -> set[str]:
                     # reachable name under that prefix is a SUPERSET (a star import
                     # may bind fewer), which is this helper's stated contract and
                     # fails CLOSED.
-                    if any(alias.name == "*" for alias in node.names):
-                        prefix = f"{node.module}."
-                        found |= {
-                            name
-                            for name in _REACHABLE_FROM_ROOT
-                            if name.startswith(prefix)
-                        }
+                    star_prefix = f"{node.module}."
+                    found |= {
+                        name
+                        for name in _REACHABLE_FROM_ROOT
+                        if name.startswith(star_prefix)
+                    }
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
                 found |= {
@@ -864,11 +871,12 @@ def _package_root_attributes(source: str) -> set[str]:
     package name can only produce a FALSE POSITIVE here, and a guard that reddens
     spuriously is recoverable while one that stays green is not.
 
-    ⛔ THE ATTRIBUTE FORM LIVES HERE, NOT IN `_imports_of`. That helper's contract
-    is "every MODULE this source imports", and its other consumers
-    (`_modules_reaching_a_store`, the relative-import pin) read it that way; making
-    it also emit export names put a non-module in a module set and left the
-    attribute leg unpinned (deleting it reddened nothing). One owner per spelling.
+    ⛔ THE ATTRIBUTE FORM LIVES HERE, NOT IN `_imports_of`. That helper answers a
+    different question ("every name this source imports or names through an
+    imported module" — a SUPERSET that deliberately includes export names, because
+    `_offending`'s export intersection and the star handling need them). This one
+    asks which names are BOUND to the package root. One owner per question, and
+    deleting this leg reddens the export pin rather than nothing.
     """
     tree = ast.parse(source)
     nodes = list(ast.walk(tree))
@@ -893,7 +901,7 @@ def _package_root_attributes(source: str) -> set[str]:
                 targets = [node.target]
             else:
                 continue
-            if isinstance(node.value, ast.Name) and node.value.id in bound:
+            if _dotted_base(node.value) in bound:
                 for target in targets:
                     if isinstance(target, ast.Name) and target.id not in bound:
                         bound.add(target.id)
@@ -1127,8 +1135,11 @@ def test_no_graph_dependency() -> None:
 def test_the_no_graph_guard_catches_relative_imports() -> None:
     """The guard itself is pinned — it was defeated once by import spelling."""
     assert _imports_of("from . import projection\n") == {"tortoise.projection"}
+    # The alias IS recorded for the relative form too (load-bearing: see the
+    # `.__init__` case in the export pin), so this is a superposition.
     assert _imports_of("from .projection import FalkorProjection\n") == {
-        "tortoise.projection"
+        "tortoise.projection",
+        "tortoise.projection.FalkorProjection",
     }
     assert _imports_of("import redis\n") == {"redis"}
     assert _imports_of("from . import read_ledger\n") == {"tortoise.read_ledger"}
@@ -1287,6 +1298,18 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending(
         'import tortoise.__init__\nc = getattr(tortoise.__init__, "FalkorDB")\n'
     ) == {"tortoise.FalkorDB"}
+    # ⛔ AND THE RELATIVE `.__init__` SPELLING, which is the one `usage_signal.py`'s
+    # own import style produces (`from .config import …`). It resolves to
+    # `tortoise.__init__`, which folds onto the UNBANNED package root, so emitting
+    # only the module there lost the alias — every other relative module was saved
+    # by its own ban, which is exactly what hid this one.
+    assert _offending("from .__init__ import FalkorDB\n") == {"tortoise.FalkorDB"}
+    assert _offending("from .__init__ import Tortoise\n") == {"tortoise.Tortoise"}
+    # …and the REBINDING through that spelling, which the fixpoint missed while it
+    # followed only a bare `ast.Name` value.
+    assert _offending(
+        "import tortoise.__init__\nf = tortoise.__init__\nc = f.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}
     # A NON-literal name stays out of scope (and is named as such in the docstring).
     assert _offending("import tortoise\nc = getattr(tortoise, NAME)\n") == set()
     # ⛔ AND THE STAR IMPORT, which was TRIPLY blind: the bare `*` matched no root,
@@ -1409,7 +1432,9 @@ def _modules_reaching_a_store() -> frozenset[str]:
         rel = path.relative_to(package).with_suffix("")
         parts = [part for part in rel.parts if part != "__init__"]
         module = "tortoise" + ("." + ".".join(parts) if parts else "")
-        imported = _imports_of(path.read_text(encoding="utf-8"))
+        imported = {
+            _fold_init(name) for name in _imports_of(path.read_text(encoding="utf-8"))
+        }
         if _reaches_a_store_client(imported):
             found.add(module)
     return frozenset(found)
@@ -1473,6 +1498,27 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
     assert not _reaches_a_store_client(
         _imports_of("from .projection import FalkorProjection\n")
     )
+
+
+def test_the_direction_scan_agrees_with_the_ban_on_the_FOLDED_spelling() -> None:
+    """⛔ L1 AND L2 MUST AGREE THROUGH THE SAME FOLD, or the pair hides a reach.
+
+    The scan compares against `_STORE_CLIENT_ROOTS` and `_FORBIDDEN_CLIENT_EXPORTS`;
+    before the fold it saw `tortoise.__init__.FalkorDB`, which matches neither — so a
+    module whose ONLY reach was `from tortoise.__init__ import FalkorDB` was red in
+    `_offending` (L1) and absent from `found` (L2), leaving the coverage row green
+    while the module stayed unbanned. This pins the shared predicate, so the two
+    directions cannot drift apart again.
+    """
+    source = "def f():\n    from tortoise.__init__ import FalkorDB\n"
+    imported = {_fold_init(name) for name in _imports_of(source)}
+    reaches = bool(imported & _FORBIDDEN_CLIENT_EXPORTS) or any(
+        name == root or name.startswith(root + ".")
+        for name in imported
+        for root in _STORE_CLIENT_ROOTS
+    )
+    assert reaches, f"the scan would not see {sorted(imported)!r}"
+    assert _offending(source) == {"tortoise.FalkorDB"}
 
 
 def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
