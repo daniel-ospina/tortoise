@@ -6507,28 +6507,39 @@ def _services_region(text: str) -> str:
     `` `[[vm]]` `` inline, so a bare-token split cuts inside that comment and
     keeps the label only by paragraph ordering (re-ordering the note would
     false-RED a correct file). Shared by the pin and its non-vacuity probe.
+
+    KNOWN SCOPE LIMIT: if the `[[vm]]` line ever gains trailing content
+    (`[[vm]]  # shape`), this matches nothing and returns the WHOLE file — the
+    pin then reads later regions too. It fails toward red, not toward a silent
+    green, so it is left un-guarded; re-derive it rather than widening it.
     """
     return re.split(r"(?m)^\[\[vm\]\]\s*$", text)[0]
 
 
 def _priced_shapes(services_region: str) -> set[int]:
-    """Core counts the note PRICES — not merely mentions.
+    """Core counts the note PRICES — a PRICE ROW, not a mention.
 
-    A mention counts only when a figure accompanies it on its own line or the
-    line after it (this file's COST note names the shape on one line and the
-    money on the next). Prose that merely names a shape — "the block declares
-    `shared-cpu-4x`" — therefore cannot satisfy a price and disarm the pin,
-    which a bare mention-based match allowed.
+    A shape counts only when it is written as a priced row —
+    ``shared-cpu-Nx:NNNNMB =`` — whose figure (`$`) follows the ``=`` on the
+    same line, or opens the next one. That is this file's COST-note shape
+    (shape and ``=`` on one line, money on the next).
+
+    Why the row form matters: counting any `shared-cpu-Nx` mention with a figure
+    nearby let prose like "the block declares `shared-cpu-4x:4096MB`
+    (~$26.76/mo)" enter the priced set, and the pin went GREEN while the note
+    still priced 2 cores. A mention is not a price; a bare ``=`` with no figure
+    behind it is not one either.
     """
     lines = services_region.splitlines()
     priced: set[int] = set()
     for i, line in enumerate(lines):
-        if "shared-cpu-" not in line:
+        row = re.search(r"shared-cpu-(\d+)x:\s*\d+\s*MB\s*=", line)
+        if row is None:
             continue
-        window = line + (lines[i + 1] if i + 1 < len(lines) else "")
-        if "$" not in window:
-            continue
-        priced |= {int(n) for n in re.findall(r"shared-cpu-(\d+)x", line)}
+        next_line = lines[i + 1] if i + 1 < len(lines) else ""
+        priced_here = "$" in line[row.end():] or re.match(r"\s*#?\s*\$", next_line)
+        if priced_here:
+            priced.add(int(row.group(1)))
     return priced
 
 
