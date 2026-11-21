@@ -1665,12 +1665,21 @@ def test_no_graph_dependency() -> None:
     # witness, which neither shape can fake: `tortoise.hosted_backup` is a banned root
     # that no injected name implies, so an answer built from `injected` loses it.
     _mixed = _probe("import tortoise.hosted_backup", "falkordb")
-    assert _mixed == {"tortoise.hosted_backup", "falkordb"}, (
+    assert {"tortoise.hosted_backup", "falkordb"} <= _mixed, (
         f"a run that both imports a real root and carries an injected witness must "
         f"report BOTH: got {sorted(_mixed)}. A missing injected name means injection "
         "is not reaching the child; a missing REAL root means the answer was derived "
         "from `injected` instead of from what the child printed, which satisfies every "
-        "injected row above by construction and witnesses nothing (#14118 item 1)")
+        "injected row above by construction and witnesses nothing (#14118 item 1). "
+        "⛔ THIS ROW IS A CONTAINMENT CHECK, NOT AN EQUALITY, and the two halves it "
+        "takes are the reason: an EXTRA banned root is not a defect in this row — it "
+        "is a REAL transitive reach, which the exact-footprint rows BELOW own. "
+        "Measured: a module-scope `import tortoise.cypher_guard` added to "
+        "`tortoise/hosted_backup.py` makes this run report the extra "
+        "`tortoise.cypher_guard`/`tortoise.retry`, and an equality here reds naming "
+        "two MISSING causes, neither of which describes what it saw. Both echo shapes "
+        "(`_matching(injected)`, `... & set(injected)`) still red here, because each "
+        "drops `tortoise.hosted_backup`")
 
     # ⛔ AND THE VERDICT IS ALSO GRADED ACROSS TWO IMPORTS THROUGH `_probe` ITSELF, so a
     # filter placed INSIDE the production path is graded here too, because the injected witness
@@ -1708,10 +1717,17 @@ def test_no_graph_dependency() -> None:
     assert _observed_cases == _cases, (
         f"the probe disagrees with its own expectations: {_observed_cases}. "
         f"`import tortoise.hosted_backup` MUST come back as {{'tortoise.hosted_backup'}} "
-        f"— if that half is wrong the detector is broken, not the tree — and "
-        f"`from tortoise import usage_signal` must come back empty. A filter or slice on "
-        f"this expression reds the leaking half instead of silencing the clean one "
-        f"(#14118 item 1)")
+        f"and `from tortoise import usage_signal` must come back empty. ⛔ READ WHICH "
+        f"WAY IT DISAGREES BEFORE BLAMING ONE SIDE, because an equality red here has "
+        f"two opposite meanings: a MISSING name means the detector is broken (the "
+        f"derivation or the matcher dropped a root), while an EXTRA banned root is "
+        f"either a REAL transitive reach the tree gained — the exact leak this leg "
+        f"exists to catch, and a legitimate red — or the probe over-reporting. "
+        f"Measured: a module-scope `import tortoise.cypher_guard` added to "
+        f"`tortoise/hosted_backup.py` reports the EXTRA "
+        f"`tortoise.cypher_guard`/`tortoise.retry` alongside the expected root. "
+        f"A filter or slice on this expression reds the leaking half instead of "
+        f"silencing the clean one (#14118 item 1)")
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
