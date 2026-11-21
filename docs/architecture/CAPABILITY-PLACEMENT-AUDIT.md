@@ -1092,7 +1092,8 @@ rules are arguable here.
   places.** An earlier revision of this paragraph claimed "every `:GraphEvent` emit sits behind a journal
   append" and concluded the move was "very likely" a feed re-pointing. It is not:
 
-  1. **`_emit_event`'s own contract** (`sdk.py:16077-16081`): the JSONL half is written only *when* `point`,
+  1. **`_emit_event`'s own contract** (`sdk.py:16077-16082`, the paragraph's last line included —
+     `:16081` is its penultimate one): the JSONL half is written only *when* `point`,
      `id` or `turns` is provided — *"Events with NONE of the three are skipped (nothing meaningful to log)."*
   2. **`append_event`'s own contract** (`event_store.py:808`, and again in its module docstring at `:58`):
      *"a payload-only emit writes one with no JSONL record at all."*
