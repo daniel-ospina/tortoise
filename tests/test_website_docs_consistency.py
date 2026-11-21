@@ -2911,9 +2911,11 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
         # bounds, so `_UNBOUNDABLE_ANCESTORS` is ancestry and not a page-wide switch
         ("after a closed option", '<option>x</option><h2 id="qs">Q</h2>', "qs"),
         # ⛔ AND A BARE `<optgroup>` IS A POSITIVE CONTROL, not a refusal: it DOES
-        # render its child heading (measured — 812x38 rect, 668 painted px), which is
-        # why it is not in `_UNBOUNDABLE_ANCESTORS`. An earlier revision refused it on
-        # a sentence the measurement falsifies (#14073 review round 9).
+        # render its child heading (measured — 798 ink px on a white UA page against 0
+        # for an empty `<optgroup>` control, 812x38 against 812x0 on a `docs.html`
+        # copy), which is why it is not in `_UNBOUNDABLE_ANCESTORS`. An earlier
+        # revision refused it on a sentence the measurement falsifies, and cited pixel
+        # counts that did not reproduce (#14073 review rounds 9-10).
         ("bare optgroup", '<optgroup><h2 id="qs">Q</h2></optgroup>', "qs"),
     ):
         assert [

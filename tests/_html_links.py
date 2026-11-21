@@ -385,8 +385,10 @@ class _AnchorHrefParser(HTMLParser):
     # section lists `rp` with the hidden elements, and CSS Ruby's sample UA stylesheet
     # carries `rp { display: none; }` (the parenthesis exists for engines with NO ruby
     # support). MEASURED on this box's Chrome as well: `<rp><h2>HELLO</h2></rp>` → the
-    # `<rp>` computes `display: none`, the heading's rect 0x0, 0 painted px; and
-    # `<rp>PAREN</rp>` → 0 painted px, so its own text is dropped too. Before it was
+    # `<rp>` computes `display: none`, the heading's rect 0x0, 0 ink px; and
+    # `<rp>PAREN</rp>` → 0 ink px against 398 for a `<p>PAREN</p>` control on the same
+    # harness, so its own text is dropped too and the control proves the harness can
+    # see text. Before it was
     # listed, `extract_heading_positions('<rp><h2 id="qs">Q</h2></rp>')` returned the
     # heading, so a `<rp>` decoy BOUND the slice with the claim under it outside every
     # pin (#14073 review round 9, reproduced end-to-end through `_docs_section`).
@@ -485,24 +487,29 @@ class _AnchorHrefParser(HTMLParser):
     #: * `<select>` — the conservative side of a spec change, stated at length on
     #:   `_record_heading`; ancestry, so `<optgroup><option>` under it is covered.
     #: * `<option>` — no insertion mode involved and nothing unsettled: a `<h2>`
-    #:   inside a `<option>` is simply not rendered (`<option><h2>HELLO</h2></option>`
-    #:   → rect 0x0, 0 painted px, with or without a `<select>` above it), and the rule
-    #:   that missed it (`_unmet_by_reader` asked about `<select>`, `_UNRENDERED`,
-    #:   `hidden` and `<details>`) let the heading bound the slice. The refusal is
-    #:   BOUNDARY-ONLY on purpose — `<option>TAIL</option>` paints 244 px, so the
-    #:   option's own text IS rendered and adding `option` to `_UNRENDERED` would DROP
-    #:   painted copy, the text-question fail-open this file keeps paying for.
+    #:   inside a BARE `<option>` is not rendered (`<option><h2>HELLO</h2></option>` →
+    #:   heading rect 0x0, 0 ink px; an `<option>TAIL</option>` control paints 244), and
+    #:   the rule that missed it (`_unmet_by_reader` asked about `<select>`,
+    #:   `_UNRENDERED`, `hidden` and `<details>`) let the heading bound the slice. The
+    #:   refusal is BOUNDARY-ONLY on purpose — the option's own text IS rendered, so
+    #:   adding `option` to `_UNRENDERED` would DROP painted copy, the text-question
+    #:   fail-open this file keeps paying for. Inside a `<select>` the heading's box is
+    #:   still 0x0 but its TEXT is flattened into the rendered option label (453 ink px
+    #:   for the same markup) — which the `<select>` ancestor rule already refuses, and
+    #:   which is also why the TEXT recording must go on counting it.
     #:
     #: ⛔ `<optgroup>` IS NOT A MEMBER, and an earlier revision of this comment claimed
     #: it was by saying a heading inside "one of them" is not rendered. MEASURED FALSE
     #: for a BARE `<optgroup>`: `<optgroup><h2>HELLO</h2></optgroup>` gives the heading
-    #: an 812x38 rect and 668 painted px (32 480 dark px on a `docs.html` copy with the
-    #: real stylesheet). Only `<optgroup><option><h2>…` is 0x0 — and `option` already
-    #: covers that, as does the `<select>` ancestor rule for the spelling a real page
-    #: uses. Refusing `optgroup` therefore refused a heading a reader DOES meet: the
-    #: loud direction (a wrongly long slice), and the honest fix is to drop the member
-    #: rather than keep an over-refusal resting on a false sentence (#14073 review
-    #: round 9, measured).
+    #: a 1000x27 rect and 798 ink px on a white UA page (an empty `<optgroup>` control:
+    #: 0), and on a `docs.html` copy 812x38 — against 812x0 with no paintable box when
+    #: the heading is empty. Only `<optgroup><option><h2>…` is 0x0 — and `option`
+    #: already covers that, as does the `<select>` ancestor rule for the spelling a real
+    #: page uses. Refusing `optgroup` therefore refused a heading a reader DOES meet:
+    #: the loud direction (a wrongly long slice), and the honest fix is to drop the
+    #: member rather than keep an over-refusal resting on a false sentence (#14073
+    #: review rounds 9-10, measured — the harness is a Playwright element screenshot
+    #: with ink = any channel < 250, so every number here is re-runnable).
     #:
     #: The end-to-end escape this set closes, measured through `_docs_section` on a page
     #: copy: a TOC entry for `#storage-limits` plus
@@ -796,12 +803,13 @@ class _AnchorHrefParser(HTMLParser):
         TEXT recording.
 
         ⛔ AND `<optgroup>` WAS IN THAT SET FOR ONE ROUND AND CAME OUT — a bare
-        `<optgroup>` DOES render its child heading (measured: 812x38 rect, 668 painted
-        px; only `<optgroup><option><h2>` is 0x0, and `option` covers that), so
-        refusing it refused a heading a reader meets. An over-refusal is the loud
-        direction and therefore safe, but it rested on a sentence this measurement
+        `<optgroup>` DOES render its child heading (measured: 798 ink px on a white UA
+        page against 0 for an empty `<optgroup>` control, 812x38 against 812x0 on a
+        `docs.html` copy; only `<optgroup><option><h2>` is 0x0, and `option` covers
+        that), so refusing it refused a heading a reader meets. An over-refusal is the
+        loud direction and therefore safe, but it rested on a sentence this measurement
         falsifies, and an unmeasured member in a measured set is how the next reader is
-        misled (#14073 review round 9).
+        misled (#14073 review rounds 9-10).
 
         ⛔ AND "INSIDE A SELECT" IS THE SPEC'S QUESTION, NOT THIS STACK'S. The
         tokens that close the scope in the LIVING standard are `<input>` and a
