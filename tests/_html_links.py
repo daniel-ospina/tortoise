@@ -304,21 +304,23 @@ class _AnchorHrefParser(HTMLParser):
     # SHORTER slice, the fail-open direction, while the helper's own message
     # promised the opposite (#14073 review).
     #
-    # ⛔ `form` IS NOT ONE OF THEM, and listing it here was a false premise that
-    # REFUSED a legitimate caller. The in-body `<form>` rule is *"If the form
-    # element pointer is not null … then this is a parse error; ignore the token"*
-    # — it acts as an end tag for nothing; an open form is closed by its OWN
-    # `</form>` and by nothing else. Measured in Chromium
-    # (`<form class=toc id=f1><a href="#a">A</a><form id=f2><a href="#b">B</a>` →
-    # one form, both anchors inside it), so the end-tag extent this helper builds
-    # for `form` IS the browser's tree. The refusal made
-    # `extract_anchors_within(tag="form")` raise on a correct question (#14073
-    # review). ⚠️ Residual, left unmodelled and in the SAFE direction: a NESTED
-    # `<form>` start tag is IGNORED by a browser (the same form-pointer rule), while
-    # this parser pushes it — which can only make an extent SHORTER, i.e. the
-    # advertised set smaller and the slice longer, never the fail-open way.
+    # ⛔ `form` IS HERE FOR THE IN-TABLE RULE, NOT A SIBLING ONE. An earlier revision
+    # of this comment listed it among the tags a SIBLING start tag closes, which is
+    # false (the in-body rule is *"If the form element pointer is not null … ignore
+    # the token"*), and the revision after that deleted the member on the strength of
+    # that error. Both were wrong, because the tag is unmodellable for a DIFFERENT
+    # reason — the "in table" rule (13.2.6.4.9): *"Insert an HTML element for the
+    # token … **Pop the current node (which will be that form element) off the stack
+    # of open elements**."* A `<form>` written inside a table therefore exists as an
+    # EMPTY element and its following content is FOSTER-PARENTED out in front of the
+    # table, so an extent built on `</form>` collects anchors the form does not hold —
+    # a LARGER advertised set, a SHORTER slice, the fail-open direction (measured:
+    # `<table><tr><td>x</td></tr><form class=toc id=f><a href="#a">A</a></form>`
+    # gives a browser a form holding NO anchors, #14073 review). Outside a table the
+    # end-tag extent IS the tree, which is why this is a conservative refusal of an
+    # unmodellable tag rather than a wrong one.
     _IMPLICITLY_CLOSED = frozenset({
-        "a", "button", "caption", "colgroup", "dd", "dt", "h1", "h2",
+        "a", "button", "caption", "colgroup", "dd", "dt", "form", "h1", "h2",
         "h3", "h4", "h5", "h6", "li", "nobr", "optgroup", "option", "p",
         "rb", "rp", "rt", "rtc", "select", "table", "tbody", "td", "tfoot",
         "th", "thead", "tr",
@@ -1837,14 +1839,17 @@ def extract_anchors_within(
     Limits, all inherited from the parser and declared rather than guessed. An
     IMPLICIT-CLOSE tag is REFUSED outright (`_IMPLICITLY_CLOSED`, which covers BOTH
     families: spec 13.2.6.3's implied end tags and the tags a sibling START TAG
-    closes — `<button>`, `<h1>`–`<h6>`, `<a>`, `<form>`, `<nobr>`, `<select>`,
-    `<table>`): for a container whose tag a sibling closes (`<li>`, `<p>`, `<td>`…)
-    an extent built on end tags alone runs past the sibling, which is a LARGER
-    advertised set and therefore a SHORTER slice — the fail-open direction — so the
-    honest answer is to refuse the tag rather than to state a direction for it and
-    hope. The refusal message says which tags ARE safe instead of implying every
-    accepted tag is. A container inside an inert region is not in the tree at all,
-    which is the point.
+    closes — `<button>`, `<h1>`–`<h6>`, `<a>`, `<nobr>`, `<select>`, `<table>`): for a
+    container whose tag a sibling closes (`<li>`, `<p>`, `<td>`…) an extent built on
+    end tags alone runs past the sibling, which is a LARGER advertised set and
+    therefore a SHORTER slice — the fail-open direction — so the honest answer is to
+    refuse the tag rather than to state a direction for it and hope. `form` is refused
+    for a different reason and is NOT in that family: a `<form>` written inside a table
+    is popped as soon as it is inserted, so its content is foster-parented out of it
+    and the edge would collect anchors the form does not hold (see
+    `_IMPLICITLY_CLOSED`). The refusal message says which tags ARE safe instead of
+    implying every accepted tag is. A container inside an inert region is not in the
+    tree at all, which is the point.
 
     ⛔ THE ENTRIES follow `_unmet_by_reader`; a CONTAINER is counted by the tree, not
     by the reader — the two are deliberately different answers, and this paragraph
@@ -1870,9 +1875,10 @@ def extract_anchors_within(
     if tag in _AnchorHrefParser._IMPLICITLY_CLOSED:
         raise ValueError(
             f"`{tag}` is closed by a browser WITHOUT an end tag — by implied end "
-            f"tags, or by a following sibling start tag — so an extent built on end "
-            f"tags alone would run past its next sibling: a larger advertised set "
-            f"and a SHORTER slice. Ask a container tag whose end tag is the only "
+            f"tags, by a following sibling start tag, or (for `form`) by popping it "
+            f"the moment it is inserted inside a table — so an extent built on end "
+            f"tags alone would advertise anchors the element does not hold: a larger "
+            f"set and a SHORTER slice. Ask a container tag whose end tag is the only "
             f"thing that closes it (div/section/nav/ul/…), or model the implicit "
             f"close first."
         )

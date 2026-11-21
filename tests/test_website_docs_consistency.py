@@ -2301,8 +2301,9 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     the slice long and the extra text pinned. The declared cost: a genuinely
     rendered heading inside a select does not end the slice.
 
-    ⛔ AND THE ONE TOKEN THAT DOES CLOSE THE SCOPE IS MODELLED — `<input>`, the
-    living standard's "in body" rule (`_SELECT_POP`). This paragraph used to say
+    ⛔ AND THE TOKENS THAT DO CLOSE THE SCOPE ARE MODELLED — `<input>` and a nested
+    `<select>`, the living standard's "in body" rules (`_SELECT_POP`). This
+    paragraph used to say
     the classic mode's `input`/`keygen`/`textarea` were all unmodelled; that was
     wrong twice over: `<input>` and a nested `<select>` are modelled now, and
     `keygen`/`textarea` have no select-scope step in the living standard, so
@@ -2490,7 +2491,7 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
 
 
 def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else() -> None:
-    """Only `<input>` pops an open `<select>` — and the other two tokens MUST NOT.
+    """`<input>` and a nested `<select>` pop an open `<select>` — nothing else does.
 
     The living standard has no "in select" insertion mode (`grep -c 'in select'
     parsing.html` is 0; the sequence runs "in cell" → "in template"), which this
@@ -2499,10 +2500,15 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
 
       `<input>` — *"If the stack of open elements has a select element in scope:
       Parse error. Repeatedly pop the current node off the stack of open elements
-      until a select element has been popped."*
+      until a select element has been popped."* → pops, and is inserted.
+      `<select>` — *"Parse error. Ignore the token. Repeatedly pop …"* → pops AND
+      creates no element of its own.
       `<textarea>` — *"Insert an HTML element for the token … Switch the tokenizer
       to the RCDATA state"* — no select-scope step, so it does NOT pop.
-      `keygen` — no start-tag rule at all; it is not in the living standard.
+      `keygen` — has its own start-tag rule (it is in *"area, br, embed, img,
+      keygen, wbr"*) and that rule has no select-scope step, so it does NOT pop
+      either. ⛔ It is in the standard; an earlier revision of this docstring said
+      it was not.
 
     ⛔ THE TWO EXTRA TOKENS ARE NOT A HARMLESS OVER-REACH — THEY ARE THE FAIL-OPEN
     DIRECTION, which is why this test pins their ABSENCE as hard as `input`'s
@@ -3085,15 +3091,19 @@ def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
     SHORTER slice, the fail-open direction (measured, #14073 review). Only `div` is
     a safe answer today, and that is the positive control below.
 
-    ⛔ `form` IS NOT IN THIS FAMILY, and this test asserted it was. The in-body
-    `<form>` rule is *"If the form element pointer is not null … then this is a
-    parse error; ignore the token"* — it acts as an end tag for nothing, so an open
-    form is closed by its own `</form>` alone and the end-tag extent IS the
-    browser's tree. Measured in Chromium:
-    `<form class=toc id=f1><a href="#a">A</a><form id=f2><a href="#b">B</a>` → one
-    form with BOTH anchors in it. Refusing the tag therefore blocked a correct
-    question, so `form` is asserted ACCEPTED below, with its extent checked
-    against that measurement (#14073 review).
+    ⛔ `form` IS REFUSED, BUT NOT FOR A SIBLING REASON — and it is worth saying
+    which, because this test asserted the sibling reason and a later revision
+    deleted the member on the strength of that error. The in-body `<form>` rule is
+    *"If the form element pointer is not null … then this is a parse error; ignore
+    the token"*: a sibling `<form>` is not an end tag, so OUTSIDE a table the
+    end-tag extent is exactly the browser's tree. The "in table" rule (13.2.6.4.9)
+    is what settles it: *"Insert an HTML element for the token … Pop the current
+    node (which will be that form element) off the stack of open elements"* — so an
+    in-table form is an EMPTY element whose content is foster-parented out, and an
+    extent would advertise anchors it does not hold (measured:
+    `<table><tr><td>x</td></tr><form class=toc id=f><a href="#a">A</a></form>`
+    gives a browser a form holding NO anchors; #14073 review). Unmodellable in
+    general, so refused — the safe side, not a wrong one.
     """
     declared = set(_AnchorHrefParser._IMPLICITLY_CLOSED)
     # ⛔ THE SET UNDER TEST IS NAMED HERE, not read back out of the refusal list — a
@@ -3119,23 +3129,24 @@ def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
                 tag=tag,
                 class_token="toc",
             )
-    # `form` is the OTHER direction: it is in no sibling-close family, so the helper
-    # must answer it — and answer it with the browser's tree, where a nested `<form>`
-    # is IGNORED and its anchors belong to the outer element.
-    assert "form" not in declared, (
-        "`_IMPLICITLY_CLOSED` refuses `form` again: a nested `<form>` start tag is "
-        "IGNORED by a browser, not an end tag for the open one, so the refusal "
-        "blocks a container whose end-tag extent is already the browser's tree"
+    # `form` is refused for a reason OUTSIDE both sibling families — the "in table"
+    # rule pops it the instant it is inserted, so its content is foster-parented out
+    # of it and an end-tag extent would collect anchors the form does not hold. It is
+    # therefore NOT a sibling-close tag, but it IS unmodellable, and the refusal is
+    # the conservative answer rather than a mistaken one.
+    assert "form" in declared, (
+        "`_IMPLICITLY_CLOSED` accepts `form` again: a `<form>` written inside a table "
+        "is popped as soon as it is inserted (spec 13.2.6.4.9), so its content is "
+        "foster-parented out and the edge would advertise anchors the form does not "
+        "hold — a larger set and a shorter slice, the fail-open direction"
     )
-    assert extract_anchors_within(
-        '<form class="toc"><a href="#a">A</a><form><a href="#b">B</a></form></form>',
-        tag="form",
-        class_token="toc",
-    ) == [["#a", "#b"]], (
-        "a `form` container's extent does not match the browser: a nested `<form>` "
-        "is ignored, so both anchors belong to the ONE outer form (measured in "
-        "Chromium)"
-    )
+    with pytest.raises(ValueError, match="WITHOUT an end tag"):
+        extract_anchors_within(
+            '<table><tr><td>x</td></tr><form class="toc" id="f">'
+            '<a href="#a">A</a></form></table>',
+            tag="form",
+            class_token="toc",
+        )
     # POSITIVE CONTROL: the tag the callers actually ask for is accepted, and it
     # measures what the refusal protects — the sibling's anchor is NOT included.
     assert extract_anchors_within(
