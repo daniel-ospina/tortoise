@@ -19,9 +19,10 @@
       "snippets": [
         "MATCH (e:GraphEvent {event_id:$id}) RETURN count(e)"
       ],
+      "min_occurrences": 2,
       "needs": "key existence on event_id",
       "class": "maintenance",
-      "why": "a dedupe probe before the CREATE; a unique index answers it."
+      "why": "a dedupe probe before the CREATE; a unique index answers it. The same statement is also `_event_row_exists` below, so this row requires BOTH occurrences."
     },
     {
       "file": "tortoise/event_store.py",
@@ -37,14 +38,49 @@
     },
     {
       "file": "tortoise/event_store.py",
+      "line": "410",
+      "reader": "ensure_event_schema (event_id index)",
+      "snippets": [
+        "CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)"
+      ],
+      "needs": "DDL: an exact-match index",
+      "class": "maintenance",
+      "why": "one of the three schema statements `ensure_event_schema` issues \u2014 the schema a re-home must recreate, which is why it is censused and not assumed."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "415",
+      "reader": "ensure_event_schema (unique constraint)",
+      "snippets": [
+        "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent",
+        "PROPERTIES 1 event_id"
+      ],
+      "needs": "DDL: a uniqueness constraint on event_id",
+      "class": "maintenance",
+      "why": "the belt behind the dedupe pre-check (the app-side probe is the suspenders). \u26a0\ufe0f Issued through `g.query()` inside a `try/except` that only logs, so on a server without the verb it is REFUSED and production runs without it."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "421",
+      "reader": "ensure_event_schema (seq index)",
+      "snippets": [
+        "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)"
+      ],
+      "needs": "DDL: a range index",
+      "class": "maintenance",
+      "why": "the index `read_after`'s ordered scan plans against."
+    },
+    {
+      "file": "tortoise/event_store.py",
       "line": "879",
       "reader": "_event_row_exists",
       "snippets": [
         "MATCH (e:GraphEvent {event_id:$id}) RETURN count(e)"
       ],
+      "min_occurrences": 2,
       "needs": "key existence",
       "class": "maintenance",
-      "why": "#9208's loss discriminator: asks whether a failed append landed."
+      "why": "#9208's loss discriminator: asks whether a failed append landed. Shares its statement text with the dedupe probe above, which is why the two rows both require TWO occurrences in the file."
     },
     {
       "file": "tortoise/event_store.py",
@@ -128,13 +164,14 @@
     {
       "file": "tortoise/hosted_backup.py",
       "line": "1333",
-      "reader": "whole-graph export (nodes)",
+      "reader": "whole-graph export (dump side)",
       "snippets": [
         "MATCH (n) RETURN labels(n), properties(n)"
       ],
+      "min_occurrences": 2,
       "needs": "a full label-agnostic dump",
       "class": "maintenance",
-      "why": "the export carries `:GraphEvent` rows because it carries everything; it names no label and needs no capability."
+      "why": "the export carries `:GraphEvent` rows because it carries everything; it names no label and needs no capability. \u26a0\ufe0f It is censused because a re-home must decide what the export does with the shape, not because it reads one."
     },
     {
       "file": "tortoise/hosted_backup.py",
@@ -143,15 +180,16 @@
       "snippets": [
         "MATCH (n) RETURN labels(n), properties(n)"
       ],
+      "min_occurrences": 2,
       "needs": "a full label-agnostic dump",
       "class": "maintenance",
-      "why": "the second whole-graph scan (#13083 \u00a72.6 measured both): the same statement shape as the line above, in the restore path."
+      "why": "the second whole-graph scan: the same statement shape as the line above, in the restore path, so both rows require TWO occurrences."
     }
   ],
   "counts": {
     "serving": 1,
-    "maintenance": 12
+    "maintenance": 15
   },
   "graph_capability_readers": [],
-  "verdict": "no reader needs a graph capability \u2014 every reader is a key lookup, an ordered range scan, an aggregate or a predicate delete"
+  "verdict": "no reader needs a graph capability \u2014 every reader is a key lookup, an ordered range scan, an aggregate, a predicate delete, or the schema those three depend on"
 }
