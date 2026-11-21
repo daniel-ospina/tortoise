@@ -306,19 +306,25 @@ all three `durations:` rows still emits 720.4) — what moves it is three more f
 +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is applied. ⛔ **THIS
 RE-CUT THEN MERGED THE TWO SIDES, WHICH IS A THIRD TREE, SO THE TERM IS READ OFF IT RATHER THAN
 INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on THIS manifest emits **25 m on all eleven
-shards**, the worst at `est_seconds` **720.6** (`ceil(720.6/60 x 2)` = 25), and the pool it packs now
-holds BOTH parents' added suites — `#14012`'s three (shards `a`, `d`, `i`) and `#14015`'s M5
-`test_miss_rate_m5.py` (shard `i`) — so no arithmetic on the two parents' figures would have
+shards**, the worst at `est_seconds` **720.7** (`ceil(720.7/60 x 2)` = 25, re-read after the
+`origin/main` `b4da1f5c` merge — it emitted 720.6 on the previous tree), and the pool it packs now
+holds BOTH parents' added suites — `#14012`'s three (shards `d`, `e`, `i` — `test_14012_resident_cli`,
+`test_14012_resident_pin`, `test_14012_outside_view`) and `#14015`'s M5 `test_miss_rate_m5.py` (shard
+`d`, beside `resident_cli`) — so no arithmetic on the two parents' figures would have
 predicted the merged reading. The three
 hand-added figures are re-added from the
-emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, plus `config/ci-surfaces.yml`'s S=11
-header block, which reads **arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
-`test_demo_session_read_exclusion_8290.py` `durations:` row, which repeats 85.0 m against the 90 m
-cap), which is the 1-decimal restatement of the terms' own total, 56.64 m — ⛔ the × 1.5 is taken on
-the UNROUNDED total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying
-the ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre,
-which is how this one sentence came to disagree with the row above it — and the `84.9 / 5.1` this
-sentence itself carried was that same re-derivation, withdrawn here: ⛔ NOT the sum of the four ROUNDED
+emitted 25 m: 56.6 m / 85.0 m / 5.0 m (the row above, and the same three figures as the row's own
+`x 1.5 = 85.0`), which is the 1-decimal restatement of the
+terms' own total, 56.64 m, that
+`config/ci-surfaces.yml` already records for this same quantity — its S=11 header block reads
+**arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
+`test_demo_session_read_exclusion_8290.py` `durations:` row repeats 85.0 m against the 90 m cap — ⛔ and the × 1.5 is taken on the UNROUNDED
+total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying the
+ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre, which
+is how this one sentence came to disagree with the row above it. ⛔ **THIS PARAGRAPH ITSELF RESTATED
+84.9 m / 5.1 m UNTIL THE `#14183` RE-CUT** — that is the ROUNDED-SUM path its own next clause
+forbids — and `origin/main` and this branch corrected it independently, to the same pair —
+⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
 first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
