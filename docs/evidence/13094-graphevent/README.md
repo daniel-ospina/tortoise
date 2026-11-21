@@ -110,11 +110,13 @@ never manages to create (see `measure_graphevent_residency.py`'s docstring and `
 which carries the measurement). ⛔ **BUT THE TWO SLOPES
 QUOTED BELOW WERE MEASURED WITHOUT THAT CONSTRAINT**, and this is the sentence that has to say so
 rather than leave it to a footnote: both committed JSONs record it REFUSED
-(`schema[1].installed == false`, the graph-key-slot defect the instrument names), so those slopes are
+(`schema[1].installed == false` — the constraint is the SECOND of the three statements, and `schema`
+index 1 in both JSONs — the graph-key-slot defect the instrument names), so those slopes are
 a **LOWER BOUND** — a graph without that constraint's index understates the cost, never overstates it
 (the two plain `CREATE INDEX` statements WERE installed; only the constraint was refused) — and re-running the
 instrument (it issues the constraint the module way, the only form that runs) is what would make them
-a coverage claim about production's intent.
+a coverage claim about production's intent. ⚠️ Each JSON carries that reading as a `schema_note`, so a
+reader who meets the recorded `refused` line in the artifact FIRST cannot take it for a server limit.
 
 Instrument: `measure_graphevent_residency.py` (this directory), run at head `05d218fcaf` (recorded as
 `tree.git_head` in both JSONs). Outputs: `measurement-payload88.json`, `measurement-payload190.json`.

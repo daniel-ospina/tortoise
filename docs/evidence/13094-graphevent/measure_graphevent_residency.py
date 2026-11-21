@@ -58,11 +58,13 @@ import sys
 
 GRAPH_PREFIX = "probe_13094"
 
-#: `event_store.ensure_event_schema`'s three statements, verbatim (`:410`, `:415`,
-#: `:421`), each with HOW it must be issued. The measurement is meaningless without
-#: them — see the module docstring.
+#: `event_store.ensure_event_schema`'s three statements (`:410`, `:415`, `:421`), each
+#: with HOW it must be issued. ⛔ The two `CREATE INDEX` spellings are production's
+#: verbatim; the module command is NOT — it is re-keyed to the probe graph's own key
+#: below, because the graph slot is what production gets wrong. The measurement is
+#: meaningless without them — see the module docstring.
 #:
-#: ⚠️ The third one is NOT Cypher and cannot go down `graph.query()`: `GRAPH.
+#: ⚠️ The SECOND one is NOT Cypher and cannot go down `graph.query()`: `GRAPH.
 #: CONSTRAINT` is a module command, and `ensure_event_schema` sends it through
 #: `g.query()` inside a `try/except` that only logs (its own comment: *"FalkorDB
 #: #664 crash reports on string-property unique constraints"*). So in production the
@@ -231,9 +233,9 @@ def _slope(points: list[dict]) -> float | None:
     """Bytes per node from the LAST two populations — the marginal cost.
 
     Two neighbouring populations, not the first and the last: the graph's own
-    fixed cost (key tables, the two indexes above, the unique constraint) is
-    paid once and would otherwise be divided into every node and reported as if
-    it recurred. The marginal figure is the one that answers "does removing these
+    fixed cost (key tables, the two indexes above, and the unique constraint where
+    the server accepts it) is paid once and would otherwise be divided into every
+    node and reported as if it recurred. The marginal figure is the one that answers "does removing these
     rows give the memory back?".
     """
     if len(points) < 2:

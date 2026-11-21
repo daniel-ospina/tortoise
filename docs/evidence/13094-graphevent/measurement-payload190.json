@@ -16,6 +16,7 @@
       "installed": true
     }
   ],
+  "schema_note": "\u26a0\ufe0f Statement 2 records WHAT THE SCRIPT ISSUED, and the script was wrong: `tortoise_ge_uid` sat in the GRAPH-KEY slot of the module command, so the command addressed a graph it minted on the way (which carries no `event_id` index) \u2014 the `missing supporting exact-match index` is that graph failing its own precondition, NOT a server limit and NOT an asynchronous-index race. Correctly formed against the probe graph's own key the constraint is ACCEPTED (`PENDING`) on falkordb-server:v4.20.6. Fixed in the script after this run (see its module docstring and README \u00a72); the statements and slopes below are unaffected \u2014 the constraint was refused in this run either way.\n",
   "used_memory_baseline": 4274464,
   "used_memory_after_schema": 4389072,
   "schema_bytes": 114608,
