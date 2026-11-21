@@ -974,8 +974,9 @@ def _package_root_attributes(source: str) -> set[str]:
     (`sys.modules['tortoise.__init__'] is tortoise` → `False`). Both states measured
     on this tree at `e022fc935b`. The leg exists anyway because the name was the one
     package-root spelling `_imports_of` FOLDS onto the unbanned `tortoise` and no
-    other loop read `ast.ImportFrom` at all, so a caller writing this form would
-    have reached the guarded client with every leg green. Reporting a name that is
+    other loop read `ast.ImportFrom` at all, so — IN THAT ORDERING, after an
+    explicit `import tortoise.__init__` — a caller writing this form would have
+    reached the guarded client with every leg green. Reporting a name that is
     not the client unless the submodule was imported first is recoverable; staying
     silent on a spelling of the root is not — the same asymmetry this function's
     first paragraph sanctions.
