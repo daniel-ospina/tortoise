@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""#13629 step 3 — strip `embedding` from `:Object`/`:Subject`/`:Event`/`:Source` nodes.
+"""#13629 step 3 — strip `embedding` from `:Object`/`:Subject`/`:Event`/`:Source`/`:Point`
+nodes.
+
+`:Point` joined the population in `#13971` (see `entity_vector_parity_census.RETIRED`
+for why the old exclusion was reversed, and the `:Point` paragraph below).
 
 **A PREVIEW IS THE DEFAULT. There is no `--dry-run`: the ABSENCE of `--execute` is
 the preview.** The preview reads both stores, prints the exact population it would
@@ -61,15 +65,35 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     `tortoise.hosted_backup::restore_graph` (all five labels) and, for `:Event`, by five
     more `sdk`/`session_indexer` writers. Every one of those re-adds the vector on the next
     call, so the requirement this gate enforces is **every declared writer of the label
-    asks the gate** — not "the fold does". The gate therefore refuses all four labels
-    today, INCLUDING after #13617 lands. When the coverage predicate is present it names
-    each un-cleared writer; while the predicate is ABSENT it returns before that walk, so
-    it names the requirement rather than the writers. That is the
-    true state of a two-pronged retirement, and it is a satisfiable one: as each
-    writer's `stores` entry loses the label, the gate opens for it. Testing that the gate
-    CAN open (rather than only that it refuses) is
+    asks the gate** — not "the fold does". The gate therefore refused all four entity
+    labels until `#13854` closed them, and it REFUSES `:Point` today on TWO INDEPENDENT
+    arms — the coverage verdict, which currently measures a shortfall, and the writer
+    census, which names two of its four declared writers that must keep the copy:
+    `tortoise.sdk::_write_capture_turns` (the graph write is the SOLE store on every lane
+    where the record cannot hold the turn — no journal, no tenant, an open connect breaker,
+    or a record write that REFUSED the turn) and `tortoise.projection::_rebuild_all_replay`
+    (pass-1b restores a snapshot vector only for ids the journal wrote NO vector for, i.e.
+    only where the snapshot is the sole carrier). `#13971`'s first cut gated all four on the
+    label's coverage verdict and was reverted on review: that verdict is
+    `record_vectors >= graph_vectors` over a LABEL, so blanking on it wrote those turns'
+    vectors to NEITHER store. The two writers that place a genuinely redundant copy
+    (`tortoise.sdk::_update_entity`, `tortoise.hosted_backup::restore_graph`) DO ask, and
+    do stop. When the coverage verdict answers STOP it names each un-cleared writer; while
+    it answers KEEP, or cannot be read, it returns before that walk and names the counts
+    (or, with the predicate symbol absent, the requirement). That is the
+    true state of a two-pronged retirement, and the WRITER prong is a satisfiable one: as
+    each writer's `stores` entry loses the label, that arm opens for it. ⛔ THE COVERAGE
+    PRONG IS NOT, for this label: `operator`'s graph denominator is the whole `:Point`
+    label while its record numerator is the operator subset, so `record_vectors >=
+    graph_vectors` is UNREACHABLE while any plain point carries an embedding
+    (`tortoise/record_vector.py`, pinned by
+    `test_13610_graph_vector_copy.py::test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify`).
+    `:Point`'s cut-over is therefore an OPERATOR act — or a later, kind-aware denominator —
+    not a backfill that will eventually measure true. Testing that the writer arm CAN open
+    (rather than only that it refuses) is
     `test_the_gate_OPENS_when_every_declared_writer_asks` — an enforcer whose firing
-    condition can never hold would be the defect, not the refusal.
+    condition can never hold would be the defect, not the refusal, which is exactly why
+    the third condition above is stated rather than waited on.
 ``REFUSE_TARGET_DRIFT``
     The target this run resolved is not the one the plan was built against — compared on
     all four axes that name a store: the graph NAME, `org_id`, `graph_id` and the graph
@@ -335,8 +359,21 @@ journal IS mandatory: those rows are the transcript, and a rebuild that resurrec
 is the failure. Here a rebuild that re-derives a vector is the SEQUENCED re-write, and
 the write gate above is what keeps it from happening by accident.
 
-⚠️ **The graph-side `:Point` vector is NOT in scope** — the armed cutover and `#13330`
-own it, and `#13629`'s brief forbids touching it. The population is
+⚠️ **The graph-side `:Point` vector is IN `RETIRED` since `#13971`** — it joined
+`entity_vector_parity_census.RETIRED` once its record coverage became measurable from a
+fresh process. It is the
+largest reclaimable block left (37,158 stored vectors, ≈67 MB), the in-graph `:Point`
+HNSW index is RETIRED (`#13330`) so nothing reads the property, and `#5004`'s "a Point
+vector is RECORD TRUTH" is now the reason a graph copy that the record also holds is a
+redundant MIRROR — not a reason to keep it. ⛔ **BUT THE PLAN STILL REFUSES `:Point`**, and
+the refusal is the honest half: two declared writers must keep the copy because on their
+lanes it is the SOLE carrier (`sdk::_write_capture_turns` on every lane where the record
+cannot hold the turn; `projection::_rebuild_all_replay`, whose pass-1b restore runs only
+for ids the journal wrote no vector for). The census names them once coverage verifies, so
+that arm of the refusal is checkable rather than a shrug; the coverage arm names both
+counts instead. The tool's refusals are otherwise unchanged: it will not
+strip `:Point` unless the record's coverage for `point`/`operator` MEASURES true in this
+process. The population remains
 `entity_vector_parity_census.RETIRED` and nothing else.
 
 Usage::
@@ -504,6 +541,21 @@ FOLD_MODULE = "tortoise.projection.entities"
 FOLD_WRITERS: dict[str, tuple[str, ...]] = {
     "Object": ("_upsert_object",),
     "Subject": ("_upsert_subject",),
+    # ⛔ `:Point` IS DELIBERATELY ABSENT (#13971), and that is a RECORDED EXCEPTION, not an
+    # oversight. `_upsert_point_props` is the journal fold: its vector is the JOURNAL's own
+    # record truth (`#5004`), so it must restore what the journal holds or
+    # `derived == replay(journal)` goes false. Two shipped pins state the product decision:
+    # `record_vector.MIRROR_RETIRED_LABELS` must NOT contain `point`, and that set must equal
+    # the labels the folds stop writing
+    # (`tests/test_13610_graph_vector_copy.py::
+    # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`). The
+    # consequence is stated in the tool's own refusal text rather than hidden: a
+    # `rebuild_all` re-materialises the journal's `:Point` vectors, so the strip is an
+    # operator action that has to be RE-RUN after a rebuild. TWO of the four declared
+    # `:Point` writers ask the gate (the SDK update door and `restore_graph`); the live
+    # capture and the pass-1b snapshot restore must NOT, because on their lanes the graph
+    # copy is the SOLE store — which is why the census REFUSES `:Point` once coverage
+    # verifies, naming both.
     "Event": ("_upsert_event", "_event_plain_merge"),
     # ⛔ NOT `_event_plain_merge`: it MERGEs `(s:Source {url:$id})` but every `embedding`
     # touch in it is on `e` (`clear_embedding(..., "e", ...)` and
@@ -6772,6 +6824,21 @@ def render_plan(plan: dict) -> str:
         "  --execute --plan <this file> --confirm-plan-digest "
         f"{plan['digest']}",
     ]
+    if any(row["label"] == "Point" for row in plan["labels"]):
+        # ⛔ THE CAVEAT IS PRINTED, NOT HELD IN A COMMENT (`#13971`). `:Point` is the one
+        # label whose JOURNAL FOLD keeps writing the graph copy by decision
+        # (`record_vector.MIRROR_RETIRED_LABELS` must not contain `point`), so a rebuild
+        # re-materialises what this plan removes. An operator who is not told that reads the
+        # next rebuild as "the strip silently failed".
+        lines += [
+            "",
+            "⚠️ `:Point` durability: the JOURNAL FOLD re-adds the vector, so this plan is "
+            "undone by a `rebuild_all` AND by any journalled point write that carries one "
+            "— re-run this tool afterwards. Only the SDK update door and the DR restore "
+            "ask the gate and stop; the capture writer, the pass-1b snapshot restore and "
+            "the fold keep the copy on the lanes where it is the ONLY one, which is why "
+            "this plan refuses `:Point` while the census names them once coverage verifies.",
+        ]
     measured = plan.get("population") or [r["label"] for r in plan["labels"]]
     declared = plan.get("declared_population") or measured
     dropped = sorted(set(declared) - set(measured))
@@ -7588,7 +7655,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="record tenant graph")
     parser.add_argument("--label", action="append", default=None,
                         choices=[label for _, label, _ in parity.RETIRED],
-                        help="plan only this label (repeatable); default: all four")
+                        help="plan only this label (repeatable); default: all five")
     parser.add_argument("--batch", type=int, default=None,
                         help="nodes per removal statement (default: the plan's recorded "
                              f"batch on --execute, else {DEFAULT_BATCH})")

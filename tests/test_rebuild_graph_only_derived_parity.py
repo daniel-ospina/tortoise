@@ -370,6 +370,45 @@ def test_live_journaled_point_round_trips(sup, tmp_path):
     assert _read_derived(sdk, pid) == before
 
 
+def test_the_pass_1b_snapshot_restore_is_NEVER_gated_by_the_label_verdict(
+        sup, tmp_path, monkeypatch):
+    """`#13971` review P1 (Finding 2): the snapshot vector is the SOLE carrier here.
+
+    ⛔ `#13971`'s first cut popped `embedding` out of the pass-1b restore when the `point`
+    label's COVERAGE verdict answered "stop", justified by "the record holds that vector —
+    that is what coverage means". It does not: coverage is `record_vectors >= graph_vectors`
+    over a LABEL, while pass-1b exists for a GRAPH-ONLY id whose journal carries no record of
+    it at all. Its `restore_embedding` predicate already requires
+    `pid not in journal_embed_write`, so the pop could only ever delete the ONE copy — after
+    the wipe, with no journal vector to replay and no record row for the id.
+
+    The gate is forced to STOP here (an unarmed test process otherwise answers "keep
+    mirroring" and the pre-fix code never reaches its pop, which is why the rest of this
+    suite is blind to it). Pre-fix: the point comes back VECTORLESS. Post-fix: the snapshot
+    vector is restored, exactly as for a shape no coverage verdict can speak about.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required",
+                        lambda entity_type: False, raising=False)
+    events, sdk = sup
+    pid = "pt-graph-only-vector"
+    _seed(sdk, pid, "SEED")
+    # A falsy re-emit: the journal writes NO derived for this id, so the pre-wipe
+    # snapshot is the only carrier of `embedding` and of `content_hash`.
+    records = [_point_added(pid, "")]
+    _write_journal(events, records)
+    expected = _oracle(tmp_path, records, pid, "SEED")
+    assert expected["embedding"] is not None, (
+        "the live oracle holds no vector, so this pin would prove nothing")
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    actual = _read_derived(sdk, pid)
+    assert actual["embedding"] == expected["embedding"], (
+        "a graph-only id came back from `rebuild_all` WITHOUT its vector: the record has no "
+        "row for it and the journal writes none, so the popped snapshot value was the only "
+        "copy (#13971 review P1)")
+
+
 def test_rebuild_is_idempotent_for_graph_only_derived(sup, tmp_path):
     """rebuild → rebuild must converge (the restore is a fixed point)."""
     events, sdk = sup

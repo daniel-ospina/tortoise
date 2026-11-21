@@ -321,7 +321,7 @@ def _collapse_merged_anchor_rows(handle: Any,
 
 # ── two-Subject seed ─────────────────────────────────────────
 
-def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
+def seed_onboarding_anchors(surface: Any, *, org_name: str, org_id: str,
                             person_name: str | None = None,
                             user_id: str | None = None,
                             person_email: str | None = None,
@@ -351,7 +351,7 @@ def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
     #    all-or-nothing contract — a disambiguation round never leaves a
     #    half-seed behind). ────────────────────────────────────────────
     org_class = _classify_anchor(
-        sdk, name=org_name, kind=ORG_ANCHOR_KIND,
+        surface, name=org_name, kind=ORG_ANCHOR_KIND,
         ours_refs={"org_id": org_id})
     person_class = None
     if include_person:
@@ -361,12 +361,12 @@ def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
         if person_email is not None:
             person_refs[EMAIL_REF] = person_email
         person_class = _classify_anchor(
-            sdk, name=person_name, kind=PERSON_ANCHOR_KIND,
+            surface, name=person_name, kind=PERSON_ANCHOR_KIND,
             ours_refs={"user_id": user_id, "email": person_email})
 
     # ── PHASE 2 (writes) ─────────────────────────────────────────────
     org_subject, org_created, org_normalized = _write_anchor(
-        sdk, name=org_name, kind=ORG_ANCHOR_KIND, refs={"org_id": org_id},
+        surface, name=org_name, kind=ORG_ANCHOR_KIND, refs={"org_id": org_id},
         classification=org_class)
     report: dict[str, Any] = {
         "org_subject": org_subject,
@@ -380,9 +380,9 @@ def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
         report["member_of"] = None
         return report
     user_subject, person_created, person_normalized = _write_anchor(
-        sdk, name=person_name, kind=PERSON_ANCHOR_KIND, refs=person_refs,
+        surface, name=person_name, kind=PERSON_ANCHOR_KIND, refs=person_refs,
         classification=person_class)
-    member_of = sdk._create_edge(MEMBER_OF_RELATION,
+    member_of = surface.create_edge(MEMBER_OF_RELATION,
                                 user_subject["id"], org_subject["id"])
     report.update({
         "user_subject": user_subject,
@@ -399,14 +399,14 @@ def _require_name(name: str | None, label: str) -> str:
     return name.strip()
 
 
-def _classify_anchor(sdk: Any, *, name: str, kind: str,
+def _classify_anchor(surface: Any, *, name: str, kind: str,
                      ours_refs: dict[str, Any]) -> dict[str, Any] | None:
     """Phase-1 collision classification: None = safe to create;
     {"subject": props} = OURS (reuse + normalize on match); raises
     ``SubjectCollision`` when a same-name Subject exists that is not ours
     (identity-unprovable or ref-mismatch). Zero writes."""
     try:
-        existing = find_subject_by_name(sdk, name)
+        existing = find_subject_by_name(surface, name)
     except AmbiguousEntityName as exc:
         # #3633: a name held by two live Subjects has no single identity to
         # classify — refuse through the seed's OWN contract (callers map
@@ -432,7 +432,7 @@ def _classify_anchor(sdk: Any, *, name: str, kind: str,
     return {"subject": existing}
 
 
-def _write_anchor(sdk: Any, *, name: str, kind: str,
+def _write_anchor(surface: Any, *, name: str, kind: str,
                   refs: dict[str, Any],
                   classification: dict[str, Any] | None,
                   ) -> tuple[dict, bool, bool]:
@@ -445,11 +445,16 @@ def _write_anchor(sdk: Any, *, name: str, kind: str,
     created = classification is None
     normalized = False
     existing = (classification or {}).get("subject")
+    # ⛔ ``surface`` HERE IS THE SEED SURFACE, NOT THE SDK (``_OrgSeedSurface`` /
+    # ``_SdkSeedSurface``), and its published door is ``create_subject`` — the private
+    # ``_create_subject`` is what the surface itself calls on the real SDK underneath.
+    # `#13899` retired the public spelling from the SDK's own surface and these two call
+    # sites were left naming the private one, which no surface has.
     if existing is not None and existing.get("subjectKind") != kind:
         # legacy free-string kind on OUR anchor → canonical kind on MATCH
-        return (dict(sdk._create_subject(name, subjectKind=kind, **refs)),
+        return (dict(surface.create_subject(name, subjectKind=kind, **refs)),
                 False, True)
     if existing is not None and not refs:
         return (dict(existing), False, False)
-    node = dict(sdk._create_subject(name, subjectKind=kind, **refs))
+    node = dict(surface.create_subject(name, subjectKind=kind, **refs))
     return node, created, normalized
