@@ -105,8 +105,14 @@ the other direction — every declared row resolves, and a reworded or deleted s
 `#13083` §5.1 is explicit that its own residency figure is **unmeasured**: the payload is exact
 (12,768 B over 67 `:GraphEvent` nodes ≈ **190 B/event**) and the RAM figure is run-dependent drift it
 refused to quote. So it is measured here, against a real FalkorDB, with production's schema INTENT —
-including the `event_id` unique constraint, which production's own path never manages to create (see
-`measure_graphevent_residency.py`'s docstring and `#14204`'s census rows).
+the two `CREATE INDEX` statements plus the `event_id` unique constraint that production's own path
+never manages to create (see `measure_graphevent_residency.py`'s docstring). ⛔ **BUT THE TWO SLOPES
+QUOTED BELOW WERE MEASURED WITHOUT THAT CONSTRAINT**, and this is the sentence that has to say so
+rather than leave it to a footnote: both committed JSONs record it REFUSED
+(`schema[1].installed == false`, the graph-key-slot defect the instrument names), so those slopes are
+a **LOWER BOUND** — an un-indexed graph understates the cost, never overstates it — and re-running the
+instrument (it issues the constraint the module way, the only form that runs) is what would make them
+a coverage claim about production's intent.
 
 Instrument: `measure_graphevent_residency.py` (this directory), run at head `05d218fcaf` (recorded as
 `tree.git_head` in both JSONs). Outputs: `measurement-payload88.json`, `measurement-payload190.json`.
@@ -115,8 +121,8 @@ Instrument: `measure_graphevent_residency.py` (this directory), run at head `05d
 **marginal slope** between the last two. The slope is the quoted number: the graph's fixed cost (the two
 `CREATE INDEX` statements, and the `event_id` unique constraint the script also issues — the same
 three statements `event_store.ensure_event_schema` WRITES, though production's `g.query()` cannot parse
-the constraint's module command, so every slope quoted below is either without it or must name the
-JSON that installed it) is paid once and would otherwise be divided
+the constraint's module command, so **every slope quoted below is WITHOUT it**: neither committed JSON
+installed the constraint, and the instrument's own docstring says so) is paid once and would otherwise be divided
 into every node and reported as if it recurred.
 
 | synthetic payload | slope | `GRAPH.MEMORY USAGE` at 60k rows |
