@@ -885,7 +885,6 @@ SWEEP_NAMES = 66
 #: cite. `main` at `fbcd24760b` printed `(11831, "b14af0d2db12529b")` for ITS tree; that pair is
 #: recorded here as a measurement of a different tree, NOT carried as this tree's pin.
 #: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
-
 #:
 #: ⛔ MERGED `origin/main` at `ba0eab1d86` — measured on THAT merge tree with `--repin`, never
 #: combined from the two sides' figures: it printed `(11837, "59e8f90d787a0cf8")`. `--report --base 28ca66878d… --top 5000` reads "UNTYPED receivers NOT swept
