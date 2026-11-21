@@ -1420,15 +1420,37 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         f"so it has to be argued in review — declared: {_UNREADABLE_EXEMPT_MODULES}")
     keys = sorted(register.EMBED_WRITER_CLASSES)
     assert keys, "the register is empty, so this control proves nothing"
-    sources = {k.partition("::")[0]: strip._module_source(k.partition("::")[0]) for k in keys}
+    # ⛔ TOLERATE THE ENVIRONMENT THIS PIN EXISTS FOR (`#14099` review of `102d5e4e` / `540c29ec`).
+    # Reading every module up front with no handling made this control ERROR in exactly the case its
+    # exemption is for (measured: only `prometheus_client` absent → `tortoise.sdk` folds, the PIN
+    # PASSES and this test died with an uncaught `_UnreadableFold`, then with `KeyError` once the
+    # fake indexed `sources`). A module this venv cannot read is simply not cached.
+    sources: dict[str, str] = {}
+    for key in keys:
+        module_name = key.partition("::")[0]
+        if module_name in sources:
+            continue
+        try:
+            sources[module_name] = strip._module_source(module_name)
+        except strip._UnreadableFold:
+            continue
     outsider = next(k for k in keys if k.partition("::")[0] not in _UNREADABLE_EXEMPT_MODULES)
     declared = next((k for k in keys if k.partition("::")[0] in _UNREADABLE_EXEMPT_MODULES), None)
+
+    def env_source(name: str) -> str:
+        # ⛔ THE ENVIRONMENT'S OWN REFUSAL MUST OUTLIVE THE FAKE. A module this venv cannot read is
+        # absent from `sources`; indexing it died with `KeyError: 'tortoise.sdk'` in exactly the
+        # environment the exemption exists for. The declaration's own arms cover that module, so
+        # every other fake re-raises the environment's refusal instead.
+        if name in sources:
+            return sources[name]
+        raise strip._UnreadableFold(f"{name} unreadable") from ModuleNotFoundError(name)
 
     def folding(module_name: str, cause: BaseException):
         def fake(name: str) -> str:
             if name == module_name:
                 raise strip._UnreadableFold(f"{name} unreadable") from cause
-            return sources[name]
+            return env_source(name)
         return fake
 
     # baseline: the real loader, nothing shrunk, nothing refused.
@@ -1444,46 +1466,51 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     monkeypatch.setattr(strip, "_module_source", folding(module, ValueError("loader changed")))
     assert outsider in _writer_register_population()["stray"]
 
-    if declared is not None:
-        declared_module = declared.partition("::")[0]
-        # the declared module MAY skip — for a missing dependency, the measured shape.
-        monkeypatch.setattr(
-            strip, "_module_source",
-            folding(declared_module, ImportError("cannot import name 'Counter'")))
-        skipped = _writer_register_population()
-        assert declared in skipped["unreadable"] and skipped["stray"] == []
-        # …but a NON-import cause inside it is a loader change, not the environment.
-        monkeypatch.setattr(
-            strip, "_module_source", folding(declared_module, ValueError("loader changed")))
-        assert declared in _writer_register_population()["stray"], (
-            f"`{declared_module}`'s loader changed shape and the skip was blamed on the "
-            "environment")
+    # ⛔ AN ABSENT DECLARED KEY IS A FINDING, NOT A SKIPPED ARM (`#14099` review of `102d5e4e`):
+    # behind `if declared is not None:` the four exemption arms silently stopped running, so this
+    # control proved NOTHING about `_UNREADABLE_EXEMPT_MODULES` and still reported green.
+    assert declared is not None, (
+        "no register key lives on a declared environment-optional module, so the exemption's "
+        "arms cannot run and this control would prove nothing about it")
+    declared_module = declared.partition("::")[0]
+    # the declared module MAY skip — for a missing dependency, the measured shape.
+    monkeypatch.setattr(
+        strip, "_module_source",
+        folding(declared_module, ImportError("cannot import name 'Counter'")))
+    skipped = _writer_register_population()
+    assert declared in skipped["unreadable"] and skipped["stray"] == []
+    # …but a NON-import cause inside it is a loader change, not the environment.
+    monkeypatch.setattr(
+        strip, "_module_source", folding(declared_module, ValueError("loader changed")))
+    assert declared in _writer_register_population()["stray"], (
+        f"`{declared_module}`'s loader changed shape and the skip was blamed on the "
+        "environment")
 
-        # ⛔ …AND NOR MAY A REPO-SIDE IMPORT BREAK INSIDE IT (`#14099` F1). This is the measured
-        # shape of a renamed symbol in the module's chain: `ImportError` (NOT a
-        # `ModuleNotFoundError`) whose `.name` is the `tortoise` module that lost the symbol.
-        # Grading the class alone let this read as "the environment" and dropped all ten writers.
-        monkeypatch.setattr(
-            strip, "_module_source",
-            folding(declared_module, ImportError(
-                "cannot import name 'is_turn_echo_row' from 'tortoise.retrieval'",
-                name="tortoise.retrieval")))
-        assert declared in _writer_register_population()["stray"], (
-            f"`{declared_module}` failed on a REPO-SIDE import and the skip was blamed on the "
-            "environment — ten writers left the population silently")
-        # …and the same origin with no `name=`, where only the message carries it.
-        monkeypatch.setattr(
-            strip, "_module_source",
-            folding(declared_module,
-                    ImportError("cannot import name 'is_turn_echo_row' from 'tortoise.retrieval'")))
-        assert declared in _writer_register_population()["stray"], (
-            "a hand-raised repo-side ImportError carries its origin in the MESSAGE, and the "
-            "message was not read")
+    # ⛔ …AND NOR MAY A REPO-SIDE IMPORT BREAK INSIDE IT (`#14099` F1). This is the measured
+    # shape of a renamed symbol in the module's chain: `ImportError` (NOT a
+    # `ModuleNotFoundError`) whose `.name` is the `tortoise` module that lost the symbol.
+    # Grading the class alone let this read as "the environment" and dropped all ten writers.
+    monkeypatch.setattr(
+        strip, "_module_source",
+        folding(declared_module, ImportError(
+            "cannot import name 'is_turn_echo_row' from 'tortoise.retrieval'",
+            name="tortoise.retrieval")))
+    assert declared in _writer_register_population()["stray"], (
+        f"`{declared_module}` failed on a REPO-SIDE import and the skip was blamed on the "
+        "environment — ten writers left the population silently")
+    # …and the same origin with no `name=`, where only the message carries it.
+    monkeypatch.setattr(
+        strip, "_module_source",
+        folding(declared_module,
+                ImportError("cannot import name 'is_turn_echo_row' from 'tortoise.retrieval'")))
+    assert declared in _writer_register_population()["stray"], (
+        "a hand-raised repo-side ImportError carries its origin in the MESSAGE, and the "
+        "message was not read")
 
     # a renamed writer is `missing`, never silently dropped.
     blanked = outsider.partition("::")[0]
     monkeypatch.setattr(
-        strip, "_module_source", lambda name: "" if name == blanked else sources[name])
+        strip, "_module_source", lambda name: "" if name == blanked else env_source(name))
     assert outsider in _writer_register_population()["missing"]
 
     # ⛔ THE PIN ITSELF MUST RED (`#14099` F2). The arms above prove the WALK classifies; they do
@@ -1502,6 +1529,18 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     monkeypatch.setattr(strip, "_module_source", folding(module, ValueError("loader changed")))
     with pytest.raises(AssertionError, match="outside the declared environment-optional modules"):
         test_no_declared_entity_writer_mentions_a_dynamic_namespace()
+
+    # ⛔ THE EXEMPTION IS AN EXACT MODULE, NOT A PREFIX (`#14099` review of `310ddeeb`, whose fix was
+    # itself unpinned: reverting it to `key.startswith(...)` left this file green because no
+    # `tortoise.sdk_v2` key exists in the register today). A synthetic key makes the rule
+    # measurable — a module that merely STARTS with the declared name must not inherit it.
+    neighbour = f"{declared_module}_v2::_emit"
+    monkeypatch.setattr(register, "EMBED_WRITER_CLASSES", frozenset({neighbour}))
+    monkeypatch.setattr(
+        strip, "_module_source",
+        folding(neighbour.partition("::")[0], ImportError("part of the declared name")))
+    assert _writer_register_population()["stray"] == [neighbour], (
+        "a module that merely starts with the declared name inherited its exemption")
 
 
 #: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
