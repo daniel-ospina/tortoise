@@ -21898,9 +21898,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         else:
             # ⛔ ONE read, and the CONSTRUCTION keeps `_org_sdk`'s own shape
             # (`_org_sdk` = `_org_sdk_from_name(org_id, _org_default_namespace(
-            # org_id))`). A `None` here means "the default never moved", and
-            # `_org_sdk_from_name` then opens `namespace=org_id` — byte-for-byte
-            # what `main` built for this class. Folding the historical name in
+            # org_id))`). `None` = "never moved" OR FAIL-SOFT read arm (`:960-969`) ⇒
+            # HISTORICAL graph (DEMOTED if promoted, #2952): `namespace=org_id`,
+            # byte-for-byte what `main` built. Folding the historical name in
             # with `or _graph_name_for_namespace(...)` instead hands a
             # never-`None` name to `_org_sdk_from_name`, which switches every
             # UNMOVED default-bound credential from `_make_sdk(namespace=…)` to
@@ -39424,8 +39424,8 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     binding, not ``bool(graph_id)``].
     The other caller still reaches it: ``mcp_server._maybe_onboarding_auto_complete``
     calls this with ``sdk=None`` for any hosted org, and the MCP tools that reach
-    it (``tortoise_create_point`` at ``mcp_server.py``'s ``_maybe_onboarding_auto_complete``
-    call site, and the decision/observe paths beside it) are NOT behind
+    it (``tortoise_create_point``, ``tortoise_file_decision`` and
+    ``tortoise_create_entity`` — its only three call sites) are NOT behind
     ``_reject_graph_bound_mcp_org_surface`` — so for a graph-bound MCP credential
     this function IS still called and ``_org_proj(org_id)`` DOES perform that one
     primary-key ``organizations.graph_name`` read, exactly as
@@ -39452,8 +39452,8 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     why the ``_org_sdk`` construction constraint above is not relaxed by the
     capture guard (#14086 review rounds 3-5: an earlier draft said it was "no
     longer called at all" for such a key, then that only the capture lane
-exempts it; the tree refutes both. The user-facing half of the capture guard is
-    #14131).
+    exempts it; the tree refutes both. The user-facing half of the capture guard
+    is #14131).
     Left as ``None`` the historical behaviour is unchanged for every other
     caller."""
     try:

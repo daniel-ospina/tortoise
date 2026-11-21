@@ -1058,11 +1058,17 @@ step**, a step that exists in the onboarding vocabulary, so a render that writes
 or skips it changes the flow with nobody deciding that it should).
 
 **Resolution — the render CONSUMES nothing and WRITES nothing.** `capture-disclosed`
-has exactly ONE writer, the capture path
+has exactly ONE AUTOMATIC writer, the capture path
 (`tortoise/hosted_api.py::_capture_session_impl` →
 `write_completed_step(<the org's DEFAULT-graph projection>, org_id,
 "capture-disclosed", ...)`, first-write-wins, on the org's first 2xx capture; a 409
-off-switch capture never writes it). ⛔ The handle is the **org DEFAULT graph**,
+off-switch capture never writes it). An AGENT credential may also assert it
+EXPLICITLY at the checkpoint surface (`POST /v1/onboarding/state/checkpoint`;
+`capture-disclosed` is a member of `_CHECKPOINT_STEPS`, so
+`hosted_api.py::onboarding_checkpoint` writes it through
+`write_completed_step` on the org default graph — the §Checkpoint route named
+below is that surface). The render writes it in neither case. ⛔ The handle is
+the **org DEFAULT graph**,
 never the capture's own `proj` — the step is an org-level surface, and
 `write_completed_step` mints the node, the step node and their edge in the graph
 it is handed. ⛔ And a **CUSTOM-graph-bound credential runs NEITHER half** (no
