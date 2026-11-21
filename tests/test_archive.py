@@ -1448,56 +1448,54 @@ def test_a_module_row_that_froze_the_STUB_is_not_a_record(tree: Path) -> None:
     shape: it is an AST question, and a stub IS statements. Arm 1b's own rule is that a `.pyi` is
     never runtime code, so the credit rule asks THAT question instead.
 
-    Discriminating: removing the `stubbed and frozen.endswith(".pyi")` arm leaves this row with
-    no violation (the row silently credits), and the negative control below stays green either
-    way — so this row cannot pass on the arm being absent.
+    ⛔ **Ask `archived_from`, not the row's `file`** (round-2 correction of this very row): the first
+    version of the arm tested `file.endswith(".pyi")`, which is DEAD — `archive_rel` always emits
+    `.../<symbol>.py`, so the fixture had to invent a `.pyi` path the writer cannot produce and the
+    guard could never fire on a real row. This fixture therefore uses the WRITER's shape: the
+    default `.py` archive path, with `archived_from` naming the `.pyi` stub that was frozen — which
+    is what `archive_symbol` records (`archived_from = blocks[0][0]`, and `file_violations` binds it
+    to the frozen file's `ARCHIVED_FROM` header).
+
+    Discriminating: removing the `stubbed and src.endswith(".pyi")` arm leaves this row with no
+    violation (the row silently credits) — measured.
     """
     (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
     _commit(tree, "tortoise/stubby.py")
     subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
     stub = "def value() -> int: ...\n"
     (tree / "tortoise" / "stubby.pyi").write_text(stub, encoding="utf-8")
-    frozen = tree / "archive" / "modules" / "batch-a" / "tortoise.stubby.pyi"
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    # The writer's own shape: `archive_rel` always writes `.py`, and the stub is what was frozen.
+    entry["archived_from"] = "tortoise/stubby.pyi"
+    frozen = tree / entry["file"]
     frozen.parent.mkdir(parents=True, exist_ok=True)
     frozen.write_text(stub, encoding="utf-8")
-    arch.save_manifest(
-        {
-            "entries": [
-                _entry(
-                    arch.MODULE,
-                    "tortoise.stubby",
-                    file="archive/modules/batch-a/tortoise.stubby.pyi",
-                )
-            ]
-        },
-        tree / "archive" / "MANIFEST.json",
-    )
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
     _commit(tree, ".")
 
     problems = arch.shrink_violations(tree, base_ref="HEAD~1")
     froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
     assert froze, f"a row that froze the stub must not credit the removal: {problems}"
     assert "tortoise.stubby" in froze[0], froze[0]
-    assert ".pyi" in froze[0], f"the violation must name the stub it found: {froze[0]}"
+    assert "tortoise/stubby.pyi" in froze[0], f"the violation must name the stub source: {froze[0]}"
 
 
 def test_a_module_row_that_froze_the_REAL_body_is_still_credited(tree: Path) -> None:
     """The negative control for the row above, on the same shape.
 
-    Same base, same stub left in the tree, same `stubbed` — only the FROZEN FILE differs (the
-    real `.py` body instead of the stub), which is exactly the question the new arm asks. If the
-    arm keyed on `stubbed` alone, or on the row merely existing, this legitimate record would
-    red and `archive/README.md`'s own restore-and-freeze route would stop working.
+    Same base, same stub left in the tree, same `stubbed` — only `archived_from` differs (the real
+    `.py` body instead of the stub), which is exactly the question the new arm asks. If the arm
+    keyed on `stubbed` alone, or on the row merely existing, this legitimate record would red and
+    `archive/README.md`'s own restore-and-freeze route would stop working.
     """
     (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
     _commit(tree, "tortoise/stubby.py")
     subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
     (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
-    arch.save_manifest(
-        {"entries": [_entry(arch.MODULE, "tortoise.stubby")]},
-        tree / "archive" / "MANIFEST.json",
-    )
-    frozen = tree / _entry(arch.MODULE, "tortoise.stubby")["file"]
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    entry["archived_from"] = "tortoise/stubby.py"
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
     frozen.parent.mkdir(parents=True, exist_ok=True)
     frozen.write_text("def value():\n    return 1\n", encoding="utf-8")
     _commit(tree, ".")
@@ -1506,6 +1504,47 @@ def test_a_module_row_that_froze_the_REAL_body_is_still_credited(tree: Path) -> 
     assert not [p for p in problems if "THE RECORD FROZE A STUB" in p], (
         f"a row holding the real body is the legitimate record and must not red: {problems}"
     )
+
+
+def test_a_module_waiver_does_not_claim_the_tree_carries_a_module_it_only_STUBBED(
+    tree: Path,
+) -> None:
+    """The waiver diagnostic must not disagree with arm 1b about a `.pyi` stub (review P2).
+
+    Base carries `tortoise/stubby.py` (+ a stub, so the anchor resolves); the tree keeps only the
+    stub; the `module` row freezes the REAL body, so arm 1b credits the row and the waiver this
+    run was given is left UNCONSUMED. The diagnostic then has to answer "does this tree still
+    carry the module?" — and it used to answer with `_path_carries_a_module_body`, which counts a
+    stub as a body, printing "this tree still carries it, so nothing was removed" over the very
+    removal the same run graded and credited.
+
+    Discriminating: reverting the diagnostic to `_path_carries_a_module_body` reds the
+    `still carries it` assertion below, because a `.pyi` stub answers `True` there.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    entry["archived_from"] = "tortoise/stubby.py"
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "still carries it" not in waived[0], (
+        "a `.pyi` stub is not the module's runtime body, and arm 1b already graded its removal "
+        f"in this same run: {waived[0]}"
+    )
+    assert "this tree does not" in waived[0], waived[0]
 
 
 def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:
