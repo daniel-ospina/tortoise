@@ -242,9 +242,13 @@ A Cypher read against a graph the server does not hold **creates** it — measur
 multi-tenant server) and refuse a name `GRAPH.LIST` does not carry — **before** binding it. The refusal
 lives in the ONE reader both verbs call (`_graph_rows`), not in a verb: round 1 put it in `residency`
 only, so `superset` — the verb whose verdict gates a re-home — was the one that could mint a graph.
-Pinned at the reader AND at the verb
+`residency` ALSO carries a verb-level guard, and it is not redundant: its `MATCH (n)` totals read runs
+**before** `_graph_rows`, so without that guard the totals read would mint the graph and `_graph_rows`
+would then find "present" the empty graph it had just created. Pinned at the reader, at `superset` end
+to end, and at `residency`'s own totals read
 (`test_a_graph_the_server_does_not_hold_is_refused_before_it_is_read`,
-`test_the_superset_verb_refuses_an_unknown_graph_too`).
+`test_the_superset_verb_refuses_an_unknown_graph_too`,
+`test_the_residency_verb_refuses_an_unknown_graph_before_reading_totals`).
 
 ---
 
@@ -314,8 +318,8 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 | file | what it is |
 |---|---|
 | `tools/graphevent_home.py` | the census as data (`READERS`), the residency reader, and the **`superset` verb** that answers `#13094`'s blocking question on a real tenant — read-only by mechanism (§3.1), with exit `2` for "no verdict" |
-| `tests/test_13094_graphevent_home.py` | 29 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity on BOTH sides, the paging cursor against duplicate and fractional `seq`, the completeness counts (NULL `seq`, a short read), the graph-minting refusal at the reader AND at `superset` (including that the graph is refused BEFORE the journal is paged), which side the `no_verdict` message names, a capability-bearing reader making the derived census verdict say so, the exit-code contract, the committed census being the verb's own bytes (the drift pin), and this declared count matching the file's own |
-| `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible |
+| `tests/test_13094_graphevent_home.py` | 31 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity on BOTH sides, the paging cursor against duplicate and fractional `seq` (with two rows sharing `(seq, type, payload)` so the `event_id` half of the dedupe key is discriminating), the completeness counts (NULL `seq`, a short read), the graph-minting refusal at the reader, at `superset`, and at `residency`'s own totals read (including that the graph is refused BEFORE the journal is paged), which side the `no_verdict` message names, a capability-bearing reader making the derived census verdict say so (with a whitespace-re-spaced Fixed-length row so the `- [r]->` stripper is discriminating), the exit-code contract, the measurement script's refusal code, the committed census being the verb's own output (the drift pin), and this declared count matching the file's own |
+| `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible; it refuses any graph name outside the `probe_13094` prefix with **exit 2** (`1` is reserved for a produced verdict, so a refusal must not share it) |
 | `docs/evidence/13094-graphevent/readers.json` | the census table, as the verb emits it |
 
 **No product code changed. No graph write changed. No record read changed. Nothing deleted.**

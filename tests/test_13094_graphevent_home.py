@@ -70,6 +70,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "tools" / "graphevent_home.py"
+MEASURE = (REPO_ROOT / "docs" / "evidence" / "13094-graphevent"
+           / "measure_graphevent_residency.py")
 
 #: Capability words a reader would have to need for the shape to stay resident.
 #: The vocabulary is the audit's own (`#13083` §2): the four capabilities only a
@@ -85,6 +87,20 @@ GRAPH_CAPABILITIES = ("traversal", "adjacency", "fulltext", "vector", "ep walk",
 def _tool():
     """The verb, imported by path (`tools/` is not a package)."""
     spec = importlib.util.spec_from_file_location("graphevent_home", TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _measure():
+    """The measurement script, imported by path (`docs/` is not a package).
+
+    Its `_connection` imports `falkordb` INSIDE the function, so importing the
+    module needs no driver and no server — which is what lets the refusal path be
+    pinned without one.
+    """
+    spec = importlib.util.spec_from_file_location("measure_graphevent_residency",
+                                                  MEASURE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -209,6 +225,19 @@ def test_no_reader_of_the_change_feed_needs_a_graph_capability():
         ("edge existence",
          "MATCH (e:GraphEvent) WHERE EXISTS { (e)-[:TOUCHED]->(:Point) } RETURN e"),
         ("adjacency aggregate", "MATCH (e:GraphEvent) RETURN size((e)-->())"),
+        # ⛔ WHITESPACE IS NOT A BYPASS (#14183 round-4 review, P3). The engine
+        # accepts `- [r:IMPL|NAND]-`, and a contiguous-substring detector sees NO
+        # arm in this spelling at all: the raw form carries neither `-[` nor `--`
+        # nor `]->`. THIS is the row that reds when the strip is removed — every
+        # fixture above is contiguous, and the directed spelling below still
+        # matches `]->` raw.
+        ("re-spaced undirected adjacency",
+         "MATCH (a) - [r:IMPL|NAND]- (b)"),
+        # The DIRECTED re-spaced spelling pins the SECOND half: raw it is caught by
+        # `]->` alone, and on the stripped form by the earlier `-[` arm — so the
+        # expected arm here also fixes arm PRECEDENCE, not just detection.
+        ("re-spaced directed adjacency",
+         "MATCH (e:GraphEvent) - [r:T]-> (p)"),
     ):
         smuggled = {
             "file": "tortoise/event_store.py", "line": 992, "reader": "walk_out",
@@ -217,8 +246,12 @@ def test_no_reader_of_the_change_feed_needs_a_graph_capability():
             "snippets": (cypher,),
         }
         caught = module.graph_capability(smuggled)
+        # The expected arm is derived on the SAME whitespace-stripped form the
+        # predicate matches against, so the re-spaced row asserts an arm identity
+        # rather than a coincidence of spelling.
+        stripped = module._NO_WS.sub("", cypher.lower())
         assert caught == f"cypher:{next(t for t in module.GRAPH_CAPABILITY_CYPHER
-                                        if t in cypher.lower())}", (
+                                        if module._NO_WS.sub('', t) in stripped)}", (
             f"the {label} case is not caught by the CYPHER arm (got {caught!r}) — "
             "a capability reader filed as `maintenance` passes this pin, and the "
             "census can go false with every pin green")
@@ -570,14 +603,25 @@ def test_a_duplicate_seq_at_a_page_boundary_is_not_dropped():
     """`seq` is NOT unique (only `event_id` is), so a strict `>` cursor loses rows.
 
     A lost row makes the comparison UNDER-report the graph's population — the
-    direction that produces a false `covered`. The reader pages with `>=` and
-    dedupes, so all three rows survive a two-row page.
+    direction that produces a false `covered`. The reader pages with a STRICT
+    COMPOSITE cursor — `e.seq > $after OR (e.seq = $after AND e.event_id > $last_id)`
+    — and dedupes, so all three rows survive a two-row page.
+
+    ⛔ THE PAYLOAD OF ROWS 2 AND 3 IS DELIBERATELY IDENTICAL (#14183 round-4
+    review, P2). The dedupe key is `(seq, event_id, type, digest(payload))`, and
+    with distinct payloads the OLD key — the one without `event_id` — also keeps
+    all three rows, so reverting `event_id` out of the key reddened NOTHING. Two
+    rows sharing `(seq, type, payload)` with distinct `event_id`s are the
+    multiset members a payload-keyed dedupe merges, and merging them undercounts
+    the graph side: the read then yields 2 rows against a total of 3, which the
+    completeness count turns into a refusal. The assertion below is on all three
+    surviving, so the revert reds here.
     """
     module = _tool()
     rows = [
         (1, "PointAdded", "e1", '{"id": "a"}'),
         (2, "PointAdded", "e2", '{"id": "b"}'),
-        (2, "PointAdded", "e3", '{"id": "c"}'),
+        (2, "PointAdded", "e3", '{"id": "b"}'),
     ]
     db = _StubDB(_StubGraph(rows))
     got = module._graph_rows(db, "g_real", batch=2)
@@ -680,6 +724,32 @@ def test_the_superset_verb_refuses_an_unknown_graph_too(monkeypatch, capsys):
         "the refusal must be the GRAPH arm's, not a caught record error: " + err)
     assert "NO VERDICT" in err
     assert db.selected == [], "superset bound a graph the server does not hold"
+
+
+def test_the_residency_verb_refuses_an_unknown_graph_before_reading_totals(
+        monkeypatch):
+    """`residency` reads node TOTALS before `_graph_rows`, so it needs its own guard.
+
+    ⛔ THE PARAGRAPH AND THE CODE MUST AGREE (#14183 round-4 review, P2). The
+    evidence doc says the refusal lives in the ONE reader both verbs call — but
+    `residency`'s `MATCH (n)` totals read runs BEFORE `_graph_rows`, and a read
+    against an absent graph CREATES it (`#11113`), so `_graph_rows` would then
+    find "present" the very graph the totals read had just minted. The verb-level
+    `_require_graph` is therefore not redundant, and this pin is why deleting it
+    reds.
+
+    The assertion is on `select_graph` never being reached: with the verb-level
+    guard removed, the totals query binds the graph and `db.selected` is non-empty.
+    """
+    module = _tool()
+    db = _StubDB(_StubGraph([]))
+    monkeypatch.setattr(module, "_graph_connection", lambda uri: db)
+    with pytest.raises(module.Unpageable) as refused:
+        module.residency("docker://:@127.0.0.1:1/x", "g_never_existed")
+    assert "CREATES it" in str(refused.value)
+    assert db.selected == [], (
+        "residency bound a graph the server does not hold — its totals read would "
+        "have minted the empty graph it then reports on")
 
 
 class _RecordCursor:
@@ -861,6 +931,49 @@ def test_a_store_that_refused_exits_2_and_never_1(monkeypatch, capsys):
         "the RECORD arm must be the one that ran — otherwise this asserts the "
         "graph read refused, not the missing driver: " + err)
     assert "NO VERDICT" in err
+
+
+def test_the_residency_measure_script_refuses_a_graph_outside_its_prefix(
+        monkeypatch, capsys):
+    """The measurement's refusal is exit 2, and it happens before any graph touch.
+
+    #14183 round-4 review (P3): `measure_graphevent_residency.py` moved its
+    prefix refusal from `raise SystemExit("refusing…")` (which exits **1**, the
+    code the sibling verb reserves for a produced verdict) to a stderr message +
+    `SystemExit(2)`. Nothing pinned that, and the doc declared exit-2 semantics
+    for the `superset` verb only, so the change was invisible to both.
+
+    A refusal is not a measurement: `2` is "could not run", `1` is "ran, and the
+    answer is no" — and a caller gating on the exit code must not read the first
+    as the second.
+    """
+    module = _measure()
+    touched: list[str] = []
+
+    class _NeverUsed:
+        """Any use is a failure: the refusal must precede every graph command."""
+
+        class connection:
+            @staticmethod
+            def execute_command(*a, **_k):
+                touched.append("execute_command")
+                raise AssertionError("the refusal must not touch a graph")
+
+        @staticmethod
+        def select_graph(name):
+            touched.append(name)
+            raise AssertionError("the refusal must not bind a graph")
+
+    monkeypatch.setattr(module, "_connection", lambda uri: _NeverUsed())
+    with pytest.raises(SystemExit) as refused:
+        module.measure("docker://:@127.0.0.1:1/x", "tortoise", [10], False)
+    assert refused.value.code == 2, (
+        f"a refusal is exit 2, not {refused.value.code!r} — `1` is the sibling "
+        "verb's 'a verdict was produced' code, so a refusal sharing it reads as "
+        "an answer")
+    err = capsys.readouterr().err
+    assert "refusing" in err and module.GRAPH_PREFIX in err, err
+    assert touched == [], "the refusal touched a graph it had just refused"
 
 
 def test_the_declared_event_types_are_the_sdks_own():
