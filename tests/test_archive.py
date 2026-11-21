@@ -1547,11 +1547,10 @@ def test_a_module_row_that_LIES_about_archived_from_cannot_credit_a_stub(
     """The row's claim field is writable by the splicer; `blocks[].path` is not (review P1).
 
     `archived_from` is bound only to the frozen file's `ARCHIVED_FROM` header — a string the same
-    hand-splicing author writes. `tools/archive_surface.py` records that limit in its own
-    `CLAIM_FIELD` note ("bound to nothing else on this path … so a consistent lie passed both"),
-    and
-    hand-splicing is the procedure `MEMORY.md` recommends, so this is a REACHABLE shape, not a
-    contrived one. Measured before the fix: a spliced row saying `tortoise/stubby.py` over frozen
+    hand-splicing author writes. `tools/archive_surface.py` records that limit in
+    `_reanchor_is_verified`'s "EVERY OTHER CLAIM FIELD IS FIXED" note ("bound to nothing else on
+    this path … so a consistent lie passed both"), and hand-splicing is the procedure `MEMORY.md`
+    recommends, so this is a REACHABLE shape, not a contrived one. Measured before the fix: a spliced row saying `tortoise/stubby.py` over frozen
     STUB bytes was credited, with `shrink_violations` AND `file_violations` BOTH empty.
 
     The field tied to the bytes is `blocks[].path`: `file_violations` requires it to equal the path
