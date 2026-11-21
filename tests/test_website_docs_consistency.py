@@ -8568,23 +8568,44 @@ def test_the_document_roots_a_browser_ignores_insert_nothing() -> None:
     assert extract_visible_text("<p>ONE<select>X") == "ONE X", (
         "control: the same shape without the root token keeps both words"
     )
-    # ⛔ ...AND `html` IS NOT IN THAT CLASS IN EITHER MODEL (#14073 review round 25, P2): the
-    # living standard ignores an `html` start tag only while a `template` is open and
-    # otherwise MERGES it into the root, and the classic mode processed it "using the rules for
-    # the in-body mode" — so its `hidden` always lands and nothing is painted, even inside a
-    # `<select>`. Gating it on the select stack un-hid the document (measured: `'ONE TWO'` and
-    # a pre-root `<h2>` back as a boundary):
-    assert extract_visible_text("<p>ONE<select><html hidden></select><p>TWO") == "", (
-        "an `html` token inside an open `<select>` was treated as an ignored token: both "
-        "parsing models MERGE it into the root, so its `hidden` hides the document and the "
-        "text must not reach the golden"
+    # ⛔ ...AND AN `html` TOKEN'S ATTRIBUTES MERGE INTO **THE TOP ELEMENT OF THE STACK**, NOT
+    # THE DOCUMENT ROOT (#14073 review round 26, P1 — corrected here). Living standard, "in
+    # body": *"Let htmlElement be the top element of the stack of open elements … if htmlElement
+    # does not have an attribute whose name is attribute's name, then add …"*; the classic 2014
+    # REC carries the same "top element" wording through the in-body rules. So
+    # `<select><html hidden>` hides the SELECT and `<div><html hidden>` hides the DIV — both
+    # paragraphs still paint. Treating either as a hidden document dropped copy a browser
+    # paints (the DROP direction), and it was a regression against the previous commit:
+    assert extract_visible_text("<p>ONE<select><html hidden></select><p>TWO") == "ONE TWO", (
+        "the `hidden` on an `html` token inside a `<select>` landed on the DOCUMENT instead "
+        "of on the select (the top element), so `ONE` and `TWO` — both painted — were "
+        "dropped from the golden"
     )
-    assert extract_heading_positions('<h2 id="h">H</h2><select><html hidden><p>X') == [], (
-        "a `<h2>` read before a hidden `html` root survived, and it would BOUND the section "
-        "at a heading no reader meets"
+    assert extract_visible_text("<p>ONE<div><html hidden></div><p>TWO") == "ONE TWO", (
+        "the same over-hide one element up: `hidden` lands on the `div`, so only that "
+        "element's subtree is hidden"
+    )
+    assert extract_visible_text("<p>ONE<span><html hidden></span><p>TWO") == "ONE TWO", (
+        "`span` is the top element here, and it is inline — the whole kept"
     )
     assert extract_visible_text("<p>ONE<select><html></select><p>TWO") == "ONE TWO", (
         "control: the same `html` token WITHOUT `hidden` changes nothing"
+    )
+    # ...while an `html` token with NOTHING open reaches the ROOT, and there it hides the page:
+    assert extract_visible_text("<html hidden><p>CLAIM") == "", (
+        "`<html hidden>` with an empty stack lands on the root element, so nothing is painted"
+    )
+    # The HEADING question follows the same split: a `<h2>` outside the hidden subtree is one a
+    # reader meets (it bounds), and one INSIDE it is not.
+    assert extract_heading_positions('<h2 id="h">H</h2><select><html hidden><p>X') == [
+        ("h", 0)
+    ], (
+        "a `<h2>` written BEFORE the select is outside the hidden subtree, so a reader meets "
+        "it and it is a legitimate boundary — refusing it would UN-bound the slice"
+    )
+    assert extract_heading_positions('<div><html hidden><h2 id="h">H</h2></div>') == [], (
+        "a `<h2>` INSIDE the element the `html` token hid was still recorded, so it would "
+        "bound the section at a heading no reader meets"
     )
     # ⛔ A PRE-ROOT HEADING CANNOT BOUND EITHER (#14073 review round 24, P2): the clear the
     # row above pins for `text` has to cover `headings` too, or the boundary question answers

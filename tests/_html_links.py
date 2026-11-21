@@ -2187,6 +2187,27 @@ class _AnchorHrefParser(HTMLParser):
             # pre-root `<h2>` came back as a boundary.
             if tag == "body" and self._in_select():
                 return
+            # ⛔ AND `html`'s ATTRIBUTES DO **NOT** MERGE INTO THE DOCUMENT ROOT (#14073 review
+            # round 26, P1): both models merge them into **the TOP ELEMENT OF THE STACK**, not
+            # the root — living standard, "in body": *"Let htmlElement be the top element of
+            # the stack of open elements … if htmlElement does not have an attribute whose name
+            # is attribute's name, then add …"*; classic 2014 REC: the same "top element"
+            # wording via the in-body rules. So `<div><html hidden>` hides the DIV, and
+            # `<select><html hidden>` hides the SELECT, while every other paragraph paints —
+            # treating either as a hidden DOCUMENT dropped copy a browser paints:
+            #
+            #   '<p>ONE<div><html hidden></div><p>TWO'          -> ''   # both paragraphs paint
+            #   '<p>ONE<select><html hidden></select><p>TWO'   -> ''   # round-25 regression
+            #
+            # With an open element the attribute lands ON IT, so the frame's own `renders`
+            # flag carries it (the same flag `<div hidden>` already sets) and nothing is
+            # cleared. Only an `html` token at the TOP of the document — nothing open — reaches
+            # the root and can hide everything, which is the `_root_renders` path below.
+            if tag == "html" and self._open_elements:
+                if any(name == "hidden" for name, _value in attrs):
+                    open_tag, container, _renders = self._open_elements[-1]
+                    self._open_elements[-1] = (open_tag, container, False)
+                return
             # ⛔ THE `hidden` FLAG STILL HAS TO LAND SOMEWHERE. No element is inserted, so
             # the inherited `renders` flag cannot carry it — and before `_root_renders`
             # existed this early return turned `<body hidden><p>CLAIM` INTO VISIBLE TEXT
