@@ -589,11 +589,22 @@ SWEEP_NAMES = 66
 #: (`test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk`), and they are the two rows
 #: this branch adds: `surface.create_subject` 6 → 7 and `surface.create_edge` 1 → 2, read from
 #: `--report`'s row dump against `SWEEP_BASE` (⛔ NOT
-#: from `--repin`, which prints the tuple and nothing else). The TOTAL is this tree's own
-#: measurement — `--repin` prints `(11833, "c115acaf5bbb4163")` and `--check` exits 0. The last
-#: step is 11831 → 11833 (+2) and the two rows named above account for it (+1 each), so THAT step
-#: is fully attributed; the earlier per-head totals recorded ABOVE are `--repin` readings at their
-#: own heads, not arithmetic on today's rows.
+#: from `--repin`, which prints the tuple and nothing else). (The `create_subject` half of that row
+#: is GONE as of the seed-surface door rename recorded at the pin below — the door is
+#: `create_subject_anchor` now; `surface.create_edge` is still a row, because `create_edge` is not
+#: a retired name and this counter reports ordinary-word receivers from the swept map only, so
+#: read the LIVE rows off `--report`, never this history.) That head's TOTAL was its own
+#: measurement: `--repin` printed `(11833, "c115acaf5bbb4163")` there, and the 11831 → 11833 (+2)
+#: step is fully attributed to the two rows named above (+1 each). ⛔ THE DIGEST IS NOT CARRIED
+#: FORWARD: after the merge and the door rename the SAME COUNT carries a DIFFERENT digest —
+#: `--repin` prints `(11833, "4358280454f50b14")` and `--check` exits 0 on THIS tree. That is
+#: legitimate, not a contradiction: the digest is over the whole `row -> count` MULTISET (the note
+#: above says so), so an equal total with a different digest is a DIFFERENT tree — the rename
+#: removed rows (the −11 attributed at the pin below) and the merge added rows. ⛔ Read the PAIR
+#: from `SWEEP_RESIDUE` (the authority), never from this paragraph; a lane that re-runs `--repin`,
+#: gets `4358280454f50b14`, and trusts the digest typed here would conclude its own pin is wrong.
+#: The earlier per-head totals recorded ABOVE are `--repin` readings at their own heads, not
+#: arithmetic on today's rows.
 #: ⛔ A FIRST READING OF THIS DELTA attributed the +2 to the `tests/test_github_indexer.py`
 #: citation rows added for the moved `entities.py` addresses, on the theory that a pin row
 #: QUOTES its statement and so re-counts the `.query(` inside the string. That is wrong on this
@@ -693,7 +704,31 @@ SWEEP_NAMES = 66
 #: row, 2 → 0, is the ONLY difference, and 11844 − 2 = 11842 is a cross-check of the measurement,
 #: never its evidence. Both moves are downward, and `typed references still pointing at a public
 #: name: 0` on this tree, so no SDK-typed reference was legitimised by the re-cut.
-SWEEP_RESIDUE = (11842, "e1caacfa6167aa7f")
+#: RE-CUT DOWN (11844, "70d6cfdcd8b769e4") → (11833, "4358280454f50b14") by the SEED-SURFACE DOOR
+#: RENAME (`tortoise/onboarding/selfhost.py`, `tortoise/hosted_api.py`, `tortoise/onboarding/seed.py`,
+#: #13971): the two duck-typed seed surfaces published `create_subject`, which is a RETIRED SDK name
+#: (`RETIRED_SDK_METHODS`, #12901), so `seed._write_anchor` calling it red the retired-name census
+#: (`test_11609_write_containers.py`) on a CORRECT call — the census is receiver-blind and its
+#: exemption table refuses a parameter receiver by design (#13863 P1), so the ambiguity is removed
+#: from the product instead: the door is now `create_subject_anchor`. Three residue rows go with it,
+#: and they are the whole delta: `surface.create_subject` 7, `org.create_subject` 2,
+#: `selfhost.create_subject` 2 — **−11**, measured on both trees with
+#: `--report --base 28ca66878d… --top 5000` and diffed (the parent head carries those rows; this head
+#: carries none). No other row differs, so the `query` population this counter exists for is untouched
+#: (`typed references still pointing at a public name: 0`). `create_subject_anchor` is NOT a swept
+#: name, so the renamed call sites stop being residue at all — they are not "guessed at", they are
+#: simply not references to a privatised method. Re-measured with `--repin` on THIS tree.
+#: RE-CUT AT THE MERGE TREE (`#14125` × `main` `fbcd24760b`), and BOTH blocks above are carried
+#: because BOTH facts are true of THIS tree: this branch's −2 (the two arm-2 `create_point` controls
+#: re-pointed at `sdk._create_point`) AND `main`'s −11 (the seed-surface door rename). ⛔ Neither
+#: block's pin is this tree's pin — each was measured on ITS OWN tree, and a merged tree is a THIRD
+#: tree — so the pair below was RE-DERIVED with `--repin` on the MERGE tree, which is the rule both
+#: blocks cite. (11842 − 11 = 11831 would be the arithmetic guess; the merged tree's `--repin`
+#: printed exactly that count — the two row sets are DISJOINT, which the arithmetic cannot know and
+#: is a cross-check of the measurement, never its evidence. The digest is the field that proves the
+#: tree: it differs from BOTH sides' digests, as a third tree's must.)
+#: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11831, "b14af0d2db12529b")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
