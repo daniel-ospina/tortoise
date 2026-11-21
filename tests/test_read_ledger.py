@@ -408,10 +408,15 @@ def test_the_row_paths_record_the_served_page_and_never_an_internal_read(hooked_
     the product read keeps that rule on its DEFAULT and is switched off only for a
     population scan (`_query`: its default is pinned in the population-scan test
     below, because `TortoiseClient`'s structural reads reach it without the flag).
-    An accessor that is only ever an INTERNAL check records NOTHING at all
-    (`_get_point` here): a written-but-never-read node that a write path touched
-    must stay at zero, or `f` biases HIGH. Applying one rule to the other's path
-    is the #7983 direction error, in whichever direction it is made.
+    An accessor used as an INTERNAL check records NOTHING — that is the `_get_point`
+    pin below: a written-but-never-read node that a write path touched must stay at
+    zero, or `f` biases HIGH. ⛔ IT IS NOT A CLAIM THE PUBLIC SERVE IS MEASURED:
+    `_get_point` is also the implementation behind the caller-facing
+    `tortoise_get_point` (`mcp_server._read_point_served` passes `served_out=`), and
+    an un-recorded caller-facing read-by-id is a KNOWN UNFIXED hole — `sdk.py`'s own
+    comment names it (#8877) and says the fix is a seam, not a blanket hook. This
+    body drives the UNARMED accessor (`served_out=None`), which is the internal
+    path, so nothing here witnesses the served door.
 
     ⛔ ONE HOOK IN THIS FAMILY HAS NO PRODUCT CALLER ON ITS RECORDING ARM, and
     that is recorded rather than papered over: `_query_points_by_tag` takes
@@ -794,11 +799,16 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
-    They read through the `_query` ACCESSOR with `_record_reads=False` (its own
-    docstring, #7983: `_query`, `_paginated_query` and `_query_points_by_tag` each
-    record at their own level and each take the flag) — the retired public
-    `query()` was only the caller-facing skin over it, and #13899 removed the skin,
-    not the flag. Recording such a scan would mark every Point read after one
+    They read through the `_query` ACCESSOR with `_record_reads=False` (#7983): the
+    retired public `query()` was only the caller-facing skin over it, and #13899
+    removed the skin, not the flag. ⚠️ ONLY TWO of the recording accessors accept that
+    flag — `_query` and `_query_points_by_tag`. `_paginated_query` does NOT: its
+    signature is `kind / skip / limit / include_retracted / **filters` and it records
+    unconditionally, so passing `_record_reads=False` to it is swallowed by
+    `**filters`, accepted by `validate_filter_key` as an ordinary filter key, and
+    rendered as a property predicate no Point carries — an EMPTY page instead of an
+    unrecorded scan. A population scan must not route through it.
+    Recording such a scan would mark every Point read after one
     `recall_gaps()` call — `f` → ~1, the exact contamination excluding `get_point`
     prevented, and it would silently invalidate the one-directional "the gaps bias
     `f` LOW" caveat the docs rest on.
