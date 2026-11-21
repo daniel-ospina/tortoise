@@ -1470,17 +1470,24 @@ def shrink_violations(
             if key in waivers:
                 used.add(key)
                 continue
-            if surface is not None and (carrier := live_return(base_entry, surface)) is not None:
-                # A RESTORE, not a loss: the row left because the code came BACK (direction
-                # one reds the row if it stays — archived ⇔ absent), so there is nothing the
-                # archive promised that the product no longer carries. Recognising it here is
-                # what keeps `archive/README.md`'s own restore procedure green in CI, which
-                # runs this arm with `--base-ref` on every PR.
-                #
-                # ⛔ The BODY decides, not the name: a stub dropped at the dotted path is not
-                # the code returning (see `_live_body_is_the_recorded_one`).
-                if _live_body_is_the_recorded_one(root, base_entry, carrier) is not False:
-                    continue
+            # A RESTORE, not a loss: the row left because the code came BACK (direction
+            # one reds the row if it stays — archived ⇔ absent), so there is nothing the
+            # archive promised that the product no longer carries. Recognising it here is
+            # what keeps `archive/README.md`'s own restore procedure green in CI, which
+            # runs this arm with `--base-ref` on every PR.
+            #
+            # ⛔ The BODY decides, not the name: a stub dropped at the dotted path is not
+            # the code returning (see `_live_body_is_the_recorded_one`).
+            #
+            # ONE `and` chain, not two nested `if`s: the second test only ever means
+            # "skip the report", so nesting it bought nothing and cost a ruff SIM102 on
+            # the required `surface-guard`/lint path.
+            if (
+                surface is not None
+                and (carrier := live_return(base_entry, surface)) is not None
+                and _live_body_is_the_recorded_one(root, base_entry, carrier) is not False
+            ):
+                continue
             out.append(
                 f"{symbol} ({kind}): REMOVED from archive/MANIFEST.json — {base_label} records "
                 "it and this tree does not, so the only index of what was removed from the "
