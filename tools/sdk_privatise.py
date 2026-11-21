@@ -764,6 +764,81 @@ SWEEP_NAMES = 66
 #: The row is a plain `dict` accumulator in a test, not a typed reference to a swept name, so the
 #: SDK population is untouched (`typed references still pointing at a public name: 0`).
 #:
+#: ⛔ THE PIN CHAIN, CORRECTED — each figure is true of the tree it NAMES. An earlier draft of
+#: this block attributed `(11844, "70d6cfdcd8b769e4")` to THIS branch's merge of `e022fc935b2d`,
+#: and that is wrong. Measured, three different trees, three different pins:
+#:   * `main` at `e022fc935b`                        → (11838, "de5664dc98549d56")
+#:   * THIS branch merged #14100/#14108 (`0d2dafed1d`) → (11839, "7159a040b69431a9")
+#:   * `main` today, `e0accb8fe6`                     → (11844, "70d6cfdcd8b769e4"), `--check` exits 0
+#: 11844 is `main`'s OWN pin, re-cut by a DIFFERENT lane's merge of the same `main` commit
+#: (`8ed8d86291`, `feat/13971-point-strip`) — it is not this branch's measurement, and the
+#: `11845 − 1 = 11844` "cross-check" that used to sit here was reconciling two unrelated trees.
+#: That the two merge trees differ at all is this PR's own `seen.update` 102 → 101 (the `_capture`
+#: helper now APPENDS instead of `update`ing, #14108), which is a row the #13971 lane does not carry.
+#:
+#: ⛔ AND THE "+8 IS FIGURE LITERALS" PARAGRAPH IS GONE, DELIBERATELY. This file's own block above
+#: records that claim as FALSE — *"it said 'its whole diff is figure literals: stripping every digit
+#: run from each `-`/`+` pair leaves the pair identical', and that is FALSE at this head: this PR
+#: also rewrites `tests/test_13337_cache_graph_declaration.py`… so the digit-stripped `-`/`+`
+#: multisets differ"*. Its present-tense tail was false too: "`main`'s own tree today derives 11833
+#: against its own 11825 pin, i.e. `--check` is RED on `main`" — `origin/main` pins 11844 and
+#: `--check` exits 0 there. A rebase splice had orphaned that paragraph's opening clause (the text
+#: began mid-sentence at "run from each `-`/`+` pair…"), and an earlier attempt to repair it by
+#: restoring the missing clause RE-ASSERTED the refuted universal. Deleting the paragraph is the
+#: repair; restoring it is not. The #14062/#14058 recurrence it was about is real, and is argued in
+#: the blocks above without the false premise.
+#:
+#: RE-MEASURED ON THE REBASED TREE (#14086 rebased onto `main` `e0accb8fe6`, then the review-round-3
+#: commit `41672df4f9` landed on top): `--repin` on THAT tree printed **11846**. ⛔ NEITHER block
+#: above was that tree's answer and neither was carried: `main` (`e0accb8fe6`) pinned
+#: `(11844, "70d6cfdcd8b769e4")` and the FIFTH merge tree measured 11839 — three different trees,
+#: three different figures, NONE of which is this tree's (see the last block for the live pin).
+#: ⛔ THE +2 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, NOT BY ARITHMETIC. `--report --base 28ca66878d7c
+#: --top 5000` was run in a worktree at `origin/main` (`e0accb8fe6`) AND on this tree, both row sets
+#: sorted and diffed: EXACTLY TWO rows differ, and both are DECLARED rather than legitimised —
+#:   * `captured.update` **30 → 31** — this PR's own analytics-capture stub in
+#:     `tests/test_10893_pre_handler_parts.py` (the `lambda org, ev, props:
+#:     captured.update(props=dict(props))` arm of its analytics-capture monkeypatch), a plain
+#:     `dict.update`. ⛔ Cited by TEXT, not by line: this file's own rule above forbids a typed
+#:     line number, because the reproducer goes stale the moment the file moves (`#14030` review).
+#:   * `ha_mod._make_sdk(namespace='registry')._.query` **10 → 11** — the review-round-3 pin
+#:     `test_a_graph_bound_capture_skips_the_org_level_checkpoint_entirely` (`41672df4f9`), which
+#:     lives in `tests/test_capture_loop_responsiveness.py` (⛔ NOT in the file named above, and
+#:     `_make_sdk` appears nowhere in that one). The added occurrence is the test's FIXTURE: it
+#:     seeds the `Graph` row the ownership probe requires, through the REGISTRY control plane
+#:     (`ha_mod._make_sdk(namespace="registry")._get_registry().query(…)`) — not the org
+#:     default-graph SDK. That SDK's non-resolution is proved by a monkeypatched `_org_sdk`
+#:     RECORDER, which is a different line.
+#: Neither is a typed reference to a swept name, so no typed call site is legitimised. The DIGEST
+#: moves with the row set (`residue_digest` hashes each row's NAME with its COUNT), which is why it
+#: cannot be carried from a tree whose row set is not this one. 11844 + 2 = 11846 is a CROSS-CHECK of
+#: that measurement, never the evidence for it.
+#: `--check` on this tree: `typed references still pointing at a public name: 0`.
+#: ⛔ AND ONE MORE ROW ON THE MERGED TREE (#14086 review round 4): the COMPLEMENT of that pin —
+#: `test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint` — issues the SAME registry probe
+#: (`ha_mod._make_sdk(namespace='registry')._.query` 11 → 12), so `--repin` here prints
+#: `(11847, '327c14afa2e43e7c')` — the pin at that round, NOT this tree's. Same class as the two
+#: rows above: a test
+#: double, not a typed reference to a swept name — no call site is legitimised by it.
+#: ⛔ AND ONE MORE OF THE SAME SHAPE (#14086 fixer):
+#: `test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop` seeds the `Graph` row its
+#: graph-bound capture needs through the SAME registry control plane, so
+#: `ha_mod._make_sdk(namespace='registry')._.query` moves **12 → 13** and `--repin` prints
+#: `(11848, '5e58f2032543c415')` — the pin at that round, NOT this tree's. Attributed by the
+#: row-by-row diff this block
+#: requires (`--report --base 28ca66878d7c --top 5000` run in a detached worktree at the pre-change
+#: head `60bfeb1a55` AND on this tree, both row sets sorted and diffed): EXACTLY that one row differs,
+#: so no shape was silently absorbed in the other direction and NO NEW SHAPE APPEARED. `hosted_api.py`
+#: adds no receiver row at all (the guard's `_org_default_namespace` call is off-loaded, and the file's
+#: own `.query(` occurrence count is unchanged). A test double again, not a typed reference to a swept
+#: name — `typed references still pointing at a public name: 0`, so no call site is legitimised.
+#: ⛔ RE-MEASURED, NOT INHERITED. A digest measured while a merge was half-resolved is a digest of
+#: the WRONG tree: an intermediate measurement of this block read `ea69254fe59a30ab` with the SAME
+#: count, because stale conflict markers were still embedded in `activation_scorecard.py` and added
+#: rows. Removing them returned the set to 11847 rows / `327c14afa2e43e7c` — this is the value
+#: `--repin` prints on the RESOLVED tree, and the sibling commit that reverted the inert `dispatch`
+#: note is already accounted for in it. That was the pin at that round; the live pin is the
+#: `SWEEP_RESIDUE` line itself, and the last paragraph above it is the one that describes it.
 #: MERGED `origin/main` (`e022fc935b2d`, #14100/#14108) — both sides' histories above are kept, and the
 #: pin is RE-MEASURED on THIS tree with `--repin`, never combined arithmetically: it prints
 #: `(11844, "70d6cfdcd8b769e4")` and `--check` exits 0 with `typed references still pointing at a
@@ -801,15 +876,14 @@ SWEEP_NAMES = 66
 #: (`typed references still pointing at a public name: 0`). `create_subject_anchor` is NOT a swept
 #: name, so the renamed call sites stop being residue at all — they are not "guessed at", they are
 #: simply not references to a privatised method. Re-measured with `--repin` on THIS tree.
-#: RE-CUT AT THE MERGE TREE (`#14125` × `main` `fbcd24760b`), and BOTH blocks above are carried
-#: because BOTH facts are true of THIS tree: this branch's −2 (the two arm-2 `create_point` controls
-#: re-pointed at `sdk._create_point`) AND `main`'s −11 (the seed-surface door rename). ⛔ Neither
-#: block's pin is this tree's pin — each was measured on ITS OWN tree, and a merged tree is a THIRD
-#: tree — so the pair below was RE-DERIVED with `--repin` on the MERGE tree, which is the rule both
-#: blocks cite. (11842 − 11 = 11831 would be the arithmetic guess; the merged tree's `--repin`
-#: printed exactly that count — the two row sets are DISJOINT, which the arithmetic cannot know and
-#: is a cross-check of the measurement, never its evidence. The digest is the field that proves the
-#: tree: it differs from BOTH sides' digests, as a third tree's must.)
+#: RE-CUT ONCE MORE (`#14125` × `main` `fbcd24760b`, then merged INTO this branch at
+#: `main` `05d218fcaf`), and BOTH blocks above are carried because BOTH facts are true of THIS
+#: tree: this branch's −2 (the two arm-2 `create_point` controls re-pointed at
+#: `sdk._create_point`) AND `main`'s −11 (the seed-surface door rename). ⛔ Neither block's pin is
+#: this tree's pin — each was measured on ITS OWN tree, and a merged tree is a THIRD tree — so the
+#: pair below was RE-DERIVED with `--repin` on THIS merge tree, which is the rule both blocks
+#: cite. `main` at `fbcd24760b` printed `(11831, "b14af0d2db12529b")` for ITS tree; that pair is
+#: recorded here as a measurement of a different tree, NOT carried as this tree's pin.
 #: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
 #:
 #: RE-CUT → (11843, "077a6f82c7284536") by the `#14012` lane ("keep this resident" + "see what's
@@ -830,8 +904,17 @@ SWEEP_NAMES = 66
 #: 11831 + 12 = 11843 is a CROSS-CHECK of the measurement, not the evidence for it: the pair below
 #: is what `--repin` prints on THIS tree, and it is re-derived whenever the branch grows a file (the
 #: CLI suite landed after the first re-cut and moved this pair by exactly its own +1).
-SWEEP_RESIDUE = (11843, "077a6f82c7284536")
-
+#: HISTORICAL — measured on the BRANCH's own pre-merge tree, never on this one: `--repin`
+#: printed `(11843, "077a6f82c7284536")` there. It is kept as a measurement, not as the pin;
+#: the single assignment below is THIS tree's pin, re-derived after the `origin/main` merge.
+#:
+#: ⛔ RE-CUT ON THE MERGE TREE → `(11847, "ef7d5433fc80acd7")`. A merged tree is a THIRD
+#: tree, so this pair is `--repin`'s output on THIS one, never computed from either side.
+#: The branch's own +12 rows (attributed per file above) sit ON TOP of whatever `main`
+#: last pinned for its OWN tree, so `11835 + 12 = 11847` is a CROSS-CHECK of the two
+#: measurements, not the evidence for this pin. `--check` exits 0 on this tree:
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11847, "ef7d5433fc80acd7")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

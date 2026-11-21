@@ -8092,6 +8092,14 @@ def test_the_call_site_passes_the_CHECK_flag_to_removal_report(checker, tmp_path
     on the KWARGS THIS CALL SITE PASSES — which is exactly the wiring that was unpinned.
     Mutation: `flag="--allow-removal"` -> the captured value differs (RED here).
     Mutation: `committed_rename_record=False` -> RED here, and in the rename row above.
+
+    ⛔ THE BASE REF MUST BE ONE THE CI CHECKOUT CREATES. `origin/main` is not: on a
+    `pull_request` event `actions/checkout@v4` fetches only `refs/pull/<N>/merge`, so no
+    remote-tracking base ref exists and `archive_surface.resolve_base` refuses — which red'd
+    the REQUIRED aggregate (`python-ci-gate` needs `test-slow`) for a tree it had nothing to
+    say about, in `test-slow (a)` on PR #14158 (run 44917018723). `HEAD` always resolves; it
+    carries no grading semantics here because the base DOCUMENT is the fabricated one above
+    and `_manifest_at` is stubbed, so this ref only has to EXIST for the merge-base call.
     """
     sm = checker
     with MANIFEST.open() as fh:
@@ -8112,7 +8120,7 @@ def test_the_call_site_passes_the_CHECK_flag_to_removal_report(checker, tmp_path
         lambda root, sha, rel="config/surface-manifest.yml": copy.deepcopy(base),
     )
 
-    rc, out = _check(sm, doc, tmp_path, base_ref="origin/main")
+    rc, out = _check(sm, doc, tmp_path, base_ref="HEAD")
 
     assert rc == 0, out
     assert seen, "the shrink arm never reached removal_report, so this pin proves nothing"

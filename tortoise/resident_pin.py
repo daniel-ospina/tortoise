@@ -504,7 +504,14 @@ def read(graph: Any, *, budget: PinBudget | None = None) -> PinReading:
     return PinReading(
         label=label,
         key_prop=key_prop,
-        keys=frozenset(asked),
+        # ⛔ THE DECLARED SET IS COMPLETE, THE CLOSURE MAY NOT BE. The payload is read
+        # whole (`_declaration` returns every key on the `:Meta` node); the bound exists
+        # only on the `UNWIND` probe, which resolves closures. Reporting the PROBED
+        # subset as `keys` made the declaration look truncated to a reader that then
+        # wrote it back — the tail-loss this module exists to forbid — and it also made
+        # `unpin`'s only remedy unreachable, because the writer saw the same bound the
+        # reader did. `truncated` therefore describes the CLOSURE alone.
+        keys=frozenset(keys),
         closure=closure,
         degrees=degrees,
         missing=missing,
@@ -564,6 +571,23 @@ def pin(
             f"({current.source or 'unreadable'}), so adding to it would silently "
             f"replace a set nobody could see",
             code="unreadable",
+        )
+    if current.truncated:
+        # ⛔ THE WRITER MAY NOT ADD FROM AN UNMEASURED FOOTPRINT. `read` bounds the
+        # CLOSURE probe at `DEFAULT_KEY_LIMIT + 1` keys and REPORTS it (`truncated`)
+        # instead of silently shortening the closure, so `current.closure` is a LOWER
+        # BOUND — and the budget below is measured over it. Admitting an addition on a
+        # lower bound would let a pin that is already over the cap grow. The declared
+        # KEYS are complete (`PinReading.keys` is the whole payload), so `unpin` stays
+        # available and is lossless — that is the way out this message names.
+        raise PinRefused(
+            f"the pinned closure could not be measured in full (one probe may resolve "
+            f"{DEFAULT_KEY_LIMIT} keys), so how much of the fast layer this set already "
+            f"claims is UNKNOWN and the budget cannot admit another pin. Nothing was "
+            f"pinned; the declaration is unchanged. `unpin` still works and is lossless "
+            f"— the declared key list is read whole — so releasing keys is the way back "
+            f"under the read bound.",
+            code="truncated",
         )
     if (current.label, current.key_prop) != (label, key_prop) and current.keys:
         raise PinRefused(
@@ -722,6 +746,12 @@ def unpin(
             f"so removing from it would silently replace a set nobody could see",
             code="unreadable",
         )
+    # ⛔ `truncated` is deliberately NOT a refusal HERE, and that asymmetry with `pin` is
+    # the design: `current.keys` is the WHOLE declared payload even when the closure
+    # probe hit its bound, so `keys - drop` is lossless. Refusing in both writers made a
+    # >`DEFAULT_KEY_LIMIT`-key declaration a one-way door — `pin` refusing and `unpin`
+    # refusing the only way out of it. A truncated reading only forbids what needs the
+    # FOOTPRINT (an addition, which the budget must size); releasing keys needs the SET.
     eff_label = current.label if current.keys else (label or "Point")
     eff_key_prop = current.key_prop if current.keys else (key_prop or "id")
     drop = {k for k in keys if isinstance(k, str) and k}

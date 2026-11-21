@@ -37,14 +37,18 @@ Exit codes — the census's vocabulary, so a scheduler keys on one table
     0  OK          the declaration was applied / read cleanly, or the view was measured
     3  REFUSED     a DECLARED refusal: over the pin budget, over the degree ceiling, a
                    key the fast layer does not hold, an unreadable declaration, a pin
-                   set whose budget no longer covers it, or a `--label`/`--key-prop`
-                   that is not a bare identifier. Nothing was written.
+                   set whose budget no longer covers it, a closure too large to measure
+                   (so the budget cannot admit an addition — `unpin` still works), a
+                   budget that cannot be derived at all for `pin`/`unpin`/`show`, or a
+                   `--label`/`--key-prop` that is not a bare identifier. Nothing was
+                   written.
     4  UNMEASURED  what is outside could not be measured (a partial resident read, an
                    unreachable record). ⛔ NOT zero: a missing measurement read as a
                    healthy zero is the defect both controls exist to avoid.
     1  usage       a flag, import or IO mistake — including a `--label` the record
-                   has no table for, and a `--topic-column` that is not a real column
-                   of it
+                   has no table for, a `--topic-column` that is not a real column
+                   of it, and a `--top`/`--max-keys` below its floor of 1 (a zero
+                   bound would report an empty answer as a measurement)
 """
 from __future__ import annotations
 
@@ -183,15 +187,30 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error(
                     f"{resident_pin.EVICTION_MAX_NODES_ENV}={raw!r} is not an integer"
                 )
-    try:
-        budget = resident_pin.PinBudget.resolve(
-            max_nodes=args.max_pins, max_degree=args.max_degree, window_nodes=window
-        )
-    except resident_pin.PinConfigError as exc:
-        _emit({"verdict": "REFUSED", "reason": f"config refused: {exc}"}, args.out)
-        return EXIT_REFUSED
+    def _resolve_budget() -> resident_pin.PinBudget | None:
+        """Resolve the pin budget for the verbs that ACT on it; ``None`` = refused.
 
-    def _refused(reason: str, code: str) -> int:
+        ⛔ Resolved INSIDE `pin`/`unpin`/`show`, never before the verb dispatch. The
+        budget is a pin control, and `outside` never reads it — resolving it up front
+        refused this module's own documented `outside` invocation (which names neither
+        `--window-nodes` nor `$TORTOISE_CACHE_MAX_NODES`) with exit 3, a DECLARED
+        refusal about a control the verb the operator asked for does not touch.
+        """
+        try:
+            return resident_pin.PinBudget.resolve(
+                max_nodes=args.max_pins, max_degree=args.max_degree,
+                window_nodes=window,
+            )
+        except resident_pin.PinConfigError as exc:
+            # ⛔ The SAME envelope `_refused` writes, not a second shape: a refusal a
+            # scheduler cannot classify (no `graph`, no `code`) is a refusal it will
+            # treat as success. This one is `code: "config"` — the same code the
+            # `PinConfigError` arms below use for a bad `--label`/`--key-prop`.
+            _emit({"verdict": "REFUSED", "graph": args.graph, "code": "config",
+                   "reason": f"config refused: {exc}"}, args.out)
+            return None
+
+    def _refused(reason: str, code: str, budget: resident_pin.PinBudget) -> int:
         """ONE refusal envelope, so a new refusal path cannot invent a second shape."""
         _emit({"verdict": "REFUSED", "graph": args.graph, "code": code,
                "reason": reason, "budget": budget.as_dict()}, args.out)
@@ -216,39 +235,48 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_REFUSED
 
         if args.verb == "pin":
+            budget = _resolve_budget()
+            if budget is None:
+                return EXIT_REFUSED
             try:
                 result = resident_pin.pin(
                     graph, args.key, label=args.label, key_prop=args.key_prop,
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:
-                return _refused(exc.reason, exc.code)
+                return _refused(exc.reason, exc.code, budget)
             except resident_pin.PinConfigError as exc:
                 # ⛔ A non-bare `--label`/`--key-prop` reaches `bare_identifier` INSIDE
                 # `pin` (via `_closure_for`) on a graph with no declaration yet, because
                 # `read()` validates the DECLARATION's pair and returns early when there
                 # is nothing declared. Catching it here is what turns a traceback into
                 # the declared refusal this tool's exit-code vocabulary promises.
-                return _refused(f"config refused: {exc}", "config")
+                return _refused(f"config refused: {exc}", "config", budget)
             _emit({"verdict": "OK", "graph": args.graph, "pin": result.as_dict()},
                   args.out)
             return EXIT_OK
 
         if args.verb == "unpin":
+            budget = _resolve_budget()
+            if budget is None:
+                return EXIT_REFUSED
             try:
                 result = resident_pin.unpin(
                     graph, args.key, label=args.label, key_prop=args.key_prop,
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:
-                return _refused(exc.reason, exc.code)
+                return _refused(exc.reason, exc.code, budget)
             except resident_pin.PinConfigError as exc:
-                return _refused(f"config refused: {exc}", "config")
+                return _refused(f"config refused: {exc}", "config", budget)
             _emit({"verdict": "OK", "graph": args.graph, "pin": result.as_dict()},
                   args.out)
             return EXIT_OK
 
         if args.verb == "show":
+            budget = _resolve_budget()
+            if budget is None:
+                return EXIT_REFUSED
             reading = resident_pin.read(graph, budget=budget)
             refusal = reading.gate_reason()
             _emit({
@@ -274,6 +302,23 @@ def main(argv: list[str] | None = None) -> int:
                               "is outside cannot be measured, so nothing is claimed")},
                   args.out)
             return EXIT_UNMEASURED
+        # ⛔ Explicit `is None`, never `or`: `--max-keys 0` and `--top 0` are FALSY, so
+        # `args.max_keys or DEFAULT` silently substituted the default for the one flag
+        # whose documented meaning is a bound — and the library refuses that value, so
+        # the refusal never arrived. A value below its floor is a FLAG mistake here, at
+        # exit 1, not a measurement failure at exit 4.
+        topic_column = (outside_view.TOPIC_COLUMN if args.topic_column is None
+                        else args.topic_column)
+        top = outside_view.DEFAULT_TOP_TOPICS if args.top is None else args.top
+        key_limit = (outside_view.DEFAULT_RESIDENT_KEY_LIMIT
+                     if args.max_keys is None else args.max_keys)
+        for flag, value in (("--top", top), ("--max-keys", key_limit)):
+            if value < 1:
+                parser.error(
+                    f"{flag} {value} is below its floor of 1: it bounds how much the "
+                    f"view may read, and a bound of zero would report an empty answer "
+                    f"as if it were a measurement"
+                )
         try:
             conn = psycopg.connect(dsn)
         except Exception as exc:
@@ -288,9 +333,9 @@ def main(argv: list[str] | None = None) -> int:
                     graph, conn,
                     org_id=args.org_id, graph_id=args.graph_id,
                     label=args.label, key_prop=args.key_prop,
-                    topic_column=args.topic_column or outside_view.TOPIC_COLUMN,
-                    top=args.top or outside_view.DEFAULT_TOP_TOPICS,
-                    key_limit=args.max_keys or outside_view.DEFAULT_RESIDENT_KEY_LIMIT,
+                    topic_column=topic_column,
+                    top=top,
+                    key_limit=key_limit,
                 )
             except (ValueError, resident_pin.PinConfigError) as exc:
                 # A `--label` the record has no table for, or a `--topic-column` that is

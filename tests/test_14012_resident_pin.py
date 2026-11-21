@@ -524,6 +524,78 @@ def test_a_malformed_declaration_is_unreadable_rather_than_empty():
     assert "malformed" in (reading.source or "")
 
 
+def test_a_truncated_closure_refuses_a_pin_but_unpin_stays_lossless(monkeypatch):
+    """A truncated CLOSURE may not admit an addition, and may not close the only exit.
+
+    The reader bounds the closure probe at `DEFAULT_KEY_LIMIT + 1` keys and reports
+    `truncated`. Both writers used to rebuild the declaration from the PROBED subset —
+    so a declaration above the bound was rewritten as its first N keys, `written=True`,
+    with the rest gone and no counter. The fix separates the two questions: the declared
+    SET is read whole, so `unpin` is lossless; the FOOTPRINT is a lower bound, so `pin`
+    refuses. ⛔ The arms are chosen so a guard that only fires when a NEW key is added
+    reds (a no-op `pin` must refuse too), and so that an off-by-one in the bound
+    (`>` → `>=`) reds (the at-bound arm at the end). The bound is patched down so the
+    rows stay fast; the arm under test is the guard, not the number.
+    """
+    import tortoise.resident_pin as module
+
+    monkeypatch.setattr(module, "DEFAULT_KEY_LIMIT", 3)
+    budget = PinBudget(max_nodes=10)
+    # FIVE declared keys, bound 3: the probe asks for four, so `e` is never probed and
+    # a write sourced from the probed subset is visibly lossy.
+    declared = ["a", "b", "c", "d", "e"]
+    g = _FakeGraph([*declared, "new"])
+    g.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": declared}
+    reading = read(g, budget=budget)
+    assert reading.truncated is True, "sanity: the closure probe hit its bound"
+    assert reading.keys == frozenset(declared), (
+        "the DECLARED set was reported as the probed subset, so any writer sourcing its "
+        "answer here would drop every key past the bound"
+    )
+    before = list(g.mutating)
+
+    with pytest.raises(PinRefused) as exc:
+        pin(g, ["new"], budget=budget)
+    assert exc.value.code == "truncated"
+    assert g.meta[PINS_META_KEY]["keys"] == declared, (
+        "a pin sourced from a truncated reading rewrote the declaration"
+    )
+    assert g.mutating == before, "a refused pin issued a mutating statement"
+
+    # ⛔ The NO-OP pin arm: `fresh` is empty here, so a guard placed AFTER the fresh
+    # branch would let this path write `current.keys` back unchanged-looking and drop
+    # nothing — but it is the arm that shows the guard is asked before anything else.
+    with pytest.raises(PinRefused) as exc:
+        pin(g, ["a"], budget=budget)
+    assert exc.value.code == "truncated"
+    assert g.mutating == before, "a no-op pin under a truncated reading issued a write"
+
+    # … and the refusal's own remedy must exist: `unpin` releases from the WHOLE set.
+    result = unpin(g, ["a"], budget=budget)
+    assert result.written is True
+    assert g.meta[PINS_META_KEY]["keys"] == ["b", "c", "d", "e"], (
+        "an unpin sourced from a truncated reading dropped the tail of the declaration "
+        "— 'a' released, and `e` (never probed) must survive"
+    )
+
+
+def test_a_declaration_exactly_at_the_read_bound_is_not_truncated(monkeypatch):
+    """The bound is `>`, not `>=`: a legal set of exactly the bound must still pin."""
+    import tortoise.resident_pin as module
+
+    monkeypatch.setattr(module, "DEFAULT_KEY_LIMIT", 3)
+    budget = PinBudget(max_nodes=10)
+    declared = ["a", "b", "c"]
+    g = _FakeGraph([*declared, "new"])
+    g.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": declared}
+    assert read(g, budget=budget).truncated is False
+
+    result = pin(g, ["new"], budget=budget)
+
+    assert result.written is True
+    assert g.meta[PINS_META_KEY]["keys"] == ["a", "b", "c", "new"]
+
+
 def test_a_missing_declaration_is_the_normal_state_and_pins_nothing():
     g = _FakeGraph(["p0"])
     reading = read(g, budget=PinBudget(max_nodes=10))

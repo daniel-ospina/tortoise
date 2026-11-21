@@ -145,6 +145,34 @@ def test_show_with_no_declaration_is_ok_and_names_nothing(wired, capsys):
     assert out["pin"]["keys"] == []
 
 
+def test_show_with_no_derivable_budget_is_a_REFUSAL_never_an_ok(wired, capsys,
+                                                             monkeypatch):
+    """`show` answers "is this set within budget?" — with no budget it may not say OK.
+
+    ⛔ The mutant this row kills: `if budget is None: return EXIT_OK` in the `show`
+    branch. `read(graph, budget=None)` then reports `over_budget() is None`, so the run
+    exits 0 with the budget question unanswered — the gate-that-exits-0 shape. The
+    three branches are otherwise uncovered: every other `show`/`pin`/`unpin` row passes
+    `--window-nodes`, and for `pin`/`unpin` the mutant is masked by the library's own
+    re-resolution raising `PinConfigError` (exit 3 either way).
+    """
+    for name in ("TORTOISE_CACHE_MAX_NODES", "TORTOISE_PIN_MAX_NODES",
+                 "TORTOISE_PIN_MAX_DEGREE"):
+        monkeypatch.delenv(name, raising=False)
+    code = resident.main(["show", *BASE])
+    assert code == resident.EXIT_REFUSED, (
+        "`show` exited OK with no derivable budget, so 'is this pin set within budget?' "
+        "was answered yes by a run that never had a budget"
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "REFUSED"
+    assert out["code"] == "config", (
+        "a config refusal a scheduler cannot classify is one it will read as success"
+    )
+    assert out["graph"] == "tortoise"
+    assert "no pin budget can be derived" in out["reason"]
+
+
 def test_a_graph_that_disagrees_with_the_uri_is_a_usage_error(
         wired, capsys, monkeypatch):
     import tools.cache_eviction_census as census
@@ -352,6 +380,73 @@ def test_pin_with_a_non_bare_key_prop_is_a_refusal_not_a_traceback(wired, capsys
     assert code == resident.EXIT_REFUSED
     out = json.loads(capsys.readouterr().out)
     assert out["code"] == "config"
+    assert wired.mutations == []
+
+
+def test_outside_without_a_window_or_a_budget_declaration_still_measures(
+        wired, capsys, monkeypatch):
+    """The documented `outside` invocation names no window and no pin budget.
+
+    ⛔ The budget is resolved INSIDE `pin`/`unpin`/`show`, never before verb dispatch:
+    resolving it up front refused this exact invocation (`exit 3`, "no pin budget can be
+    derived") with a DECLARED refusal about a control `outside` never reads, which an
+    operator reads as "nothing was measured" — and every pre-existing `outside` row
+    passed `--window-nodes`, so nothing exercised the documented form.
+    """
+    monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
+    conn = _Conn()
+    _fake_psycopg(monkeypatch, conn)
+    code = resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                          "org_a", "--graph-id", "g_1"])
+    assert code == resident.EXIT_OK, (
+        "the documented `outside` invocation was refused for want of a PIN budget"
+    )
+    view = json.loads(capsys.readouterr().out)["outside"]
+    assert view["complete"] is True
+    assert view["outside"] == 1
+
+
+def test_a_bound_flag_of_zero_is_a_usage_error_not_the_default(wired, capsys,
+                                                               monkeypatch):
+    """`--max-keys 0` is FALSY, so `args.max_keys or DEFAULT` silently read 200_000."""
+    _fake_psycopg(monkeypatch, _Conn())
+    for flag in ("--max-keys", "--top"):
+        with pytest.raises(SystemExit) as exc:
+            resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                           "org_a", "--graph-id", "g_1", flag, "0"])
+        assert exc.value.code == resident.EXIT_USAGE, (
+            f"{flag} 0 was not refused: a zero bound is a flag mistake (exit 1), and "
+            f"substituting the default for it hides the bound the operator asked for"
+        )
+
+
+def test_a_negative_bound_is_a_usage_error_not_an_unmeasured_view(
+        wired, capsys, monkeypatch):
+    """`--max-keys -1` used to exit 4 — "what is outside could not be measured"."""
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                       "org_a", "--graph-id", "g_1", "--max-keys", "-1"])
+    assert exc.value.code == resident.EXIT_USAGE, (
+        "a negative bound reported the measurement as failed rather than the flag"
+    )
+
+
+def test_pin_with_a_leading_digit_label_is_refused(wired, capsys):
+    """The leading-digit arm of `bare_identifier` is the only thing refusing `1bad`.
+
+    ⛔ `_BARE_SAFE` ADMITS digits anywhere, so every row that recomputes the character
+    set (`--label "Bad Label"`, `--key-prop "i d"`) passes with the digit arm deleted.
+    This row is what reds when `if value[0].isdigit():` becomes `if False:`.
+    """
+    code = resident.main(["pin", *BASE, "--key", "p0", "--label", "1bad",
+                          "--window-nodes", "1000"])
+    assert code == resident.EXIT_REFUSED
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "REFUSED"
+    assert out["code"] == "config"
+    assert "starts with a digit" in out["reason"]
+    assert PINS_META_KEY not in wired.meta, "a refused pin wrote a declaration"
     assert wired.mutations == []
 
 
