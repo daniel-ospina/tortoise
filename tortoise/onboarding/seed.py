@@ -16,6 +16,14 @@ The required handle surface (hosted org SDK / MCP SDK / W12 self-host SDK):
 - ``create_edge(relation, from_id, to_id)`` → {created: bool, ...}
 - ``query(cypher, **params)`` → result with ``.result_set``
 
+⛔ The anchor door is ``create_subject_anchor``, NEVER ``create_subject``. That spelling is a
+RETIRED SDK method name (``tortoise/sdk_retired.py``, #12901), the repo-wide census that refuses
+one is receiver-blind, and it cannot exempt a surface reached through a function parameter
+(#13863 P1) — so a surface door spelled like it reds a correct call (#13971). A handle that
+implements THIS header with ``create_subject`` therefore raises ``AttributeError`` on every
+production run of both lanes; the two real surfaces publish ``create_subject_anchor`` and
+this module calls it by that name (``_write_anchor``).
+
 Pins (epic plan §2 WF-2, §4 DM-3; test-design #1992 surfaces 7/15; W5 scope
 pin 12): collision check BEFORE any MERGE-with-refs (a same-name Subject
 that is NOT this org/user raises ``SubjectCollision`` — the caller surfaces

@@ -593,11 +593,18 @@ SWEEP_NAMES = 66
 #: is GONE as of the seed-surface door rename recorded at the pin below — the door is
 #: `create_subject_anchor` now; `surface.create_edge` is still a row, because `create_edge` is not
 #: a retired name and this counter reports ordinary-word receivers from the swept map only, so
-#: read the LIVE rows off `--report`, never this history.) The TOTAL is this tree's own
-#: measurement — `--repin` prints `(11833, "c115acaf5bbb4163")` and `--check` exits 0. The last
-#: step is 11831 → 11833 (+2) and the two rows named above account for it (+1 each), so THAT step
-#: is fully attributed; the earlier per-head totals recorded ABOVE are `--repin` readings at their
-#: own heads, not arithmetic on today's rows.
+#: read the LIVE rows off `--report`, never this history.) That head's TOTAL was its own
+#: measurement: `--repin` printed `(11833, "c115acaf5bbb4163")` there, and the 11831 → 11833 (+2)
+#: step is fully attributed to the two rows named above (+1 each). ⛔ THE DIGEST IS NOT CARRIED
+#: FORWARD: after the merge and the door rename the SAME COUNT carries a DIFFERENT digest —
+#: `--repin` prints `(11833, "4358280454f50b14")` and `--check` exits 0 on THIS tree. That is
+#: legitimate, not a contradiction: the digest is over the whole `row -> count` MULTISET (the note
+#: above says so), so an equal total with a different digest is a DIFFERENT tree — the rename
+#: removed rows (the −11 attributed at the pin below) and the merge added rows. ⛔ Read the PAIR
+#: from `SWEEP_RESIDUE` (the authority), never from this paragraph; a lane that re-runs `--repin`,
+#: gets `4358280454f50b14`, and trusts the digest typed here would conclude its own pin is wrong.
+#: The earlier per-head totals recorded ABOVE are `--repin` readings at their own heads, not
+#: arithmetic on today's rows.
 #: ⛔ A FIRST READING OF THIS DELTA attributed the +2 to the `tests/test_github_indexer.py`
 #: citation rows added for the moved `entities.py` addresses, on the theory that a pin row
 #: QUOTES its statement and so re-counts the `.query(` inside the string. That is wrong on this

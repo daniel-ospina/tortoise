@@ -80,17 +80,31 @@ class _FakeSDK:
     # (`tortoise/sdk_retired.py`) and the receiver-blind census cannot exempt a call
     # reached through a function parameter, so the collision was a red on a correct
     # call (#13971 review).
-    def create_subject_anchor(self, name, subjectKind="other", **props):
+    # ⛔ `subjectKind=None` means ABSENT, never a fabricated `"other"`: both real
+    # doors default to `None` and forward the argument absent (#9572), and a BLANK
+    # kind is "not supplied" too (`kind_fallbacks.named_kind`). This double stands in
+    # for the SURFACE, so it must not invent the value the surface never sent — a
+    # fabricated default here CLOBBERS a stored kind through the ON MATCH arm below,
+    # and it keeps a seed that STOPS passing `subjectKind` green in tests while
+    # production forwards absent. The fold's ON CREATE `"other"` is the graph layer's
+    # default, not a surface door's, and no seed path reads it
+    # (`test_the_seed_double_does_not_fabricate_a_subject_kind`).
+    def create_subject_anchor(self, name, subjectKind=None, **props):
+        if subjectKind is not None:
+            from tortoise.kind_fallbacks import named_kind
+            subjectKind = named_kind(subjectKind)
         node = self.subjects.get(name)
         if node is None:
             node = {"id": self._id_for("Subject", name), "name": name,
-                    "subjectKind": subjectKind, "status": "live"}
+                    "status": "live"}
+            if subjectKind is not None:  # absent stays absent
+                node["subjectKind"] = subjectKind
             node.update(props)
             self.subjects[name] = node
             return dict(node)
         # ON MATCH: canonical id wins; subjectKind=coalesce; props SET +=
         node["id"] = node.get("id") or self._id_for("Subject", name)
-        if subjectKind:
+        if subjectKind is not None:
             node["subjectKind"] = subjectKind
         for k, v in props.items():
             node[k] = v
@@ -421,3 +435,77 @@ def test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk():
     assert seen[-1] == ("edge", "WORKS_AT", "sub-Acme", "sub-Alex")
     # and it never advertises the SDK's private spelling, which is what the seed must not call
     assert not hasattr(_OrgSeedSurface, "_create_subject")
+
+
+def test_the_seed_double_does_not_fabricate_a_subject_kind():
+    """`#9572`: the doors take `subjectKind=None` — absent, NEVER a fabricated `"other"`.
+
+    The double stands in for the seed SURFACE, so it must publish the surface's own contract
+    (both real doors take `subjectKind=None` and forward the argument absent). A double that
+    invents a kind diverges in the one direction that hurts: a seed which STOPS passing
+    `subjectKind` stays green here while production forwards absent, its ON MATCH arm clobbers
+    the stored kind with the invented value, and re-seeding a user erases the user-authored kind
+    (`#9572`). The real doors' own `test_org_seed_surface_does_not_fabricate_a_kind` /
+    `test_selfhost_seed_surface_does_not_fabricate_a_kind` pins exist for the same reason; this
+    one keeps the DOUBLE from drifting back.
+    """
+    import inspect
+
+    from tortoise import hosted_api
+    from tortoise.onboarding import selfhost
+
+    for door in (_FakeSDK.create_subject_anchor,
+                 hosted_api._OrgSeedSurface.create_subject_anchor,
+                 selfhost._SdkSeedSurface.create_subject_anchor):
+        default = inspect.signature(door).parameters["subjectKind"].default
+        assert default is None, (
+            f"{door.__qualname__} fabricates subjectKind={default!r}. Both real doors and this "
+            "double must default to None (absent, #9572) — a fabricated default is forwarded as "
+            "if the caller had sent it, and the ON MATCH coalesce then clobbers a stored kind.")
+
+    sdk = _FakeSDK()
+    # a bare create forwards absence: no invented kind on the node
+    assert sdk.create_subject_anchor("Acme").get("subjectKind") is None
+    # a BLANK kind is "not supplied" too — `kind_fallbacks.named_kind`, exactly as the doors rule
+    assert sdk.create_subject_anchor("Acme", subjectKind="   ").get("subjectKind") is None
+    # an explicitly supplied kind still lands
+    assert (sdk.create_subject_anchor("Acme", subjectKind="organization")["subjectKind"]
+            == "organization")
+    # and a bare RE-create must not clobber it (the #9572 clobber, at the double)
+    sdk.create_subject_anchor("Acme")
+    assert sdk.subjects["Acme"]["subjectKind"] == "organization", (
+        "a bare re-create clobbered the stored kind — the double fabricated one")
+
+
+def test_the_seed_header_documents_only_doors_that_actually_exist():
+    """The module header is the ONLY statement of the duck-typed handle contract.
+
+    `#13899` shipped because a door was renamed on the surfaces and the code was updated in
+    lockstep — but the header still declared the old spelling. A lane that implements this
+    header (the header names the lanes it serves) then defines a door the seed never calls,
+    and the seed raises `AttributeError` on every run of both lanes, while a double renamed
+    in lockstep keeps the suite green. So pin the HEADER, not just the call sites: parse the
+    door bullets it documents and require each one to be published by both real surfaces.
+
+    ⛔ Only the bullet lines are parsed, deliberately: prose elsewhere in this module names the
+    RETIRED spelling (`create_subject`) to explain why it must not be used, and a substring
+    scan would read that warning as a violation.
+    """
+    import re
+
+    from tortoise import hosted_api
+    from tortoise.onboarding import seed as seed_module
+    from tortoise.onboarding import selfhost
+
+    documented = set(re.findall(r"^- ``(\w+)\(", seed_module.__doc__ or "", re.MULTILINE))
+    assert {"create_subject_anchor", "create_edge", "query"} <= documented, (
+        f"the header's door list no longer declares the contract: {sorted(documented)}")
+
+    for surface_cls in (hosted_api._OrgSeedSurface, selfhost._SdkSeedSurface):
+        missing = sorted(name for name in documented if not hasattr(surface_cls, name))
+        assert not missing, (
+            f"{surface_cls.__name__} does not publish {missing}, which the header of "
+            "tortoise/onboarding/seed.py declares as the REQUIRED handle surface — a lane "
+            "implementing that header raises AttributeError on every run (#13899), and the "
+            "call-site scan in `test_every_door_the_seed_calls_is_published_by_both_real_"
+            "surfaces` cannot see a stale header.")
