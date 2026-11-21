@@ -12,7 +12,7 @@ Mirrors ``tortoise/onboarding/state.py`` hygiene: importable without
 hosted_api (no circular import), every writer takes a duck-typed handle.
 The required handle surface (hosted org SDK / MCP SDK / W12 self-host SDK):
 
-- ``create_subject(name, subjectKind=..., **props)`` → node dict (id etc.)
+- ``create_subject_anchor(name, subjectKind=..., **props)`` → node dict (id etc.)
 - ``create_edge(relation, from_id, to_id)`` → {created: bool, ...}
 - ``query(cypher, **params)`` → result with ``.result_set``
 
@@ -152,7 +152,7 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
     ⛔ It is NOT a §17.1 declaration, and it must not be read as one. The
     onboarding lane's declaration lives in ``onboarding.state._run`` (see
     ``ONBOARDING_WRITE_LANE`` there); this module writes through the SDK's
-    journalled doors (``create_subject`` / ``create_edge``), so a mutating
+    journalled doors (``create_subject_anchor`` / ``create_edge``), so a mutating
     statement added to THIS primitive is a NEW unjournaled writer: it gets no
     authorization from the onboarding declaration, and on a journal-backed
     projection whose handle guard is armed it is refused rather than silently
