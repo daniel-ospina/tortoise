@@ -887,14 +887,19 @@ SWEEP_NAMES = 66
 #: evidence a merged tree is a third tree rather than a sum. `--check` on this tree: exit 0,
 #: `typed references still pointing at a public name: 0`.
 #:
-#: MERGED `origin/main` (`e022fc935b2d`, #14100/#14108) — both sides' histories above are kept, and the
-#: pin is RE-MEASURED on THIS tree with `--repin`, never combined arithmetically: it prints
-#: `(11844, "70d6cfdcd8b769e4")` and `--check` exits 0 with `typed references still pointing at a
-#: public name: 0`. The row composition is read off `--report --base 28ca66878d… --top 5000` AT THIS
-#: HEAD, not inferred: `proj.g.query` 3642 and `g.query` 1492 are this PR's own rows, unchanged by the
-#: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
-#: accumulating by APPEND rather than `update` (#14108), a file this branch's DIFF does not touch. That the
-#: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
+#: MERGED `origin/main` (`e022fc935b2d`, #14100/#14108) at `74fdd9e922` — both sides' histories above
+#: are kept, and the pin is RE-MEASURED on THIS tree with `--repin`, never combined arithmetically: it
+#: prints `(11839, "39ce8cef9690600a")` and `--check` exits 0 with `typed references still pointing at a
+#: public name: 0`. The two PARENTS' pairs are `(11840, "2d0be375b93fd382")` (this branch,
+#: `991bb3436f`) and `(11838, "de5664dc98549d56")` (`main` at `e022fc935b`) — BOTH stated with the
+#: commit they belong to, because `(11844, "70d6cfdcd8b769e4")` is `origin/main` `e0accb8fe6`'s OWN
+#: tree, a DIFFERENT commit, and an earlier cut of this paragraph attributed it to this merge
+#: (#14038 review, P3). The row composition is read off `--report --base 28ca66878d… --top 5000`, not
+#: inferred: `proj.g.query` 3642 and `g.query` 1492 are this PR's own rows, unchanged by the merge, and
+#: `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
+#: accumulating by APPEND rather than `update` (#14108), a file this branch's DIFF does not touch.
+#: ⛔ NO ARITHMETIC ON THE PARENTS IS OFFERED AS EVIDENCE: the merge tree's pair is what `--repin`
+#: printed, and it is neither parent's — which is the field that proves a third tree, not a sum.
 #:
 #: RE-PINNED DOWN by #14125 → (11842, "e1caacfa6167aa7f") — the #13899-fallout sweep. The −2 is
 #: THIS LANE's own and it is the harmless direction (a residue count that FALLS cannot hide a new
@@ -940,8 +945,8 @@ SWEEP_NAMES = 66
 #: tree prints (11842, '8978dc5cca557200'). ⛔ This merge is the SIXTH tree's (11853,
 #: '6fd7431f4665e801') LESS the 11 rows `main`'s seed-surface door rename removes — the three rows the
 #: block above names (`surface.create_subject` 7, `org.create_subject` 2, `selfhost.create_subject` 2)
-#: — and nothing else: the −11 is the attribution `--report` gives, not the direction of a delta. The FIFTH merge tree printed (11845, '1797f10f33f3441c'),
-#: and that pair is RECORDED here rather than carried: later commits changed this file, so this sixth
+#: — and nothing else: the −11 is the attribution `--report` gives, not the direction of a delta. `4ae073f96e` (the branch's later
+#: merge on the same row) printed (11845, '1797f10f33f3441c'), and that pair is RECORDED here rather than carried: later commits changed this file, so this sixth
 #: tree is a different tree and its pair was taken with `--repin` again instead of adjusted.
 #: Neither parent carries it — a merged tree is a THIRD tree,
 #: and the digest is what proves it. `--check` on this tree: exit 0, `typed references still pointing

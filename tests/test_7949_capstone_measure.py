@@ -18203,11 +18203,14 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ RE-MEASURED AT THIS HEAD (measured, never carried): `main`'s `#13854` (issue `#13826`,
     # `ae26adf963`) re-derived `04-plan.md`'s own row from `sdk.py:28718` to `sdk.py:28935`,
     # and `main`'s `#13971` (`e0accb8fe6`) then moved both the file and that row to
-    # `sdk.py:29121` — so at this head the row AGREES with `main` and the file is NOT in the
-    # diff (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). An earlier
-    # cut of this block stated the opposite in both halves (once "NOT in this diff at all", once
-    # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
-    # arm has been wrong in both directions on.
+    # `sdk.py:29121` — so the ROW agrees with `main` here. That says nothing about membership:
+    # the file IS in this diff at this head, and NOT because of that row — `git diff --numstat
+    # origin/main...HEAD -- …/04-plan.md` prints `1 1`, the I7 row's `hosted_api.py` range, moved
+    # by this branch's own 108 inserted lines (`:15346-15423` → `:15454-15531`). An earlier cut
+    # of this block stated the opposite in both halves (once "NOT in this diff at all", once "IS
+    # in the diff, this branch's re-point [of the sdk.py row]"), which is the head-bound-
+    # membership class this arm has been wrong in both directions on — which is why the arm
+    # below RUNS the command instead of reading any sentence, this one included.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
     # "CARRIES". Both ends are still pinned so the row cannot drift back to the base's value,
     # which is what a re-derivation-by-offset produces — and `sdk.py:28935` is NOT
@@ -18221,10 +18224,12 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-measured at this head)")
     assert "is the pair `04-plan.md` carries at this head" not in text, (
-        "D5 has gone back to claiming `04-plan.md` carries a re-point PAIR at this "
-        "head, while its row reads ONE address and the file is not in this diff at all "
-        "(`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). "
-        "That sentence was deleted for being false at this head (#13879 review, cycle 3)")
+        "D5 has gone back to claiming `04-plan.md` carries a re-point PAIR of its own ROW at "
+        "this head, while that row reads ONE address (`sdk.py:29121`). Whether the FILE is in "
+        "the diff is a different question and a measured one — `git diff --numstat "
+        "origin/main...HEAD -- …/04-plan.md` prints `1 1` here, for the I7 row's range — so it "
+        "is graded by the command below, not by this message. That sentence was deleted for "
+        "being false at its head (#13879 review, cycle 3)")
     # ⛔ THE MEMBERSHIP IS MEASURED, NOT TYPED (#14038 × main merge, MEASURED). This arm has
     # now been wrong in BOTH directions — it asserted "NOT in this diff" at one head and this
     # branch's re-point at another — which is the head-bound-membership class its own comment

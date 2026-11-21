@@ -851,6 +851,32 @@ class TestDriftAndStaleness:
         assert out["status"] == "notice-mark-unavailable", out
         assert send.calls == [], "a suspended org was mailed on a transient error"
 
+    def test_the_unreadable_account_log_line_names_WHICH_failure(self, caplog):
+        """The docstring's promise, graded: the line carries the MESSAGE, not the type alone.
+
+        Both a REJECTED COLUMN and a TRANSPORT failure reach this seam as
+        `RuntimeError` (`supabase_control` raises the same class for `HTTP 400` and
+        for a connection error), and `_rejected_the_projection` decides between
+        them on the MESSAGE text. A line printing only `type(e).__name__` therefore
+        told an operator "RuntimeError" for both "apply the migration" and "wait and
+        retry" — the distinction the account's retry decision is built on
+        (#14038 review, P2). Measured before the fix: the `HTTP 502` / transport
+        text never reached the line and nothing red.
+        """
+        cp = _FlakyCP(RuntimeError(
+            "Supabase control-plane RPC failed (organizations): "
+            "HTTP 502: upstream connect error or disconnect/reset before headers"),
+            suspended_at=None)
+        with caplog.at_level(logging.ERROR, logger="tortoise.capacity_notice"):
+            out = asyncio.run(cn.notify_account(
+                ORG_ID, cp=cp, limits=_limits(102), reading=_Reading(120.0)))
+        assert out["status"] == "notice-mark-unavailable", out
+        line = " ".join(r.getMessage() for r in caplog.records)
+        assert "HTTP 502" in line and "upstream connect error" in line, (
+            "the unreadable-account log line does not name WHICH failure this is — "
+            "`_rejected_the_projection` decides on this text, so an operator cannot "
+            f"tell 'apply the migration' from 'retry'; line={line[:300]!r}")
+
     def test_a_fully_drifted_schema_raises_the_ORIGINAL_error(self):
         """When the retry fails too, the FIRST error is what the operator sees.
 

@@ -703,6 +703,20 @@ _SCHEMA_REJECTION_MARKERS = ("pgrst204", "42703", "does not exist",
                              "undefined column", "http 400")
 
 
+def _logged_reason(err: BaseException) -> str:
+    """The failure as a log line can carry it: TYPE + a bounded MESSAGE.
+
+    The type alone cannot separate the two failures this seam retries differently —
+    `supabase_control` raises `RuntimeError` for a REJECTED COLUMN and for a
+    TRANSPORT error alike, and `_rejected_the_projection` decides on the MESSAGE
+    text. So the operator-facing line keeps the message (collapsed to one line and
+    bounded, since a PostgREST body can be long), and the docstring that promises
+    "the log line names which" is true rather than aspirational (#14038 review).
+    """
+    text = " ".join(str(err).split())
+    return f"{type(err).__name__}: {text[:240]}" if text else type(err).__name__
+
+
 def _rejected_the_projection(err: BaseException) -> bool:
     """True only for a read whose error STATES a rejected column.
 
@@ -794,7 +808,10 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     ``no-email``, ``deleted-org``, ``suspended-org``, ``notice-mark-unavailable``
     (the account ROW could not be read — the ledger column has not been migrated,
     a base column is missing, or the read failed TRANSIENTLY, which `read_account`
-    refuses to treat as schema drift; the log line names which),
+    refuses to treat as schema drift; the log line carries the exception TYPE and
+    its bounded MESSAGE, which is the datum `_rejected_the_projection` itself
+    decides on — not the type alone, because `supabase_control` raises
+    `RuntimeError` for BOTH a rejected column and a transport failure),
     ``unreadable-allowance`` and ``unreadable-reading`` (the gauge pair could not
     be read — returned verbatim, and listed here because the closed list below is
     what a caller aggregates on), ``below-threshold``/
@@ -838,7 +855,7 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
                 "base deleted_at) or a TRANSIENT read failure, which "
                 "`read_account` refuses to read as schema drift (#14038 review, "
                 "P1). Both are retried on the next pass; neither sends.",
-                org_id, type(e).__name__)
+                org_id, _logged_reason(e))
             return {"status": "notice-mark-unavailable", "org_id": org_id}
     if account is None:
         return {"status": "unknown-account", "org_id": org_id}
@@ -1037,7 +1054,7 @@ async def sweep_pass(*, cp=None, send=None, enumerate_orgs=None,
         except Exception as e:
             logger.warning(
                 "capacity notice sweep: team %s failed (%s) — continuing",
-                org_id, type(e).__name__)
+                org_id, _logged_reason(e))
             result = {"status": "error"}
         status = str(result.get("status") or "error")
         summary["statuses"][status] = summary["statuses"].get(status, 0) + 1
