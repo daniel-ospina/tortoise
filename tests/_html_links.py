@@ -760,7 +760,7 @@ class _AnchorHrefParser(HTMLParser):
     #: entries from a tree a browser has thrown away.
     _RECORDINGS = (
         "hrefs", "ids", "attrs", "headings", "containers", "mode_dependent",
-        "raw_text", "text",
+        "raw_text", "text", "heading_markup",
     )
     #: Diagnostic ratchets, NOT document recordings: they describe what the PARSE met
     #: (`foreign_tags` is the declared-limits watchdog), so an honored `<frameset>`
@@ -825,6 +825,25 @@ class _AnchorHrefParser(HTMLParser):
         # the raw SOURCE at a heading; `extract_heading_positions` turns the line
         # and column into an offset.
         self.headings: list[tuple[str | None, int, int]] = []
+        # `(index into `headings`, the (tag, attribute name) pairs met INSIDE that
+        # `<h2>` ELEMENT — its own start tag's included — and the painted text nodes
+        # inside it)`, one entry per recorded heading, in document order. The
+        # boundary question's second and third premises (#14229 review round 4, P1):
+        # a heading's OWN start tag is not the whole question, because an advertised
+        # heading whose text a reader never meets still bounded the `#storage` slice
+        # and put a claim under it outside every pin — measured with an empty
+        # heading, a comment-only heading, and a heading whose text sits inside a
+        # `style="display:none"` / `aria-hidden="true"` descendant. Read through
+        # `extract_heading_markup`.
+        self.heading_markup: list[
+            tuple[int, list[tuple[str, str]], list[str]]
+        ] = []
+        # Live HEADING frames, `(index into `heading_markup`, the stack depth the
+        # `<h2>` occupies)`. An element ends where the browser's stack stops holding
+        # it, so liveness is re-derived at the two points that ATTRIBUTE to it (an
+        # attribute record, a painted text node) instead of hooking every stack
+        # mutation in this parser — see `_settle_heading_frames`.
+        self._open_heading_frames: list[tuple[int, int]] = []
         # The container whose anchors the caller asked for, and the two recordings
         # that answer it: `containers` holds one href list per MATCHING CONTAINER
         # the tree has, in document order, and `_open_containers` holds the ones
@@ -1062,9 +1081,69 @@ class _AnchorHrefParser(HTMLParser):
         """
         if self._suppress or self.wedged_reason:
             return
+        # BEFORE the loop: a heading this element ends (a `</h2>` we are past, an
+        # ancestor the stack no longer holds) must not receive this tag's names.
+        self._settle_heading_frames()
         line = self.getpos()[0]
+        # ⛔ AND THE SAME NAME INSIDE AN OPEN HEADING, because a heading's boundary is
+        # decided by its OWN ELEMENT and not by its start tag (#14229 review round 4,
+        # P1). An advertised `<h2>` whose TEXT a reader never meets still bounded the
+        # `#storage` slice and put a claim under it outside every pin — measured with
+        # the empty heading, the comment-only heading, and the heading whose text sits
+        # inside a `style="display:none"` / `aria-hidden="true"` DESCENDANT (four
+        # rows, all green). The target is resolved ONCE, by the innermost open heading
+        # (`_settle_heading_frames` is what makes "open" mean the browser's answer),
+        # and a heading's own start tag is seeded by `_record_heading` instead —
+        # this runs before the frame exists.
+        enclosing = (
+            self.heading_markup[self._open_heading_frames[-1][0]][1]
+            if self._open_heading_frames
+            else None
+        )
         for name, _value in attrs:
             self.attrs.append((tag, name, line))
+            if enclosing is not None:
+                enclosing.append((tag, name))
+
+    def _settle_heading_frames(self) -> None:
+        """Drop the heading frames whose `<h2>` element the stack no longer holds.
+
+        Called at the two points that ATTRIBUTE something to an open heading (an
+        attribute record, a painted text node), rather than from every one of this
+        parser's stack mutations. That is enough to keep attribution honest and it
+        keeps the change additive: nothing here changes an existing recording.
+
+        ⛔ TWO TESTS, because one is not enough and each closes a different drift:
+
+        * `len(_open_elements) > depth` — the element was POPPED (an explicit
+          `</h2>`, or an ancestor's end tag that took it with it). Without it a frame
+          left over from a closed heading re-attached to the NEXT subtree, so an
+          unrelated element's text or attribute decided the closed heading's
+          boundary — the same "something else decides" defect the ±1 neighbourhood
+          had (#14229 review rounds 3-4);
+        * `_open_elements[depth][0] == "h2"` — the slot still holds a heading.
+          `_remove_nearest` deletes an INTERIOR frame (the adoption agency
+          algorithm), which shifts the slots above it while the stack length is
+          unchanged; a length-only test would then read a different element as this
+          heading.
+
+        ⛔ DECLARED LIMIT — a MISSING `</h2>`. When the page never closes a heading,
+        this parser keeps the next `<h2>` NESTED inside it (a browser pops the first
+        one at the second start tag), so the outer frame stays live until the stack
+        drops below it. The cost is attribution the browser would not make: the outer
+        heading can collect a sibling's text and attributes. Both directions of that
+        are the LOUD one for this bound — extra text only makes a heading look
+        more visible, extra attributes can only REFUSE a bound, which runs the slice
+        long — and refusing a heading that should bound is the direction this file
+        takes everywhere (see `_heading_may_bound_the_slice` in
+        `tests/test_website_docs_consistency.py`).
+        """
+        self._open_heading_frames = [
+            (index, depth)
+            for index, depth in self._open_heading_frames
+            if len(self._open_elements) > depth
+            and self._open_elements[depth][0] == "h2"
+        ]
 
     def _record_heading(
         self, tag: str, attrs: list[tuple[str, str | None]],
@@ -1166,6 +1245,22 @@ class _AnchorHrefParser(HTMLParser):
             return
         heading_id = next((value for name, value in attrs if name == "id"), None)
         self.headings.append((heading_id, *self.getpos()))
+        # The heading's OWN subtree facts, alongside its position: its start tag's
+        # attributes are seeded here (this runs BEFORE `_record_attributes` could
+        # attribute them to an outer heading), and its descendants' attributes and
+        # painted text are attributed while the frame is live — see
+        # `_open_heading_frames`. `_open_extent` pushes this `<h2>` AFTER this call,
+        # so the depth recorded is exactly the slot it will occupy.
+        self.heading_markup.append(
+            (
+                len(self.headings) - 1,
+                [(tag, name) for name, _value in attrs],
+                [],
+            ),
+        )
+        self._open_heading_frames.append(
+            (len(self.heading_markup) - 1, len(self._open_elements)),
+        )
 
     def _unmet_by_reader(self, attrs: list[tuple[str, str | None]]) -> bool:
         """True when no reader meets this start tag, so it must not bound or advertise.
@@ -1234,10 +1329,17 @@ class _AnchorHrefParser(HTMLParser):
         vocabulary scan, the destination pin and the allowlist all green.
 
         ⛔ SO THE HIDING IS SPLIT BY WHO CAN DECIDE IT. Markup-decidable hiding is
-        refused by the CONSUMER, not here: a heading carrying `style`, `hidden` or
-        `aria-hidden` may not bound the docs page's slice
-        (`_heading_may_bound_the_slice` in `tests/test_website_docs_consistency.py`),
-        so the slice runs LONG and the golden reds loudly. Hiding that needs a
+        refused by the CONSUMER, not here: a heading may not bound the docs page's
+        slice when a READER would not meet it — `style`/`aria-hidden` on the heading's
+        `<h2>` OR ON A DESCENDANT, or an element that paints no text at all
+        (`_heading_offsets_that_may_not_bound` over `extract_heading_markup` in
+        `tests/test_website_docs_consistency.py`) — so the slice runs LONG and the
+        golden reds loudly. ⛔ THE START TAG ALONE WAS NOT ENOUGH, and that sentence
+        used to say it was: an advertised `<h2 id="storage-limits"></h2>`, a
+        comment-only heading, and a heading whose text sat inside a
+        `<span style="display:none">` all still cut the slice, putting a claim under
+        them outside every pin (#14229 review round 4, measured through
+        `_docs_section`). Hiding that needs a
         STYLESHEET — the `class` case — stays the residual named above, because
         refusing it would red a correct page whose heading carries a `class` (the
         round-5 false-red control). A page that hides copy with CSS is still making a
@@ -2133,6 +2235,7 @@ class _AnchorHrefParser(HTMLParser):
         for name in self._RECORDINGS:
             getattr(self, name).clear()
         self._open_containers.clear()
+        self._open_heading_frames.clear()
         self._open_elements.clear()
         # A replaced document has a FRESH root, so the root's flag is reset with the
         # recordings. ⛔ THIS IS BELT-AND-BRACES, NOT AN OBSERVED CASE (#14073 review round
@@ -2305,6 +2408,11 @@ class _AnchorHrefParser(HTMLParser):
                 # was dropped, i.e. the boundary question answered a heading no reader meets.
                 self.text.clear()
                 self.headings.clear()
+                # The subtree facts are keyed BY INDEX into `headings`, so they go
+                # with it — a kept row would describe the heading of a document a
+                # reader can no longer see.
+                self.heading_markup.clear()
+                self._open_heading_frames.clear()
             return
         opened_container = False
         if self._container is not None:
@@ -2732,6 +2840,13 @@ class _AnchorHrefParser(HTMLParser):
             )
         ):
             self.text.append(data)
+            # The heading's own painted text, for the boundary question: a heading
+            # whose text a reader never meets cannot decide what a reader at the
+            # anchor meets (#14229 review round 4, P1). Same painted test as the
+            # wording golden above, so the two cannot answer differently.
+            self._settle_heading_frames()
+            if self._open_heading_frames:
+                self.heading_markup[self._open_heading_frames[-1][0]][2].append(data)
 
     def _in_painted_label(self) -> bool:
         """Is this text repainted by a painted `<option>`/`<optgroup>` LABEL?
@@ -3191,6 +3306,72 @@ def extract_heading_positions(html: str) -> list[tuple[str | None, int]]:
     return [
         (heading_id, line_starts[line - 1] + column)
         for heading_id, line, column in parser.headings
+    ]
+
+
+def extract_heading_markup(
+    html: str,
+) -> list[tuple[str | None, int, tuple[tuple[str, str], ...], str]]:
+    """``(id, offset, attributes, text)`` for every rendered ``<h2>``, in order.
+
+    The section bound's SECOND and THIRD premises (#14229 review round 4, P1).
+    `extract_heading_positions` answers *where* a heading is; this answers *whether a
+    reader meets it*, out of the same parsed tree and without a second walk over the
+    source.
+
+    * ``attributes`` — every ``(tag, attribute name)`` pair inside that heading
+      ELEMENT: its own start tag's, then those of its descendants, in document order.
+      Empty when the heading carries no attributes at all, which is what makes "this
+      heading declares nothing about hiding" an answerable question;
+    * ``text`` — the painted text INSIDE that element, joined, under the same
+      suppression rule the wording pin uses (raw text a browser does not paint, an
+      inert `<template>`, a `hidden` subtree, a `noscript` under scripting). An empty
+      string therefore means a heading whose text no reader of the rendered page meets.
+
+    ⛔ WHY THE ELEMENT AND NOT THE START TAG. Inspecting only the heading's own
+    attributes left four escapes on the docs page's bound, all measured through
+    `_docs_section` with a TOC entry for `#storage-limits` and a
+    `FalkorDB`/`allowance`/`tier` paragraph under it — the claim painted inside the
+    `#storage` band with the wording golden, the vocabulary scan, the destinations
+    pin and the attribute allowlist ALL green:
+
+        `<h2 id="storage-limits"></h2>`                                    no text
+        `<h2 id="storage-limits"><!-- Limits --></h2>`                      a comment
+        `<h2 id="storage-limits"><span style="display:none">Limits</span>` descendant
+        `<h2 id="storage-limits"><span aria-hidden="true">Limits</span>`   descendant
+
+    ⛔ AND A LINE IS NOT AN IDENTITY — two headings can share one source line, so a
+    question keyed on `getpos()[0]` let an UNADVERTISED sibling on the same line as a
+    correct heading refuse the correct heading's bound: with
+    `<h2 id="storage-limits">Limits</h2><h2 id="storage-draft" aria-hidden="true">`
+    on one line the slice ran past the correct boundary and the wording golden
+    reddened on a page whose `#storage` copy is byte-identical to the fixture. The
+    identity here is the OFFSET `extract_heading_positions` already reports.
+
+    Every entry is a pure record of the tree: which attributes exist in this element
+    and what text it paints. Which of those mean "this heading cannot bound" is the
+    consumer's decision, not this function's.
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    line_starts = [0]
+    for index, char in enumerate(html):
+        if char == "\n":
+            line_starts.append(index + 1)
+    # Keyed by index into `headings` (the parser's own alignment), so a heading the
+    # tree does not hold can never borrow another one's facts.
+    facts = {
+        index: (tuple(pairs), " ".join(texts))
+        for index, pairs, texts in parser.heading_markup
+    }
+    return [
+        (
+            heading_id,
+            line_starts[line - 1] + column,
+            *facts.get(index, ((), "")),
+        )
+        for index, (heading_id, line, column) in enumerate(parser.headings)
     ]
 
 
