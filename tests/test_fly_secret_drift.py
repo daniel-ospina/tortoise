@@ -6483,3 +6483,68 @@ class TestTheMitigationLedger:
         # …and the run that env produces is green, i.e. the seam is not just named
         # but honoured by the subprocess.
         assert _run(_secrets_file(_ALL_DECLARED, "hermetic-ledger-secrets.json")).returncode == 0
+
+
+# ── #13665/#14156: the DECLARED machine shape, pinned ───────────────────────
+# The bug this closes is "fly.toml says 2 cores, the machine runs 4": `fly
+# scale vm` is a MANUAL operation, so a versioned `cpus = 2` reverted every
+# hand-resize on the next deploy, and nothing reddened for a whole measurement
+# window. `fly.toml`'s shape is declarative, but "declarative" is exactly what a
+# silent revert is invisible in — so the shape becomes the thing a diff must
+# move deliberately.
+
+
+def _real_fly_toml() -> dict:
+    import tomllib
+
+    return tomllib.loads(REAL_FLY_TOML.read_text(encoding="utf-8"))
+
+
+def test_vm_block_declares_the_four_core_shape():
+    """A revert of `cpus` to 2 — the #13665 regression — must redden this."""
+    vm = _real_fly_toml()["vm"]
+    assert isinstance(vm, list) and len(vm) == 1, (
+        "fly.toml must declare exactly one [[vm]] block: a second process group "
+        "left at the old size is the same declared-vs-live drift, one table over"
+    )
+    shape = vm[0]
+    assert shape["cpu_kind"] == "shared", (
+        "the measured 4-core shape is `shared`; `cpu_kind` is part of the "
+        "declared shape, so changing it changes what a deploy provisions"
+    )
+    assert shape["cpus"] == 4, (
+        "the box runs 4 cores (#13665, measured); a versioned 2 is the revert "
+        "that made the hand-resize not survive a deploy"
+    )
+    assert shape["memory_mb"] == 4096, (
+        "memory_mb is pinned separately: the file's history is OOM "
+        "crash-loops at 2 GB (#545), so a reduction is a real regression"
+    )
+
+
+def test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so():
+    """The F2 class (#14156 review): one cost claim, not two.
+
+    After the 2→4 resize the `[[services]]` COST note still priced the 2-core
+    machine, so a reader took a stale figure as current. Either the note prices
+    the declared shape, or it says out loud that it is the pre-#13665 snapshot.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    declared_cpus = _real_fly_toml()["vm"][0]["cpus"]
+
+    # Everything before the `[[vm]]` table is the `[[services]]` block, which is
+    # where the COST note lives (the reverse split would read the [[vm]] comment).
+    services_region = text.split("[[vm]]", 1)[0]
+    priced = {int(n) for n in re.findall(r"shared-cpu-(\d+)x", services_region)}
+    assert priced, (
+        "the [[services]] COST note names no `shared-cpu-Nx` shape any more, so "
+        "this pin can no longer see what it prices — re-derive it against the "
+        "note's new spelling rather than deleting it"
+    )
+    if declared_cpus not in priced:
+        assert "pre-#13665" in services_region.lower(), (
+            f"the [[services]] COST note prices {sorted(priced)} cores while "
+            f"[[vm]] declares {declared_cpus}, and never labels itself as the "
+            "pre-#13665 historical shape — a reader acts on the stale figure "
+            "(#14156 review F2)"
+        )

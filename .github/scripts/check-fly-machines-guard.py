@@ -68,6 +68,15 @@ RESIDUAL GAPS (documented, not blocked):
    ``[processes]`` table, the traffic set is exactly its keys — a machine in
    the implicit Fly ``app`` group would be flagged ORPHAN (fail-closed).
    Adding ``[processes]`` must explicitly include the traffic groups.
+   (d) DECLARED-vs-LIVE machine SHAPE is not compared at all — ``config.env``
+   is the only part of the machine config this guard reads (the same blind spot
+   ``check-fly-machine-env.py`` documents for ``[env]``). ``fly.toml``'s
+   ``[[vm]]`` (``cpu_kind``/``cpus``/``memory_mb``) can therefore diverge from
+   the running machine with no red signal: #13665 found the box running 4 cores
+   while ``fly.toml`` declared 2, unnoticed for a whole measurement window. A
+   shape leg (compare ``config.guest.*`` against ``[[vm]]``, fail-closed like
+   the env gate) is the follow-up; until it lands, versioning ``cpus`` in
+   ``fly.toml`` is what makes the size survive a deploy.
 
    Crash-loop detection applies to TRAFFIC groups only (the ``[processes]``
    keys or ``{'app'}`` default) — internal groups are transient/non-traffic
