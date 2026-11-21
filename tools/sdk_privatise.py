@@ -726,21 +726,27 @@ SWEEP_NAMES = 66
 #: typed reference to a swept name is legitimised). 11838 + 1 = 11839 and 11840 − 1 = 11839 are
 #: CROSS-CHECKS of those two measurements, never the evidence for either.
 #:
-#: RE-MEASURED ON THE REBASED TREE (#14086 rebased onto `main` `e0accb8fe6`): `--repin` on THIS
-#: tree prints the pair below. ⛔ NEITHER block above is this tree's answer and neither was carried:
-#: `main` (`e0accb8fe6`) pins `(11844, "70d6cfdcd8b769e4")`, the FIFTH merge tree measured 11839,
-#: and THIS tree measures 11845 — three different trees, three different pins, one of them live.
-#: ⛔ THE +1 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, NOT BY ARITHMETIC. `--report --base 28ca66878d7c
+#: RE-MEASURED ON THE REBASED TREE (#14086 rebased onto `main` `e0accb8fe6`, then the review-round-3
+#: commit `41672df4f9` landed on top): `--repin` on THIS tree prints the pair below. ⛔ NEITHER block
+#: above is this tree's answer and neither was carried: `main` (`e0accb8fe6`) pins
+#: `(11844, "70d6cfdcd8b769e4")`, the FIFTH merge tree measured 11839, and THIS tree measures
+#: **11846** — three different trees, three different pins, one of them live.
+#: ⛔ THE +2 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, NOT BY ARITHMETIC. `--report --base 28ca66878d7c
 #: --top 5000` was run in a worktree at `origin/main` (`e0accb8fe6`) AND on this tree, both row sets
-#: sorted and diffed: EXACTLY ONE row differs — `captured.update` **30 → 31** — and it is this PR's
-#: own analytics-capture stub in `tests/test_10893_pre_handler_parts.py`
-#: (`lambda org, ev, props: captured.update(props=dict(props))`), a plain `dict.update`, so it is a
-#: DECLARED residue row and no typed reference to a swept name is legitimised. The DIGEST moves with
-#: the row set (`residue_digest` hashes each row's NAME with its COUNT), which is why it cannot be
-#: carried from a tree whose row set is not this one. 11844 + 1 = 11845 is a CROSS-CHECK of that
-#: measurement, never the evidence for it.
+#: sorted and diffed: EXACTLY TWO rows differ, and both are DECLARED rather than legitimised —
+#:   * `captured.update` **30 → 31** — this PR's own analytics-capture stub in
+#:     `tests/test_10893_pre_handler_parts.py`
+#:     (`lambda org, ev, props: captured.update(props=dict(props))`), a plain `dict.update`;
+#:   * `ha_mod._make_sdk(namespace='registry')._.query` **10 → 11** — the same file's review-round-3
+#:     pin `test_a_graph_bound_capture_skips_the_org_level_checkpoint_entirely` (`41672df4f9`), which
+#:     drives a real `graph_id` credential through `POST /v1/sessions` and reads the org default-graph
+#:     SDK through a test double to prove it is never resolved.
+#: Neither is a typed reference to a swept name, so no typed call site is legitimised. The DIGEST
+#: moves with the row set (`residue_digest` hashes each row's NAME with its COUNT), which is why it
+#: cannot be carried from a tree whose row set is not this one. 11844 + 2 = 11846 is a CROSS-CHECK of
+#: that measurement, never the evidence for it.
 #: `--check` on this tree: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11845, "3d845b4a39da2ac8")
+SWEEP_RESIDUE = (11846, "921de057fd2fecfc")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
