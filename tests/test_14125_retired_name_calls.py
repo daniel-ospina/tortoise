@@ -545,8 +545,10 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
         _caught = _handler_names(handler) | ({handler.name} if handler.name else set())
         if isinstance(_last.exc, ast.Name) and _last.exc.id in _caught:
             return True
-        # PEP 3134's CHAINED form is the same propagation with a nicer message, and
-        # `_covered` already counts it — reading the two halves differently
+        # PEP 3134's CHAINED form is the same propagation with a nicer message, and the
+        # SWALLOW side must read it the same way `_covered` does (the consumer here is
+        # `_covered`; it counts the chained form because THIS predicate does, not the
+        # other way round) — reading the two halves differently
         # made ONE handler simultaneously "no coverage" and "re-raises, drops nothing", so a
         # block written per this gate's own repair instruction read UNARMED (review of
         # #14160, cycle 7, P2-2). `raise X from None` discards the cause and is not coverage.
@@ -4697,8 +4699,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         )
 
     # 4j-octovicesimus. A CHAINED re-raise — `raise RuntimeError(…) from exc` — propagates the
-    #     caught error just as `raise exc` does (PEP 3134), and `_covered` has always
-    #     counted it. `_reraises` read only a bare `raise` or `raise exc`, so ONE handler was
+    #     caught error just as `raise exc` does (PEP 3134), and the DROP side has to read it
+    #     the same way `_covered` does — `_covered` counts it because this predicate does,
+    #     so the dependency runs one way only. The PREDECESSOR predicate read just a bare
+    #     `raise` or `raise exc`, so ONE handler was
     #     simultaneously "no coverage" and "re-raises, drops nothing", and a block written per
     #     this gate's own repair instruction read UNARMED (review of #14160, cycle 7, P2-2).
     #     `raise X from None` is the control: it discards the cause, so it is not coverage.
