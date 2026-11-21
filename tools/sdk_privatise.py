@@ -317,6 +317,26 @@ SWEEP_NAMES = 66
 #: requests only), not the measurement of one commit on one day.
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
 #:
+#: RE-CUT AT THE THIRD MERGE TREE (#14068 × `main` `df0525a7a9`), measured and never carried.
+#: The pair above, `(11841, "05a67e3380c806b1")`, is what THIS PR's head derives on its OWN tree
+#: (`--repin` at `e8005748`), so nothing this lane added was absorbed in the merge. The merge tree
+#: derives a different pair because `main` moved two rows, and the attribution is a row-by-row
+#: DIFF of the three residue sets (`py_files()` → `edits_for()` → `residue`, run on the branch tree,
+#: on `origin/main`'s own tree and on this merge tree), not arithmetic on the last pin:
+#:
+#:   * `main`'s own tree derives `(11831, "4f3afdad7fb13ad7")`; the merge tree derives
+#:     `(11839, "0a7e60fa05aa31b9")` — a delta of **+8**, which is exactly this PR's eight receiver
+#:     rows, so the merge kept every one of them.
+#:   * against THIS PR's head the merge is **−2**, and the row-by-row diff says it is ONE row:
+#:     `found.update` 12 → 10. `df0525a7a90` (`#14071`, "the review remainder #14065 merged
+#:     without") rewrote both call sites in `tests/test_usage_signal.py` — `found.update(alias.name
+#:     for alias in node.names)` and `found.update(f"tortoise.{alias.name}" …)` — into
+#:     `found |= {…}` at `:692` and `:707`. A `set` fed by `|=` carries no `.update` receiver, so
+#:     the two rows are GONE from the population rather than re-spelled into a new one. ⛔ No row
+#:     moved in the other direction: every other entry of the three dicts is identical.
+#: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
+#: legitimised by the re-cut. Measured with `--repin` on THIS tree, never by arithmetic on the last
+#: pin.
 #: RE-CUT UP (11829, "f0301da129c0c584") → (11839, "42d5bd85c6e2fd9d") on the #14068 tree, which is
 #: the MERGE tree `surface-guard` grades. Two things moved it, and the first one is the reason the
 #: pin it replaces was RED ON MAIN from the moment it merged, not a row this PR added:
@@ -439,7 +459,7 @@ SWEEP_NAMES = 66
 #: `poisoned |= …` and one dead branch deleted) and this PR's +8 receiver rows are BOTH true of this
 #: tree, and a reader re-deriving the pin needs both facts, not just the surviving number.
 #: `--check` on this tree: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11841, "05a67e3380c806b1")
+SWEEP_RESIDUE = (11839, "0a7e60fa05aa31b9")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
