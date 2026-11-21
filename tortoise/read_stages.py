@@ -204,12 +204,18 @@ _NOT_MARKABLE = frozenset({STAGE_UNMARKED, STAGE_PRE_HANDLER})
 #: decomposition off the wire, so it must never be "simplified" back to
 #: ``return self.snapshot()``) and a breached caller's body stays byte-identical.
 PRE_HANDLER_PARTS: tuple[str, ...] = (
-    #: Arrival → the handler task created. The middleware chain, plus any time
-    #: this request spent waiting for the loop BEFORE its task existed.
+    #: Arrival → the handler task created. ⛔ This is the OUTERMOST transport
+    #: middleware's own preamble, plus any time this request spent waiting for
+    #: the loop BEFORE its task existed — NOT the inner middleware chain. Those
+    #: middlewares run INSIDE the created task (``WaitBoundMiddleware`` is
+    #: registered LAST, so it is OUTERMOST and wraps the rest), which is why
+    #: their time lands in ``dispatch`` (measured, #14086 review round 2).
     "middleware",
-    #: Task created → the handler's first statement. The queue for the event
-    #: loop plus the credential/organisation dependency stack — this is the
-    #: part that grows when the loop is blocked by another request's work.
+    #: Task created → the handler's first statement. ⛔ THIS INCLUDES THE
+    #: REMAINING MIDDLEWARE CHAIN (inner middlewares execute in the task, after
+    #: the ``middleware`` note), plus the queue for the event loop and the
+    #: credential/organisation dependency stack — this is the part that grows
+    #: when the loop is blocked by another request's work.
     "dispatch",
     #: ``_data_sdk_offloaded`` — the graph lane's SDK open and, where the route
     #: asks for it, the cold projection attach (TCP/TLS/``Is_Sentinel``).

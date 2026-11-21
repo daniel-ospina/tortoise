@@ -6636,10 +6636,13 @@ class WaitBoundMiddleware:
             # #10893 second cycle: the first boundary of the `pre_handler`
             # decomposition — arrival → the handler task EXISTS. After this line
             # the request is waiting for the loop to schedule that task, which
-            # is the `dispatch` part; before it, the middleware chain and this
-            # request's own share of any loop saturation are all there is. Noted
-            # INSIDE the binding (the note is a no-op when nothing is bound) and
-            # BEFORE the await, because a note is only meaningful while
+            # is the `dispatch` part. ⛔ Before it, ONLY this outermost
+            # middleware's own preamble and this request's share of any loop
+            # saturation — NOT the inner middleware chain: those middlewares are
+            # wrapped by this one (registered LAST ⇒ outermost) and run INSIDE
+            # the task this line creates, so their time lands in `dispatch`.
+            # Noted INSIDE the binding (the note is a no-op when nothing is bound)
+            # and BEFORE the await, because a note is only meaningful while
             # `pre_handler` is still open.
             if request_stages is not None:
                 from tortoise.read_stages import note as _note_stage
@@ -10561,14 +10564,16 @@ def _require_scope(org: dict, scope: str, surface: str) -> None:
 
     #10893 second cycle: it is also where the `dispatch` boundary of
     ``pre_handler`` is closed. A data handler runs on a task the transport seam
-    created, so everything SINCE THAT TASK EXISTED and up to this line — the
-    credential/org dependency stack, plus any time the task sat unscheduled
-    behind another request's synchronous work — is the `dispatch` part. The
-    middleware chain is NOT in it: that belongs to the `middleware` part, which
-    the transport seam closes when the task is created (``PRE_HANDLER_PARTS`` in
-    ``tortoise/read_stages.py``). It is noted here rather than per-route because
-    this function's placement is already the contract above, so a new data route
-    inherits the attribution instead of having to remember it.
+    created, so everything since that task existed and up to this line — the
+    REMAINING MIDDLEWARE CHAIN (the inner middlewares execute inside the created
+    task), the credential/org dependency stack, and any time the task sat
+    unscheduled behind another request's synchronous work — is the `dispatch`
+    part. The `middleware` part is ONLY arrival → task created: the outermost
+    transport middleware's own preamble and any pre-task loop wait
+    (``PRE_HANDLER_PARTS`` in ``tortoise/read_stages.py``). It is noted here
+    rather than per-route because this function's placement is already the
+    contract above, so a new data route inherits the attribution instead of
+    having to remember it.
     """
     from tortoise.read_stages import note as _note_stage
     _note_stage("dispatch")
@@ -21694,6 +21699,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         try:
             # #4625: write-only — the return is discarded here, and this is
             # the per-capture hot path (see ``_update_onboarding_state``).
+            # ⛔ DECLARED RESIDUAL (#14086 review, round 2 P2) — this offload
+            # carries the receipt's REGISTRY CAS onto the pool, and
+            # `_write_jsonb_fields_cas` -> `_read_onboarding_state_and_version` /
+            # `_cas_write_onboarding_state` each construct
+            # `_make_sdk(namespace="registry")` THERE: the same
+            # `_make_sdk`-in-a-pooled-worker shape the checkpoint leg below
+            # deliberately avoids (#7500). It is NOT closed here, and that is a
+            # scoping decision, not an oversight: the handle would have to be
+            # threaded through the shared CAS writers, which every PATCH /
+            # checkpoint / onboarding route also calls, so that seam belongs with
+            # those writers rather than inside a capture-path change. In
+            # production the store path is env-derived and identical on every
+            # thread, so the exposure is the TEST harness's stale per-test stem
+            # (#7500's own mechanism) — measured, not assumed: the receipt write
+            # does land where the receipt tests read it. Named here because an
+            # undeclared residual is how the next reviewer re-finds it.
             await _run_off_loop(
                 _CAPTURE_EXECUTOR, _update_onboarding_state,
                 org["org_id"], _echo=False, **{receipt_key: now})
@@ -21823,8 +21844,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             """The capture-disclosed checkpoint — synchronous graph work, OFF the loop.
 
             ⛔ #10893 (second cycle): `write_completed_step` takes the per-org
-            lock and runs keyed MERGEs, and `_maybe_apply_completion` reads the
-            registry; both used to run INLINE here, on the single uvicorn
+            lock and runs keyed MERGEs, and `_maybe_apply_completion` opens the
+            org's DEFAULT graph and MATCHes its `:OnboardingState` node (plus one
+            `organizations.graph_name` control-plane read for a graph-bound
+            credential); both used to run INLINE here, on the single uvicorn
             worker, at the end of EVERY first capture. Same callable, same
             order, same non-fatal arm — only WHERE it runs changes.
             """
@@ -51247,7 +51270,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 200 tracked files (742 distinct
+# ABSOLUTE line number from 200 tracked files (744 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

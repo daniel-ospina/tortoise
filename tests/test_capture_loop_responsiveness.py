@@ -3398,7 +3398,11 @@ def test_the_org_projection_is_resolved_on_the_loop_not_in_the_pooled_checkpoint
         raise AssertionError(
             "_maybe_apply_completion resolved `_org_proj` — that builds an SDK "
             "(`_make_sdk`) and this call is reachable from a POOLED worker, "
-            "where the store path comes from a stale inherited stamp (#7500)")
+            "where the store path comes from a stale inherited stamp (#7500). "
+            "SCOPE: this gate covers `_maybe_apply_completion`'s OWN resolution. "
+            "The receipt write's registry CAS still constructs `_make_sdk` on "
+            "this pool — a DECLARED residual named at its call site in "
+            "`_capture_session_impl`, not a licence to resolve one here.")
 
     monkeypatch.setattr(ha_mod, "_org_proj", _forbidden)
     assert ha_mod._maybe_apply_completion(

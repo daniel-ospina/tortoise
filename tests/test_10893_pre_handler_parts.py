@@ -338,11 +338,26 @@ def test_the_snapshot_carries_the_decomposition_to_its_publication_site(monkeypa
 
 
 def test_an_unmeasured_pre_handler_publishes_no_part_table_at_all(monkeypatch):
-    """ABSENT beats an empty table: "no boundary observed" ≠ "observed, free"."""
+    """ABSENT beats an empty table: "no boundary observed" ≠ "observed, free".
+
+    ⛔ THE PART MUST BE NON-ZERO **AND** THE READ PATH MUST BE UNSTARTED for this
+    row to be about the ``_armed`` gate (#14086 review, round 2 P3). The previous
+    version marked under a frozen clock, so every part was ``0.0`` and
+    ``_published``'s ``ms > 0.0`` filter produced the absence by itself: deleting
+    the gate from BOTH ``parts_ms()`` and ``snapshot()`` left it green, i.e. the
+    row could not fail for the reason it names. Here a note accrues 500 ms with
+    NO mark, which is the real unmeasured state (the ``middleware``/``dispatch``
+    notes land before the handler's first mark), so the gate is the only thing
+    producing the absence.
+    """
     clock = {"t": 0.0}
     monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
     stages = begin(started_at=0.0)
-    stages.mark(STAGE_EMBED_GET)     # zero-length pre_handler: every part is 0.0
+    clock["t"] += 0.5
+    stages.note("dispatch")          # accrued, but the read path has NOT started
+    assert stages._parts == {"dispatch": 500.0}, (
+        "the fixture stopped accruing a part — this row would be vacuous again "
+        f"(internal parts: {stages._parts!r})")
     assert stages.parts_ms() == {}
     with request_stages(stages):
         view = stage_view()
