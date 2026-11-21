@@ -1152,6 +1152,99 @@ def test_the_two_silences_the_comments_name_are_measured_not_hoped():
             "comment's '`as yet` is outside the list' example becomes true again")
 
 
+def test_every_preposition_the_module_declares_reports_the_qualifier_it_introduces():
+    r"""The PREPOSITION class has ONE home, and BOTH consumers are measured (round-25).
+
+    #14033's defect is a state cue that does not fire and says nothing, and the
+    ``is_copula`` subject guard and the notice's :data:`_BLOCKED_TAIL` each decide
+    whether ``<participle> <prep> the <noun>`` is a refused constraint. Each carried
+    its OWN hand-typed preposition run, and the two copies drifted twice — both
+    caught by review, both after the fact:
+
+    * round-1 P1 — ``is the export archived by the vendor`` was SILENT while
+      ``… retired by legal`` (a bare-noun qualifier) was reported;
+    * round-2 P2 — ``during``/``until``/``as``/``than`` were still silent after
+      that fix, and the prose above the guard claimed the class was closed.
+
+    A third hand-typed copy drifts a third time, so both sites now interpolate
+    :data:`state_intent._PREPOSITIONS` and this test drives EVERY member through the
+    detector. Drop one member from EITHER site and its row goes back to
+    ``signal=None`` — which is why the pin is a loop over the declared class rather
+    than a handful of examples (the earlier pins were examples, and that is how the
+    first two omissions got through).
+
+    ⛔ The DELIBERATE omissions are pinned too, so a later reader sees a decision
+    rather than an oversight: ``after``/``before``/``since`` are prepositions AND
+    subordinators, and their silence is the guard-A trade the module records.
+    """
+    from tortoise import state_intent
+    from tortoise.state_intent import detect_state_question
+
+    declared = state_intent._PREPOSITIONS
+    assert len(declared) >= 40, (
+        f"the declared preposition class collapsed to {len(declared)} members "
+        f"({declared!r}) — a list that short cannot be the class its prose names")
+    assert len(set(declared)) == len(declared), (
+        "a duplicated member is a copy-paste artefact, not a class")
+
+    for prep in declared:
+        # …the shape this PR adds, whose guard read a prepositional qualifier as a
+        # second noun phrase and swallowed the cue.
+        got = detect_state_question(f"is the export archived {prep} the migration")
+        assert got.population is None, (
+            f"{prep!r}: the qualifier was ROUTED to {got.population!r} — a narrowing "
+            f"the read cannot apply is a silently-dropped constraint. If the class is "
+            f"deliberately wider than the notice, it must not be: the notice is the "
+            f"only channel that tells the caller the cue did not fire")
+        assert got.signal == "is_copula", (
+            f"{prep!r}: `is the export archived {prep} the migration` reports "
+            f"{got.signal!r}, not 'is_copula' — that is #14033's own defect (a state "
+            f"cue that does not fire and says nothing) on the shape this PR adds. "
+            f"Both the `is_copula` subject guard and `_BLOCKED_TAIL` interpolate "
+            f"`_PREPOSITIONS`, so this word was dropped from one of them")
+
+        # …and the notice is not `is_copula`-only: `_BLOCKED_TAIL` is the tail every
+        # tail-anchored shape swaps its end anchor for, so the SAME word must reach the
+        # notice on a different shape — the second consumer, measured separately. (The
+        # `has <subject> been <participle>` spelling reports `is_copula`, whose perfect
+        # branch claims it first; the relative-clause window is what makes it `existence`.)
+        other = detect_state_question(
+            f"has anything we promised been withdrawn {prep} legal")
+        assert other.population is None, (prep, other)
+        # WHICH existence row reports is the window guard's business (`as` trips the
+        # guarded shape and its unguarded twin reports) — the property this pin owns is
+        # the one the class fixes: the word reaches the notice instead of going silent.
+        assert other.signal in ("existence", "existence_unguarded"), (
+            f"{prep!r}: `has anything we promised been withdrawn {prep} legal` "
+            f"reports {other.signal!r} — the shape's own notice lost this preposition, "
+            f"which `_BLOCKED_TAIL` inherits from `_PREPOSITIONS`")
+
+    # ⛔ THE DEPARTURE, PINNED SO IT READS AS A DECISION: these three are prepositions
+    # in this position and still SILENCE the shape, because guard A refuses a
+    # subordinator inside the subject and cannot tell a tail from a subject without
+    # bounding itself at the participle (measured to re-route the round-16 hijack).
+    # The notice is genuinely still owed for them — the module says so — and the day
+    # that is closed, this block is what has to change.
+    for overlap in ("after", "before", "since"):
+        assert overlap not in declared, (
+            f"{overlap!r} is a subordinator overlap — admitting it to the class is a "
+            f"behaviour decision (it changes what `is the export archived "
+            f"{overlap} the merger` reports), not a list completion")
+        got = detect_state_question(f"is the export archived {overlap} the merger")
+        assert got.population is None and got.signal is None, (
+            f"{overlap!r} now reports {got.signal!r}: if the subordinator silence was "
+            f"deliberately closed, say so in the guard-B note and in `_BLOCKED_TAIL`'s "
+            f"limit paragraph, which both state it as still owed")
+
+    # …and the particles must NOT be in it: `what ended up happening` is a content
+    # query and `up` is a particle, not a preposition in that position.
+    for particle in ("up", "down", "off"):
+        assert particle not in declared, (
+            f"{particle!r} is a particle (`what ended up happening`), not a "
+            f"preposition introducing a narrowing — its admission reports a content "
+            f"query as a state cue")
+
+
 def test_a_relative_clause_in_the_perfect_still_routes():
     r"""The pronoun lookahead must not swallow the RELATIVE clause (#14033 round-15).
 

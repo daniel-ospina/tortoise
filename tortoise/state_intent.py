@@ -331,6 +331,50 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 
 _TAIL_END = r"\s*[?.!]*$"
 
+#: ⛔ THE PREPOSITION CLASS THIS MODULE'S CLOSED LISTS ARE BUILT FROM — ONE HOME.
+#: Prepositions are a CLOSED class (the `ADP` tag in the universal tag set; roughly
+#: fifty single-word English members, and the multi-word forms are excluded on purpose
+#: because both consumers here match a qualifier's FIRST word only), so a curated list
+#: is the right mechanism in a module that deliberately carries no POS tagger. But the
+#: class was typed out TWICE — once in :data:`_BLOCKED_TAIL` (the tail every tail-anchored
+#: shape swaps its end anchor for) and once in the `is_copula` subject guard — and the
+#: two copies drifted twice, each time caught by review only AFTER the fact:
+#:
+#: * round-1 P1 — `is the export archived by the vendor` was SILENT (neither routed
+#:   nor reported) while the bare-noun spelling `… retired by legal` WAS reported,
+#:   because the guard knew `of` and nothing else;
+#: * round-2 P2 — `during`, `until`, `as` and `than` were still silent after that
+#:   fix, while the prose above the guard claimed the class was closed.
+#:
+#: A third hand-typed copy drifts a third time, so BOTH sites now interpolate this
+#: tuple (:data:`_PREPOSITION_RE`), and the membership is pinned by driving every
+#: member through the detector — see
+#: `tests/test_13557_13558_reachable_reads.py::test_every_preposition_the_module_declares_reports_the_qualifier_it_introduces`.
+#: ⛔ THE DELIBERATE OMISSIONS ARE NAMED, so the departure reads as a decision rather
+#: than an oversight: `after`, `before` and `since` are prepositions AND subordinators;
+#: guard A refuses a subordinator inside the subject and cannot tell a tail from a
+#: subject without bounding itself at the participle (measured to re-route the
+#: round-16 hijack), so those three still SILENCE the `is_copula` shape and the notice
+#: for them is genuinely still owed — stated on the guard-B note. `up`/`down`/`off`
+#: are particles in the positions this module matches (`what ended up happening` is a
+#: content query and must stay quiet), and `like`/`following` are ambiguous enough to
+#: stay out of a list whose false positives land on content searches.
+_PREPOSITIONS = (
+    "about", "above", "across", "against", "along", "alongside", "amid",
+    "amidst", "among", "amongst", "around", "as", "at", "behind", "below",
+    "beneath", "beside", "besides", "between", "beyond", "by", "concerning",
+    "despite", "during", "except", "for", "from", "in", "inside", "into",
+    "near", "notwithstanding", "of", "on", "onto", "outside", "over", "past",
+    "per", "regarding", "than", "through", "throughout", "till", "to", "toward",
+    "towards", "under", "underneath", "unlike", "until", "upon", "via", "with",
+    "within", "without",
+)
+
+#: :data:`_PREPOSITIONS` as a regex alternation, LONGEST FIRST so a member that is a
+#: prefix of another (`toward`/`towards`) cannot win the alternation and then fail the
+#: `\b` that follows it.
+_PREPOSITION_RE = "|".join(sorted(_PREPOSITIONS, key=lambda w: (-len(w), w)))
+
 #: …and the tail a BLOCKED state question has INSTEAD of the end: punctuation, or
 #: a FUNCTION WORD the caller appended (`by legal`, `in Q3`, `when challenged`).
 #: ⛔ This is what keeps the notice off an ATTRIBUTIVE use — `is the archived
@@ -345,11 +389,16 @@ _TAIL_END = r"\s*[?.!]*$"
 #: is one, so it is REPORTED). The members are the ones a customer
 #: actually appends to an ending question — prepositions that introduce a narrowing,
 #: conjunctions, determiners, and the boundary-free time adverbs.
+#: ⛔ THE PREPOSITION SEGMENT IS INTERPOLATED FROM :data:`_PREPOSITIONS`, not typed
+#: again: it and the `is_copula` subject guard each carried their own copy of the class
+#: and drifted twice (round-1 P1, round-2 P2). One home, two consumers, and a pin that
+#: drives every member through the detector.
 _BLOCKED_TAIL = (
-    r"(?=\s*(?:[,;:—–]|[?.!]|$|\b(?:in|on|at|by|for|from|with|to|of|about|over|"
-    r"against|regarding|concerning|toward|towards|and|or|but|so|yet|that|which|"
-    r"when|where|who|if|as|than|because|while|after|before|during|since|until|"
-    r"per|last|next|this|these|those|yesterday|today|tomorrow|recently|lately|"
+    r"(?=\s*(?:[,;:—–]|[?.!]|$|\b(?:"
+    + _PREPOSITION_RE
+    + r"|and|or|but|so|yet|that|which|"
+    r"when|where|who|if|because|while|after|before|since|"
+    r"last|next|this|these|those|yesterday|today|tomorrow|recently|lately|"
     r"already|ever|now|still|previously|earlier|afterwards|once|then|anymore|"
     r"ago)\b))"
 )
@@ -792,22 +841,29 @@ _COPULA_SUBJECT = (
     # question that is indistinguishable from "nothing has ended") reproduced on the
     # shape this PR ADDS. The pinned row that should have caught it pins only
     # `… retired by legal`, the `<prep> <bare noun>` spelling — the one shape the
-    # guard happened to let through. So every PREPOSITION `_BLOCKED_TAIL` names is
-    # now excluded here, which is what makes a reported qualifier of that form
-    # reportable instead of swallowed by a guard looking past the participle.
-    # ⛔ EVERY PREPOSITION, AND NO MORE THAN THAT (round-2 review, P2, measured):
-    # `during`, `until`, `as` and `than` are `_BLOCKED_TAIL` members this list
-    # omitted, so `is the export archived during the migration` and `… until the
-    # merger` were STILL silent while the first draft of this comment claimed the
-    # class was closed — the same over-claim, one level down. They are in the list
-    # now. What is NOT covered is stated rather than implied: a CONJUNCTION or
-    # SUBORDINATOR member of `_BLOCKED_TAIL` (`because`, `since`, `when`, `if`,
-    # `and`, …) still silences this shape, because guard A refuses inside the
+    # guard happened to let through. So the PREPOSITION CLASS is excluded here, and
+    # it is not typed here: it is interpolated from :data:`_PREPOSITIONS`, which is
+    # what makes a reported qualifier of that form reportable instead of swallowed by
+    # a guard looking past the participle.
+    # ⛔ ONE HOME, TWO CONSUMERS (round-25, measured — the third round on this class).
+    # This list and `_BLOCKED_TAIL` each carried their OWN hand-typed copy of the class,
+    # so each round fixed the copy the reviewer happened to probe and left the other
+    # short: round-1 P1 (`by the vendor`) and round-2 P2 (`during`/`until`/`as`/`than`)
+    # were both drift between the two, and the prose here claimed the class closed
+    # while `despite`, `without`, `within`, `under`, `through`, `across`, `between`,
+    # `via`, `near`, `beyond`, `upon`, `around`, `above`, `below` … all still came back
+    # `signal=None` — measured, on the unchanged head. Both sites now interpolate
+    # `_PREPOSITIONS`, and the membership is pinned by driving every member through the
+    # detector, so a fourth drift reddens instead of shipping.
+    # ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: a CONJUNCTION or SUBORDINATOR
+    # (`because`, `when`, `if`, `and`, and the three words that are both — `after`,
+    # `before`, `since`) still silences this shape, because guard A refuses inside the
     # subject and cannot tell a tail from a subject without bounding itself at the
-    # participle — measured to re-route the round-16 hijack.
-    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of|"
-    r"in|on|at|by|for|from|with|to|about|over|against|regarding|concerning|"
-    r"towards|toward|per|during|until|as|than|"
+    # participle — measured to re-route the round-16 hijack. Those three are the notice
+    # genuinely still owed, which is why they stand OUTSIDE `_PREPOSITIONS` rather than
+    # being quietly counted as covered by it.
+    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|"
+    rf"{_PREPOSITION_RE}|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
