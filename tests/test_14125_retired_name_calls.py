@@ -435,7 +435,8 @@ def _handler_names(handler: ast.ExceptHandler) -> set[str]:
 
 
 def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
-    """Whether some handler here CATCHES anything (bare or `Exception`) and DROPS it.
+    """Whether some handler here CATCHES anything (bare, `Exception`/`BaseException`,
+    or one of `_RAISED`) and DROPS it.
 
     Whether the handler re-raises is part of the question, not a separate one:
     the property is *"the programming error never reaches the caller"*, and a
@@ -487,10 +488,11 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     property as one four-name tuple and must not be redded for its shape. The
     broad arm is never coverage: it is what swallows the rest.
 
-    A handler only COUNTS when its body is a bare `raise`. Naming a programming
-    error in the clause is not the property — `except ImportError: return False`
-    names the seam and then swallows it, and counting the name would let a probe
-    pass this gate with exactly the behaviour it exists to forbid.
+    A handler only COUNTS when its LAST statement re-raises its own caught exception —
+    a bare `raise`, `raise exc`, or a chained `raise X from exc` (see `_reraises`) — and
+    never when it merely NAMES a programming error in the clause: `except ImportError:`
+    `return False` names the seam and then swallows it, and counting the name would let a
+    probe pass this gate with exactly the behaviour it exists to forbid.
 
     ⛔ ORDER IS PART OF THE PROPERTY (review F2, and it was still open at
     `9b7ac6ee8d`). Python tests `except` clauses in source order and runs only
@@ -3571,8 +3573,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     `4j-vicesimus-bis` (`outermost iterable`, `later generator iterable`), and the
     #     header/definition-scope rows. The same error forbids every one of those shapes,
     #     which is why the set is NAMED BY FAMILY and NOT counted — an explicit "two" for
-    #     the class-body family was itself off by one at the next head, because a sibling
-    #     had added the nested-class-body row in between.
+    #     the class-body family was already wrong WHEN WRITTEN: the `4j-sesvicesimus`
+    #     nested-class-body row was present at that head (a sibling had added it in an
+    #     earlier commit, `69a92755b21e`), so it was short on arrival rather than outgrown.
     #     ⛔ NO TOTAL IS RESTATED HERE, and that is the correction, not an omission. This
     #     sentence carried one four times ("one", "three", "four", "five") and each was
     #     falsified by the next commit that added a row: the flip set GROWS with the file,
