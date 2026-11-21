@@ -802,7 +802,10 @@ SWEEP_NAMES = 66
 #: ⛔ BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE — every block is true of the tree it names, and a
 #: reader re-deriving this pin needs the whole chain. There is exactly ONE assignment after them, and
 #: it is MEASURED on this merged tree with `--repin`, never computed from either parent's pair: the
-#: tree prints (11845, '1797f10f33f3441c'). Neither parent carries it — a merged tree is a THIRD tree,
+#: tree prints (11853, '6fd7431f4665e801'). ⛔ The FIFTH merge tree printed (11845, '1797f10f33f3441c'),
+#: and that pair is RECORDED here rather than carried: later commits changed this file, so this sixth
+#: tree is a different tree and its pair was taken with `--repin` again instead of adjusted.
+#: Neither parent carries it — a merged tree is a THIRD tree,
 #: and the digest is what proves it. `--check` on this tree: exit 0, `typed references still pointing
 #: at a public name: 0`. ⛔ NO ROW IS ATTRIBUTED BY THE DIRECTION OF THE DELTA: a re-pin absorbs
 #: whatever shape the tree holds in EITHER direction (#14003 review, round 3, P3 / #14030), so the

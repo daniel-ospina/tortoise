@@ -382,8 +382,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # conflict resolution `4ae073f96e5` — it took `main`'s rows and the branch's paragraph, so the
     # enumeration kept `:15842`/`:16046-16050`/`:3777` while the rows moved to the spellings that
     # carry those statements at this head. One ROW per SITE, as this file requires.
-    # NON-VACUOUS: move any of the three by `+1` and the content arm reds while the token arm stays
-    # green — the document still carries the address, which is exactly the re-point this row catches.
+    # NON-VACUOUS, MEASURED both ways: re-pointing the DOC (`:15873`→`:15874`) reds the content arm AND
+    # `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` (the token string is gone); moving
+    # the ROW's line (`15873`→`15874`) reds the content arm and
+    # `test_every_pinned_row_grades_a_line_inside_the_address_its_token_names` — **2 failed, 28 passed**
+    # each way. An earlier form of this comment claimed the token arm "stays green"; it does not.
     (_AUDIT, '`:15873`', _SDK, 15873, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
     (_AUDIT, '`:16077-16081`', _SDK, 16077, '**JSONL event log (#548):** written when *point* is provided'),
     (_AUDIT, '`:3801`', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
@@ -713,9 +716,12 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     ⛔ It does NOT prove the figures are CURRENT: a figure goes stale the moment this file gains or loses a
     cite, and this test would happily pass over a newly-wrong number. Re-measuring is the header's own
     instruction, and `test_the_published_denominator_is_the_count_of_this_file` below is the half of that
-    which CAN be checked without history; the NUMERATOR (the drifter count) cannot be, because it compares
-    two historical blobs: `git show <head>:<path> | sed -n '<N>p'` at each of them, text for text — that
-    rule is what this revert guard's literals are a change-detector for, not a re-measurement of.
+    which CAN be checked without history. The NUMERATOR (the drifter count) compares two historical
+    blobs — `git show <head>:<path> | sed -n '<N>p'` at each of them, text for text — and this file NOW
+    re-derives it too, in `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried` (and,
+    in a shallow checkout, through that arm's history-free `comparable + incomparable == pairs`
+    identity). So these literals are a change-detector for the RENDERING of the figures, not the only
+    measurement of them.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
@@ -859,8 +865,8 @@ def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
     return out.stdout.splitlines()
 
 
-def _re_derived_drift(text: str, repo: Path = REPO) -> tuple[int, int, int, int] | None:
-    """(pairs, comparable, drifted, drifters) re-derived from the pin blob — `None` if history is unreadable.
+def _re_derived_drift(text: str, repo: Path = REPO) -> tuple[int, ...] | None:
+    """(pairs, comparable, drifted, drifters, alt_pairs, alt_comparable, alt_drifted, alt_drifters).
 
     The header's own rule, as code: a pair is COMPARABLE when its written line exists at the pin, and
     DRIFTED when that line's text differs at this head; the drifters are the drifted comparable pairs
@@ -888,7 +894,35 @@ def _re_derived_drift(text: str, repo: Path = REPO) -> tuple[int, int, int, int]
         comparable += 1
         if line > len(head) or pin[line - 1] != head[line - 1]:
             drifted += 1
-    return len(pairs), comparable, drifted, drifted + (len(pairs) - comparable)
+    # ⛔ The ALTERNATIVE basis is RE-DERIVED from the union set, never `drifters + extra_pairs`: an
+    # added pair can be UNDRIFTED, so that addition publishes a figure the tree never measured. Before
+    # this, the only guard on it was a BAND around the addition (`#13599`), which accepts any numerator
+    # the band still contains.
+    union = pairs | _two_span_pairs(text, repo)
+    alt_comparable = alt_drifted = 0
+    for path, line in sorted(union):
+        pin = _pin_blob_lines(path)
+        if pin is None:
+            return None
+        head_path = repo / path
+        if not head_path.is_file():
+            continue
+        head = head_path.read_text(encoding="utf-8").splitlines()
+        if not pin or line > len(pin):
+            continue
+        alt_comparable += 1
+        if line > len(head) or pin[line - 1] != head[line - 1]:
+            alt_drifted += 1
+    return (
+        len(pairs),
+        comparable,
+        drifted,
+        drifted + (len(pairs) - comparable),
+        len(union),
+        alt_comparable,
+        alt_drifted,
+        alt_drifted + (len(union) - alt_comparable),
+    )
 
 
 def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> None:
@@ -904,30 +938,85 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
     header states — so a denominator-only edit reds HERE instead of shipping. That is the same class as
     the `#13599` finding (a figure nothing re-derived) one level up.
 
-    NON-VACUOUS, measured at this head: restoring the pre-fix "159 of this document's 229" while keeping
-    the corrected `229` reds THIS test. SKIPPED — not failed — when the pin's blobs are unreadable (a
-    shallow clone): that is a fact about the checkout, not about the document.
+    ⛔ NOT A SILENT SKIP (#13802's ruling, `tests/test_docs_citation_refs.py:1219` — the INERT-ENFORCER
+    shape). Every job that runs a suite checks out at `actions/checkout@v4`'s DEFAULT `fetch-depth: 1`,
+    and `ccb49741b2ec` is contained by NO branch (`git for-each-ref --contains ccb49741b2ec` →
+    `refs/review/13095head` alone), so `pytest.skip` here would assert NOTHING in the only place the rail
+    reads this file. When the pin is unreadable the arm therefore grades the HISTORY-FREE identity the
+    shipped defect violated — `comparable + incomparable == pairs`, and `drifted + incomparable ==
+    drifters` — which needs no history and reds the `#14038` cycle-4 figures exactly
+    (`222 + 9 = 231` beside a 227-pair denominator). With history available it re-derives both bases in
+    full, including the ALTERNATIVE one from the union set rather than `drifters + extra_pairs`.
+
+    NON-VACUOUS, measured at this head BOTH ways: (a) restoring the pre-fix `159`/`150`/`222` while
+    keeping the corrected denominator reds THIS test; (b) mutating `all 218 comparable ones` to `222`
+    fails the history-free identity with "the halves do not add up to the whole", and (c) in a real
+    `--depth 1` clone of this head the arm RUNS (no skip) and passes on that identity.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    body = _unbolded(text)
+    quadruple = _QUADRUPLE.search(body)
+    assert quadruple, (
+        "the header no longer publishes `N written spellings → P pairs → C collisions → D drifters of "
+        "the M`, so this arm has no ratio to grade. Restore the sentence rather than deleting the arm."
+    )
+    _spellings, pairs, _collisions, drifters, _of = map(int, quadruple.groups())
+    split = re.search(r"(?i)the drift is (\d+) of the (\d+) comparable, plus all (\w+) of the", body)
+    comparable_said = re.search(r"all (\d+) comparable ones resolve at BOTH heads", body)
+    drifted_said = re.search(r"(\d+) of the (\d+) comparable", body)
+    assert split and comparable_said and drifted_said, (
+        "the header no longer publishes the comparable SPLIT (`N of the M comparable, plus all W of the "
+        "… not comparable` / `all M comparable ones`), which is the history-free half of this arm — the "
+        "half a `fetch-depth: 1` checkout can actually grade."
+    )
+    incomparable_word = split.group(3).lower()
+    assert incomparable_word in _NUMERALS, (
+        f"the header counts the non-comparable addresses as {incomparable_word!r}, which is not in "
+        "`_NUMERALS` — a count this arm cannot read is a count nothing grades."
+    )
+    # ⛔ `_as_int`, never `_SPELLED_NUMERALS.index`: that tuple carries `zero` AND `none` first, so an
+    # index is off by one from `one` onward (`nine` → 10). Measured: the first cut used `.index()` and
+    # red on a CORRECT header.
+    incomparable = _as_int(incomparable_word)
+    # (1) HISTORY-FREE — the arm the CI shape gets. The halves must add up to the whole.
+    assert int(comparable_said.group(1)) + incomparable == pairs, (
+        f"the header publishes {comparable_said.group(1)} comparable + {incomparable} non-comparable "
+        f"against a {pairs}-pair denominator — the halves do not add up to the whole. That is the "
+        "`#14038` cycle-4 defect exactly (`222 + 9 = 231` beside a 229-pair population): a "
+        "denominator-only edit leaves both halves stale and every arm green."
+    )
+    assert int(drifted_said.group(1)) + incomparable == drifters, (
+        f"the header publishes {drifted_said.group(1)} drifted comparable + {incomparable} "
+        f"non-comparable but a {drifters}-drifter numerator — the numerator and its own split disagree."
+    )
+    # (2) WITH HISTORY — re-derive both bases from the pin's blobs.
     derived = _re_derived_drift(text)
     if derived is None:
-        pytest.skip(
-            f"this checkout cannot read `{_DRIFT_PIN}`'s blobs (shallow clone?), so the drifter "
-            "numerator cannot be re-derived here"
-        )
-    pairs, comparable, drifted, drifters = derived
-    body = _unbolded(text)
+        return  # the identity above is the graded arm in a shallow checkout (#13802 forbids a skip)
+    (
+        pairs_d,
+        comparable_d,
+        drifted_d,
+        drifters_d,
+        alt_pairs_d,
+        alt_comparable_d,
+        alt_drifted_d,
+        alt_drifters_d,
+    ) = derived
     for claim in (
-        f"{drifters} of this document's {pairs}",
-        f"The drift is {drifters} of those {pairs}",
-        f"all {comparable} comparable ones resolve at BOTH heads",
-        f"{drifted} of the {comparable} comparable",
+        f"{drifters_d} of this document's {pairs_d}",
+        f"The drift is {drifters_d} of those {pairs_d}",
+        f"all {comparable_d} comparable ones resolve at BOTH heads",
+        f"{drifted_d} of the {comparable_d} comparable",
+        f"{alt_pairs_d} pairs and {alt_drifters_d} drifters",
+        f"{drifters_d} and {alt_drifters_d} are one measurement",
     ):
         assert claim in body, (
             f"the header does not carry {claim!r}, which is what THIS head measures against the pin "
-            f"`{_DRIFT_PIN}` ({pairs} pairs, {comparable} comparable, {drifted} drifted, {drifters} "
-            "drifters). Re-measure the figure by the header's own rule and update BOTH the numerator "
-            "and its cross-references — never adjust an older number by an offset."
+            f"`{_DRIFT_PIN}` ({pairs_d} pairs, {comparable_d} comparable, {drifted_d} drifted, "
+            f"{drifters_d} drifters; alternative basis {alt_pairs_d}/{alt_comparable_d}/"
+            f"{alt_drifted_d}/{alt_drifters_d}). Re-measure the figure by the header's own rule and "
+            "update BOTH the numerator and its cross-references — never adjust an older number by an offset."
         )
 
 
@@ -2029,7 +2118,8 @@ def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them()
     token carries, so a token naming two unrelated addresses became a range spanning the gap: the
     arm accepted the `58316` neither address names. That is the same false PASS this arm exists to
     refuse — a row asserting an address the document does not carry — so it is refused here rather
-    than recorded as a residual. Measured on the shipped tree: 0 of 112 rows carries more than one
+    than recorded as a residual. Measured on the shipped tree: 0 of the rows this arm scans (`_PINS` ∪
+    `_MAIN_SET_MISSED`) carries more than one
     address, so no row's verdict moves.
     """
     between = (_AUDIT, "`:58315`/`:58317`", _SDK, 58316, "rows = proj.g.query(")
@@ -2049,7 +2139,12 @@ def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
 
     On the PRE-FIX code `_token_span` returned `None` for a token with no digits and the loop
     `continue`d, so such a row was silently exempt from the arm — the gate vouching for a claim it
-    never read. Measured on the shipped tree: 0 of 112 rows has a token with no address.
+    never read. Measured on the shipped tree: 0 of the rows this arm scans has a token with no address.
+
+    ⛔ NO ROW COUNT HERE ON PURPOSE: an earlier form said "0 of 112", then the peer lane added three
+    `_PINS` rows and the sentence was silently two rows stale — the same unverified-literal class this
+    file exists to catch, in prose (the `#14038` cycle-5 review's finding, applied to the count's own
+    text rather than to a figure). The arm scans whatever `_PINS ∪ _MAIN_SET_MISSED` holds.
     """
     unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37547, "``:Document`` node).")
     assert _rows_outside_their_token((unaddressed,)), (
@@ -2580,9 +2675,9 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     ("entities.py:2419-2420", "tortoise/projection/entities.py", 2420, "# `update_point(<id>, story_arc=None)` \u2014 #11325, and only on the rows ", 1),
     ("entities.py:3177", "tortoise/projection/entities.py", 3177, "set_clauses.append(\"n.sourceVersionTransit=$sv\")", 1),
     ("entities.py:3982", "tortoise/projection/entities.py", 3982, "\"MERGE (s:Session {id:$sid}) SET s.is_episodic=true\",", 1),
-    (":3295-3297", "tortoise/projection/entities.py", 3297, "self._POINT_HANDLED | self._POINT_DENY,", 1),
-    (":3339", "tortoise/projection/entities.py", 3339, "for key in self._POINT_DENY - self._POINT_HANDLED:", 1),
-    (":3389", "tortoise/projection/entities.py", 3389, "or key in self._POINT_DENY or key in self._META_KEYS:", 1),
+    (":3295-3297", "tortoise/projection/entities.py", 3297, "self._POINT_HANDLED | self._POINT_DENY,", 2),
+    (":3339", "tortoise/projection/entities.py", 3339, "for key in self._POINT_DENY - self._POINT_HANDLED:", 2),
+    (":3389", "tortoise/projection/entities.py", 3389, "or key in self._POINT_DENY or key in self._META_KEYS:", 2),
 )
 
 
