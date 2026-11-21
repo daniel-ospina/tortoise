@@ -508,7 +508,7 @@ def test_an_unapproved_threshold_has_no_copy():
     (0, 102, 0),
     (40.8, 102, 40),
     (81.6, 102, 80),      # 80 % exactly, floored
-    (101.9, 102, 99),     # 99.9 % is NOT 100 % — the cap-at-99 rule
+    (101.9, 102, 99),     # 99.9 % is NOT 100 % — below the allowance floors to 99
     (102, 102, 100),
     (153, 102, 100),
     (5, 0, None),         # unarmed tier: nothing to be a percentage OF
@@ -657,6 +657,50 @@ def test_an_already_notified_account_is_never_emailed_again():
     assert summary["sent"] == 0
     assert summary["statuses"]["already-notified"] == 1
     assert send.calls == []
+
+
+def test_a_finished_80_pass_pays_no_render_and_no_pre_send_reread(monkeypatch):
+    """The ledger gate answers BEFORE the render and the pre-send mark re-read.
+
+    ⛔ THIS ROW EXISTS BECAUSE NOTHING ATTRIBUTED THAT GATE (#14038 review,
+    mutation pass). Mark 80, gauge still at 80: the gate returns
+    `already-notified` — but with its comparison weakened to `<`, or with the
+    whole block deleted, EVERY other row in this file stayed green (measured),
+    because the pre-send re-read re-decides the same threshold and there is no
+    send either way. What differs is what a finished pass COSTS: a render and one
+    control-plane round trip. So the row watches those two effects directly,
+    which is what makes it red when the gate goes rather than a restatement of
+    the status it returns.
+    """
+    cp = _fake_cp(storage_notice_pct=80)
+    send = _Sender()
+    rendered: list[int] = []
+    rereads: list[str] = []
+    real_render = cn.render
+
+    def spy_render(threshold, first_name):
+        rendered.append(threshold)
+        return real_render(threshold, first_name)
+
+    monkeypatch.setattr(cn, "render", spy_render)
+    monkeypatch.setattr("tortoise.supabase_control.org_storage_notice_pct",
+                        lambda cp_, org_id: rereads.append(org_id) or 80)
+    from unittest.mock import patch
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(81.6)):
+        out = _pass(cp=cp, send=send,
+                    enumerate_orgs=lambda limit=None: [
+                        _org_row(storage_notice_pct=80)])
+    assert out["statuses"]["already-notified"] == 1
+    assert send.calls == []
+    assert rendered == [], (
+        "the ledger gate rendered copy for a threshold the mark already covers — "
+        "`render` here is work a re-run of a finished pass must not pay")
+    assert rereads == [], (
+        "the ledger gate fell through to the pre-send mark re-read for a threshold "
+        "the mark already covers — that re-read is the extra round trip the gate "
+        "exists to skip")
 
 
 def test_a_failed_send_does_not_stamp_and_is_retried():

@@ -982,21 +982,24 @@ SWEEP_NAMES = 66
 #: merge, so the two numbers above are stated as what they are — two other trees' pins — and not as
 #: a decomposition of this one.
 #: `--check` on this tree: exit 0, `typed references still pointing at a public name: 0`.
-#: ── RE-CUT AT THE NINTH MERGE TREE (`#13998` × `main` `69908d006b`) ───────────────
+#: ── RE-CUT AT THE NINTH MERGE TREE (`#13998` × `main` `69908d006b`) ──────────────
 #: ⛔ BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE — each is true of the tree it names, and a merged
 #: tree is a THIRD tree, so this pair is RE-DERIVED with `--repin` on the merge tree, never combined
 #: from either parent's: it prints **(11852, '52e4a15116d6f32b')**. The two parents' own pairs are
 #: (11844, '544521652dca0209') (this branch's eighth merge tree) and (11835, "891187f5a4636487")
-#: (`main` at `69908d006b`, the pair its OWN copy of this file pins). ⛔ NO ROW-BY-ROW ATTRIBUTION IS
-#: TYPED HERE, for the same reason the seventh and eighth re-cuts give: the difference against
-#: `main` was not diffed row for row for THIS merge, so the two numbers above are stated as what
-#: they are — two other trees' pins — and not as a decomposition of this one. (A REVIEW REPORTED
-#: `tools/graphevent_home.py` ×3 plus `tests/test_13094_graphevent_home.py:251` as the +8; that is
-#: FOUR of them, and `docs/evidence/13094-graphevent/measure_graphevent_residency.py` carries the
-#: other four (`:122`, `:141`, `:147`, `:154`) — so the count is right and the attribution typed in
-#: that finding was incomplete. Stated rather than silently adopted, and not promoted into a row
-#: decomposition this lane did not measure.) All eight arrive with `main`'s `#13094` fold
-#: (`f9f480a55a`), not with this branch's own changes.
+#: (`main` at `69908d006b`, the pair its OWN copy of this file pins). Neither the count nor the
+#: digest is either parent's, which is the field that proves a third tree rather than a sum. ⛔ NO
+#: ROW-BY-ROW ATTRIBUTION IS TYPED HERE: the difference against `main` was not diffed row for row for
+#: THIS merge, so the two numbers above are stated as what they are — two other trees' pins — and
+#: not as a decomposition of this one.
+#: ⛔ THIS RE-CUT WAS MEASURED TWICE, INDEPENDENTLY, AND THE PAIR AGREED. Two lanes re-cut this same
+#: merge tree without seeing each other's pin (`--repin` returned 11852 / `52e4a15116d6f32b` both
+#: times), which is the corroboration one measurement cannot supply. What the second lane adds is a
+#: CORRECTION to a review that reported this delta: the +8 was attributed to four sites
+#: (`tools/graphevent_home.py` ×3 plus `tests/test_13094_graphevent_home.py:251`), but
+#: `docs/evidence/13094-graphevent/measure_graphevent_residency.py` carries the other four (`:122`,
+#: `:141`, `:147`, `:154`). The count was right and the attribution in that finding was incomplete —
+#: recorded, not adopted, and still not promoted into a row decomposition this pin does not claim.
 #: `--check` on this tree: exit 0, `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
 
