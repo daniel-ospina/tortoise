@@ -704,9 +704,14 @@ SWEEP_NAMES = 66
 #: So 11839 + 12 = 11851 and 11843 + 8 = 11851 — a CROSS-CHECK of three measurements, never the
 #: evidence for the pin. Both lanes that re-cut this file at this tree printed the same pair.
 #: RE-CUT → (11851, "f1ba9f2563209e40") on the SECOND `origin/main` merge into this branch
-#: (`2fe01fc775e`, the `#13337` merge, `#13994`), measured with `--repin` on that merged tree
+#: (`2fe01fc775e`, the `#13337` merge, `#14068`), measured with `--repin` on that merged tree
 #: rather than taken from either side: the pin is graded on PULL REQUESTS only, so `main`'s
 #: own tree drifts under every merge it lands and neither side carries this tree's number.
+#: ⛔ THAT PARENTHETICAL READ `#13994` AND WAS WRONG (review, round 12): `git log -1 --format=%s`
+#: on `2fe01fc775e` reads `fix(12943): … (#13337) (#14068)`, so its PRs are `#13337` and `#14068`;
+#: `#13994` is `e0accb8fe6`, a LATER commit that is not an ancestor of that tree. The block names
+#: this tree `#14068` seven other times, so the wrong number made it give two answers for one
+#: address — an address that resolves to a different tree, which is the class this block polices.
 #: Rule unchanged: re-derive with `--repin` on YOUR tree, never by arithmetic on the last pin.
 #: RE-CUT AGAIN → (11845, "d86902194b3dbbbb") — a **SHRINK of 6**, and every row is named, because
 #: a shrink is not evidence on its own (see the -1 above). The three module-level availability probes

@@ -241,6 +241,13 @@ RESIDUE_CARRIER_COUNT = 6               # interval trees still holding `seen.upd
 # Word forms, so a change to either constant can never leave the prose silently mismatched.
 RESIDUE_COUNT_WORDS = {6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE"}
 
+# The re-cut pair and the TREE that derives it (review, round 13, P2). The pair is `--repin`'s
+# output on `1b82cc7063` — the capture rewrite — and NOT "the pair THIS head pins": this head
+# pins `(11844, "70d6cfdcd8b769e4")`, so the relative form asserted a pair this head does not
+# carry, the very class the block fixes one sentence above for `e022fc935b`.
+RESIDUE_PAIR_REV = "1b82cc7063"         # the rewrite's own tree, which DERIVES the pair
+RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
+
 
 def _residue_block() -> str:
     """The `#:` comment block immediately above `SWEEP_RESIDUE`, as text."""
@@ -298,13 +305,28 @@ def _ref_sha(ref: str) -> str | None:
 #: PR whose thesis is falsifiability. A REFSPEC pulls the objects (`_rev_present` reads
 #: the object DB, not a ref), and `refs/pull/14108/head` carries every interval commit
 #: while `main` carries the rest.
+#:
+#: ⛔ AND SOURCE-ONLY IS STILL INERT FOR THE REF (review, round 13, P3). `git fetch origin
+#: refs/pull/14108/head` records the objects in `FETCH_HEAD` and updates NO local ref —
+#: git-fetch(1), "Refspec": a refspec with no destination "intentionally updates no local
+#: ref". Verified against the manual (git-scm.com/docs/git-fetch, "./<repository> refspec"):
+#: the documented way to get a local ref for a pull request is a DESTINATION refspec
+#: (`refs/pull/1/head:refs/remotes/origin/pr/1`). So the source-only re-arm armed
+#: `_rev_present` — which reads the OBJECT DB — while `_ref_sha("refs/pull/14108/head")"
+#: ` stayed None, and the ADDRESS/drift assertion in
+#: `test_the_history_clause_premises_hold_in_this_clone` — the only arm that re-measures the
+#: moving pointer — stayed silently UNCHECKED *while the skip message told the operator the
+#: block's addresses were now checked*. That is the round-12 inert-re-arm finding one level
+#: down, so the spec below is the form that creates exactly the ref `_ref_sha` reads:
+#: `test_the_rearm_refspec_creates_the_ref_it_promises` is the offline proof.
+_PR_HEAD_REFSPEC = "+refs/pull/14108/head:refs/pull/14108/head"
 _ARM_REFSPECS: dict[str, str] = {
-    RESIDUE_ABBREV: "refs/pull/14108/head",
-    RESIDUE_REWRITE_PARENT: "refs/pull/14108/head",
-    RESIDUE_DELETING_COMMIT: "refs/pull/14108/head",
-    RESIDUE_INTERVAL_END: "refs/pull/14108/head",
-    RESIDUE_PR_HEAD: "refs/pull/14108/head",
-    "origin/main": "main",
+    RESIDUE_ABBREV: _PR_HEAD_REFSPEC,
+    RESIDUE_REWRITE_PARENT: _PR_HEAD_REFSPEC,
+    RESIDUE_DELETING_COMMIT: _PR_HEAD_REFSPEC,
+    RESIDUE_INTERVAL_END: _PR_HEAD_REFSPEC,
+    RESIDUE_PR_HEAD: _PR_HEAD_REFSPEC,
+    "origin/main": "+main:refs/remotes/origin/main",
 }
 
 
@@ -341,12 +363,92 @@ def _quoted(block: str, start: int) -> bool:
                           re.IGNORECASE))
 
 
+def _refuted(text: str, start: int) -> bool:
+    """Does the block REFUTE the claim at `start` — quoted as a falsified draft, or negated?
+
+    The block's own shape for a corrected sentence is to QUOTE the earlier draft and call it
+    wrong (`not "the pair THIS head pins"`), or to negate it in place (`a pair this head does
+    NOT carry`, `…, and it was wrong`). Both are honest prose; neither is the claim. Everything
+    else is charged.
+    """
+    if _quoted(text, start):
+        return True
+    return bool(re.search(r"(?i)\b(?:not|never|no longer|does not|did not|wrong|false|falsified)\b",
+                          text[start:start + 70]))
+
+
 def test_the_residue_block_is_a_real_block_and_publishes_its_addresses():
-    """Non-vacuity for the arms below: the block exists and carries its addresses."""
+    """Non-vacuity for the arms below: the block exists and carries its addresses.
+
+    It also grades the addresses' OWNERSHIP: a revision the block names must be attributed to
+    the PR that produced it, never to a neighbouring one — the defect a round-12 review found
+    in ``(`2fe01fc775e`, the `#13337` merge, `#13994`)``, where the same block calls that tree
+    `#14068` seven other times, so one address was given two answers.
+    """
     block = _residue_block()
     assert block.count("\n") > 100, "the residue block is missing or truncated"
     for literal in (RESIDUE_ABBREV, RESIDUE_PR_HEAD, RESIDUE_REWRITE_PARENT):
         assert literal in block, f"{literal} is one of the block's published addresses"
+    # ⛔ NON-VACUITY IN BOTH DIRECTIONS: the tree is still attributed to its own squash, so
+    # deleting the sentence is not the fix, AND no neighbouring PR may sit beside it.
+    assert _attributions(block), (
+        f"non-vacuity: `{RESIDUE_REWRITE_PARENT}` must still be attributed to `#14068`, the "
+        "squash that landed it — dropping the attribution is not the fix")
+    bad = _misattributions(block)
+    assert not bad, (
+        f"`{RESIDUE_REWRITE_PARENT}` is attributed to {', '.join(sorted(set(bad)))}; its squash "
+        f"subject reads `(#13337) (#14068)`, so only `#14068`/`#13337` own it and `#13994` is a "
+        "later, unrelated commit — an address that resolves to a different tree is exactly the "
+        "defect this block exists to remove")
+    # The arm's own falsifier, on the PRE-FIX and fixed texts (this is what makes it
+    # non-vacuous without a git object, so it also runs in the sharded `test` job).
+    assert _misattributions("(`2fe01fc775e`, the `#13337` merge, `#13994`)"), (
+        "the PRE-FIX parenthetical must be refused — this assertion is why the fix is "
+        "falsifiable rather than a comment")
+    assert not _misattributions("(`2fe01fc775e`, the `#13337` merge, `#14068`)"), (
+        "the corrected parenthetical must pass, or the arm reds an honest block")
+    assert not _misattributions("the red `test (a)` reported on `#13994`'s shard `a`"), (
+        "`#13994` is a legitimate statement elsewhere in the block; forbidding the NUMBER "
+        "instead of the ATTRIBUTION would red it")
+
+
+#: The PRs that legitimately OWN `RESIDUE_REWRITE_PARENT`: its squash subject reads
+#: `fix(12943): read a tenant's cache graph, never derive it from the credential (#13337) (#14068)`,
+#: so `#13337` is the PR the commit came from and `#14068` the squash that landed it.
+RESIDUE_REWRITE_PARENT_PRS = frozenset({"#14068", "#13337"})
+
+#: How close a PR number must sit to a named sha to BE an attribution of it. Beyond this the
+#: block is talking about a different tree (it legitimately discusses `#14108`, `#14101`,
+#: `#14078` and `#13994` itself within a paragraph), so distance is the boundary between an
+#: attribution and a neighbouring statement — the same windowed shape the arms above use.
+_ATTRIBUTION_WINDOW = 45
+
+
+def _attributions(block: str) -> list[str]:
+    """PR numbers stated within `_ATTRIBUTION_WINDOW` characters of `RESIDUE_REWRITE_PARENT`."""
+    flow = re.sub(r"\n#:\s?", " ", block)
+    found: list[str] = []
+    for occ in re.finditer(re.escape(RESIDUE_REWRITE_PARENT), flow):
+        for pr in re.finditer(r"#[0-9]{4,6}", flow):
+            if abs(pr.start() - occ.end()) <= _ATTRIBUTION_WINDOW:
+                found.append(pr.group(0))
+    return found
+
+
+def _misattributions(block: str) -> list[str]:
+    """Attributions of `RESIDUE_REWRITE_PARENT` to a PR that did not produce it.
+
+    ⛔ AN ADDRESS THAT RESOLVES TO A DIFFERENT TREE (review, round 12, P2): the parenthetical
+    read ``(`2fe01fc775e`, the `#13337` merge, `#13994`)``. Measured,
+    `git log -1 --format='%s' 2fe01fc775e` is
+    `fix(12943): … (#13337) (#14068)`, and `#13994` is `e0accb8fe6` — ~4h later, and not an
+    ancestor of that merge tree at all. So the block gave one address two answers and the
+    parenthetical gave the wrong one.
+
+    ⛔ SHAPE, NOT PHRASE, and not a ban on the NUMBER: `#13994` is used correctly elsewhere in
+    the block (`the red `test (a)` reported on #13994's shard (a)`), which the arm must accept.
+    """
+    return [pr for pr in _attributions(block) if pr not in RESIDUE_REWRITE_PARENT_PRS]
 
 
 def _abbreviation_length_claims(block: str) -> list[tuple[str, int]]:
@@ -771,6 +873,12 @@ def test_the_pointer_arm_does_not_red_an_honest_rewording():
 _PAST_OR_MEASURED = re.compile(
     r"(?i)\b(?:was|were|resolved|measured|at\s+the\s+time|when\s+measured)\b")
 
+#: A PRESENT-TENSE binding of a sha to something: `it is `sha``, `the ref pins `sha`` …
+#: ⛔ `resolves to` / `resolved to` are NOT in this set: they are the dated form, and the
+#: arm below requires a qualifier to be ABSENT before it charges one.
+_MOVING_REF_TARGET = re.compile(
+    r"(?i)\b(?:is|pins?|names?|equals?|points?\s+at|resolves?\s+to)\s+`[0-9a-f]{7,40}`")
+
 
 def _moving_pointer_violations(block: str) -> list[str]:
     """Sentences that bind a sha to the PR head ref's CURRENT target in the PRESENT tense.
@@ -783,10 +891,15 @@ def _moving_pointer_violations(block: str) -> list[str]:
     `refs/pull/14108/head` was fetched by hand (never in CI). A sha bound to a moving ref in
     the present tense rots into a false statement with nothing red.
 
-    The shape graded: a sha within 40 characters after `CURRENT head` with no qualifier that
-    marks it as a measurement. Word order and the surrounding words are free, so an honest
-    rewrite (`… as measured`, `… it resolved to `d523c9be8c` when these figures were
-    measured`) is accepted; what is refused is the unqualified present-tense binding.
+    ⛔ TWO SHAPES, BECAUSE THE FIRST ONE WAS A PHRASE AND NOT A CONTRACT (review, round 13,
+    P3). Keyed only on the literal `CURRENT head`, the arm could fire **nowhere** in the real
+    block any more — that wording is gone — so a PARAPHRASE that drops the dating without
+    restoring the word ("… the ref tracks the branch's head, and it is `d523c9be8c`") stayed
+    GREEN, which made the "second direction" unreachable on the block it exists to grade.
+    The contract graded now is the BINDING, not the vocabulary: (1) an appositive beside
+    `CURRENT head`, and (2) a present-tense copula binding a sha inside a ref-tracking clause
+    with no past/measured qualifier. Word order and surrounding words stay free, so an honest
+    rewrite ("it resolved to `…` when these figures were measured") is accepted.
     """
     flow = re.sub(r"\n#:\s?", " ", block)
     violations: list[str] = []
@@ -797,6 +910,21 @@ def _moving_pointer_violations(block: str) -> list[str]:
         if _PAST_OR_MEASURED.search(window):
             continue
         violations.append(flow[claim.start():claim.end() + 40])
+    # ⛔ THE PARAPHRASE SHAPE: the DATING is the thing that must not vary, so a present-tense
+    # copula inside a ref-tracking clause is charged unless a past/measured qualifier precedes
+    # the sha. `resolved to` is the dated form and is excluded by `_PAST_OR_MEASURED` rather
+    # than by a phrase list, so an honest rewording cannot be red.
+    for clause in re.finditer(r"(?i)(?:tracks?|resolves?\s+to)\b[^.]{0,80}\bhead\b", flow):
+        window = flow[clause.start():clause.start() + 240]
+        for bound in _MOVING_REF_TARGET.finditer(window):
+            before = window[max(0, bound.start() - 50):bound.start()]
+            # The qualifier may also FOLLOW the sha (`… it is `d523c9be8c` as measured`), so the
+            # forward window is graded too — bounded at the sentence end, or a `measured` two
+            # sentences later would launder an undated binding.
+            after = re.split(r"\.", window[bound.end():bound.end() + 60], maxsplit=1)[0]
+            if _PAST_OR_MEASURED.search(before) or _PAST_OR_MEASURED.search(after):
+                continue
+            violations.append(window[max(0, bound.start() - 40):bound.end()])
     return violations
 
 
@@ -833,13 +961,198 @@ def test_the_moving_pointer_arm_accepts_dated_forms():
         "it resolved to `d523c9be8c` when these figures were measured.",
         "`#14108` tracks the branch's CURRENT head — `d523c9be8c` as measured — so name the sha.",
         "`#14108` tracks the branch's head, and the sha it pointed at was `d523c9be8c`.",
+        # ⛔ THE PARAPHRASE DIRECTION (review, round 13, P3): the date is carried by a
+        # present-tense sentence with an explicit `measured` qualifier, not by the word
+        # `CURRENT`. Before round 13 this shape was unreachable — the arm keyed on a literal
+        # that no longer occurs on the block.
+        "`#14108` tracks the branch's head, and it is `d523c9be8c` as measured.",
+        "the ref tracks the branch's head; it is `d523c9be8c`, measured on the day this was written.",
     ]
     for text in dated:
         assert not _moving_pointer_violations(text), text
-    undated = ("`#14108` resolves to a ref that tracks the branch's CURRENT head, "
-               "`d523c9be8c`, and `83e94826a8a` is the OLDEST of the eight.")
-    assert _moving_pointer_violations(undated), (
-        "the PRE-FIX sentence must be refused — this arm is what makes the fix falsifiable")
+    undated = [
+        # the verbatim pre-fix sentence
+        "`#14108` resolves to a ref that tracks the branch's CURRENT head, "
+        "`d523c9be8c`, and `83e94826a8a` is the OLDEST of the eight.",
+        # ⛔ and the PARAPHRASE that drops the dating without restoring the word `CURRENT`, which
+        # was GREEN before round 13: same claim, no `CURRENT head` for a phrase-keyed arm to find.
+        "`#14108` resolves to a ref that tracks the branch's head, and it is `d523c9be8c`.",
+    ]
+    for text in undated:
+        assert _moving_pointer_violations(text), (
+            f"a sha bound to a MOVING ref in the present tense must be refused — this arm is what "
+            f"makes the fix falsifiable: {text!r}")
+
+
+#: ⛔ THE ONE ISSUE NUMBER IN THIS BLOCK THAT CANNOT ADDRESS A TREE (review, round 13, P2).
+#: `#14108` resolves to `refs/pull/14108/head`, which TRACKS a branch head — so a tree cited by
+#: that number is a moving address, and the block's own sentence is what says so. Other numbers
+#: in the block (`#14068 tree`, `#14067`) name MERGED pull requests and are stable, which is why
+#: this is keyed on the OBJECT and not on the shape `#<n> tree`: a shape-keyed arm red the honest
+#: `on the #14068 tree`, which is the false-block this file rejects everywhere else.
+_PR_REF_AS_TREE = re.compile(
+    r"(?:#14108|refs/pull/14108/head)`?[\s,]*"
+    r"(?:(?:PRE-MERGE|PRE-REWRITE|PRE-FIX|pre-merge|pre-rewrite|pre-fix)\s+)?(?:tree|tip)\b")
+
+#: A relative pin address: "the pair THIS head pins" / "this commit's `origin/main`" — a claim
+#: that is true only for the tree it was written on, in a block that has already been re-cut under
+#: it twice (PR body §4, review round 13, P2).
+_RELATIVE_PIN_ADDRESS = re.compile(
+    r"(?i)\b(?:pair|pin)\b[^.\"]{0,40}\bTHIS\s+head\b"
+    r"|\bthis\s+commit'?s\s+`?origin/main`?")
+
+#: The rewrite's PARENT claim: `83e94826a8a` is the pre-rebase DRAFT of the commit that landed as
+#: `1b82cc7063`; the rewrite's PARENT — the tree every row above is measured against — is
+#: `2fe01fc775e`. Presenting the draft as the parent is the misattribution round 8 removed
+#: (PR body §1, review round 13, P2).
+_PARENT_CLAIM = re.compile(
+    r"(?i)\b(?:parent|pre-rewrite\s+tree|pre-rebase\s+tree)\b[^.]{0,40}`83e94826a8a`"
+    r"|`83e94826a8a`[^.]{0,40}\b(?:is|was)\s+the\s+parent\b"
+    r"|\bthis\s+commit'?s\s+PRE-REWRITE\s+tree")
+
+
+def _pr_ref_as_tree_violations(flow: str) -> list[str]:
+    """A TREE addressed by the moving PR ref's issue number (review, round 13, P2)."""
+    return [flow[m.start():m.end()] for m in _PR_REF_AS_TREE.finditer(flow)
+            if not _refuted(flow, m.start())]
+
+
+def _relative_pin_addresses(flow: str) -> list[str]:
+    """A pin pair or an `origin/main` bound to a RELATIVE head (review, round 13, P2)."""
+    return [flow[m.start():m.end()] for m in _RELATIVE_PIN_ADDRESS.finditer(flow)
+            if not _refuted(flow, m.start())]
+
+
+def _parent_claims(flow: str) -> list[str]:
+    """The pre-rebase DRAFT presented as the capture rewrite's PARENT (review, round 13, P2)."""
+    return [flow[m.start():m.end()] for m in _PARENT_CLAIM.finditer(flow)
+            if not _refuted(flow, m.start())]
+
+
+def test_the_14068_attribution_names_its_tree_by_sha_never_by_the_pr_ref():
+    """PR body §2 — the `#14068` attribution, UNGRADED before round 13 (P2).
+
+    The block attributed the move past the 274 `graph.query` rows to "the `#14108` PRE-MERGE
+    tree". `#14108` resolves to `refs/pull/14108/head`, which tracks a branch head, so that
+    citation does not name a tree at all — and measured, the tree it had to name is the one
+    `2fe01fc775e` and `83e94826a8a` share.
+
+    ⛔ NON-VACUITY IS IN THIS TEST, ON THE REAL BLOCK: the reviewer's proof that this site was
+    unguarded was that restoring the pre-fix text left all 14 arms green. The in-memory mutant
+    below is that restoration, so the arm can be seen to FIRE on it — a green that survives the
+    mutation is exactly what the finding charged.
+    """
+    flow = re.sub(r"\n#:\s?", " ", _residue_block())
+    # ⛔ DIRECTION 1 — the tree is named by SHA, in the same clause as the diff command it
+    # qualifies, and the attribution names the PR that landed it by number as well.
+    assert re.search(r"`git diff`[^.]{0,80}between `" + RESIDUE_REWRITE_PARENT
+                     + r"` and `" + RESIDUE_ABBREV + r"`", flow), (
+        f"the paragraph must name the tree it diffs against by SHA (`{RESIDUE_ABBREV}`), because "
+        "the issue number cannot name it")
+    assert re.search(r"`#14068`'s \(`" + RESIDUE_REWRITE_PARENT + r"`\)", flow), (
+        f"the move past 274 must be attributed to `#14068`'s tree with its sha "
+        f"(`{RESIDUE_REWRITE_PARENT}`), not to a lane and not to a PR head ref")
+    # ⛔ DIRECTION 2 — the pre-fix citation is refused. `#14108` may be discussed (it IS the
+    # ref the block explains at length); it may not ADDRESS a tree or a tip.
+    assert not _pr_ref_as_tree_violations(flow), (
+        "`#14108` resolves to `refs/pull/14108/head`, a ref that TRACKS a branch head — it cannot "
+        f"address a tree: {_pr_ref_as_tree_violations(flow)[0]!r}. Name the tree by its sha.")
+    # ⛔ THE MUTATION, ON THE REAL BLOCK: restore the citation the finding is about.
+    pre_fix = f"and `{RESIDUE_ABBREV}` over"
+    assert pre_fix in flow, f"anchor for the mutation is gone — revisit this arm: {pre_fix!r}"
+    mutant = flow.replace(pre_fix, "and the `#14108` PRE-MERGE tree over")
+    assert _pr_ref_as_tree_violations(mutant), (
+        "the PRE-FIX citation must be refused — restoring `the `#14108` PRE-MERGE tree` left "
+        "every arm green before this one existed")
+
+
+def test_the_recut_pair_is_bound_to_its_rev_never_to_a_relative_head():
+    """PR body §4 — the `e022fc935b` scoping and the "pair THIS head pins" contradiction (P2).
+
+    Two halves of one correction: `main`'s tree at a RELATIVE "this commit's `origin/main`" and
+    the pair that tree derives stated as "the pair THIS head pins". This head pins
+    `(11844, "70d6cfdcd8b769e4")`, so the relative form asserted a pair this head does not carry.
+    """
+    flow = re.sub(r"\n#:\s?", " ", _residue_block())
+    # ⛔ DIRECTION 1 — the pair is bound to the rev that DERIVES it, and `origin/main` is scoped.
+    assert re.search(re.escape(RESIDUE_PAIR) + r"[^.]{0,80}`" + RESIDUE_PAIR_REV + r"`", flow), (
+        f"the {RESIDUE_PAIR} pair must be stated against `{RESIDUE_PAIR_REV}`, the tree that "
+        "derives it — a pair stated against a relative head is what the finding is about")
+    assert re.search(r"`origin/main` this was written against", flow), (
+        "`origin/main` is a moving ref: the sentence must scope it to when it was read")
+    # ⛔ DIRECTION 2 — no unrefuted relative binding.
+    assert not _relative_pin_addresses(flow), (
+        "a pin pair / `origin/main` bound to a RELATIVE head must be scoped to the rev it names: "
+        f"{_relative_pin_addresses(flow)[0]!r}")
+    # ⛔ THE MUTATIONS, ON THE REAL BLOCK — each half, restored.
+    scoped = f"re-cut to `{RESIDUE_PAIR}` on `{RESIDUE_PAIR_REV}`'s tree"
+    assert scoped in flow, f"anchor for the mutation is gone — revisit this arm: {scoped!r}"
+    assert _relative_pin_addresses(flow.replace(
+        scoped, f"re-cut to the pair THIS head pins, `{RESIDUE_PAIR}`")), (
+        "`the pair THIS head pins` must be refused: this head pins (11844, …)")
+    when_written = "(the `origin/main` this was written against)"
+    assert when_written in flow, "anchor for the mutation is gone — revisit this arm"
+    assert _relative_pin_addresses(flow.replace(when_written, "").replace(
+        "`main`'s tree at `e022fc935b` ", "this commit's `origin/main` ")), (
+        "`this commit's `origin/main`` must be refused: a rebase falsifies it")
+
+
+def test_the_capture_rewrites_parent_is_the_rev_the_block_names():
+    """PR body §1 — the rewrite's PARENT (review, round 13, P2).
+
+    `83e94826a8a` is the pre-rebase DRAFT of the commit that landed as `1b82cc7063`; the
+    rewrite's PARENT — the tree the row counts above are measured against — is
+    `2fe01fc775e`, the same rev that pins `(11839, "0a7e60fa05aa31b9")`. The pre-fix sentence
+    presented the draft as the parent, which is the misattribution round 8 removed.
+    """
+    flow = re.sub(r"\n#:\s?", " ", _residue_block())
+    assert re.search(r"(?i)capture rewrite'?s own PARENT,\s*`" + RESIDUE_REWRITE_PARENT + r"`",
+                     flow), (
+        f"the block must name the capture rewrite's PARENT as `{RESIDUE_REWRITE_PARENT}`")
+    assert not _parent_claims(flow), (
+        "the pre-rebase DRAFT (`83e94826a8a`) is not the rewrite's parent — `2fe01fc775e` is: "
+        f"{_parent_claims(flow)[0]!r}")
+    parent_anchor = "on the capture rewrite's own PARENT,"
+    assert parent_anchor in flow, "anchor for the mutation is gone — revisit this arm"
+    assert _parent_claims(flow.replace(
+        parent_anchor,
+        "on this commit's PRE-REWRITE tree (`83e94826a8a`), which is the PARENT,")), (
+        "the PRE-FIX wording must be refused: the draft is not the parent, and `this commit's` "
+        "is a relative address in a block that has been re-cut under it")
+
+
+def test_the_relative_address_arms_accept_honest_rewordings():
+    """The other half of the three arms above: an honest rewrite must not red.
+
+    Written because a phrase-keyed ban turns a REWORDING into a false block (this file's
+    round-12 lesson on the abbreviation and pointer arms), and because a negative-only arm can
+    be satisfied by DELETING the sentence — each arm above also asserts the fact that replaced
+    the defect, so deletion is red.
+    """
+    honest = [
+        "the move is `#14068`'s (`2fe01fc775e`), and `#14108` resolves to a tree that is not it",
+        "`#14108` resolves to `refs/pull/14108/head`, so it resolves to a DIFFERENT tree",
+        "on the #14068 tree, which is the MERGE tree `surface-guard` grades",
+        f"re-cut to {RESIDUE_PAIR} on `{RESIDUE_PAIR_REV}`'s tree, measured",
+        "`main`'s tree at `e022fc935b` re-cut to the pair that tree derives",
+        "`--repin` on THIS tree prints the same pair the first merge derived",
+        "it left the sentence asserting a pair this head does not carry",
+        f"on the capture rewrite's own PARENT, `{RESIDUE_REWRITE_PARENT}`",
+        "that tip's parent is `2fe01fc775e`, the very rev just named",
+    ]
+    for text in honest:
+        assert not _pr_ref_as_tree_violations(text), text
+        assert not _relative_pin_addresses(text), text
+        assert not _parent_claims(text), text
+    # ⛔ AND THE QUOTED PRE-FIX DRAFTS THE BLOCK ITSELF KEEPS are honest prose, because the block
+    # refutes them — refusing them would red the block for documenting its own corrections.
+    refuted = [
+        'it names the TREE and not "the pair THIS head pins", which is what it said',
+        "an earlier draft said the pair read `origin/main`, and this commit's `origin/main` "
+        "was then wrong",
+    ]
+    for text in refuted:
+        assert not _relative_pin_addresses(text), text
 
 
 def test_every_addressed_rev_names_a_fetchable_refspec():
@@ -854,6 +1167,14 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
         assert rev in _ARM_REFSPECS, f"{rev} has no fetchable address — a skip naming it is inert"
         assert not re.fullmatch(r"[0-9a-f]{7,39}", _ARM_REFSPECS[rev]), (
             f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
+        _, _, destination = _ARM_REFSPECS[rev].lstrip("+").partition(":")
+        assert destination, (
+            f"{rev} is mapped to a SOURCE-ONLY refspec: git records it in `FETCH_HEAD` and "
+            "creates no local ref, so a skip printing it re-arms the object DB and leaves the "
+            "ADDRESS assertion UNCHECKED — the round-13 inert remedy")
+    assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
+        "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
+    assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
 
 
 def test_the_skip_instruction_is_a_command_git_can_actually_run(monkeypatch):
@@ -877,5 +1198,77 @@ def test_the_skip_instruction_is_a_command_git_can_actually_run(monkeypatch):
         assert not re.fullmatch(r"[0-9a-f]{7,39}", token), (
             f"`git fetch` cannot `want` {token!r}: it is an abbreviation, and the skip must "
             "name a REFSPEC (`refs/pull/14108/head` / `main`) instead")
-    assert "refs/pull/14108/head" in tokens, (
-        f"the interval commits are carried by `refs/pull/14108/head`: {command.group(0)}")
+        # ⛔ AND IT MUST NAME A DESTINATION (review, round 13, P3): source-only fetches store
+        # into `FETCH_HEAD` and create NO local ref, so `_ref_sha` — and therefore the ADDRESS
+        # assertion, the only re-measurement of the moving pointer — stays unchecked. The
+        # printed line must be the form that actually arms what the message promises.
+        _, _, destination = token.lstrip("+").partition(":")
+        assert destination, (
+            f"the printed remedy `{token}` is SOURCE-ONLY: git stores it in `FETCH_HEAD` and "
+            "creates no local ref, so the ADDRESS assertion stays UNCHECKED while the skip says "
+            "the block's addresses are checked — print a `source:destination` refspec")
+    assert any(token.lstrip("+").partition(":")[2] == "refs/pull/14108/head" for token in tokens), (
+        "the interval commits are carried by `refs/pull/14108/head`, and the destination must be "
+        f"the ref `_ref_sha` reads: {command.group(0)}")
+
+
+def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
+    """Review round 13 (P3): a SOURCE-ONLY re-arm leaves the ADDRESS assertion unchecked.
+
+    Measured on this box and stated in git-fetch(1) ("Refspec"): `git fetch origin
+    refs/pull/14108/head` — no destination — records the objects in `FETCH_HEAD` and creates
+    NO local ref. So the round-12 remedy armed `_rev_present` (object DB) while
+    `_ref_sha("refs/pull/14108/head")` stayed `None`, and the only arm that re-measures the
+    moving pointer stayed silently UNCHECKED *while the skip message said the block's addresses
+    were now checked* — the same inert-remedy class one level down.
+
+    ⛔ HERMETIC, OFFLINE, AND IT PROVES THE MECHANISM RATHER THAN THE STRING: a bare "origin"
+    carrying `refs/pull/9/head` is fetched into two clones, once in each form. The source-only
+    fetch leaves the ref absent; the destination fetch creates it at the pushed sha. If git ever
+    changes that, the premise assertion below says so instead of the arm silently rotting.
+    """
+
+    def run(*args: str, cwd: Path) -> str:
+        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        assert done.returncode == 0, f"git {' '.join(args)} failed: {done.stderr.strip()}"
+        return done.stdout
+
+    try:
+        run("--version", cwd=tmp_path)
+    except (FileNotFoundError, AssertionError):  # no `git` on this host at all
+        pytest.skip("no `git` on this host — the refspec mechanism cannot be measured here")
+
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    run("init", "--bare", "-q", ".", cwd=origin)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    run("init", "-q", ".", cwd=seed)
+    for key, value in (("user.email", "t@example.invalid"), ("user.name", "t")):
+        run("config", key, value, cwd=seed)
+    (seed / "f.txt").write_text("x\n", encoding="utf-8")
+    run("add", "f.txt", cwd=seed)
+    run("commit", "-qm", "seed", cwd=seed)
+    sha = run("rev-parse", "HEAD", cwd=seed).strip()
+    run("push", "-q", str(origin), "HEAD:refs/pull/9/head", cwd=seed)
+
+    def fetch_into(name: str, refspec: str) -> str | None:
+        clone = tmp_path / name
+        clone.mkdir()
+        run("init", "-q", ".", cwd=clone)
+        run("remote", "add", "origin", str(origin), cwd=clone)
+        run("fetch", "-q", "origin", refspec, cwd=clone)
+        verify = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", "refs/pull/9/head"],
+            cwd=clone, capture_output=True, text=True)
+        return verify.stdout.strip() or None
+
+    assert fetch_into("source-only", "refs/pull/9/head") is None, (
+        "premise: git-fetch(1) — a source-only refspec updates NO local ref. If this ever "
+        "creates one, the destination requirement is unnecessary and this arm should be revisited")
+    assert fetch_into("with-destination", "refs/pull/9/head:refs/pull/9/head") == sha, (
+        "a DESTINATION refspec must create exactly the ref `_ref_sha` reads, at the pushed sha")
+    printed = _ARM_REFSPECS[RESIDUE_PR_HEAD]
+    assert printed.lstrip("+").partition(":")[2] == "refs/pull/14108/head", printed
+    assert ":" in printed.lstrip("+"), (
+        f"the printed remedy `{printed}` is the SOURCE-ONLY form measured above as inert")
