@@ -281,9 +281,12 @@ kill_timeout = 30
   # which is the signature of a marginal-memory kill.
   # cpus bumped 1→2 so vector encoding doesn't starve the API thread during
   # cold starts and backfill. Estimated cost impact: +$1-3/mo (Fly shared-cpu-2x)
-  # for that 1→2 step; it is not the price of the 2→4 step below (see COST).
+  # for that 1→2 step — a RANGE written before the two-term derivation below
+  # existed; on that basis the step is ≈+$0.7/mo, because the preset's included
+  # RAM rises with cores too ($20.70 → $21.39 on the COST note's sheet). It is
+  # not the price of the 2→4 step below (see COST).
   #
-  # #13665/#13722 — cpus bumped 2→4 (2026-11-21). This line is why the box runs
+  # #13665/#14156 — cpus bumped 2→4 (2026-11-21). This line is why the box runs
   # what it runs: `fly scale vm` is a MANUAL operation, so a versioned `cpus = 2`
   # reverted every hand-resize on the next deploy, and the machine was observed at
   # 4 while this file said 2. MEASURED at 2 cores with 7 workloads in flight:
