@@ -639,13 +639,12 @@ _COPULA_SUBJECT = (
     # measured as REGRESSIONS — these routed before the guard and went SILENT after):
     # (1) DETERMINER STACKING is not a second noun phrase. `all|both|half|such` are
     #     PRE-determiners, so `all the`, `both the`, `half the`, `such a` is ONE noun
-    #     phrase — the premise "a noun phrase cannot contain a second determiner" was
-    #     simply false for them, and `is all the data archived`, `is all our old plans
-    #     retired`, `is half the exports archived`, `is such a report archived`,
-    #     `is both the reports archived` and the perfect branch `has all the data been
-    #     archived` all went silent. So a pre-determiner cannot occupy the WORD slot
-    #     (it cannot be the tail of a first noun phrase), and the quantifiers are out of
-    #     the guard's own determiner list for the same reason.
+    #     phrase, and `is all the data archived`, `is all our old plans retired`,
+    #     `is half the exports archived`, `is such a report archived`, `is both the
+    #     reports archived` and the perfect branch `has all the data been archived` all
+    #     went silent. So is an `of`-PARTITIVE (`is one of the exports archived`,
+    #     `has none of the data been archived`) — see the position rule below, which is
+    #     the one that handles both.
     # (2) A HYPHEN OR SLASH IS NOT A WORD BOUNDARY FOR THIS RULE. `\b` matches before
     #     `-` and `/`, so `how-to`, `what-if`, `all-hands` and `a/b` read as a
     #     subordinator/determiner followed by a word, and `is the how-to guide archived`,
@@ -661,11 +660,31 @@ _COPULA_SUBJECT = (
     # module's stated notice-scope limit rather than a surprise. Both are measured, and
     # the second is the price of closing the route: the same expression that refuses a
     # reduced relative is what a caller sees as the unchanged relevance read.
+    # ⛔ THE PRE-DETERMINER EXCLUSION IS IN THE POSITION THAT MATTERS, NOT IN EVERY TICK
+    # OF THE WORD RUN (round-19 review, P1 + P2, both measured) — and the first cut of it
+    # got that wrong twice over. It read
+    #
+    #     (?: (?!(?:all|both|half|such…)) <word> \s+ ){1,5} <determiner>
+    #
+    # which excludes a pre-determiner from EVERY word position, so a subject that OPENS
+    # with one cannot start the run at all and the whole guard is SKIPPED — not narrowed.
+    # `is every report the board archived` and `is all the data the board archived` are
+    # the same reduced-relative shape as `is the report the board archived` and were
+    # answered with the WHOLE ended population, `signal=None`: round-17's P1 class,
+    # re-opened by its own fix. And the same over-broad exclusion is what kept the
+    # `of`-PARTITIVE silent: `is one of the exports archived` and `has none of the data
+    # been archived` are ONE noun phrase, routed before round 17, and were refused with
+    # no notice.
+    # So the rule is stated as what it is — a determiner is a SECOND noun phrase only if
+    # the word DIRECTLY before it is not a pre-determiner and not `of`:
+    # `is all the data` (stacking) and `is one of the exports` (partitive) do not fire;
+    # `is every report the board archived` and `is the report the board archived` do.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
     r"where|whereas|after|before|now|what|how|why)(?![-/])\b)"
-    r"(?!(?:(?!(?:all|both|half|such|many|most|some|any|no|each|every)\b)"
-    r"[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
+    r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
+    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of)\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your)(?![-/])\b)"
     # ⛔ AND A SUBJECT PRONOUN MAY ONLY **BE** THE SUBJECT (round-18 review, P1,
     # measured — the SAME #14033 defect still open after round 17's two guards, in the
