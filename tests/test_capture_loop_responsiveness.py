@@ -2918,17 +2918,39 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
     the first assertion. Deleting the work instead fails the second, for the
     rows in ``_TAIL_MUST_BE_ISSUED`` — the ones this fixture actually ISSUES.
 
-    ⛔ THE CLAIM IS SCOPED, NOT UNIVERSAL (#14086 review, P2). Two declared tail
-    legs are INERT in THIS fixture: `s.entity_links_attempted` (its SET fires
-    only when a link was ATTEMPTED, and `_resolve_targets` never creates an
-    Object on an empty graph) and the write-verb enrichment read
+    ⛔ THE CLAIM IS SCOPED, NOT UNIVERSAL (#14086 review, P2). THREE declared
+    tail legs are INERT in THIS fixture: `s.entity_links_attempted` (its SET
+    fires only when a link was ATTEMPTED, and `_resolve_targets` never creates
+    an Object on an empty graph), the write-verb enrichment read
     (`n.posterior_alpha, n.ep_alpha` — `_measure_capture_graph_work` stubs the
-    extractor to emit nothing, so `if extracted:` is never entered). An inline
-    copy of either would NOT red here. The link PASS is still caught by its
-    sibling needle (`ENDS WITH $suffix`); the enrichment read is UNCOVERED — see
-    the residual note on `_TAIL_MUST_BE_ISSUED` below, so nobody reads this
-    test's green as evidence about that leg.
+    extractor to emit nothing, so `if extracted:` is never entered), and **the
+    receipt write** (`_update_onboarding_state` with the receipt key — an
+    OPERATIONAL key, so the router sends it to `_write_jsonb_fields_cas` and the
+    registry MATCH/SET that results matches no needle here; the needle labelled
+    "the onboarding state write" is satisfied by another writer, which is why an
+    inline copy of THIS leg would not red). An inline copy of any of the three
+    would NOT red here. The link PASS is still caught by its sibling needle
+    (`ENDS WITH $suffix`); the enrichment read and the receipt write are
+    UNCOVERED — see the residual note on `_TAIL_MUST_BE_ISSUED` below, so nobody
+    reads this test's green as evidence about them.
     """
+    # ⛔ `_PRE_EXISTING_OFFLOAD_LEGS` used to be DEAD: defined, referenced only in
+    # a comment, read by no assertion — so the collision it documents (a tail
+    # needle that matches a leg which was ALREADY off-loop before this change)
+    # could come back silently, and the constant could never fire. Consumed here
+    # (#14086 review, P3): a needle that overlaps one of those statements makes
+    # the prohibition half vacuous and the presence half satisfied whatever the
+    # tail did — the exact inertness cycle-3 finding 1 removed.
+    collisions = sorted(
+        f"{needle!r} — also matched by {label}"
+        for needle in _CAPTURE_TAIL_STATEMENTS
+        for leg, label in _PRE_EXISTING_OFFLOAD_LEGS.items()
+        if leg in needle or needle in leg)
+    assert not collisions, (
+        "a tail needle overlaps a leg that was ALREADY off-loop before this "
+        "change, so it can neither fire as a prohibition nor prove the tail "
+        "(the cycle-3 inertness):\n  " + "\n  ".join(collisions))
+
     resp, records, _writer = _measure_capture_graph_work(
         monkeypatch, 40, "tail-off-loop-10893",
         conversation=_ref_conversation(40))

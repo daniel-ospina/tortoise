@@ -423,9 +423,32 @@ class ReadStages:
         One construction site, so the analytics props and the log line cannot
         drift into two shapes. ⛔ This is NOT the shape that goes on the wire —
         see :meth:`wire_snapshot` for why the refusal body is stricter.
+
+        ⛔ ONE acquisition of ``_lock``, ONE instant (#14086 review, P2).
+        Composing :meth:`current` + :meth:`spent_ms` + :meth:`parts_ms` takes
+        the lock THREE times, and a first :meth:`mark` landing between the
+        second and the third publishes ``pre_handler_parts`` under a
+        ``stages_ms`` that does not contain ``pre_handler`` — the exact
+        "partial sum under a total it does not equal" :meth:`parts_ms` exists
+        to prevent. That interleaving is ordinary traffic: the middleware reads
+        this object while the read-lane worker still runs (ABANDON-never-cancel),
+        so the three-reader composition was a race, not a hypothetical. The
+        rounding/filter rules below are the SAME as the three readers'.
         """
-        view = {"stage": self.current(), "stages_ms": self.spent_ms()}
-        parts = self.parts_ms()
+        with self._lock:
+            stage = self._stage
+            armed = self._armed
+            spent = dict(self._spent)
+            parts = dict(self._parts)
+        view = {
+            "stage": stage,
+            "stages_ms": {
+                name: round(ms, 1) for name, ms in spent.items() if ms > 0.0},
+        }
+        # `parts_ms` publishes nothing until the read path armed; the same
+        # filter (unrounded > 0.0, then round) applies here.
+        parts = ({name: round(ms, 1) for name, ms in parts.items() if ms > 0.0}
+                 if armed else {})
         if parts:
             # #10893 second cycle: the decomposition rides the SAME snapshot, so
             # the analytics row and the breach log line carry one shape. ABSENT

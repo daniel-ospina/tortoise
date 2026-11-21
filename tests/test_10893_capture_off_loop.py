@@ -241,6 +241,49 @@ def test_capture_event_mint_runs_off_the_event_loop(client, llm_mock,
     assert r.status_code == 200, r.text[:300]
 
 
+def test_a_tail_dispatch_that_raises_still_200s_the_committed_capture(
+        client, llm_mock, monkeypatch):
+    """⛔ The tail's off-loop DISPATCH is fail-open too (#14086 review, P2).
+
+    `_run_off_loop` submits in the CALLING task — `_submit_off_loop` ends in
+    `executor.submit(…)` — and `concurrent.futures` raises `RuntimeError` from
+    `submit()` once the pool is shut down (`_dispose_capture_executor`, the
+    threading-atexit path) and `BrokenThreadPool` when a worker cannot start.
+    NEITHER could happen while these legs were inline, so an unguarded dispatch
+    turns a committed capture into a 500 — against this block's own promise
+    ("compensate (the response still 200s; the capture itself was valid)") and
+    `_sweep_orphaned_writes`' docstring ("a sweep failure never 500s the
+    committed capture").
+
+    Non-vacuity is asserted first: if the tail stops being dispatched the run
+    fails on "never dispatched" rather than passing silently.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    real_submit = ha_mod._submit_off_loop
+    refused: list[str] = []
+
+    def _refuse_the_tail(executor, fn, /, *a, **kw):
+        name = getattr(fn, "__name__", "")
+        if name in ("_session_alive", "_sweep_orphaned_writes",
+                    "_sweep_orphaned_writes_off_loop"):
+            refused.append(name)
+            raise RuntimeError(
+                "cannot schedule new futures after interpreter shutdown")
+        return real_submit(executor, fn, *a, **kw)
+
+    monkeypatch.setattr(ha_mod, "_submit_off_loop", _refuse_the_tail)
+    r = client.post("/v1/sessions", json={"conversation": _CONV})
+
+    assert refused, (
+        f"the tail's off-loop legs were never dispatched ({r.status_code}: "
+        f"{r.text[:300]}) — this run proves nothing about the fail-open arm")
+    assert r.status_code == 200, (
+        "a pool that refused the DISPATCH 500'd a capture whose writes had "
+        "already committed — the block's own promise is that the response "
+        f"still 200s: {r.status_code} {r.text[:400]}")
+
+
 def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         client, llm_mock):
     """THE CENSUS: every sync `TortoiseSDK` method, observed on the loop.

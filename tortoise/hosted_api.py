@@ -21609,6 +21609,32 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         if source_removed:
             sdk._emit_event("SessionDeleted", id=session_id)
 
+    async def _sweep_orphaned_writes_off_loop() -> str | None:
+        """Dispatch the orphan sweep, folding a DISPATCH failure into a warning.
+
+        ⛔ WHY THIS EXISTS (#14086 review, P2): `_run_off_loop` submits in the
+        CALLING task — `_submit_off_loop` ends in `executor.submit(…)` — and
+        `concurrent.futures` raises `RuntimeError` from `submit()` once the pool
+        is shut down (`_dispose_capture_executor` runs on the threading atexit
+        path, which is exactly when an in-flight capture can still be awaiting
+        this block) and `BrokenThreadPool` when a worker cannot start. NEITHER
+        could happen while these calls were inline, so an unguarded dispatch
+        would 500 a capture whose writes had already committed — contradicting
+        this block's own promise ("compensate (the response still 200s; the
+        capture itself was valid)") and `_sweep_orphaned_writes`' docstring ("a
+        sweep failure never 500s the committed capture"). The sweep's BODY is
+        already `suppress`-guarded; this guards the dispatch.
+
+        Returns the warning to append, or ``None`` when the dispatch landed.
+        """
+        try:
+            await _run_off_loop(_CAPTURE_EXECUTOR, _sweep_orphaned_writes)
+        except Exception:
+            _logger.exception(
+                "orphan-write sweep could not be dispatched (non-fatal)")
+            return "orphan-write sweep could not be dispatched (non-fatal)"
+        return None
+
     receipt_key = _capture_receipt_key(capture_harness)
     # ⛔ #10893 (second cycle): THE RECEIPT BLOCK IS SYNCHRONOUS GRAPH + REGISTRY
     # WORK, and it used to run INLINE on the single uvicorn worker. Two
@@ -21624,7 +21650,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # compensation and fail-closed warnings are byte-identical. ⛔ The ATOMICITY
     # is NOT — an awaited thread is a scheduling point, so the pre-check → PATCH
     # window is genuinely open; the post-write re-check below is exactly its arm.
-    if await _run_off_loop(_CAPTURE_EXECUTOR, _session_alive):
+    # ⛔ THE DISPATCH IS FAIL-OPEN TOO (#14086 review, P2): see
+    # `_sweep_orphaned_writes_off_loop` for the mechanism — `submit()` raises
+    # once the pool is shut down, which the inline form could not do. A dispatch
+    # failure is "the guard could not answer", so it takes the same fail-open
+    # answer each of these arms already gives on a READ failure.
+    try:
+        session_still_alive = await _run_off_loop(
+            _CAPTURE_EXECUTOR, _session_alive)
+    except Exception:
+        _logger.exception(
+            "session-alive pre-check could not be dispatched (non-fatal)")
+        session_still_alive = True
+    if session_still_alive:
         try:
             # #4625: write-only — the return is discarded here, and this is
             # the per-capture hot path (see ``_update_onboarding_state``).
@@ -21644,7 +21682,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             extraction_warnings.append(
                 "session capture receipt write failed (non-fatal)")
         else:
-            if not await _run_off_loop(_CAPTURE_EXECUTOR, _session_alive):
+            try:
+                rechecked_alive = await _run_off_loop(
+                    _CAPTURE_EXECUTOR, _session_alive)
+            except Exception:
+                _logger.exception(
+                    "session-alive re-check could not be dispatched "
+                    "(non-fatal)")
+                rechecked_alive = True   # fail-open: keep the receipt
+            if not rechecked_alive:
                 # The delete won between the pre-check and the receipt PATCH
                 # — compensate (the response still 200s; the capture itself
                 # was valid). Bucket-aware like the delete-side recompute:
@@ -21682,7 +21728,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     extraction_warnings.append(
                         "session deleted during capture — capture receipt "
                         "retained (sessions remain in this harness bucket)")
-                await _run_off_loop(_CAPTURE_EXECUTOR, _sweep_orphaned_writes)
+                sweep_warning = await _sweep_orphaned_writes_off_loop()
+                if sweep_warning:
+                    extraction_warnings.append(sweep_warning)
     else:
         # Session deleted mid-capture before the receipt write — never land
         # an orphan receipt (the mutation was already removed). The capture
@@ -21691,7 +21739,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # (exact-ids; best-effort).
         extraction_warnings.append(
             "session deleted during capture — capture receipt not recorded")
-        await _run_off_loop(_CAPTURE_EXECUTOR, _sweep_orphaned_writes)
+        sweep_warning = await _sweep_orphaned_writes_off_loop()
+        if sweep_warning:
+            extraction_warnings.append(sweep_warning)
         # #3520: the unconditional clear that used to sit HERE is gone as well.
         # The per-harness `last_error` is written ONCE, from the capture
         # outcome, above — clearing it here as well would be a second writer of
@@ -21729,6 +21779,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             registry; both used to run INLINE here, on the single uvicorn
             worker, at the end of EVERY first capture. Same callable, same
             order, same non-fatal arm — only WHERE it runs changes.
+
+            ⛔ EXCEPT THE SDK CONSTRUCTION (#14086 review, P2 — recorded, not
+            hidden): `_maybe_apply_completion` → `_org_proj` → `_org_sdk` →
+            `_make_sdk` resolves the STORE PATH, and `_org_sdk_from_name`'s own
+            docstring states the rule this leg crosses — "off-load the READ,
+            keep the CONSTRUCTION on the loop" (built in a pooled worker, that
+            path comes from the thread's stale inherited stamp; tortoise#7500,
+            measured as 3 reds under #4645). So this leg moves WHERE it runs for
+            the graph work, and NOT yet for the construction. **#7500 owns that
+            split** and is the owner of this residual — it is declared here so
+            the next reader does not have to re-derive it, and so it is not an
+            unnamed move.
             """
             created = bool(_os.write_completed_step(
                 proj, org["org_id"], "capture-disclosed",

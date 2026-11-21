@@ -334,6 +334,73 @@ def test_the_snapshot_carries_the_decomposition_to_its_publication_site(monkeypa
         view["stages_ms"]["pre_handler"], abs=0.2)
 
 
+def test_the_snapshot_is_ONE_instant_not_three_lock_acquisitions(monkeypatch):
+    """⛔ A mark landing between the reads must not publish a hole (#14086 P2).
+
+    `snapshot()` used to compose `current()` + `spent_ms()` + `parts_ms()`, each
+    taking `_lock` separately. A first `mark()` in that window left
+    `pre_handler_parts` published under a `stages_ms` with NO `pre_handler` in it
+    — the "partial sum under a total it does not equal" `parts_ms` exists to
+    prevent, and ordinary traffic (the middleware reads while the read-lane
+    worker still runs) reaches it.
+
+    The seam is injected through `spent_ms` itself: if `snapshot()` still calls
+    it, the mark lands mid-snapshot; with one acquisition it can never run.
+    """
+    clock = {"t": 0.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+    stages = begin(started_at=0.0)
+    clock["t"] += 0.2
+    stages.note("dispatch")
+
+    original = rs.ReadStages.spent_ms
+    seen = {"calls": 0}
+
+    def spent_ms_then_mark(self):
+        seen["calls"] += 1
+        out = original(self)
+        clock["t"] += 0.3
+        self.mark(STAGE_EMBED_GET)     # the race window, forced open
+        return out
+
+    monkeypatch.setattr(rs.ReadStages, "spent_ms", spent_ms_then_mark)
+    view = stages.snapshot()
+    assert seen["calls"] == 0, (
+        "snapshot() re-composed the three locked readers; a mark between them "
+        "publishes a decomposition under a total that does not contain it")
+    parts = view.get("pre_handler_parts", {})
+    if parts:
+        assert "pre_handler" in view["stages_ms"], (
+            f"published {parts} under stages_ms={view['stages_ms']} — the "
+            f"decomposition names time the total does not contain")
+
+
+def test_no_reader_is_called_through_its_own_lock_by_the_snapshot(monkeypatch):
+    """Structural half: the publication path must not borrow the readers."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+    stages = begin(started_at=0.0)
+    clock["t"] += 0.4
+    stages.note("dispatch")
+    clock["t"] += 0.1
+    stages.mark(STAGE_EMBED_GET)
+
+    def _boom(self):
+        raise AssertionError("snapshot() went through a separately-locked reader")
+
+    originals = {name: getattr(rs.ReadStages, name)
+                 for name in ("current", "spent_ms", "parts_ms")}
+    for name in originals:
+        setattr(rs.ReadStages, name, _boom)
+    try:
+        view = stages.snapshot()
+    finally:
+        for name, fn in originals.items():
+            setattr(rs.ReadStages, name, fn)
+    assert set(view) == {"stage", "stages_ms", "pre_handler_parts"}
+    assert view["stage"] == STAGE_EMBED_GET
+
+
 def test_an_unmeasured_pre_handler_publishes_no_part_table_at_all(monkeypatch):
     """ABSENT beats an empty table: "no boundary observed" ≠ "observed, free"."""
     clock = {"t": 0.0}
