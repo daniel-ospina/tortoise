@@ -1767,10 +1767,14 @@ def test_a_plan_time_window_holding_BOTH_pin_states_names_the_UNANSWERABLE_one()
 
     ⛔ Swapping the two arms at `cache_evictor.py:1170` (asking `pinned` before
     `pin-unanswerable`) left all 211 tests green, while the report offered `unpin` for the
-    nodes nothing established as pinned. Both hold-backs present in ONE pass is the only
-    state where the order is observable, so it needs a row rather than a convention: the
-    file already reads the other way round in the `reach` block, which is exactly why a
-    silent inversion is possible.
+    nodes nothing established as pinned. ⛔ THE ARM ORDER IS OBSERVABLE WITH UNANSWERABLE
+    HOLDS ALONE, which is why that same swap also reds the wholly-unanswerable row beside
+    this one: the plan-time gate adds every held id to `held_pinned_ids` whichever bucket it
+    lands in (`cache_evictor.py:1079-1083`), so that set is the ANY-HOLD set, not the
+    answered-pin set. What THIS row adds is the state where both hold-backs are on offer in
+    one pass and the two buckets must stay APART in the report — the case a convention
+    cannot be trusted for, because the file already reads the other way round in the `reach`
+    block, which is exactly how a silent inversion is possible.
     """
     g = _FakeGraph(["p0", "p1", "p2", "p3"])
 
