@@ -130,7 +130,14 @@ from typing import Any
 #: `tests/test_13094_graphevent_home.py` asserts every `snippets` entry still
 #: appears in its `file` (whitespace-collapsed, so a re-indent is not a false red
 #: while a reword is a real one) and `min_occurrences` where one file holds the
-#: same statement twice — a single shared snippet must not satisfy two rows.
+#: same statement twice. ⛔ WHERE THAT WORKS AND WHERE IT DOES NOT, because the
+#: two cases differ and only one is a proof: the `event_store.py` dedupe pair is
+#: the ONLY two occurrences of its text in that file, so deleting one reds the
+#: census; the two export scans are byte-identical to two OTHER occurrences in
+#: `hosted_backup.py` (four in total), so there `min_occurrences: 2` proves the
+#: file still carries the statement twice and NOT that both censused sites
+#: survive — the `line` is the address for those two, and the residual is named
+#: on the rows themselves.
 #:
 #: CLASSIFICATION — the three classes, and what each one can justify:
 #:
@@ -304,7 +311,11 @@ READERS: tuple[dict[str, Any], ...] = (
         "why": "the export carries `:GraphEvent` rows because it carries everything; "
                "it names no label and needs no capability. ⚠️ It is censused because "
                "a re-home must decide what the export does with the shape, not "
-               "because it reads one.",
+               "because it reads one. ⚠️ This statement occurs FOUR times in the file "
+               "and the two censused sites are byte-identical, so `min_occurrences` "
+               "proves only that the file still carries at least two of them — it "
+               "cannot prove BOTH censused sites survive (a named residual; the "
+               "`line` is the address).",
     },
     {
         "file": "tortoise/hosted_backup.py",
@@ -314,8 +325,9 @@ READERS: tuple[dict[str, Any], ...] = (
         "min_occurrences": 2,
         "needs": "a full label-agnostic dump",
         "class": "maintenance",
-        "why": "the second whole-graph scan: the same statement shape as the line "
-               "above, in the restore path, so both rows require TWO occurrences.",
+        "why": "the second whole-graph scan (the restore's node-count verification): "
+               "the same statement shape as the line above, so both rows require two "
+               "occurrences — see the residual noted on that row.",
     },
 )
 
@@ -424,6 +436,10 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
       partial read reported as a verdict. Rows are deduped on
       `(seq, type, payload-digest)` as defense in depth.
     """
+    # ⛔ THE REFUSAL LIVES HERE, not in a verb: `residency` and `superset` both
+    # call this function, and a guard installed in one of them is how a
+    # read-only verb mints a graph through the other (review round 2, P1).
+    _require_graph(db, graph)
     g = db.select_graph(graph)
     rows: list[dict[str, Any]] = []
     seen: set[tuple] = set()
@@ -445,10 +461,18 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
                 params={"after": after, "last_id": last_id, "limit": batch},
             ).result_set
         if not page:
-            return rows
+            # ⛔ `break`, never `return`: the completeness counts below are the
+            # ONLY thing that can tell "the feed ends here" from "the cursor can
+            # no longer advance" (round-2 review, P1), and an early return skipped
+            # them.
+            break
         added = 0
         for seq, type_, event_id, payload in page:
-            key = (seq, type_, _digest(payload))
+            # ⛔ `event_id` BELONGS IN THE KEY: two rows with the same seq,
+            # type and payload but distinct event_ids are two rows of the
+            # multiset, and merging them undercounts the graph side (review
+            # round 2, P2).
+            key = (seq, event_id, type_, _digest(payload))
             if key in seen:
                 continue
             seen.add(key)
@@ -469,12 +493,37 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
                 f"{cursor_id!r}: this page added no new row. A partial read is not "
                 f"a verdict, so none is produced")
         after, last_id = cursor_seq, cursor_id
+
+    # ⛔ THE WALK MUST PROVE IT REACHED THE END (review round 2, P1). A cursor
+    # cannot see three shapes the store admits, and each makes an empty page
+    # indistinguishable from the end: a NULL `seq` (never satisfies `seq > $after`),
+    # a `seq` stored as a STRING (the engine orders strings before numbers, so a
+    # numeric cursor matches no row), and a duplicated (seq, event_id) pair beyond
+    # a page boundary. Counting first makes the failure a REFUSAL instead of a
+    # shortened read that the verdict would happily call `covered`.
+    null_seq = g.query(
+        "MATCH (e:GraphEvent) WHERE e.seq IS NULL RETURN count(e)").result_set[0][0]
+    if int(null_seq or 0):
+        raise Unpageable(
+            f"{int(null_seq)} `:GraphEvent` row(s) carry no `seq`, so they can never "
+            f"be reached by a `seq` cursor and the feed cannot be read completely. "
+            f"A partial read is not a verdict, so none is produced — repair the "
+            f"row(s) (`append_event` always writes a `seq`).")
+    total = int(g.query("MATCH (e:GraphEvent) RETURN count(e)").result_set[0][0] or 0)
+    if total != len(rows):
+        raise Unpageable(
+            f"the feed holds {total} row(s) but the cursor reached {len(rows)}: a "
+            f"`seq` stored as a string, or a duplicated (seq, event_id) pair past a "
+            f"page boundary, makes the remaining rows unreachable. A partial read "
+            f"is not a verdict, so none is produced.")
     return rows
 
 
 def residency(graph_uri: str, graph: str) -> dict[str, Any]:
     """What the graph holds, and what share of it this one shape is."""
     db = _graph_connection(graph_uri)
+    # `_graph_rows` refuses an unknown graph (and that refusal covers every verb);
+    # this read happens first, so the same check is made here too.
     _require_graph(db, graph)
     g = db.select_graph(graph)
     totals = g.query(
@@ -627,7 +676,7 @@ def superset(graph_rows: list[dict[str, Any]],
     # ⛔ The empty arm comes FIRST: an empty multiset is a subset of everything, so
     # `covered` would be arithmetically true for a purged feed, a mistyped graph
     # name, or a store that answered with nothing — the vacuous PASS.
-    verdict = ("no_verdict" if not graph_rows
+    verdict = ("no_verdict" if (not graph_rows or not journal_rows)
                else ("covered" if covered else "not_covered"))
     return {
         "verdict": verdict,
