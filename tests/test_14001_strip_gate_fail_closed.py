@@ -68,7 +68,9 @@ def _record_write(*args, **kwargs) -> None:
     that only inspects `props` cannot see the store. The handed arguments are part of the
     measurement.
     """
-    _HANDED.clear()
+    # ⛔ DO NOT CLEAR HERE (`#14001`, measured by the cycle-4 review): `_oracle` resets per run, and
+    # clearing on entry meant a handoff-then-`_write(props)` arm recorded only the LAST call — the
+    # false "documents nothing" that would get a real row deleted on a false premise.
     _HANDED.extend(args)
     # ⛔ A KEYWORD HANDOFF IS THE SAME HANDOFF (`#14001`, measured by the review of this branch):
     # `_write(props={**props, k: vec})` certifies and lands, and an oracle that recorded only
@@ -834,6 +836,38 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ THE IMPORT AND STRING-KEY SPELLINGS (`#14001`, measured by the cycle-4 review): they name
+    # a dynamic namespace without producing a `Name` node, so `ast.alias` and a string-keyed
+    # `__dict__`/`__builtins__` subscript had to be inspected too.
+    ("namespace-from-import-alias", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        from builtins import globals as _g
+        _g()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-builtins-dict-key", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        import builtins
+        builtins.__dict__["globals"]()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-dunder-builtins", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        __builtins__["globals"]()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
     ("namespace-function-alias", """
     global gk
     gk = "x"
@@ -1213,3 +1247,50 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
         "a declared entity writer now mentions a dynamic namespace, so the blanket rule refuses "
         "it: argue the trade (is the writer's stop arm provable another way?) before either "
         f"narrowing the rule or accepting the refusal: {offenders}")
+
+
+#: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
+#: The rule matches a `globals`/`locals`/`vars` NAME, attribute, import alias or string key. A name
+#: COMPOSED at runtime (`builtins.__dict__["glob"+"als"]`) or reached by FRAME INTROSPECTION
+#: (`sys._getframe(0).f_globals`) names nothing the scanner can see. Pinned, not fixed: chasing
+#: string composition is the unbounded recogniser this issue exists to stop.
+DYNAMIC_NAMESPACE_NAME_COMPOSITION = (
+    ("composed-string-key", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        import builtins
+        _g = builtins.__dict__["glob" + "als"]
+        _g()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("frame-introspection", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        import sys
+        sys._getframe(0).f_globals["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+)
+
+
+@pytest.mark.parametrize("case,arm", DYNAMIC_NAMESPACE_NAME_COMPOSITION,
+                         ids=[row[0] for row in DYNAMIC_NAMESPACE_NAME_COMPOSITION])
+def test_the_composed_name_residual_is_PINNED_as_a_known_fail_open(tmp_path, monkeypatch, case, arm):
+    """Residual 5, measured: a COMPOSED namespace name certifies while storing.
+
+    ⛔ GREEN ON A KNOWN FAIL-OPEN IS THE POINT. The tool's docstring states the boundary, and this
+    pin is what stops it changing silently: closing it reds here and the row moves into
+    `DEFEATED_RESOLVER_ROWS`.
+    """
+    assert _oracle(arm)["lands"] is True, (
+        f"`{case}` no longer stores the vector, so it documents nothing")
+    gated, _why = _gate(tmp_path, monkeypatch, arm, f"composed_residual_{case.replace('-', '_')}")
+    assert gated is True, (
+        f"`{case}` is CLOSED — good news, but it must not change silently: delete this pin and "
+        "move the row into DEFEATED_RESOLVER_ROWS")

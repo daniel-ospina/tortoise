@@ -239,15 +239,22 @@ confidence:
    it does, every name the scope declares `global`/`nonlocal` is unproven and the stop arm
    refuses — a writer that merely READS a dynamic namespace is refused too, which is the
    over-refusal the doctrine accepts and which costs nothing on the real population (pinned: no
-   declared entity writer mentions one). A name
-   with no `global`/`nonlocal` declaration is either unproven (absent from the binding map ⇒
-   refuse) or out of
-   reach (a `locals()` write does not rebind a fast local — measured: the writer stores nothing).
-   Pinned by the `globals-*` and `namespace-alias-*` rows in `DEFEATED_RESOLVER_ROWS`.
-   ⛔ THE BOUNDARY: a writer that reaches a namespace WITHOUT NAMING IT — a helper returning one
-   (`ns = _namespace()`), or `exec` — is not covered; residual 1 covers `exec`, and the
-   `_fold_consults_gate` population is where that stays visible. The claim is "every spelling that
-   names a dynamic namespace", not "every spelling".
+   declared entity writer mentions one). ⛔ AND EVERY NAME IS UNPROVEN, not only the declared ones:
+   PEP 667 (3.13+) makes `locals()` write-through, so `locals()["k"] = …` rebinds a FAST LOCAL —
+   on 3.12 that write reaches nothing (measured), on 3.13+ it does, and the answer cannot depend
+   on the interpreter a lane happens to run. Measured cost: zero (of 15,090 functions in this
+   repo, 8 mention a namespace and all 8 already refused).
+   The legal spellings of the mention are pinned as the `globals-*` / `namespace-*` rows in
+   `DEFEATED_RESOLVER_ROWS`: a `Name`, an `Attribute`, an import `alias`, a string-keyed
+   `__dict__`/`__builtins__` subscript, in any binding form, any scope depth.
+   ⛔ THE BOUNDARY, stated as a scope and not a completeness claim:
+     * residual 1 — `exec`;
+     * residual 5 — a name the scanner cannot READ: COMPOSED at runtime
+       (`builtins.__dict__["glob"+"als"]`) or reached by frame introspection
+       (`sys._getframe(0).f_globals`);
+     * a helper that RETURNS a namespace (`ns = _namespace()`) names nothing either.
+   The pinned rows are 5 (`test_the_composed_name_residual_is_PINNED_as_a_known_fail_open`); a
+   spelling outside them is not claimed to refuse.
 
 THE REMOVAL ITSELF
 ==================
@@ -4575,7 +4582,17 @@ def _is_dynamic_namespace_reference(node) -> bool:
     if isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMESPACE_NAMES:
         return True
     # `builtins.globals()` / `import builtins as b; b.globals()` — the attribute spelling.
-    return isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_NAMESPACE_NAMES
+    if isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_NAMESPACE_NAMES:
+        return True
+    # `from builtins import globals as _g` — the IMPORT spelling names it without a Name node
+    # (`#14001`, measured by the cycle-4 review, which found `ast.alias` was never inspected).
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        return any((alias.name.rsplit(".", 1)[-1] in _DYNAMIC_NAMESPACE_NAMES
+                    or alias.asname in _DYNAMIC_NAMESPACE_NAMES) for alias in node.names)
+    # `builtins.__dict__["globals"]()` / `__builtins__["globals"]()` — the string-key spelling,
+    # the same mention one indirection over (measured by the same review).
+    return (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+            and node.slice.value in _DYNAMIC_NAMESPACE_NAMES)
 
 
 def _is_namespace_source(expr) -> bool:
@@ -4590,8 +4607,9 @@ def _dynamic_namespace_mutation(call) -> bool:
 
     ⛔ THE MUTATOR SPELLING IS THE SUBSCRIPT SPELLING ONE VERB OVER (`#14001`, measured by the
     round-8 review): `globals().update({"k": "embedding"})` rebinds a module name, and an arm
-    that only recognised `globals()[k] = …` certified it. The receiver must be the namespace (a
-    CALL to the namespace function, or a NAME bound to one), so `props.update(…)` is untouched.
+    that only recognised `globals()[k] = …` certified it. The receiver must be a CALL to the
+    namespace function here; a NAME that holds the namespace is covered by the MENTION rule in
+    `_string_bindings`, not by this predicate, so `props.update(…)` stays untouched.
     """
     import ast
 
@@ -4718,7 +4736,8 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
     # `for`/`match` binding, a parameter default and the FUNCTION alias `g = globals; g()[…]` each
     # defeated a receiver-shape model one spelling later. The mention is the evidence; every name
     # the scope declares `global`/`nonlocal` could be what the write rebinds, so all are unproven.
-    if any(_is_dynamic_namespace_reference(node) for node in whole):
+    _namespace_mentioned = any(_is_dynamic_namespace_reference(node) for node in whole)
+    if _namespace_mentioned:
         poisoned |= _scope_declarations    # `|=`: see the residue note in `_poison`'s arm
 
     # ⛔ AND A PARAMETER IS A BINDING THAT HAS **ALREADY** HAPPENED (`#14001`, measured by the
@@ -4917,6 +4936,13 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
     # EVERY value bound to a name is UNIONED, and a conditional rebinding is therefore answered
     # by all of its arms — an over-approximation, which on this arm can only refuse more.
     bindings: dict[str, frozenset[str] | None] = {}
+    if _namespace_mentioned:
+        # ⛔ EVERY NAME, NOT ONLY THE `global`/`nonlocal` DECLARED ONES (`#14001`, raised by the
+        # cycle-4 review): PEP 667 (3.13+) makes `locals()` a write-through proxy, so
+        # `locals()["k"] = "embedding"` rebinds a FAST LOCAL — which the declared-name set never
+        # covers. Measured cost on the real population: zero (only 8 of 15,090 functions in this
+        # repo mention a dynamic namespace at all, and every one of them already refuses).
+        return {name: None for name in assigned}
     for _round in range(8):
         changed = False
         for name, values in assigned.items():
