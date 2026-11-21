@@ -48,6 +48,7 @@ from __future__ import annotations
 import functools
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -842,7 +843,10 @@ def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
 
     ⛔ MEMOISED per `(path, rev)` — the caller walks one entry per cited LINE, so without this the
     same module is re-rendered once per cite (measured at 227 `git show` calls over 53 distinct
-    paths, the slowest arm in this file at 12.56 s; 53 calls after).
+    paths, the slowest arm in this file at 12.56 s; 53 calls after). ⚠️ That is a PERFORMANCE note,
+    not a graded behaviour: the sole call site never varies `rev`, so NO mutation of this decorator
+    can change a result and nothing here asserts it — deleting it only makes the suite ~7 s slower.
+    Stated so the next reader does not read the memo as covered (#14038 review, rule 3).
     """
     if not _rev_is_readable(rev):
         return None
@@ -1040,6 +1044,78 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
             f"{alt_drifted_d}/{alt_drifters_d}). Re-measure the figure by the header's own rule and "
             "update BOTH the numerator and its cross-references — never adjust an older number by an offset."
         )
+
+
+def test_the_tree_probe_grades_absence_and_an_unreadable_tree_DIFFERENTLY(tmp_path, monkeypatch):
+    """The tri-state is the point of `_path_in_tree`, so it is graded, not merely described.
+
+    ⛔ WHY THIS TEST EXISTS (#14038 review, rule 3). The docstring above says the whole reason
+    `_path_in_tree` asks `git ls-tree` rather than `git rev-parse '<rev>:<path>'` is that the latter
+    answers the SAME (False) for a genuine absence and for a tree object this checkout cannot read —
+    and a review measured that reverting to it left this whole file GREEN, because every path the
+    census walks is either present or genuinely absent in a COMPLETE checkout. A distinction no
+    assertion can redden is a claim, not a guard; this constructs the one shape that separates them.
+
+    The fixture is a commit whose root tree carries a `sub/` entry pointing at a subtree blob that
+    does not exist (`git mktree --missing`), which is the treeless/`filter=tree:0` shape in
+    miniature. Measured, in that fixture: `ls-tree <c> -- sub/x.py` exits **1** (an object it could
+    not read) and `rev-parse --verify -q '<c>:sub/x.py'` ALSO exits **1** — indistinguishable from
+    absence, which is exactly the bug. So:
+      * absent from a HEALTHY tree -> `False` -> `[]`, graded not-comparable;
+      * present in a tree whose subtree cannot be read -> `None` -> the cannot-run class, so the
+        census SKIPS rather than counting a pair it could not read.
+    """
+    repo = tmp_path / "tiny"
+    repo.mkdir()
+
+    def git(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, input=stdin, check=False
+        )
+
+    assert git("init", "-q").returncode == 0
+    assert git("config", "user.email", "census@example.invalid").returncode == 0
+    assert git("config", "user.name", "census fixture").returncode == 0
+    (repo / "present.py").write_text("x = 1\n", encoding="utf-8")
+    assert git("add", "present.py").returncode == 0
+    assert git("commit", "-q", "-m", "base").returncode == 0
+    head = git("rev-parse", "HEAD").stdout.strip()
+    blob = git("hash-object", "-w", "present.py").stdout.strip()
+
+    # A root tree that REFERENCES a subtree object this repository does not hold.
+    listed = git(
+        "mktree",
+        "--missing",
+        stdin=f"040000 tree {'1' * 40}\tsub\n100644 blob {blob}\tlone.py\n",
+    )
+    assert listed.returncode == 0, listed.stderr
+    made = git("commit-tree", listed.stdout.strip(), "-m", "root tree with a missing subtree")
+    assert made.returncode == 0, made.stderr
+    broken = made.stdout.strip()
+
+    monkeypatch.setattr(sys.modules[__name__], "REPO", repo)
+    _pin_blob_lines.cache_clear()
+    try:
+        # the healthy tree: present vs genuinely absent
+        assert _path_in_tree(head, "present.py") is True
+        assert _path_in_tree(head, "nope.py") is False
+        assert _pin_blob_lines("nope.py", rev=head) == []  # graded, never skipped
+
+        # the unreadable subtree: the arm the `rev-parse` probe cannot see
+        assert _path_in_tree(broken, "sub/x.py") is None, (
+            "a path whose TREE object cannot be read must be the cannot-run class, not 'absent'"
+        )
+        assert _pin_blob_lines("sub/x.py", rev=broken) is None
+
+        # ⛔ THE MUTANT THIS PINS: `rev-parse --verify '<rev>:<path>'` answers False HERE — the same
+        # answer it gives for a genuine absence — so a re-implementation using it returns `[]` and
+        # counts an unreadable pair as not-comparable, inflating the drifter figure.
+        assert _git_resolves(f"{broken}:sub/x.py") is False, (
+            "the fixture stopped constructing the shape: `<rev>:<path>` must resolve the same way it "
+            "would for an absent path, otherwise this row no longer discriminates"
+        )
+    finally:
+        _pin_blob_lines.cache_clear()
 
 
 #: An as-written one-token `path.py:NNNN` spelling — the header's stated population. A RANGE cite is one
