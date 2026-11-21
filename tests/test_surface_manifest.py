@@ -1339,6 +1339,47 @@ def test_the_check_refuses_when_the_baseline_is_missing(tmp_path, monkeypatch, c
     assert "::error::" in out and "missing" in out, out
 
 
+def test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE(tmp_path, monkeypatch, capsys):
+    """A forward merge can leave a top-level key TWICE; YAML silently last-winses it.
+
+    #14033 review P1, measured ON THIS FILE: `cut_at_commit:` sat on two adjacent lines
+    (this branch's cut and `main`'s), `yaml.safe_load` kept the last one, so the artifact
+    READ as one value while the diff showed two — and `check` exited 0. The file's own
+    header has a `⛔ ONE ROW ONLY` paragraph describing exactly that hazard and nothing
+    enforcing it, which is the false-PASS shape these gates exist to refuse: a gate
+    reporting OK on evidence it never actually read.
+
+    ⛔ AND THE REPAIR PATH MUST STILL READ IT. `cut` rewrites the artifact from the
+    declaration and emits a single key, so it is the only command that can repair a
+    duplicated file — a refusal here that also applied to `cut` would leave the file
+    unrepairable by the tool that owns it.
+    """
+    sm = _load_manifest_tool()
+    text = MANIFEST.read_text(encoding="utf-8")
+    marker = "cut_at_commit: "
+    assert text.count("\n" + marker) == 1, (
+        "this test needs the artifact to carry `cut_at_commit:` exactly once to start "
+        "from")
+    duplicated = text.replace(
+        "\n" + marker,
+        "\n" + marker + "1b0db0489408e1e817688f83cef0d7c1ee33be5d\n" + marker,
+        1,
+    )
+    path = tmp_path / "duplicated.yml"
+    path.write_text(duplicated, encoding="utf-8")
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+
+    assert sm.cmd_check(argparse.Namespace()) == 1, (
+        "a duplicated top-level key was not refused — YAML last-winses it, so the check "
+        "is then reporting on a value the diff contradicts")
+    out = capsys.readouterr().out
+    assert "::error::" in out and "duplicate key" in out, out
+
+    # the repair path still opens it, or nobody can fix it
+    doc = sm._read_manifest(check_provenance=False)
+    assert doc.get("cut_at_commit"), doc.get("cut_at_commit")
+
+
 def test_the_check_refuses_when_the_ordering_table_is_missing(tmp_path, monkeypatch, capsys):
     sm = _load_manifest_tool()
     monkeypatch.setattr(sm, "ORDER_FILE", tmp_path / "no-order.yml")

@@ -967,6 +967,7 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
     """
     from tortoise.state_intent import (
         MISSED_ROUTE_HINT,
+        STATE_NOTICE_KEYS,
         detect_state_question,
         missed_route_payload,
     )
@@ -977,6 +978,18 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
         ("has anything we promised been withdrawn by legal", "existence"),
         ("which claims were retracted by legal", "which_predicate"),
         ("is the onboarding flow retired by legal", "is_copula"),
+        # ⛔ …AND THE `<prep> the <noun>` SPELLING OF THE SAME QUALIFIER, which the row
+        # above did NOT cover and which review P1 measured as SILENT (not routed and not
+        # reported): the subject guard read the qualifier's own noun phrase as a second NP
+        # inside the subject, so `is the export archived by the vendor` came back
+        # `signal=None` while `… by legal` (a BARE noun) was reported. A closed-list
+        # qualifier that produces no notice is #14033's own defect on the shape this PR
+        # adds, so the guard now treats every preposition `_BLOCKED_TAIL` names the way it
+        # already treated `of` — one noun phrase, not two, and the cue is REPORTED.
+        ("is the export archived by the vendor", "is_copula"),
+        ("is the billing service deprecated for the new plans", "is_copula"),
+        ("is the Q3 export archived in the old sharepoint", "is_copula"),
+        ("is the data archived on the old server", "is_copula"),
         ("list what we retired in Q3", "imperative_what"),
         # …and the compound question the table has always refused
         ("what ended, and what replaced it", "wh_whole_question"),
@@ -1012,6 +1025,16 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
         assert payload["reason"] == "shape"
         assert payload["cue"], "the notice must name the words it saw"
         assert payload["hint"] == MISSED_ROUTE_HINT
+        # ⛔ THE CLEARED KEY SET IS DERIVED FROM THIS PAYLOAD, so it is pinned HERE:
+        # `sdk._tortoise_fts_query` clears a reused caller sink by KEY (never with
+        # `dict.clear()` — the sink may carry the caller's own bookkeeping), using
+        # `STATE_NOTICE_KEYS`. A key added to the payload without being added to that
+        # constant would leave a STALE notice on a reused sink, which is the one thing
+        # the clear exists to stop.
+        assert tuple(payload) == STATE_NOTICE_KEYS, (
+            f"payload keys {tuple(payload)} != STATE_NOTICE_KEYS {STATE_NOTICE_KEYS} — "
+            f"the sink clear in `sdk._tortoise_fts_query` is key-scoped and would leak "
+            f"the difference as a stale notice")
 
     # …and the notice is NOT emitted where there is nothing to report: an
     # ordinary content query (the four that must not route, and a record lookup)
@@ -2420,11 +2443,19 @@ def test_a_missed_state_cue_is_distinguishable_from_an_honest_empty(sdk):
         "state cue was seen")
     reused_status = dict(status)          # carries this test's earlier notice
     reused: dict = dict(notice)
+    # ⛔ …and the CLEAR IS KEY-SCOPED (review P2, measured). The sink belongs to the
+    # CALLER, so a reused dict may also carry that caller's own bookkeeping; the
+    # hygiene this block performs must not destroy it. `dict.clear()` did, which is
+    # what the code shipped before this row: the sibling `truncation.mark_truncation`
+    # (the pattern the comment cites) writes its own keys and `pop`s its own stale one,
+    # and never wipes the mapping.
+    reused["caller_own_key"] = "kept"
     sdk._tortoise_fts_query("launch event", entity_type="point", limit=5,
                             _state_route_out=reused,
                             read_status_out=reused_status)
-    assert reused == {}, (
-        f"a REUSED sink kept a stale notice {sorted(reused)} on a content read")
+    assert reused == {"caller_own_key": "kept"}, (
+        f"the clear took something it does not own: {sorted(reused)} (a stale notice "
+        f"must go, a caller's own key must not)")
     assert "state_question" not in reused_status, (
         "a REUSED read-status sink kept a stale `state_question` on a content "
         "read — the cleared-then-decided rule is what stops that")

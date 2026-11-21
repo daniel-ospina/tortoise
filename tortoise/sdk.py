@@ -46336,8 +46336,19 @@ class TortoiseSDK:
         # that was never seen. (A call REFUSED before this block — `claim_class` on
         # a non-Point family raises at the top — replies with an exception, never
         # with a clean read.)
+        # ⛔ KEY-SCOPED, NOT `clear()` (review P2, measured). This sink is the
+        # CALLER's: a reused dict may also carry that caller's own bookkeeping,
+        # and wiping it would destroy data the contract never claims to own. The
+        # sibling `truncation.mark_truncation` is the pattern being matched here
+        # — it writes its own keys and `pop`s its own stale one, and NEVER
+        # `clear()`s — which the earlier wording of this comment got wrong. The
+        # anti-stale property this block exists for needs only the keys this
+        # module writes, and `missed_route_payload` owns that closed list.
         if _state_route_out is not None:
-            _state_route_out.clear()
+            from .state_intent import STATE_NOTICE_KEYS
+
+            for _state_key in STATE_NOTICE_KEYS:
+                _state_route_out.pop(_state_key, None)
         if read_status_out is not None:
             read_status_out.pop("state_question", None)
         if _state_notice is not None:

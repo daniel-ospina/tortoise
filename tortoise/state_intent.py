@@ -747,6 +747,19 @@ _COPULA_SUBJECT = (
     # `other`, `another`, `much`, `enough` — `is the export several teams use deprecated`)
     # still ROUTE, because telling a bare noun from a bare verb needs a lexicon this
     # detector does not have.
+    # ⛔ …AND ONE MORE, ADDED WHEN THE PREPOSITION FIX BELOW WAS MEASURED: a qualifier
+    # introduced by a SUBORDINATOR is still SILENT on this shape — `is the export archived
+    # because of the migration`, `is the onboarding flow retired since the merger`. That is
+    # not the same defect as the preposition case this round fixed: a `because`/`since`
+    # clause turns the question into a CAUSAL or TEMPORAL one, which this module refuses
+    # deliberately (`is the export broken because the schema was deprecated` is the pinned
+    # content class), and a boundary-naming `since` is the class `wh_whole_question` refuses
+    # by design. What is honestly still owed is the NOTICE — `_BLOCKED_TAIL` lists both
+    # words, so the closed-list contract promises a report the shape does not deliver. The
+    # guard cannot see WHERE its subordinator sits without bounding every lookahead at the
+    # participle, and that bound was measured to re-ROUTE the round-16 hijack
+    # (`has anyone complained billing has been deprecated`), so it is recorded here as a
+    # KNOWN silence rather than traded for a routing regression.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
     # ⛔ AND A SECOND AUXILIARY IS A NESTED CLAUSE (round-16 review, measured):
@@ -761,7 +774,23 @@ _COPULA_SUBJECT = (
     r"where|whereas|after|before|now|what|how|why|has|have|had|is|are|was|were|will|"
     r"would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
+    # ⛔ A PREPOSITION IS NOT A SECOND NOUN PHRASE (review P1, measured). `of` was
+    # already excluded here — a genitive (`the export of the vendor`) is ONE noun
+    # phrase — but no OTHER preposition was, so a `<prep> the <noun>` QUALIFIER
+    # sitting after the participle was read as a second NP inside the subject and
+    # REFUSED the shape. The result was neither a route nor a notice: `is the export
+    # archived by the vendor`, `is the Q3 export archived in the old sharepoint` and
+    # `is the billing service deprecated for the new plans` all came back
+    # `signal=None` — SILENT — which is #14033's own defect (an unrouted state
+    # question that is indistinguishable from "nothing has ended") reproduced on the
+    # shape this PR ADDS. The pinned row that should have caught it pins only
+    # `… retired by legal`, the `<prep> <bare noun>` spelling — the one shape the
+    # guard happened to let through. These are `_BLOCKED_TAIL`'s own prepositions, so
+    # a qualifier that table REPORTS can no longer be swallowed by a guard looking
+    # past the participle.
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of|"
+    r"in|on|at|by|for|from|with|to|about|over|against|regarding|concerning|"
+    r"towards|toward|per|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
@@ -1106,6 +1135,17 @@ MISSED_ROUTE_FAMILY_HINT = (
 #: Event has no lifecycle — ``ended.py``'s own refusal).
 MISSED_ROUTE_REASONS = ("shape", "family")
 
+#: The keys :func:`missed_route_payload` writes — the CLOSED list a caller-owned sink
+#: must be cleared of before a new decision is written to it. It is a constant because
+#: the clearing side (`sdk._tortoise_fts_query`) is in another module and a sink is
+#: CALLER-OWNED and reusable: it may carry the caller's own bookkeeping beside these
+#: keys, so the sink is cleared BY KEY and never with `dict.clear()` (the same hygiene
+#: `truncation.mark_truncation` performs on its sibling sink). A key added to the
+#: payload without being added here would leave a stale one behind on a reused sink —
+#: which is the whole reason the clear exists — so :func:`missed_route_payload` asserts
+#: the two agree and a test pins it.
+STATE_NOTICE_KEYS = ("routed", "population", "reason", "cue", "hint")
+
 
 #: THE COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,
 #: not a phrase* — so the cue is a shape that ASKS FOR THE SET, and the population
@@ -1307,7 +1347,7 @@ def missed_route_payload(state_question: StateQuestion, *,
             return None
         population = ENDED
         cue = state_question.signal_cue
-    return {
+    payload = {
         "routed": False,
         "population": population,
         "reason": reason,
@@ -1315,6 +1355,12 @@ def missed_route_payload(state_question: StateQuestion, *,
         "hint": (MISSED_ROUTE_FAMILY_HINT if reason == "family"
                  else MISSED_ROUTE_HINT),
     }
+    if tuple(payload) != STATE_NOTICE_KEYS:  # pragma: no cover - drift guard
+        raise AssertionError(
+            f"missed-route payload keys {tuple(payload)} do not match "
+            f"STATE_NOTICE_KEYS {STATE_NOTICE_KEYS}; a sink cleared by KEY would "
+            f"carry the difference as a STALE notice on a reused dict")
+    return payload
 
 
 __all__ = [
@@ -1325,6 +1371,7 @@ __all__ = [
     "MISSED_ROUTE_REASONS",
     "POPULATIONS",
     "ROUTING_NOTE",
+    "STATE_NOTICE_KEYS",
     "StateQuestion",
     "detect_state_question",
     "missed_route_payload",
