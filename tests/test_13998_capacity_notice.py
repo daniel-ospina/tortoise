@@ -1552,6 +1552,135 @@ def _source_block(path: pathlib.Path, start_marker: str,
     return text[start:text.index(end_marker, start)]
 
 
+# --- the Idempotency-Key's bound: the PROVIDER's window, not ours ----------
+# #14038 review (P2, tree). Four passages stated that the provider Idempotency-Key
+# "collapses" the crash-window duplicate and stopped there. Resend's own page
+# bounds it — "Resend checks whether an email with the same idempotency key has
+# already been sent in the last 24 hours" — so a replay older than that window
+# sends AGAIN, and the unqualified sentence is false on the very path it explains.
+# The grading is per PARAGRAPH, because the claim and its bound must be readable
+# together: a bound parked two paragraphs away is the same defect one step out.
+_IDEMPOTENCY_CLAIM = re.compile(r"idempotency[-\s]?key", re.IGNORECASE)
+_COLLAPSE_CLAIM = re.compile(r"collaps", re.IGNORECASE)
+#: A retention bound, in the spellings these sources actually use. Each names a
+#: WINDOW — a duration the key lives for — never a count of sends.
+_RETENTION_BOUND = re.compile(
+    r"last\s+\**24\s*hours?\**"        # Resend's own wording
+    r"|\b24\s?-?h(?:ours?)?\b"         # the short form these headers use
+    r"|retention\s+window"             # the name of the thing
+    r"|(?:inside|within)\s+its\s+window",
+    re.IGNORECASE)
+
+
+def _comment_paragraphs(text: str) -> list[str]:
+    """Blank-line paragraphs, with the comment marker stripped.
+
+    `#:` justification blocks and `--` SQL headers are the two homes of these
+    claims, and a bare marker line is a PARAGRAPH BREAK in both — reading the
+    marker as text would glue a bound to a claim it does not belong to.
+    """
+    paragraphs: list[str] = []
+    current: list[str] = []
+    for raw in text.splitlines():
+        line = re.sub(r"^\s*(#:?|--)\s?", "", raw)
+        if not line.strip():
+            if current:
+                paragraphs.append(" ".join(current))
+                current = []
+            continue
+        current.append(line.strip())
+    if current:
+        paragraphs.append(" ".join(current))
+    return paragraphs
+
+
+def _unbounded_idempotency_claims(text: str) -> list[str]:
+    """Paragraphs that claim the key collapses a duplicate and never bound it."""
+    unbounded: list[str] = []
+    for paragraph in _comment_paragraphs(text):
+        if not (_IDEMPOTENCY_CLAIM.search(paragraph)
+                and _COLLAPSE_CLAIM.search(paragraph)):
+            continue
+        if not _RETENTION_BOUND.search(paragraph):
+            unbounded.append(paragraph)
+    return unbounded
+
+
+#: The three files that carry the claim. `capacity_notice` is where the notices
+#: send, `supabase_control` is where every marker it stamps lives (including the
+#: #2406 onboarding key, the same claim one marker over), and the migration header
+#: is append-only once applied — the artifact that can never be corrected later.
+_IDEMPOTENCY_ARTIFACTS = (
+    "tortoise/capacity_notice.py",
+    "tortoise/supabase_control.py",
+    "supabase/migrations/20261120000001_storage_notice_pct.sql",
+)
+
+
+def test_every_idempotency_key_claim_names_the_providers_retention_window():
+    """⛔ #14038 review (P2, tree): the collapse was claimed UNBOUNDED.
+
+    Four passages said the key "collapses" the crash-window duplicate and stopped
+    there, while `supabase_control`'s own two readers already said "inside its
+    window" — so the same defect was worded correctly one function away from the
+    docstring that overstated it. Resend's page is the bound: *"Resend checks
+    whether an email with the same idempotency key has already been sent in the
+    last 24 hours."* Past that window the key is gone, the deterministic key
+    `capacity-notice:{org_id}:{pct}` is replayed into a fresh window, and the
+    notice is sent a second time — which is exactly the path
+    `_ACCOUNT_DRIFT_SOFT` describes ("an unledgered pass re-sends the one-shot
+    notice every interval forever").
+
+    Nothing in this module expires a key, so the window is the PROVIDER's and the
+    prose has to name it. This row grades the CLAIM rather than one literal
+    string, so a reworded over-claim is still caught.
+    """
+    graded = 0
+    for rel in _IDEMPOTENCY_ARTIFACTS:
+        paragraphs = [
+            paragraph
+            for paragraph in _comment_paragraphs(
+                (ROOT / rel).read_text(encoding="utf-8"))
+            if _IDEMPOTENCY_CLAIM.search(paragraph)
+            and _COLLAPSE_CLAIM.search(paragraph)
+        ]
+        graded += len(paragraphs)
+        unbounded = [p for p in paragraphs if not _RETENTION_BOUND.search(p)]
+        assert not unbounded, (
+            f"{rel}: {len(unbounded)} paragraph(s) claim the provider "
+            "Idempotency-Key collapses the duplicate WITHOUT naming its "
+            "retention window. Resend keeps a key for the last 24 hours, so a "
+            "replay after that window sends again and the bare claim is false:\n  "
+            + "\n  ".join(p[:400] for p in unbounded))
+    assert graded >= 7, (
+        f"only {graded} paragraph(s) were graded — this row is vacuous if the "
+        "claim's homes stop being found. The sites are the module docstring, "
+        "`claim_notice`, `_ACCOUNT_DRIFT_SOFT`, the migration header, and "
+        "`supabase_control`'s three marker docstrings")
+
+
+def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
+    """The detector's own discriminating power, pinned.
+
+    A guard nobody has seen refuse is a guard that may be matching nothing. The
+    second sample is the PRE-FIX wording, verbatim — so the assertion below is
+    the same one that was red on the tree this PR was reviewed on.
+    """
+    assert _unbounded_idempotency_claims(
+        "the provider Idempotency-Key collapses the duplicate a crash between "
+        "the two produces.")
+    assert _unbounded_idempotency_claims(
+        "the provider Idempotency-Key `capacity-notice:{org_id}:{pct}` "
+        "collapses the one duplicate a crash between the provider accept and "
+        "the stamp can produce.")
+    assert not _unbounded_idempotency_claims(
+        "the provider Idempotency-Key collapses the duplicate within its "
+        "window.")
+    assert not _unbounded_idempotency_claims(
+        "Resend dedupes a repeated key against the last 24 hours, so a replay "
+        "after it sends again.")
+
+
 def test_the_module_docstring_names_the_post_rename_table():
     """P3-1: the module a reader opens FIRST must not name the retired table.
 

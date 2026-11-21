@@ -56,7 +56,12 @@
 -- two processes cannot interleave into a lower mark and two passes that both
 -- saw NULL cannot both claim the first send. The provider Idempotency-Key
 -- `capacity-notice:{org_id}:{pct}` collapses the one duplicate a crash between
--- the provider accept and the stamp can produce.
+-- the provider accept and the stamp can produce — AND ONLY INSIDE THE KEY'S
+-- RETENTION WINDOW: Resend dedupes a repeated key against "the last 24 hours"
+-- (`resend.com/docs/dashboard/emails/idempotency-keys`), so a replay that
+-- arrives after that window sends a SECOND copy and then stamps. The window is
+-- written into the header rather than left implied because this header is
+-- append-only once applied, and the bare claim read as unbounded.
 --
 -- A SKIPPED OR FAILED SEND NEVER STAMPS — so the mark never swallows a notice
 -- the customer has not received. That is also what makes the send-budget guard

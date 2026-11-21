@@ -103,7 +103,13 @@ stamp itself is a
 compare-and-swap on the value this pass read (:func:`claim_notice`), so two
 processes cannot interleave into a LOWER mark, and the provider Idempotency-Key
 (`capacity-notice:{org_id}:{pct}`) collapses the cross-process replay that
-survives a crash between send and stamp.
+survives a crash between send and stamp — **inside that key's retention window
+only**. Resend dedupes a repeated key against "the last **24 hours**"
+(`resend.com/docs/dashboard/emails/idempotency-keys`), so a replay that arrives
+later than that sends a SECOND copy and then stamps. ⛔ The bound is stated
+rather than implied because nothing in this code expires a key: the window is
+the PROVIDER's, and the one path that can outlive it — a ledger that cannot be
+marked at all — is named in `_ACCOUNT_DRIFT_SOFT`.
 
 BLAST CONTROL. The send budget (#1138/#3631, `email_notify.reserve_send_slot`)
 is the limiter for the first fleet-wide pass: past the daily cap the remaining
@@ -615,7 +621,11 @@ def claim_notice(cp, org_id: str, threshold: int,
     ⛔ SEND-THEN-STAMP, like the #2406 onboarding marker: the stamp follows a
     provider ACCEPT, so a failed send leaves the mark alone (retryable) and the
     provider Idempotency-Key collapses the duplicate a crash between the two
-    produces. The opposite order would permanently swallow the notice on any
+    produces. ⛔ THAT COLLAPSE IS BOUNDED BY THE PROVIDER, NOT HERE: Resend keeps
+    a key for "the last 24 hours"
+    (`resend.com/docs/dashboard/emails/idempotency-keys`), so a crash-replay that
+    arrives after the window sends a second copy and then stamps. Nothing in this
+    module expires a key, so the window is stated rather than assumed. The opposite order would permanently swallow the notice on any
     send failure — the customer would never learn, which is the failure mode this
     email exists to prevent.
     """
@@ -653,8 +663,9 @@ _ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
 #: ⛔ `storage_notice_pct` and `deleted_at` are DELIBERATELY NOT here: the mark is
 #: the LEDGER, and an unreadable ledger must refuse to send
 #: (`notice-mark-unavailable`) rather than mean "never notified" — the provider
-#: idempotency key collapses only a replay of the SAME threshold, so an unledgered
-#: pass re-sends the one-shot notice every interval forever. Deletion is the
+#: idempotency key collapses only a replay of the SAME threshold, and only inside
+#: that key's 24 h retention window (beyond it the provider sends again), so an
+#: unledgered pass re-sends the one-shot notice every interval forever. Deletion is the
 #: fail-closed direction too (#1096: a deletion column is never an additive tier).
 #: A single PostgREST 400 does not say WHICH column it rejected, which is why
 #: `read_account` retries without these and re-raises when the retry also fails.
