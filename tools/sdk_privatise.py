@@ -497,9 +497,9 @@ SWEEP_NAMES = 66
 #: so no typed call site is legitimised by this re-cut.
 #: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8 — but NOT for the reason an earlier draft gave. It said
 #: "its whole diff is figure literals: stripping every digit run from each `-`/`+` pair leaves the
-#: pair identical", and that is FALSE at this head: this PR also rewrites
-#: `tests/test_13337_cache_graph_declaration.py` (the `_capture` helper and the anchors), so the
-#: digit-stripped `-`/`+` multisets differ in both files. The conclusion still holds, but it must be
+#: pair identical", and that is FALSE of the `#14108` commit that landed it: the capture rewrite
+#: also rewrites `tests/test_13337_cache_graph_declaration.py` (the `_capture` helper and the anchors),
+#: so the digit-stripped `-`/`+` multisets differ in both files. The conclusion still holds, but it must be
 #: SCOPED, and an earlier draft of THIS sentence got it wrong: it said `--repin` reads the same pair
 #: "on `origin/main` and on this head, so … nothing in it moves a receiver row", which CONTRADICTED
 #: the re-cut paragraph FURTHER DOWN THIS BLOCK ("The −1 is THIS LANE's own"). ⛔ No line distance is
@@ -733,7 +733,7 @@ SWEEP_NAMES = 66
 #: public name: 0`. The row composition is read off `--report --base 28ca66878d… --top 5000` AT THIS
 #: HEAD, not inferred: `proj.g.query` 3642 and `g.query` 1492 are this PR's own rows, unchanged by the
 #: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
-#: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
+#: accumulating by APPEND rather than `update` (#14108), a file this branch's DIFF does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
 SWEEP_RESIDUE = (11844, "70d6cfdcd8b769e4")
 
