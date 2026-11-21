@@ -3394,15 +3394,26 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "resolving reach from the BLOCK rather than from the CALL leaves the block "
         f"exempt over OUR client: {_rebind_nested_row}"
     )
-    # ⛔ THE CONTROL IS THE OTHER DIRECTION OF THE SAME RULE, and it is the one the
-    #     docstrings call a REGRESSION against `origin/main`: the nested `def` rebinds the
+    # ⛔ THE CONTROL IS THE OTHER DIRECTION OF THE SAME RULE: the nested `def` rebinds the
     #     IMPORT NAME, and the call stays at BLOCK level, where that local CANNOT reach it
     #     (§4.2.2 — a nested `def` is a different block). Block-granularity resolution
     #     graded this legitimate third-party probe as a ROOT, i.e. turned a skip into a
-    #     collection error. Measured: green here, and the ONLY row that reds when the
-    #     `ast.walk(block)` subtraction (the deleted `_rebinds_within` mechanism) is put
-    #     back — which is why the fail-open row above cannot stand alone (review of
-    #     #14160, P2: without this the fix could be reverted with all eight tests green).
+    #     collection error — the 4k-/4l- false red.
+    #     ⚠️ THIS INSTANCE IS NOT MAIN-VS-BRANCH: `origin/main` grades it too — its
+    #     `_third_party_receivers` subtracts `ast.Name`-Store rebinds with an UNSCOPED
+    #     `ast.walk(tree)`, which sees the nested assignment, so main measures
+    #     `((5, (), True, False, True),)` here while this tree measures `()` (measured with
+    #     each tree's own `_probe_blocks_from_source`). A row's comment must not send the
+    #     next reader to test it against main and be contradicted: this row pins the
+    #     DIRECTION, and the family where main genuinely differs is the `str`-field one
+    #     above (`except … as falkordb` in a nested `def`, call at block level: main `()`,
+    #     block-granularity grades it, this tree `()`).
+    #     Measured: green here, and the ONLY row that reds when the block-granularity
+    #     subtraction (the `ast.walk(block)` mechanism the deleted `_rebinds_within` was)
+    #     is put back — verified over every one of the 573 source classifications this
+    #     self-test makes, exactly one of which flips. That is why the fail-open row above
+    #     cannot stand alone (review of #14160, P2: without this the fix could be reverted
+    #     with all eight tests green).
     _nested_def_control = roots(
         textwrap.dedent(
             """
@@ -3423,8 +3434,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     )
     assert _nested_def_control == (), (
         "the CONTROL: a nested `def`'s LOCAL cannot reach a call at BLOCK level, so the "
-        "block must stay exempt — grading it is the 4k-/4l- false red, and it is the "
-        "direction that regressed against origin/main: "
+        "block must stay exempt — grading it is the 4k-/4l- false red this row pins (a "
+        "false red `origin/main` happens to share on this instance; the main-vs-branch "
+        "family is the `str`-field one): "
         f"{_nested_def_control}"
     )
 
