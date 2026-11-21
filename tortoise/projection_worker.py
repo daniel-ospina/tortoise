@@ -408,11 +408,23 @@ class ProjectionWorker:
     def submit(self, item: PendingProjection) -> bool:
         """Queue one projection. ``True`` queued, ``False`` ⇒ fold it inline.
 
-        ⛔ NEVER RAISES. This is called on the write path after the journal has
-        committed, so a failure here would hand the producer an exception for a
-        write that persisted — and would leave the record short with no inline
-        fallback. Thread start failures are therefore answered as ``False``
-        (the caller folds inline), which is the same verdict a full queue gets.
+        ⛔ IT RAISES NOTHING THE CALLER DOES NOT ALREADY CATCH — and the precise
+        wording is load-bearing (#14222 review, finding 6). It is called on the
+        write path after the journal has committed, so a failure here would hand
+        the producer an exception for a write that persisted, leaving the record
+        short with no inline fallback. Two arms DO raise by design:
+
+        * :meth:`_ensure_started` calls ``thread.start()`` unguarded, so a
+          ``RuntimeError: can't start new thread`` (fd/thread exhaustion)
+          propagates from the line below;
+        * :meth:`_publish` is a foreign call and may raise.
+
+        Both are answered INLINE by :func:`tortoise.live_write._submitted_to_worker`,
+        which wraps this call in ``except Exception: return False``. The queue's
+        own declines (a full bound, a stopping/closed instance) are the only
+        verdicts returned as ``False`` from HERE. A future DIRECT caller must wrap
+        this the same way; do not read "never raises" into either arm above —
+        only an exception at the seam is guaranteed to fold inline.
         """
         self._ensure_started()
         with self._cond:
@@ -559,7 +571,6 @@ class ProjectionWorker:
         self._ensure_not_inherited()
         while True:
             cond = self._cond
-            snapshot = None
             with cond:
                 # ⛔ A PEER REPLACED THE CONDITION WHILE THIS THREAD WAITED: it is
                 # holding the old one, which nobody else can see, so the only
@@ -588,12 +599,6 @@ class ProjectionWorker:
                         self._quietly(
                             lambda: atexit.register(_drain_at_exit, self))
                     return
-            # ⛔ PUBLISHED OUTSIDE THE QUEUE LOCK (#14222 review cycle 4, P2):
-            # `Gauge.set` is a foreign call and its first call imports
-            # `monitoring`, which must never happen under `_cond` — the write ACK
-            # and `stats()` live behind that lock.
-            if snapshot is not None:
-                self._publish(snapshot)
 
     def _ensure_not_inherited(self) -> None:
         """Reset this object for a NEW PROCESS, before anyone takes its lock.
@@ -802,6 +807,38 @@ class ProjectionWorker:
 
 _WORKER: ProjectionWorker | None = None
 _WORKER_LOCK = threading.Lock()
+
+
+def _reinit_module_lock_after_fork() -> None:
+    """Replace the SINGLETON's lock in a forked child (#14222 review, finding 1).
+
+    :meth:`ProjectionWorker._reset_for_fork_locked` replaces the two locks an
+    INSTANCE owns, and its docstring says "BOTH LOCKS" because that is how many
+    the instance has. The MODULE has a third, ``_WORKER_LOCK``, and no instance
+    reset can reach it: it is taken by :func:`worker` — on the DEFERRED WRITE
+    path, once per deferred write — and twice by :func:`shutdown`. A child
+    forked while a peer thread held it would block in :func:`worker` FOREVER,
+    and ``live_write._submitted_to_worker``'s ``except Exception`` cannot answer
+    a hang, so the module's "every doubt folds inline" posture would be
+    unreachable at exactly the point it is claimed.
+
+    Replaced, not acquired, for the same reason the instance reset replaces
+    rather than waits: the thread holding it did not survive the fork, so the
+    lock has no owner in this process. POSIX only — Windows has no ``fork`` —
+    and registered at import, the same shape ``tortoise/log.py`` and
+    ``tortoise/embedded_lifecycle.py`` already use for this hazard.
+
+    ⛔ ``_WORKER`` is deliberately NOT cleared. The inherited instance carries
+    ``_closed``/``_stopping`` that a ``shutdown()`` may be relying on, and every
+    entry point already calls ``_ensure_not_inherited()``, whose ``_cond_pid``
+    check resets the instance itself.
+    """
+    global _WORKER_LOCK
+    _WORKER_LOCK = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
+    os.register_at_fork(after_in_child=_reinit_module_lock_after_fork)
 
 
 def armed() -> bool:

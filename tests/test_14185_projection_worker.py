@@ -637,11 +637,16 @@ def test_a_record_only_write_is_never_deferred(armed, monkeypatch):
                                      outcome="applied")
 
     # ⛔ THE TENANT IS SUPPLIED ON PURPOSE (#14222 review cycle 5, ISSUE 2). The
-    # gate order in `live_write._submitted_to_worker` answers "no carried tenant"
-    # BEFORE it looks at `journal_skipped`, so a write with no `tenant=` stayed
-    # inline for the WRONG reason and this row passed even with condition 1
-    # deleted. Every deferral-expecting write in this file carries `_TENANT`; a
-    # condition test that does not is testing the tenant gate instead.
+    # gate order in `live_write._submitted_to_worker` is: condition 1
+    # (`journal_skipped`) and the `durable`/`record_sink` clauses FIRST, in one
+    # `if`, and the tenant gate SECOND — so a write with no `tenant=` is declined
+    # by a LATER gate, which MASKS this one. Deleting condition 1 would then
+    # leave the tenant gate answering `False` anyway and this row would pass even
+    # with the behaviour reverted. Every deferral-expecting write in this file
+    # carries `_TENANT`; a condition test that does not is testing the tenant
+    # gate instead. (Cycle-7 review, finding 4: an earlier revision of this
+    # comment stated the order backwards — tenant BEFORE `journal_skipped` — which
+    # is not what the code does.)
     write = live_write.write({"type": "PointAdded"}, log=_Log(), project=project,
                              tenant=_TENANT)
     assert write.appended is False, "the append should have been skipped"
@@ -664,8 +669,10 @@ def test_a_write_whose_outcome_a_door_reads_is_never_deferred(armed):
     sink: list = []
     outcome = types.SimpleNamespace(applied=True, refusal=None, outcome="applied")
 
-    # `tenant=` as well: without it the tenant gate (`live_write.py:336`) answers
-    # first and the `record_sink` condition is never the reason (ISSUE 2).
+    # `tenant=` as well: without it the tenant gate (`live_write.py:336`) would
+    # decline the write too, so the `record_sink` condition (in the FIRST `if`,
+    # `live_write.py:334`) would never be the reason and this row would pass with
+    # it deleted (ISSUE 2).
     write = live_write.write(
         {"type": "PointAdded"}, log=_Log(), record_sink=sink, tenant=_TENANT,
         project=lambda e, s, journal_skipped=False: outcome)
@@ -992,6 +999,65 @@ def test_a_forked_worker_republishes_its_gauges(armed):
     slow.gate.set()
     assert projection_worker.wait_for_drain(10) is True
     projection_worker.shutdown(drain=True, timeout=5)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
+def test_the_MODULE_lock_is_replaced_in_a_forked_child():
+    """⛔ #14222 review, finding 1: `_WORKER_LOCK` is MODULE-level, so the
+    per-instance fork reset cannot reach it.
+
+    `_reset_for_fork_locked` replaces the two locks an INSTANCE owns — `_cond`
+    and `_publish_lock` — and says "BOTH LOCKS", which is how many the instance
+    has. The module has a THIRD, `_WORKER_LOCK`, taken by `worker()` on the
+    deferred write's ACK path (once per deferred write) and twice by
+    `shutdown()`. A child forked while a peer thread held it blocked inside
+    `worker()` FOREVER, and `live_write._submitted_to_worker`'s
+    `except Exception` cannot answer a hang — so "every doubt folds inline" was
+    unreachable exactly where it is claimed. The `after_in_child` hook replaces
+    it.
+
+    Forked probe, in-suite: the parent holds `_WORKER_LOCK` while it forks; the
+    child asks for the singleton and must answer. ⛔ WITH THE HOOK REMOVED this
+    child does NOT answer 0 — it blocks on the inherited lock until its own
+    alarm fires. Measured on this box, the alarm's disposition is converted, so
+    the mutant reports exit **4** (the `except BaseException` arm) rather than a
+    raw `SIGALRM`; both assertions below therefore fail on the mutant and neither
+    depends on which arm the platform takes.
+    """
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with projection_worker._WORKER_LOCK:
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, name="worker-lock-holder", daemon=True)
+    holder.start()
+    assert holding.wait(5), "the peer never took the module lock"
+
+    pid = os.fork()
+    if pid == 0:                                   # ── child ──
+        code = 3
+        try:
+            signal.alarm(10)
+            projection_worker.worker()             # takes `_WORKER_LOCK`
+            code = 0
+        except BaseException:                      # noqa: BLE001, RUF100
+            code = 4
+        finally:
+            os._exit(code)                         # never unwind into pytest
+
+    release.set()
+    holder.join(5)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+        "the forked child did not reach the singleton: "
+        f"exited={os.WIFEXITED(status)} status="
+        f"{os.WEXITSTATUS(status) if os.WIFEXITED(status) else 'signalled'} — it "
+        "was still blocked on `_WORKER_LOCK`, the MODULE lock its peer held at "
+        "fork(), so the `after_in_child` hook never replaced it")
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
