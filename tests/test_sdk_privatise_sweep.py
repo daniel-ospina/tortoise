@@ -214,3 +214,262 @@ def test_a_name_bound_both_ways_in_one_scope_is_not_rewritten(tmp_path):
     edits = privatise.edits_for(_module(tmp_path, src), {"query": "_query"})
     assert edits.attrs == [], "a name bound from an SDK AND a graph handle is ambiguous"
     assert edits.residue["reg.query"] == 1
+
+
+# ── the residue block's own FIGURES: a published address must reproduce ─────────
+#
+# The `#:` block above `SWEEP_RESIDUE` is the only place this tool publishes ADDRESSES
+# (`83e94826a8a`, `d523c9be8c`, …) and FIGURES (a character count, which commit deleted a
+# line, which trees still carry it). A review round found four of them that did not
+# reproduce against the command printed beside them — the defect class the block polices
+# in its own words, and one no other suite can see: the block is comments, so nothing
+# executable depends on it. These arms ARE the falsifier, one per finding.
+
+RESIDUE_ABBREV = "83e94826a8a"          # the literal the block prints and calls an abbreviation
+RESIDUE_DELETING_COMMIT = "aee14c5ceb"  # measured: the interval commit that drops `seen.update`
+RESIDUE_INTERVAL_END = "d5ecef0d72"     # measured: that commit's parent, the last carrier
+RESIDUE_PR_HEAD = "d523c9be8c"          # `refs/pull/14108/head`
+RESIDUE_REWRITE_PARENT = "2fe01fc775e"  # the capture rewrite `#14068` re-cut
+
+
+def _residue_block() -> str:
+    """The `#:` comment block immediately above `SWEEP_RESIDUE`, as text."""
+    lines = (ROOT / "tools" / "sdk_privatise.py").read_text(encoding="utf-8").splitlines()
+    pin = next(i for i, line in enumerate(lines) if line.startswith("SWEEP_RESIDUE = ("))
+    start = pin
+    while start and lines[start - 1].lstrip().startswith("#:"):
+        start -= 1
+    return "\n".join(lines[start:pin])
+
+
+def _rev_present(rev: str) -> bool:
+    """Is `rev` carried by THIS clone? The `test` job is `fetch-depth: 1` (no objects)."""
+    try:
+        done = subprocess.run(
+            ["git", "cat-file", "-e", f"{rev}^{{commit}}"],
+            cwd=ROOT, capture_output=True, text=True)
+    except FileNotFoundError:  # no `git` on this host at all
+        return False
+    return done.returncode == 0
+
+
+def _git(*args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+    assert done.returncode == 0, f"git {' '.join(args)} failed: {done.stderr.strip()}"
+    return done.stdout
+
+
+def _requires(*revs: str) -> None:
+    missing = [rev for rev in revs if not _rev_present(rev)]
+    if missing:
+        pytest.skip(
+            f"{', '.join(missing)} absent from this clone — a `fetch-depth: 1` checkout "
+            "lacks them by construction, so the block's addresses are UNCHECKED here, not "
+            f"wrong. Re-arm with `git fetch origin {' '.join(missing)}`.")
+
+
+def _quoted(block: str, start: int) -> bool:
+    """Is the text at `start` introduced as a QUOTED earlier draft that was called wrong?
+
+    The block's shape for that is `<NOT|never|falsified|wrong> "<the draft's words>"`.
+    """
+    before = block[max(0, start - 100):start]
+    # The draft's words may open with an article (`NOT "the re-indented …"`), so a short run of
+    # word chars is allowed between the open quote and the occurrence.
+    return bool(re.search(r"(?:NOT|never|falsif\w*|wrong)[\s#:]*\"[\s#:\w]{0,12}$", before,
+                          re.IGNORECASE))
+
+
+def test_the_residue_block_is_a_real_block_and_publishes_its_addresses():
+    """Non-vacuity for the arms below: the block exists and carries its addresses."""
+    block = _residue_block()
+    assert block.count("\n") > 100, "the residue block is missing or truncated"
+    for literal in (RESIDUE_ABBREV, RESIDUE_PR_HEAD, RESIDUE_REWRITE_PARENT):
+        assert literal in block, f"{literal} is one of the block's published addresses"
+
+
+def test_the_abbreviation_length_claim_reproduces():
+    """Finding 1: `<N>-character ABBREVIATION` must equal the literal standing beside it.
+
+    The block printed `13-character` while `83e94826a8a` — the literal in the same
+    sentence — is ELEVEN characters: a figure that does not reproduce against the object
+    it describes, which is the defect the block names in its own words.
+    """
+    block = _residue_block()
+    claim = re.search(r"(\d+)-character ABBREVIATION", block)
+    assert claim, "non-vacuity: the block states the abbreviation's length"
+    # ⛔ GRADED AGAINST THE CONSTANT **AND** THE WINDOW (review, round 6): grading only the
+    # nearest backticked token let a decoy literal of a different length satisfy a WRONG figure
+    # (`the `83e94826a8abc` 13-character ABBREVIATION` went green). The abbreviation this claim
+    # is about is the one the block prints, so it must be the literal in the window, and the
+    # printed count must equal its length.
+    window = block[max(0, claim.start() - 200):claim.start()]
+    assert RESIDUE_ABBREV in window, "non-vacuity: the claim stands beside the literal"
+    assert int(claim.group(1)) == len(RESIDUE_ABBREV), (
+        f"the block says {claim.group(1)} characters; `{RESIDUE_ABBREV}` is "
+        f"{len(RESIDUE_ABBREV)}")
+
+
+def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
+    """Finding 2: WHICH commit deleted the line, and over which span the claim holds.
+
+    The block credited the interval's HEAD (`d523c9be8c`) with the deletion, and said the
+    re-indent was true "ONLY on `83e94826a8a`". Measured: the deleting commit is
+    `aee14c5ceb`, and SIX of the eight interval commits still carry the line — so the
+    claim is interval-scoped, not tree-unique.
+    """
+    _requires(RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT, RESIDUE_INTERVAL_END,
+              RESIDUE_PR_HEAD)
+    block = _residue_block()
+    revs = _git("rev-list", "--reverse", f"{RESIDUE_REWRITE_PARENT}..{RESIDUE_PR_HEAD}").split()
+    assert len(revs) == 8, "premise: `83e94826a8a` is the OLDEST of the EIGHT interval commits"
+    assert revs[0].startswith(RESIDUE_ABBREV), "premise: the interval opens on that commit"
+
+    def carries(rev: str) -> bool:
+        shown = subprocess.run(
+            ["git", "show", f"{rev}:tests/test_13337_cache_graph_declaration.py"],
+            cwd=ROOT, capture_output=True, text=True)
+        assert shown.returncode == 0, f"{rev} lost the file the claim is about"
+        return "seen.update(" in shown.stdout
+
+    carriers = [rev for rev in revs if carries(rev)]
+    droppers = [rev for rev in revs if not carries(rev)]
+    assert [rev[:10] for rev in droppers] == [RESIDUE_DELETING_COMMIT, RESIDUE_PR_HEAD], (
+        "premise: the deletion lands at aee14c5ceb, and d523c9be8c is one commit after it")
+    assert len(carriers) == 6, "premise: SIX of the eight trees carry the line, not one"
+    assert carriers[-1].startswith(RESIDUE_INTERVAL_END), (
+        "premise: the last carrier is the deleting commit's parent")
+
+    # ⛔ THE GAP MAY NOT INVERT, RELATIVISE OR DELEGATE THE ATTRIBUTION (review, rounds 6-8):
+    # a 60-char gap alone accepted `is one commit before the one that deletes …`, `does not
+    # delete …` and `is one commit before the commit that deletes …` — every one credits the
+    # wrong tree while naming ours, so the verb must be OURS and immediate.
+    assert re.search(
+        rf"`{RESIDUE_DELETING_COMMIT}`"
+        rf"(?![^.]{{0,60}}(?i:\b(?:not|never|no longer|before|after)\b))"
+        rf"(?![^.]{{0,60}}(?i:\bthe (?:one|commit|tree|rev)\b))"
+        rf"[^.]{{0,60}}(?i:\bdelet(e|es|ed)\b) the `seen\.update` line",
+        block), (
+        "the DELETION must be BOUND to the commit that made it — naming `aee14c5ceb` somewhere "
+        "in the block is not the attribution the finding asked for")
+    # ⛔ AND THE INTERVAL SPAN MUST STILL BE PUBLISHED (review, round 8): the too-narrow ban is
+    # a pure negative, so deleting the sentence that states the span left it green — the
+    # "deleting the sentence must not pass" defect this file rejects elsewhere.
+    assert re.search(rf"`{RESIDUE_ABBREV}`[^.]{{0,80}}`{RESIDUE_INTERVAL_END}`", block), (
+        "the claim is interval-scoped, so the span must be named: `83e94826a8a` to "
+        "`d5ecef0d72`")
+    # ⛔ CASE-INSENSITIVE, THE NOUN "deletion" MUST NOT COUNT, AND A SENTENCE SPLIT OR A LONGER
+    # RUN MUST NOT HIDE IT (review, rounds 6-8): the block honestly says the interval head
+    # `inherits that deletion` — only a VERB credits it — and both `… of the eight. It deletes
+    # the seen.update line.` and a 76-char credit sentence slid past a short fixed gap. So the
+    # negative runs on a period-flattened copy with a wider reach, EXCEPT when another revision
+    # is named in between (then the verb is that revision's, which is the honest attribution).
+    flat = re.sub(r"\.\s", " ", block)
+    for head_ref in re.finditer(rf"`{RESIDUE_PR_HEAD}`", flat):
+        tail = flat[head_ref.end():head_ref.end() + 200]
+        verb = re.search(r"(?i:\bdelet(e|es|ed)\b)", tail)
+        if verb is None:
+            continue
+        assert re.search(r"`[0-9a-f]{7,40}`", tail[:verb.start()]), (
+            "`d523c9be8c` is the interval HEAD and only inherits the deletion; a delete verb "
+            "near it with no other revision named in between credits it with doing it")
+    # ⛔ THE SHAPE, NOT THE PHRASE (review, rounds 7-8): `ONLY on …` has paraphrases — `solely
+    # on`, `ONLY for … is it true`, and a bare ` … alone` — and a phrase lookup let each
+    # reinstate the too-narrow claim. The escape is the block's own honest form, which says the
+    # narrow reading is TOO NARROW right after naming it.
+    for too_narrow in re.finditer(
+            rf"(?i:only|solely|just|exclusively)\s+(?:on|of|for|at|across)?\s*`{RESIDUE_ABBREV}`"
+            rf"|`{RESIDUE_ABBREV}`\s+alone", block):
+        assert _quoted(block, too_narrow.start()) or re.search(
+            r"too narrow", block[too_narrow.end():too_narrow.end() + 80]), (
+            "the re-indent holds across the six commits up to the deleting commit's parent, "
+            "not for one sha")
+
+
+def test_the_history_clause_is_only_quoted_as_falsified():
+    """Finding 3: the commit IS inside a history a reader browses.
+
+    `83e94826a8a` is an ancestor of `refs/pull/14108/head`, and a PR head ref survives a
+    merge, so "outside every history a reader browses" was false as an assertion. What is
+    measured is narrower: no remote BRANCH contains it, and `main` does not. The arm accepts
+    either honest form — the narrow claim stated outright, or the false one quoted as false —
+    and refuses the unqualified version, which is where the finding landed.
+
+    ⛔ THE CLAUSE IS MATCHED BY SHAPE, NOT BY ONE SENTENCE (review, rounds 5-8): the block has
+    already been reworded twice under this arm ("a reader browses" → "the repo PUBLISHES"), and
+    a phrase-keyed lookup turned each honest rewording into a red while letting a dishonest
+    one through. What must not vary is *a claim about every history* with no measured
+    qualifier in it.
+    """
+    _requires(RESIDUE_ABBREV, RESIDUE_PR_HEAD, "origin/main")
+    inside = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", RESIDUE_ABBREV, RESIDUE_PR_HEAD],
+        cwd=ROOT, capture_output=True, text=True)
+    assert inside.returncode == 0, (
+        "premise: the commit IS an ancestor of `refs/pull/14108/head`")
+    on_main = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", RESIDUE_ABBREV, "origin/main"],
+        cwd=ROOT, capture_output=True, text=True)
+    assert on_main.returncode == 1, (
+        "premise: the commit is NOT on `origin/main` (rc 1 = not an ancestor; anything else "
+        "means the measurement did not run)")
+    assert _git("branch", "-r", "--contains", RESIDUE_ABBREV).strip() == "", (
+        "premise: no remote BRANCH contains it — which is the only part of the block's "
+        "narrow claim that is about branches",)
+    block = _residue_block()
+    clampse = re.search(r"outside every[^.]{0,80}history", block)
+    assert clampse, "non-vacuity: the block still says where such a commit sits"
+    # ⛔ TWO HONEST SHAPES, AND NO THIRD (review, rounds 5-7). Either the clause itself carries a
+    # MEASURED qualifier (`BRANCH`), or it is a QUOTED earlier draft and the narrow fact that
+    # replaced it sits beside it. Keyed on the CLAUSE AS WRITTEN, not on one exact phrase: an
+    # earlier version looked up the exact phrase, so swapping the qualifier for an unmeasured one
+    # (`outside every TAG history …`) made the phrase absent, which it read as "quoted", and the
+    # nearby narrow sentence carried it — an unmeasured claim went green.
+    if not re.search(r"BRANCH|branch", clampse.group(0)):
+        assert _quoted(block, clampse.start()), (
+            "unquoted clause with no measured qualifier: the commit sits outside every BRANCH "
+            "history and not on `main` — `refs/pull/14108/head` IS a history a reader browses")
+        near = block[max(0, clampse.start() - 400):clampse.end() + 400]
+        assert re.search(r"no (?:remote )?branch", near, re.IGNORECASE), (
+            "a quoted earlier draft is acceptable only BESIDE the narrow fact that replaced it")
+
+
+def test_the_reindent_reference_points_at_the_bullet_that_counts_it():
+    """Finding 4: "the re-indented `seen.update` above" has no referent above it.
+
+    The only re-indents described above that sentence are `graph.query`'s. The row it means
+    is counted in the `tests/test_13337_cache_graph_declaration.py` +2 bullet, so the
+    sentence must POINT AT that bullet: the "already counted" claim, the bullet's
+    `seen.update` 1, and the bullet's file have to meet in one sentence. A test that only
+    forbade the dangling phrase would pass if the sentence were deleted, leaving the row
+    uncounted by name.
+    """
+    block = _residue_block()
+    # ⛔ `(?!\d)`: the block's own totals carry `seen.update` 101/102, and a bare substring
+    # test let `seen.update` 101 satisfy this arm — and satisfied its non-vacuity check on the
+    # PRE-FIX head, which is the shape of a gate that has never been able to go red.
+    row = re.compile(r"`seen\.update` 1(?!\d)")
+    assert row.search(block), "non-vacuity: the +2 bullet counts the row"
+    # ⛔ A WINDOW FORWARD FROM THE CLAIM, not a proximity window around the phrase: the
+    # `already counted` paraphrase further down the block sits next to the test file's name (as
+    # a path in a `git show <rev>:tests/…` command) but never beside `seen.update` 1, so it
+    # cannot satisfy this arm, and deleting the pointer sentence cannot pass it.
+    pointer = [
+        anchor for anchor in re.finditer(r"already count", block)
+        if row.search(block[anchor.start():anchor.start() + 320])
+        and "tests/test_13337_cache_graph_declaration.py"
+        in block[anchor.start():anchor.start() + 320]
+    ]
+    assert pointer, (
+        "the sentence must POINT AT the bullet that counts the `seen.update` row, naming "
+        "`tests/test_13337_cache_graph_declaration.py` and its `seen.update` 1 — pointing at a "
+        "re-indent 'above' resolves to `graph.query`'s, and pointing nowhere resolves to nothing")
+    # ⛔ THE SHAPE, NOT THE PHRASE (review, round 7): `the re-indented `seen.update` above` has
+    # paraphrases (`… row above`, `… line above`, `a re-indent of `seen.update` above`), and an
+    # exact-phrase ban let them all through. The pointer sentence below survives both, so the
+    # shape is what has to be banned — unless it is quoted as the earlier draft it was.
+    for dangling in re.finditer(
+            r"re-?indent\w*[^.\"]{0,40}`seen\.update`[^.\"]{0,20}\babove", block, re.IGNORECASE):
+        assert _quoted(block, dangling.start()), (
+            "no `seen.update` re-indent is described above that sentence — point at the bullet "
+            "that counts the row instead of pointing 'above'")
