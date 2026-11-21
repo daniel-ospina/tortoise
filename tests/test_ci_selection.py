@@ -10454,6 +10454,13 @@ ROWED_BY_THIS_FOLD = (
     # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:`
     # row and nothing reds.
     "test_vector_parity_13906.py",
+    # #13337 (PR #14068) — the fold that READ a tenant's cache graph instead of
+    # deriving it from the credential. A file this fold ADDED and registered on
+    # `api` + `core`; its first cut shipped the surface rows but no `durations:`
+    # row, which is exactly the #3400/#4348 trap (a default is not a reading), so
+    # it is listed here. Its end-to-end legs are armed in `test-record-postgres`
+    # (see that file's `test_the_armed_CI_job_supplies_BOTH_stores`), not here.
+    "test_13337_cache_graph_declaration.py",
     # #13123 — the eviction path's OWN end-to-end suite (`evict()` → the cache the
     # degraded read path actually consults, `FallbackSnapshotStore.get_or_build`), a
     # file this fold ADDED and registered on `core` + `uri_requiring:` + `durations:`.
@@ -10467,16 +10474,18 @@ ROWED_BY_THIS_FOLD = (
     # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
     # which re-derives the set from a real URI-less collection.
     "test_evictor_invalidates_fallback_snapshot_13123.py",
-    # #14070 — `tests/test_usage_signal.py` was ADDED by #14065 and the ENTRY-RULE pin
-    # iterates this EXPLICIT tuple, so it could not see the file: dropping its `durations:`
-    # row was silent. The `config/ci-surfaces.yml` half of #14070 is NOT carried here —
-    # #14072 (merged) already landed the `core` member row and the `durations:` row, and
-    # carrying it again unions a duplicate `core` scalar and a duplicate `durations:` key
-    # that `tools/ci_selection.py`'s `_NoDuplicateKeyLoader` and `tools/registry_integrity.py`
-    # refuse (#5373's `merge=union` shape, #10790/#10717). What is still missing on `main` —
-    # measured: `grep test_usage_signal origin/main:tests/test_ci_selection.py` → empty — is
-    # exactly this tuple entry, which is the half that reds when the row is dropped.
-    "test_usage_signal.py",
+    # ⛔ `test_usage_signal.py` IS NOT REPEATED HERE. This is the SECOND copy the merge of
+    # `origin/main` created, and the #14070 argument above is why it must not stay: carrying
+    # a second copy of a file that already has a row is exactly the duplicate shape that
+    # argument refuses. MEASURED, not assumed — the duplicate is INERT on this tree today,
+    # because nothing pins this particular file: `tests/test_ci_selection.py` passes 528 with
+    # it present (`grep test_usage_signal` finds no `== [name]` pin for it). What it does
+    # break is the next such pin: the list-equality form these ENTRY-RULE pins use
+    # (`[f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name]`) yields
+    # `['test_usage_signal.py', 'test_usage_signal.py']` against a one-element expectation,
+    # i.e. a pin written for this file could never pass. The entry above (the `#14011`
+    # block) is the survivor; the `config/ci-surfaces.yml` `core` scalar was de-unioned the
+    # same way in the same merge.
     # #10893 (second cycle) — the `pre_handler` decomposition's two falsifier files, ADDED by
     # this fold. The surface rows for both landed in this PR's registration commit and the
     # `durations:` rows did NOT, which is the residual half of the cycle-2 review's F1:
