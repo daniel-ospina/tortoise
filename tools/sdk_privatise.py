@@ -350,8 +350,14 @@ SWEEP_NAMES = 66
 #: lane first pasted before it measured). Both `main` pairs here are `--repin` output, not
 #: arithmetic on the pin: `11831, "1aef9c61f81faf39"` is what `main`'s own tree derives and
 #: `11825, "539914480e400722"` is what THIS tree derives. The recurrence is the one `#14062`
-#: documents: the pin is graded on PULL REQUESTS only, `main` merged `#14065` with nothing
-#: grading it, and `--check` is therefore RED on `main` today.
+#: documents: the pin is graded on PULL REQUESTS only, so `main` merged `#14065` with nothing
+#: grading it, and `--check` was RED on `main` at `f392bb67d5` — the tree this re-cut was measured
+#: on. ⛔ THAT IS A WINDOW, NOT A STANDING STATE, and the present-tense "is therefore RED on `main`
+#: today" this sentence used to carry went FALSE: `#14068` (`2fe01fc775`) re-cut `main`'s pin to
+#: `(11839, "0a7e60fa05aa31b9")` — the pair this file pins below — and that tree DERIVES it, so
+#: `--check` exits 0 on `main`. Measured on BOTH trees at this head, not inferred from the pins:
+#: `untyped receivers left alone (deliberate, reported): 11839`, exit 0, here and on `origin/main`
+#: `2fe01fc775`.
 #: The delta from `main`'s tree is −6 and it is a REMOVAL, not an absorption: SIX of the
 #: eight rows the `#14062` block above declared are the `poisoned.update` shape, and this lane
 #: deleted the shape rather than declaring it. The binding-poison arms in
@@ -380,10 +386,14 @@ SWEEP_NAMES = 66
 #: merge-base --is-ancestor ac57b2d38a 8610ed965c` says so, measured — so the +2 was already beneath
 #: the re-cut and `8610ed965c`'s own tree derives 11831. The 11829 pin was therefore STALE ON
 #: ARRIVAL, not stale from a later drift. "It drifted afterwards" would imply a window in which the
-#: pin was correct, and no such window existed; so `main`'s own tree measures 11831 against its own
-#: 11829 pin, and `--check` is RED on `main` right now (the same recurrence `#14062` documents: the
-#: pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded against a
-#: stale number). The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
+#: pin was correct, and no such window existed; so `main`'s tree AT `8610ed965c` measured 11831
+#: against its own 11829 pin, and `--check` was RED on `main` at that commit (the same recurrence
+#: `#14062` documents: the pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is
+#: then graded against a stale number). ⛔ SCOPED TO THAT COMMIT ON PURPOSE: the present-tense
+#: "`--check` is RED on `main` right now" this sentence used to carry went FALSE when `#14068`
+#: (`2fe01fc775`) merged and re-cut `main`'s pin to `(11839, "0a7e60fa05aa31b9")` — that tree
+#: derives 11839, measured on `origin/main`'s own tree at this head, so `--check` exits 0 on `main`.
+#: The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
 #: added by `ac57b2d38a` (`#14065`) — already an ancestor of the re-cut commit, so it sits between
 #: the 11821 pin and this tree, NOT "after" the 11829 one. Both sit on
 #: a plain `set` fed by a generator expression, so neither is a typed reference to a swept name
