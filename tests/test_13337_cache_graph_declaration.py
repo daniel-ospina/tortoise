@@ -206,13 +206,27 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
     namespace can never be resolved for a ``(id, org)`` pair the ownership check
     would refuse.
 
-    ⛔ THE EXPECTATION IS CAPTURED FROM THE OWNERSHIP READ, NEVER TYPED HERE.
-    This row asserted the literal ``[("id","eq","g_1"),("org_id","eq","orgA")]``
-    and a hardcoded pair cannot detect the drift it is named for: move the
-    ownership read's filters or its table and this row stayed GREEN while the two
-    readers diverged — the exact failure the docstring above claims to prevent
-    (raised by review). So both readers are EXECUTED against one spy and their
-    calls compared, which is an equivalence rather than a transcription.
+    ⛔ AGREEMENT ALONE IS NOT ENOUGH — the row needs BOTH halves, and it carries
+    both: an EQUIVALENCE (both readers are EXECUTED against one spy and their
+    calls compared) beside a KNOWN-ANSWER LITERAL.
+
+    The equivalence is what a transcription cannot supply: this row once asserted
+    the literal pair alone, and a hardcoded expectation cannot detect the drift it
+    is named for — move the ownership read's filters or its table and it stayed
+    GREEN while the two readers diverged (raised by review).
+
+    The literal is what the equivalence cannot supply: agreement on the WRONG
+    pair is still wrong. An equality between two captured lists is satisfied just
+    as well by ONE filter, or by a different one, as long as both readers were
+    edited the same way — measured: delete ``("org_id", "eq", org_id)`` from
+    BOTH ``tortoise/cache_graph.py`` and ``tortoise/hosted_api.py`` and the two
+    equality rows stay GREEN while the tenant filter this read exists for is
+    gone. The old literal-only row went RED on that joint mutant, and dropping it
+    outright traded away the dimension the read is for. So the anchor stays, as
+    the independently-stated expectation the comparison is checked against —
+    the pattern the review's research pass found in comparable suites (a
+    known-answer literal pinned beside equivalence assertions across input
+    paths).
     """
     from tortoise import supabase_control
 
@@ -246,6 +260,12 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
 
     assert declaration["table"] == ownership["table"]
     assert declaration["filters"] == ownership["filters"]
+    # ⛔ The ANCHOR the equivalence above cannot supply: agreement on the WRONG
+    # pair is still wrong, so the pair itself — the "same two filters" this row
+    # is named for — is stated independently. Dropping `org_id` from BOTH readers
+    # leaves every equality above green; this line is what goes RED.
+    assert ownership["filters"] == [("id", "eq", "g_1"),
+                                    ("org_id", "eq", "orgA")]
     # `select` is deliberately NOT pinned equal: the ownership read also fetches
     # `id` (it needs the row's identity), the declaration needs only the name.
     assert "namespace" in declaration["select"]
