@@ -40,10 +40,12 @@ version: 1
 # the map as #11576 shipped it packed the worst shard at 782.0 s -> 27 m, i.e. 58.64 x 1.5 =
 # 87.96 m: 2.04 m of real headroom rather than the 0.54 m S=10 was clearing by. (The
 # 2026-11-16 durations sweep re-packed the same 11 shards to a 23 m worst-shard watchdog, and
-# #12926's own 10.0 s row moved that emission one whole minute further, to 24 m; this branch's own
-# `tests/test_13998_capacity_notice.py` (2.0 s default weight, i.e. no duration row) takes the same
-# packing 719.9 s -> 720.1 s and moves it one minute further AGAIN: arm-2 SUM 56.64 m,
-# x 1.5 = 84.96 m, 5.04 m of headroom. Those numerals are a
+# #12926's own 10.0 s row moved that emission one whole minute further: arm-2 SUM 55.64 m,
+# x 1.5 = 83.4 m, 6.6 m of headroom. ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant: this
+# branch's own `tests/test_13998_capacity_notice.py` (2.0 s default weight, no duration row) puts
+# the worst shard at exactly 720.0 s — `ceil(720.0/60 x 2)` = 24 m, a tenth of a second from 25 m —
+# and two intermediate folds packed 720.1 s and emitted 25 m before the next main fold re-packed it
+# back to 720.0 s. Re-run `--emit-push-matrix`; do not carry the last revision's minute. Those numerals are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head — re-derive them with
 # that verb rather than trusting them, but a restatement is fine when it cites the emission
 # it came from.) ⛔ The cap was NOT
