@@ -1113,6 +1113,15 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending(
         "from typing import Any\nimport tortoise\nf: Any = tortoise\nc = f.FalkorDB\n"
     ) == {"tortoise.FalkorDB"}
+    # ⛔ AND THE FIXPOINT ITERATION ITSELF. `ast.walk` is BREADTH-FIRST, so a
+    # rebinding inside a nested block is visited AFTER a module-level statement
+    # that consumes it — one pass sees `b = a` before it knows `a` is the package
+    # root and records nothing. Pinned because replacing `while changed:` with a
+    # single pass left the suite fully green (measured: 98 passed) while the
+    # shipped code catches the real spelling below.
+    assert _offending(
+        "import tortoise\nif True:\n    a = tortoise\nb = a\nc = b.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}
     # …and `import tortoise.sdk` binds `tortoise` too, so it is both a banned
     # module AND the handle the attribute form is read through.
     assert _offending("import tortoise.sdk\nc = tortoise.FalkorDB\n") == {
