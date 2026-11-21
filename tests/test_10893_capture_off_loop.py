@@ -455,9 +455,10 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
     totals: the measured probe-overhead band is NOT reported, and a leg of the
     size the census exists to catch still is.
 
-    Verified non-vacuous: restoring the bar to 1.0 reds the first assertion
-    (`_emit_event` at 1.2 ms comes back as unreported-but-blocking), and no
-    other row in this file depends on `_ON_LOOP_BAR_MS`.
+    Verified non-vacuous: restoring the bar to 1.0 reds the FIRST assertion
+    (`_emit_event` at 1.2 ms comes back as unreported-but-blocking) AND the
+    census row above, whose verdict is `_undeclared_blocking` — that row is the
+    one the change exists for, since it flipped at 1 ms under coverage.
     """
     # The measured overhead band, including the coverage run that flipped the
     # real census — noise, not work.

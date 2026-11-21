@@ -3382,7 +3382,7 @@ def test_the_org_projection_is_resolved_on_the_loop_not_in_the_pooled_checkpoint
     READ off-loop for exactly that reason.
 
     Non-vacuity: this row reds the moment ``_maybe_apply_completion`` stops
-    honouring a supplied ``proj`` (it calls ``_org_proj``, which raises here).
+    honouring a supplied ``sdk`` (it calls ``_org_proj``, which raises here).
     """
     import tortoise.hosted_api as ha_mod
 
@@ -3398,10 +3398,11 @@ def test_the_org_projection_is_resolved_on_the_loop_not_in_the_pooled_checkpoint
             "where the store path comes from a stale inherited stamp (#7500)")
 
     monkeypatch.setattr(ha_mod, "_org_proj", _forbidden)
-    assert ha_mod._maybe_apply_completion(TEST_ORG_ID, proj=object()) is False
+    assert ha_mod._maybe_apply_completion(
+        TEST_ORG_ID, sdk=_StubDefaultGraphSdk()) is False
 
     # …and a caller that supplies nothing keeps the historical shape, so the
-    # seam is additive rather than a behaviour change for the other three sites.
+    # seam is additive rather than a behaviour change for the other sites.
     resolved: list[str] = []
 
     def _record(org_id):
@@ -3411,15 +3412,31 @@ def test_the_org_projection_is_resolved_on_the_loop_not_in_the_pooled_checkpoint
     monkeypatch.setattr(ha_mod, "_org_proj", _record)
     assert ha_mod._maybe_apply_completion(TEST_ORG_ID) is False
     assert resolved == [TEST_ORG_ID], (
-        "passing no `proj` must still resolve one — the seam is additive")
+        "passing no `sdk` must still resolve one — the seam is additive")
 
 
-def test_the_first_capture_checkpoint_hands_its_projection_in():
-    """The wiring half: the closure must PASS the projection, not just support it.
+class _StubDefaultGraphSdk:
+    """A stand-in for ``_org_sdk``'s handle — only ``_get_proj()`` is load-bearing."""
+
+    def __init__(self):
+        self.proj = object()
+        self.proj_threads: list[str] = []
+
+    def _get_proj(self):
+        import threading
+        self.proj_threads.append(threading.current_thread().name)
+        return self.proj
+
+
+def test_the_first_capture_checkpoint_hands_in_the_DEFAULT_graph_handle():
+    """The wiring half: the closure must PASS a handle, not the capture's `proj`.
 
     A seam nobody uses protects nothing, and the closure is the one caller that
     runs on the pool. Parsed rather than grepped so a reflowed comment cannot
-    satisfy it.
+    satisfy it. The keyword must be ``sdk`` and NOT ``proj``: `proj` is the
+    CAPTURE graph, which for a graph-bound credential is a CUSTOM graph, and this
+    gate is an org-level surface on the DEFAULT graph
+    (``_reject_graph_bound_org_surface``) — see the behavioural row below.
     """
     import ast
 
@@ -3434,10 +3451,88 @@ def test_the_first_capture_checkpoint_hands_its_projection_in():
     assert keyword_sets, (
         "`_first_capture_checkpoint` no longer calls `_maybe_apply_completion` "
         "— re-point this pin at whatever replaced it")
-    assert all("proj" in kws for kws in keyword_sets), (
+    assert all("sdk" in kws for kws in keyword_sets), (
         "the pooled checkpoint resolved its own projection instead of being "
         "handed one — `_make_sdk` must not construct a store path on a pooled "
         f"worker (#7500); keyword sets: {keyword_sets}")
+    assert not any("proj" in kws for kws in keyword_sets), (
+        "the checkpoint handed in the CAPTURE projection — for a graph-bound "
+        "key that is a CUSTOM graph, and the completion gate is an org-level "
+        f"surface on the org DEFAULT graph (#14086 review, P2); got: {keyword_sets}")
+
+
+def test_the_capture_completion_gate_reads_the_org_DEFAULT_graph_not_the_capture_graph(
+        client, monkeypatch):
+    """⛔ THE COMPLETION GATE MUST STAY ON THE ORG **DEFAULT** GRAPH (#14086 review, P2).
+
+    ``_maybe_apply_completion`` is an ORG-LEVEL surface: its siblings in this
+    module are guarded by ``_reject_graph_bound_org_surface`` with the reason
+    stated verbatim — *"checkpoint writes onboarding FLOW state into the org's
+    DEFAULT graph via _org_proj — a graph-bound key writing it would be a
+    cross-graph write (org-level surface, like the siblings)"*. The capture route
+    carries no such guard, and ``_data_sdk``'s ``if gid:`` branch opens a CUSTOM
+    graph for a graph-bound credential, so the capture's own ``proj`` is the WRONG
+    handle for this gate.
+
+    The earlier fix for #7500 handed that ``proj`` in, which kept ``_make_sdk``
+    off the pool but moved the gate off the default graph. Nothing red: the
+    fixtures' credential is org-wide (``graph_id: None``), so ``proj`` and
+    ``_org_proj`` name the same graph and no assertion in the tree could tell them
+    apart. This row tells them apart by making the default-graph handle a
+    SENTINEL that no other seam can produce.
+
+    Mutation check (must stay true): restoring ``_maybe_apply_completion(org_id,
+    proj=proj)`` in the closure reds BOTH assertions below — `_org_sdk` is never
+    asked for the org, and the gate's read is handed the capture's projection —
+    measured, and it is the reason this row exists.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    stub = _StubDefaultGraphSdk()
+    real_org_sdk = ha_mod._org_sdk
+    default_graph_requests: list[str] = []
+
+    def _recording_org_sdk(org_id, **kwargs):
+        # Delegate for every OTHER org: this fixture drives a whole request, and
+        # a blanket stub would be asserting about seams this row does not judge.
+        if org_id != TEST_ORG_ID:
+            return real_org_sdk(org_id, **kwargs)
+        default_graph_requests.append(org_id)
+        return stub
+
+    monkeypatch.setattr(ha_mod, "_org_sdk", _recording_org_sdk)
+
+    seen: list[tuple[object, str]] = []
+
+    def _recording_read(proj, org_id):
+        seen.append((proj, threading.current_thread().name))
+        return None  # no onboarding node -> the gate is a no-op, as in the seam rows
+
+    monkeypatch.setattr(ha_mod._os, "read_onboarding_node", _recording_read)
+
+    resp, _records, _writer = _measure_capture_graph_work(
+        monkeypatch, 2, "completion-default-graph-14086")
+    require_answered(
+        resp, what="POST /v1/sessions answered (completion-graph run)")
+    assert resp.status_code == 200, resp.text[:300]
+
+    assert default_graph_requests == [TEST_ORG_ID], (
+        "the capture checkpoint never asked `_org_sdk` for the org's DEFAULT "
+        "graph — it handed `_maybe_apply_completion` the CAPTURE projection, "
+        "which for a graph-bound key is a CUSTOM graph (a cross-graph write "
+        f"`_reject_graph_bound_org_surface` refuses elsewhere); got "
+        f"{default_graph_requests!r}")
+    assert stub.proj in [proj for proj, _thread in seen], (
+        "the completion gate read onboarding state through a projection that is "
+        "NOT the org's default graph — for a graph-bound key it would find no "
+        "node and onboarding completion would silently stop firing "
+        f"(#14086 review, P2); projections seen: "
+        f"{[id(p) for p, _t in seen]} vs default {id(stub.proj)}")
+    assert stub.proj_threads and all(
+        name.startswith("capture-extract") for name in stub.proj_threads), (
+        "the default-graph projection's cold `_get_proj()` open ran on "
+        f"{stub.proj_threads!r}, not the capture pool — `_make_sdk`'s store "
+        "path must not be resolved on the event loop either (#7500)")
 
 
 def test_the_pre_existing_offload_exemption_is_actually_consumed():

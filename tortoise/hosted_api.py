@@ -527,9 +527,11 @@ async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
     return await asyncio.wrap_future(_submit_off_loop(executor, fn, *args, **kwargs))
 
 
-#: Returned by :func:`_run_off_loop_fail_open` when the leg did not RUN at all —
-#: a value no offloaded leg in this module can legitimately return, so an arm can
-#: tell "the work failed" from "the work never started" without a second flag.
+#: Returned by :func:`_run_off_loop_fail_open` when the leg's RESULT IS UNAVAILABLE
+#: — either the dispatch failed or the leg raised. The wrapper's single ``except``
+#: arm catches both, so it CANNOT tell them apart; an arm must not read this as
+#: "the work never started". It is a value no offloaded leg in this module can
+#: legitimately return, so the arms below can branch on it without a second flag.
 _DISPATCH_FAILED = object()
 
 
@@ -552,7 +554,9 @@ async def _run_off_loop_fail_open(fn, /, *args, executor=None, **kwargs):
     warning) without four copies of one ``try``/``except``.
 
     Only for legs that are NON-FATAL by contract: an escaped worker exception is
-    swallowed here too, which is what "fail-open" means for these two closures.
+    swallowed here too, which is what "fail-open" means for the three capture
+    closures it serves — the session-alive probe, the orphan sweep, and the
+    extraction/EP pass.
     """
     try:
         return await _run_off_loop(
@@ -21667,10 +21671,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # `_submit_off_loop` submits IN THE CALLING TASK and raises once the pool is
     # shut down (`_dispose_capture_executor`, at thread shutdown) or a worker
     # cannot start (`BrokenThreadPool`) — neither could happen to an inline call.
-    # Every await below therefore goes through `_run_off_loop_fail_open`, which
-    # reads a failed dispatch as "alive" for the probes (the same direction
-    # `_session_alive` already takes on a failed read) and as a warning for the
-    # sweep, so a COMMITTED capture still 200s (#14086 review, P2).
+    # So every arm that had NO `try` of its own now goes through
+    # `_run_off_loop_fail_open`, which reads a failed dispatch as "alive" for the
+    # probes (the same direction `_session_alive` already takes on a failed read)
+    # and as a warning for the sweep. The three awaits that KEEP their own
+    # `except`/`suppress` — the receipt write, the bucket count, the receipt
+    # clear — stay on `_run_off_loop`: wrapping them would duplicate an arm they
+    # already have. Either way a COMMITTED capture still 200s (#14086 review, P2).
     alive_now = await _run_off_loop_fail_open(_session_alive)
     if alive_now is _DISPATCH_FAILED:
         # FAIL-OPEN IN THE SAME DIRECTION AS A FAILED READ: the receipt follows
@@ -21792,6 +21799,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         legacy_mirror = bool(
             _onboard_state.get("onboarding_complete"))
 
+        # ⛔ THE GATE READS THE ORG **DEFAULT** GRAPH — NOT THE CAPTURE'S. This
+        # is an org-level surface, kept on the default graph by the same rule its
+        # siblings state ("a graph-bound key writing it would be a cross-graph
+        # write" — `_reject_graph_bound_org_surface`). `proj` below is the
+        # CAPTURE graph, and for a graph-bound credential `_data_sdk`'s
+        # `if gid:` branch opens a CUSTOM one — so handing `proj` to the gate
+        # moves it off the default graph, where it finds no node, returns False,
+        # and onboarding completion silently stops firing for that org
+        # (#14086 review, P2).
+        # Constructed HERE, ON the loop: `_make_sdk` must not resolve a store path
+        # in a pooled worker (#7500). Only the cold `_get_proj()` attach stays in
+        # the worker, via the handle handed to `_maybe_apply_completion`.
+        completion_sdk = _org_sdk(org["org_id"])
+
         def _first_capture_checkpoint():
             """The capture-disclosed checkpoint — synchronous graph work, OFF the loop.
 
@@ -21804,10 +21825,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             created = bool(_os.write_completed_step(
                 proj, org["org_id"], "capture-disclosed",
                 status_from_mirror=legacy_mirror)["created"])
-            # ⛔ `proj` is handed in, not resolved here: this closure runs on a
-            # POOLED worker, where `_make_sdk` must not construct a store path
-            # (#7500 — see `_maybe_apply_completion`'s docstring).
-            _maybe_apply_completion(org["org_id"], proj=proj)
+            # ⛔ The DEFAULT-graph HANDLE is handed in, not resolved here: this
+            # closure runs on a POOLED worker, where `_make_sdk` must not
+            # construct a store path (#7500 — see `_maybe_apply_completion`'s
+            # docstring). The capture's `proj` is NOT a substitute: it is the
+            # capture graph (see the block above).
+            _maybe_apply_completion(org["org_id"], sdk=completion_sdk)
             return created
 
         first_capture = await _run_off_loop(
@@ -39215,7 +39238,7 @@ def _org_proj(org_id: str):
     return _org_sdk(org_id)._get_proj()
 
 
-def _maybe_apply_completion(org_id: str, proj=None) -> bool:
+def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     """Post-write gate eval (scope pin 12): reads the fresh node + step
     edges, evaluates the fork-aware gate, and writes status 'complete' when
     satisfied. MONOTONIC: complete can never regress; a grandfathered org's
@@ -39223,18 +39246,31 @@ def _maybe_apply_completion(org_id: str, proj=None) -> bool:
     re-onboarded). Returns True when the org transitioned to complete
     (the caller invalidates the MCP TTL cache).
 
-    ⛔ ``proj`` IS SUPPLIED BY THE CAPTURE CHECKPOINT, and it is load-bearing
-    (#14086 review, P2). Resolving it here means ``_org_proj`` → ``_org_sdk`` →
-    ``_make_sdk``, and ``_org_sdk_from_name``'s own docstring forbids building
-    one in a POOLED worker: the store path comes from the worker thread's stale
-    inherited stamp once the pool reuses it, so the job writes to a store the
-    reader never looks at (``#7500``; measured as 3 reds under ``#4645``). The
-    checkpoint closure RUNS on a pooled worker, so the caller — on the loop —
-    resolves the projection and hands it in. Left as ``None`` the historical
-    behaviour is unchanged for every other caller."""
+    ⛔ ``sdk`` IS SUPPLIED BY THE CAPTURE CHECKPOINT, and BOTH halves of that are
+    load-bearing (#14086 review, P2 — twice over).
+
+    WHICH GRAPH: this gate is an ORG-LEVEL surface and lives on the org's DEFAULT
+    graph, exactly like its siblings — ``_reject_graph_bound_org_surface`` states
+    the rule for them ("a graph-bound key writing it would be a cross-graph
+    write"). The capture's OWN ``proj`` is the CAPTURE graph, and for a
+    graph-bound credential ``_data_sdk``'s ``if gid:`` branch opens a CUSTOM one,
+    so handing ``proj`` in moves the gate off the default graph. There it finds no
+    node, returns False, and onboarding completion silently stops firing for that
+    org — with nothing red (the fixtures' credential is org-wide, ``graph_id:``
+    None, so they cannot see it).
+
+    WHERE IT IS BUILT: resolving the handle here means ``_org_proj`` →
+    ``_org_sdk`` → ``_make_sdk``, and ``_org_sdk_from_name``'s own docstring
+    forbids building one in a POOLED worker: the store path comes from the worker
+    thread's stale inherited stamp once the pool reuses it, so the job writes to a
+    store the reader never looks at (``#7500``; measured as 3 reds under
+    ``#4645``). So the caller — ON the loop — CONSTRUCTS the DEFAULT-graph SDK
+    (``_org_sdk``: no I/O, the auth seam has already published the namespace) and
+    hands the HANDLE in; the cold ``_get_proj()`` attach stays in the worker.
+    Left as ``None`` the historical behaviour is unchanged for every other
+    caller."""
     try:
-        if proj is None:
-            proj = _org_proj(org_id)
+        proj = _org_proj(org_id) if sdk is None else sdk._get_proj()
         node = _os.read_onboarding_node(proj, org_id)
         if node is None:
             return False
@@ -51182,7 +51218,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 200 tracked files (744 distinct
+# ABSOLUTE line number from 200 tracked files (742 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
