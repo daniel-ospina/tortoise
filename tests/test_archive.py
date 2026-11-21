@@ -1541,6 +1541,51 @@ def test_a_stub_row_credits_nothing_after_the_stub_is_deleted(
     )
 
 
+def test_a_module_row_that_LIES_about_archived_from_cannot_credit_a_stub(
+    tree: Path,
+) -> None:
+    """The row's claim field is writable by the splicer; `blocks[].path` is not (review P1).
+
+    `archived_from` is bound only to the frozen file's `ARCHIVED_FROM` header — a string the same
+    hand-splicing author writes. `tools/archive_surface.py` records that limit in
+    `_reanchor_is_verified`'s "EVERY OTHER CLAIM FIELD IS FIXED" note ("bound to nothing else on
+    this path … so a consistent lie passed both"), and hand-splicing is the procedure `MEMORY.md`
+    recommends, so this is a REACHABLE shape, not a contrived one. Measured before the fix: a spliced row saying `tortoise/stubby.py` over frozen
+    STUB bytes was credited, with `shrink_violations` AND `file_violations` BOTH empty.
+
+    The field tied to the bytes is `blocks[].path`: `file_violations` requires it to equal the path
+    baked into the frozen file's verbatim banner and `blocks[].sha256` to equal that body's digest,
+    so it cannot be re-pointed without the bytes following.
+
+    Discriminating: an arm keyed on `archived_from` credits this row (measured) — which is why the
+    writer-driven row above cannot catch it on its own; there `archived_from` and the block path
+    agree, so only this row separates the two answers.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    stub = "def value() -> int: ...\n"
+    (tree / "tortoise" / "stubby.pyi").write_text(stub, encoding="utf-8")
+
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    entry["archived_from"] = "tortoise/stubby.py"  # the lie
+    entry["blocks"] = [{"path": "tortoise/stubby.pyi", "sha256": "a" * 64}]  # the truth
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text(stub, encoding="utf-8")
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    assert arch._row_froze_a_stub(entry), (
+        "the block path is bound to the frozen banner and digest, so it decides even when the "
+        f"claim field says otherwise: {entry}"
+    )
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert froze, f"a spliced row that froze the stub must not be credited: {problems}"
+    assert "tortoise/stubby.pyi" in froze[0], froze[0]
+
+
 def test_a_module_row_that_froze_the_REAL_body_is_still_credited(tree: Path) -> None:
     """The negative control for both rows above, through the writer's restore-then-freeze route.
 
@@ -1606,6 +1651,170 @@ def test_a_module_waiver_does_not_claim_the_tree_carries_a_module_it_only_STUBBE
         f"in this same run: {waived[0]}"
     )
     assert "this tree does not" in waived[0], waived[0]
+
+
+def test_a_waiver_for_a_row_that_FROZE_A_STUB_does_not_say_the_removal_IS_recorded(
+    tree: Path,
+) -> None:
+    """One run must not print two contradicting statements about the same entry (review F1).
+
+    **Writer-driven, nothing spliced.** Base carries `tortoise/stubby.py`; the tree deletes it and
+    leaves `tortoise/stubby.pyi`; `archive_symbol` then freezes the STUB — measured, that row's
+    `archived_from` and `blocks[0].path` are BOTH `tortoise/stubby.pyi` (`archive_symbol` sets
+    `archived_from = blocks[0][0] if kind == MODULE`), so `_row_froze_a_stub` is True. Arm 1b then
+    appends "THE RECORD FROZE A STUB" and `continue`s BEFORE consuming the waiver — so the
+    diagnostic loop re-derives the same key and, asking only `key in working`, printed "the
+    removal IS recorded by the `module` entry you also passed" in the same run.
+
+    ⛔ Built through `archive_symbol`, not by hand: a hand-built row here would advertise a
+    writer-side property it never calls, and a later change to what the writer freezes would
+    leave it green. This also pins `archived_from` to the `.pyi`, which is the fact that makes
+    the anti-stub rule fire on a module that still has a stub on disk.
+
+    Discriminating: the sibling test above covers the opposite arm — its row froze the REAL body,
+    so `_row_froze_a_stub` is False there and a key-presence-only check is right. Only this row
+    separates "an entry exists" from "an entry that records the source", which is the whole
+    point of the anti-stub rule it sits beside.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    entry = arch.archive_symbol(
+        arch.MODULE, "tortoise.stubby", "batch-a", "review F1", root=tree
+    )
+    _commit(tree, ".")
+
+    assert entry["archived_from"] == "tortoise/stubby.pyi", (
+        "the writer froze a stub, so the row itself must say so — this is what makes the "
+        f"anti-stub rule fire: {entry}"
+    )
+    assert arch._row_froze_a_stub(entry), "this fixture must freeze the stub, not the body"
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    assert [p for p in problems if "THE RECORD FROZE A STUB" in p], (
+        f"the stub row must not credit the removal: {problems}"
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "IS recorded" not in waived[0], (
+        "the same run just graded this entry as having frozen a stub — saying the removal IS "
+        f"recorded by it contradicts that and points away from the fix: {waived[0]}"
+    )
+    assert "FROZE ONLY A STUB" in waived[0], waived[0]
+
+
+def test_a_waiver_over_a_STUB_ONLY_base_does_not_send_the_reader_to_the_base(
+    tree: Path,
+) -> None:
+    """The base may hold only a `.pyi`, so "restore from the base" can be impossible (review F1).
+
+    `_modules_with_a_body` filters only `__init__.py`, so a `.pyi`-only module IS in
+    `base_modules` — membership there does NOT mean the base holds the `.py`. An earlier round
+    cleared this second copy of the sentence on the opposite assumption; the shape below is the
+    counterexample: base carries only `tortoise/stubby.pyi`, this run archives that stub (the
+    writer sets `archived_from` to the `.pyi`, so `_row_froze_a_stub` is True and arm 1 refuses to
+    credit it), deletes it as the writer instructs, and passes an unnecessary waiver. The
+    diagnostic then runs and must not print a `git checkout <base> -- tortoise/stubby.py` route.
+
+    Discriminating: the old wording prints "restore the source from the base" here, and that base
+    has no `tortoise/stubby.py` for the route to resolve against. The round-20 wording that
+    followed it ("a commit that still holds it") is unfollowable for the same reason — NO commit
+    holds a `.py` for a module whose only carrier is a stub — so this row also pins that the
+    diagnosis names the true fact instead: there was no runtime source to record, and the stub row
+    is the writer's own correct output for a stub-only module (see the writer's rule at
+    `_module_source`, "a stub-only module's only code IS the stub").
+    """
+    (tree / "tortoise").mkdir(exist_ok=True)
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    entry = arch.archive_symbol(
+        arch.MODULE, "tortoise.stubby", "batch-a", "review F1", root=tree
+    )
+    assert entry["archived_from"] == "tortoise/stubby.pyi", entry
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.pyi"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "from the base" not in waived[0], (
+        "the base holds only the stub, so a checkout from it cannot yield the source: "
+        f"{waived[0]}"
+    )
+    assert "not a record" not in waived[0], (
+        "a stub-only module's stub IS its code, so this row is a record — calling it 'not a "
+        f"record' is false and sends the reader to redo a correct freeze: {waived[0]}"
+    )
+    assert "no runtime source to record" in waived[0], waived[0]
+    assert "drop the flag" in waived[0], waived[0]
+
+
+def test_a_waiver_over_a_STUB_ONLY_base_whose_row_is_at_the_BASE_says_it_too(
+    tree: Path,
+) -> None:
+    """The OTHER copy of the sentence, reachable when the stub row was committed at the base.
+
+    Two rounds in a row fixed the `elif symbol in base_modules` copy and left this one — the
+    `key in base_entries` branch — emitting "restore the source from a commit that still holds
+    it" over a repo in which `git log --all -- tortoise/stubby.py` is empty, and calling a correct
+    stub-only row "not a record of the source". The two copies contradicted each other for the
+    same state depending only on WHERE the row was committed.
+
+    Discriminating: the had-runtime wording contains "FROZE ONLY A STUB" and "restore the source"
+    and neither is asserted absent, so this row is what pins the split at this site.
+    """
+    (tree / "tortoise").mkdir(exist_ok=True)
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review F1", root=tree)
+    _commit(tree, ".")  # the BASE carries the row
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.pyi"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "no runtime source to record" in waived[0], waived[0]
+    assert "drop the flag" in waived[0], waived[0]
+    assert "FROZE ONLY A STUB" not in waived[0], (
+        "the base held only a stub, so the row is the writer's correct output — not a stub "
+        f"frozen over a deleted body: {waived[0]}"
+    )
+    assert "from the base" not in waived[0], waived[0]
+
+
+def test_the_stub_waiver_text_names_the_head_carrier_it_can_see() -> None:
+    """`base_paths_by_module` proves the BASE side only (review F2).
+
+    The sentence said "and no `.py` on either side", which that map cannot support: it is built
+    from `base_paths` alone, and the head can hold a `.py` — an emptied one, or a docstring
+    `__init__.py` that `module_name` collapses onto the same symbol. The head carrier is now named
+    explicitly and never claimed absent.
+
+    Discriminating: the previous wording asserted "no `.py` on either side" while holding a head
+    `.py`, and this assertion rejects exactly that string.
+    """
+    said = arch._stub_waiver_why("P", "tortoise/x.pyi", "tortoise/x.py")
+    assert "tortoise/x.py" in said, said
+    assert "no `.py` on either side" not in said, said
+    assert arch._stub_waiver_why("P", "tortoise/x.pyi", "").endswith(
+        "this tree carries no module file, so there was no runtime source to record. The "
+        "`module` entry you also passed is the writer's own output for a stub-only module (a "
+        "stub-only module's only code IS the stub), and nothing was removed for the waiver to "
+        "waive: drop the flag"
+    )
 
 
 def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:

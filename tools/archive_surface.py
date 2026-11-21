@@ -1410,21 +1410,99 @@ def _row_froze_a_stub(entry: dict) -> bool:
     runtime code, so such a row holds none of the module's body — and crediting it on the row's
     EXISTENCE reads "the removal has its record" over a record holding no code.
 
-    ⛔ ASK `archived_from`, NOT THE ROW'S `file`. Two successive first cuts of this guard asked
-    the archived file's suffix and were DEAD CODE: `archive_rel` always emits
-    `archive/modules/<batch>/<mirror>.py` (`:2177`, "one symbol, one path, always"), so no
-    row the writer produced could satisfy either — and the fixtures that "covered" them
-    hand-wrote a `.pyi` path `archive_rel` cannot produce. Measured through the writer on the
-    pre-fix bytes: the stub's TEXT was frozen into `.../x.py`, the stub was then deleted as the
-    writer itself prints, and `check --base-ref` answered OK with the removed body in NO file
-    under `archive/`. `archive_symbol` sets `archived_from` from `blocks[0][0]` for a MODULE and
-    `file_violations` binds it to the frozen file's `ARCHIVED_FROM` header, so it cannot be
-    spoofed independently of the bytes on disk.
+    ⛔ ASK `blocks[].path` — THE FIELD BOUND TO THE BYTES (round-3 correction of this helper).
+    Three successive cuts of this guard were each wrong in a different way, and only mutation
+    separated them:
+
+      * the archived FILE's suffix — DEAD CODE. `archive_rel` always emits
+        `archive/modules/<batch>/<mirror>.py` ("one symbol, one path, always"),
+        so no row the writer produces could satisfy it, and the fixtures that "covered" it
+        hand-wrote a `.pyi` path `archive_rel` cannot produce.
+      * `archived_from` — SPOOFABLE. It is bound only to the frozen file's own `ARCHIVED_FROM`
+        header, i.e. to a string the same hand-splicing author writes; this file already records
+        that limit in `_reanchor_is_verified`'s "EVERY OTHER CLAIM FIELD IS FIXED" note ("bound
+        to nothing else on this path … so a consistent lie passed both"), and hand-splicing is
+        what `MEMORY.md` recommends. Measured: a spliced row saying `tortoise/x.py` over frozen
+        STUB bytes was credited, with `shrink_violations` AND `file_violations` both empty.
+      * `blocks[0].path` — the field `file_violations` ties to the path baked into the frozen
+        file's verbatim banner AND to that body's sha256, so it cannot be re-pointed without the
+        bytes following. This is the one asked below.
+
+    ⛔ THESE CITATIONS NAME SYMBOLS, NOT LINE NUMBERS, ON PURPOSE. Each of the three cuts above
+    was once described by a line-number anchor and every one of them rotted: the `archive_rel`
+    cite said line 2177, then 2224-2235 at a head where the definition sat at 2314, and the
+    re-anchor note's 1357-1361 was correct when written and was 15 lines off after a merge that
+    INSERTED above it. `MEMORY.md` `[pin-defensive-claim]` states the rule ("re-derive from the
+    SYMBOL … never key a needle to a loop variable"); comments are held to it here too.
+
+    ⛔ AND FAIL CLOSED ON AN ABSENT SOURCE. An entry recording no block path proves nothing
+    about what it holds, so it is refused WITH the stub, never credited: hence
+    `not src.endswith(".py")`, not `src.endswith(".pyi")` — the latter answers False for an
+    absent field and silently credits it.
 
     ⛔ `_init_carries_a_body` is deliberately NOT the test: it is an AST question and a stub IS
     statements (`def f1() -> int: ...`).
     """
-    return str(entry.get("archived_from") or "").endswith(".pyi")
+    rows = entry.get("blocks")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        path = str(rows[0].get("path") or "")
+        if path:
+            # Authoritative: bound to the frozen banner AND the body's sha256, so it answers the
+            # question in BOTH directions (a real `.py` credits, anything else refuses).
+            return not path.endswith(".py")
+    src = str(entry.get("archived_from") or "")
+    if not src:
+        # Records NOTHING about what it froze. Unprovable, so it is refused rather than credited
+        # — but only in this shape: a row that does name a source falls through to the claim-field
+        # test, because `SOURCE_OF` is not a path and refusing it would red the README's own
+        # restore route (measured: two legitimate rows redded when absence alone refused).
+        return True
+    return src.endswith(".pyi")
+
+
+def _row_frozen_source(entry: dict) -> str:
+    """What the row says it froze FROM, preferring the field bound to the bytes."""
+
+    rows = entry.get("blocks")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        path = str(rows[0].get("path") or "")
+        if path:
+            return path
+    return str(entry.get("archived_from") or "")
+
+
+def _stub_waiver_why(prefix: str, base_carrier: str, head_carrier: str) -> str:
+    """Why an unconsumed waiver over a stub-frozen `module` row waives nothing.
+
+    ⛔ ONE CONSTRUCTION, TWO CALL SITES (review F1 of round 21). This sentence existed in two
+    copies — the `key in base_entries` branch and the `elif symbol in base_modules` branch — and
+    two consecutive rounds fixed ONE copy, leaving the same falsity standing one branch below,
+    contradicting its sibling for the same state depending only on whether the row was committed
+    at the base. Reusing one helper is what makes a third copy impossible.
+
+    ⛔ AND IT NAMES WHAT IS TRUE OF THIS TREE (review F2 of round 21). "No `.py` on either side"
+    was not provable from `base_paths_by_module` alone — that map is built from the BASE paths
+    only, and the head can hold a `.py` (an emptied one, or a docstring `__init__.py`) which
+    `module_name` collapses onto the same symbol. So the head carrier is named explicitly, and
+    the claim is only ever about what the two maps can prove.
+
+    `base_paths_by_module` PREFERS the runtime carrier (the sorted builder skips a `.pyi` once a
+    non-`.pyi` is stored), so a `.pyi` there is positive proof the base carried nothing else.
+    """
+
+    if not base_carrier.endswith(".pyi"):
+        return (
+            f"{prefix} — but the `module` entry you also passed FROZE ONLY A STUB, so it is not "
+            "a record: restore the source from a commit that still holds it, archive it, and "
+            "delete it again"
+        )
+    return (
+        f"{prefix} — only as a stub (`{base_carrier}`): the base held no `.py` for this module "
+        f"and this tree carries {head_carrier or 'no module file'}, so there was no runtime "
+        "source to record. The `module` entry you also passed is the writer's own output for a "
+        "stub-only module (a stub-only module's only code IS the stub), and nothing was removed "
+        "for the waiver to waive: drop the flag"
+    )
 
 
 def _record_froze_a_stub(
@@ -1434,7 +1512,8 @@ def _record_froze_a_stub(
     return (
         f"{module}: THE RECORD FROZE A STUB — {base_label} carried the module's statements in "
         f"`{base_carrier}`, this tree carries {head_desc}, and the `module` row present froze "
-        f"only `{entry.get('archived_from')}`, which is that stub. This run reports the module "
+        f"only `{_row_frozen_source(entry) or 'NO recorded source'}`, which is not the removed "
+        "runtime source. This run reports the module "
         "body removed and then credits a record that holds none of it, which is the false PASS "
         "`archive/` exists to prevent (#12402). "
         f"{MODULE_ROUTE}"
@@ -1503,10 +1582,11 @@ def shrink_violations(
             # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
             # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
             # head carrier at all, so it is `base - head` that lands in this arm while the row's
-            # existence silences it. `_row_froze_a_stub` reads the SOURCE the row recorded —
-            # `archived_from`, never the archived file's suffix (the archived file is always
-            # `.py`; see its docstring for the measured false PASS that made the suffix-keyed
-            # first cut dead code).
+            # existence silences it. `_row_froze_a_stub` asks `blocks[].path` — the field
+            # `file_violations` binds to the frozen banner AND the body's sha256 — and falls back
+            # to `archived_from` only for a row carrying no block list. Never the archived file's
+            # suffix (the archived file is always `.py`; see its docstring for the measured false
+            # PASS that made the suffix-keyed first cut dead code).
             if runtime_carrier is not None and _row_froze_a_stub(working[key]):
                 out.append(
                     _record_froze_a_stub(
@@ -1583,8 +1663,9 @@ def shrink_violations(
         if key in working:
             # ⛔ A ROW THAT FROZE THE STUB IS NOT A RECORD (fresh-context review of PR #14039,
             # P0). `stubbed` keeps the legit stub-only module (a `.pyi` carrier on BOTH sides)
-            # out of this branch; `_row_froze_a_stub` asks the SOURCE the row recorded — see its
-            # docstring for why the archived file's suffix is a dead question.
+            # out of this branch; `_row_froze_a_stub` asks `blocks[].path` (falling back to
+            # `archived_from` for a row with no block list) — see its docstring for why the
+            # archived file's suffix is a dead question.
             if stubbed and _row_froze_a_stub(working[key]):
                 out.append(
                     _record_froze_a_stub(
@@ -1730,9 +1811,17 @@ def shrink_violations(
                         "it, so nothing was removed for it to waive"
                     )
                 else:
-                    why = (
-                        f"{base_label} already records `{symbol}` ({kind}) and this tree does "
-                        "not carry it — the removal IS recorded by that `module` entry, so the "
+                    if _row_froze_a_stub(base_entries[key]):
+                        why = _stub_waiver_why(
+                            f"{base_label} already records `{symbol}` ({kind}) and this tree "
+                            "does not carry it",
+                            base_paths_by_module.get(symbol) or "",
+                            head_paths_by_module.get(symbol) or "",
+                        )
+                    else:
+                        why = (
+                            f"{base_label} already records `{symbol}` ({kind}) and this tree does "
+                            "not carry it — the removal IS recorded by that `module` entry, so the "
                         "waiver waives nothing"
                     )
             elif symbol in base_modules:
@@ -1755,11 +1844,56 @@ def shrink_violations(
                         "it, so nothing was removed for it to waive"
                     )
                 else:
-                    why = (
-                        f"{base_label} carries `{symbol}` ({kind}) and this tree does not — "
-                        "the removal IS recorded by the `module` entry you also passed, so the "
-                        "waiver waives nothing"
-                    )
+                    # ⛔ SPLIT ON THE ROW, NOT ON THE MODULE (review P2 of PR #14039). The body
+                    # being gone does NOT imply a row records it: arm 1b `continue`s on
+                    # scaffolding-on-BOTH-sides BEFORE it can consume the waiver, so a module
+                    # whose base file was docstring-only arrives here with NO `module` entry
+                    # anywhere in the tree — and the one-sentence version told the operator "the
+                    # removal IS recorded by the `module` entry you also passed" over a tree that
+                    # has no such entry. Verdict right, stated fact false: this loop's own
+                    # recurring class.
+                    if key in working and not _row_froze_a_stub(working[key]):
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
+                            "— the removal IS recorded by the `module` entry you also passed, "
+                            "so the waiver waives nothing"
+                        )
+                    elif key in working:
+                        # ⛔ ASK THE RECORD, NOT THE KEY (review F1 of round 17). Arm 1b appends
+                        # `_record_froze_a_stub` and `continue`s BEFORE it consumes the waiver, so
+                        # on the shape the anti-stub rule was added for this loop re-derives the
+                        # same key, takes `key in working`, and printed "the removal IS recorded"
+                        # ONE RUN after printing "THE RECORD FROZE A STUB" — two contradicting
+                        # statements about the same entry, the false one pointing away from the
+                        # only route that clears it.
+                        # ⛔ AND NAME A SOURCE THAT ACTUALLY EXISTS (review F1 of round 19).
+                        # `_modules_with_a_body` admits a `.pyi` module (it filters only
+                        # `__init__.py`), so membership here does NOT mean the base holds the `.py`.
+                        # An earlier round cleared this site on the opposite assumption.
+                        #
+                        # ⛔ AND SPLIT ON WHETHER A RUNTIME SOURCE EVER EXISTED (review F1 of
+                        # round 20). "Restore the source from a commit that still holds it" is
+                        # unfollowable for a module whose ONLY carrier is a stub: no commit holds a
+                        # `.py`, and re-running the writer just reproduces this row — the writer's
+                        # own rule says a stub-only module's only code IS the stub, so that row IS
+                        # a record and there was no runtime source to lose. Telling that operator
+                        # to hunt history for a file that never existed, AND that their correct row
+                        # is "not a record", is false on both counts. `base_paths_by_module`
+                        # PREFERS the runtime carrier (:1584-1586), so a `.pyi` there is positive
+                        # proof the base had nothing else. The split lives in ONE helper
+                        # (`_stub_waiver_why`), shared with the `key in base_entries` copy, so the
+                        # two can no longer drift apart — two rounds fixed one and left the other.
+                        why = _stub_waiver_why(
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not",
+                            base_paths_by_module.get(symbol) or "",
+                            head_paths_by_module.get(symbol) or "",
+                        )
+                    else:
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
+                            "— and NO `module` entry records it, so the removal is UNRECORDED: "
+                            "the entry is what is missing, not what this waiver waives"
+                        )
             elif symbol in head_modules:
                 why = (
                     f"{base_label} carries no `{symbol}` ({kind}) and this tree does — that is "
