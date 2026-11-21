@@ -1092,10 +1092,18 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: red a correct mention (the over-block direction). Blank lines and lines that OPEN a
     #: new markdown block (table row, heading, list item) are boundaries, because that is
     #: where prose actually stops.
+    #:
+    #: A table CELL is a boundary too, and that is load-bearing rather than tidy: a
+    #: markdown row has no sentence terminator, so without this a MIGRATION NOTE in one
+    #: cell and an INSTRUCTION in the next shared one "sentence" and the instruction
+    #: passed on its neighbour's word (measured — the first form of this fix let exactly
+    #: that through). `|` is the cell separator, and it is not a character this doc uses
+    #: in prose.
     SENTENCE_BREAK = re.compile(
         r"[.!?](?=\s)"                                    # ends a sentence
         r"|\n[ \t]*\n"                                     # ends a block
         r"|\n(?=\||#{1,6} |[ \t]*[-*+] |[ \t]*\d+\. )"     # a new block begins
+        r"|\|"                                            # a table CELL boundary
     )
 
     @classmethod
@@ -1128,6 +1136,20 @@ class TestEveryReaderNamesTheLiveListingDoor:
             text, instruction + 6, instruction + 26).lower(), (
             "the INSTRUCTION shares a ±window with the note's 'retired' but not a "
             "sentence — a window-based guard would call this labelled")
+
+    def test_a_table_cell_is_its_own_sentence(self):
+        """A markdown row has no terminator, so cell scoping is what keeps a note
+        and an instruction apart inside one row (measured fail-open: without it, a
+        `retired` note in the next cell cleared the instruction)."""
+        row = ("|| `GRAPH_LISTING` | call `tortoise_list_graphs` for names "
+               "| (`tortoise_list_graphs` retired forward into it) |")
+        instruction = row.index("call `tortoise_list_graphs") + 6
+        assert "retire" not in self.sentence_around(
+            row, instruction, instruction + 20).lower(), (
+            "an instruction in one cell was cleared by a note in another")
+        note = row.rindex("`tortoise_list_graphs`")
+        assert "retire" in self.sentence_around(row, note, note + 20).lower(), (
+            "the migration note's own cell says retired")
 
     @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
     def test_every_mention_says_the_name_is_retired(self, relpath):
