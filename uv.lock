@@ -2753,6 +2753,7 @@ test = [
     { name = "pytest-playwright" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -2797,6 +2798,7 @@ requires-dist = [
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.4.0" },
     { name = "pytest-xdist", marker = "extra == 'test'", specifier = ">=3.6" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "pyyaml", marker = "extra == 'test'", specifier = "==6.0.3" },
     { name = "redis", specifier = ">=7.1,<8" },
     { name = "scikit-learn", marker = "extra == 'embeddings'", specifier = ">=1.0" },
     { name = "scipy", specifier = ">=1.10" },
