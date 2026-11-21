@@ -642,31 +642,116 @@ def test_a_graph_the_server_does_not_hold_is_refused_before_it_is_read():
 
 
 def test_the_superset_verb_refuses_an_unknown_graph_too(monkeypatch, capsys):
-    """The verb an operator points at a TENANT must not mint it either.
+    """The verb an operator points at a TENANT must not mint it either — and it
+    must refuse BEFORE paying for the journal.
 
     `residency` was guarded and `superset` was not (review round 2, P1): the
     guard sat in one verb, so the one whose verdict gates a re-home was the one
     that would create an empty graph from a `--graph` typo and then compare it.
+
+    ⛔ THE ORDERING HALF IS PINNED HERE TOO (review round 3, P2). Round 2 wrote
+    this assertion and then set `_record_connection` a SECOND time, overwriting
+    it — so it never ran, and the code contradicted it anyway: `main()` opened
+    and paged the whole tenant journal before `_graph_rows` ran the refusal.
+    A store that raises is swallowed by `main()`'s `except Exception` and still
+    exits 2, so the exit code cannot discriminate; the CALL RECORD and the
+    message are what can. Both are asserted below.
     """
     module = _tool()
     db = _StubDB(_StubGraph([]))
     monkeypatch.setattr(module, "_graph_connection", lambda uri: db)
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
-    monkeypatch.setattr(module, "_record_connection",
-                        lambda dsn, org: (_ for _ in ()).throw(
-                            AssertionError("the record must not be read for a "
-                                           "graph that does not exist")))
+    # Set EXPLICITLY: without it `main()` stops at its "no record DSN" arm and the
+    # graph arm is never reached, so every assertion here would be vacuous.
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://nowhere/record")
+    read: list[tuple[str, str]] = []
 
-    class _NoRecord:
-        def cursor(self):
-            return type("_C", (), {"execute": staticmethod(lambda *a: None),
-                                   "fetchall": staticmethod(lambda: [])})()
+    def _must_not_read(dsn, org):
+        read.append((dsn, org))
+        raise AssertionError("the record must not be read for a graph that does "
+                             "not exist")
 
-    monkeypatch.setattr(module, "_record_connection", lambda dsn, org: _NoRecord())
+    monkeypatch.setattr(module, "_record_connection", _must_not_read)
     assert module.main(["superset", "--graph", "g_never_existed", "--org-id", "o",
                         "--graph-id", "g"]) == 2
-    assert "NO VERDICT" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert read == [], "superset read the record for a graph the server does not hold"
+    assert "CREATES it" in err, (
+        "the refusal must be the GRAPH arm's, not a caught record error: " + err)
+    assert "NO VERDICT" in err
     assert db.selected == [], "superset bound a graph the server does not hold"
+
+
+class _RecordCursor:
+    """One static page, then empty — enough for `record_rows` to finish."""
+
+    def __init__(self, rows):
+        self._rows = list(rows)
+        self._served = False
+
+    def execute(self, *_a, **_k):
+        return None
+
+    def fetchall(self):
+        if self._served:
+            return []
+        self._served = True
+        return self._rows
+
+
+class _RecordConnection:
+    def __init__(self, rows):
+        self._cur = _RecordCursor(rows)
+
+    def cursor(self):
+        return self._cur
+
+    def close(self):
+        return None
+
+
+def test_the_no_verdict_message_names_the_side_that_was_EMPTY(monkeypatch, capsys):
+    """A refusal must say WHICH side was empty, or it points at the wrong store.
+
+    Round 3 (P2): the verb refuses an empty RECORD as well as an empty graph, but
+    its only operator-facing sentence still said "the graph holds no `:GraphEvent`
+    rows". For the case that widening introduces — a mistyped `--org-id`/
+    `--graph-id` or a never-armed scope, against a graph holding N events — the
+    verb told the operator the graph was empty and to go backfill it, which is
+    the mirror of the misdirection the evidence doc forbids.
+
+    Both directions are driven, so the test cannot pass by pinning one fixed
+    string: an empty graph must be called a graph, an empty record a record.
+    """
+    module = _tool()
+
+    def _run(graph_rows, record_rows_):
+        db = _StubDB(_StubGraph(graph_rows))
+        monkeypatch.setattr(module, "_graph_connection", lambda uri: db)
+        monkeypatch.setattr(module, "_record_connection",
+                            lambda dsn, org: _RecordConnection(record_rows_))
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://nowhere/record")
+        code = module.main(["superset", "--graph", "g_real", "--org-id", "o",
+                           "--graph-id", "g"])
+        return code, capsys.readouterr().err
+
+    # the graph holds rows, the RECORD holds none -> name the record
+    code, err = _run([(1, "PointAdded", "e1", '{"id": "a"}')], [])
+    assert code == 2, err
+    assert "RECORD" in err, err
+    assert "--org-id" in err, (
+        "the empty-record arm must name the scope an operator would have got "
+        "wrong: " + err)
+    assert "the graph holds no" not in err, (
+        "the graph holds a row, so telling the operator it is empty sends them "
+        "to backfill the store that is fine: " + err)
+
+    # control: an EMPTY graph still names the graph
+    code, err = _run([], [(1, "PointAdded", '{"id": "a"}')])
+    assert code == 2, err
+    assert "the graph holds no" in err, err
+    assert "RECORD" not in err, err
 
 
 def test_a_null_seq_row_refuses_instead_of_shortening_the_read():
@@ -745,6 +830,13 @@ def test_a_store_that_refused_exits_2_and_never_1(monkeypatch, capsys):
     module = _tool()
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://nowhere/record")
+    # ⛔ THE GRAPH SIDE MUST SUCCEED for the two `superset` arms below to say
+    # anything about the RECORD (review round 3, P2). `main()` now refuses an
+    # unknown graph BEFORE it opens the record, so without this stub both arms
+    # would exit 2 from the graph read and the `RecordUnavailable` path — the one
+    # this test exists for — would never run.
+    monkeypatch.setattr(module, "_graph_connection",
+                        lambda uri: _StubDB(_StubGraph([])))
 
     def _refuse(*_a, **_k):
         raise RuntimeError("the store refused the read")
@@ -754,17 +846,21 @@ def test_a_store_that_refused_exits_2_and_never_1(monkeypatch, capsys):
     assert "NO VERDICT" in capsys.readouterr().err
 
     monkeypatch.setattr(module, "_record_connection", _refuse)
-    assert module.main(["superset", "--graph", "g_x", "--org-id", "o",
+    assert module.main(["superset", "--graph", "g_real", "--org-id", "o",
                         "--graph-id", "g"]) == 2
-    assert "NO VERDICT" in capsys.readouterr().err
+    assert "the store refused the read" in capsys.readouterr().err
 
     def _no_driver(*_a, **_k):
         raise module.RecordUnavailable("psycopg2 is not installed")
 
     monkeypatch.setattr(module, "_record_connection", _no_driver)
-    assert module.main(["superset", "--graph", "g_x", "--org-id", "o",
+    assert module.main(["superset", "--graph", "g_real", "--org-id", "o",
                         "--graph-id", "g"]) == 2
-    assert "NO VERDICT" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "psycopg2 is not installed" in err, (
+        "the RECORD arm must be the one that ran — otherwise this asserts the "
+        "graph read refused, not the missing driver: " + err)
+    assert "NO VERDICT" in err
 
 
 def test_the_declared_event_types_are_the_sdks_own():
@@ -789,6 +885,45 @@ def test_the_reader_census_is_json_serialisable_and_states_its_verdict():
     assert report["graph_capability_readers"] == []
 
 
+def test_a_capability_reader_makes_the_verdict_say_so(monkeypatch):
+    """The DERIVED verdict must be exercised in its non-empty branch (round 3, P2).
+
+    The PR's stated fix is that the verdict is derived from `capability_readers`
+    instead of being a fixed sentence, so it cannot print "no reader needs a graph
+    capability" beside a non-empty `graph_capability_readers`. Nothing pinned that:
+    `READERS` holds no capability row, so the empty-branch string and the pre-fix
+    literal produce byte-identical output — reverting the derivation left every
+    row green (agent-infra#3442's class: an untested fix).
+
+    This injects ONE capability-bearing row and asserts the verdict names it, so
+    reverting to the literal reds here.
+    """
+    module = _tool()
+    capability_row = {
+        "file": "tortoise/example.py",
+        "line": "1",
+        "reader": "injected_traversal",
+        "snippets": ("MATCH (e:GraphEvent)-[r:TOUCHED]->(p:Point) RETURN p",),
+        "needs": "a hop from the event to the point",
+        "class": "maintenance",
+        "why": "fixture: the capability is in the Cypher, not the prose",
+    }
+    monkeypatch.setattr(module, "READERS", (*module.READERS, capability_row))
+    report = module.readers_report()
+
+    assert report["graph_capability_readers"] == [
+        {"file": "tortoise/example.py", "line": "1",
+         "reader": "injected_traversal", "capability": "cypher:-["}], (
+        "the census must surface a capability row at its class, and name the "
+        f"shape that made it one: {report['graph_capability_readers']!r}")
+    assert "injected_traversal" in report["verdict"], (
+        "the verdict must name the reader that needs the capability, not print "
+        f"a reassuring sentence beside a non-empty list: {report['verdict']!r}")
+    assert "cypher:-" in report["verdict"], report["verdict"]
+    assert "no reader needs a graph capability" not in report["verdict"]
+    json.dumps(report)  # the injected form must still serialise
+
+
 def test_the_committed_census_is_the_verbs_own_output():
     """`readers.json` is EVIDENCE, so it must be the verb's bytes, not a memory.
 
@@ -809,3 +944,27 @@ def test_the_committed_census_is_the_verbs_own_output():
         "`readers.json` no longer matches the verb — regenerate it with "
         "`uv run python tools/graphevent_home.py readers > "
         "docs/evidence/13094-graphevent/readers.json` rather than hand-editing")
+
+
+def test_the_evidence_docs_pin_count_is_this_files_own_count():
+    """The doc's "N pins" must BE the number of pins — the count drifted once.
+
+    Review round 3 (P3): the README said "24 pins" while this file held 26, and its
+    enumeration omitted the drift pin above. The convention is per-test-function
+    (the pre-fix doc said 21 against a file of 21), so the number is checkable
+    rather than rhetorical — and a hand-maintained count that nothing reads is a
+    claim that drifts on the next test anyone adds. Counting the file's own
+    `def test_` lines is what makes it a measurement.
+    """
+    readme = (REPO_ROOT / "docs" / "evidence" / "13094-graphevent" / "README.md"
+              ).read_text(encoding="utf-8")
+    declared = re.search(
+        r"`tests/test_13094_graphevent_home\.py` \| (\d+) pins", readme)
+    assert declared, "the README's pin-count row is gone — restore it as `N pins:`"
+    here = REPO_ROOT / "tests" / "test_13094_graphevent_home.py"
+    actual = sum(1 for line in here.read_text(encoding="utf-8").splitlines()
+                 if line.startswith("def test_"))
+    assert int(declared.group(1)) == actual, (
+        f"the README declares {declared.group(1)} pins but this file holds {actual}"
+        " — update the count and the enumeration in"
+        " docs/evidence/13094-graphevent/README.md §6")

@@ -441,8 +441,22 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
       advances.
     * a row with NO `event_id` cannot take part in that cursor, so a page whose
       LAST row has none is a NAMED refusal: silently stopping there would be a
-      partial read reported as a verdict. Rows are deduped on
-      `(seq, type, payload-digest)` as defense in depth.
+      partial read reported as a verdict.
+
+    Rows are deduped on `(seq, event_id, type, payload-digest)` as defense in
+    depth — `event_id` is IN the key because two rows sharing seq/type/payload
+    but carrying distinct `event_id`s are two rows of the multiset, and merging
+    them would undercount the graph side.
+
+    ⚠️ WITH THE COMPLETENESS COUNT, a dedupe HIT cannot produce a deduped
+    reading: `total` counts NODES while `len(rows)` counts DISTINCT KEYS, so any
+    hit makes `len(rows) < total` and the walk REFUSES (`Unpageable`) rather than
+    returning a silently merged list. That includes the genuinely duplicated
+    `(seq, event_id, type, payload)` row this store admits where the uniqueness
+    constraint is refused (`measurement-payload88.json`): it is refused as a
+    short read, never merged away. So the dedupe's only remaining effect is to
+    keep `len(rows)` meaning "distinct keys" — it must not be described as, and
+    must not be trusted to perform, a merge.
     """
     # ⛔ THE REFUSAL LIVES HERE, not in a verb: `residency` and `superset` both
     # call this function, and a guard installed in one of them is how a
@@ -635,11 +649,15 @@ def superset(graph_rows: list[dict[str, Any]],
     (`#13083` §6.3: `PointRetracted` on the graph side is `EntityMutated` in the
     journal) and a type-level absence is the failure a subscriber cannot see.
 
-    ⚠️ An EMPTY graph side returns ``no_verdict``, not ``covered``: an empty
-    multiset is a subset of everything, so the naive arithmetic would answer
-    `covered` for a feed that had been purged, for a mistyped graph name, or for
-    a store that answered a read with nothing — the vacuous PASS this verb must
-    never emit.
+    ⚠️ An EMPTY side returns ``no_verdict``, not ``covered`` — and that is BOTH
+    sides, not only the graph's: an empty multiset is a subset of everything, so
+    the naive arithmetic would answer `covered` for a feed that had been purged,
+    for a mistyped graph name, or for a store that answered a read with nothing
+    — and equally for a RECORD that holds none of this tenant's rows, which is
+    what a mistyped `--org-id`/`--graph-id` or a never-armed scope looks like
+    against a graph that holds thousands. The vacuous PASS this verb must never
+    emit, from either direction. Which side was empty is carried by
+    ``graph_events`` / ``record_events`` so the caller can say WHICH.
     """
     graph_by_type: dict[str, Counter] = {}
     for row in graph_rows:
@@ -844,12 +862,19 @@ def main(argv: list[str] | None = None) -> int:
     # never managed to read. Exit 2 says what happened. `RecordUnavailable` is a
     # `RuntimeError` for the same reason (a `SystemExit` would escape this arm).
     try:
+        # ⛔ THE GRAPH REFUSAL COMES FIRST (review round 3, P2): `_graph_rows`
+        # runs `_require_graph`, one `GRAPH.LIST` command, while `record_rows` is
+        # a full paginated scan of the tenant's journal. Reading the record first
+        # meant a mistyped `--graph` paid for the whole journal BEFORE being
+        # refused — and it made the ordering assertion in
+        # `test_the_superset_verb_refuses_an_unknown_graph_too` a claim the code
+        # contradicted.
+        graph_rows_ = _graph_rows(_graph_connection(args.graph_uri), args.graph)
         conn = _record_connection(args.record_dsn, args.org_id)
         try:
             journal = record_rows(conn, args.org_id, args.graph_id)
         finally:
             conn.close()
-        graph_rows_ = _graph_rows(_graph_connection(args.graph_uri), args.graph)
     except Exception as exc:  # a store that refused is not a verdict (see above)
         print(f"a store could not be read ({type(exc).__name__}: {exc}). "
               "NO VERDICT was produced.", file=sys.stderr)
@@ -862,9 +887,22 @@ def main(argv: list[str] | None = None) -> int:
     if verdict["verdict"] == "covered":
         return 0
     if verdict["verdict"] == "no_verdict":
-        print("the graph holds no `:GraphEvent` rows, so there is nothing to "
-              "compare — an empty or purged feed is NOT `covered`. NO VERDICT "
-              "was produced.", file=sys.stderr)
+        # ⛔ SAY WHICH SIDE IS EMPTY (review round 3, P2). The verb now refuses an
+        # empty RECORD as well as an empty graph, and a fixed "the graph holds no
+        # rows" sentence over a graph holding thousands sends the operator to
+        # backfill the store that is fine — the same misdirection the evidence
+        # doc forbids in the other direction.
+        if not verdict["graph_events"]:
+            print("the graph holds no `:GraphEvent` rows, so there is nothing to "
+                  "compare — an empty or purged feed is NOT `covered`. NO VERDICT "
+                  "was produced.", file=sys.stderr)
+        else:
+            print(f"the RECORD holds no rows for this scope while the graph "
+                  f"holds {verdict['graph_events']} `:GraphEvent` row(s), so "
+                  f"there is nothing to compare — a mistyped `--org-id`/"
+                  f"`--graph-id`, a never-armed scope, or a record that lost "
+                  f"this tenant is NOT `covered`. NO VERDICT was produced.",
+                  file=sys.stderr)
         return 2
     return 1
 
