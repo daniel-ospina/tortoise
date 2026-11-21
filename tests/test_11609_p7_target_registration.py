@@ -598,9 +598,66 @@ class TestTheRelationDecidedArmCountsItsPointCreates:
             f"{relation!r} was weighted {weight}: an operator Point and a plain edge "
             "cannot share a weight, or the abuse signal means nothing")
 
+    def test_an_explicit_operator_true_is_routed_to_the_OPERATOR_arm(
+            self, served, monkeypatch):
+        """The routing fact the helper's SCOPE note rests on (#14237 N2).
+
+        The helper keeps an `operator is True` term as belt-and-braces and its SCOPE
+        note says production cannot reach it, because the handler sends an explicit
+        `operator=true` to the OPERATOR writer, which passes `abuse_weight=1`
+        directly. That claim is only worth what its measurement is: asserted here on
+        the OBJECT the handler wraps, and on the WEIGHT it receives.
+        """
+        seen: list = []
+        real = ms._quota_gated
+
+        def spy(fn, resource="points", **kwargs):
+            seen.append((fn, kwargs.get("abuse_weight")))
+            return real(fn, resource, **kwargs)
+
+        monkeypatch.setattr(ms, "_quota_gated", spy)
+        served("_create_operator", {"operator": 1})
+        served("link_entities", {"edge": 1})
+        assert ms.tortoise_link_entities(
+            "supports", "a", "b", operator=True) == {"operator": 1}, (
+            "an explicit operator=true did not write through the operator arm")
+        assert len(seen) == 1, (
+            f"the handler wrapped {len(seen)} writers for one call — an explicit "
+            "operator=true must reach exactly one")
+        writer, weight = seen[0]
+        assert getattr(writer, "__func__", writer) is TortoiseSDK._create_operator, (
+            "an explicit operator=true reached the SDK's relation-decided dispatch — "
+            "if that routing ever moves, this test AND the weight helper's "
+            "'unreachable' SCOPE note must move with it")
+        assert weight == 1, (
+            "the OPERATOR arm weighs its Point create directly; a callable here would "
+            "mean the scalar helper is on a path its own SCOPE note declares "
+            "unreachable")
+
     def test_an_explicit_operator_true_is_weighted(self):
         assert ms._link_entities_scalar_abuse_weight(
             {"": 1}, ("ownedBy", "a", "b"), {"operator": True}) == 1
+
+    def test_a_meaning_ADDED_to_the_SDK_is_weighted_without_editing_the_door(
+            self, monkeypatch):
+        """The "read from the SDK, not copied" claim, MEASURED (#14237 r2 review, P2).
+
+        The param rows above are the meanings the SDK declares TODAY, so a hand-copied
+        tuple of those four spellings passes every one of them — which is exactly the
+        parallel-list failure the helper's docstring says it cannot have, left
+        unasserted. This row adds a FIFTH meaning to the SDK's own mapping and requires
+        the door to weight it with no edit here: the copied-list mutant answers 0.
+        """
+        meanings = dict(TortoiseSDK._EPISTEMIC_RELATION_MEANINGS)
+        assert "entails" not in {str(k).lower() for k in meanings}, (
+            "the fixture meaning collides with a live SDK meaning — pick another")
+        meanings["ENTAILS"] = "entails"
+        monkeypatch.setattr(TortoiseSDK, "_EPISTEMIC_RELATION_MEANINGS", meanings)
+        weight = ms._link_entities_scalar_abuse_weight({}, ("entails", "a", "b"), {})
+        assert weight == 1, (
+            "a meaning added to the SDK's own dispatch table was not weighted by the "
+            f"door (got {weight}): the door is reading a COPY of that table, not the "
+            "table itself, so the two can drift with every row here green")
 
     def test_the_scalar_arm_PASSES_a_weight_to_the_wrapper(self, served, monkeypatch):
         """Wiring, measured on the OBJECT: the wrapper must RECEIVE the callable.

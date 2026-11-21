@@ -7759,12 +7759,14 @@ def _link_entities_scalar_abuse_weight(result, args, kwargs) -> int:
 
     `1` when that call built a carrying OPERATOR, `0` otherwise. The asymmetry is
     the handler's own: the LIST/`operator=True` arm always writes one operator
-    (`abuse_weight=1`), while the scalar arm writes an operator only for an
-    epistemic relation or an explicit `operator=True` and a plain edge everywhere
-    else. So a blanket `1` would bill a linking burst of plain edges as Point
-    creates — a false abuse signal on the most ordinary call this door serves —
-    and a blanket `0` (the state this replaces) would let the operator half of the
-    SAME call go uncounted, which is the metering gap the wrapper was added for.
+    (`abuse_weight=1`), while the scalar arm — the only arm that reaches this
+    helper — writes one only for an EPISTEMIC RELATION and a plain edge everywhere
+    else (the `operator=True` term in the rule below is belt-and-braces, not a
+    live path; the SCOPE note says why). So a blanket `1` would bill a linking
+    burst of plain edges as Point creates — a false abuse signal on the most
+    ordinary call this door serves — and a blanket `0` (the state this replaces)
+    would let the operator half of the SAME call go uncounted, which is the
+    metering gap the wrapper was added for.
 
     ⛔ The rule is READ from the SDK, not copied (#4170): `_EPISTEMIC_RELATION_MEANINGS`
     is the very mapping `TortoiseSDK.link_entities` dispatches on, and `operator=True`
@@ -7962,9 +7964,11 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
     # the wrapper alone does not close). `_quota_gated` without `abuse_weight` checks
     # the cap and counts the write op, but records NO point_create — and this arm DOES
     # create a Point whenever the relation is epistemic (`link_entities("supports", a, b)`
-    # -> `create_operator`) or `operator=True`. Passing a flat 1 would over-count the
-    # plain-edge majority; passing none under-counts the operator half. The helper reads
-    # the SDK's own dispatch table, so the two spellings cannot drift.
+    # -> `create_operator`). An explicit `operator=true` does NOT reach this arm — it
+    # takes the OPERATOR arm above, which weighs 1 directly — so "an epistemic relation"
+    # is the whole live rule here. Passing a flat 1 would over-count the plain-edge
+    # majority; passing none under-counts the operator half. The helper reads the SDK's
+    # own dispatch table, so the two spellings cannot drift.
     return _safe(_quota_gated(sdk.link_entities, "points",
                               abuse_weight=_link_entities_scalar_abuse_weight),
                  relation, from_id, targets[0],
