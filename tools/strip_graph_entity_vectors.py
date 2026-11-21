@@ -166,15 +166,18 @@ then have nothing to prove. `#13826` is its partial form (writers ask a gate at 
    is safe; it is proof about ONE question, asked of source text.
 
 ⛔ **THE STATED RESIDUALS.** The polarity closes the KEY-SOURCE family — every shape `#13864`,
-`#13910`, `#13915`, `#13920` and `#13936` measured. Three things it does NOT close, plus one note, each named
+`#13910`, `#13915`, `#13920` and `#13936` measured. Four things it does NOT close (1–3 and 5), plus one note, each named
 because a completeness claim narrower than the code is how the next lane re-derives false
 confidence:
 
 1. **A store that reaches the arm through an UNRECOGNISED HELPER CALL.** The reproducible
    witness is `list(map(props.update, [{"embedding": vec}]))` — pinned by
    `test_the_helper_call_residual_is_PINNED_as_a_known_fail_open`, so it cannot change silently.
-   `exec(code, globals())` after a `global` declaration is the same class (the CALLEE is what the
-   gate cannot read), measured as a certifying witness and not separately pinned.
+   `exec(code)` with NO namespace argument is the same class (it rebinds a fast local on 3.13+;
+   on 3.12 the writer stores nothing — measured here — so the witness is the PEP 667 case, not
+   this host) and is not separately pinned. ⛔ `exec(code, globals())` is NOT part of this
+   residual any more: the mention rule refuses it (`globals` is named), measured — an earlier
+   revision of this paragraph still called it a certifying witness, and it was stale.
    The same class covers a local `def` written in the arm and CALLED there
    (`def _bg(): props["embedding"] = …; _bg()`): the body is not this arm's text, the call is a
    callee the gate cannot read, and `_stop_arm_walk` prunes it for that reason. `_set(props, k,
@@ -183,6 +186,12 @@ confidence:
    vec)` ARE refused (the third-argument and alias rules, measured), and
    `functools.partial(props.update, …)` is refused by the dynamic-callee rule. Resolving the
    class needs defence 1's structural seam: `#13826`'s work, not another recogniser row here.
+   ⛔ THE SAME CLASS, ONE DOOR OVER (`#14001`, measured by the cycle-5 review): a namespace that
+   comes from a helper the writer CALLS — `ns = _namespace()` where `_namespace()` returns
+   `globals()` — names nothing in the writer's text, so the mention rule cannot see it and the
+   writer CERTIFIES while storing (`_namespace()`'s own body is a different function's source).
+   DISCLOSED AND UNPINNED on purpose: pinning it needs a module-level preamble in the synthetic
+   writer harness, and the honest statement is that nothing reds if it closes.
 2. **A store in the statements the STOP RUN FALLS THROUGH TO**, after a guard whose own arm is
    clean — `if not gate("object"): props.pop("embedding", None)` followed by
    `props.update({"embedding": vec})` certifies today (measured by the round-5 review; it is
@@ -217,9 +226,10 @@ confidence:
    Pinned by `test_the_rebuild_residual_is_PINNED_as_a_known_fail_open`; closing it needs a
    mapping-VALUE analysis (which expressions can evaluate to a mapping, in every position), not
    another positional arm.
-4. **Dynamic-namespace writes — CLOSED for every shape measured, stated because the rule has a
-   scope.** `globals()[…] = …` / `locals()[…] = …` / `vars()[…] = …` (any index, constant or
-   computed) and their mutator spellings (`globals().update({…})`) poison EVERY name the scope
+4. **Dynamic-namespace writes — CLOSED for every spelling that NAMES one, which is what the
+   pinned rows measure; what is left is residual 5.** `globals()[…] = …` / `locals()[…] = …` /
+   `vars()[…] = …` (any index, constant or computed) and their mutator spellings
+   (`globals().update({…})`) make EVERY name the scope assigns unproven, and every name it
    declares `global`/`nonlocal` — **in the writer's own statements AND one level down**, which is
    where the round-10 review measured the hole (`class _C: globals()["k"] = "embedding"` runs at
    definition time and was unreachable in the nested-scope walk). **Every assignment spelling is
@@ -247,14 +257,30 @@ confidence:
    The legal spellings of the mention are pinned as the `globals-*` / `namespace-*` rows in
    `DEFEATED_RESOLVER_ROWS`: a `Name`, an `Attribute`, an import `alias`, a string-keyed
    `__dict__`/`__builtins__` subscript, in any binding form, any scope depth.
-   ⛔ THE BOUNDARY, stated as a scope and not a completeness claim:
-     * residual 1 — `exec`;
-     * residual 5 — a name the scanner cannot READ: COMPOSED at runtime
-       (`builtins.__dict__["glob"+"als"]`) or reached by frame introspection
-       (`sys._getframe(0).f_globals`);
-     * a helper that RETURNS a namespace (`ns = _namespace()`) names nothing either.
-   The pinned rows are 5 (`test_the_composed_name_residual_is_PINNED_as_a_known_fail_open`); a
-   spelling outside them is not claimed to refuse.
+   ⛔ THE BOUNDARY, stated as a scope and not a completeness claim. Two entries, and each says
+   which pin covers it:
+     * residual 1 — `exec(code)` (no namespace argument);
+     * residual 5 — a name the scanner cannot READ. COMPOSED at runtime
+       (`builtins.__dict__["glob"+"als"]`) and reached by frame introspection
+       (`sys._getframe(0).f_globals`) are both PINNED, as the two rows of
+       `DYNAMIC_NAMESPACE_NAME_COMPOSITION` (`composed-string-key`, `frame-introspection`); a
+       helper that RETURNS a namespace (`ns = _namespace()`) is DISCLOSED AND UNPINNED — no test
+       reds if it closes, and a writer shaped that way still certifies (measured).
+   Everything OUTSIDE these rows is not claimed to refuse.
+
+5. **A DYNAMIC NAMESPACE THE WRITER NEVER NAMES.** Two spellings, measured by the cycle-4/cycle-5
+   reviews:
+   * a name COMPOSED at runtime (`builtins.__dict__["glob" + "als"]()`) or reached by FRAME
+     introspection (`sys._getframe(0).f_globals`) — PINNED, as the two rows of
+     `DYNAMIC_NAMESPACE_NAME_COMPOSITION`
+     (`test_the_composed_name_residual_is_PINNED_as_a_known_fail_open`);
+   * a helper that RETURNS one (`ns = _namespace()`, with `_namespace()` at module scope) —
+     DISCLOSED AND UNPINNED: the writer's own text names nothing, so the mention rule cannot see
+     it and the writer certifies while storing (measured). Pinning it needs a module-level
+     preamble in the synthetic writer harness; until then nothing reds if it closes, and this
+     line is the record that it is open.
+   Chasing string composition is the unbounded recogniser this issue exists to stop; the structural
+   seam (`#13826`) is the real answer for the helper case.
 
 THE REMOVAL ITSELF
 ==================
@@ -4576,6 +4602,10 @@ def _is_dynamic_namespace_reference(node) -> bool:
     evade it, because the mention is what is checked, not the path from the mention to the write.
     A writer that only READS `globals()` is refused too: that is the over-refusal the doctrine
     accepts, and it costs nothing on the real population (no entity writer mentions one — pinned).
+
+    ⛔ THIS IS NOT A TOTALITY CLAIM. A namespace obtained WITHOUT the writer naming it — a helper
+    that returns one, a name composed at runtime, frame introspection — is outside it; see
+    residual 5 in the module docstring, which states which of those are pinned and which are not.
     """
     import ast
 
