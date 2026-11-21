@@ -259,6 +259,19 @@ def _git(*args: str) -> str:
     return done.stdout
 
 
+def _ref_sha(ref: str) -> str | None:
+    """The sha `ref` resolves to in THIS clone, or None when it is not fetched here.
+
+    `refs/pull/*` is not in a normal clone's refspec, so its absence is the ORDINARY
+    case — the address is still graded through the constant the block prints, and only
+    the drift arm is UNCHECKED. No network: a `git ls-remote` here would trip the
+    suite-wide egress guard, and an arm that needs the network is not a test.
+    """
+    done = subprocess.run(
+        ["git", "rev-parse", "--verify", "-q", ref], cwd=ROOT, capture_output=True, text=True)
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
 def _requires(*revs: str) -> None:
     missing = [rev for rev in revs if not _rev_present(rev)]
     if missing:
@@ -394,11 +407,19 @@ def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
 def test_the_history_clause_is_only_quoted_as_falsified():
     """Finding 3: the commit IS inside a history a reader browses.
 
-    `83e94826a8a` is an ancestor of `refs/pull/14108/head`, and a PR head ref survives a
-    merge, so "outside every history a reader browses" was false as an assertion. What is
-    measured is narrower: no remote BRANCH contains it, and `main` does not. The arm accepts
-    either honest form — the narrow claim stated outright, or the false one quoted as false —
-    and refuses the unqualified version, which is where the finding landed.
+    `83e94826a8a` is an ancestor of the tree the block names as `refs/pull/14108/head`
+    (`d523c9be8c`), and a PR head ref survives a merge, so "outside every history a reader
+    browses" was false as an assertion. What is measured is narrower: no remote BRANCH
+    contains it, and `main` does not. The arm accepts either honest form — the narrow claim
+    stated outright, or the false one quoted as false — and refuses the unqualified version,
+    which is where the finding landed.
+
+    ⛔ TWO DIFFERENT MEASUREMENTS, NAMED SEPARATELY (review cycle 1): the ancestry below is
+    against the CONSTANT `d523c9be8c`, so its message must not claim the REF was measured —
+    and where this clone does carry `refs/pull/14108/head`, its target is graded against the
+    constant, because the block's own sentence says a PR head ref "tracks the branch's
+    CURRENT head": the moment #14108 gains a commit the address moves and every interval
+    claim written against it goes stale without a red.
 
     ⛔ THE CLAUSE IS MATCHED BY SHAPE, NOT BY ONE SENTENCE (review, rounds 5-8): the block has
     already been reworded twice under this arm ("a reader browses" → "the repo PUBLISHES"), and
@@ -407,11 +428,19 @@ def test_the_history_clause_is_only_quoted_as_falsified():
     qualifier in it.
     """
     _requires(RESIDUE_ABBREV, RESIDUE_PR_HEAD, "origin/main")
+    head_ref = _ref_sha("refs/pull/14108/head")
+    if head_ref is not None:  # fetched here: grade the ADDRESS, not only the ancestry
+        assert head_ref.startswith(RESIDUE_PR_HEAD), (
+            f"`refs/pull/14108/head` resolves to {head_ref[:10]}, not `{RESIDUE_PR_HEAD}` — the "
+            "block's ADDRESS has MOVED, so its '`2fe01fc775e..d523c9be8c`' interval and every "
+            "claim written against that head must be re-measured before this arm may pass")
     inside = subprocess.run(
         ["git", "merge-base", "--is-ancestor", RESIDUE_ABBREV, RESIDUE_PR_HEAD],
         cwd=ROOT, capture_output=True, text=True)
     assert inside.returncode == 0, (
-        "premise: the commit IS an ancestor of `refs/pull/14108/head`")
+        f"premise: the commit IS an ancestor of `{RESIDUE_PR_HEAD}`, the tree the block names "
+        "as `refs/pull/14108/head` (this clone does not carry that ref, so only the constant "
+        "is graded here)")
     on_main = subprocess.run(
         ["git", "merge-base", "--is-ancestor", RESIDUE_ABBREV, "origin/main"],
         cwd=ROOT, capture_output=True, text=True)
