@@ -864,11 +864,21 @@ class _AnchorHrefParser(HTMLParser):
         self._body_seen = False
         # ⛔ `html`/`body` ARE NEVER PUSHED (`_open_extent` — a browser inserts no element for
         # those tokens), so a `hidden` on one of them cannot ride the stack's inherited
-        # `renders` flag. It still HIDES THE WHOLE DOCUMENT (a global attribute; the UA
-        # stylesheet's `[hidden] { display: none }` applies to the body too — measured in
-        # Chrome: `<body hidden>` and `<html hidden>` both paint a 0x0 box), so the flag is
-        # carried here instead, and read by BOTH the text question (`_text_is_painted`) and
-        # the boundary question (`_unmet_by_reader`). Without it, skipping the push silently
+        # `renders` flag when there is one to ride.
+        #
+        # ⛔ AND **WHICH ONE HIDES THE DOCUMENT DEPENDS ON THE TAG AND ON THE STACK** (#14073
+        # review rounds 26 and 28 — this paragraph used to say `html`/`body` BOTH "HIDE THE
+        # WHOLE DOCUMENT", which is the false premise that produced round 26's P1). Measured,
+        # and matching the living standard:
+        #   * `body` — its attributes merge into the body element (`[hidden]` is global), so it
+        #     hides everything and no stack state changes the answer;
+        #   * `html` — the attributes merge into the **TOP ELEMENT OF THE STACK**, so
+        #     `<div><html hidden>` hides the DIV and `<p>ONE<div><html hidden>D</div><p>TWO`
+        #     still paints `'ONE TWO'`; only an `html` token with NOTHING OPEN reaches the root
+        #     and can hide everything.
+        # `_open_extent` implements that split at the root-token arm; this flag is the
+        # nothing-open case, read by BOTH the text question (`_text_is_painted`) and the
+        # boundary question (`_unmet_by_reader`). Without it, skipping the push silently
         # converted a hidden root into a visible one (#14073 review round 22, P2).
         self._root_renders = True
         self.foreign_tags: list[str] = []
@@ -2180,15 +2190,18 @@ class _AnchorHrefParser(HTMLParser):
             #
             # ⛔ `html` IS **NOT** IN THAT CLASS, so the select skip is gated on `body` alone
             # (#14073 review round 27, P2 — this paragraph said the opposite and the code three
-            # lines below it is what is right). The two tags differ in BOTH models: a `body` token
-            # is the browser-dependent one above, while an `html` token is HANDLED everywhere —
-            # ignored only when a `template` is open, and otherwise merged into the top element
-            # (see the next paragraph, which is the measurement that settled it) — and in the
-            # deleted classic in-select mode it was ignored outright. Neither reading hides the
-            # DOCUMENT from this token, so there is nothing for a select skip to decide here, and
-            # routing `html`'s `hidden` to `_root_renders` (the earlier mistake) is what DROPPED
-            # copy a browser paints: `<p>ONE<select><html hidden></select><p>TWO` is `'ONE TWO'`,
-            # which `test_the_document_roots_a_browser_ignores_insert_nothing` now requires.
+            # lines below it is what is right; round 28 P3 corrected the classic-mode sentence).
+            # The two tags differ in BOTH models: a `body` token is the browser-dependent one
+            # above, while an `html` token is HANDLED everywhere — the living standard ignores
+            # it only inside a `template` and otherwise merges into the top element, and the
+            # deleted classic in-select mode had its own explicit `html` rule FORWARDING to
+            # that same in-body merge (HTML 5.1 REC, "in select": *"A start tag whose tag name
+            # is `html`: process the token using the rules for the 'in body' insertion mode"*) —
+            # so neither reading hides the DOCUMENT from this token, and there is nothing for a
+            # select skip to decide here. Routing its `hidden` to `_root_renders` (the earlier
+            # mistake) is what DROPPED copy a browser paints:
+            # `<p>ONE<select><html hidden></select><p>TWO` is `'ONE TWO'`, which
+            # `test_the_document_roots_a_browser_ignores_insert_nothing` now requires.
             if tag == "body" and self._in_select():
                 return
             # ⛔ AND `html`'s ATTRIBUTES DO **NOT** MERGE INTO THE DOCUMENT ROOT (#14073 review
