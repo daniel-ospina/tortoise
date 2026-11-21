@@ -3545,12 +3545,14 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     block-granularity grades it, this tree `()`).
     #     ⛔ MEASURED WITHOUT A COUNT, ON PURPOSE. Putting the block-granularity subtraction
     #     back (the `ast.walk(block)` mechanism the deleted `_rebinds_within` was) reds this
-    #     control AND every other row that pins a BLOCK-SCOPED exemption: the two
-    #     class-body barrier controls (`_class_body_method_control`,
-    #     `_class_body_comprehension_control`), both iterable rows of
+    #     control AND every other row that pins a BLOCK-SCOPED exemption: the CLASS-BODY
+    #     family (`_class_body_method_control`, `_class_body_comprehension_control`, and
+    #     the `4j-sesvicesimus` nested-class-body row), both iterable rows of
     #     `4j-vicesimus-bis` (`outermost iterable`, `later generator iterable`), and the
     #     header/definition-scope rows. The same error forbids every one of those shapes,
-    #     which is why the set is named and NOT counted.
+    #     which is why the set is NAMED BY FAMILY and NOT counted — an explicit "two" for
+    #     the class-body family was itself off by one at the next head, because a sibling
+    #     had added the nested-class-body row in between.
     #     ⛔ NO TOTAL IS RESTATED HERE, and that is the correction, not an omission. This
     #     sentence carried one four times ("one", "three", "four", "five") and each was
     #     falsified by the next commit that added a row: the flip set GROWS with the file,
