@@ -203,7 +203,13 @@ class TestRegistryEquivalence:
         # lane C composes on top of lane B (59), then the READ/QUERY wave (55), then the
         # door-retirement wave (48), then lane P1 (46), then lane P2's confidence arms
         # (44), then lane P6's `rest_spec` pair (42), then its DELETE pair: 42 - 2 + 0 = 40.
-        assert len(TOOL_REGISTRY) == 40, f"Expected 40, got {len(TOOL_REGISTRY)}"
+        # #11609 lane P7: 40 -> 39 — FOUR approved target names were registered
+        # (`link_entities`, `poll_events`, `delete_knowledge`,
+        # `get_historical_knowledge`) and FIVE off-target doors retired forward in
+        # the same change (`create_edge`, `create_operator`, `events_poll`, `delete`,
+        # `list_graphs`). The count is a derived fact; the pins that matter are in
+        # `tests/test_11609_door_retirement.py` and `…_p7_target_registration.py`.
+        assert len(TOOL_REGISTRY) == 39, f"Expected 39, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
         # consolidated, the 5 #4282 container members, the 14 #11609 lane B
@@ -211,7 +217,10 @@ class TestRegistryEquivalence:
         # members are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
 
-        assert len(retired) == 68, f"Expected 68 retired, got {len(retired)}"
+        # #11609 lane P7: 68 -> 73 — FIVE doors retired forward in the change that
+        # registered their destinations (`create_edge`, `create_operator`,
+        # `events_poll`, `delete`, `list_graphs`).
+        assert len(retired) == 73, f"Expected 73 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         # #405's `validate_domain` capability is not lost: #4282 retired the door into the
         # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
@@ -261,7 +270,9 @@ class TestRegistryEquivalence:
             "Missing the review_link_candidates container that #913's review_connections "
             "read now answers through")
         assert "review_link_candidates" in _rui["tortoise_review_connections"]
-        assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
+        # #11609 lane P7: the LIVE name is the approved target spelling; the door
+        # it replaced is a forward entry beside it (`RETIRED_USE_INSTEAD`).
+        assert "tortoise_poll_events" in names, "Missing #432 poll_events tool"
         # #432's retraction, reached through `tortoise_update_knowledge`: retraction is a
         # TEMPORAL FIELD on the revise verb (#11609 lane B), so the door retired and the
         # container is what resolves.
@@ -289,8 +300,12 @@ class TestRegistryEquivalence:
         # container grew a `recall=True` arm and the door retires FORWARD into it, so
         # the capability assertion follows the container (asserting the NAME would
         # re-assert the surface shape the approved target removes).
-        w_consolidations = {"tortoise_check_confidence", "tortoise_delete",
-                            "tortoise_create_edge",
+        # #11609 lane P7: W2's `delete` and `create_edge` likewise moved onto the approved
+        # target spelling — `tortoise_delete_knowledge` (the kept entry, #9660) and
+        # `tortoise_link_entities` (row 19) are the containers now, and both old names are
+        # forward entries to them.
+        w_consolidations = {"tortoise_check_confidence", "tortoise_delete_knowledge",
+                            "tortoise_link_entities",
                             "tortoise_graph_overview", "tortoise_get_entity",
                             "tortoise_ingest",
                             # #11609 lane B: W2's update/operator_action arms moved
@@ -391,9 +406,16 @@ class TestCurationGroups:
         assert retired.group == "memory", f"got {retired.group}"
 
     def test_poll_events_in_sessions_group(self):
-        from tortoise.tool_registry import TOOL_REGISTRY
-        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
+        """#11609 lane P7: the LIVE name is the target spelling; the retired
+        declaration keeps the same group so its #3883 warning stays coherent."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_poll_events")
         assert entry.group == "sessions", f"got {entry.group}"
+        retired = next(t for t in RETIRED_TOOL_REGISTRY
+                       if t.name == "tortoise_events_poll")
+        assert retired.group == entry.group, (
+            "the retired name and its replacement must render in the same group, "
+            "or a group-scoped surface shows one and hides the other")
 
     def test_session_capture_tool_grouped_sessions(self):
         """#1727 (Task 13): the session-capture surface groups under "sessions"
@@ -445,7 +467,11 @@ class TestCurationGroups:
         # now serves it rather than re-asserting the removed name.
         assert "tortoise_update_knowledge" in memory
         groups = tool_groups()
-        assert "tortoise_events_poll" in groups["sessions"]
+        # #11609 lane P7 renamed the live door to the approved target spelling.
+        # `tool_groups()` reads TOOL_REGISTRY only, so the RETIRED declaration is not
+        # in it — its group is asserted beside the live entry, in
+        # `test_poll_events_in_sessions_group`.
+        assert "tortoise_poll_events" in groups["sessions"]
 
 
 # ── #3540 — agent-addressable integrations (epic #1714 R6) ────────────────
@@ -2079,7 +2105,7 @@ class TestCapabilityModel:
 
 
 class TestReadTierCannotHideAnOutOfBoundaryWrite:
-    """#9576 (the #4122 defect class): `tortoise_events_poll` is `read` — a
+    """#9576 (the #4122 defect class): `tortoise_poll_events` is `read` — a
     `readOnlyHint: true` entry a client auto-approves and a `graphs:read` key may
     call — while its handler path runs an interval-gated `DETACH DELETE` of
     expired-or-over-cap `:GraphEvent` rows (`poll_events` -> `_maybe_purge_events` ->
@@ -2111,7 +2137,10 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         """
         import tool_surface_capabilities as tsc
 
-        assert tsc.handler_operations("tortoise_events_poll").operations \
+        # #11609 lane P7: the LIVE door is the approved target spelling. The
+        # retired `tortoise_events_poll` is a forwarder with no SDK call in its own
+        # body, so the reach signal must be read off the body that HAS the purge.
+        assert tsc.handler_operations("tortoise_poll_events").operations \
             == frozenset({"poll_events"})
         assert "poll_events" not in tsc.sdk_graph_mutators()
         assert "poll_events" in tsc.OUT_OF_BOUNDARY_MUTATORS
@@ -2120,7 +2149,11 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         import tool_surface_capabilities as tsc
 
         declared = set(tsc.RETENTION_CARVEOUTS)
-        assert declared == {"tortoise_events_poll"}, sorted(declared)
+        # #11609 lane P7: the carve-out follows the live door to the approved target
+        # spelling, and its RETIRED declaration is still served (#3883) — so the
+        # ledger names both, one per served name, and nothing else.
+        assert declared == {"tortoise_poll_events", "tortoise_events_poll"}, \
+            sorted(declared)
         # and the real registry is clean under the new arm
         assert tsc.write_classification_violations(tsc.served_registry()) == []
         assert tsc.declared_set_violations(tsc.served_registry()) == []
@@ -2214,7 +2247,7 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         import tool_surface_capabilities as tsc
 
         maint = [dataclasses.replace(e, risk="maintenance")
-                 if e.name == "tortoise_events_poll" else e
+                 if e.name == "tortoise_poll_events" else e
                  for e in tsc.served_registry()]
         assert tsc.declared_set_violations(maint) == [], (
             "the liveness arm refused the carve-out on a READING tier — the two "
@@ -2242,7 +2275,7 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
             tsc, "handler_operations",
             lambda name, source=None: type(
                 "H", (), {"operations": frozenset(), "unresolved": ()})()
-            if name == "tortoise_events_poll" else real(name, source))
+            if name == "tortoise_poll_events" else real(name, source))
         assert any("no longer reaches" in v
                    for v in tsc.declared_set_violations(tsc.served_registry()))
 
@@ -2496,9 +2529,18 @@ class TestToolIdentity:
         # DELETE pair (`tortoise_delete_point` / `tortoise_delete_entity`, both
         # `risk="destructive"`) does — both keep their #3883 shims, so SERVED stays 54
         # (20 live + 34 retired writer shims) while LIVE falls 22 -> 20.
-        assert len(WRITE_TOOL_NAMES) == 54, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # #11609 lane P7 registered TWO writers by the approved target names —
+        # `tortoise_link_entities` (absorbing two write doors, which keep their shims)
+        # and `tortoise_delete_knowledge` (the kept delete entry under the target
+        # spelling, beside the retired `tortoise_delete` shim) — so the SERVED census
+        # rises 54 -> 56 while LIVE falls 20 -> 19: the two write doors that retired
+        # (`create_edge`, `create_operator`) and `tortoise_delete` left the advertised
+        # surface, and the two arrivals are one net new writer on each side. No
+        # capability was added — every one of the four was already reachable through
+        # the doors and the SDK.
+        assert len(WRITE_TOOL_NAMES) == 56, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 20, f"live write census moved: {len(live)}"
+        assert len(live) == 19, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
@@ -2532,7 +2574,7 @@ class TestToolIdentity:
         # than 43; lane C then retired SEVEN advertised writers into its containers
         # (still served, #3883) and added FIVE writing containers (+5 served, -2 live).
         # Pinned here so the derived loop below can never pass by covering nothing.
-        assert len(writers) == 54, writers
+        assert len(writers) == 56, writers
         for name in ("tortoise_index_files", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):

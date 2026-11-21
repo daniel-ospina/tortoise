@@ -133,6 +133,12 @@ DESTINATION = {
     "tortoise_delete_point": "delete_knowledge",
     "tortoise_delete_entity": "delete_knowledge",
     "tortoise_delete": "delete_knowledge",
+    # #11609 lane P7 — the four newly-registered targets. Each is a REGISTRY tool,
+    # so the map owes it a row; its destination is its own target name.
+    "tortoise_delete_knowledge": "delete_knowledge",
+    "tortoise_get_historical_knowledge": "get_historical_knowledge",
+    "tortoise_link_entities": "link_entities",
+    "tortoise_poll_events": "poll_events",
     "tortoise_retract_point": "update_knowledge",
     "tortoise_invalidate": "supersede_knowledge",
     "tortoise_supersede": "supersede_knowledge",
@@ -149,7 +155,12 @@ DESTINATION = {
     "tortoise_list_tags": "graph_overview",
     "tortoise_list_namespaces": "list_knowledge",
     "tortoise_list_pointkinds": "graph_overview",
-    "tortoise_list_graphs": "tenancy:list_memory_graphs",
+    # #11609 lane P7 retired this door FORWARD into `graph_overview(section="graphs")`,
+    # so its destination on the MCP surface is the container — not the tenancy SDK read
+    # it used to reach. The map's contract is "the destination a retiring row leads to",
+    # and `test_retired_rows_lead_to_their_replacement_destination` checks exactly that
+    # against the live replacement's own row.
+    "tortoise_list_graphs": "graph_overview",
     "tortoise_taxonomy": "graph_overview",
     "tortoise_overview": "graph_overview",
     # #4282 — the containers themselves. Each is a REGISTRY tool, so the map owes

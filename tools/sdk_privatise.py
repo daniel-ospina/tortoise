@@ -936,6 +936,61 @@ SWEEP_NAMES = 66
 #: never its evidence. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
 #:
+#: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on this branch: `f9f480a55ab3` (#14164, the
+#: #13094 change-feed reader census + measured residency) added untyped `Graph` receivers and
+#: re-pinned nothing, so `--check` reds on `origin/main` `69908d006b3d` itself — measured with
+#: `--repin` in a detached worktree at that commit: `(11843, "6aed5368ffa10513")`, the SAME pair
+#: this branch's tree carried at `72c104bcbb`, so the red was the BASE tree's and not the change's
+#: (that commit's diff is `docs/infra-runbook.md` + `tests/test_fly_secret_drift.py` and adds no row).
+#: ⛔ NO TREE ON THIS BRANCH PRINTS IT ANY MORE — the merges with `main` re-measured the pair, and the
+#: block at the END of this run carries the reading that is current: read that one for the live pin.
+#: THE +8 IS ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: `--repin` was run in one detached worktree
+#: at `2c0d66e2ec07` (the previous pin's commit) → `(11835, "891187f5a4636487")`, at
+#: `dc92b0eecc15` → the same, and at `f9f480a55ab3` → `(11843, "6aed5368ffa10513")`, so exactly
+#: ONE commit moved it; and `--report --base 28ca66878d… --top 5000` was run at the pre-move commit
+#: AND at `f9f480a55ab3`, both row sets sorted and diffed — EXACTLY TWO rows differ,
+#: `g.query` 1492 → 1499 and `proj.g.query` 3642 → 3643, with the row SHAPE set unchanged on both
+#: sides (858 rows). Both are FalkorDB `Graph` receivers, which is this sweep's documented edge (a
+#: `Graph` is never the SDK), so no shape was absorbed and no defect is hidden — the direction the
+#: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
+#: re-pin, with `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN. `SWEEP_RESIDUE` moved repeatedly on 2026-11-21 — count it
+#: yourself with `git log -G'^SWEEP_RESIDUE = ' -- tools/sdk_privatise.py`, and bucket it on ONE clock,
+#: because the total depends on which timezone window you pick (the same day reads differently on UTC
+#: and on -06:00) and `git log -L` on this line TRUNCATES the chain — measured on `origin/main`, it
+#: stops at `2c0d66e2ec` — so a numeral quoted here is a claim about the instrument, not about the
+#: drift. This paragraph therefore quotes none. What the day does measure is not thrift: twice at
+#: least, the census moved in a commit that re-pinned NOTHING and the recovery landed later, in a
+#: commit about something else. `f9f480a55ab3` (#14164) moved it and `427c418ebb` (#14188) re-pinned
+#: afterwards; `67dc298ec3` (#14194) with `1b0db04894` (#14162) moved it and THIS commit re-pins.
+#: That is the shape of the problem rather than a coincidence: `SWEEP_RESIDUE` is a WHOLE-TREE
+#: census, so any commit that adds or retires an untyped receiver anywhere moves it, while the
+#: commits that do so have no reason to touch this file. At `1b0db04894` — this branch's own tree,
+#: before the merges — `--repin` prints `(11840, "b7eb08ff3acdcce4")`, measured, never carried
+#: forward by arithmetic; at `72c104bcbb` the tree still satisfies its own pin
+#: `(11843, "6aed5368ffa10513")` — the row map re-derived there totals 11843 — so the move happened
+#: strictly between those two commits.
+#: THE −3 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic: the residue map was re-derived on
+#: BOTH heads from this file's own `edits_for`/`rename_map` (not by grep over the source, which
+#: over-counts receivers that appear inside comments and string literals), and EXACTLY SIX rows
+#: differ, with the row SHAPE set going 858 → 855:
+#:   `67dc298ec3` (#14194) REWROTE `tests/test_read_ledger.py` — it is the ONLY commit in the range
+#:   that touches that file, and it retires four `inst.*` rows: `inst.query` 3 → 0,
+#:   `inst.get_point` 1 → 0, `inst.paginated_query` 1 → 0, `inst.query_points_by_tag` 1 → 0, i.e.
+#:   the six removed `inst.*` source lines = −6;
+#:   `1b0db04894` (#14162) is the only commit in the range that touches `tools/miss_rate_m5.py` or
+#:   its test, and it GROWS the `cur['proj'].g.query` ROW 2 → 4 tree-wide (+2; that file adds two
+#:   of the four, `tools/window_quality_m2.py` holds the other two) and adds one NEW row,
+#:   `terms.update` 0 → 1 in `tests/test_miss_rate_m5.py` (+1), i.e. +3; net −3 → `11843 − 3`.
+#: The ONE new shape is DECLARED rather than waved through: `terms` at that site
+#: (`_pp_terms`, `tests/test_miss_rate_m5.py`) is a plain `set[str]` built by `re.findall`, so
+#: `.update` there is the ordinary-word receiver this sweep deliberately leaves alone — it is
+#: neither an SDK handle nor a FalkorDB `Graph`. `typed references still pointing at a public
+#: name: 0` on BOTH heads, so no public name was absorbed in either direction and no defect is
+#: hidden: the four retired `inst.*` rows are that test rewrite's own deletions, not an escape,
+#: and the direction the pin exists to catch — the SET moving — is what this re-pin declares.
+#:
 #: ⛔ MERGED `origin/main` (`2c0d66e2ec`) INTO THIS BRANCH — the resolution of the ONE conflict this
 #: merge had. Both sides had edited ONLY this pin line (verified: with the `#:` blocks stripped, the
 #: three-way diff is a single `SWEEP_RESIDUE` replacement on each side and nothing else), so the
@@ -1022,6 +1077,24 @@ SWEEP_NAMES = 66
 #: `super().query` 74 → 75, the `_EventGraph` fake in `tests/test_14012_outside_view.py` delegating to
 #: its parent for the statements it does not answer (the end-to-end per-label timestamp row).
 #: `typed references still pointing at a public name` stays **0**.
+#:
+#: ⛔ MERGED `origin/main` (`e74cf1d13d`, the `#14012` lane's "keep this resident" + "see what's
+#: outside") INTO THIS BRANCH — and THIS branch's own census contribution is ZERO ROWS, so the
+#: merged tree's pair is MEASURED on the RESOLVED tree and it coincides with `main`'s own: `--repin`
+#: here prints `(11857, "ed40203dbbf32b87")`, the SAME pair `main` pins at `e74cf1d13d`. ⛔ THE
+#: COINCIDENCE IS NOT THE EVIDENCE — the evidence is that `--repin` run. What makes it expected
+#: rather than lucky is MEASURED too, not assumed: `git diff origin/main` on the resolved tree
+#: touches exactly TWO files, and every line it adds is either `#:`-prefixed prose or the single
+#: docstring figure in `tests/test_sdk_privatise_sweep.py` — not one executable line. `edits_for`
+#: walks the AST and cannot see a comment, and a docstring is a `Constant`, not an `Attribute`, so
+#: this branch can move no row in either direction, which is why the two readings agree.
+#: ⛔ NEITHER SIDE'S FIGURE IS INHERITED BY ARITHMETIC: this branch's own tree `1b0db04894` measured
+#: `(11840, "b7eb08ff3acdcce4")` (the block above), and the `#14012` block above independently
+#: reports the SAME 11840 for that commit — "`--check` on a detached worktree of `1b0db0489408`
+#: reports **11840** against the 11843 that tree pins" — so `main`'s +17 from there is `#14012`'s own
+#: rows, attributed row by row in that block, not this branch's. `11840 → 11857` is a CROSS-CHECK of
+#: two independent readings, never the derivation of this pin.
+#: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

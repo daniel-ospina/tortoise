@@ -635,6 +635,19 @@ def live_return(entry: dict, surface: dict, root: Path | None = None) -> str | N
         # where the old path-set answer is the only one available.
         base = symbol.replace(".", "/")
         carriers = surface.get("modules_with_a_body")
+        # ⛔ A `.pyi` IS SURFACE, AND THIS IS THE RECORDED RULE (round-15 review, P2 — DECLINED).
+        # A round-15 reviewer proposed skipping the `.pyi` candidate unless the row itself froze a
+        # stub, on the ground that arm 1b's `_head_carries_runtime_body` calls a `.pyi` "not
+        # runtime statements". The two questions are DIFFERENT and both answers are recorded:
+        #   * "does the module's RUNTIME BODY still exist?" -> no, a stub is not a body (arm 1b);
+        #   * "is the symbol still declared in the shipped package?" -> YES, and that is what this
+        #     function answers: `_package_modules` scans `*.py*` on purpose, and
+        #     `test_a_tortoise_archive_stub_module_is_reported` plus
+        #     `test_the_package_module_scan_sees_pyi_stubs` pin it ("a `.pyi` stub under the shipped
+        #     package is importable surface, so the scan must see it"). Adopting the finding would
+        #     reverse that rule and un-red a shape the operator is meant to fix by deleting the
+        #     stub — which IS the green route `archive/README.md` gives, so the finding's "no green
+        #     route" does not hold either.
         for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
             if candidate not in surface.get("modules", set()):
                 continue
@@ -850,8 +863,11 @@ def file_violations(entries: list[dict], archive_dir: Path | None = None,
                 "sha (or is the all-zero placeholder) — the restore anchor was not recorded "
                 "(a guess is not a record)"
             )
-        if not entry.get("reason"):
-            out.append(f"{symbol}: no `reason` — a reader cannot tell why it was removed")
+        if not str(entry.get("reason") or "").strip():
+            out.append(
+                f"{symbol}: no `reason` — a reader cannot tell why it was removed (a blank or "
+                "whitespace-only reason is not one)"
+            )
 
     if archive_dir.exists():
         for path in sorted(archive_dir.rglob("*.py")):
@@ -1039,9 +1055,11 @@ def _init_carries_a_body(text: str) -> bool:
     importable siblings. A comparison over PATHS therefore cancels that deletion, which is why
     "the package still imports" is the wrong question to ask of `__init__.py`.
 
-    Only an `__init__.py` with no statements of its own — empty, whitespace, or a docstring
-    alone — is pure scaffolding, where deleting it while siblings survive removes nothing. Any
-    statement (an import, a re-export, `__all__`, an assignment, a function) is content.
+    Only an `__init__.py` with no statements of its own — empty, whitespace, a docstring
+    alone, or a bare no-op (any inert expression statement: `pass`, `...`, the name `Ellipsis`,
+    a bare `None`/`0`) — is pure scaffolding, where deleting it while siblings survive removes
+    nothing. Any statement (an import, a re-export, `__all__`, an assignment, a function) is
+    content.
     Unparseable text is treated as carrying NOTHING: a body that no longer parses holds no
     statements a caller can reach, so the arm reports the removal rather than reading the
     garbage as content and cancelling it. (The previous version returned True here and called
@@ -1060,6 +1078,33 @@ def _init_carries_a_body(text: str) -> bool:
         and isinstance(body[0].value.value, str)
     ):
         body = body[1:]  # a docstring alone is prose about scaffolding, not content
+    # ⛔ A NO-OP STATEMENT IS NOT CONTENT EITHER (round-16 P2, widened in round-17 P1 — measured
+    # in BOTH directions, then measured again ONE SPELLING OVER). A file reduced to `pass` or `...`
+    # carries nothing a caller can reach, which is exactly the README's test ("the name no longer
+    # resolves to any code"). Counting them as a body was a false PASS one branch over from the
+    # docstring hole: the WRITER accepted `pass` as the module's source of record
+    # (`archived_from = tortoise/x.py`) and `shrink_violations` then credited the row on its
+    # EXISTENCE — every arm green, the body in no file under `archive/`. The SAME predicate
+    # over-blocked the mirror shape: a `pass`-only `__init__.py` read as CONTENT, so deleting a
+    # scaffolding package went RED while deleting a docstring-only one was green.
+    #
+    # ⛔ ROUND-16 FIXED TWO SPELLINGS AND LEFT THE CLASS OPEN (round-17 P1, measured): `Ellipsis`
+    # is the same object spelled as a NAME, and `None` / `0` / `NotImplemented` / `frozenset()` are
+    # equally bare — every one of them still answered "carries a body", so `check --base-ref`
+    # printed OK while the base's four functions were in no file under `archive/`. An enumeration
+    # of spellings IS the defect. So ask the language rule instead, which closes the class:
+    # a top-level expression STATEMENT has no effect unless it calls, awaits, yields, or binds a
+    # named expression. Everything else — a bare constant (the docstring above included), a bare
+    # name, an arithmetic expression — is dead code and cannot be the source of record.
+    # Still only TOP-LEVEL: a `def`/`class`/`if` whose own body is `pass` is a statement, and a
+    # `.pyi` stub's `def f() -> int: ...` is a FunctionDef.
+    _effectful = (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr)
+    body = [
+        node
+        for node in body
+        if not isinstance(node, ast.Pass)
+        and not (isinstance(node, ast.Expr) and not isinstance(node.value, _effectful))
+    ]
     return bool(body)
 
 
@@ -1080,6 +1125,33 @@ def _modules_with_a_body(paths, read) -> set[str]:
                 continue
         out.add(module_name(path))
     return out
+
+
+def _carrier_carries_a_body(root: Path, sha: str, path: str) -> bool:
+    """Does THIS base carrier hold the module's code? — half of ONE quantifier.
+
+    ⛔ A MODULE HAS MORE THAN ONE POSSIBLE CARRIER, and asking one of them is the defect this
+    helper exists to remove (`module_name` collapses `<dotted>.py`, `<dotted>/__init__.py` and
+    `<dotted>.pyi` onto the SAME symbol). A body-less `.py` beside a body-carrying
+    `__init__.py` is a dead leftover, not proof that the base carried nothing: `next(...)`-ing
+    the lexicographically first non-stub carrier cancelled the deletion of the 406 lines that
+    left with it, and every other arm was blind to it (round-23 review, F1 — a removal graded
+    green, which is the one direction this whole function exists to prevent).
+
+    A `.pyi` COUNTS as the module's code. That is a RECORDED rule, not a preference: a stub
+    under the shipped package is importable surface (`live_return`'s DECLINED note), it is why
+    `_package_modules` reads `*.py*` on purpose, and it is the module's ONLY code when nothing
+    else carries it (`test_the_package_module_scan_sees_pyi_stubs`). It is exactly why the
+    stub-only case must keep being graded as a removal.
+
+    An UNREADABLE carrier counts too, deliberately: `_git_blob` returns `None` when this clone
+    cannot answer (a shallow base), and "I could not read it" must never cancel a removal —
+    the same fail-closed reading `_modules_with_a_body` documents.
+    """
+    if path.endswith(".pyi"):
+        return True
+    source = _git_blob(root, sha, path)
+    return source is None or _init_carries_a_body(source)
 
 
 def _head_carries_runtime_body(
@@ -1458,6 +1530,68 @@ def _row_frozen_source(entry: dict) -> str:
     return str(entry.get("archived_from") or "")
 
 
+def _stub_waiver_why(
+    prefix: str, base_carrier: str, head_carrier: str, *, base_has_runtime_body: bool
+) -> str:
+    """Why an unconsumed waiver over a stub-frozen `module` row waives nothing.
+
+    ⛔ ONE CONSTRUCTION, TWO CALL SITES (review F1 of round 21). This sentence existed in two
+    copies — the `key in base_entries` branch and the `elif symbol in base_modules` branch — and
+    two consecutive rounds fixed ONE copy, leaving the same falsity standing one branch below,
+    contradicting its sibling for the same state depending only on whether the row was committed
+    at the base. Reusing one helper is what makes a third copy impossible.
+
+    ⛔ AND IT NAMES WHAT IS TRUE OF THIS TREE (review F2 of round 21). "No `.py` on either side"
+    was not provable from `base_paths_by_module` alone — that map is built from the BASE paths
+    only, and the head can hold a `.py` (an emptied one, or a docstring `__init__.py`) which
+    `module_name` collapses onto the same symbol. So the head carrier is named explicitly, and
+    the claim is only ever about what the two maps can prove.
+
+    `base_paths_by_module` PREFERS the runtime carrier (the sorted builder skips a `.pyi` once a
+    non-`.pyi` is stored), so a `.pyi` there is positive proof the base carried nothing else.
+
+    ⛔ SPLIT ON THE ASSERTION THE TEXT MAKES (review F1 of round 22). The polarity is "does the
+    base carry a RUNTIME source" — NOT "is the carrier a stub". An EMPTY
+    carrier (the base holds no file for this module at all, the strongest proof there was nothing
+    to remove) does not end with `.pyi`, so keying on `.pyi` sent it to the had-runtime arm and
+    re-emitted both removed falsities: "it is not a record", and "restore the source from a commit
+    that still holds it" over a repo where `git log --all -- <path>.py` is empty. Fail toward the
+    no-runtime text, and describe an absent carrier as such rather than printing `() `.
+
+    ⛔ AND ASK IT ABOUT THE CARRIER'S CONTENT, NOT ITS SUFFIX (round-23 review, F1).
+    `endswith(".py")` is a statement about a FILENAME, and a `.py` whose body is gone is not a
+    runtime source — the same repo establishes that one function up. With the suffix test, a base
+    whose only `.py` was a leftover scaffold took the had-runtime arm and printed "restore the
+    source from a commit that still holds it" over a module with no body-carrying `.py` in ANY
+    commit: a route that cannot be followed, which is the class rounds 19-22 removed here. The
+    caller now answers the question from the base's whole carrier set
+    (`base_runtime_body_modules`), and the wording follows the carrier it actually found.
+    """
+
+    if base_has_runtime_body:
+        return (
+            f"{prefix} — but the `module` entry you also passed FROZE ONLY A STUB, so it is not "
+            "a record: restore the source from a commit that still holds it, archive it, and "
+            "delete it again"
+        )
+    if base_carrier.endswith(".pyi"):
+        where = f"only as a stub (`{base_carrier}`)"
+        held = "the base held no `.py` for this module"
+    elif base_carrier:
+        where = f"only as scaffolding (`{base_carrier}`, no statements of its own)"
+        held = "the base's `.py` for this module carried nothing"
+    else:
+        where = "on neither side"
+        held = "the base held no `.py` for this module"
+    return (
+        f"{prefix} — {where}: {held} "
+        f"and this tree carries {head_carrier or 'no module file'}, so there was no runtime "
+        "source to record. The `module` entry you also passed is the writer's own output for a "
+        "stub-only module (a stub-only module's only code IS the stub), and nothing was removed "
+        "for the waiver to waive: drop the flag"
+    )
+
+
 def _record_froze_a_stub(
     module: str, base_label: str, base_carrier: str, head_desc: str, entry: dict
 ) -> str:
@@ -1523,14 +1657,78 @@ def shrink_violations(
     # `tortoise/__init__.py` is 406 lines of the public API, and the ancestor expansion that
     # used to cancel it graded that deletion green).
     base_modules = _modules_with_a_body(base_paths, lambda path: _git_blob(root, sha, path))
+    # ⛔ ONE CARRIER SET PER MODULE, asked ONCE and about the WHOLE SET (round-23 review, F1).
+    # "Did the base carry this module's code?" is a question about the module's carriers, and a
+    # module can have three of them; answering it from one path cancelled a real removal. The two
+    # sets below are that question asked twice — "any carrier holds code" (the scaffolding skip)
+    # and "any carrier is a `.py` that holds code" (the stub-waiver diagnosis, which must not
+    # print a restore route for a runtime source that never existed).
+    base_carriers: dict[str, list[str]] = {}
+    for path in sorted(base_paths):
+        base_carriers.setdefault(module_name(path), []).append(path)
+    base_body_modules = {
+        module
+        for module, paths in base_carriers.items()
+        if any(_carrier_carries_a_body(root, sha, path) for path in paths)
+    }
+    base_runtime_body_modules = {
+        module
+        for module, paths in base_carriers.items()
+        if any(
+            path.endswith(".py") and _carrier_carries_a_body(root, sha, path) for path in paths
+        )
+    }
     head_modules = _modules_with_a_body(head_paths, lambda path: _file_text(root, path))
     gone_modules = base_modules - head_modules
     for module in sorted(gone_modules):
         key = (MODULE, module)
         # `candidates` is the BASE's carrier set for this module, so it answers both "did the base
         # hold RUNTIME code (not a `.pyi` stub only)?" and the `where` in the violation below.
-        candidates = sorted(path for path in base_paths if module_name(path) == module)
-        runtime_carrier = next((path for path in candidates if not path.endswith(".pyi")), None)
+        candidates = base_carriers.get(module, [])
+        # ⛔ THE CARRIER WHOSE CODE WAS LOST, asked by CONTENT — not the first non-`.pyi` path
+        # (round-23 residual, measured). Both readers below make a claim about THIS file: the
+        # `_record_froze_a_stub` verdict that the row credited the wrong source, and the
+        # `where` that tells the operator which file the removed statements were in. The suffix
+        # test answered with a leftover docstring `tortoise/x.py`, so a base of `x.py` (scaffold)
+        # + `x.pyi` (the module's only code) with a row that correctly froze the `.pyi` was
+        # graded RED ("THE RECORD FROZE A STUB … carried the module's statements in
+        # `tortoise/x.py`"): a false violation AND a false stated fact about the same file, in
+        # the arm whose job is to catch a row that holds nothing — which is why the answer must
+        # be the carrier that actually holds code, and `None` when no non-stub one does (the row
+        # that froze the stub IS the record there).
+        runtime_carrier = next(
+            (
+                path
+                for path in candidates
+                if not path.endswith(".pyi") and _carrier_carries_a_body(root, sha, path)
+            ),
+            None,
+        )
+        # …and the file named in a `MODULE REMOVED` is the carrier the code was IN: with a
+        # scaffolding `.py` beside a body-carrying `__init__.py`, `candidates[0]` pointed the
+        # reader at the file that held nothing.
+        lost_carrier = runtime_carrier or next(
+            (path for path in candidates if _carrier_carries_a_body(root, sha, path)),
+            candidates[0] if candidates else f"{module.replace('.', '/')}.py",
+        )
+        # ⛔ SCAFFOLDING AT THE BASE IS NOT A REMOVAL (round-17 P2, measured). Arm 1b already
+        # grades the IN-PLACE shape by content, but this arm graded the DELETION shape by PATH: a
+        # base `tortoise/doc.py` that was a docstring alone (or 0 bytes) landed in `base_modules`,
+        # so deleting it was `MODULE REMOVED` — and the remedy the violation printed
+        # (`archive module tortoise.doc`) is one this tool REFUSES for a body-less source, so the
+        # red had no route at all: not the waiver (CI passes no `--allow-archive-shrink`), not the
+        # writer. Nothing left the product, so the arm must cancel the way an emptied package does.
+        #
+        # ⛔ AND THE CANCELLATION IS ABOUT THE MODULE, NOT ONE CARRIER (round-23 review, F1). The
+        # first cut asked `next(...)`-picked carrier — the lexicographically first non-`.pyi` path
+        # — so a 0-byte leftover `tortoise/projection.py` cancelled the deletion of a 406-line
+        # `projection/__init__.py`, and a docstring `.py` cancelled a deleted `.pyi` beside it:
+        # both were `MODULE REMOVED` before this block existed, and both went green with it, with
+        # no record, no waiver and no diagnostic. Nothing left the product only when NO base
+        # carrier carries code, which is what `base_body_modules` answers. The `.pyi`-only case
+        # is untouched: a stub IS a module's code when nothing else carries it.
+        if module not in base_body_modules:
+            continue
         if key in working:
             # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
             # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
@@ -1554,7 +1752,7 @@ def shrink_violations(
         if key in waivers:
             used.add(key)
             continue
-        where = candidates[0] if candidates else f"{module.replace('.', '/')}.py"
+        where = lost_carrier
         out.append(
             f"{module}: MODULE REMOVED — {base_label} carries it and this tree does not, and "
             "`archive/MANIFEST.json` has no `module` entry for it. A module is the largest "
@@ -1613,26 +1811,10 @@ def shrink_violations(
         if base_text is None or not _init_carries_a_body(base_text):
             continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
         key = (MODULE, module)
-        if key in working:
-            # ⛔ A ROW THAT FROZE THE STUB IS NOT A RECORD (fresh-context review of PR #14039,
-            # P0). `stubbed` keeps the legit stub-only module (a `.pyi` carrier on BOTH sides)
-            # out of this branch; `_row_froze_a_stub` asks `blocks[].path` (falling back to
-            # `archived_from` for a row with no block list) — see its docstring for why the
-            # archived file's suffix is a dead question.
-            if stubbed and _row_froze_a_stub(working[key]):
-                out.append(
-                    _record_froze_a_stub(
-                        module,
-                        base_label,
-                        base_carrier,
-                        f"only the `.pyi` stub `{head_carrier}`",
-                        working[key],
-                    )
-                )
-            continue  # an entry of the right kind names it: the removal has its record
-        if key in waivers:
-            used.add(key)
-            continue
+        # HOW this tree's module file stopped carrying code: the stub spelling, or the body-less
+        # `.py` this branch was written for. Computed BEFORE the `key in working` branch so the
+        # row-credits-a-stub message names the same fact the violation below names — the two
+        # used to disagree about the same file when only the latter was asked.
         if stubbed:
             how = f"replaced by a `.pyi` STUB (`{head_carrier}`), which holds no runtime statements"
         else:
@@ -1649,6 +1831,35 @@ def shrink_violations(
                     f"`{head_carrier}` carries none (empty, whitespace, comments or a bare "
                     "docstring)"
                 )
+        if key in working:
+            # ⛔ A ROW THAT FROZE THE STUB IS NOT A RECORD (fresh-context review of PR #14039,
+            # P0). `_row_froze_a_stub` asks `blocks[].path` (falling back to `archived_from` for a
+            # row with no block list) — see its docstring for why the archived file's suffix is a
+            # dead question.
+            #
+            # ⛔ AND ASK THE BASE, NOT THE HEAD'S CARRIER SUFFIX (round-23 review, residual). The
+            # conjunct used to be `stubbed`, i.e. "the head carrier is a `.pyi` and the base's was
+            # not" — a statement about the HEAD. Its blind spot is the shape the writer resolves
+            # to the stub (round-23 review, F1): base `x.py` carries the body, head `x.py` is a
+            # docstring, head `x.pyi` is a stub, and a `module` row froze the `.pyi`. There the
+            # head carrier is the `.py`, so `stubbed` is False, the guard never fires, and the
+            # row's EXISTENCE credits the removal: measured green, with the base's `real()` in no
+            # file under `archive/` — the exact false PASS this branch exists to refuse.
+            # `base_runtime_body_modules` is the true premise (a runtime body left), so ask that.
+            if module in base_runtime_body_modules and _row_froze_a_stub(working[key]):
+                out.append(
+                    _record_froze_a_stub(
+                        module,
+                        base_label,
+                        base_carrier,
+                        f"only the `.pyi` stub `{head_carrier}`" if stubbed else how,
+                        working[key],
+                    )
+                )
+            continue  # an entry of the right kind names it: the removal has its record
+        if key in waivers:
+            used.add(key)
+            continue
         out.append(
             f"{module}: MODULE BODY REMOVED — {base_label} carries statements in "
             f"`{base_carrier}` and this tree's module file {how}. The NAME survived, "
@@ -1765,11 +1976,12 @@ def shrink_violations(
                     )
                 else:
                     if _row_froze_a_stub(base_entries[key]):
-                        why = (
-                            f"{base_label} already records `{symbol}` ({kind}) and this tree does "
-                            "not carry it — but that `module` entry FROZE ONLY A STUB, so it is "
-                            "not a record of the source: restore the source from the base, "
-                            "archive it, and delete it again"
+                        why = _stub_waiver_why(
+                            f"{base_label} already records `{symbol}` ({kind}) and this tree "
+                            "does not carry it",
+                            base_paths_by_module.get(symbol) or "",
+                            head_paths_by_module.get(symbol) or "",
+                            base_has_runtime_body=symbol in base_runtime_body_modules,
                         )
                     else:
                         why = (
@@ -1805,7 +2017,23 @@ def shrink_violations(
                     # removal IS recorded by the `module` entry you also passed" over a tree that
                     # has no such entry. Verdict right, stated fact false: this loop's own
                     # recurring class.
-                    if key in working and not _row_froze_a_stub(working[key]):
+                    #
+                    # ⛔ AND ASK WHETHER ANYTHING WAS REMOVED AT ALL (round-23 review, F2). Arm
+                    # 1's scaffolding skip `continue`s BEFORE it can consume a waiver, so a
+                    # waiver over a deleted body-less module arrives here with no entry and no
+                    # removal — and the fallback below announced "NO `module` entry records it,
+                    # so the removal is UNRECORDED" about a deletion that removed no code. The
+                    # verdict (the waiver waives nothing) was right; the stated fact was false,
+                    # and it sent the operator looking for a record of a removal that never
+                    # happened. `base_body_modules` is the same answer arm 1 cancelled on, so the
+                    # two cannot disagree about the same file.
+                    if symbol not in base_body_modules:
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and NOTHING was removed: "
+                            "no file the base held for it carries a statement (a docstring alone, "
+                            "or nothing), so there is no removal for a record to name"
+                        )
+                    elif key in working and not _row_froze_a_stub(working[key]):
                         why = (
                             f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
                             "— the removal IS recorded by the `module` entry you also passed, "
@@ -1819,11 +2047,29 @@ def shrink_violations(
                         # ONE RUN after printing "THE RECORD FROZE A STUB" — two contradicting
                         # statements about the same entry, the false one pointing away from the
                         # only route that clears it.
-                        why = (
-                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
-                            "— but the `module` entry you also passed FROZE ONLY A STUB, so it "
-                            "is not a record: restore the source from the base, archive it, and "
-                            "delete it again"
+                        # ⛔ AND NAME A SOURCE THAT ACTUALLY EXISTS (review F1 of round 19).
+                        # `_modules_with_a_body` admits a `.pyi` module (it filters only
+                        # `__init__.py`), so membership here does NOT mean the base holds the `.py`.
+                        # An earlier round cleared this site on the opposite assumption.
+                        #
+                        # ⛔ AND SPLIT ON WHETHER A RUNTIME SOURCE EVER EXISTED (review F1 of
+                        # round 20). "Restore the source from a commit that still holds it" is
+                        # unfollowable for a module whose ONLY carrier is a stub: no commit holds a
+                        # `.py`, and re-running the writer just reproduces this row — the writer's
+                        # own rule says a stub-only module's only code IS the stub, so that row IS
+                        # a record and there was no runtime source to lose. Telling that operator
+                        # to hunt history for a file that never existed, AND that their correct row
+                        # is "not a record", is false on both counts. `base_paths_by_module`
+                        # PREFERS the runtime carrier (the sorted builder replaces a stored `.pyi`
+                        # as soon as any non-`.pyi` is seen), so a `.pyi` there is positive
+                        # proof the base had nothing else. The split lives in ONE helper
+                        # (`_stub_waiver_why`), shared with the `key in base_entries` copy, so the
+                        # two can no longer drift apart — two rounds fixed one and left the other.
+                        why = _stub_waiver_why(
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not",
+                            base_paths_by_module.get(symbol) or "",
+                            head_paths_by_module.get(symbol) or "",
+                            base_has_runtime_body=symbol in base_runtime_body_modules,
                         )
                     else:
                         why = (
@@ -2191,8 +2437,9 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     the opposite of "not available".
     """
     rel = symbol.replace(".", "/") + ".py"
+    package_rel = symbol.replace(".", "/") + "/__init__.py"
+    stub_rel = symbol.replace(".", "/") + ".pyi"
     path = root / rel
-    package_fallback = False
     if not path.exists():
         # ⛔ A PACKAGE is archived by its DOTTED path and its source is `<dotted>/__init__.py`.
         # Without this fallback the rule arm 1 grades was UNRUNNABLE for the very shape it was
@@ -2203,16 +2450,13 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
         # correct red and NO route. The archived FILE stays `<dotted>.py` (`archive_rel`), so no
         # `__init__.py` ever lands under `archive/` (`package_violations` refuses that), and
         # `archived_from` names the init file the body actually came from.
-        package_rel = symbol.replace(".", "/") + "/__init__.py"
         if (root / package_rel).exists():
             rel, path = package_rel, root / package_rel
-            package_fallback = True
         else:
             # …and a `.pyi`-only module is graded by every other arm (`_package_modules` reads
             # `*.py*`, `module_name` strips `.pyi`, arm 1b's stub rule), so the remedy must be
             # able to freeze one — otherwise the red the gate prints has no route, one suffix
             # over from the package fallback above (round-7 review).
-            stub_rel = symbol.replace(".", "/") + ".pyi"
             if (root / stub_rel).exists():
                 rel, path = stub_rel, root / stub_rel
             else:
@@ -2242,16 +2486,52 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     # module's only code IS the stub). The route this refusal names is the one
     # `archive/README.md` already gives: restore the source from the base, archive it, then
     # delete it again in the same batch.
-    if package_fallback and not _init_carries_a_body(source):
-        plain = symbol.replace(".", "/") + ".py"
-        raise ArchiveRefused(
-            f"module {symbol} has no file at {plain}, and the only file left at {rel} is "
-            "SCAFFOLDING — no statements of its own. Freezing it would record a docstring as the "
-            "source of record for code that is gone, and `check --base-ref` would then read the "
-            "removal as recorded. Restore the deleted source from the base first "
-            f"(`git checkout <base-sha> -- {plain}`), archive it, and delete it again in the "
-            "same batch."
-        )
+    #
+    # ⛔ AND THE SAME HOLE EXISTS ON THE ORDINARY `<dotted>.py` PATH (round-15 review, P2 — the
+    # gate was scoped to `package_fallback` and therefore exempted the commonest shape). Arm 1b
+    # grades a module whose file is still there but whose BODY is gone as `MODULE BODY REMOVED`,
+    # and the remedy it prints is `archive module <dotted>` — so emptying `tortoise/x.py` in
+    # place and archiving it froze `"""Scaffolding."""` as the source of record, after which
+    # `shrink_violations` credited the row on its EXISTENCE and the whole run went green with the
+    # module's code in no file under `archive/`. Measured: `archived_from = tortoise/x.py`, the
+    # frozen block was the docstring, `shrink_violations` -> `[]`, `check --base-ref` -> OK.
+    # The rule is therefore about the RESOLVED SOURCE, not about which fallback found it: the only
+    # file shape exempt is a `.pyi`, because a stub's annotations ARE its statements.
+    if not rel.endswith(".pyi") and not _init_carries_a_body(source):
+        # ⛔ ASK THE MODULE'S OTHER CARRIERS BEFORE REFUSING (round-23 review, F1). The resolution
+        # above picks a carrier by PATH EXISTENCE, and `module_name` collapses `<dotted>.py`,
+        # `<dotted>/__init__.py` and `<dotted>.pyi` onto ONE symbol — so a body-less leftover
+        # `.py` hid the module's real code behind it, and the route this refusal printed
+        # (`git checkout <base-sha> -- <dotted>.py`) restored the same body-less file and was
+        # refused again: a red with no route, the shape the package fallback above was added for,
+        # one carrier over. A body-carrying carrier anywhere in the module's set is the thing to
+        # freeze, so walk the set in the same preference order and refuse only when NONE carries a
+        # body. A `.pyi` carries (a stub under the shipped package IS importable surface, and it is
+        # the module's only code when nothing else carries it), which is the exemption the
+        # suffix test above already makes.
+        for other in (package_rel, stub_rel):
+            other_path = root / other
+            if other == rel or not other_path.exists():
+                continue
+            try:
+                other_source = other_path.read_text(encoding="utf-8")
+                if not other.endswith(".pyi"):
+                    ast.parse(other_source, filename=str(other_path))
+            except (OSError, SyntaxError):
+                continue
+            if other.endswith(".pyi") or _init_carries_a_body(other_source):
+                rel, path, source = other, other_path, other_source
+                break
+        else:
+            plain = symbol.replace(".", "/") + ".py"
+            raise ArchiveRefused(
+                f"module {symbol} resolves to {rel}, which carries no body of its own — a "
+                "docstring alone, or nothing. Freezing it would record SCAFFOLDING as the source "
+                "of record for code that is gone, and `check --base-ref` credits a row on its "
+                "EXISTENCE, so the removal would read as recorded while no file under `archive/` "
+                "held it. Restore the source from the base revision first (`git checkout "
+                f"<base-sha> -- {plain}`), archive it, and delete it again in the same batch."
+            )
     return [(rel, source, None)]
 
 
@@ -2357,6 +2637,13 @@ def archive_symbol(
     root = Path(root or ROOT)
     if kind not in KINDS:
         raise ArchiveRefused(f"unknown kind {kind!r} — expected one of {KINDS}")
+    # ⛔ WHITESPACE IS NOT A REASON (round-17 P3, measured). Raw truthiness let `--reason '   '`
+    # through: the row was written carrying `"reason": "   "` and `file_violations` accepted it,
+    # so the one field a future reader consults for WHY read as checked while saying nothing —
+    # the same hole the pairing guards name for `--flag` ("an unexplained removal could be waived
+    # by pressing space"). The reason is NORMALISED in place, so the record cannot keep the
+    # padding that made the check pass.
+    reason = (reason or "").strip()
     if not batch or not reason:
         raise ArchiveRefused("a batch slug and a reason are required: they are what a reader has")
     if not _BATCH_RE.match(batch):

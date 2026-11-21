@@ -183,11 +183,23 @@ NON_SDK_READ_BINDINGS: dict[str, str] = {
 # fails, so "tidy it silently" is not available to the next lane, and neither is
 # adding a second one.
 RETENTION_CARVEOUTS: dict[str, str] = {
-    "tortoise_events_poll":
+    # #11609 lane P7: the LIVE name is the approved target spelling
+    # (`tortoise_poll_events`). The carve-out belongs to the TOOL, not to a name, so it
+    # moves with it — the retired `tortoise_events_poll` declaration keeps the same
+    # handler and would otherwise be the only declared member while the advertised
+    # door went unnamed (which is the "ledger is a comment" shape #9576 exists to red).
+    "tortoise_poll_events":
         "poll_events -> event_store.purge_expired/purge_overflow: DETACH DELETE "
         "of expired-or-over-cap :GraphEvent rows, then `_refresh_first_seq` SETs the "
         "(:GraphEventMeta).first_seq watermark — both system-owned, "
         "interval-gated — #9576/#4122",
+    # Its RETIRED declaration is served too (#3883), and `served_registry()` reads
+    # retired entries — so the same reach is detected on both names. One carve-out
+    # per SERVED name, or the ledger leaves the shim undeclared while it serves the
+    # very DELETE the record is about.
+    "tortoise_events_poll":
+        "the retired declaration of `tortoise_poll_events` (#11609 lane P7): same "
+        "handler, same interval-gated `:GraphEvent` retention DELETE — #9576/#4122",
 }
 
 # SDK operations that MUTATE storage from a module OUTSIDE the `sdk.py` derivation
