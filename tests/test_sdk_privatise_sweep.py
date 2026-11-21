@@ -299,7 +299,11 @@ def _ref_sha(ref: str) -> str | None:
 #: ⛔ A RE-ARM THAT CANNOT RUN IS NOT A RE-ARM (review, round 12, P2): the skip printed
 #: `git fetch origin <the missing revs>`, and every rev this block addresses is an
 #: ELEVEN-character abbreviation — which git cannot `want` (`fatal: couldn't find remote
-#: ref 83e94826a8a`, and this block's own prose says so at `tools/sdk_privatise.py:378`).
+#: ref 83e94826a8a`, and this block's own prose says so in its "11-character ABBREVIATION"
+#: sentence). ⛔ NAMED BY ITS TEXT AND NOT BY A LINE NUMBER: an address rots on the next
+#: insertion above it, and the block's own rule forbids one — it publishes a `grep` over
+#: `tests/` returning EMPTY as the evidence that nothing cites it by line, so a line address
+#: here would falsify that sentence in the very commit that quotes it.
 #: So the printed remedy contradicted the sentence it exists to explain, and an operator
 #: who followed it would believe the guard was re-armed while it stayed UNCHECKED — in a
 #: PR whose thesis is falsifiability. A REFSPEC pulls the objects (`_rev_present` reads
@@ -903,8 +907,8 @@ def _moving_pointer_violations(block: str) -> list[str]:
     """
     flow = re.sub(r"\n#:\s?", " ", block)
     violations: list[str] = []
-    for claim in re.finditer(r"(?i)current\s+head", flow):
-        window = flow[claim.end():claim.end() + 40]
+    for claim in re.finditer(r"(?i)current\s+head|refs/pull/14108/head", flow):
+        window = flow[claim.end():claim.end() + 120]
         if not re.search(r"`[0-9a-f]{7,40}`", window):
             continue  # no sha bound here at all — nothing to relativise
         if _PAST_OR_MEASURED.search(window):
@@ -1181,7 +1185,8 @@ def test_the_skip_instruction_is_a_command_git_can_actually_run(monkeypatch):
     """Review round 12 (P2): the printed re-arm used to be `git fetch origin 83e94826a8a …`.
 
     Measured: `fatal: couldn't find remote ref 83e94826a8a` — git cannot `want` an
-    abbreviation, and the block says so itself at `tools/sdk_privatise.py:378`. An operator
+    abbreviation, and the block says so itself in its "11-character ABBREVIATION" sentence. An
+    operator
     who followed the old line would believe the two repo-state arms were re-armed while they
     stayed UNCHECKED, in a PR whose thesis is falsifiability.
     """
