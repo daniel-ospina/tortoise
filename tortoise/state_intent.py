@@ -347,8 +347,10 @@ _TAIL_END = r"\s*[?.!]*$"
 #:   fix, while the prose above the guard claimed the class was closed.
 #:
 #: A third hand-typed copy drifts a third time, so BOTH sites now interpolate this
-#: tuple (:data:`_PREPOSITION_RE`), and the membership is pinned by driving every
-#: member through the detector — see
+#: tuple (:data:`_PREPOSITION_RE`), and the membership is pinned TWICE: the tuple is
+#: asserted verbatim (so a member can neither vanish nor appear without the commit
+#: saying why), and every member is then driven through the detector on both consumers
+#: (so a member that stops reaching one of them reds). See
 #: `tests/test_13557_13558_reachable_reads.py::test_every_preposition_the_module_declares_reports_the_qualifier_it_introduces`.
 #: ⛔ THE DELIBERATE OMISSIONS ARE NAMED, so the departure reads as a decision rather
 #: than an oversight: `after`, `before` and `since` are prepositions AND subordinators;
