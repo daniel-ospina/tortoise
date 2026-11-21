@@ -683,6 +683,7 @@ SWEEP_NAMES = 66
 #: branch's on an earlier one. Neither is dropped: each is true of the tree it was
 #: measured on. Neither is the answer for THIS tree — the pin below is `--repin` on
 #: it, and the cross-check against both is arithmetic, never the evidence.
+#: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8. Its whole diff is figure literals: stripping every digit
 #: run from each `-`/`+` pair leaves the pair identical, so it cannot move a receiver population. The
 #: reason the gate is red here is the recurrence `#14062` and `#14058` both document, now a THIRD
 #: time: the pin is graded on PULL REQUESTS only, so `main` merges with nothing grading it — and
@@ -707,7 +708,8 @@ SWEEP_NAMES = 66
 #: pair below; it is not `main`'s + 1 by arithmetic, and the row sets were not assumed additive. The
 #: two parents' blocks above both stay: each is true of the tree it was measured on, and the only
 #: thing that survives a merge is a figure taken on the merged tree.
-#: MEASURED HERE: `.venv/bin/python tools/sdk_privatise.py --repin` on this merged tree printed
+#: MEASURED ON THAT MERGE TREE `e022fc935b` (⚠️ that is NOT the tree below — a LATER rebase onto
+#: `main` `e0accb8fe6` re-measured again, see the last block): `--repin` there printed
 #: `SWEEP_RESIDUE = (11839, '7159a040b69431a9')`. The COUNT is `main`'s 11838 plus this PR's single
 #: declared row (`captured.update` in `tests/test_10893_pre_handler_parts.py`, untouched by `main`,
 #: so the +1 is structural rather than assumed). The DIGEST is new against BOTH parents because the
@@ -723,6 +725,21 @@ SWEEP_NAMES = 66
 #: (this PR's own analytics-capture stub: a plain `dict.update`, so a DECLARED residue row and no
 #: typed reference to a swept name is legitimised). 11838 + 1 = 11839 and 11840 − 1 = 11839 are
 #: CROSS-CHECKS of those two measurements, never the evidence for either.
+#:
+#: RE-MEASURED ON THE REBASED TREE (#14086 rebased onto `main` `e0accb8fe6`): `--repin` on THIS
+#: tree prints the pair below. ⛔ NEITHER block above is this tree's answer and neither was carried:
+#: `main` (`e0accb8fe6`) pins `(11844, "70d6cfdcd8b769e4")`, the FIFTH merge tree measured 11839,
+#: and THIS tree measures 11845 — three different trees, three different pins, one of them live.
+#: ⛔ THE +1 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, NOT BY ARITHMETIC. `--report --base 28ca66878d7c
+#: --top 5000` was run in a worktree at `origin/main` (`e0accb8fe6`) AND on this tree, both row sets
+#: sorted and diffed: EXACTLY ONE row differs — `captured.update` **30 → 31** — and it is this PR's
+#: own analytics-capture stub in `tests/test_10893_pre_handler_parts.py`
+#: (`lambda org, ev, props: captured.update(props=dict(props))`), a plain `dict.update`, so it is a
+#: DECLARED residue row and no typed reference to a swept name is legitimised. The DIGEST moves with
+#: the row set (`residue_digest` hashes each row's NAME with its COUNT), which is why it cannot be
+#: carried from a tree whose row set is not this one. 11844 + 1 = 11845 is a CROSS-CHECK of that
+#: measurement, never the evidence for it.
+#: `--check` on this tree: `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11845, "3d845b4a39da2ac8")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
