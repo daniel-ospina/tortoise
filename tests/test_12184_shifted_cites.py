@@ -1503,7 +1503,9 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         if not one:
             problems.append(
                 "the `N and M are one measurement` sentence is gone — it is the second publication of the "
-                "alternative numerator, and the only history-free cross-check on it"
+                "alternative numerator, and the only history-free AGREEMENT between its two publications "
+                "(the band and the two-code-span arm beside it grade the figure, not what the document says "
+                "about it twice)"
             )
         else:
             one_drifters, one_alt_drifters = map(int, one.groups())
@@ -1528,8 +1530,11 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried` grades the alternative
         # basis from the pin's union set, so an alt numerator this BAND still contains is caught there —
         # MEASURED on this head: `230 pairs and 158 drifters` → `… and 156 drifters` sits inside
-        # `155..158`, passes this band, and reds that arm — nothing else moves, so the failure names the
-        # figure and not an unrelated row. ⛔ No pass TOTAL is published here: an earlier draft of this
+        # `155..158`, passes this band, and reds that arm — and, since the mention leg landed above, ALSO
+        # reds the `N and M are one measurement` leg (the document then states `158` and `156` for one
+        # figure). "Nothing else moves" was true before that leg existed and is false now; the failure
+        # therefore names the figure it is about rather than an unrelated row. ⛔ No pass TOTAL is
+        # published here: an earlier draft of this
         # very sentence said "1 failed, 29 passed", and a peer's commit on the same branch added a test
         # one minute later, so the total was stale before it was pushed (`#14038`, the same rot as the
         # retired "0 of 112 rows"). The ARM is the claim; the total is a moving picture of the file.
@@ -1663,19 +1668,35 @@ def test_a_carried_forward_figure_is_reported() -> None:
     same failure for the next re-measurement, which is the one thing this file must not do: a figure quoted
     from the document it guards rots the moment the document is re-measured.
 
-    What cannot rot is the RELATION each mutant breaks: a pair count one under the measured one, an
-    arithmetic figure that stops following its pair count, a ratio naming a denominator it does not carry,
-    one of the three mentions of the ratio disagreeing with the others, an alternative basis level with the
-    primary, an alternative basis whose numerator is inflated past what its added pairs can
-    contribute, the SECOND publication of that alternative numerator disagreeing with the first while both
-    stay inside the band, a two-code-span pair count stated below what the document measures, and one more
-    of those pairs claimed uncounted than the union adds. Each is applied to the sentence AS SHIPPED, by
-    capture-group position.
+    What cannot rot is the RELATION each mutant breaks, and this list is now written in TABLE ORDER so the
+    two can be audited against each other — it had one item the table does not contain and omitted two the
+    table does (`#14038` review, P2). Measured: "an alternative basis LEVEL WITH THE PRIMARY" is a state the
+    guard ACCEPTS — the band's lower edge is inclusive, so `alt_drifters == drifters` is legal by
+    construction, and a document carrying it measures `problems == []` here and at the pre-leg head — so it
+    was never a broken relation. The rows it omitted are the alternative basis one pair short of what the
+    two-code-span form measures, and the alternative basis reading fewer drifters than the primary. Ten
+    rows, ten items:
+
+      1. a pair count and its collision arithmetic one edition behind (the `triple`);
+      2. collisions that stop following the pair count they are arithmetic on;
+      3. a ratio naming a denominator it does not carry;
+      4. one of the three mentions of the ratio disagreeing with the others;
+      5. an alternative basis one pair short of what the two-code-span form measures, not level with it;
+      6. an alternative numerator inflated past what its added pairs can contribute;
+      7. an alternative basis reading FEWER drifters than the primary — adding pairs cannot remove one;
+      8. the SECOND publication of that alternative numerator disagreeing with the first while both stay
+         inside the band;
+      9. a two-code-span pair count stated below what the document measures;
+     10. one more of those pairs claimed uncounted than the union adds.
+
+    Each is applied to the sentence AS SHIPPED, by capture-group position.
 
     ⛔ The alternative basis is mutated on BOTH capture groups (`:1` pairs, `:2` drifters) on purpose: the
-    drifter half used to be read and thrown away (`_alt_drifters`), so the guard on the only figure in this
-    sentence without a second witness was never exercised by the control that exists to prove it works —
-    which is how a one-sided bound survived a round that found two other reachability defects here.
+    drifter half used to be read and thrown away (`_alt_drifters`), so the guard on it was never exercised by
+    the control that exists to prove it works — which is how a one-sided bound survived a round that found
+    two other reachability defects here. ⚠️ That sentence used to call it "the only figure in this sentence
+    without a second witness"; the alternative numerator now HAS one — the `N and M are one measurement`
+    sentence, graded by the history-free leg — so the item is past-tensed rather than left standing false.
     """
     raw = (REPO / _AUDIT).read_text(encoding="utf-8")
     assert _figure_problems(raw) == [], "the shipped document must measure clean before it is mutated here"
@@ -1812,6 +1833,30 @@ def test_a_carried_forward_figure_is_reported() -> None:
             assert _as_int(rematched.group(1)) == next(iter(overrides.values())), (
                 f"the control for {why!r} rewrote the count the pattern grades, not its own figure: "
                 f"{rematched.group(1)!r} vs {next(iter(overrides.values()))!r}"
+            )
+        if match is one_measurement:
+            # ⛔ RULE 2, for the same reason as the count rows below: the generic observation is only
+            # `_figure_problems(mutated) != []`, and the BAND satisfies it too. The anchor is
+            # `alt_drifters - 2` precisely so the mutant sits INSIDE the band, but "inside the band" is a fact
+            # about TODAY's figures — a legal re-measurement putting `alt_drifters` at the band's lower edge
+            # (`{drifters, drifters + 1}`) lands the mutant below it, and the row would then pass on the
+            # BAND's red while the leg it exists for stayed unproven. So assert the red NAMES the leg: the
+            # mention-disagreement message must be among the problems, whatever the figures become.
+            rematched = _ONE_MEASUREMENT.search(_unbolded(mutated))
+            assert rematched is not None, (
+                f"the control for {why!r} produced {stale!r}, which `_ONE_MEASUREMENT` cannot read, so the "
+                "red would come from the absent-sentence arm — fix the mutant VALUE, do not relax this"
+            )
+            assert int(rematched.group(2)) == next(iter(overrides.values())), (
+                f"the control for {why!r} rewrote a figure the pattern does not grade: "
+                f"{rematched.group(2)!r} vs {next(iter(overrides.values()))!r}"
+            )
+            assert any("sentence disagrees with the figures it claims to restate" in problem
+                       for problem in _figure_problems(mutated)), (
+                f"the control for {why!r} red for some other reason ({_figure_problems(mutated)}), so the "
+                "mention-agreement leg was never consulted — the anchor `alt_drifters - 2` can fall OUTSIDE "
+                "the band after a legitimate re-measurement, and a row that then passes on the band's red "
+                "proves nothing"
             )
         assert _figure_problems(mutated) != [], (
             f"a document carrying {stale!r} ({why}) reported no problem — the comparator is decoration"
