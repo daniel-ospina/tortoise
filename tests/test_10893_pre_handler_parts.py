@@ -433,10 +433,75 @@ def test_require_scope_notes_the_dispatch_boundary_before_any_early_return(
         "note placed below its legacy/session-auth early return never runs, so "
         "every legacy-key request's arrival → SDK-open wait is published as "
         "`sdk_open` (the attribution that picks the wrong fix)")
-    # Not merely PRESENT: `note()` closes the interval that ENDED, so this part
-    # carries the whole arrival → dispatch gap (10 s) plus the 10 ms below. A
-    # note fired at any other boundary leaves the magnitude wrong.
-    assert parts["dispatch"] == pytest.approx(10_010.0, abs=0.5)
+    assert set(parts) == {"dispatch"}, (
+        f"the legacy arm closed {sorted(parts)} — `_require_scope` notes ONLY "
+        "the dispatch boundary, so a second part here means the note moved to "
+        "another boundary's site")
+    # ⛔ The MAGNITUDE is deliberately not asserted HERE. On this arm the note
+    # is inside a call the fixture cannot instrument, so `dispatch` is
+    # `now - started_at` by construction: 10_010 ms under every placement that
+    # keeps the presence assert above green — there is no separating mutant, and
+    # a row that cannot red is not evidence (#14086 review, P2). The magnitude
+    # IS pinned, discriminatingly, by
+    # `test_the_dispatch_note_is_the_FIRST_statement_of_require_scope` below:
+    # its fixture makes every `org.get` cost clock, so a note moved below the
+    # early-return guard lands on a different number while presence stays green.
+
+
+def test_the_dispatch_note_is_the_FIRST_statement_of_require_scope(
+        monkeypatch):
+    """The `dispatch` note must close the boundary BEFORE any org read.
+
+    Why a second row: the legacy-arm row above pins only PRESENCE, and its
+    magnitude is fixed by construction. `note("dispatch")` sits above
+    ``_require_scope``'s early returns for that reason, but nothing stopped it
+    being moved BELOW them while a PRESENCE assert stayed green. This row
+    separates the placements on the MAGNITUDE: the org mapping costs 3 s of fake
+    clock per `.get`, the guard reads it twice, so a note below the guard reports
+    16_000 ms where the first-statement note reports 10_000 ms.
+
+    Verified non-vacuous (executed): moving `_note_stage("dispatch")` in
+    `_require_scope` below `if org.get("legacy_full_access") or
+    org.get("key_id") is None:` reds this row on the MAGNITUDE
+    (`assert 16000.0 == 10000.0 ± 0.5`) while THIS row's presence check stays
+    GREEN — the note still fires for a scoped key, so only the value moves.
+    That relative position is the discrimination the legacy row's
+    by-construction magnitude assertion could not provide, because there the
+    note either fires at the one reachable instant or not at all. (The sibling
+    legacy row also reds under that mutant, but on PRESENCE: a legacy key's
+    guard returns before a note placed below it.)
+    """
+    from tortoise import hosted_api as ha
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+
+    class _CostlyScopes(dict):
+        """A scope mapping whose every read costs 3 s of the fake clock."""
+
+        def get(self, key, default=None):
+            clock["t"] += 3.0
+            return super().get(key, default)
+
+    org = _CostlyScopes({"key_id": "k_10893", "legacy_full_access": False,
+                         "scopes": ["graphs:read"]})
+
+    stages = begin(started_at=990.0)
+    with request_stages(stages):
+        # A SCOPED key: the legacy/session-auth early return is NOT taken, so
+        # the note runs under either placement and only its POSITION differs.
+        ha._require_scope(org, "graphs:read", "search")
+    stages.mark(STAGE_EMBED_GET)
+
+    parts = stages.parts_ms()
+    assert "dispatch" in parts, (
+        "the `dispatch` boundary was never closed for a scoped key")
+    assert parts["dispatch"] == pytest.approx(10_000.0, abs=0.5), (
+        f"the `dispatch` boundary closed at {parts['dispatch']:.1f} ms on a "
+        "10_000 ms arrival → guard window: the note fired AFTER "
+        "`_require_scope` read the org, so every scoped request's "
+        "credential-check time is published under a part that did not spend "
+        "it (the attribution that picks the wrong fix, #10893)")
 
 
 def test_the_analytics_prop_is_allowlisted():

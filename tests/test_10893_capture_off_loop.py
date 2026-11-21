@@ -87,6 +87,29 @@ def _is_sync_callable(raw) -> bool:
                 or inspect.isasyncgenfunction(raw))
 
 
+def _undeclared_blocking(totals: dict[str, float]) -> dict[str, float]:
+    """The census's verdict: legs at/above the bar that no issue owns.
+
+    Factored out of the test body so the THRESHOLD's semantics are pinnable
+    WITHOUT a wall clock — see `test_the_census_bar_reports_magnitude_and_not
+    _probe_overhead`, which pins both ends of the bar on synthetic totals.
+    """
+    return {m: ms for m, ms in totals.items()
+            if ms >= _ON_LOOP_BAR_MS and m not in _ON_LOOP_RESIDUAL}
+
+
+#: The "this is WORK, not probe overhead" bar, in ms of TOTAL on-loop time for
+#: one capture request. ⛔ Deliberately a MAGNITUDE and not the noise floor: the
+#: legs that matter here are tens to hundreds of milliseconds (the mint 552 ms
+#: before the fix; `_get_registry` 16-36 ms on this tree), while the largest
+#: UNDECLARED leg on the path (`_emit_event`, inside the provenance stamp) reads
+#: 0.51-0.92 ms and 1.20 ms under coverage — so a 1 ms bar put that leg 0.1 ms
+#: from reding a gate whose own docstring argues against timing sensitivity.
+#: 5 ms leaves ~4x margin over the measured overhead band and is still ~110x
+#: below the 552 ms the mint cost, i.e. every leg worth declaring is caught
+#: (#14086 review, P2).
+_ON_LOOP_BAR_MS = 5.0
+
 #: Synchronous SDK legs that still run on the loop during a capture, each with
 #: the issue that owns removing it. An allow-list rather than a time budget: a
 #: wall-clock budget on a shared runner is flaky in the direction that HIDES a
@@ -110,16 +133,29 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     "_get_registry": "#4451 (metering registry read inside `record_write_ops`)",
     # The two provenance stamps in `_capture_session_impl`
     # (`_stamp_capture_provenance` at `hosted_api.py` ~21182 and
-    # `_capture_stamp_targets` at ~21209) go through this ONE retry wrapper, so
-    # the census sees a single leg and not two: measured 2.50 ms + 4.11 ms on the
-    # loop (a throwaway spy keyed on the retry's own `what=` argument).
+    # `_capture_stamp_targets` at ~21209) go through this ONE retry wrapper —
+    # but the stamp is JOURNAL-FIRST, so it is TWO synchronous legs per stamp on
+    # the loop and the census observes BOTH: this wrapper, and the journal
+    # `_emit_event` that precedes it (`sdk.py:11559`). Measured on three
+    # consecutive runs of this test on this tree: `_emit_event` 0.51 / 0.56 /
+    # 0.83 / 0.92 ms and this wrapper 0.99–3.62 ms per row. ⛔ An earlier cut of
+    # this comment said "the census sees a single leg and not two": the second
+    # leg was there and sat under the bar, i.e. the figure was stated wider than
+    # the measurement (#14086 review, P2). Neither leg is listed separately —
+    # this entry is the declaration for the stamp, and both legs are the same
+    # owned work.
     # ⛔ NOT a same-cycle off-load: `_stamp_capture_provenance` is JOURNAL-FIRST
     # (#9350) — one `PointRevised` per minted id, then the stamp inside its own
     # `_live_write_scope` lane — so moving it to another thread changes which
     # thread OWNS that lane, which is a behaviour change, not a move of WHERE the
     # same callable runs. It needs its own measurement (#14104).
-    # ⚠️ This entry is keyed on a GENERIC retry wrapper with ~9 other call sites,
-    # so it exempts any FUTURE on-loop use of it at any cost. #14104 is CLOSED
+    # ⚠️ This entry is keyed on a GENERIC retry wrapper — measured 36 call sites
+    # in `tortoise/sdk.py` (34 besides the two provenance stamps; the only other
+    # references in `tortoise/` are prose, in `exceptions.py` and `retry.py`), so
+    # it exempts any FUTURE on-loop use of it at any cost, and the size of that
+    # exemption is the number that sizes the residual. An earlier cut of this
+    # comment said "~9 other call sites", understating it ~4× (#14086 review,
+    # P2). #14104 is CLOSED
     # (NOT_PLANNED, 2026-11-21) and its closing comment WITHDRAWS the reason it
     # recorded for leaving the stamps where they are: the write scope is a
     # `ContextVar` and `_run_off_loop` confines context, so relocating them
@@ -202,8 +238,17 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
 
     A leg that costs effectively nothing on the loop (a flag read, an
     environment probe) is not a blocker and is not required to be listed; the
-    bar is 1 ms of TOTAL on-loop time for the request, two orders of magnitude
-    below the 552 ms the mint cost.
+    bar is `_ON_LOOP_BAR_MS` of TOTAL on-loop time for the request — two orders
+    of magnitude below the 552 ms the mint cost, and set with margin over the
+    probe's OWN overhead rather than at the noise floor. ⛔ It used to be 1 ms,
+    and the largest UNDECLARED leg on this path (`_emit_event`, 0.51-0.92 ms
+    measured here) sat 0.1-0.5 ms inside that: under coverage the same leg
+    measured 1.20 ms and flipped this test to FAILED on a leg the table
+    deliberately does not require — a false block in a gate whose own docstring
+    argues against timing sensitivity (#14086 review, P2). The bar is about
+    MAGNITUDE: a leg that matters is tens to hundreds of ms (the mint 552 ms,
+    `_get_registry` 16-36 ms here), so 5 ms still catches every leg worth
+    declaring while no longer reding on the probe's own cost.
 
     Which entries the census Actually OBSERVES on the path this test drives is
     not restated here as a count. The declared set below is about OWNERSHIP
@@ -235,12 +280,15 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         # the SAME descriptor kind it was read from (plain / `staticmethod` /
         # `classmethod`), so the descriptor machinery binds exactly the first
         # argument the original got. Naming `self` here is what silently broke
-        # all 15 `staticmethod`s on the class — the probe became an INSTANCE
-        # method, so `sdk._helper(x)` was invoked as `fn(instance, x)` and raised
-        # `… got multiple values for argument 'point_kind'` INSIDE the capture
-        # this census measures, leaving every leg downstream of it uncharged
-        # (#14086 cycle-4 review, F1 — measured on `_dedup_match_clauses`,
-        # `sdk.py:32725`, on the point-creation path).
+        # all 16 `staticmethod`s on the class — measured: `TortoiseSDK` carries
+        # 16 `staticmethod`s and all 16 are sync, so all 16 were wrapped (an
+        # earlier cut of this comment said 15, and the number is the exposure)
+        # — the probe became an INSTANCE method, so `sdk._helper(x)` was invoked
+        # as `fn(instance, x)` and raised `… got multiple values for argument
+        # 'point_kind'` INSIDE the capture this census measures, leaving every
+        # leg downstream of it uncharged (#14086 cycle-4 review, F1 — measured
+        # on `_dedup_match_clauses`, `sdk.py:32725`, on the point-creation
+        # path).
         def _probe(*a, **kw):
             # Re-entry guard: a sync SDK method calling another one must be
             # charged to the OUTER method, or the census reports the whole call
@@ -329,11 +377,20 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     # exception observed in a probed leg is a FAILURE of the instrument's
     # coverage, whatever the SDK's own fail-open arm then did with it.
     raised = [f"{r['method']}: {r['err']}" for r in rows if r["err"]]
+    # ⛔ WHAT THIS ROW CAN AND CANNOT SEE. `_probe` appends a row only when the
+    # leg ran ON the loop, so this catches a real raise from an ON-LOOP leg
+    # (executed: a plugin wrapping `TortoiseSDK._get_registry` to raise reds it,
+    # with the exception text in the message). It does NOT catch the probe's own
+    # signature breaking a leg that runs OFF the loop — no row is written there.
+    # Measured over all 16 `staticmethod`s: the only two the capture reaches
+    # (`_dedup_match_clauses`, `_validate_kind`) run on `capture-extract_0`, so
+    # the F1 `TypeError` produced no row and no `err` here at all. That class is
+    # the structural descriptor-kind guard above — a SEPARATE check that has to
+    # exist precisely because this row cannot see it (#14086 review, P2).
     assert not raised, (
         "a synchronous SDK leg RAISED while the census was measuring it, so "
         "every leg after it on the same path went uncharged and this census is "
-        "not evidence about the class — a `TypeError` here is usually the "
-        "probe's own signature rather than the SDK's:\n  " + "\n  ".join(raised))
+        "not evidence about the class:\n  " + "\n  ".join(raised))
 
     totals: dict[str, float] = {}
     for row in rows:
@@ -354,10 +411,11 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         f"what is left on the loop (methods wrapped: {len(saved)}; "
         f"methods observed: {sorted(totals) or 'none'})")
 
-    # 1 ms of TOTAL on-loop time is the "not a blocker" bar (see the docstring).
-    blocking = {m: ms for m, ms in totals.items() if ms >= 1.0}
-    undeclared = {m: ms for m, ms in blocking.items()
-                  if m not in _ON_LOOP_RESIDUAL}
+    # A leg at or above `_ON_LOOP_BAR_MS` of TOTAL on-loop time is the "this is
+    # work, not probe overhead" bar (see the docstring for why it is a magnitude
+    # and not the noise floor). `_undeclared_blocking` IS the verdict, and it is
+    # a module-level function so the threshold can be pinned without a clock.
+    undeclared = _undeclared_blocking(totals)
     assert not undeclared, (
         "synchronous SDK legs ran ON the event loop during a capture and are "
         f"not in the declared residual: "
@@ -368,3 +426,32 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         "around it already use — or, if it must stay, add it to "
         "`_ON_LOOP_RESIDUAL` with the issue that owns removing it. "
         f"Observed totals (ms): { {k: round(v, 1) for k, v in totals.items()} }")
+
+
+def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
+    """The bar is a MAGNITUDE, pinned here WITHOUT a wall clock.
+
+    `_ON_LOOP_BAR_MS` used to be 1 ms, which put the largest UNDECLARED leg on
+    this path (`_emit_event`, inside the provenance stamp) 0.1-0.5 ms inside it:
+    measured here at 0.51-0.92 ms, and at 1.20 ms under coverage, where this test
+    went FAILED on a leg the residual deliberately does not require. Loosening a
+    bar must not become a blind spot, so both ends are pinned on synthetic
+    totals: the measured probe-overhead band is NOT reported, and a leg of the
+    size the census exists to catch still is.
+
+    Verified non-vacuous: restoring the bar to 1.0 reds the second assertion
+    (`_emit_event` at 1.2 ms comes back as unreported-but-blocking), and no
+    other row in this file depends on `_ON_LOOP_BAR_MS`.
+    """
+    # The measured overhead band, including the coverage run that flipped the
+    # real census — noise, not work.
+    assert _undeclared_blocking({"_emit_event": 1.2}) == {}
+    # The bar itself is inclusive-and-reporting: anything AT it is reported.
+    assert _undeclared_blocking({"a_leg_at_the_bar": _ON_LOOP_BAR_MS}) != {}
+    # The mint's own measured cost before the fix, and a leg no one has named.
+    assert set(_undeclared_blocking({"_create_event": 552.0})) == {"_create_event"}
+    assert set(_undeclared_blocking({"some_new_sync_write": 40.0})) == {
+        "some_new_sync_write"}
+    # …and a DECLARED leg is never reported, whatever it costs: the table is an
+    # ownership declaration, not a budget.
+    assert _undeclared_blocking({"_get_registry": 16.29}) == {}
