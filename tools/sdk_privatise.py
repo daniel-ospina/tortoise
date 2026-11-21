@@ -305,13 +305,95 @@ SWEEP_NAMES = 66
 #:
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
 #: which is what makes this safe to take: no typed call site is being legitimised by the re-cut. What
-#: made it URGENT is that the pin is graded only on PULL REQUESTS — `main`'s `d4a8dddc4e` carries 12
-#: check-runs and none of them is `surface-guard` — so main drifted 1 row off the pin and every open
-#: PR then graded main's row as its own: #14045 measured `observed: (11822, …)` against the 11821 pin
-#: on a tree that itself derived 11821, while `main` at `38086c1bc5` derived 11822. A stale pin on
-#: main is a red gate on every PR that touches nothing in this population (#14062).
+#: made it URGENT is that the pin is graded only on PULL REQUESTS, so `main` sat one row off the
+#: pin with nothing grading it and every open PR then graded main's row as its own: #14045 measured
+#: `observed: (11822, …)` against the 11821 pin on a tree that itself derived 11821, while `main` at
+#: `38086c1bc5` derived 11822. A stale pin on main is a red gate on every PR that touches nothing in
+#: this population (#14062). ⛔ NO CHECK-RUN COUNT IS QUOTED FOR THAT COMMIT ANY MORE: this block
+#: used to cite `d4a8dddc4e` as carrying 12 check-runs, none of them `surface-guard`, and re-running
+#: the job since has made that FALSE — the commit now reports 72 check-runs and `surface-guard` is
+#: one of them (`completed`, `failure`). Check-run counts accumulate and never reset, so a count in
+#: this block re-stales against a re-run; the durable fact is the RULE (the pin is graded on pull
+#: requests only), not the measurement of one commit on one day.
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11829, "f0301da129c0c584")
+#:
+#: RE-CUT DOWN (11831, "1aef9c61f81faf39") → (11825, "539914480e400722") by the `#14001` lane,
+#: measured on `origin/main` `f392bb67d5`'s own tree. ⛔ THE SOURCE OF THIS RE-CUT IS `main`'S
+#: **TREE**, NOT ITS **PIN**, and the two disagree: `main`'s pin reads 11829 (the `#14062` re-cut,
+#: MEASURED on `d4a8dddc4e`'s tree and COMMITTED at `8610ed965c` — `git show
+#: d4a8dddc4e:tools/sdk_privatise.py` still reads 11821, so the rev that CARRIES 11829 is the merge,
+#: not the base) but `main`'s tree at `f392bb67d5` measures 11831, so a re-cut stated as
+#: "11829 → 11825, delta −6" is arithmetically FALSE (11829 − 6 is 11823, and 11823 is the pair this
+#: lane first pasted before it measured). Both `main` pairs here are `--repin` output, not
+#: arithmetic on the pin: `11831, "1aef9c61f81faf39"` is what `main`'s own tree derives and
+#: `11825, "539914480e400722"` is what THIS tree derives. The recurrence is the one `#14062`
+#: documents: the pin is graded on PULL REQUESTS only, `main` merged `#14065` with nothing
+#: grading it, and `--check` is therefore RED on `main` today.
+#: The delta from `main`'s tree is −6 and it is a REMOVAL, not an absorption: SIX of the
+#: eight rows the `#14062` block above declared are the `poisoned.update` shape, and this lane
+#: deleted the shape rather than declaring it. The binding-poison arms in
+#: `tools/strip_graph_entity_vectors.py` called `poisoned.update(…)`, which this sweep cannot type
+#: on an ordinary-word receiver. FIVE of them are now `poisoned |= …` — the same store, no row — and
+#: one of those five keeps a `set(...)` conversion (`poisoned |= set(sub.names)`):
+#: `ast.Global.names` / `ast.Nonlocal.names` are `list[str]` and `set |= list` is a `TypeError`
+#: (`set.__ior__` takes a set, unlike `.update`, which takes any iterable), measured — the
+#: `nonlocal-rebinding` row fails on exactly that. The SIXTH arm was DELETED, not converted: a
+#: nested-scope `Assign` + `_dynamic_namespace_write` branch that could never run, because an
+#: identical predicate `continue`s above it and the generic `Assign`/`AnnAssign` arm consumes the
+#: rest. It only cost a residue row. ⛔ Five conversions and one deletion is SIX rows; the count is
+#: stated here because "each is now `poisoned |= …`" was this block's own first draft and the tree
+#: falsifies it (raised by a fresh review of this branch's pre-rebase head, #14058 — ⛔ cited by
+#: ISSUE NUMBER and not by sha on purpose: a pre-rebase commit is reachable from no ref and
+#: disappears on the next `gc`, so a sha here would be an unreproducible address of exactly the
+#: kind this block forbids elsewhere).
+#: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
+#: MEASURED on both trees and diffed row by row (`py_files()` → `edits_for()` → `residue` on
+#: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
+#: differs. Nothing else moved in either direction.
+#: TWO absorbed rows are `main`'s, not this lane's, and they are named here because a re-pin that
+#: only states the count is what this block forbids. `main`'s re-cut measured 11829 on
+#: `d4a8dddc4e`'s tree and was COMMITTED at `8610ed965c`. ⛔ IT DID NOT DRIFT AFTERWARDS, and the
+#: difference is not cosmetic: `#14065` (`ac57b2d38a`) is an ANCESTOR of `8610ed965c` — `git
+#: merge-base --is-ancestor ac57b2d38a 8610ed965c` says so, measured — so the +2 was already beneath
+#: the re-cut and `8610ed965c`'s own tree derives 11831. The 11829 pin was therefore STALE ON
+#: ARRIVAL, not stale from a later drift. "It drifted afterwards" would imply a window in which the
+#: pin was correct, and no such window existed; so `main`'s own tree measures 11831 against its own
+#: 11829 pin, and `--check` is RED on `main` right now (the same recurrence `#14062` documents: the
+#: pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded against a
+#: stale number). The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
+#: added by `ac57b2d38a` (`#14065`) — already an ancestor of the re-cut commit, so it sits between
+#: the 11821 pin and this tree, NOT "after" the 11829 one. Both sit on
+#: a plain `set` fed by a generator expression, so neither is a typed reference to a swept name
+#: (`typed references still pointing at a public name: 0` on this tree).
+#: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
+#: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
+#: RE-CUT UP (11825, "539914480e400722") → (11833, "addee5ad564bd9bc") by the `#13874` lane. The
+#: pasted pair is `--repin`'s output measured on THIS tree, never arithmetic on the last pin.
+#: The +8 is ONE merge's rows, attributed by measurement and not by count: over the whole range
+#: `1956b3431f` (the `#14058` re-cut) → this tree, the `.py` diff carries EIGHT added receiver rows
+#: and ONE removed receiver line that is the SAME statement re-indented (it is re-added, so nothing
+#: was deleted) — `git diff … -- '*.py' | grep -E '^[+-]' | grep -E '\.(query|update|delete)\b'`.
+#: SEVEN of the eight are `graph.query`, all inside the file `ad79129cb5` (`#14067`, "invalidate the
+#: degraded snapshot on the eviction path") ADDS,
+#: `tests/test_evictor_invalidates_fallback_snapshot_13123.py`; the eighth is `client.delete`, in
+#: `tortoise/cache_evictor.py`, from that same commit. Added rows (8) == net delta (11833 − 11825),
+#: which is the cross-check that NO row was silently absorbed in the other direction.
+#: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. Both spellings are
+#: already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
+#: occurs 46 times across the tracked tree
+#: (`git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py' | sort | uniq -c`). So the
+#: condition this gate exists to catch — "a reference shape that was not there when this sweep was
+#: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
+#: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
+#: so no typed call site is legitimised by this re-cut.
+#: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8. Its whole diff is figure literals: stripping every digit
+#: run from each `-`/`+` pair leaves the pair identical, so it cannot move a receiver population. The
+#: reason the gate is red here is the recurrence `#14062` and `#14058` both document, now a THIRD
+#: time: the pin is graded on PULL REQUESTS only, so `main` merges with nothing grading it — and
+#: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
+#: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
+#: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
+SWEEP_RESIDUE = (11833, "addee5ad564bd9bc")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

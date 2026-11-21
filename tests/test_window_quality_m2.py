@@ -3154,17 +3154,19 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
         + "\n  ".join(missing))
 
 
-def test_the_evictor_still_does_not_invalidate_the_degraded_snapshot():
-    """The record's `#13123` claim is about CODE THIS PR DOES NOT CHANGE.
+def test_the_record_state_is_bound_to_whether_the_evictor_invalidates_the_snapshot():
+    """The record's `#13123` claim must match the CODE, in whichever direction.
 
-    ⛔ Measured: `grep -c 'fallback_snapshot\\|cache_evictor\\|record_serve'` on this
-    module was **0** (#13126 round 3), so the claim was true at this head purely
-    by luck of the tree. The verdict paragraph tells a reader the loss is silent
-    TODAY because `cache_evictor._delete_nodes` issues a bare `DETACH DELETE` and
-    never invalidates `fallback_snapshot` — the day `#13123` lands, that callout
-    is false and nothing reds. This pin makes the record red in that PR instead of
-    letting it rot green, the same binding `test_the_record_quotes_the_current_
-    wording_of_the_honesty_item` already does for §7's prose.
+    ⛔ This pin was written NEGATIVE (“the evictor still does not invalidate”), because
+    the record told a reader the loss was silent TODAY and nothing would red the day
+    that stopped being true — measured: `grep -c` for the eviction path's own tokens on
+    this module was **0** (#13126 round 3), so the claim held only by luck of the tree.
+    #13123 has now landed, so the pin is INVERTED: the evictor DOES invalidate, and the
+    record says so.
+
+    Both halves are checked, so neither can drift alone. A tree where the eviction path
+    stops invalidating, and a record that still claims the loss is silent, are the two
+    ways this goes stale — and each reds here instead of rotting green.
     """
     src = (ROOT / "tortoise" / "cache_evictor.py").read_text(encoding="utf-8")
     assert "_delete_nodes" in src, (
@@ -3172,11 +3174,50 @@ def test_the_evictor_still_does_not_invalidate_the_degraded_snapshot():
         "claim rather than editing this pin")
     delete_path = src[src.index("def _delete_nodes"):]
     delete_path = delete_path[:delete_path.find("\ndef ", 10) if "\ndef " in delete_path[10:] else len(delete_path)]
-    for token in ("fallback_snapshot", "_mark_dirty", "invalidate"):
-        assert token not in delete_path, (
-            f"`cache_evictor._delete_nodes` now mentions {token!r} — #13123 may have "
-            f"landed, which makes the record's 'the loss is silent' callout stale; "
-            f"correct the record in that PR and then relax this pin")
+    # ⚠️ THIS IS A PRESENCE CHECK ON THE NAME, and the comment says so rather than
+    # claiming more (review round 2 measured that "call-shaped" was unearned: a call
+    # wrapped in `if False:`, or commented out, still satisfies it). What a substring
+    # can honestly bind is "this module still has the invalidation wired into the delete
+    # path at all" — which is what makes the record's Finding-6 correction true.
+    # ⛔ WHAT IS *NOT* PINNED HERE, deliberately, and where it lives instead:
+    #   * that the invalidation actually RUNS, and that it runs AFTER the statement
+    #     (never before) — `test_cache_eviction_evictor_pins.py::
+    #     test_the_snapshot_is_invalidated_AFTER_the_statement_not_before`, plus the
+    #     three other order/gate pins beside it, which record statement-versus-
+    #     invalidation order on a fake graph and were each mutation-verified;
+    #   * that a zero-row delete invalidates nothing, a failed invalidation is `False`,
+    #     and `None` never overwrites a real answer — the same file.
+    # A textual "the call is below the statement" assertion here would be satisfied by
+    # the helper DEFINITION sitting above it while every call sat below: a pin that
+    # passes on the very refactor it looks like it forbids.
+    assert "_invalidate_degraded_snapshot(" in delete_path, (
+        "`cache_evictor._delete_nodes` no longer CALLS the snapshot invalidation — an "
+        "evicted node would be returnable for up to 60 s (#13123), and the record now "
+        "tells a reader the opposite")
+    readme = (ROOT / "docs" / "evidence" / "12186-m2-windowed-quality" /
+              "README.md").read_text(encoding="utf-8")
+    assert "never invalidates" not in readme, (
+        "the record still says the evictor never invalidates `fallback_snapshot` — "
+        "#13123 landed, so that callout is stale and a reader would take the shipped "
+        "path for one that serves demoted nodes")
+    # ⛔ BOUND TO THE FINDING-6 PARAGRAPH ITSELF, not "some paragraph that mentions
+    # #13123" (review round 2 measured that: the record names the issue in TWO places and
+    # BOTH say "landed", so replacing the Finding-6 correction with "still tracked
+    # separately" left the `any(...)` form green). The correction site is the paragraph
+    # that describes the shipped gap; that paragraph must still describe it AND state its
+    # state. If the describing sentence is removed, the anchor disappears and this reds —
+    # which is correct: the place a reader learns the gap existed is the place it must
+    # learn it was closed.
+    sites = [p for p in readme.split("\n\n")
+             if "The same gap existed in shipped code" in p]
+    assert sites, (
+        "the record's Finding-6 paragraph ('The same gap existed in shipped code') is "
+        "gone — re-derive where the gap is described and where its state is stated, "
+        "rather than editing this pin")
+    assert "#13123" in sites[0] and "has since landed" in sites[0], (
+        "the paragraph that describes the shipped eviction gap no longer states that "
+        "#13123 LANDED — a reader then takes the shipped path for one that serves "
+        f"demoted nodes. Paragraph: {sites[0][:200]!r}")
 
 
 def test_every_published_arrow_is_bound_to_the_cell_it_reports(artifact):
