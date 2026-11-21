@@ -1475,15 +1475,12 @@ def test_no_graph_dependency() -> None:
     # text pin cannot see a narrowing written AROUND the text it looks for —
     # `forbidden=[r for r in <the pinned list> if '.' not in r]` contains the pinned
     # repr verbatim and silences every dotted root. So the controls below name roots
-    # that a narrowed candidate would DROP — one DOTLESS and TWO DOTTED — and each
-    # is matched against a SET of names, never a substring
-    # (`"redis" in "redislite.falkordb_client"` is True, the class this file removes
-    # everywhere else).
-    # ⛔ THE CONTROLS BELOW ARE BEHAVIOURAL ON PURPOSE, and they are the whole
-    # assertion surface for the walk now that the matcher lives in this file. The
-    # `_probe_forbidden()` pin above holds the LIST; these hold what the matcher
-    # actually FINDS, named as three distinct roots so that a restricted matcher
-    # has to keep all three to stay green:
+    # that a narrowed candidate would DROP — one DOTLESS and TWO DOTTED.
+    # ⛔ THE CONTROLS BELOW ARE BEHAVIOURAL ON PURPOSE, and they are the assertion
+    # surface for the PRODUCTION path (`_probe`) now that the matcher lives in this
+    # file. The `_probe_forbidden()` pin above holds the LIST; these hold what the
+    # matcher actually FINDS on a real import, named as three distinct roots so that
+    # a restricted matcher has to keep all three to stay green:
     #   `redis`                 — DOTLESS, the original store-client witness;
     #   `tortoise.ep`           — DOTTED, so a dotless-only list/matcher reds;
     #   `tortoise.session_indexer` — a THIRD root, and the reason this row exists:
@@ -1491,6 +1488,11 @@ def test_no_graph_dependency() -> None:
     #     stays green (measured at `ebb479dc60`: `and r in ('redis','tortoise.ep')`
     #     → **102 passed** while `import tortoise.session_indexer` came back empty).
     #     A root the narrowing would DROP is the only thing that can witness it.
+    # ⚠️ WHAT THESE THREE PINS IS THOSE THREE ROOTS' REACH, not the predicate — at the
+    # head they were added to they were nearly the whole assertion surface, and "keep
+    # the named controls" really was green. The per-root loop over `_probe_forbidden()`
+    # below is what pins the WHOLE predicate now; these rows are what pins it through
+    # the production path rather than the matcher in isolation.
     # Each is matched against a SET of names, never a substring
     # (`"redis" in "redislite.falkordb_client"` is True, the class this file removes
     # everywhere else).
