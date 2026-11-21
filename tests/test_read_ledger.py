@@ -423,10 +423,13 @@ def test_the_three_hooked_row_paths_feed_the_ledger(hooked_sdk):
     key gets, which is the same class of wrong as a lost one).
 
     ⛔ The PUBLIC spellings these hooks served (`query`, `paginated_query`,
-    `get_point`, `query_points_by_tag`) were retired by #13899/#4282, so the
-    doors are driven directly; driving the retired names would only prove the
-    retirement hint still raises. `_get_point` is driven for the OPPOSITE
-    reason — it must record NOTHING, pinned below.
+    `query_points_by_tag`) were retired by #13899/#4282, so the doors are driven
+    directly; driving a retired name would only prove the retirement hint still
+    raises. (`get_point` is in that retired group too, but it is NOT in this
+    clause for a measured reason: it has no retirement hint — `retirement_hint(
+    "get_point")` is `None`, so driving it raises a bare `AttributeError`, not
+    the #4282 message.) `_get_point` is driven for the OPPOSITE reason — it
+    must record NOTHING, pinned below.
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
@@ -773,8 +776,11 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
-    They call `_query(_record_reads=False)` to do it (the door `query` retired
-    into). `_query` IS caller-facing with recording ON elsewhere
+    They opt OUT of recording explicitly — `_query(_record_reads=False)` for a
+    POPULATION scan, and `_tortoise_fts_query(…, _record_reads=False)` for a
+    retrieval POOL (that is a different door, so a reader auditing the opt-outs
+    by grepping `_query(` will not find the FTS arm; `recall_gaps` drives both).
+    `_query` IS caller-facing with recording ON elsewhere
     (`tortoise_client`'s `query_prior_research` / `query_existing_strategies` /
     `query_existing_visions` take the default), which is exactly why these
     population scans have to opt OUT explicitly: recording them would mark every Point read after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding

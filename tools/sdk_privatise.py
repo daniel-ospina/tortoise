@@ -694,12 +694,14 @@ SWEEP_NAMES = 66
 #: (apply each file's change alone): 11844 everywhere except `tests/test_read_ledger.py`, which lands
 #: at 11838. ⛔ Name the frame or the numbers contradict each other: 11844 is the parent's residue and
 #: 11838 this head's, so "reverting X alone leaves 11844" is only true when X is the file that CARRIES
-#: the delta. The three module-level probes likewise contribute no DELTA row (they carry 12 untyped rows
-#: in all — 5 in `test_assembly_sdk.py`, 4 in `test_assembly_fixtures.py`, 3 in
-#: `longmem_eval/test_assembly_arm.py` — identical at both heads), so this re-cut shares none with the
-#: `#13994` probe shrink above. ⛔ "contributes no row" was the earlier wording and it is FALSE for every
-#: file named here: a row is what the census COUNTS, so "no row" would mean the file has no swept-name
-#: receiver at all, and `tests/test_7405_update_point_writes.py` alone carries 80 of them.
+#: the delta. The three module-level probes likewise contribute no DELTA row (they carry 14 untyped
+#: rows in all — 6 in `test_assembly_sdk.py`, 5 in `test_assembly_fixtures.py`, 3 in
+#: `longmem_eval/test_assembly_arm.py`, identical at both heads; 5/4/3 are the distinct row SHAPES, and
+#: this note states ROWS because that is the unit the paragraph defines and the unit the 80 above uses),
+#: so this re-cut shares none with the `#13994` probe shrink above. ⛔ "contributes no row" was the
+#: earlier wording and it is FALSE for every file named here: a row is what the census COUNTS, so "no
+#: row" would mean the file has no swept-name receiver at all, and
+#: `tests/test_7405_update_point_writes.py` alone carries 80 of them.
 #: The 6 are plain untyped receivers in a test (`inst` is built via `TortoiseSDK.__new__`), not typed
 #: references to a swept name, so the SDK population is untouched — `--check` still reports
 #: `typed references still pointing at a public name: 0`.

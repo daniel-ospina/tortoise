@@ -287,11 +287,13 @@ def _module_level_write_probe_lines(path: Path) -> list[int]:
     yes to. It can only skip files that CANNOT match.
 
     The doors are every spelling of the point write, because the SDK surface
-    is not fixed: the public `create_point`, the consolidated
-    `create_entity("point", …)` it was retired in favour of (#13899, which
-    RELAYS to the same write), and the internal `_create_point` (#13899 KEPT
-    it). All three pay the same `encode_for_store` -> `EmbeddingModel.get` cost
-    at import.
+    is not fixed: the consolidated `create_entity("point", …)`, the internal
+    `_create_point` (#13899 kept it), and the RETIRED public `create_point` —
+    still in the tuple so a branch mid-migration is flagged rather than
+    silently dropped, even though driving it now raises the #4282 retirement
+    hint before any write. So the two LIVE spellings pay the same
+    `encode_for_store` -> `EmbeddingModel.get` cost at import; the retired one
+    pays nothing, which is exactly why leaving it out would be a silent green.
     A census that knew only one spelling would report the three probes as gone
     (a silent green) the moment they migrated — which is exactly what happened
     on #13971's `test (a)`: the probes were still unmasked-in-spirit while the
@@ -328,11 +330,23 @@ def test_the_census_sees_every_declared_door_and_is_blind_to_an_alias(tmp_path):
     Same standard this guard applies to the probes themselves — the claim is a
     row, not prose.
 
+    ⛔ AND THE LOOP BELOW CANNOT CLOSE THAT ON ITS OWN (review P2): it iterates
+    `_PROBE_WRITE_DOORS`, so membership is never asserted — running this test
+    with the tuple narrowed to two doors still passes. The tuple itself is
+    therefore pinned explicitly, in the same "the declared registry IS the
+    census" spirit as `test_probe_census_matches_the_declared_set`.
+
     The blind-spot arm is the OTHER half: `PROBE_MODULES`' note states that a
     call through a local alias or through `getattr` is OUTSIDE the census, and a
     documented blind spot that nothing measures is how a note comes to say the
     opposite of the code — which is exactly what an earlier draft of it did.
     """
+    assert set(_PROBE_WRITE_DOORS) == {
+        "create_point", "create_entity", "_create_point"}, (
+        "the declared door set is the census — narrowing it silently un-covers "
+        "a spelling a migrating module can reach for (#14127 review round 4); "
+        "this assertion is what makes the loop below non-vacuous about WHICH "
+        "doors exist")
     for door in _PROBE_WRITE_DOORS:
         probe = tmp_path / f"probe_{door}.py"
         probe.write_text(
