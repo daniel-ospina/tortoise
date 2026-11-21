@@ -16341,8 +16341,8 @@ class TortoiseSDK:
         # cannot order them differently from the SDK's or the miner's. The
         # append stays inside the caller's `try` (it is the commit point; a
         # failure is this door's accounting, not a record refusal) and the
-        # chokepoint never withdraws it: the truth store does not wait for a
-        # derived store (see `tortoise/live_write.py`).
+        # chokepoint never withdraws it: the append is the commit point and
+        # does not wait for a derived store (see `tortoise/live_write.py`).
         #
         # ⛔ EXCEPT ON A CUT-OVER GRAPH, WHERE IT DOES NOT APPEND AT ALL (#14002).
         # There the record owns the ordinal, the chokepoint skips the file append
@@ -16431,7 +16431,7 @@ class TortoiseSDK:
             write_sink.append(write)
         # ⛔ THE PER-CALL COMMIT SIGNAL, FOR THE ARM THIS CALL ACTUALLY TOOK
         # (#14002 review cycle 7, blocking). The append arm is untouched: a line
-        # was committed to the journal, which is the truth store, so every
+        # was committed to the journal, so every
         # pre-existing gate (`_create_point`'s `WriteNotLandedError`,
         # `_update_point`'s, the evidence fold's, and
         # `hosted_api._report_narrative_home`'s `journalled`) keeps meaning what

@@ -230,6 +230,21 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # it historical and forbids running it against production. Named here so
     # the scan covers it rather than leaving it an unrecorded door.
     ("graph-scripts/setup.py", "step11e"): ("exempt:historical-script", 2),
+
+    # ── NOT THE PROJECTION FOLD AT ALL — a LOCAL accumulator ──────────
+    # `usage_signal._consume` folds serve events into `_State.apply`
+    # (`tortoise/usage_signal.py:899`), a dataclass in the SAME module that holds
+    # the checkpoint's window-local payload — its own docstring is the claim:
+    # "the checkpoint's payload — a CACHE of a fold, never the record". #14011's
+    # usage signal is derived from its OWN append-only serve stream (⛔ NOT from
+    # `read_ledger` — that module is forbidden here by a recorded decision; see
+    # `tortoise/usage_signal.py`'s header) and it writes nothing to the graph, so
+    # neither of these two calls reaches `FalkorProjection.apply`,
+    # which is the only object this map is about. Class `not-a-projection`: this
+    # module's DECLARED class for exactly this case (a receiver heuristic was
+    # tried and abandoned for letting four spellings escape, so a non-graph
+    # `.apply` is declared here, never inferred by the scan).
+    ("tortoise/usage_signal.py", "_consume"): ("not-a-projection", 2),
 }
 
 
