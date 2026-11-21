@@ -2552,12 +2552,24 @@ def org_storage_notice_pct(cp, org_id: str) -> int | None:
     """The highest capacity-notice threshold already sent for this account.
 
     ``None`` means NO NOTICE HAS BEEN SENT — and also covers an org row that
-    does not exist. The two are not distinguished on purpose: every caller
-    enumerates orgs from the table itself, so a missing row is not a state a
-    caller can be in, and returning a sentinel for it would invite a caller to
-    branch on a case that cannot occur. A row whose column is missing (one
-    migration behind) reads the same way, which is the fail-soft behaviour the
-    #1096 ladder exists for.
+    does not exist, and a value that is not an integer. None of those are
+    distinguished on purpose: every caller enumerates orgs from the table
+    itself, so a missing row is not a state a caller can be in, and returning a
+    sentinel for it would invite a caller to branch on a case that cannot
+    occur; an unparseable figure is read as NO MARK because a re-send is the
+    safe direction (the provider Idempotency-Key collapses the duplicate inside
+    its window).
+
+    ⛔ A row whose COLUMN is missing (one migration behind) does NOT read as
+    ``None`` — it RAISES. ``cp.query`` raises ``RuntimeError`` on any status
+    ≥ 300, and PostgREST answers an unknown column with 400/PGRST204. That is
+    deliberate, not an oversight: the mark is the LEDGER, and an unreadable
+    ledger must FAIL CLOSED (the caller reports ``notice-mark-unavailable``)
+    rather than read as “never notified”, which would re-send the one-shot
+    notice every interval forever — ``capacity_notice`` states the same rule at
+    its ``_DEGRADE_COLUMNS`` block. This reader therefore carries NO ladder (it
+    is not an additive tier): the fail-soft half is the CALLER's
+    ``try``/``except`` around the pre-send re-read, not this function's.
     """
     rows = cp.query(
         "organizations", select=["storage_notice_pct"],
