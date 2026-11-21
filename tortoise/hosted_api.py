@@ -4680,7 +4680,13 @@ async def _capacity_notice_sweep_loop(interval: float,
     already at the top mark, THREE control-plane reads (the account row via
     ``read_account``, the allowance via ``quota.resolve_org_limits``, and the
     gauge via ``allowance_gate.read_dimension``), plus a pre-send mark re-read and
-    the ``claim_notice`` PATCH when it actually sends. ⛔ An earlier cut said "one
+    the ``claim_notice`` PATCH when it actually sends. ⛔ AND A DUE ACCOUNT WHOSE
+    TWO CONTACT COLUMNS CARRY NO ADDRESS ALSO PAYS THE OWNER RUNG — two MORE
+    blocking calls (`supabase_control.owner_email`: the owner membership read and
+    the GoTrue admin GET) — so the true bound for that population is five, not
+    three, and it is per DUE ACCOUNT per pass rather than per SENT notice
+    (`capacity_notice._notice_recipient` states the arithmetic; an earlier cut of
+    this paragraph stopped at the three). ⛔ An earlier cut said "one
     point read per account", which the next clause of that same sentence already
     contradicts ("short-circuits BEFORE the gauge is read" — the gauge read is
     one of the three). An account whose ledger

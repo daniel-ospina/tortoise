@@ -585,8 +585,8 @@ async def _send_rendered(to: str, subject: str, html_body: str, text_body: str,
                 idempotency_key=idempotency_key, from_addr=from_addr,
                 timeout=timeout)
             message_id = (result or {}).get("id")
-            logger.info("email notify: %s accepted by provider (%s, msg %s)",
-                        label, to, message_id)
+            logger.info("email notify: %s accepted by provider (msg %s)",
+                        label, message_id)
             return {"status": "sent", "message_id": message_id}
         except Exception as e:  # noqa: BLE001, RUF100
             last_err = e
@@ -594,8 +594,8 @@ async def _send_rendered(to: str, subject: str, html_body: str, text_body: str,
                 await asyncio.sleep(0.5)
                 continue
             break
-    logger.warning("email notify: %s failed for %s (%s)",
-                   label, to, redact_safe(last_err))
+    logger.warning("email notify: %s failed (%s)",
+                   label, redact_safe(last_err))
     refund_send_slot()  # #1138: provider rejected/failed the POST — free the slot
     return {"status": "failed"}
 

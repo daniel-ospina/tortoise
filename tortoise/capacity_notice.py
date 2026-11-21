@@ -865,7 +865,14 @@ def _notice_recipient(account: Account, cp) -> str | None:
     precisely the paying, capacity-holding population these two thresholds exist
     to tell.
 
-    The order is `hosted_api._billing_customer_email`'s, not invented here:
+    This chain shares `hosted_api._billing_customer_email`'s two ENDPOINTS — the
+    account's own ``email`` and the ACTIVE OWNER's GoTrue address — and
+    deliberately INSERTS one rung between them, the Stripe-mirrored
+    ``customer_email``. It is therefore NOT that chain's order, and an earlier cut
+    of this sentence said it was; the distinction matters because a maintainer
+    changing one chain would rely on that claim to keep the other in step, while
+    `_billing_customer_email` never reads ``customer_email`` at all (only the
+    Stripe mirror writes it, ``hosted_api`` ~:48696, ~:49293):
 
     1. ``organizations.email`` — the account's own recorded contact.
     2. ``organizations.customer_email`` — the Stripe mirror's billing contact
@@ -1096,11 +1103,12 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         # greets a PERSON, so there is nobody to greet.
         logger.info(
             "capacity notice: team %s owes the %s%% notice but resolves no "
-            "address — organizations.email and organizations.customer_email are "
-            "empty, and the owner's GoTrue address answered none EITHER (absent, "
-            "or the lookup FAILED and logged a warning above; the two states are "
-            "not the same and this line does not claim which) — nothing is sent "
-            "for it",
+            "DELIVERABLE address — organizations.email and "
+            "organizations.customer_email are empty OR do not have an address "
+            "shape (`_deliverable_address`), and the owner's GoTrue address "
+            "answered none EITHER (absent, or the lookup FAILED and logged a "
+            "warning above; the two states are not the same and this line does "
+            "not claim which) — nothing is sent for it",
             org_id, notice.threshold)
         return {"status": "no-email", "org_id": org_id}
     copy = render(notice.threshold,
