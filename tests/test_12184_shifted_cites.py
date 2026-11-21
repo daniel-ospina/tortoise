@@ -207,7 +207,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:8515`", _MCP, 8515, "entity_type=entity_type"),
     # ⛔ The four `sdk.py` members of §2.5's `:Tag` row are enumerated in the header as BARE `:NNNN`
     # siblings — a spelling none of the rows above reaches (they all require a path or the one-token
-    # form), which is the same one-site-vs-one-string gap the `:11281` header half and `:6989` were:
+    # form), which is the same one-site-vs-one-string gap the `:11590` header half and `:6989` were:
     # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
     # the fragment the header paragraph quotes for it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31551`", "tortoise/sdk.py", 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})"),
@@ -316,9 +316,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
     # §2.6's row, re-pointed to this head by the same review: the census's `:890`/`:1182`/`:1383` do not land
-    # on these statements at this head, and `hosted_backup.py` drifts in TWO steps (`+2` above the pin's `:58`,
-    # `+132` above the pin's `:1175`) — so the offsets are `+2`/`+134`, not one delta. Pinned by content
-    # because the header's enumeration names them and promises exactly that.
+    # on these statements at this head, and `hosted_backup.py` drifts in THREE offset STEPS (`+2` above the
+    # pin's `:58`/`:59`, `+60` above its `:1035`, `+89` above its `:1175`) — so the offsets are
+    # `+2`/`+62`/`+151`, not one delta and not the `+2`/`+134` an earlier draft read off a two-step
+    # `+132` hunk count (the `+134` lands at `:1316`/`:1517`, which are not the statements). Pinned by
+    # content because the header's enumeration names them and promises exactly that.
     (_AUDIT, "hosted_backup.py:892", _HB, 892, '"MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"'),
     (_AUDIT, "hosted_backup.py:1333", _HB, 1333, 'MATCH (n) RETURN labels(n), properties(n)'),
     (_AUDIT, "hosted_backup.py:1534", _HB, 1534, 'MATCH (n) RETURN labels(n), properties(n)'),
@@ -345,7 +347,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, '`:1292-1300`', _SSM, 1292, '_CONTROL_LEXICON_ROWS = ('),
     # --- #14043 review (finding 1, this cycle): §6.3's own two addresses were in neither list and
     # unpinned, and the header's default resolves them to the PIN — where `sdk.py:16077` is unrelated
-    # prose and `sdk.py:3801` is an EMPTY LINE. Both are one-token spellings already, so no figure
+    # prose and `sdk.py:3801` is a DIFFERENT STATEMENT (`sdk._graph_write_with_retry(`, re-opened at
+    # this head; the earlier "EMPTY LINE" claim here was the pre-`#14169` reading). Both are one-token
+    # spellings already, so no figure
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
     # ⛔ #14087 review: the span's END was one short — `:16081` is the paragraph's PENULTIMATE line and
     # `:16082` (the line reading "turns list is that same requirement for the record-held lane.") is its
@@ -2152,8 +2156,8 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # re-review). MEASURED, not inferred: the count of `_PINS` rows at each of these heads is
     # 72 (ecb137107e) -> 77 (298d3328db, the five above) -> 80 (0a53ad23d8).
     # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16077-16082` and
-    # `sdk.py:3801` were in neither list and unpinned, and the pin default opens on prose and on an
-    # empty line respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
+    # `sdk.py:3801` were in neither list and unpinned, and the pin default opens on prose and on a
+    # DIFFERENT STATEMENT (`sdk._graph_write_with_retry(`, re-opened) respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
     # document on top of its own `:Point` join; the END stayed one short until #14087 re-derived it
     # here. One ROW, one token — the row count did not move.)
     # 82 -> 83 at the #14087 review round 7 (P3): `00_index.md`'s entity-verdict row carries a

@@ -111,6 +111,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from collections import Counter
 from collections.abc import Mapping
 from typing import Any
@@ -120,8 +121,8 @@ from typing import Any
 #: Every statement in `tortoise/` that READS or MAINTAINS the `:GraphEvent`
 #: label — including the three `ensure_event_schema` DDL statements, because a
 #: re-home has to recreate the schema they describe (the `event_id` dedupe index
-#: and the `seq` range index `read_after` scans), plus the two whole-graph export
-#: scans that carry the label WITHOUT naming it. That is the inclusion rule,
+#: and the `seq` range index `read_after` scans), plus the two whole-graph scans in
+#: the RESTORE path that carry the label WITHOUT naming it. That is the inclusion rule,
 #: stated rather than implied: **statements that name the label, plus the two
 #: statements that carry it by being label-agnostic and would therefore carry it
 #: into (or drop it from) a new home.**
@@ -130,7 +131,14 @@ from typing import Any
 #: `tests/test_13094_graphevent_home.py` asserts every `snippets` entry still
 #: appears in its `file` (whitespace-collapsed, so a re-indent is not a false red
 #: while a reword is a real one) and `min_occurrences` where one file holds the
-#: same statement twice — a single shared snippet must not satisfy two rows.
+#: same statement twice. ⛔ WHERE THAT WORKS AND WHERE IT DOES NOT: the
+#: `event_store.py` dedupe pair is the ONLY two occurrences of its text in that
+#: file, so deleting one reds the census; the two restore-side scans share their
+#: text with two more occurrences in `hosted_backup.py` (four in total), so those
+#: rows pin the EXACT count in `occurrences` — deleting ANY of the four reds, which
+#: a bare `min_occurrences` floor did NOT do (measured: deleting both censused
+#: sites left two and stayed green). What no pin can do is say WHICH occurrence a
+#: row addresses: the `line` is that address and nothing grades it.
 #:
 #: CLASSIFICATION — the three classes, and what each one can justify:
 #:
@@ -200,10 +208,22 @@ READERS: tuple[dict[str, Any], ...] = (
                      "GraphEvent", "PROPERTIES 1 event_id"),
         "needs": "DDL: a uniqueness constraint on event_id",
         "class": "maintenance",
-        "why": "the belt behind the dedupe pre-check (the app-side probe is the "
-               "suspenders). ⚠️ Issued through `g.query()` inside a `try/except` "
-               "that only logs, so on a server without the verb it is REFUSED and "
-               "production runs without it.",
+        "why": "⛔ THE SUSPENDERS, not the belt — the row said both, in one "
+               "breath, until #14183 review round 10 measured which layer holds. "
+               "`ensure_event_schema` issues it through `g.query()`, which cannot "
+               "parse a module command, so the constraint is never created in "
+               "production: the app-side dedupe pre-check in `event_store.py` is "
+               "the belt that is actually there, and the store admits a duplicated "
+               "`(seq, event_id)` row if that probe goes. ⚠️ `event_store.py:794-797` "
+               "still states the reverse and is tracked as #14212 (a product-code "
+               "comment, out of this census's files). ⛔ THE `missing supporting exact-match index` THIS "
+               "ROW ONCE RECORDED WAS A SCRIPT DEFECT, NOT A SERVER LIMIT (#14183 "
+               "review round 9, measured): the measurement put `tortoise_ge_uid` in "
+               "the GRAPH-KEY slot of the module command, so it ran against a "
+               "freshly minted graph with no `event_id` index at all. Correctly "
+               "formed against a graph WITH that index the command is ACCEPTED "
+               "(`PENDING`) on `falkordb-server:v4.20.6`, empty and 20k-node graphs "
+               "alike — there is no asynchronous-index race to allow for.",
     },
     {
         "file": "tortoise/event_store.py",
@@ -296,26 +316,43 @@ READERS: tuple[dict[str, Any], ...] = (
     {
         "file": "tortoise/hosted_backup.py",
         "line": "1333",
-        "reader": "whole-graph export (dump side)",
+        "reader": "whole-graph scan (restore's dirty-target pre-check)",
         "snippets": ("MATCH (n) RETURN labels(n), properties(n)",),
         "min_occurrences": 2,
-        "needs": "a full label-agnostic dump",
+        "occurrences": 4,
+        "needs": "a full label-agnostic read of the target graph",
         "class": "maintenance",
-        "why": "the export carries `:GraphEvent` rows because it carries everything; "
-               "it names no label and needs no capability. ⚠️ It is censused because "
-               "a re-home must decide what the export does with the shape, not "
-               "because it reads one.",
+        "why": "this is `restore_graph`'s pre-check (`hosted_backup.py:1333`, inside "
+               "`def restore_graph` at `:1098`), NOT the export: it refuses a dirty target "
+               "before the rebuild, so a re-home must keep it reading every node whatever "
+               "shape it carries. ⚠️ It is censused because the restore must decide what "
+               "it does with a `:GraphEvent` node, not because it reads one. ⚠️ NEITHER "
+               "EXPORT-SIDE READER IS IN THIS CENSUS: the paged dump's node statement is "
+               "`_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, consumed by `dump_graph` "
+               "at `:647`), and the export endpoint's own whole-graph scan is "
+               "`hosted_api.py:33404` (`_export_graph_snapshot`; the `"
+               "\"GraphEvent\" in labels` branch is `:33420` and the append `:33428` — a "
+               "SERVING reader under this census's own class rule, so the `serving: 1` "
+               "count in this file excludes it). No row carries either (#14204). ⚠️ This "
+               "statement occurs FOUR times in `hosted_backup.py` — `:1333`, `:1534`, the "
+               "live read at `:3603` (`_restore_into_temp_verify_swap`) and a docstring "
+               "mention at `:3442` — and the exact count is pinned, so deleting any of "
+               "them reds. What the pin cannot do is say WHICH occurrence a row addresses: "
+               "the `line` is that address and nothing grades it.",
     },
     {
         "file": "tortoise/hosted_backup.py",
         "line": "1534",
-        "reader": "whole-graph export (restore-side scan)",
+        "reader": "whole-graph scan (restore's node-count verification)",
         "snippets": ("MATCH (n) RETURN labels(n), properties(n)",),
         "min_occurrences": 2,
-        "needs": "a full label-agnostic dump",
+        "occurrences": 4,
+        "needs": "a full label-agnostic read of the graph",
         "class": "maintenance",
-        "why": "the second whole-graph scan: the same statement shape as the line "
-               "above, in the restore path, so both rows require TWO occurrences.",
+        "why": "the second restore-side scan (the restore's `actual_nodes` verification, "
+               "`hosted_backup.py:1533-1534`): "
+               "the same statement shape as the line above, so both rows require two "
+               "occurrences — see the residual noted on that row.",
     },
 )
 
@@ -419,11 +456,32 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
       hand-written `3.5`, and an `int()` cursor would never advance past it — an
       unbounded loop. The cursor keeps the value the server returned, so `> 3.5`
       advances.
-    * a row with NO `event_id` cannot take part in that cursor, so a page whose
+    * a row with no STRING `event_id` — absent, or a non-string that cannot be
+      compared with a string cursor (the same mixed-type ordering trap the
+      end-proof guards) — cannot take part in that cursor, so a page whose
       LAST row has none is a NAMED refusal: silently stopping there would be a
-      partial read reported as a verdict. Rows are deduped on
-      `(seq, type, payload-digest)` as defense in depth.
+      partial read reported as a verdict.
+
+    Rows are deduped on `(seq, event_id, type, payload-digest)` as defense in
+    depth — `event_id` is IN the key because two rows sharing seq/type/payload
+    but carrying distinct `event_id`s are two rows of the multiset, and merging
+    them would undercount the graph side.
+
+    ⚠️ WITH THE COMPLETENESS COUNT, a dedupe HIT cannot produce a deduped
+    reading: `total` counts NODES while `len(rows)` counts DISTINCT KEYS, so any
+    hit makes `len(rows) < total` and the walk REFUSES (`Unpageable`) rather than
+    returning a silently merged list. That includes the genuinely duplicated
+    `(seq, event_id, type, payload)` row this store admits where the uniqueness
+    constraint never exists (production issues it through `g.query()`, which cannot
+    parse the module command): it is refused as a short read, never merged away. So
+    the dedupe's only remaining effect is to keep `len(rows)` meaning "distinct
+    keys" — it must not be described as, and must not be trusted to perform, a
+    merge.
     """
+    # ⛔ THE REFUSAL LIVES HERE, not in a verb: `residency` and `superset` both
+    # call this function, and a guard installed in one of them is how a
+    # read-only verb mints a graph through the other (review round 2, P1).
+    _require_graph(db, graph)
     g = db.select_graph(graph)
     rows: list[dict[str, Any]] = []
     seen: set[tuple] = set()
@@ -445,10 +503,18 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
                 params={"after": after, "last_id": last_id, "limit": batch},
             ).result_set
         if not page:
-            return rows
+            # ⛔ `break`, never `return`: the completeness counts below are the
+            # ONLY thing that can tell "the feed ends here" from "the cursor can
+            # no longer advance" (round-2 review, P1), and an early return skipped
+            # them.
+            break
         added = 0
         for seq, type_, event_id, payload in page:
-            key = (seq, type_, _digest(payload))
+            # ⛔ `event_id` BELONGS IN THE KEY: two rows with the same seq,
+            # type and payload but distinct event_ids are two rows of the
+            # multiset, and merging them undercounts the graph side (review
+            # round 2, P2).
+            key = (seq, event_id, type_, _digest(payload))
             if key in seen:
                 continue
             seen.add(key)
@@ -458,23 +524,54 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
         cursor_seq, _, cursor_id = page[-1][0], page[-1][1], page[-1][2]
         if not isinstance(cursor_id, str) or not cursor_id:
             raise Unpageable(
-                f"the row at seq {cursor_seq!r} carries no `event_id`, so the "
-                f"composite cursor cannot advance past it and the rest of the feed "
-                f"cannot be read. A partial read is not a verdict, so none is "
-                f"produced — repair the row (append_event always writes one) or "
-                f"read the feed with `read_after`, which pages on `seq` alone.")
+                f"the row at seq {cursor_seq!r} carries no STRING `event_id` — it is "
+                f"absent, or it is not a string and so cannot be compared with a "
+                f"string cursor — so the composite cursor cannot advance past it and "
+                f"the rest of the feed cannot be read. A partial read is not a "
+                f"verdict, so none is produced — repair the row (append_event always "
+                f"writes one) or read the feed with `read_after`, which pages on "
+                f"`seq` alone.")
         if not added:
             raise Unpageable(
                 f"the feed could not be paged past seq {cursor_seq!r}/"
                 f"{cursor_id!r}: this page added no new row. A partial read is not "
                 f"a verdict, so none is produced")
         after, last_id = cursor_seq, cursor_id
+
+    # ⛔ THE WALK MUST PROVE IT REACHED THE END (review round 2, P1). A cursor
+    # cannot see three shapes the store admits, and each makes an empty page
+    # indistinguishable from the end: a NULL `seq` (never satisfies `seq > $after`),
+    # a `seq` stored as a STRING (the engine orders strings before numbers, so the
+    # page that ends the STRING block puts a STRING on the cursor, and `seq >
+    # $after` then matches no NUMERIC row — every row sorting after the block is
+    # unreachable; measured on the lane, `ORDER BY v ASC` gives `'10', 5, 20`,
+    # `v > '10'` returns nothing and `v > 5` returns `20`, so it is the STRING
+    # cursor that strands and NOT a numeric one), and a duplicated (seq, event_id)
+    # pair beyond a page boundary. Counting first makes the failure a REFUSAL
+    # instead of a shortened read that the verdict would happily call `covered`.
+    null_seq = g.query(
+        "MATCH (e:GraphEvent) WHERE e.seq IS NULL RETURN count(e)").result_set[0][0]
+    if int(null_seq or 0):
+        raise Unpageable(
+            f"{int(null_seq)} `:GraphEvent` row(s) carry no `seq`, so they can never "
+            f"be reached by a `seq` cursor and the feed cannot be read completely. "
+            f"A partial read is not a verdict, so none is produced — repair the "
+            f"row(s) (`append_event` always writes a `seq`).")
+    total = int(g.query("MATCH (e:GraphEvent) RETURN count(e)").result_set[0][0] or 0)
+    if total != len(rows):
+        raise Unpageable(
+            f"the feed holds {total} row(s) but the cursor reached {len(rows)}: a "
+            f"`seq` stored as a string, or a duplicated (seq, event_id) pair past a "
+            f"page boundary, makes the remaining rows unreachable. A partial read "
+            f"is not a verdict, so none is produced.")
     return rows
 
 
 def residency(graph_uri: str, graph: str) -> dict[str, Any]:
     """What the graph holds, and what share of it this one shape is."""
     db = _graph_connection(graph_uri)
+    # `_graph_rows` refuses an unknown graph (and that refusal covers every verb);
+    # this read happens first, so the same check is made here too.
     _require_graph(db, graph)
     g = db.select_graph(graph)
     totals = g.query(
@@ -578,11 +675,15 @@ def superset(graph_rows: list[dict[str, Any]],
     (`#13083` §6.3: `PointRetracted` on the graph side is `EntityMutated` in the
     journal) and a type-level absence is the failure a subscriber cannot see.
 
-    ⚠️ An EMPTY graph side returns ``no_verdict``, not ``covered``: an empty
-    multiset is a subset of everything, so the naive arithmetic would answer
-    `covered` for a feed that had been purged, for a mistyped graph name, or for
-    a store that answered a read with nothing — the vacuous PASS this verb must
-    never emit.
+    ⚠️ An EMPTY side returns ``no_verdict``, not ``covered`` — and that is BOTH
+    sides, not only the graph's: an empty multiset is a subset of everything, so
+    the naive arithmetic would answer `covered` for a feed that had been purged,
+    for a mistyped graph name, or for a store that answered a read with nothing
+    — and equally for a RECORD that holds none of this tenant's rows, which is
+    what a mistyped `--org-id`/`--graph-id` or a never-armed scope looks like
+    against a graph that holds thousands. The vacuous PASS this verb must never
+    emit, from either direction. Which side was empty is carried by
+    ``graph_events`` / ``record_events`` so the caller can say WHICH.
     """
     graph_by_type: dict[str, Counter] = {}
     for row in graph_rows:
@@ -627,7 +728,7 @@ def superset(graph_rows: list[dict[str, Any]],
     # ⛔ The empty arm comes FIRST: an empty multiset is a subset of everything, so
     # `covered` would be arithmetically true for a purged feed, a mistyped graph
     # name, or a store that answered with nothing — the vacuous PASS.
-    verdict = ("no_verdict" if not graph_rows
+    verdict = ("no_verdict" if (not graph_rows or not journal_rows)
                else ("covered" if covered else "not_covered"))
     return {
         "verdict": verdict,
@@ -650,10 +751,40 @@ def superset(graph_rows: list[dict[str, Any]],
 
 #: Cypher shapes that only a graph engine can answer. A row carrying one of
 #: these is NOT a `record_only` candidate, whichever class it was filed under.
+#:
+#: ⛔ The ADJACENCY arm is the one that matters most and is the easiest to miss.
+#: `#13083` §2 / `CAPABILITY-PLACEMENT-AUDIT.md` define "adjacency" and the EP walk
+#: by **fixed-length** patterns — `(new:Point {id:$n})-[r]->(t)`, `NOT (n)--()`,
+#: `MATCH (a)-[r:IMPL|NAND]-(b)` — so a variable-length-only detector (`-[*`) sees
+#: neither, and a one-hop reader filed as `maintenance` would pass. Measured at
+#: #14164 review round 2: six capability-bearing shapes returned `None` under a
+#: `-[*`-only arm, including the audit's own EP walk verbatim.
+#:
+#: ⛔ Matched against a WHITESPACE- AND BACKTICK-STRIPPED snippet, so `- [r]->` and
+#: `-[r]->` are one shape rather than two, and `` CALL `algo.pageRank`(…) `` is the
+#: same shape as `CALL algo.pageRank(…)` — the engine accepts all three spellings
+#: (this repo's own write gate documents the backticked procedure name as valid
+#: Cypher; `tortoise/projection/__init__.py:3572` carries the explicit `` `? ``
+#: in `_CALL_PROC_RE`, and `:3594` states that a backtick-quoted name is valid).
+#:
+#: ⛔ THE BACKTICK IS THE FALSE-PASS DIRECTION, which is why it is STRIPPED rather
+#: than declared away (`#14183` round-8 review, P2/P3). A contiguous arm sees
+#: neither `- [r] -` nor a quoted procedure name, so a capability reader could
+#: space or backtick its way past every prose check and the census's derived
+#: verdict would read "no reader needs a graph capability" beside a real one —
+#: the single failure this guard exists to prevent. Measured before the strip:
+#: `CALL `algo.pageRank`(null, null)` returned `None`.
+_NO_WS = re.compile(r"[\s`]+")
 GRAPH_CAPABILITY_CYPHER = (
     "-[*",                # a variable-length traversal
+    "*]",                 # a TYPED variable-length pattern, `-[r:NEXT*]->`
     "*1..", "*..",        # a bounded / open hop count
+    "-[",                  # a fixed-length relationship pattern (adjacency)
+    "]->", "<-", "--",    # a directed / undirected hop, including `(n)--()`
+    "exists {",           # a pattern-existence predicate over an edge
+    "size((",             # an adjacency aggregate
     "shortestpath",       # path search
+    "call algo", "apoc.",  # a graph algorithm / path procedure
     "call db.idx.fulltext", "db.idx.fulltext",
     "call db.idx.vector", "db.idx.vector",
 )
@@ -682,9 +813,14 @@ def graph_capability(row: Mapping[str, Any]) -> str | None:
         if word in prose:
             return word
     for snippet in row.get("snippets", ()):
-        haystack = snippet.lower()
+        # ⛔ WHITESPACE IS NOT A BYPASS. Every arm is a contiguous substring, so
+        # `MATCH (e:GraphEvent) - [r:T]-> (p)` — spacing the engine ACCEPTS — looked
+        # like no capability at all (#14183 review, non-blocking 6, measured). Both
+        # sides are whitespace-stripped before matching, so a re-spaced pattern is
+        # the same pattern.
+        haystack = _NO_WS.sub("", snippet.lower())
         for shape in GRAPH_CAPABILITY_CYPHER:
-            if shape in haystack:
+            if _NO_WS.sub("", shape) in haystack:
                 return f"cypher:{shape}"
     return None
 
@@ -695,17 +831,29 @@ def readers_report() -> dict[str, Any]:
     # Every row, at every class — not only the `serving` ones. A capability
     # reader misfiled as `maintenance` is exactly the case this must surface,
     # and a filter on `class` cannot see it by construction.
+    capability_readers = [
+        {"file": r["file"], "line": r["line"], "reader": r["reader"],
+         "capability": capability}
+        for r in READERS if (capability := graph_capability(r))
+    ]
     return {
         "readers": list(READERS),
         "counts": dict(counts),
-        "graph_capability_readers": [
-            {"file": r["file"], "line": r["line"], "reader": r["reader"],
-             "capability": capability}
-            for r in READERS if (capability := graph_capability(r))
-        ],
-        "verdict": ("no reader needs a graph capability — every reader is a "
-                    "key lookup, an ordered range scan, an aggregate, a predicate "
-                    "delete, or the schema those three depend on"),
+        "graph_capability_readers": capability_readers,
+        # ⛔ DERIVED, never a literal. A fixed sentence here would print a
+        # reassuring "no reader needs a graph capability" in the same JSON as a
+        # non-empty `graph_capability_readers` — and the evidence doc sources its
+        # table from this verb, so the artifact would contradict itself.
+        "verdict": (
+            "no reader needs a graph capability — every reader is a "
+            "key lookup, an ordered range scan, an aggregate, a predicate "
+            "delete, or the schema those three depend on"
+            if not capability_readers else
+            f"{len(capability_readers)} reader(s) NEED a graph capability, so "
+            "the shape is NOT a record_only candidate — re-open #13094's "
+            "verdict: " + ", ".join(
+                f"{r['reader']} ({r['capability']})" for r in capability_readers)
+        ),
     }
 
 
@@ -761,12 +909,19 @@ def main(argv: list[str] | None = None) -> int:
     # never managed to read. Exit 2 says what happened. `RecordUnavailable` is a
     # `RuntimeError` for the same reason (a `SystemExit` would escape this arm).
     try:
+        # ⛔ THE GRAPH REFUSAL COMES FIRST (review round 3, P2): `_graph_rows`
+        # runs `_require_graph`, one `GRAPH.LIST` command, while `record_rows` is
+        # a full paginated scan of the tenant's journal. Reading the record first
+        # meant a mistyped `--graph` paid for the whole journal BEFORE being
+        # refused — and it made the ordering assertion in
+        # `test_the_superset_verb_refuses_an_unknown_graph_too` a claim the code
+        # contradicted.
+        graph_rows_ = _graph_rows(_graph_connection(args.graph_uri), args.graph)
         conn = _record_connection(args.record_dsn, args.org_id)
         try:
             journal = record_rows(conn, args.org_id, args.graph_id)
         finally:
             conn.close()
-        graph_rows_ = _graph_rows(_graph_connection(args.graph_uri), args.graph)
     except Exception as exc:  # a store that refused is not a verdict (see above)
         print(f"a store could not be read ({type(exc).__name__}: {exc}). "
               "NO VERDICT was produced.", file=sys.stderr)
@@ -779,9 +934,22 @@ def main(argv: list[str] | None = None) -> int:
     if verdict["verdict"] == "covered":
         return 0
     if verdict["verdict"] == "no_verdict":
-        print("the graph holds no `:GraphEvent` rows, so there is nothing to "
-              "compare — an empty or purged feed is NOT `covered`. NO VERDICT "
-              "was produced.", file=sys.stderr)
+        # ⛔ SAY WHICH SIDE IS EMPTY (review round 3, P2). The verb now refuses an
+        # empty RECORD as well as an empty graph, and a fixed "the graph holds no
+        # rows" sentence over a graph holding thousands sends the operator to
+        # backfill the store that is fine — the same misdirection the evidence
+        # doc forbids in the other direction.
+        if not verdict["graph_events"]:
+            print("the graph holds no `:GraphEvent` rows, so there is nothing to "
+                  "compare — an empty or purged feed is NOT `covered`. NO VERDICT "
+                  "was produced.", file=sys.stderr)
+        else:
+            print(f"the RECORD holds no rows for this scope while the graph "
+                  f"holds {verdict['graph_events']} `:GraphEvent` row(s), so "
+                  f"there is nothing to compare — a mistyped `--org-id`/"
+                  f"`--graph-id`, a never-armed scope, or a record that lost "
+                  f"this tenant is NOT `covered`. NO VERDICT was produced.",
+                  file=sys.stderr)
         return 2
     return 1
 

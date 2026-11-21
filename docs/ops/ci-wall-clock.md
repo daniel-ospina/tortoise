@@ -302,17 +302,36 @@ here MUST name the head it was measured at and re-derive BOTH arms with the verb
 LOWER A WEIGHT: the three enter at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
 their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
-all three `durations:` rows still emits 720.7 at the merged tree) — the three files' +6 s over 11
-shards is what was measured to cross the minute boundary at the earlier head. The three
+all three `durations:` rows still emits **721.1** at the `#14183` head) — the three files' +6 s over 11
+shards is what was measured to cross the minute boundary at the earlier head. ⛔ **AND THIS PARAGRAPH HAS
+NOW BEEN RE-DERIVED A THIRD TIME, BECAUSE THE TWO SIDES OF `#14183`'s MERGE EACH RECORDED A DIFFERENT
+NUMBER FOR THAT SAME ARM AT THE SAME HEAD** — `main` wrote `720.7` and this branch wrote `720.4` — which
+is the symptom the clause above predicts, not a disagreement about the mechanism. Re-measured with the
+verb on the RESOLVED tree (`origin/main` `10e51693f1` + this branch, the head that carries this
+sentence): as shipped, all eleven shards emit **25 m** and the worst reads `est_seconds` **721.1**
+(`ceil(721.1/60 × 2)` = `ceil(24.037)` = **25**); with the three `durations:` rows dropped it STILL
+reads **721.1** / 25 m (so the rows are not what the ceiling rests on, exactly as the clause above
+says); and with `#14012`'s three `core` suites removed from the pool it reads **720.6** / **25 m** —
+still above the 720.0 cliff, so **the pair does not separate at this head either**. ⛔ NONE of the
+three readings is carried from either side: each was taken on the resolved tree, and the two historical
+figures are kept above only as the record of what each side measured at its own head. ⛔ **THIS
+RE-CUT MERGED THE TWO SIDES, WHICH IS A THIRD TREE, SO THE TERM IS READ OFF IT RATHER THAN
+INHERITED FROM EITHER PARENT:** the pool it packs now
+holds BOTH parents' added suites — `#14012`'s three (shards `d`, `e`, `i` — `test_14012_resident_cli`,
+`test_14012_resident_pin`, `test_14012_outside_view`) and `#14015`'s M5 `test_miss_rate_m5.py` (shard
+`d`, beside `resident_cli`) — so no arithmetic on the two parents' figures would have
+predicted the merged reading. The three
 hand-added figures are re-added from the
-emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, plus `config/ci-surfaces.yml`'s S=11
-header block, which reads **arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
-`test_demo_session_read_exclusion_8290.py` `durations:` row, which repeats 85.0 m against the 90 m
-cap), which is the 1-decimal restatement of the terms' own total, 56.64 m — ⛔ the × 1.5 is taken on
-the UNROUNDED total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying
-the ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre,
-which is how this one sentence came to disagree with the row above it — and the `84.9 / 5.1` this
-sentence itself carried was that same re-derivation, withdrawn here: ⛔ NOT the sum of the four ROUNDED
+emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, and the same three figures as the row's own
+`x 1.5 = 85.0`; `config/ci-surfaces.yml`'s S=11
+header block independently reads **arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
+`test_demo_session_read_exclusion_8290.py` `durations:` row repeats 85.0 m against the 90 m cap), which is the 1-decimal restatement of the
+terms' own total, 56.64 m — ⛔ the × 1.5 is taken on the UNROUNDED total, 56.64 → 84.96 → **85.0 m**,
+headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying the ROUNDED 56.6 instead reads 84.9 m / 5.1 m and
+overstates the headroom by a tenth of a metre, which is how this one sentence came to disagree with the
+row above it. ⛔ **THIS PARAGRAPH ITSELF RESTATED 84.9 m / 5.1 m UNTIL THE `#14183` RE-CUT** — that is
+exactly the ROUNDED-SUM path the clause just above forbids — and `origin/main` and this branch corrected
+it independently, to the same pair — ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
 first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
