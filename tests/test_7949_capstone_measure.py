@@ -1517,31 +1517,46 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
     artifact after the loop arms the fourth direction the wording claims — the cells this reader
     COULD read returned beside the fault.
     """
-    for payload, why in (("[]", "a LIST"),
-                         ("{\"packs\": \"x\"}", "non-object packs"),
-                         ("{}", "no packs at all"),
-                         ("{\"packs\": null}", "null packs"),
-                         ("{\"packs\": {\"dev\": {\"relations\": 42}}}", "non-LIST surface"),
-                         ("{\"packs\": {\"dev\": {\"hierarchies\": true}}}", "bool surface"),
-                         ('{"packs": {"dev": {"relations": [{"predicate": ["a", "b"]}]}}}',
-                          "unhashable row id"),
-                         ('{"packs": {"dev": 5}}', "non-OBJECT pack block"),
-                         # ⛔ the SIBLING SURFACE must be a list here, or the `hierarchies` guard
-                         # fires first and this payload never reaches the row guard it is written
-                         # for — measured: with `hierarchies` absent, dropping the row fault left
-                         # the case green (the `NoneType` surface fault supplied the UNMEASURED).
-                         ('{"packs": {"dev": {"relations": [5], "hierarchies": []}}}',
-                          "NON-OBJECT row")):
+    for payload, why, fault in (("[]", "a LIST", "not a JSON object"),
+                               ("{\"packs\": \"x\"}", "non-object packs", "`packs` object"),
+                               ("{}", "no packs at all", "no `packs` object"),
+                               ("{\"packs\": null}", "null packs", "no `packs` object"),
+                               ("{\"packs\": {\"dev\": {\"relations\": 42}}}",
+                                "non-LIST surface", "not a list"),
+                               ("{\"packs\": {\"dev\": {\"hierarchies\": true}}}",
+                                "bool surface", "not a list"),
+                               ('{"packs": {"dev": {"relations": [{"predicate": ["a", "b"]}]}}}',
+                                "unhashable row id", "could not be read"),
+                               ('{"packs": {"dev": 5}}', "non-OBJECT pack block",
+                                "pack 'dev' is a int"),
+                               # ⛔ the SIBLING SURFACE must be a list here, or the `hierarchies`
+                               # guard fires first and this payload never reaches the row guard it is
+                               # written for — measured: with `hierarchies` absent, dropping the row
+                               # fault left the case green (the `NoneType` surface fault supplied the
+                               # UNMEASURED).
+                               ('{"packs": {"dev": {"relations": [5], "hierarchies": []}}}',
+                                "NON-OBJECT row", "dev.relations carries a int row")):
         bad = tmp_path / "census.json"
         bad.write_text(payload)
         cells, source = measure._e6_write_cells(str(bad))
         assert cells == {}, (why, cells)
         assert "UNMEASURED" in source.upper(), (why, source)
+        # ⛔ THE NAMING IS THE ARM, not the UNMEASURED above (#14060 round-17 review, P3).
+        # Deleting a guard WHOLE leaves its `isinstance`/`continue` gone and the blanket
+        # `except Exception` below then supplies the very `UNMEASURED` this loop asserts —
+        # measured: with the `packs`-container, surface or row guard deleted outright, the case
+        # stayed green (1 failed, 40 passed over the E6 selection; the one red is #13768's).
+        # Each payload therefore also asserts the sentence ITS guard writes, so a deletion is
+        # distinguishable from the catch that would otherwise cover for it.
+        assert fault in source, (why, source)
     # …and the MIXED direction, where the fault costs CELLS rather than the whole column: a
     # readable pack beside a non-object one must still contribute its rows AND say what it could
-    # not read (`_e6_write_cells`' own wording: "the cells it could read are returned beside the
-    # fault"). Measured before this case: no payload reached that branch — every artifact above
-    # loses every cell, so `return cells, "… MALFORMED …"` and `return {}, "… MALFORMED …"` were
+    # not read. ⛔ QUOTED VERBATIM from `_e6_write_cells` (§14060 round-17 review, P3: an earlier
+    # cut put quotation marks around a PARAPHRASE — "the cells it could read are returned beside
+    # the fault" is in no file; the probe says "the cells this reader COULD read" — the same
+    # invented-quote defect this bundle's pins exist to catch). Measured before this case: no
+    # payload reached that branch — every artifact above loses every cell, so `return cells,
+    # "… MALFORMED …"` and `return {}, "… MALFORMED …"` were
     # indistinguishable and the beside-column claim was armed by nothing.
     mixed = tmp_path / "mixed.json"
     mixed.write_text(json.dumps({"packs": {

@@ -203,9 +203,12 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    exists to catch (`tests/test_7949_capstone_measure.py`'s reconcile-cite arm is what reds on
    it). FIVE statements move together and never one alone: the prose cite above, the bare
    parenthetical here, the `sed` below, `probes/capstone_measure.py:281`'s docstring, which
-   carried that same short number, and `README.md:453`, which names the same call and was the
-   statement an earlier cut of this note left out of its own enumeration — and an omission is
-   exactly what a completeness claim hides. The bare
+   carried that same short number, and `README.md`'s "reached from the capture path at
+   `sdk.py:<n>`" sentence, which names the same call and was the statement an earlier cut of this
+   note left out of its own enumeration — and an omission is exactly what a completeness claim
+   hides. ⛔ Named by its SENTENCE, not by a line number (#14060 round-17 review, P3): a
+   `README.md:<n>` pointer into a file that grows on any paragraph inserted above it is the same
+   unchecked anchor this note exists to catch, and no arm resolves cites INTO this README. The bare
    parenthetical is the statement no `sdk.py:` token and no `sed` covers, so it is the one that rots silently. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 286 lines into `tortoise/sdk.py`, 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. Then `#12882` (`2dfbb5d455`) inserted 379 lines and deleted 29 in `tortoise/sdk.py` (`git show --numstat 2dfbb5d455 -- tortoise/sdk.py` → `379 29`, net `+350`; an earlier cut of this note said “inserted 408”, which is the CHURN, not the insertions) and `#12904` (`5cc36a42d4`) added 8 and deleted 2 in `tortoise/hosted_api.py` (`8 2`, net `+6`, not “added 10”), and a third re-derivation moved all three together again, by the same +20 net band, off the same grep. Then `#13084` inserted its own RAM-cap seam into `tortoise/sdk.py` above this writer, and a fourth re-derivation moved all three together off the same grep. Then at the `#14060`
    review head the writer sat at `tortoise/sdk.py:22440`, so the figure recorded one round earlier
    (`22385`) was 55 short — measured at the head that wrote it: `sed -n '22385p'` reads `#   * this
@@ -801,7 +804,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:16388`) that derives the doc's cite, two are the
+                                                          # (`:16403`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
@@ -811,7 +814,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
                                                           # later commits on this branch (#13802 review, P2)**: no line number
-                                                          # is typed HERE for that figure; the `:16388` cite earlier in this block IS the
+                                                          # is typed HERE for that figure; the `:16403` cite earlier in this block IS the
                                                           # derived value the guard reads at this head — named by the value, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
