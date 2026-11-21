@@ -1144,14 +1144,17 @@ def evict(
                 # reason: a window made entirely of PINNED nodes is not an exhausted
                 # population either — the answer is "unpin, or raise the pin budget",
                 # and neither is reachable from a message about widening a selector.
+                # ⛔ AND THE PIN OUTRANKS THE LEASE IN THIS ARM TOO — the same ordering as
+                # gate 6 itself and as the last-hop arm below, because `unpin` is the only
+                # remedy that clears a pin while a lease clears itself.
                 if held_record_ids:
                     stop_reason = "population"
-                elif held_leased_ids:
-                    stop_reason = "leased"
                 elif held_pinned_unanswerable:
                     stop_reason = "pin-unanswerable"
                 elif held_pinned_ids:
                     stop_reason = "pinned"
+                elif held_leased_ids:
+                    stop_reason = "leased"
                 else:
                     stop_reason = "population"
                 break
@@ -1181,11 +1184,12 @@ def evict(
         late_pinned = 0
         late_pinned_unanswerable = 0
         for candidate in local:
-            if candidate.node_id in holds:
-                if candidate.node_id not in held_leased_ids:
-                    held_leased_ids.add(candidate.node_id)
-                    held_leased.append(candidate)
-                continue
+            # ⛔ THE PIN IS ASKED BEFORE THE LEASE HERE TOO, so all three sites agree
+            # (plan-time gate 6, this loop, and both stop-reason arms below). The ordering
+            # is not cosmetic: the buckets exist to route the operator to the remedy that
+            # clears the state, `unpin` is the only one that clears a pin, and the module
+            # header's rule is that a node reported as "pinned" must not be reported as
+            # held for a reader instead.
             if pinned is not None:
                 answered = True
                 try:
@@ -1203,28 +1207,44 @@ def evict(
                     else:
                         late_pinned_unanswerable += 1
                     continue
+            if candidate.node_id in holds:
+                if candidate.node_id not in held_leased_ids:
+                    held_leased_ids.add(candidate.node_id)
+                    held_leased.append(candidate)
+                continue
             final.append(candidate)
 
         if not final:
-            # ⛔ NOT "population". Every node this pass was about to take is held by a
-            # READER (skipped_leased) or by a pin declared mid-sweep (skipped_pinned), so
-            # blaming the population sends the next reader to research an exhausted
-            # selector that is not the problem — the same misattribution class
-            # `stop_reason` exists to separate ("satisfied" | "population" | "licence" |
-            # "pass_budget"), and worse here because the answer is "something is holding
-            # these", which no population query reveals. The pin arms come first because
-            # the pin is the control a reader can clear themselves (`unpin`), whereas a
-            # lease is a reader that was live at statement time.
-            # `pinned` is the only other way a candidate leaves this loop, so an empty
-            # `final` is exhausted by the two pin arms and the lease arm below — the
-            # fallback is a construction, not an assumption about what happened.
-            if late_pinned_unanswerable:
-                stop_reason = "pin-unanswerable"
-            elif late_pinned:
-                stop_reason = "pinned"
-            else:
-                stop_reason = "leased"
-            break
+            # ⛔ REFUND THE LICENCE FIRST. `local` was debited above and this arm takes
+            # nothing, so without the refund the next pass computes
+            # `budget = min(batch, remaining_plan, licence_remaining) = 0` and stops with
+            # the FALSE reason `licence` — a debit that no delete explains.
+            licence_remaining += len(local)
+            # ⛔ AND DO NOT BREAK JUST BECAUSE THIS WINDOW WAS ENTIRELY HELD BACK — the
+            # same rule the `if not local:` arm above states, for the same reason. The
+            # window widens on the NEXT pass (it is recomputed from the held sets each
+            # pass), so breaking here means the widening never applies in the case it was
+            # written for: a pin that becomes visible only at the delete statement would
+            # abandon the remaining passes and report zero evictions while the identical
+            # declaration, seen one ask earlier, would have delivered them. Break only when
+            # there is nothing left to widen (`window >= after_nodes`) or when the hold
+            # sets did not grow (every candidate was already held — continuing would spin).
+            held_grew = (len(held_leased_ids), len(held_pinned_ids)) != held_before[1:]
+            if window >= after_nodes or not held_grew:
+                # ⛔ WHICH hold-back stopped this pass is REPORTED, not assumed. The PIN
+                # arms come first: the pin is the control a reader can clear themselves
+                # (`unpin`), whereas a lease is a reader that was live at statement time,
+                # and the same ordering governs the `if not local:` arm above so the two
+                # cannot disagree about the same both-holds condition.
+                if late_pinned_unanswerable:
+                    stop_reason = "pin-unanswerable"
+                elif late_pinned:
+                    stop_reason = "pinned"
+                else:
+                    stop_reason = "leased"
+                break
+            # The window grew but this pass found nothing new to take: keep widening.
+            continue
         # ⛔ `snapshot_out` IS HOW THE ABORT PATH LEARNS WHAT THE INVALIDATION DID. On a
         # raise the tuple below never arrives, so without this channel the report would
         # have to say `None` — "not applicable" — about a statement whose effect is
