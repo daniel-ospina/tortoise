@@ -1429,6 +1429,15 @@ def test_no_graph_dependency() -> None:
         suppressed name from an absent one" — is true of an assert over an IMPORT, and
         false of an assert over an input the test supplies: the injected roots are
         known to be present, so their absence from the result is a defect either way.
+        ⛔ AND THE WITNESS INPUTS ARE NOT THE ONLY EVIDENCE: every root is also
+        IMPORTED for real, one subprocess each, with nothing injected, and the probe
+        must report the module that import put in `sys.modules`. That row is what
+        closes the keep-list class for good — a filter keyed on `set(injected)` (empty
+        there) or on any fixed list of roots has to carry the WHOLE derivation, i.e.
+        the whole ban set, which is no narrowing at all. Measured on the previous head:
+        a six-literal keep-list (the three named controls plus `tortoise.cypher_guard`,
+        `tortoise.projection`, `tortoise.retry`) was **102 passed** and left the probe
+        blind to `tortoise.acl_graph_users` and `tortoise.hosted_backup`; it reds here.
         What remains is only PREDICTION of this test's inputs, the same residual as
         above, and a narrowed child now reds BY ITSELF instead of merely being
         undetectable.
@@ -1550,19 +1559,20 @@ def test_no_graph_dependency() -> None:
         "on the way into `_matching` (the parent's parse), or inside the matcher; each "
         "is a live miss for that root and none of them is visible to a row that "
         "imports a real module (#14118 item 1)")
-    # ⛔ AND ONE ROW IS KEYED ON A REAL IMPORT, because the composition row above
-    # cannot catch a filter keyed on ITS OWN INPUT: its expected set IS the injected
-    # set, so `… if n in set(injected) | {the three named controls}` passes it by
-    # construction — measured GREEN on this head before this row, with
-    # `import tortoise.projection` then returning an empty set. This import is fixed by
-    # the tree, supplies no injected name, and pulls three distinct banned roots, so an
-    # injected-or-controls filter keeps NONE of them and reds here.
-    _real = _probe("import tortoise.projection")
-    assert {"tortoise.cypher_guard", "tortoise.projection", "tortoise.retry"} <= _real, (
-        f"`import tortoise.projection` left only {sorted(_real)} — it puts those three "
-        "banned roots in `sys.modules`, so a filter keyed on the witness rows' own "
-        "inputs (`set(injected) | the named controls`) drops them and reds here "
-        "(#14118 item 1)")
+    # ⛔ AND EVERY ROOT IS IMPORTED FOR REAL, one at a time, with NOTHING injected —
+    # the row that cannot be satisfied by a keep-list. The expected name is the module
+    # the import statement ITSELF put in `sys.modules`, so a filter keyed on
+    # `set(injected)` (empty here) or on any fixed list of controls must include the
+    # WHOLE derivation to stay green. Measured on the previous head: a keep-list of six
+    # literals — the three named controls plus the three roots the old `projection` row
+    # named — left the probe blind to `tortoise.acl_graph_users` and
+    # `tortoise.hosted_backup` and was still **102 passed**; it reds here.
+    for _root in _probe_forbidden():
+        assert _root in _probe(f"import {_root}"), (
+            f"`import {_root}` puts `{_root}` in `sys.modules`, so the probe must "
+            "report it. Nothing is injected for this row, so no keep-list can be keyed "
+            "on the witness inputs, and a filter that names only some roots drops this "
+            "one (#14118 item 1)")
     assert _matching(["redis_probe", "tortoise_ep", "notfalkordb"]) == set(), (
         "the matcher must not treat a name that merely CONTAINS a banned root as "
         "being under it — `redis_probe` is not `redis.*`, and matching it would make "
