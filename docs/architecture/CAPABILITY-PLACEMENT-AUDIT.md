@@ -198,7 +198,7 @@ below repeats the pin's and `ae54df166d`'s — it does not carry the branch-base
 longer names the door's `MERGE` line or its `def` (it is `+2` into a BYTE-IDENTICAL region, so the door
 did not change between those heads — only the offsets above it did), so this paragraph is the only place
 that reading appears. ⛔ **Re-derive by CONTENT:
-never reuse the delta.** The `+419` all three of this
+never reuse the delta.** The `+419` that all three of this
 row's and row 15's sites take between that squash (`32441c280d`) and this one is **not** one insert: that
 interval is **569 inserted and 59 deleted** lines in `tortoise/hosted_api.py`
 (`git diff --numstat 32441c280d HEAD -- tortoise/hosted_api.py`), across **25** hunks — and the convention,
