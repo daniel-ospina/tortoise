@@ -3050,15 +3050,35 @@ _SWEEP_STATEMENTS = {
 }
 
 
-def _assert_the_sweep_never_runs_on_the_loop(records, *, arm: str) -> None:
-    """The three assertions every sweep arm owes, shared by both arms.
+def _assert_the_sweep_never_runs_on_the_loop(records, *, arm: str,
+                                            alive_probes: int) -> None:
+    """The four assertions every sweep arm owes, shared by both arms.
 
     Factored out because the delete-race branch has TWO sweep call sites
     (`hosted_api.py:21685`, the receipt re-check window, and `:21694`, the
     session already gone at the pre-check) and a test that reaches one of them
     is silent about the other — measured: inlining the sweep at `:21685` only
-    left the `:21691` test GREEN (#14086 review, P2). Both arms now call this.
+    left the `:21694` test GREEN (#14086 review, P2). Both arms now call this.
+
+    ⛔ `alive_probes` is what says WHICH arm ran, and it is asserted FIRST. Both
+    arms issue the SAME three sweep statements from the SAME pool, so the other
+    three assertions cannot tell them apart: forcing `session_gone=True` into
+    the re-check row (i.e. collapsing it onto its sibling's branch) left that
+    row GREEN before this count existed (#14086 review, P2). The ordinal is the
+    only arm-dependent observable the fixture exposes — the pre-check arm
+    answers the first `_session_alive` "gone", the re-check arm answers the
+    first "alive" and the second "gone".
     """
+    # ⛔ WHICH ARM: the session-alive probe count, before anything about threads.
+    observed = sum(1 for _n, c, _d in records if c == _SESSION_ALIVE)
+    assert observed == alive_probes, (
+        f"this row is supposed to drive the {arm} sweep arm, which probes "
+        f"`_session_alive` {alive_probes}x, but it probed {observed}x — so the "
+        "capture took the OTHER arm (or a new query was added ahead of the "
+        "pre-check and shifted the ordinal). The sweep needles below are "
+        "identical in both arms, so without this count the row passes on its "
+        "sibling's branch and proves nothing about its own")
+
     on_loop = [c for name, c, _d in records if name == "MainThread"]
     all_cyphers = [c for _n, c, _d in records]
 
@@ -3127,7 +3147,8 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop(
     require_answered(
         resp, what="POST /v1/sessions answered (delete-race tail run)")
     assert resp.status_code == 200, resp.text[:300]
-    _assert_the_sweep_never_runs_on_the_loop(records, arm="pre-check (21691)")
+    _assert_the_sweep_never_runs_on_the_loop(
+        records, arm="pre-check (21694)", alive_probes=1)
 
 
 def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins_the_recheck(
@@ -3139,13 +3160,16 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins
     the receipt write succeed and the delete wins INSIDE the window the
     off-load itself opened (`session_gone=2` — gone from the second probe), so
     the compensation arm runs and its `_sweep_orphaned_writes` is the one under
-    test. Measured before this row existed: inlining the sweep at `:21682` only
+    test. Measured before this row existed: inlining the sweep at `:21685` only
     was GREEN, so that arm was uncovered by every test in this tree and — unlike
     the enrichment read above — not declared as a residual (#14086 review, P2).
 
     Mutation check (must stay true): inlining `_sweep_orphaned_writes()` at
     `:21685` reds the off-loop assertion; deleting that call reds the
-    non-vacuity one.
+    non-vacuity one; and collapsing the fixture onto the sibling's branch
+    (`session_gone=True`, i.e. ONE alive probe instead of two) reds the
+    arm-identity assertion, which is what stops this row passing on the wrong
+    branch.
     """
     resp, records, _writer = _measure_capture_graph_work(
         monkeypatch, 40, "tail-off-loop-sweep-recheck-10893",
@@ -3154,4 +3178,5 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins
     require_answered(
         resp, what="POST /v1/sessions answered (delete-race re-check run)")
     assert resp.status_code == 200, resp.text[:300]
-    _assert_the_sweep_never_runs_on_the_loop(records, arm="re-check (21682)")
+    _assert_the_sweep_never_runs_on_the_loop(
+        records, arm="re-check (21685)", alive_probes=2)
