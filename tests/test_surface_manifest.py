@@ -8006,7 +8006,10 @@ def test_the_shrink_arm_is_off_unless_a_base_ref_is_given(checker, tmp_path, mon
 
     assert rc == 0, out
     assert called == [], "the shrink arm ran without --base-ref"
-    assert "shrink checked against" not in out
+    assert "shrink checked against" not in out, (
+        "the arm did not run, so the green line must not claim it compared anything: a pass "
+        f"that names a base it never read is the false green this arm exists to prevent: {out}"
+    )
 
 
 def test_a_shrink_waiver_needs_a_reason_and_a_base_ref():
@@ -8217,4 +8220,11 @@ def test_the_green_line_echoes_the_waiver_reason(checker, tmp_path, monkeypatch)
     assert rc == 0, out
     assert "waived: tool:tortoise_deliberate_drop" in out, out
     assert "reason: deliberate: measured no callers" in out, out
+    # ⛔ THE POSITIVE SIDE OF THE GREEN LINE (review note of PR #14039, "no red"): the only
+    # row over this string asserted its ABSENCE (`test_the_shrink_arm_is_off_unless_a_base_ref
+    # _is_given`, `assert "shrink checked against" not in out`), so deleting the suffix from
+    # `cmd_check` kept every row green while a green shrink pass went back to reading
+    # identically to a run where the arm silently did nothing. Assert what was COMPARED, and
+    # assert the value the arm produced rather than the literal prefix.
+    assert "shrink checked against origin/main (merge base abc)" in out, out
 
