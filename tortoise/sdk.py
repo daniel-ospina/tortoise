@@ -5706,13 +5706,13 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #: drop the reserved names before splatting, and `create_source` — the one door
 #: that bypasses intake — drops them itself. With every relay covered, the
 #: collision is impossible and live == replay.
-#: ``record_sink`` (#10000) and ``write_sink`` (#14002) are the PER-CALL objects
-#: the signature owns: the writer hands in a list and `_emit_event` appends the
-#: write's OUTCOME (or its SKIP fact) to it, so the caller decides a store from
-#: what the write did. A caller prop of either name splatted into the call binds
-#: the parameter and suppresses the outcome, so both are reserved — and prose is
-#: not the gate: the set is DERIVED against `inspect.signature(_emit_event)` by
-#: `tests/test_2296_document_created_journal.py`, which caught `write_sink`.
+#: ``record_sink`` (#10000) / ``write_sink`` (#14002): `_emit_event` appends the
+#: RECORD write's outcome (record_sink) or the live write's SKIP fact
+#: (write_sink) to the list the caller hands in, so the caller decides a store
+#: from what the write did. A caller prop of either name splatted into the call
+#: binds the parameter and suppresses that outcome — every turn then reads as
+#: unrecorded and falls back to the graph (safe, but silent). Prose is no gate:
+#: DERIVED from `_emit_event`'s signature by `test_2296_document_created_journal`.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
                             "record_sink", "write_sink")
 
