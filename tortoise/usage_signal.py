@@ -1598,6 +1598,24 @@ def refresh(
         window = _window_days()
     else:
         window = window_days if isinstance(window_days, int | float) else None
+        if window is None and window_days is not None:
+            # ⛔ A NON-NUMERIC WINDOW IS NOT "NO WINDOW" EITHER, and this is the
+            # quiet direction. `window_days="7"` — a day count arriving from
+            # config or JSON, the ordinary way this knob reaches a caller — would
+            # otherwise silently run the UNBOUNDED roll-up with NO signal at all,
+            # so the bound the caller asked for evaporates and the roll-up grows
+            # unbounded. `_window_days()` already warns for the env spelling; the
+            # argument must not be quieter than the variable it stands in for.
+            # The type is still refused rather than raised on (`refresh` is
+            # documented "NEVER raises", and the pre-fix `timedelta(days="7")`
+            # raised `TypeError`), but the refusal is now audible.
+            _warn_once(
+                "window-type",
+                "usage signal: window_days=%r is not a day count — the roll-up "
+                "is running UNBOUNDED for this call (every entry kept); fix the "
+                "value to bound it",
+                window_days,
+            )
         if window is not None and not window > 0:
             # ⛔ ZERO IS NOT "PRUNE EVERYTHING". A bound of zero would empty the
             # roll-up, which is never the intended reading of a tuning knob, and

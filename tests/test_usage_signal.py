@@ -1044,6 +1044,64 @@ def test_a_same_inode_shrink_forces_a_cold_replay(stream: Path) -> None:
     assert [e.key for e in got.entries.values()] == ["new"]
 
 
+def test_a_shrink_between_the_body_read_and_the_probe_is_caught(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `copytruncate` landing INSIDE the read window, not between two refreshes.
+
+    ⛔ `after.st_size < start` let a truncation INTO the freshly-read window
+    through: the size after the shrank is still greater than the OLD offset, so the
+    fold certified bytes the file no longer contained (measured `st_size` 348 → 300
+    against an offset of 348, reading `stale=False`, `orderable=True`). The guard
+    is `st_size < start + len(whole)`.
+
+    The two existing shrink tests cannot reach this arm: they truncate BETWEEN
+    refreshes, so `_checkpoint_matches`'s own `st_size < state.offset` test fires
+    first, `start` becomes 0, and `st_size < start + len(whole)` reduces to
+    `size < size` — false, exactly as `< start` is. This test truncates AFTER the
+    body has been read and BEFORE the post-read probe, which is the only shape
+    that reaches the line.
+    """
+    _serve(stream, "Point", ["hot"], at=_at(1))
+    usage_signal.refresh(stream)
+    start = len(stream.read_bytes())
+    assert start > 0, "a non-zero offset is the whole point of this arm"
+    ckpt = json.loads(usage_signal.checkpoint_path(stream).read_text(encoding="utf-8"))
+    assert ckpt["offset"] == start, "the test's premise: a live checkpoint at `start`"
+
+    # ONE COMPLETE serve appended, so `start + len(whole)` is the file's own size
+    # and a shrink to anything in `(start, start + len(whole))` separates the two
+    # spellings of the guard.
+    _serve(stream, "Point", ["vanishing"], at=_at(2))
+    full = stream.stat().st_size
+    assert full - 20 > start, "the truncation must land strictly inside the window"
+
+    real_fstat = usage_signal.os.fstat
+    ino = stream.stat().st_ino
+    seen = {"count": 0}
+
+    def _probe(fd: int):
+        st = real_fstat(fd)
+        if st.st_ino != ino:
+            return st
+        seen["count"] += 1
+        if seen["count"] == 2:  # the probe AFTER the body read, not the pre-read one
+            with open(stream, "r+b") as fh:
+                fh.truncate(full - 20)
+        return real_fstat(fd)
+
+    monkeypatch.setattr(usage_signal.os, "fstat", _probe)
+    got = usage_signal.refresh(stream)
+    monkeypatch.setattr(usage_signal.os, "fstat", real_fstat)
+
+    assert seen["count"] >= 2, "the guard was never probed after the body read"
+    assert got.replayed is True, "a mid-read truncation was folded as current bytes"
+    assert got.serve_count("Point", "vanishing") == 0, (
+        "a coordinate whose bytes were truncated away mid-read was reported as "
+        "served AND orderable — the fail-open this guard exists to close"
+    )
+
+
 def test_a_bad_stream_path_does_not_raise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`refresh` is documented NEVER to raise — and it is on the armed path.
 
@@ -1224,6 +1282,62 @@ def test_the_pruning_window_is_part_of_the_checkpoint_identity(stream: Path) -> 
     assert unbounded.serve_count("Point", "ancient") == 1, (
         "a coordinate still in the stream read as 'no opinion' because another "
         "caller had pruned it"
+    )
+
+
+def test_the_window_sentinel_lets_a_caller_switch_the_env_window_off(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None` means "no window"; only the absent default reads the env.
+
+    ⛔ `refresh`'s default WAS `None`, so a window set through the environment
+    could only be turned ON: every explicit `window_days=None` fell through to
+    `_window_days()` and pruned entries the caller had just asked not to bound.
+    That is the same fail-open as the checkpoint-identity defect — a caller reads
+    a coordinate as "no opinion" because a tuning knob it did not set destroyed
+    it — so the sentinel needs its own assertion, not only the identity test.
+    """
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    now = datetime(2026, 1, 5, tzinfo=UTC)
+    monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "2")
+
+    unbounded = usage_signal.refresh(stream, now=now, window_days=None)
+
+    assert unbounded.pruned == 0, "an explicit None read the env and pruned"
+    assert unbounded.serve_count("Point", "ancient") == 1, (
+        "the caller asked for no window and had a live entry destroyed by an env "
+        "variable it was overriding"
+    )
+
+    from_env = usage_signal.refresh(stream, now=now)
+
+    assert from_env.pruned > 0, "the default must still read the env window"
+    assert from_env.serve_count("Point", "ancient") == 0
+
+
+def test_a_non_numeric_window_is_refused_out_loud(stream: Path) -> None:
+    """A day count spelled as a string must not un-bound the roll-up SILENTLY.
+
+    ⛔ `window_days="7"` (config, JSON — the ordinary way the knob reaches a
+    caller) is not an `int`/`float`, so the type filter maps it to `no window`:
+    the roll-up grows without the bound the caller asked for and NOTHING is
+    emitted — the env spelling of the same mistake warns, the argument did not.
+    The non-positive arm is refused loudly for the same reason; a type error is
+    the quiet direction and was the only branch without a signal.
+    """
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    usage_signal._warned.clear()
+
+    got = usage_signal.refresh(
+        stream, now=datetime(2026, 1, 5, tzinfo=UTC), window_days="7"
+    )
+
+    # It must still degrade rather than raise (`refresh` NEVER raises, and the
+    # pre-fix `timedelta(days="7")` raised `TypeError`) — but it must SAY so.
+    assert got.pruned == 0
+    assert got.serve_count("Point", "ancient") == 1
+    assert "window-type" in usage_signal._warned, (
+        "a non-day-count window ran the roll-up UNBOUNDED with no warning at all"
     )
 
 
