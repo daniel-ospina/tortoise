@@ -1135,6 +1135,32 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
             "is not told that the cue report is suppressed — the filter/population "
             "boundary is over-promised again (#14033 review round-12, P2)")
 
+    # ⛔ AND THE CLAUSE ITSELF MUST BE TRUE, NOT MERELY NAME THE ARGUMENTS (#14033
+    # round-13 review, P3). It first read "ANY RETRIEVAL ARGUMENT SILENCES THE
+    # REPORT", which is FALSE at a value equal to the default — `_retrieval_knobs()`
+    # classifies `threshold not in (0.0, 0)`, `min_confidence not in (0.0, 0)` and
+    # `order_by != "relevance"`, so `threshold=0.0` passed EXPLICITLY is not a knob
+    # and the report still fires (measured in
+    # `test_a_retrieval_knob_suppresses_the_notice_too`). And a names-only pin could
+    # not see an INVERSION of the sentence: flipping "AND ANY … SILENCES" to "AND NO
+    # … SILENCES" left every assertion above green (reviewer-measured mutant).
+    # So the qualifier and its carve-out are pinned as the CLAIMS they are, and the
+    # behaviour behind them is pinned in the SDK test that drives the guard.
+    # ⛔ NORMALISED FIRST: the served string is line-wrapped, and the phrase this pins
+    # spans a wrap (`... THAT CHANGES THE\nREAD SILENCES ...`), so a raw `in doc` would
+    # report a false failure on the very wording it is checking (measured).
+    _doc_flat = " ".join(doc.split())
+    assert "THAT CHANGES THE READ" in _doc_flat and "NON-DEFAULT" in _doc_flat, (
+        "the SERVED description is back to claiming that ANY retrieval argument "
+        "silences the cue report, which is false at a default-equal value "
+        "(`threshold=0`, `min_confidence=0`, `order_by=\"relevance\"` do not silence "
+        "it) — the boundary is described more broadly than the guard implements it "
+        "(#14033 round-13 review, P3)")
+    assert "is not a filter and does not silence it" in _doc_flat, (
+        "the SERVED description dropped the NEUTRAL-VALUE carve-out: a caller who "
+        "passed `threshold=0` explicitly is then told they silenced a report that in "
+        "fact still fires (#14033 round-13 review, P3)")
+
 
 def test_the_bounded_cost_claims_name_every_scan():
     """The cost claims this module makes are PINNED to the tables they describe.
@@ -2016,6 +2042,24 @@ def test_a_retrieval_knob_suppresses_the_notice_too(sdk):
     sdk._tortoise_fts_query("which claims were retracted by legal",
                             entity_type="point", limit=5, _state_route_out=plain)
     assert plain.get("reason") == "shape", plain
+
+    # ⛔ AND THE SERVED CLAUSE'S CARVE-OUT IS THE MEASURED BEHAVIOUR, not a hope
+    # (#14033 round-13 review, P3). The served text now says a retrieval argument
+    # "THAT CHANGES THE READ" silences the report and that a default-equal value is
+    # "not a filter and does not silence it" — this is the arm that makes that true.
+    # `_retrieval_knobs()` classifies by VALUE (`threshold not in (0.0, 0)`), so a
+    # caller who passes the default explicitly is still served the report; the mutant
+    # that would break it is `("threshold", threshold is not None)`, which makes this
+    # arm red while every non-default arm above stays green.
+    neutral: dict = {}
+    sdk._tortoise_fts_query("which claims were retracted by legal",
+                            entity_type="point", limit=5, threshold=0.0,
+                            min_confidence=0.0, order_by="relevance",
+                            _state_route_out=neutral)
+    assert neutral.get("reason") == "shape", (
+        f"a DEFAULT-equal value silenced the cue report ({neutral!r}) — the served "
+        f"description says such a value \"is not a filter and does not silence it\", "
+        f"so the text and the guard now disagree (#14033 round-13 review, P3)")
 
 
 def test_the_missed_route_hint_states_only_what_the_read_did():

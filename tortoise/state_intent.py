@@ -751,13 +751,15 @@ SEARCH. There is no second attempt and no fallback: you get the rows the words
 match, which may be empty or unrelated, and an EMPTY answer here is NOT
 evidence that nothing has ended. This tool takes NO argument that forces the
 ended read — the SHAPE is the only way in, so the way to be explicit is to ask
-a form from the ROUTES list above. ⛔ AND ANY RETRIEVAL ARGUMENT SILENCES THE
-REPORT, which is the other half of that boundary: `threshold`,
-`min_confidence`, `order_by`, `relationship_filter` and `traversal_path` each
-ask for a FILTERED relevance read, and the cue report is raised inside the
-same guard that decides routing — so with any of them supplied you get that
-filtered read and NO report, and a state question you filtered looks exactly
-like an honest empty again. The filter and the population are different
+a form from the ROUTES list above. ⛔ AND A RETRIEVAL ARGUMENT THAT CHANGES THE
+READ SILENCES THE REPORT, which is the other half of that boundary: a
+NON-DEFAULT `threshold`, `min_confidence`, `order_by`, `relationship_filter`
+or `traversal_path` asks for a FILTERED relevance read, and the cue report is
+raised inside the same guard that decides routing — so with any of those
+supplied you get that filtered read and NO report, and a state question you
+filtered looks exactly like an honest empty again. (A value equal to the
+default — `threshold=0`, `min_confidence=0`, `order_by="relevance"` — is not a
+filter and does not silence it.) The filter and the population are different
 answers: send the question ALONE to get the population or the report. (The
 hosted `GET /v1/search` route below takes only the question and `limit`,
 neither of which is a routing argument, so it is not silenced.)
