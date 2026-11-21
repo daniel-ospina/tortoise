@@ -5025,6 +5025,47 @@ def test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool():
         r["surfaces"])
 
 
+def test_the_doc_reader_guard_runs_on_the_doc_it_reads():
+    # #14237 review (P1, the #6138 class — a doc that GAINED a reader).
+    # `tests/test_11609_door_retirement.py::TestEveryReaderNamesTheLiveListingDoor`
+    # READS `docs/how-to/provision-a-graph-per-end-user.md` and asserts every
+    # `tortoise_*` mention in it is a labelled migration note rather than an
+    # instruction — but the doc was in no `SOURCE_PATTERNS` row, and `docs/` is a
+    # `NON_PYTHON_PREFIX`, so `_keep_changed` dropped it, `changed == []`, and
+    # `select()` took the docs-only early return. Measured on the pre-fix tree:
+    #   select(["docs/how-to/provision-a-graph-per-end-user.md"])
+    #     -> surfaces=[] , full=False , 106 files, guard ABSENT
+    # while a `mcp_server.py` diff (SHARED_MODULES -> FULL matrix) ran it. So the
+    # guard was awake on code diffs and asleep on the ONE edit class it exists
+    # for: a how-to that re-points a step at a name `tools/list` does not
+    # advertise would merge green — the reader it protects is the reader who ACTS
+    # on the doc. This pin is the registration's own guard, so deleting the
+    # `SOURCE_PATTERNS["sdk"]` entry reds here instead of silently sleeping.
+    doc = "docs/how-to/provision-a-graph-per-end-user.md"
+    r = _sel([doc])
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert "sdk" in r["surfaces"], (
+        "a diff to the how-to the retired-name guard READS selects no surface "
+        "(SOURCE_PATTERNS['sdk'] entry removed?) — the guard then never runs on "
+        "the doc edit it exists to catch", r["surfaces"])
+    assert runs("test_11609_door_retirement.py"), (
+        "the how-to-reader guard is not in the selection for a diff to the doc it "
+        "reads (SOURCE_PATTERNS['sdk'] entry removed?)", r["test_files"])
+    # …and the entry must stay CONCRETE: an unrelated prose doc is still not a
+    # python-relevant change, so it keeps taking the docs-only early return
+    # (tier-1 smoke). A `docs/how-to/` prefix here would drag this suite into
+    # every documentation PR.
+    other = _sel(["docs/how-to/some-unrelated-page.md"])
+    assert other["surfaces"] == [], (
+        "an unrelated how-to now selects a surface — the entry for the reader doc "
+        "was widened to a prefix; keep it one concrete path", other["surfaces"])
+    assert "test_11609_door_retirement.py" not in other["test_files"], (
+        "the retired-name guard runs on docs it does not read", other["test_files"])
+
+
 def test_mcp_client_change_keeps_the_core_pool_that_guards_its_words():
     # #10605 / PR #10727 review (P2). `tortoise/mcp_client.py` was registered as
     # an exact SOURCE_PATTERNS["api"] entry so that `tests/test_mcp_client.py`

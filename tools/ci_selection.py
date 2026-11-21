@@ -1209,7 +1209,27 @@ SOURCE_PATTERNS = {
             # The `eval` half of the fix is one tuple down (the replay proxy).
             # Pinned by tests/test_ci_selection.py::
             # test_temporal_leg_change_runs_its_pins_and_keeps_the_core_pool.
-            "tortoise/temporal_leg.py"),
+            "tortoise/temporal_leg.py",
+            # ⛔ #14237 review (P1, the #6138 class — a doc that GAINED a reader):
+            # `tests/test_11609_door_retirement.py::TestEveryReaderNamesTheLiveListingDoor`
+            # reads this how-to and asserts every `tortoise_*` mention in it is a labelled
+            # migration note, not an instruction — but `docs/` is in `NON_PYTHON_PREFIXES`
+            # and the doc sat in no SOURCE_PATTERNS row, so a DOC-ONLY edit that re-points
+            # the how-to at a retired door filtered to `changed == []` and took the
+            # docs-only early return. Measured before this entry:
+            #   select(["docs/how-to/provision-a-graph-per-end-user.md"]) ->
+            #     surfaces=[] , full=False , 106 files, guard ABSENT
+            # i.e. the guard ran on a `mcp_server.py` diff (FULL matrix, shared module)
+            # and NEVER on the one change class it exists to catch — the reader it protects
+            # would have been told to call a name `tools/list` does not advertise, with
+            # every gate green. Registered against `sdk`, the surface the guard itself is
+            # registered in (`config/ci-surfaces.yml`), the narrower of the two remedies
+            # the review named: a concrete path costs nothing until this doc changes, where
+            # `tier1` would put the whole catalogue suite in every PR's smoke leg. Named as
+            # a CONCRETE file, not a glob — `select()` matches with `startswith` and has no
+            # glob support. If a SECOND doc-reading guard is added later, graduate this to
+            # `tier1` instead of growing this row.
+            "docs/how-to/provision-a-graph-per-end-user.md"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #10605: the MCP CLIENT side — the driver every long-lived consumer
