@@ -1080,30 +1080,61 @@ def _construct(name: str) -> EmbeddingBacking:
     return InProcessBacking()
 
 
+def _retire(retired: _Retired) -> None:
+    """Stop a replaced collector and close a replaced backing — OUTSIDE the lock.
+
+    ⛔ WHY THIS IS A FUNCTION AND NOT TWO INLINE CALLS (#14186 review). Stopping
+    the collector JOINS its thread, and that thread calls :func:`active_backing`
+    — which takes the module ``_lock`` — on every batch. So a caller that held
+    ``_lock`` across the join would wait for a thread that is waiting for the
+    lock it is holding: a DEADLOCK, not a slow path, reached by nothing more
+    exotic than a concurrent submit while the lever (or a test) swaps the
+    backing. Both callers therefore mutate state under the lock, collect what
+    was retired, and do the waiting after it is released.
+
+    Every step is best-effort: a configuration change must not fail because the
+    thing it is replacing is already broken.
+    """
+    if retired.collector is not None:
+        retired.collector.stop()
+    if retired.backing is not None:
+        with _swallow_base_exception():
+            retired.backing.close()
+
+
+class _Retired:
+    """What a backing change put out of work (see :func:`_retire`)."""
+
+    __slots__ = ("backing", "collector")
+
+    def __init__(self, backing=None, collector=None) -> None:
+        self.backing = backing
+        self.collector = collector
+
+
 def active_backing() -> EmbeddingBacking:
     """The backing this process is using, constructing it on first use."""
     global _backing, _backing_name, _collector
+    retired = _Retired()
     with _lock:
         name = resolve_backing()
         if _injected is not None:
             return _injected
         if _backing is not None and _backing_name == name:
             return _backing
-        if _backing is not None:
-            # The lever moved: retire the old backing (a worker process is
-            # closed, not leaked) rather than leaving two encoders resident.
-            previous, _backing = _backing, None
-            with _swallow_base_exception():
-                previous.close()
-        if _collector is not None:
-            _collector.stop()
-            _collector = None
+        # The lever moved (or this is the first resolution): retire the old
+        # backing — a worker process is CLOSED, not leaked — and the collector
+        # built for it, whose counters described the previous backing.
+        retired = _Retired(_backing, _collector)
         _backing = _construct(name)
         _backing_name = name
-        _logger.info(
-            "embed seam: backing resolved to %r (wait %sms, batch %s) "
-            "(#14186)", name, resolve_max_wait_ms(name), resolve_max_batch())
-        return _backing
+        _collector = None
+        fresh = _backing
+    _retire(retired)
+    _logger.info(
+        "embed seam: backing resolved to %r (wait %sms, batch %s) "
+        "(#14186)", name, resolve_max_wait_ms(name), resolve_max_batch())
+    return fresh
 
 
 def install_backing(backing: EmbeddingBacking | None) -> None:
@@ -1114,11 +1145,12 @@ def install_backing(backing: EmbeddingBacking | None) -> None:
     :func:`resolve_backing`, which has its own rows.
     """
     global _injected, _collector
+    retired = _Retired()
     with _lock:
         _injected = backing
-        if _collector is not None:
-            _collector.stop()
-            _collector = None
+        retired = _Retired(None, _collector)
+        _collector = None
+    _retire(retired)
 
 
 class _swallow_base_exception:
@@ -1136,8 +1168,13 @@ class _swallow_base_exception:
         return exc_type is not None
 
 
-def _collector_for(backing: EmbeddingBacking) -> _Collector:
-    """The one collector for this process (rebuilt when the backing changes)."""
+def _collector_for() -> _Collector:
+    """The one collector for this process (rebuilt when the backing changes).
+
+    ⛔ No backing argument: the backing is resolved by the collector itself, per
+    batch, through :func:`active_backing`. Passing one in would have been a
+    parameter the body never read — and a stale one the moment the lever moves.
+    """
     global _collector
     with _lock:
         if _collector is None:
@@ -1169,7 +1206,7 @@ def encode_query(text: str) -> list[float] | None:
     admission cost, and it is why the default posture does not regress the
     uncontended query.
     """
-    collector = _collector_for(active_backing())
+    collector = _collector_for()
     rows = collector.submit(text, timeout_s=resolve_timeout_s())
     if rows is None:
         return None

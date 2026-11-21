@@ -1355,6 +1355,53 @@ class TestTheCallersRouteThroughTheSeam:
             f"a raising backing did not reach the read as encode_failed: {entry!r}")
 
 
+# ── the swap path must not deadlock ─────────────────────────────────────────
+
+
+class TestReplacingTheBackingCannotDeadlock:
+    """The module lock is never held across a collector JOIN.
+
+    ⛔ WHY THIS ROW EXISTS, as a deadlock rather than a slow path. Stopping the
+    collector joins its thread, and that thread calls ``active_backing()`` — which
+    takes the module lock — on every batch. A caller that held the lock across the
+    join would wait for a thread waiting for the lock it holds. Reached by nothing
+    more exotic than a concurrent submit while the lever (or a test) swaps the
+    backing.
+
+    A hang is a terrible thing to assert on directly, so this pins the INVARIANT
+    the fix is made of — observable, deterministic, and false on the pre-fix
+    shape: every ``stop()`` is recorded with whether the module lock was held.
+    """
+
+    def test_the_collector_is_never_stopped_while_the_module_lock_is_held(
+            self, backing):
+        recorder = backing()
+        assert embed_seam.encode_query("warm") is not None
+        collector = embed_seam._collector
+        assert collector is not None, "no collector was started, so this proves nothing"
+
+        observed: list[bool] = []
+        real_stop = collector.stop
+
+        def _stop() -> None:
+            observed.append(embed_seam._lock.locked())
+            real_stop()
+
+        collector.stop = _stop  # type: ignore[method-assign]
+        try:
+            embed_seam.install_backing(None)
+        finally:
+            embed_seam.reset_seam()
+
+        assert observed, "the collector was never stopped — nothing was measured"
+        assert not any(observed), (
+            "the collector was stopped while the module lock was HELD. Its thread "
+            "takes that lock on every batch, so a concurrent submit would have "
+            "deadlocked the process (not merely slowed it)."
+        )
+        assert recorder.batches, "the recording backing never ran"
+
+
 # ── the #5275 contract survives the move off the local model ────────────────
 
 
