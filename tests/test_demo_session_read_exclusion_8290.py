@@ -671,7 +671,6 @@ def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
 #: the claim's subject, and importing the API module for it would pull the whole
 #: stack into a fast suite.
 _PIVOT = 26167
-
 #: The one pattern that defines a "cite target" lives in
 #: ``tools/hosted_api_cite_census.py`` — ONE implementation, so the note's stated
 #: remedy and this pin cannot measure two different populations. It requires

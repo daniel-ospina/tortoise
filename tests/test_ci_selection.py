@@ -10597,6 +10597,18 @@ ROWED_BY_THIS_FOLD = (
     # variant surviving a round; `test_13826_write_gate.py`'s row records the
     # sibling that was found entirely unregistered).
     "test_13094_graphevent_home.py",
+    # #14015 M5 (§9) — the miss-rate instrument behind the working-set allowance
+    # (`#13989`). A file this fold ADDED, registered on `core` + `tier1` + `durations:`.
+    # `tools/miss_rate_m5.py` carries no `SOURCE_PATTERNS` entry, so a tools-only diff
+    # takes the tier1 early return and selects NO surface — the `tier1` row is what
+    # makes these pins RUN on the diff that can make the instrument mis-measure.
+    # Listed here for the reason every row above states: the ENTRY-RULE pin iterates
+    # this EXPLICIT tuple, so a file nobody listed has no `durations:` row and
+    # nothing reds. ⛔ The `#14162` review found the first cut of this instrument
+    # claiming three controls it did not have — a `provenance` pin, INVARIANT 5, and
+    # a test for the published windows (`#14162` F2) — which is the same
+    # claim-without-a-pin shape this tuple exists to make impossible.
+    "test_miss_rate_m5.py",
     # ⛔ `test_usage_signal.py` IS NOT REPEATED HERE. This is the SECOND copy the merge of
     # `origin/main` created, and the #14070 argument above is why it must not stay: carrying
     # a second copy of a file that already has a row is exactly the duplicate shape that
