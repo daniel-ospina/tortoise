@@ -119,7 +119,7 @@ def _script_data_state(data: str) -> str:
                     # mirror case in the `double` arm keeps `double` — same rule,
                     # different answer, see the docstring.
                     i = n
-                elif data[nxt] in " \t\n\f/>":
+                elif data[nxt] in " \t\n\f\r/>":
                     state, i = "double", nxt
                 else:
                     i = nxt
@@ -158,7 +158,7 @@ def _script_data_state(data: str) -> str:
                     # delimiter test below is the FUNCTION's correctness (pinned directly)
                     # rather than a path a real document takes here.
                     i = n
-                elif data[nxt] in " \t\n\f/>":
+                elif data[nxt] in " \t\n\f\r/>":
                     state, i = "escaped", nxt
                 else:
                     i = nxt
@@ -1965,7 +1965,18 @@ class _AnchorHrefParser(HTMLParser):
             # and every later anchor on the page was dropped — a false NEGATIVE,
             # and a regression for the tags added to `_RAW` here (review finding,
             # #3962, Chromium-verified: `<xmp/><xmp></xmp><a href="/blog">`).
-            self.set_cdata_mode(tag)
+            # ⛔ AND IT MUST RE-ARM THE RIGHT FLAVOUR (#14073 review round 16, P1,
+            # measured). A browser ignores the `/` on a non-void element, so
+            # `<textarea/>` is an ordinary `<textarea>`: RCDATA, which DECODES
+            # character references. Re-arming RAWTEXT (this call's default) left
+            # `&#70;alkorDB` undecoded in the scan while Chrome's textarea `value`
+            # reads `FalkorDB` (182×36 control, 5 619 of 5 874 ink px) — so a claim
+            # spelled with references satisfied every pin, including a vocabulary
+            # pin that hard-codes `falkor`. The split is the stdlib's own:
+            # `RCDATA_CONTENT_ELEMENTS` = (`textarea`, `title`); the rest of `_RAW`
+            # (script/style/xmp/iframe/noembed/noframes/plaintext) is RAWTEXT, where
+            # the browser does not decode either — pinned as the control.
+            self.set_cdata_mode(tag, escapable=tag in self.RCDATA_CONTENT_ELEMENTS)
 
     def handle_data(self, data: str) -> None:
         """Fail closed on the script-data ESCAPED states (13.2.5).

@@ -4640,6 +4640,30 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         "a `<textarea>` inside an inert `<template>` is template content: admitting "
         "the raw-text family must not reach into a subtree no reader meets"
     )
+    # ⛔ AND THE SELF-CLOSING SPELLING RE-ARMS **RCDATA**, NOT RAWTEXT (#14073 review
+    # round 16, P1, measured). A browser IGNORES the `/` on a non-void element, so
+    # `<textarea/>` is the same element: RCDATA, which DECODES character references.
+    # `handle_startendtag` has to re-call `set_cdata_mode` (the stdlib only sets it from
+    # `parse_starttag`), and it was passing the RAWTEXT flavour — so a claim written with
+    # references stayed `&#70;alkorDB` in the scan while Chrome's textarea `value` reads
+    # `FalkorDB`, i.e. the vocabulary pin hard-codes `falkor` and would report the section
+    # CLEAN while a reader sees the word. Chrome: `<textarea/>&#70;alkorDB ev&#105;cts …`
+    # → `value` "FalkorDB evicts …", rect 182×36, 5 619 of 5 874 ink px.
+    assert "FalkorDB" in extract_visible_text(
+        "<textarea/>&#70;alkorDB permanently deletes it</textarea>"
+    ), (
+        "`<textarea/>` re-armed RAWTEXT: a browser ignores the `/`, enters RCDATA and "
+        "DECODES the references, so the scan must read the words a reader sees — "
+        "keeping `&#70;` hides a claim from a vocabulary pin that spells it `falkor`"
+    )
+    assert "FalkorDB" in extract_visible_text(
+        "<textarea>&#70;alkorDB permanently deletes it</textarea>"
+    ), "premise: the ORDINARY spelling decodes, so the row above is the self-closing half"
+    assert extract_visible_text("<xmp/>&#70;alkorDB") == "&#70;alkorDB", (
+        "`<xmp/>` must stay RAWTEXT: the browser does not decode references there, so "
+        "decoding them would invent text no reader meets (the rawtext members are the "
+        "control that keeps the RCDATA fix pinned to `textarea`/`title`)"
+    )
 
     # 5. …and the FALLBACK slot is the same over-drop for exactly ONE element,
     #    measured rather than assumed (the reproduction under `_FALLBACK_RENDERS`: a
@@ -7868,6 +7892,16 @@ def test_the_script_data_wedge_states_its_own_rule() -> None:
         "tab/LF/FF/space, `/` or `>`, so `</script<` must stay DOUBLE-escaped — "
         "anything else is text a browser keeps as script and this scan would re-read "
         "as markup"
+    )
+    # ⛔ AND A LITERAL CR IS A DELIMITER TOO (#14073 review round 16, latent). §13.2.3
+    # preprocesses every CR to an LF before tokenization ("there are never any CR
+    # characters in the input to the tokenization stage"), and every current caller reads
+    # through universal-newline translation — so the `\r`-as-delimiter case is a contract
+    # gap rather than a live bypass, and one character closes it.
+    assert _script_data_state("<!--<script\r>") == "double", (
+        "a literal CR after `<script` did not enter double-escaped: the tokenizer never "
+        "sees a CR (§13.2.3 preprocesses it to an LF), so a parse that has one must "
+        "treat it as the LF delimiter"
     )
     with pytest.raises(ValueError, match="wedged"):
         extract_visible_text("<script><!--<script></script</script><p>SWALLOWED</p>")
