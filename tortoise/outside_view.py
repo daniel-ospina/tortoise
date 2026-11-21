@@ -281,6 +281,22 @@ def read(
         raise ValueError(f"label {label!r} is not a record label {sorted(NODE_TABLES)}")
 
     table = NODE_TABLES[label]
+    # ⛔ THE ONE IDENTIFIER THAT REACHES A **SQL** STRING, and therefore the one that
+    # must be allowlisted rather than merely quoted: `TOPICS_SQL` puts `{topic}` in the
+    # SELECT list and `GROUP BY 1`, which is an IDENTIFIER position — `%s` covers
+    # VALUES only (psycopg docs, and the reason `sql.Identifier` exists). Every other
+    # identifier here is already checked (`label`/`key_prop` through `bare_identifier`,
+    # `table` through `NODE_TABLES`, `tier` from two literals, `limit` type-checked) —
+    # a `.format` that skipped the check would make the injection surface a DEFAULT for
+    # the next caller of this library door instead of a decision they have to make.
+    # An allowlist, not just quoting: it also refuses a REAL column of the wrong table.
+    valid_columns = _rp.table_columns().get(table, frozenset())
+    if topic_column not in valid_columns:
+        raise ValueError(
+            f"topic_column {topic_column!r} is not a column of public.{table} "
+            f"— it is interpolated into the SELECT list, so it must name one of "
+            f"{sorted(valid_columns)}; nothing was read"
+        )
     tier = _tier_predicate(table)
     resident_total = resident_count(graph, label=label)
     try:
@@ -346,6 +362,22 @@ def read(
         for b in buckets
         if b.get("topic") is not None
     )
+    # ⛔ `complete` is DERIVED, not assumed. Both of the numbers below are read on this
+    # path and either can fail alone (`_record_total` issues its own statement after
+    # SPAN_SQL/TOPICS_SQL have already succeeded — a statement timeout, a dropped
+    # connection mid-scope, a `count(*)` permission that the aggregates do not need;
+    # and `span == []` leaves `outside` unmeasured). This field is what a monitor keys
+    # on and what `tools/resident.py` turns into `verdict: OK` / exit 0, so an
+    # unmeasured number under `complete=True` is the flag failing OPEN over a partial
+    # read — exactly the shape this module's own thesis forbids.
+    reason = ""
+    if outside is None:
+        reason = ("the record answered its count with no row, so how much is outside "
+                  "could not be measured — nothing is claimed")
+    elif record_total is None:
+        reason = ("the record's own total could not be read, so the cross-check that "
+                  "makes a resident/outside disagreement visible is missing — this "
+                  "view is not a census")
     return OutsideView(
         org_id=org_id,
         graph_id=graph_id,
@@ -356,9 +388,9 @@ def read(
         oldest=_text(row.get("oldest")),
         newest=_text(row.get("newest")),
         topics=topics,
-        complete=True,
+        complete=not reason,
         truncated=False,
-        reason="",
+        reason=reason,
         source=f"graph:{label}+record:{table}",
     )
 

@@ -476,7 +476,13 @@ def test_a_window_made_entirely_of_pinned_nodes_names_the_pin_as_the_reason():
 
 
 # ── the second half of the cap: state, not just the writer ──────────────────────
-def test_a_pin_set_over_its_budget_refuses_the_sweep_and_issues_no_statement():
+def test_a_pin_set_over_its_budget_is_reported_as_a_refusal():
+    """A set the budget no longer covers is a REFUSAL the caller can act on.
+
+    ⛔ Named for what it asserts. It does NOT sweep: the sweep-level guard ("refuses
+    before `evict`") lives in `tests/test_14012_resident_cli.py`, and an earlier name
+    here claimed a sweep this body never ran.
+    """
     g = _FakeGraph(["p0", "p1", "p2"])
     g.link("p0", "p1")
     g.link("p1", "p2")
@@ -491,10 +497,6 @@ def test_a_pin_set_over_its_budget_refuses_the_sweep_and_issues_no_statement():
     assert "3 node(s)" in refusal and "at most 2" in refusal
     assert "Unpin" in refusal
 
-    before = list(g.mutating)
-    assert str(refusal)  # the gate reason is what the caller refuses with
-    assert g.mutating == before
-
 
 def test_an_unreadable_pin_declaration_refuses_the_sweep():
     class _Broken(_FakeGraph):
@@ -508,7 +510,10 @@ def test_an_unreadable_pin_declaration_refuses_the_sweep():
     assert reading.readable is False
     refusal = reading.gate_reason()
     assert refusal is not None and "could not be read" in refusal
-    assert reading.gate is not None  # the gate exists; the CALLER must refuse first
+    # ⛔ No `assert reading.gate is not None` here: `gate` is a bound method on a frozen
+    # dataclass, so that assertion was a tautology that could not vary under ANY
+    # mutation of this diff (agent-infra#3442 rule 3) — it told a reader the gate was
+    # covered when the refusal string above is what actually varies.
 
 
 def test_a_malformed_declaration_is_unreadable_rather_than_empty():
