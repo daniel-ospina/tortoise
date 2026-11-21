@@ -390,11 +390,19 @@ def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     did not have, so the claim is narrowed to what the body drives rather than
     the guard being trusted on its title.
 
-    Each of `query()`, `paginated_query()` and `query_points_by_tag()` returns
+    Each of `_query()`, `_paginated_query()` and `_query_points_by_tag()` returns
     Point rows to a CALLER, so each must record exactly ONE read event per
     returned key — no fewer (a missed record inflates the never-read mass, which
     flatters the split) and no more (a double record overstates how many reads a
     key gets, which is the same class of wrong as a lost one).
+
+    ⛔ The PUBLIC spellings these hooks served (`query`, `paginated_query`,
+    `get_point`, `query_points_by_tag`) were retired by #13899/#4282, so the
+    doors are driven directly. That is the path the public containers still
+    take, not a bypass of it: `list_knowledge(kind="claim")` dispatches
+    `_paginated_query`, and `search_knowledge(mode="tag")` reaches
+    `_query_points_by_tag`. Driving the retired names would only prove the
+    retirement hint still raises.
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
@@ -403,21 +411,21 @@ def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
         record_stock("Point", key, nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    got = inst.query()
+    got = inst._query()
     assert [r["id"] for r in got] == ["p1", "p2"]
 
     graph.rows = [{"id": "p3"}]
-    assert inst.paginated_query()["results"] == [{"id": "p3"}]
+    assert inst._paginated_query()["results"] == [{"id": "p3"}]
 
     graph.rows = [{"id": "p7"}]
-    assert inst.get_point("p7") == {"id": "p7"}
+    assert inst._get_point("p7") == {"id": "p7"}
 
     graph.rows = [{"id": "p8"}, {"id": "p9"}]
-    inst.query_points_by_tag("t")
+    inst._query_points_by_tag("t")
 
     folded = fold()
     counts = {k[2]: row.read_count for k, row in folded.rows.items()}
-    # `p7` stays at ZERO: `get_point` is the internal accessor the write paths
+    # `p7` stays at ZERO: `_get_point` is the internal accessor the write paths
     # use, so it must record NOTHING — if it ever starts recording, a
     # written-but-never-read node looks read and `f` is biased HIGH.
     assert counts == {"p1": 1, "p2": 1, "p3": 1, "p7": 0, "p8": 1, "p9": 1}
@@ -741,9 +749,10 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
-    They call `query()` to do it, so recording them would mark every Point read
+    They call `_query()` to do it (the door `query` retired into; the public
+    containers still reach it), so recording them would mark every Point read
     after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
-    `get_point` prevented, and it would silently invalidate the one-directional
+    `_get_point` prevented, and it would silently invalidate the one-directional
     "the gaps bias `f` LOW" caveat the docs rest on.
     """
     inst, graph = hooked_sdk
@@ -751,13 +760,13 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     record_stock("Point", "p2", nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    assert [r["id"] for r in inst.query(_record_reads=False)] == ["p1", "p2"]
+    assert [r["id"] for r in inst._query(_record_reads=False)] == ["p1", "p2"]
     assert {row.read_count for row in fold().rows.values()} == {0}, (
         "an internal scan must record NOTHING"
     )
 
     graph.rows = [{"id": "p1"}]
-    inst.query()
+    inst._query()
     counts = {k[2]: row.read_count for k, row in fold().rows.items()}
     assert counts == {"p1": 1, "p2": 0}, "the caller-facing default still records"
 
