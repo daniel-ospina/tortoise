@@ -654,7 +654,20 @@ class ProjectionWorker:
         return self._cond_pid != os.getpid()
 
     def _reset_for_fork_locked(self) -> tuple[int, int, int, int]:
-        """Replace the state another process left behind, holding the lock being replaced.
+        """Replace the state another process left behind, WITHOUT holding any lock.
+
+        ⛔ THE NAME IS THE ONE THING HERE THAT IS NOT LITERAL: it is
+        ``_..._locked`` for the state it replaces (the locks, the queue, the
+        counters), NOT because it runs under a lock. It MUST NOT: its only caller
+        is :meth:`_ensure_not_inherited`, which takes no lock on purpose — the
+        inherited ``_cond`` may be held by a thread that did not survive the
+        ``fork()``, so acquiring it first is exactly how this method becomes
+        unreachable (cycle 5, ISSUE 4; executed on 3.12.3, the child's
+        ``acquire(timeout=0.5)`` answered ``False``). A reader who believed the
+        old wording and "fixed" the caller by adding ``with cond:`` back would
+        re-introduce that deadlock, which is what
+        ``test_the_fork_reset_does_not_wait_on_the_lock_it_REPLACES`` exists to
+        catch.
 
         Everything is per-process and everything goes:
 
@@ -677,9 +690,11 @@ class ProjectionWorker:
           healthy;
         * the PUBLISH SEQUENCE, since the numbers mean nothing across processes.
 
-        ⛔ RETURNS the gauge snapshot instead of publishing it: this runs under
-        ``_cond``, and the publish is a foreign call (cycle 4, P2-2). The caller
-        applies it after the lock is released.
+        ⛔ RETURNS the gauge snapshot instead of publishing it, because the
+        publish is a foreign call (cycle 4, P2-2) and the caller is the one place
+        that may make it: :meth:`_ensure_not_inherited` publishes the returned
+        snapshot itself once the reset has returned. There is no lock to release
+        on this path — see the paragraph above, and do not add one.
         """
         self._cond = threading.Condition()
         self._cond_pid = os.getpid()

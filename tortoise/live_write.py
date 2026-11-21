@@ -446,10 +446,23 @@ class LiveWrite:
     def armed(self) -> bool | None:
         """Was the RECORD armed for this write? ``True``/``False``/``None`` (unmeasured).
 
-        ``True`` — the seam ANSWERED, and only an armed call answers: an unarmed
-        deployment returns ``None`` from ``write_live_record``, so any
-        ``RecordWrite`` held here — APPLIED, any refusal, or the healthy
-        ``no_durable_journal`` decline — is an armed record.
+        ``True`` — the record is armed for this write, by ONE of two evidence
+        routes, and the docstring below used to claim only the first:
+
+        1. the seam ANSWERED, and only an armed call answers: an unarmed
+           deployment returns ``None`` from ``write_live_record``, so any
+           ``RecordWrite`` held here — APPLIED, any refusal, or the healthy
+           ``no_durable_journal`` decline — is an armed record; **or**
+        2. the fold is QUEUED (``deferred``, #14185) and the seam has simply not
+           answered yet. This is not an inference: :func:`_submitted_to_worker`
+           refuses to defer unless ``_record_armed()`` holds, so the deployment's
+           arming is already established when the write is queued. Answering
+           ``False`` here would make a deferred write read as an UNARMED
+           deployment, which is the one thing it is not.
+
+        ⛔ Keep both routes in view when editing this property: the contract text
+        above was written for route 1 alone and went stale the moment ``deferred``
+        existed — the "stated-but-false invariant" class this branch keeps closing.
 
         ``False`` — nothing came back and nothing is at stake: the unarmed path.
 
