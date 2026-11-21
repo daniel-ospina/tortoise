@@ -477,15 +477,28 @@ def read(
     # `record_projection` (it refuses a NULL contract key, so this needs a foreign, older
     # or manual writer) — which is exactly the case a reader is the last line of defence
     # for.
-    if (not truncated and resident_total is not None
-            and len(keys) != resident_total):
+    # ⛔ AND AN ABSENT COUNT IS ITS OWN UNMEASURED CASE: `resident_total is None` means the
+    # graph's `RETURN count(n)` RAISED, so the disambiguation this guard depends on is
+    # missing. `(resident_total or 0) > 0` was False in exactly that state, `keys == []`
+    # fell through, `SPAN_SQL` returned the ENTIRE record as `outside`, and `headline`
+    # rendered it as a number — `complete=False` and exit 4 do stop the CLI, but a
+    # population count on display is the one shape this module says it never produces. An
+    # absent count cannot license a complement.
+    if ((resident_total is None and not keys)
+            or (not truncated and resident_total is not None
+                and len(keys) != resident_total)):
         return OutsideView(
             org_id=org_id, graph_id=graph_id, label=label,
             resident=resident_total,
             complete=False,
-            reason=(f"the graph reports {resident_total} resident {label} node(s) but "
-                    f"its key read ({key_prop!r}) yielded {len(keys)} — the two halves of "
-                    f"this view disagree, so how much is outside cannot be measured"),
+            reason=(
+                    f"the resident key list ({key_prop!r}) and the graph's own count "
+                    f"could not be reconciled — the count read failed, so how much is "
+                    f"outside cannot be measured"
+                    if resident_total is None else
+                    f"the graph reports {resident_total} resident {label} node(s) but "
+                    f"its key read ({key_prop!r}) yielded {len(keys)} — the two halves "
+                    f"of this view disagree, so how much is outside cannot be measured"),
             source=f"graph:{label}",
         )
 

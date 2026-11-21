@@ -130,6 +130,10 @@ def _contract_key_prop(label: str, key_prop: str | None) -> str:
     declaration was written and reported `written: true` into a key space nothing reads,
     so `pin` and `outside` disagreed about the same flag.
     """
+    # ⛔ THE LABEL'S SPELLING IS CHECKED FIRST, so an empty or non-bare `--label` is
+    # refused for what it IS rather than for the consequence (there is no contract entry
+    # to find under `""`). Both are REFUSED/config; this one names the fixable thing.
+    resident_pin.bare_identifier(label, what="label")
     default = KEY_PROPERTY.get(label)
     if key_prop is None:
         if not default:
@@ -311,8 +315,19 @@ def main(argv: list[str] | None = None) -> int:
                 # silent half of the same defect (see `_contract_key_prop`).
                 result = resident_pin.pin(
                     graph, args.key,
-                    label=args.label or "Point",
-                    key_prop=_contract_key_prop(args.label or "Point", args.key_prop),
+                    # ⛔ `is None`, NEVER `or`, for an IDENTIFIER too: `--label "$LABEL"` with
+                    # `$LABEL` unset was silently rewritten to `Point`, so the caller was
+                    # answered about a population they never named — the same falsy-default
+                    # substitution the numeric flags below forbid. `""` now reaches
+                    # `bare_identifier`, which refuses it.
+                    label=(args.label if args.label is not None else "Point"),
+                    # ⛔ AND THE KEY PROPERTY IS THE LABEL'S CONTRACT KEY, not a literal
+                    # `id` (see `_contract_key_prop`): the graph is read by this property,
+                    # and `id` is the wrong one for `Event` (`eventId`) and `Source`
+                    # (`url`).
+                    key_prop=_contract_key_prop(
+                        args.label if args.label is not None else "Point",
+                        args.key_prop),
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:
@@ -430,7 +445,8 @@ def main(argv: list[str] | None = None) -> int:
                     # nothing and the record complement reported the whole population as
                     # outside, with `complete=True` and exit 0. `None` hands the decision
                     # to the module, which also REFUSES a non-contract property.
-                    label=args.label or "Point", key_prop=args.key_prop,
+                    label=(args.label if args.label is not None else "Point"),
+                    key_prop=args.key_prop,
                     # ⛔ `is None`, NEVER `or`: `--max-keys 0` was silently rewritten to
                     # the DEFAULT — 200,000, the WIDENING direction — which also made the
                     # module's own floor refusal ("a bound of zero cannot read any key",
