@@ -935,21 +935,24 @@ SWEEP_NAMES = 66
 #: carry one), which is why the merged total equals main's exactly.
 #: THE −3 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, never by arithmetic: `--report --base 28ca66878d… --top
 #: 5000` was run in detached worktrees at `427c418ebb` (the commit that cut the previous pin, #14188)
-#: and at `origin/main` `1b0db04894`, both row sets sorted and diffed — EIGHT row counts differ, and
-#: every one of them is main's:
+#: and at `origin/main` `1b0db04894`, both row sets sorted and diffed — SIX row counts differ (of 858
+#: rows → 855), and every one of them is main's:
 #: * `inst.query` 3 → 0, `inst.paginated_query` 1 → 0, `inst.query_points_by_tag` 1 → 0,
-#:   `inst.get_point` 1 → 0 (−6) — `67dc298ec3` (#14194) drove the read-ledger pins through the doors
-#:   #4282 retired, so those six residue rows left with the dead names;
-#: * `cur['proj'].g.query` 2 → 0 and `cur["proj"].g.query` 0 → 4 (+2 net) — the SAME FalkorDB project
-#:   graph readers in `tools/miss_rate_m5.py` / `tools/window_quality_m2.py` (#14162, the M5 miss
-#:   rate), re-spelled and expanded; the row KEY is the receiver's source span, so a quote-style change
-#:   renames the row rather than creating a shape;
-#: * `terms.update` 0 → 1 — a plain Python `set[str].update` in `tests/test_miss_rate_m5.py`'s
-#:   `_pp_terms`, i.e. the ordinary-word edge this pin exists to make VISIBLE (`update` on a set is not
-#:   a `Graph` write); no shape was absorbed and no SDK receiver is hidden.
-#: No row was removed in the fail-open direction (an SDK receiver losing its row), and the row SHAPE
-#: set still differs only by those two ordinary-word shapes. `--check` exits 0 on this tree after the
-#: re-pin, with `typed references still pointing at a public name: 0`.
+#:   `inst.get_point` 1 → 0 (−6, four SHAPES gone) — `67dc298ec3` (#14194) drove the read-ledger pins
+#:   through the doors #4282 retired, so those four ordinary-word receiver shapes left with the dead
+#:   names;
+#: * `cur['proj'].g.query` 2 → 4 (+2, the same row) — the FalkorDB project-graph readers in
+#:   `tools/miss_rate_m5.py` / `tools/window_quality_m2.py` (#14162, the M5 miss rate), expanded. The
+#:   row KEY is `ast.unparse(receiver)[:40]` (`:1400` in this file), and `ast.unparse` NORMALISES
+#:   quote style (`cur["proj"]` and `cur['proj']` are the SAME key), so a re-spelling cannot move a
+#:   row — only added receivers do;
+#: * `terms.update` 0 → 1 (one NEW shape) — a plain Python `set[str].update` in
+#:   `tests/test_miss_rate_m5.py`'s `_pp_terms`, i.e. exactly the ordinary-word edge this pin exists
+#:   to make VISIBLE (`update` on a set is not a `Graph` write); no SDK receiver is hidden.
+#: Nothing was absorbed in the fail-open direction: no SDK receiver lost its row, the six deltas are
+#: one added ordinary-word shape (`terms.update`) plus five count/removal moves on ordinary-word
+#: receivers, and `--check` exits 0 on this tree after the re-pin, with
+#: `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11840, "b7eb08ff3acdcce4")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
