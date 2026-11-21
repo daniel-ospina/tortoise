@@ -145,6 +145,11 @@ CAPABILITY_CONTROLS = (
     # nothing, which is the defect this table exists to end.
     ("typed bounded var-length", "MATCH (a:GraphEvent)-[:IMPL*1..5]->(b)",
      "cypher:*1.."),
+    # ⛔ and the BARE undirected hop. `<-` was declared undecidable on the grounds
+    # that it is "always written `<-[:T]-`, which carries `-[`" — measured FALSE for
+    # `MATCH (a)<--(b)`, the untyped form, which carries no `-[` and is the one `<-`
+    # decides (`#14183` round-6 finding 1, the sibling of the three rows above).
+    ("bare undirected hop", "MATCH (a)<--(b)", "cypher:<-"),
     ("open-ended var-length", "MATCH p=(a)-[:NEXT*..3]->(b)", "cypher:*.."),
     ("shortest path procedure",
      "CALL algo.shortestPath.stream(null, null, {relationshipQuery: 'IMPL'})",
@@ -177,7 +182,10 @@ CAPABILITY_CONTROLS = (
 #: declared arm red instead of silently leaving the declaration stale.
 ARMS_NO_SNIPPET_CAN_DECIDE = {
     "]->",           # always preceded by `-[`
-    "<-",            # always written `<-[:T]-`, which carries `-[`
+    # ⛔ `<-` was here and DID NOT BELONG: `<--` carries no `-[`, so `<-` decides it.
+    # It is pinned above. What is left here must be undecidable by FIRST-MATCH
+    # ORDERING — the completeness pin asserts this set and the control rows are a
+    # PARTITION, so a token that a row decides cannot stay declared.
     "size((",        # a pattern aggregate needs a relationship → `-[` or `--`
     # Every real spelling of these is a `CALL`: the operator spells the procedure
     # with its `call ` prefix, and the `call db.idx.*` arm is ordered before the
