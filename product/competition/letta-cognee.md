@@ -197,7 +197,7 @@ Explicitly segmented into three audiences on the homepage:
 
 [Source](https://www.cognee.ai/) · [docs.cognee.ai/examples/migrate-memory-systems.md](https://docs.cognee.ai/examples/migrate-memory-systems.md) — retrieved 2026-09-11
 
-*Last checked: 2026-09-11*
+*Last checked: 2026-09-11.*
 
 ---
 
@@ -613,7 +613,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 [Source](https://www.reddit.com/r/LLMDevs/comments/1uzyyja/cognee_10_oss_selfimproving_memory_for_agents_scoring_79_on_beam/) · [Reddit r/AI_Agents](https://www.reddit.com/r/AI_Agents/comments/1s42kmu/some_thoughts_on_working_with_memory_systems/) · [github.com/topoteretes/cognee/issues](https://github.com/topoteretes/cognee/issues) · [aitoolsatlas Cognee review](https://aitoolsatlas.ai/tools/cognee/review) — retrieved 2026-09-11
 
-*Last checked: 2026-09-11*
+*Last checked: 2026-09-11.*
 
 ---
 
