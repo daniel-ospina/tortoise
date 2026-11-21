@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 05d218fcafc5810995588a23f621893d0b168ef4
+cut_at_commit: 1b0db0489408e1e817688f83cef0d7c1ee33be5d
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1995,7 +1995,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_link_entities
-  served_from: tortoise/mcp_server.py:db5fb96136d20756
+  served_from: tortoise/mcp_server.py:a8451f8648b07546
   served_attributes: dfc0f40718e48217
   family: graph
   family_rank: 2

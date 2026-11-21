@@ -3475,6 +3475,16 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_index_sources_from_directory",   # replaces tortoise_index_files
     "tortoise_mine_knowledge_from_session",    # replaces tortoise_checkpoint
     "tortoise_mine_knowledge_from_directory",  # replaces tortoise_mine_conversations
+    # #11609 lane P7: the container that ABSORBED `tortoise_create_edge` and
+    # `tortoise_create_operator` — both still named above, because this inventory is
+    # what the #329 completeness gate cross-checks and a retired name is still a
+    # served writer shape. Its OPERATOR arm wraps `_quota_gated(sdk._create_operator, …)`
+    # and its relation-decided arm wraps `_quota_gated(sdk.link_entities, …)`; the
+    # second wrapper is not decoration — `sdk.link_entities` reaches the same
+    # node/edge writers and is NOT gated inside the SDK, so without it the door would
+    # hand any HTTP caller un-metered edge creation and this membership row would be a
+    # false claim.
+    "tortoise_link_entities",
 })
 
 
@@ -7849,7 +7859,8 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
             "RELATION itself is the meaning (e.g. relation='supports'), so it has no "
             "slot here — name the meaning as the relation instead of dropping it."),
             "code": ERR_INVALID})
-    return _safe(sdk.link_entities, relation, from_id, targets[0],
+    return _safe(_quota_gated(sdk.link_entities, "points"),
+                 relation, from_id, targets[0],
                  operator=op_flag, direction=direction, confidence=confidence,
                  weight=weight, label=label, batch_id=batch_id,
                  entity_label=entity_label, source_kind=source_kind,
