@@ -685,11 +685,19 @@ def unpin(
     graph: Any,
     keys: Iterable[str],
     *,
-    label: str = "Point",
-    key_prop: str = "id",
+    label: str | None = None,
+    key_prop: str | None = None,
     budget: PinBudget | None = None,
 ) -> PinResult:
-    """Withdraw these keys. Idempotent; an unknown key is reported, never invented."""
+    """Withdraw these keys. Idempotent; an unknown key is reported, never invented.
+
+    ⛔ ``label``/``key_prop`` default to the DECLARATION's own pair, not to
+    ``Point``/``id``. A rewrite that took the caller's defaults would silently move a
+    ``Source``-keyed set to ``Point`` — the remaining keys would then address nodes that
+    do not exist, so every one of them would stop being resident while the declaration
+    still claimed them. The set is the set; releasing keys from it cannot change what it
+    addresses.
+    """
     resolved = budget
     if resolved is None:
         resolved = PinBudget.resolve()
@@ -700,13 +708,15 @@ def unpin(
             f"so removing from it would silently replace a set nobody could see",
             code="unreadable",
         )
+    eff_label = current.label if current.keys else (label or "Point")
+    eff_key_prop = current.key_prop if current.keys else (key_prop or "id")
     drop = {k for k in keys if isinstance(k, str) and k}
     remaining = sorted(current.keys - drop)
     if remaining == sorted(current.keys) and current.keys:
         return PinResult(already=frozenset(drop), reading=current, budget=resolved,
                          written=False)
     if remaining:
-        _write(graph, label=label, key_prop=key_prop, keys=remaining)
+        _write(graph, label=eff_label, key_prop=eff_key_prop, keys=remaining)
     else:
         # ⛔ REMOVE THE NODE, do not write an empty list: `read` treats an absent node and
         # an empty enumeration identically, so keeping the node would leave a declaration

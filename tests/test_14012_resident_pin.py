@@ -535,3 +535,22 @@ def test_pin_refuses_to_extend_a_population_its_set_does_not_address():
     with pytest.raises(PinRefused) as exc:
         pin(g, ["p0"], label="Source", key_prop="url", budget=PinBudget(max_nodes=10))
     assert exc.value.code == "population-mismatch"
+
+
+def test_unpin_never_rewrites_the_population_a_set_addresses():
+    """Releasing keys must not move a `Source`-keyed set to `Point`.
+
+    Before this pin, `unpin` wrote back with its own `Point`/`id` defaults, so the
+    surviving keys kept their strings but addressed nodes that do not exist — every one
+    of them silently stopped being resident while the declaration still claimed them.
+    """
+    g = _FakeGraph(["a", "b"])
+    budget = PinBudget(max_nodes=10)
+    pin(g, ["a", "b"], label="Source", key_prop="url", budget=budget)
+    assert g.meta[PINS_META_KEY]["label"] == "Source"
+
+    unpin(g, ["a"], budget=budget)
+
+    assert g.meta[PINS_META_KEY]["label"] == "Source"
+    assert g.meta[PINS_META_KEY]["key_prop"] == "url"
+    assert g.meta[PINS_META_KEY]["keys"] == ["b"]

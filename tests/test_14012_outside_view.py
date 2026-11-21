@@ -156,8 +156,8 @@ class _Graph:
         params = params or {}
         if "MATCH (n:Point) RETURN count(n)" in statement:
             return _Result([[len(self.nodes)]])
-        if "MATCH (n:Point) RETURN n.id AS key LIMIT $limit" in statement:
-            limit = int(params["limit"])
+        if "MATCH (n:Point) RETURN n.id AS key LIMIT" in statement:
+            limit = int(statement.rsplit("LIMIT", 1)[1].strip())
             return _Result([[p["id"]] for p in
                             list(self.nodes.values())[:limit]])
         if statement.startswith("MATCH (n) RETURN count(n)"):

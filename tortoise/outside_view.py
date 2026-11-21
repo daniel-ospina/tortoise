@@ -215,9 +215,16 @@ def resident_keys(graph: Any, *, label: str = "Point", key_prop: str = "id",
 
     _bare(label, what="label")
     _bare(key_prop, what="key property")
+    # ⛔ The bound is INTERPOLATED, not parameterised: `LIMIT $limit` is not accepted by
+    # every engine version this runs against, and a rejected statement would turn the
+    # whole view into "could not be read" — a control that never works rather than one
+    # that answers. The value is an int, validated here, so there is nothing to inject.
+    bound = int(limit) + 1
+    if bound < 1:
+        raise ValueError(f"limit must be a positive integer, got {limit!r}")
     rows = graph.query(
-        f"MATCH (n:{label}) RETURN n.{key_prop} AS key LIMIT $limit",
-        params={"limit": int(limit) + 1},
+        f"MATCH (n:{label}) RETURN n.{key_prop} AS key LIMIT {bound}",
+        params={},
     ).result_set
     keys = [row[0] for row in rows if row and isinstance(row[0], str) and row[0]]
     return keys[: int(limit)], len(rows) > int(limit)
