@@ -440,6 +440,26 @@ class _AnchorHrefParser(HTMLParser):
         "applet", "button", "caption", "html", "marquee", "object", "select",
         "table", "td", "template", "th",
     })
+    #: The FORMATTING elements whose end tag runs the adoption agency algorithm
+    #: (spec 13.2.6.4.7). The list is the spec's own "formatting" list.
+    #:
+    #: ⛔ AAA CAN RELOCATE A BLOCK **OUT** OF AN UNRENDERED ANCESTOR, and the paint
+    #: seam has already decided by then (#14073 review round 13, P1, measured). The
+    #: seam judges a character token when it ARRIVES, so `<strong><canvas><div>CLAIM`
+    #: is judged while `canvas` is the ancestor; the later `</strong>` then runs AAA,
+    #: which takes the block (`furthestBlock`) and its text and re-inserts them
+    #: OUTSIDE `canvas`. Measured in this box's Chrome:
+    #: `<!doctype html><body><p>x</p><strong><canvas><div>CLAIM</canvas></strong>`
+    #: leaves the claim's text node at 224x17 px with `closest('canvas') === null`,
+    #: while the control `<canvas><div>CLAIM</canvas>` (no formatting element) is
+    #: 0x0 with `closest('canvas') === CANVAS` — the formatting wrapper is exactly
+    #: what makes the claim renderable, and `extract_visible_text` returned `''` for
+    #: both. End to end that shape in `#storage` left all six pins green over a
+    #: painted, unreviewed claim.
+    _FORMATTING = frozenset({
+        "a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small",
+        "strike", "strong", "tt", "u",
+    })
     #: The spec's ORDINARY scope boundaries — `_P_SCOPE_BOUNDARY` minus `button`, which
     #: is a boundary for BUTTON scope only. Two different questions, two different sets:
     #: `_close_p_scope` asks "is there a `p` in BUTTON scope" and needs `button`;
@@ -1368,6 +1388,55 @@ class _AnchorHrefParser(HTMLParser):
             self._open_elements.extend(relocated)
             return
 
+    def _aaa_would_relocate_a_painted_block(self, tag: str) -> bool:
+        """Would AAA later lift a BLOCK out of the unrendered element this tag closes?
+
+        The hazard is created HERE, when a misnested close ends an unrendered element
+        while a block is still open inside it, and a FORMATTING element sits below
+        that unrendered element. AAA (spec 13.2.6.4.7, `_FORMATTING`) then takes that
+        block as its `furthestBlock` and re-inserts it, with its text, OUTSIDE the
+        unrendered element — so a browser paints text this seam has already judged
+        unreadable, because `_text_is_painted` decides when the character token
+        ARRIVES.
+
+        Measured (this box's Chrome):
+        `<!doctype html><body><p>x</p><strong><canvas><div>CLAIM</canvas></strong>`
+        leaves the claim at 224x17 px with `closest('canvas') === null`, while the
+        control `<canvas><div>CLAIM</canvas>` — same misnesting, NO formatting
+        element below — stays 0x0 with `closest('canvas') === CANVAS`. So the
+        formatting element is what separates a painted claim from a dropped one, which
+        is why it is part of the test rather than a blanket "any block under an
+        unrendered parent".
+
+        Narrow on purpose: well-formed `<canvas><div>fallback</div></canvas>` closes
+        the block before the end tag and never fires, and a document with no
+        formatting element below never fires either. Firing on legal markup is what
+        gets a refusal rule deleted, so the pin drives both controls.
+        """
+        index = None
+        for i in range(len(self._open_elements) - 1, -1, -1):
+            name, _container, renders = self._open_elements[i]
+            if name == tag:
+                index = i
+                break
+        if index is None:
+            return False
+        _name, _container, renders = self._open_elements[index]
+        if renders and self._open_elements[index][0] not in self._RAW:
+            # A rendered element's close removes only its own fallback slot; nothing
+            # is relocated out of it, so there is no hazard.
+            return False
+        block_above = any(
+            self._open_elements[k][0] in self._P_CLOSERS
+            for k in range(index + 1, len(self._open_elements))
+        )
+        if not block_above:
+            return False
+        return any(
+            self._open_elements[k][0] in self._FORMATTING
+            for k in range(0, index)
+        )
+
     def _pop_top(self) -> None:
         """Pop the current node, keeping the container index in step."""
         _open_tag, opened_container, _renders = self._open_elements.pop()
@@ -2048,6 +2117,10 @@ class _AnchorHrefParser(HTMLParser):
         # stack while suppressed (`_open_extent` returns early), so an end tag that
         # arrives here has nothing legitimate to close.
         if not self._suppress:
+            # ⛔ BEFORE the close: the hazard is a property of the stack as the end tag
+            # arrives. See `_aaa_would_relocate_a_painted_block`.
+            if self._aaa_would_relocate_a_painted_block(tag):
+                self.wedged_reason = "adoption-agency-relocation"
             self._close_extent(tag)
         if tag in ("br", "p") and self._foreign:
             # Spec 13.2.6.5: `</br>`/`</p>` in foreign content pop it and are

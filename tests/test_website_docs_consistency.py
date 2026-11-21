@@ -4109,6 +4109,46 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
                 f"body level; the scan must read it"
             )
 
+    # ⛔ P1, ROUND 13 — THE ADOPTION AGENCY ALGORITHM RELOCATES A BLOCK OUT of an
+    # unrendered ancestor, and the paint seam has already judged the text by then.
+    # Measured in Chrome: `<strong><canvas><div>CLAIM</canvas></strong>` paints the
+    # claim at 224x17 px with `closest('canvas')` null, while the SAME misnesting
+    # without a formatting element (`<canvas><div>CLAIM</canvas>`) stays 0x0 inside
+    # the canvas. So the seam cannot decide, and it must not guess: it refuses.
+    # Both controls ride along — the shape WITHOUT the formatting element must still
+    # be quietly dropped (a refusal rule that fires on legal/mended markup gets
+    # deleted), and a well-formed unrendered subtree must not fire at all.
+    for unrendered in ("audio", "video", "canvas", "datalist", "meter", "progress"):
+        escaped = section.replace(
+            "</h2>",
+            f"</h2><strong><{unrendered}><div>FalkorDB permanently deletes it"
+            f"</{unrendered}></strong>",
+            1,
+        )
+        assert escaped != section
+        with pytest.raises(ValueError, match="adoption-agency-relocation"):
+            _visible_text(escaped)
+        # control 1: no formatting element below → AAA cannot lift it, the text really
+        # is inside the unrendered element, and the seam keeps dropping it.
+        control = section.replace(
+            "</h2>",
+            f"</h2><{unrendered}><div>FalkorDB permanently deletes it"
+            f"</{unrendered}>",
+            1,
+        )
+        assert "falkor" not in _banned_vocabulary(control), (
+            f"a block misnested inside a `<{unrendered}>` with NO formatting element "
+            f"is reported as painted: AAA has no furthestBlock to relocate, so a "
+            f"browser keeps the text inside the unrendered element"
+        )
+        # control 2: well-formed unrendered content must not refuse the page.
+        wellformed = section.replace(
+            "</h2>",
+            f"</h2><canvas><div>fallback</div></canvas>",
+            1,
+        )
+        _visible_text(wellformed)
+
     # ⛔ P1, ROUND 12 — FOSTER PARENTING IS PER TABLE. A cell belonging to a NESTED
     # table must not end the OUTER table's truncation. Measured:
     # `<table><audio><table><tr><td>CLAIM</td></tr></table></audio></table>` — Chrome
