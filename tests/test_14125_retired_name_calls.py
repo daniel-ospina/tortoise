@@ -306,14 +306,30 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     `except ImportError: raise` — re-raises all four, so it satisfies the same
     property as one four-name tuple and must not be redded for its shape. The
     broad arm is never coverage: it is what swallows the rest.
+
+    A handler only COUNTS when its body is a bare `raise`. Naming a programming
+    error in the clause is not the property — `except ImportError: return False`
+    names the seam and then swallows it, and counting the name would let a probe
+    pass this gate with exactly the behaviour it exists to forbid.
     """
     out: set[str] = set()
     for handler in handlers:
+        if not _reraises(handler):
+            continue
         names = _handler_names(handler)
         if names == {"<bare>"} or "Exception" in names:
             continue
         out |= names
     return out
+
+
+def _reraises(handler: ast.ExceptHandler) -> bool:
+    """Whether the handler body is exactly one bare `raise` (a re-raise)."""
+    return (
+        len(handler.body) == 1
+        and isinstance(handler.body[0], ast.Raise)
+        and handler.body[0].exc is None
+    )
 
 
 def _availability_targets(stmt: ast.stmt) -> list[ast.expr]:
@@ -329,7 +345,28 @@ def _availability_targets(stmt: ast.stmt) -> list[ast.expr]:
 #: way, and two `_probe(…)` families resolve `_AVAILABLE, _WORKING_URI = _probe(…)`
 #: — so a census keyed on one spelling graded NOTHING in the other, which is how
 #: those two kept the swallowing shape through two repair rounds (review F3).
+#:
+#: A fixed list is what went blind the third time: `test_falkordb_compat.py`
+#: resolves `_LIVE_AVAILABLE` and was graded by nothing, so the class survived a
+#: round that claimed to close it. The rule is the SUFFIX — any flag that ends in
+#: `AVAILABLE` is an availability decision, whatever it is prefixed with.
 _AVAILABILITY_FLAGS = frozenset({"FALKORDB_AVAILABLE", "_AVAILABLE"})
+_AVAILABILITY_SUFFIX = "AVAILABLE"
+_UNAVAILABLE_SUFFIX = "UNAVAILABLE"
+
+
+def _is_availability_flag(name: str) -> bool:
+    """Whether `name` is an availability FLAG.
+
+    `*_UNAVAILABLE` is not one: `X_UNAVAILABLE = _probe()` and
+    `EMBEDDER_UNAVAILABLE_REASONS` are the opposite decision, and
+    `"UNAVAILABLE".endswith("AVAILABLE")` is True — so the suffix rule has to
+    exclude the negation explicitly or it grades a "cannot use it" flag as a
+    "can use it" flag.
+    """
+    if name.endswith(_UNAVAILABLE_SUFFIX):
+        return False
+    return name in _AVAILABILITY_FLAGS or name.endswith(_AVAILABILITY_SUFFIX)
 
 
 def _names_availability(targets: list[ast.expr]) -> bool:
@@ -337,7 +374,7 @@ def _names_availability(targets: list[ast.expr]) -> bool:
     (`FALKORDB_AVAILABLE, _WORKING_URI = _probe([…])`)."""
     for target in targets:
         for node in ast.walk(target):
-            if isinstance(node, ast.Name) and node.id in _AVAILABILITY_FLAGS:
+            if isinstance(node, ast.Name) and _is_availability_flag(node.id):
                 return True
     return False
 
@@ -360,6 +397,67 @@ def _resolver_functions(tree: ast.Module) -> set[str]:
     names: set[str] = set()
     for stmt in tree.body:
         if not _names_availability(_availability_targets(stmt)):
+            continue
+        value = getattr(stmt, "value", None)
+        if value is None:
+            continue
+        for node in ast.walk(value):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+    return names
+
+
+def _skipif_conditions(tree: ast.Module) -> list[ast.expr]:
+    """Every `skipif`/`skip` condition expression in the module.
+
+    This is the SECOND place availability is resolved at import time, and it is
+    not a flag at all: `@pytest.mark.skipif(not _falkordb_available(), …)` calls
+    the probe from a decorator, and `LIVE = _falkordb_available()` feeds one from
+    a bare name. Both decide a SKIP at collection, so both are the class-2
+    decision — and a census keyed only on an assignment graded NEITHER, which is
+    how three more probes kept the swallowing shape (measured: two
+    `_falkordb_available()` helpers and one `LIVE =` family).
+    """
+    out: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        name = (
+            func.attr
+            if isinstance(func, ast.Attribute)
+            else func.id
+            if isinstance(func, ast.Name)
+            else None
+        )
+        if name in {"skipif", "skip"}:
+            out.append(node.args[0])
+    return out
+
+
+def _skip_gating_functions(tree: ast.Module) -> set[str]:
+    """Module-level helpers whose value decides a SKIP at import/collection.
+
+    Two shapes, both seen in this tree: called directly in the condition
+    (`skipif(not _falkordb_available())`), or assigned to a name the condition
+    reads (`LIVE = _falkordb_available()` … `skipif(not LIVE)`).
+    """
+    names: set[str] = set()
+    referenced: set[str] = set()
+    for condition in _skipif_conditions(tree):
+        for node in ast.walk(condition):
+            if isinstance(node, ast.Name):
+                referenced.add(node.id)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+    for stmt in tree.body:
+        targets = [
+            node.id
+            for target in _availability_targets(stmt)
+            for node in ast.walk(target)
+            if isinstance(node, ast.Name)
+        ]
+        if not set(targets) & referenced:
             continue
         value = getattr(stmt, "value", None)
         if value is None:
@@ -399,6 +497,29 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
     return out
 
 
+def _own_imported_names(nodes: list[ast.stmt]) -> set[str]:
+    """Names bound by OWN-code imports anywhere in these statements."""
+    out: set[str] = set()
+    for stmt in nodes:
+        for node in ast.walk(stmt):
+            if isinstance(node, (ast.Import, ast.ImportFrom)) and _is_own_code_import(node):
+                out |= {(alias.asname or alias.name.split(".")[0]) for alias in node.names}
+    return out
+
+
+def _touches_own_code(block: ast.AST, own_names: set[str]) -> bool:
+    """Whether the block USES a name bound from own code.
+
+    The call form of the same seam: a probe that hoisted its import above the
+    guard (`from tortoise.sdk import TortoiseSDK` … `try: TortoiseSDK()`) still
+    reads a moved/renamed door through the guard, so its arm must stay graded —
+    whether or not the import sits inside the `try`.
+    """
+    return any(
+        isinstance(node, ast.Name) and node.id in own_names for node in ast.walk(block)
+    )
+
+
 def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     """The `try` blocks that DECIDE availability — two shapes in this tree.
 
@@ -414,6 +535,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     """
     roots: list[ast.Try] = []
     resolvers = _resolver_functions(tree)
+    skip_gated = _skip_gating_functions(tree)
     for stmt in tree.body:
         if isinstance(stmt, ast.Try) and _assigns_availability(stmt):
             roots.append(stmt)
@@ -421,7 +543,31 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
             and stmt.name in resolvers
         ):
-            roots.extend(_control_flow_tries(stmt.body))
+            own_names = _own_imported_names(stmt.body)
+            roots.extend(
+                block
+                for block in _control_flow_tries(stmt.body)
+                if _imports_own_code(block) or _touches_own_code(block, own_names)
+            )
+        elif (
+            isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and stmt.name in skip_gated
+        ):
+            # Only a probe that TOUCHES own code is graded — it imports own code
+            # inside the `try`, or it calls a name it imported from own code
+            # above it. That is the seam this class exists for (a module or door
+            # that is moved must fail loudly). A THIRD-PARTY import in the same
+            # `try` — `import redislite.falkordb_client` in the embedded
+            # harnesses, `sentence_transformers` in the model probes — is an
+            # optional extra, and demanding a re-raise for it would turn a
+            # legitimate skip into a collection error, contradicting the rule
+            # that an absent capability skips.
+            own_names = _own_imported_names(stmt.body)
+            roots.extend(
+                block
+                for block in _control_flow_tries(stmt.body)
+                if _imports_own_code(block) or _touches_own_code(block, own_names)
+            )
     return roots
 
 
@@ -511,11 +657,13 @@ def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool],
             src = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        # A cheap text prefilter, not the rule: `_AVAILABLE` is a substring of
-        # `FALKORDB_AVAILABLE`, so this admits both spellings (58 tracked
-        # tests/ + tools/ files carry one, at ~11 more `ast.parse` calls than
-        # the flag-name filter did).
-        if "_AVAILABLE" not in src:
+        # A cheap text prefilter, not the rule: `AVAILABLE` is a substring of
+        # every flag spelling this tree uses (`FALKORDB_AVAILABLE`, `_AVAILABLE`,
+        # `_LIVE_AVAILABLE`), and `skipif` admits the decorator-resolved probes
+        # that have NO flag at all. Measured at this head: 218 of the 1,842
+        # tracked tests/ + tools/ `.py` files pass it and the whole census runs
+        # in 3.6 s (one `ast.parse` each, no execution).
+        if "AVAILABLE" not in src and "skipif" not in src:
             continue
         try:
             rows = _probe_blocks_from_source(src)
@@ -525,12 +673,26 @@ def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool],
     return tuple(out)
 
 
+def _required_names(own_import: bool) -> set[str]:
+    """The programming-error names a graded block's arm must cover.
+
+    `AttributeError`/`NameError`/`TypeError` always: a renamed door, a renamed
+    local, a changed call shape. `ImportError` only when the block imports OWN
+    code INSIDE the `try` — that is the module-rename seam (the #14125 F2
+    finding). A block that cannot import anything inside itself cannot raise it
+    from its own body, and demanding it there would force an `ImportError`
+    re-raise on a probe whose only import is an optional third-party extra —
+    turning a legitimate skip into a collection error.
+    """
+    return _RAISED if own_import else _RAISED - {"ImportError"}
+
+
 def _unarmed_probe_blocks() -> tuple[tuple[str, int], ...]:
     """Probe roots that swallow a programming error instead of re-raising it."""
     return tuple(
         (rel, lineno)
-        for rel, lineno, covered, swallows, _own, is_root in _probe_report()
-        if is_root and swallows and not set(covered) >= _RAISED
+        for rel, lineno, covered, swallows, own_import, is_root in _probe_report()
+        if is_root and swallows and not set(covered) >= _required_names(own_import)
     )
 
 
@@ -557,7 +719,16 @@ def test_every_availability_probe_re_raises_a_programming_error():
     shard with a message about live storage that named no door. Measured before
     this gate: ten modules in the same shape, plus 13 more in the assembly and
     `_probe` families — and eight more that resolve the flag through a helper
-    (`FALKORDB_AVAILABLE = _probe()`), which this census now reaches too.
+    (`FALKORDB_AVAILABLE = _probe()`), which this census reaches too.
+
+    ⛔ Three repair rounds in a row reported this class closed while probes kept
+    the shape, because the census knew ONE resolution at a time: first only a
+    module-body `try` (missing the helper-resolved families), then only the
+    `FALKORDB_AVAILABLE` spelling (missing `_AVAILABLE`), then only an assigned
+    flag at all (missing `_LIVE_AVAILABLE` and the three probes a module-level
+    `skipif` calls directly). The walk now answers from the DECISION — a flag
+    whose name ends in `AVAILABLE`, or a helper whose value a `skipif` reads —
+    so a fourth spelling or a fourth resolution shape cannot go quietly blind.
     """
     unarmed = _unarmed_probe_blocks()
     if unarmed:
@@ -772,4 +943,246 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
             f"{rel} is absent from the probe census — its `_AVAILABLE, … = "
             "_probe([…])` flag spelling has fallen out of `_AVAILABILITY_FLAGS`, "
             "so the arm in it is unobservable"
+        )
+
+
+def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
+    """Self-test: the third blind spot, and the rule that closes it.
+
+    Two rounds of this repair reported the class closed while probes kept the
+    swallowing shape, because the census only knew ONE way a probe is resolved:
+    a module-level `try` assigning `FALKORDB_AVAILABLE`, plus a helper that
+    assignment calls. Measured at the head before this widening: 9 more probes
+    were outside it — one resolving `_LIVE_AVAILABLE` (a third flag SPELLING,
+    so a fixed name set graded nothing), three resolved by a `skipif` that calls
+    the probe directly, and five `_has_embedded` helpers that import own code
+    inside the guard. "A silent drop is a fail" (#14125), so both directions are
+    pinned here: what the census must now grade, and what it must NOT.
+    """
+    def roots(src: str) -> tuple[tuple[int, tuple[str, ...], bool, bool, bool], ...]:
+        return _probe_blocks_from_source(textwrap.dedent(src))
+
+    # 1. A third flag SPELLING is the same decision — `_LIVE_AVAILABLE` in
+    #    `tests/test_falkordb_compat.py` was graded by nothing under a fixed set.
+    respelled = roots(
+        """
+        _LIVE_AVAILABLE = False
+        try:
+            _probe = _FP.from_uri("redis://x")
+            _probe.g.query("RETURN 1")
+            _LIVE_AVAILABLE = True
+        except Exception:
+            _LIVE_AVAILABLE = False
+        """
+    )
+    assert respelled == ((3, (), True, False, True),), (
+        "a `*_AVAILABLE` flag spelling must be graded like `FALKORDB_AVAILABLE`: "
+        f"{respelled}"
+    )
+    for name in ("FALKORDB_AVAILABLE", "_AVAILABLE", "_LIVE_AVAILABLE", "AVAILABLE"):
+        assert _is_availability_flag(name), f"{name} must read as an availability flag"
+    assert not _is_availability_flag("EMBEDDER_UNAVAILABLE_REASONS")
+    # `"UNAVAILABLE".endswith("AVAILABLE")` is True — the negation is the
+    # OPPOSITE decision (`PROBE_UNAVAILABLE = _probe()` in `tools/cmux_dispatch.py`
+    # is the "cannot use it" flag) and must not be graded as an availability flag.
+    assert not _is_availability_flag("PROBE_UNAVAILABLE")
+    negation = roots(
+        """
+        PROBE_UNAVAILABLE = _probe_unavailable()
+
+        def _probe_unavailable():
+            try:
+                from tortoise.sdk import TortoiseSDK
+                return TortoiseSDK()
+            except Exception:
+                return False
+        """
+    )
+    assert negation == (), (
+        f"a `*_UNAVAILABLE` flag is not an availability decision: {negation}"
+    )
+
+    # 2. A helper CALLED from a module-level `skipif` decides a skip at
+    #    collection — same class, no flag anywhere.
+    called = roots(
+        """
+        import pytest
+
+        def _live():
+            try:
+                from tortoise.sdk import TortoiseSDK
+                TortoiseSDK()
+                return True
+            except Exception:
+                return False
+
+        @pytest.mark.skipif(not _live(), reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert called == ((5, (), True, True, True),), (
+        f"a skipif-called probe with an own-code import must be graded: {called}"
+    )
+
+    # 3. …and a helper ASSIGNED to a name the condition reads (`LIVE = _live()`).
+    assigned = roots(
+        """
+        import pytest
+
+        def _live():
+            try:
+                from tortoise.sdk import TortoiseSDK
+                return True
+            except Exception:
+                return False
+
+        LIVE = _live()
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert assigned == ((5, (), True, True, True),), (
+        f"a skipif-referenced `LIVE = _probe()` resolution must be graded: {assigned}"
+    )
+
+    # 3b. …including a TUPLE target (`LIVE, URI = _probe()`), which a target walk
+    #     that only reads `ast.Name` nodes misses.
+    tupled = roots(
+        """
+        import pytest
+
+        def _live():
+            try:
+                from tortoise.sdk import TortoiseSDK
+                return True, "redis://x"
+            except Exception:
+                return False, None
+
+        LIVE, URI = _live()
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert tupled == ((5, (), True, True, True),), (
+        f"a tuple-target `LIVE, URI = _probe()` resolution must be graded: {tupled}"
+    )
+
+    # 3c. A hoisted-import probe whose guarded body CALLS the own-code door is
+    #     still the seam — `tests/eval/retrieval/test_1348.py` builds a
+    #     `TortoiseSDK` inside its guard — and it needs the three door errors,
+    #     not `ImportError` (nothing is imported inside its own `try`).
+    hoisted_call = roots(
+        """
+        import pytest
+
+        def _has_embedded():
+            from tortoise.sdk import TortoiseSDK
+            try:
+                TortoiseSDK().close()
+                return True
+            except (AttributeError, NameError, TypeError):
+                raise
+            except Exception:
+                return False
+
+        @pytest.mark.skipif(not _has_embedded(), reason="embedded")
+        def test_embedded():
+            pass
+        """
+    )
+    assert hoisted_call == ((6, ("AttributeError", "NameError", "TypeError"), True, False, True),), (
+        f"a hoisted-import probe that CALLS the door must be graded: {hoisted_call}"
+    )
+    assert _required_names(False) == _RAISED - {"ImportError"}
+    assert _required_names(True) == _RAISED
+
+    # 3d. …and its arm must RE-RAISE: naming the exceptions in the clause is not
+    #     the property, or `except (…): FLAG = False` would satisfy the gate with
+    #     exactly the swallow it exists to forbid.
+    swallowed = roots(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK()
+            FALKORDB_AVAILABLE = True
+        except (AttributeError, NameError, TypeError, ImportError):
+            FALKORDB_AVAILABLE = False
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert swallowed == ((3, (), True, True, True),), (
+        "a narrow arm that does NOT re-raise is not coverage — it names the "
+        f"programming error and swallows it: {swallowed}"
+    )
+
+    # 4. An OPTIONAL third-party capability is still out of scope: a skip is the
+    #    correct outcome for an absent extra, so it must NOT be redded.
+    optional = roots(
+        """
+        import pytest
+
+        def _model_cached():
+            try:
+                import sentence_transformers
+                sentence_transformers.SentenceTransformer("all-MiniLM-L6-v2")
+                return True
+            except Exception:
+                return False
+
+        @pytest.mark.skipif(not _model_cached(), reason="model")
+        def test_model():
+            pass
+        """
+    )
+    assert optional == (), (
+        "a third-party-only capability probe must not be graded — demanding a "
+        f"re-raise there turns a legitimate skip into an error: {optional}"
+    )
+
+    # 4b. The repaired `_has_embedded` shape: own code HOISTED above the guard,
+    #     the optional third-party extra left inside it. Grading this would
+    #     demand an `ImportError` re-raise for `redislite`, turning a legitimate
+    #     embedded skip into a collection error — so the census must leave it be.
+    hoisted = roots(
+        """
+        import pytest
+
+        def _has_embedded():
+            from tortoise.projection import FalkorProjection  # noqa: F401
+            try:
+                import redislite.falkordb_client  # noqa: F401
+                return True
+            except Exception:
+                return False
+
+        @pytest.mark.skipif(not _has_embedded(), reason="embedded")
+        def test_embedded():
+            pass
+        """
+    )
+    assert hoisted == (), (
+        "the hoisted-own-import shape must not be graded — its only import in "
+        f"the `try` is the optional extra: {hoisted}"
+    )
+
+    # 5. The real tree must carry all four shapes, or every assertion above is a
+    #    statement about a sample rather than about the code it is meant to guard.
+    graded = {row[0] for row in _probe_report()}
+    for rel in (
+        "tests/test_falkordb_compat.py",
+        "tests/test_evidence_assembly_wiring_2683.py",
+        "tests/test_paired_expansion_ab_2518.py",
+        "tests/test_time_aware_run_2520.py",
+    ):
+        assert rel in graded, (
+            f"{rel} is absent from the probe census — a shape it grades has "
+            "been dropped from the walk (flag suffix, skipif-call, or the "
+            "`LIVE = _probe()` resolution), so its arm is unobservable"
         )
