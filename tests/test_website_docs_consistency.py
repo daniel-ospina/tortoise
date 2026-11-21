@@ -3914,6 +3914,31 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"breakout `<h2>` is HTML content, so it closes the `<p>` and the "
             f"`<{unrendered}>` with it, and the text after it is rendered"
         )
+    # 3f. …and the RUBY family, where the ordinary-scope and button-scope questions
+    #    differ (#14073 review round 12, P1, measured — a REGRESSION this branch
+    #    introduced when `_ruby_in_scope` first reused the button-scope set). A
+    #    `<button>` is an ordinary-scope NON-boundary but a BUTTON-scope boundary, so
+    #    sharing one set made a `<button>` between the `<ruby>` and the `rp`/`rt`/`rb`/
+    #    `rtc` suppress the spec's implied close: the `_UNRENDERED` `<rp>` stayed on the
+    #    stack and every following text node was dropped — `extract_visible_text`
+    #    returned `''` while Chrome built
+    #    `<p><ruby><button><rp></rp><rt>CLAIM</rt></button></ruby>` (chain
+    #    `RT -> BUTTON -> RUBY -> P`) and painted it. The previous commit's ruby rows all
+    #    carry a `<ruby>` with nothing in between, so they could not red for this.
+    for closer in ("rt", "rb", "rtc"):
+        shape = f"<p><ruby><button><rp><{closer}>CLAIMXYZ"
+        assert "CLAIMXYZ" in extract_visible_text(shape), (
+            f"`extract_visible_text({shape!r})` dropped a claim Chrome paints: `<button>` "
+            f"is an ORDINARY-scope non-boundary, so the `<ruby>` is still in scope, "
+            f"`<{closer}>` generates the implied end tags, pops the `<rp>`, and the text "
+            f"after it is rendered — reusing the button-scope boundaries here is the "
+            f"regression this row pins"
+        )
+    # …and the protected case the precondition exists for is unchanged.
+    assert "CLAIMXYZ" in extract_visible_text("<ruby><rp><rt>CLAIMXYZ</rt></rp></ruby>"), (
+        "`<rt>` after `<rp>` must still generate implied end tags when a `<ruby>` is in "
+        "scope: the precondition is not 'never close', it is 'only when ruby is in scope'"
+    )
     # …and the NEGATIVE that stops the carve-out becoming "skip anything": an element
     # the browser DOES keep between them (`<div>`, `<section>`) means the summary is not
     # the details' child, and a closed details paints no body.

@@ -387,6 +387,13 @@ class _AnchorHrefParser(HTMLParser):
         "applet", "button", "caption", "html", "marquee", "object", "table",
         "td", "template", "th",
     })
+    #: The spec's ORDINARY scope boundaries — `_P_SCOPE_BOUNDARY` minus `button`, which
+    #: is a boundary for BUTTON scope only. Two different questions, two different sets:
+    #: `_close_p_scope` asks "is there a `p` in BUTTON scope" and needs `button`;
+    #: `_ruby_in_scope` asks "is there a `ruby` in scope" and must NOT stop at a
+    #: `<button>`. Sharing one set made a `<button>` between the `<ruby>` and an
+    #: `rp`/`rt`/`rb`/`rtc` drop painted text (#14073 review round 12, P1, measured).
+    _SCOPE_BOUNDARY = _P_SCOPE_BOUNDARY - {"button"}
     #: The `_RAW` members whose CONTENT a reader DOES meet, so the visible-text
     #: recording must not drop it with the rest of the raw-text family.
     #:
@@ -1108,14 +1115,27 @@ class _AnchorHrefParser(HTMLParser):
         """Is a `ruby` element in scope? The precondition on `_close_implied`'s
         implied-end-tag branch (spec, `<rb>`/`<rp>`/`<rt>`/`<rtc>` start tags).
 
-        "In scope" uses the ordinary scope-boundary list, so the walk stops at a
+        "In scope" uses the ORDINARY scope-boundary list, so the walk stops at a
         `table`/`td`/`template`/`object`/… — a `ruby` above one of those is not in
         scope and does not license the implied close.
+
+        ⛔ NOT `_P_SCOPE_BOUNDARY` (#14073 review round 12, P1, measured — a regression
+        this lane introduced one commit earlier). That set is the BUTTON-scope list,
+        which is what `_close_p_scope` needs; it adds `button`, and `button` is NOT an
+        ordinary-scope boundary. Reusing it here made a `<button>` between the `<ruby>`
+        and an `rp`/`rt`/`rb`/`rtc` suppress the implied close, leave the `_UNRENDERED`
+        `<rp>` on the stack, and drop every following text node:
+
+            extract_visible_text('<p><ruby><button><rp><rt>CLAIM')  ->  ''
+
+        while Chrome builds `<p><ruby><button><rp></rp><rt>CLAIM</rt></button></ruby>`
+        and paints it (ancestor chain `RT → BUTTON → RUBY → P`). One commit earlier the
+        same shape returned `'CLAIM'`, so this row is a regression test, not a new gap.
         """
         for open_tag, _container, _renders in reversed(self._open_elements):
             if open_tag == "ruby":
                 return True
-            if open_tag in self._P_SCOPE_BOUNDARY:
+            if open_tag in self._SCOPE_BOUNDARY:
                 return False
         return False
 
