@@ -1138,8 +1138,11 @@ def test_the_pin_requires_EXACTLY_ONE_delegation():
     ⛔ EVERY arm of this test comes from `_NON_EXACTLY_ONE_DELEGATION`, so an emptied
     table would leave the loop with nothing to iterate and the test GREEN — the same
     "decides NO verdict" shape as the unexercised branch this test was added for, one
-    level up. pytest turns an empty parameter set into a SKIP, which is not a red either
-    (docs.pytest.org/how-to/parametrize.html, `empty_parameter_set_mark`), so the table
+    level up. ⛔ THE SKIP SHAPE IS NOT THIS ONE: pytest's `empty_parameter_set_mark`
+    (docs.pytest.org/how-to/parametrize.html) turns an empty PARAMETRIZED set into a
+    SKIP, and that applies to the sibling parametrised tests in this file, not here — an
+    empty dict simply makes the `for` loop below run zero times and the test PASS. That
+    is a worse shape than a skip, not a better one, so the table
     is guarded by name here, exactly as this file already does for the two tables above
     (`test_the_census_exemption_is_path_and_receiver_scoped`: "vacuity is a red, not a
     StopIteration"; `test_every_declared_non_sdk_receiver_is_a_real_one`).
@@ -1154,7 +1157,7 @@ def test_the_pin_requires_EXACTLY_ONE_delegation():
         recorder = _RecordingDoorSdk()
         surface = object.__new__(fixture)
         surface._sdk = recorder
-        returned = fixture.__dict__["create_subject_anchor"](surface, "pin-probe-subject")
+        returned = fixture.__dict__["create_subject_anchor"](surface, _DOOR_PROBE_SUBJECT)
         assert returned is _DOOR_PROBE_SENTINEL, (
             f"the `{label}` fixture must RETURN the sentinel, or the identity refusal "
             "would be what fires and this arm would pin nothing")
