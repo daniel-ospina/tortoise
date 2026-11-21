@@ -59,9 +59,9 @@ two whole-graph scans in the restore path, which carry the label without naming 
 ⚠️ **The line addresses in `#13083` §2.6 for rows 15–16 are stale at this head**: the census cites
 `:1316`/`:1517`, and the statements are at `:1333`/`:1534`. Re-derived here rather than shifted by a
 constant, because `hosted_backup.py`'s drift is not one offset: measured with `diff -U0` between the
-census's pin `ccb49741b2ec` and this head it is **three hunks** — the two `+2` import lines land
-after the pin's `:58` and `:59`, then `+60` after `:1035` (`@@ -1035,0 +1038,60 @@`) and `+89` after
-`:1175` (`@@ -1175,0 +1238,89 @@`) — i.e.
+census's pin `ccb49741b2ec` and this head it accumulates in **three offset steps** — the two `+2`
+import lines land after the pin's `:58` and `:59`, then `+60` after `:1035` (`@@ -1035,0 +1038,60 @@`)
+and `+89` after `:1175` (`@@ -1175,0 +1238,89 @@`) — i.e.
 cumulative `+2` / `+62` / `+151`, and the flat `+134` an earlier draft applied lands at
 `:1316`/`:1517`, which are NOT the statements (`:1316` is `retired_vectors += 1`).
 

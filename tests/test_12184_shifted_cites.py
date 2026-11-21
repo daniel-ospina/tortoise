@@ -316,9 +316,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
     # §2.6's row, re-pointed to this head by the same review: the census's `:890`/`:1182`/`:1383` do not land
-    # on these statements at this head, and `hosted_backup.py` drifts in TWO steps (`+2` above the pin's `:58`,
-    # `+132` above the pin's `:1175`) — so the offsets are `+2`/`+134`, not one delta. Pinned by content
-    # because the header's enumeration names them and promises exactly that.
+    # on these statements at this head, and `hosted_backup.py` drifts in THREE offset STEPS (`+2` above the
+    # pin's `:58`/`:59`, `+60` above its `:1035`, `+89` above its `:1175`) — so the offsets are
+    # `+2`/`+62`/`+151`, not one delta and not the `+2`/`+134` an earlier draft read off a two-step
+    # `+132` hunk count (the `+134` lands at `:1316`/`:1517`, which are not the statements). Pinned by
+    # content because the header's enumeration names them and promises exactly that.
     (_AUDIT, "hosted_backup.py:892", _HB, 892, '"MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"'),
     (_AUDIT, "hosted_backup.py:1333", _HB, 1333, 'MATCH (n) RETURN labels(n), properties(n)'),
     (_AUDIT, "hosted_backup.py:1534", _HB, 1534, 'MATCH (n) RETURN labels(n), properties(n)'),
