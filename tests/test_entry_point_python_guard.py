@@ -1688,6 +1688,7 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/reap_empty_test_graphs.py": 2,
     "tools/claim_dense_leg_13732.py": 4,
     "tools/vector_parity_13906.py": 4,
+    "tools/graphevent_home.py": 2,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1796,6 +1797,16 @@ REFUSAL_WHY: dict[str, str] = {
         "`tools/claim_dense_leg_13732.py` takes for an unsupported interpreter. "
         "`SystemExit(<int>)` carries no message, so the refusal prints to stderr; "
         "no wrapper in `.github/` branches on 4"
+    ),
+    "tools/graphevent_home.py": (
+        "1 is this tool's PRODUCED `not_covered` verdict — a read that RAN and "
+        "found the record short — so an environment refusal must not wear it; "
+        "2 is `could not run` on the tool's own EXIT CODES table (the code a "
+        "missing `psycopg2` already returns, pinned by "
+        "`tests/test_13094_graphevent_home.py`), and a pre-3.12 interpreter is "
+        "exactly `could not run`: with the historical `SystemExit(<message>)` "
+        "shape the status would be 1, which a caller gating on the exit would "
+        "read as a produced verdict about a record nothing read"
     ),
 }
 
