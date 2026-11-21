@@ -7385,14 +7385,17 @@ def test_docs_only_skips_slow_and_carve_out():
 
 
 def test_the_p7_how_to_selects_its_reader_and_declares_the_cost():
-    """#14237 round-2 review (P2): the ONE declared exception to
+    """#14237 round-2 review (P2), corrected by round 3: the ONE declared exception to
     `test_docs_only_skips_slow_and_carve_out`'s property.
 
     Registering the P7 how-to against `sdk` is what makes the guard that READS it run on
     the doc-only diff it exists for — and `sdk` carries the slow leg and the carve-out
-    pool, so this one path sets both. That cost is declared here, measured, instead of
-    being left for whoever wonders why one markdown edit woke 64 slow files; every
-    OTHER docs-only path still skips both legs, which is what the pin above says.
+    pool. ⛔ The two legs cost DIFFERENT things and the comment in `tools/ci_selection.py`
+    must not merge them: the slow leg is diff-SCOPED by `slow_selected` (three files,
+    which is what this pin asserts), while the carve-out leg is diff-GATED but never
+    diff-SIZED, so it runs its whole pool in 3 shard jobs. Pinned here so the cost is
+    declared rather than discovered; every OTHER docs-only path still skips both legs,
+    which is what the pin above says.
     """
     doc = "docs/how-to/provision-a-graph-per-end-user.md"
     r = _sel([doc])
@@ -7408,6 +7411,12 @@ def test_the_p7_how_to_selects_its_reader_and_declares_the_cost():
     assert r["slow_run"] is True and r["carve_out_run"] is True, (
         "the declared cost of this registration moved — re-measure it and say so in "
         "the comment in tools/ci_selection.py, or move the registration")
+    # The THREE-file slow leg is the diff-SCOPED half (`slow_files` is the declared pool
+    # every path emits and sizes nothing here). Pinned by count, not by membership, so a
+    # surface gaining a leg reds here instead of silently widening a docs-only PR.
+    assert len(r["slow_selected"]) == 3, (
+        f"the slow leg this registration wakes changed size: {r['slow_selected']} — "
+        "re-measure the cost in tools/ci_selection.py's comment")
 
 
 def test_full_selection_runs_both_legs_with_whole_slow_leg_set():

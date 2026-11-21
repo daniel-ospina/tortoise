@@ -1104,15 +1104,18 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: and an instruction glued with one shared a "sentence" and the instruction again
     #: passed on its neighbour's word. It is measured by its own case below, not asserted.
     #:
-    #: A terminator followed by a CLOSING DELIMITER is still a terminator (#14237 round-2
-    #: review, P2): `(?=\s)` alone missed the `.` in `…retired forward into it.)`, so the
-    #: sentence did not end there and the NEXT line inherited the note's "retired" —
-    #: measured, the guard passed an instruction written directly under a parenthesised
-    #: migration note. Only the closing characters are skipped, and only up to whitespace,
-    #: so this can only ADD boundaries (never cut a sentence a plain terminator already
-    #: cut in two).
+    #: A terminator followed by CLOSING/MARKUP characters is still a terminator (#14237
+    #: round-2 review P2, widened by round 3): `(?=\s)` alone missed the `.` in
+    #: `…retired forward into it.)`, so the sentence did not end there and the NEXT line
+    #: inherited the note's "retired" — measured, the guard passed an instruction written
+    #: directly under a parenthesised migration note. The round-3 review then defeated the
+    #: first fix with the other markdown closers (`.**`, `.*`, `._`, a closing code span,
+    #: a blockquote's `>`), so the class is the WHOLE run of closing characters, not a
+    #: hand-picked pair — and `…` is a terminator in its own right. Everything skipped is a
+    #: character that cannot start a sentence, and only up to whitespace, so this can only
+    #: ADD boundaries (never cut a sentence a plain terminator already cut in two).
     SENTENCE_BREAK = re.compile(
-        r"[.!?][\"'\u2019\u201d)\]]*(?=\s)"                 # ends a sentence, maybe `.)`
+        r"[.!?\u2026][\"'\u2019\u201d)\]_`*>]*(?=\s)"       # ends a sentence, maybe `.**`
         r"|;[ \t]*"                                       # ends a CLAUSE
         r"|\n[ \t]*\n"                                     # ends a block
         r"|\n(?=\||#{1,6} |[ \t]*[-*+] |[ \t]*\d+\. )"     # a new block begins
@@ -1128,6 +1131,19 @@ class TestEveryReaderNamesTheLiveListingDoor:
         following = cls.SENTENCE_BREAK.search(text, end)
         right = following.end() if following else len(text)
         return text[left:right]
+
+    #: What counts as a LABEL: the past/attributive form, not the stem (#14237 r3
+    #: review, P2). `retires` / `will retire` is a PROMISE that the name goes away, so a
+    #: sentence saying "Call `tortoise_list_graphs` for now — the door retires in the next
+    #: wave" still INSTRUCTS the reader to make the call; a stem match accepted it. The
+    #: narrower form can only over-block a hand-written synonym ("retirement", "gone") in
+    #: this one doc, which is the fail-closed direction and is visible in the failure text.
+    RETIRED_LABEL = re.compile(r"\bretired\b", re.IGNORECASE)
+
+    @classmethod
+    def is_labelled(cls, sentence: str) -> bool:
+        """Is this sentence a statement that the door IS retired (not that it will be)?"""
+        return bool(cls.RETIRED_LABEL.search(sentence))
 
     def test_the_window_is_a_sentence_not_a_character_budget(self):
         """The fail-open case, as a case (#14237 review F3).
@@ -1178,22 +1194,56 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "an instruction joined to the note by ';' was cleared by the note's "
             "'retired' — a clause boundary is not a sentence boundary")
 
-    def test_a_terminator_before_a_closing_delimiter_still_ends_the_sentence(self):
-        """`.)` ends a sentence (#14237 round-2 review, P2).
+    @pytest.mark.parametrize("closer", [")", '"', "'", "\u201d", "\u2019", "]", "**", "*",
+                                      "_", "`", ">"])
+    def test_a_terminator_before_ANY_closing_closer_still_ends_the_sentence(self, closer):
+        """A terminator + ANY closing/markup run ends a sentence (#14237 r2/r3 reviews).
 
-        Measured fail-open: a parenthesised migration note ends `.`+`)`, so a boundary
-        that only looked for `[.!?]` followed by whitespace missed it, and the
-        instruction written on the next line inherited the note's "retired".
+        Measured fail-open, twice. First `.)`: a boundary that only looked for `[.!?]`
+        followed by whitespace missed it, so the instruction on the next line inherited
+        the note's "retired". Then the same hole with every OTHER markdown closer —
+        `.**`, `.*`, `._`, a closing code span, a blockquote's `>` — which is why the
+        rule skips the whole closing run instead of a hand-picked pair: each of these
+        is a form a how-to edit writes without thinking.
         """
         text = ("Intro about the wave.\n"
                 "(the door `tortoise_list_graphs` retired forward into "
-                "`tortoise_graph_overview`.)\n"
+                f"`tortoise_graph_overview`.{closer}\n"
                 "Call `tortoise_list_graphs` for the names.\n")
         instruction = text.rindex("Call `tortoise_list_graphs") + 6
         assert "retire" not in self.sentence_around(
             text, instruction, instruction + 20).lower(), (
-            "an instruction under a parenthesised `…retired….)` note was cleared by "
-            "it — a terminator followed by a closing delimiter is still a terminator")
+            f"an instruction under a `…retired….{closer}` note was cleared by it — a "
+            "terminator followed by a closing character is still a terminator")
+
+    def test_an_ELLIPSIS_terminator_ends_a_sentence(self):
+        """`…` is a terminator (#14237 r3 review, P1) — `[.!?]` alone missed it."""
+        text = ("The door `tortoise_list_graphs` retired forward into it\u2026\n"
+                "Call `tortoise_list_graphs` for the names.\n")
+        instruction = text.rindex("Call `tortoise_list_graphs") + 6
+        assert "retire" not in self.sentence_around(
+            text, instruction, instruction + 20).lower(), (
+            "an ellipsis ended the note and the next instruction still inherited its "
+            "'retired'")
+
+    def test_a_promise_to_retire_is_not_a_label(self):
+        """`retires` / `will retire` is a PROMISE, not a label (#14237 r3 review, P2).
+
+        The scan used the bare stem `"retire"`, so an instruction carrying a promise —
+        "Call `tortoise_list_graphs` for now — the door retires in the next SDK wave" —
+        was accepted as labelled while still telling the reader to make the call.
+        """
+        assert not self.is_labelled(
+            "Call `tortoise_list_graphs` for now — the door retires in the next SDK "
+            "wave."), (
+            "a future-tense promise was accepted as a retirement label — the reader is "
+            "still being told to call the retired name")
+        assert not self.is_labelled(
+            "Call `tortoise_list_graphs(graph_id=x)` to read one graph."), (
+            "a plain instruction was accepted as a label")
+        assert self.is_labelled(
+            "The door `tortoise_list_graphs` retired forward into it."), (
+            "the past form IS the label — it must stay accepted")
 
     @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
     def test_every_mention_says_the_name_is_retired(self, relpath):
@@ -1222,7 +1272,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
             for match in re.finditer(rf"\b{re.escape(name)}\b", text):
                 mentions += 1
                 sentence = self.sentence_around(text, match.start(), match.end())
-                if "retire" not in sentence.lower():
+                if not self.is_labelled(sentence):
                     unlabelled.append((name, " ".join(sentence.split())))
         assert mentions, (
             f"{relpath} names no retired door at all, so this guard measured nothing — "

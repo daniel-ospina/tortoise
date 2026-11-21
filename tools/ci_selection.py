@@ -1225,12 +1225,22 @@ SOURCE_PATTERNS = {
             # every gate green. Registered against `sdk`, the surface the guard itself is
             # registered in (`config/ci-surfaces.yml`), the narrower of the two remedies
             # the review named. ⛔ WHAT IT COSTS WHEN THE DOC CHANGES, MEASURED (#14237
-            # round-2 review, P2 — the earlier wording said only "costs nothing until
-            # this doc changes" and left the other half unstated): `select([this doc])`
-            # -> surfaces=['sdk'], test_files=221 including the guard, `slow_run=True`
-            # (64 slow files, 3 of them the sdk legs) and `carve_out_run=True`. That is
-            # the ONE declared exception to the #2147/#2148 "docs-only touches no slow
-            # leg" property — pinned by tests/test_ci_selection.py::
+            # round-2 review P2 asked for the cost; round-3 review P2 corrected the
+            # statement, which had conflated the two leg shapes). Three facts, each from a
+            # different mechanism, so they must not be merged into one number:
+            #   · `select([this doc])` -> surfaces=['sdk'], test_files=221 INCLUDING the
+            #     guard, `full=False`;
+            #   · `slow_run=True` with `slow_selected=3` — the slow leg is diff-SCOPED by
+            #     that list (three of the sdk legs), NOT the 64-file `slow_files` pool it
+            #     also emits (`slow_files` is the declared pool every return path carries,
+            #     and it sizes nothing on a tier-2 PR) — so the nightly backstop is not
+            #     what a doc edit wakes;
+            #   · `carve_out_run=True` runs the WHOLE carve-out pool — 66 files in 3 shard
+            #     jobs — because that leg is diff-GATED but never diff-SIZED
+            #     (`.github/workflows/python-ci.yml:266`). THIS is the real cost of the
+            #     registration, and the one a reader would not guess.
+            # That is the ONE declared exception to the #2147/#2148 "docs-only touches no
+            # slow leg" property — pinned by tests/test_ci_selection.py::
             # test_the_p7_how_to_selects_its_reader_and_declares_the_cost — and it is
             # accepted because the alternatives are strictly wider: `tier1` would put the
             # whole catalogue suite in every PR's smoke leg, and `core` would select the
