@@ -2060,38 +2060,56 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     every other outsider walks its own key count, 22 for `tortoise.consistency`, 23 for
     `tortoise.hosted_backup`), so neither figure can be derived from a formula.
     So this arm reads the CONTROL'S OWN FRAME and asserts that the two `partial`s it built there
-    have the SPY as their `.func` — AND that the spies were actually CALLED (`#14099`, review of
-    `2c7b5a54ca`, P2). Those are two different properties and identity alone was satisfiable
-    without either: bindings left in place as DEAD CODE beside renamed pre-F1 copies at every
-    call site satisfied every identity assertion (measured — the full F2 revert, 96 passed).
+    have the SPY as their `.func` — AND that the control's OWN CALL SITES reached them (`#14099`,
+    reviews of `2c7b5a54ca` and `0c4e706e61`). Those are two different properties, and identity
+    alone was satisfiable without either: bindings left in place as DEAD CODE beside renamed
+    pre-F1 copies at every call site satisfied every identity assertion (measured — the full F2
+    revert, 96 passed). ⛔ THE USE-FLAG IS SCOPED TO THE CONTROL'S OWN FRAMES, not to "the spy was
+    called at all": `_folding`'s inner `fake` looks `_env_source` up in the module globals, so a
+    bare flag was satisfied transitively — measured, reverting BOTH of the control's `served(...)`
+    sites to a byte-faithful local copy left the whole item GREEN (`1 passed`), because the
+    `folding` sites alone lit `used["env_source"]`. Only a call whose immediate caller is one of
+    the control's code objects (itself or one of its lambdas) counts.
     ⛔ NOT a `return`: returning the wiring from a test function makes pytest warn
     (`PytestReturnNotNoneWarning`), and a module-level side channel would outlive the test.
 
     ⛔ DECLARED RESIDUAL — ONE ARM THAT INSTALLS ITS OWN INLINE PRE-F1 FAKE is NOT covered here
-    (measured at `2c7b5a54ca`: the control's bindings stay live and used by the other arms, so
-    both the identity and the use-flag are satisfied, 96 passed). Covering it needs per-arm
-    identity, and every cheap instrument for that (a fake tag propagated through each
-    `monkeypatch.setattr`, or a whitelist of the control's own code objects) also admits the
-    inline fake it is meant to refuse — the class this arm closes is the FULL revert, and a
-    single-arm bypass still has to be argued in review rather than certified silent.
+    (measured: the control's bindings stay live AND used by its own call sites, so identity, the
+    scoped use-flags and every other arm are satisfied). Covering it needs per-arm identity, and
+    every cheap instrument for that (a fake tag propagated through each `monkeypatch.setattr`, or
+    a whitelist of the control's own code objects) also admits the inline fake it is meant to
+    refuse — the class this arm closes is the FULL revert, and a single-arm bypass still has to be
+    argued in review rather than certified silent.
     """
     real_folding, real_env_source = _folding, _env_source
+    control_code = test_the_over_refusal_population_is_itself_pinned.__code__
+
+    def _nested_codes(code):
+        yield code
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                yield from _nested_codes(const)
+
+    #: The control itself plus its lambdas — the only frames whose calls count as the control's OWN.
+    control_codes = frozenset(_nested_codes(control_code))
+
     # A BOOLEAN, deliberately: it cannot go stale the way the counts did (every arm moves a count,
-    # nothing moves "was the shared helper reached at all").
+    # nothing moves "did the control's own call sites reach the shared helper").
     used = {"folding": False, "env_source": False}
 
     def spy_folding(*args, **kwargs):
-        used["folding"] = True
+        if sys._getframe(1).f_code in control_codes:
+            used["folding"] = True
         return real_folding(*args, **kwargs)
 
     def spy_env_source(*args, **kwargs):
-        used["env_source"] = True
+        if sys._getframe(1).f_code in control_codes:
+            used["env_source"] = True
         return real_env_source(*args, **kwargs)
 
     monkeypatch.setattr(sys.modules[__name__], "_folding", spy_folding)
     monkeypatch.setattr(sys.modules[__name__], "_env_source", spy_env_source)
 
-    control_code = test_the_over_refusal_population_is_itself_pinned.__code__
     bound: dict[str, object] = {}
 
     def tracer(frame, event, arg):
