@@ -3520,17 +3520,18 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     above (`except … as falkordb` in a nested `def`, call at block level: main `()`,
     #     block-granularity grades it, this tree `()`).
     #     Measured: green here, and putting the block-granularity subtraction back (the
-    #     `ast.walk(block)` mechanism the deleted `_rebinds_within` was) reds FOUR rows,
+    #     `ast.walk(block)` mechanism the deleted `_rebinds_within` was) reds FIVE rows,
     #     not one: this control, the two class-body barrier controls
-    #     (`_class_body_method_control`, `_class_body_comprehension_control`), and the
-    #     `outermost iterable` row of `4j-vicesimus-bis` — the same block-granularity
-    #     error also forbids the three shapes those rows pin as exempt.
+    #     (`_class_body_method_control`, `_class_body_comprehension_control`), and BOTH
+    #     iterable rows of `4j-vicesimus-bis` (`outermost iterable`, `later generator
+    #     iterable`) — the same block-granularity error also forbids the five shapes those
+    #     rows pin as exempt.
     #     Verified by comparing EVERY source classification this self-test makes against
     #     the mutant; the total grows as rows are added, so it is not restated here, and
     #     the FLIP count is re-measured at each head rather than inherited (review of this
-    #     PR, P3: two earlier versions of this sentence were falsified — "one", then
-    #     "three" — and an inline-`assert roots(…)` call is invisible to a count taken
-    #     under `-O`, which is how the first wrong figure was produced). That is why the
+    #     PR, P3: three earlier versions of this sentence were falsified — "one", then
+    #     "three", then "four" — and an inline-`assert roots(…)` call is invisible to a
+    #     count taken under `-O`, which is how the first wrong figure was produced). That is why the
     #     fail-open row above cannot stand alone (review of #14160, P2: without this the
     #     fix could be reverted with all eight tests green).
     _nested_def_control = roots(
@@ -4177,7 +4178,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     subtraction was too WIDE: a generator's ITERABLE is evaluated one scope out, so a
     #     call there reads the import, not the target — measured,
     #     `[None for clients in clients.query()]` resolves `clients` from the enclosing
-    #     scope (and `[None for c in cs]` is a TypeError when `c` is meant to be local).
+    #     scope (an unbound iterable is a `NameError`, not a `TypeError`).
     #     Subtracting every target unconditionally graded this shape: a 4k-/4l- false red
     #     that would refuse a legitimate optional-extra probe (review of #14160, cycle 5).
     for _label, _body in (
