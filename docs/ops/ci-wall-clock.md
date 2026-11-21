@@ -284,7 +284,7 @@ pool mechanism for the third time: `test_miss_rate_m5.py` packs in at the 2.0 s 
 takes the worst shard past the boundary `ceil(720.1/60 x 2)` rounds up on — and at THIS head the verb
 reads 25 m again, re-measured rather than carried: `--emit-push-matrix` packs six shards (a, b, c, d, i, k)
 at **720.2 s** and the other five (e, f, g, h, j) at 720.1 s, `ceil(720.2/60 x 2)` = 25 m, the 0.1 s over
-#14015's own emission being this branch's `tests/test_13998_capacity_notice.py` at the flat 2.0 s default.
+`#14015`'s own emission being this branch's `tests/test_13998_capacity_notice.py` at the flat 2.0 s default.
 That tenth of a second is the whole margin on this boundary — two intermediate folds of this branch emitted
 24 m before main re-packed the same pool to 720.0 s — so the term the row above states, and the three
 figures after it, are this head's emission re-cut by hand from `--emit-push-matrix`, not a re-derivation.
