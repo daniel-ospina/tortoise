@@ -4518,6 +4518,15 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             'class _C[torch](torch.query("SELECT 1")):\n        pass',
             True,
         ),
+        #: A class KEYWORD is evaluated in the same (type-parameter) scope as a base, and
+        #: this row is what makes that a claim rather than a docstring line: reverting the
+        #: `keywords` half of `_header_child_is_enclosing_scope` alone stays GREEN without
+        #: it (measured — a latent fail-open over our own client, review of this PR).
+        (
+            "a class keyword",
+            'class _C[torch](metaclass=torch.query("SELECT 1")):\n        pass',
+            True,
+        ),
         (
             "a type-parameter bound",
             'def _f[torch: torch.query("SELECT 1")]():\n        pass',
@@ -4525,9 +4534,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         ),
     ):
         _generic_row = roots(_generic_header_probe.format(header=_header))
+        _expected = "GRADED (the TypeVar is in scope)" if _want else "EXEMPT (the module import is)"
         assert (len(_generic_row) == 1) == _want, (
-            f"a generic's {_label} must be {'GRADED (the TypeVar is in scope)' if _want else 'EXEMPT (the module import is)'}"
-            f": {_generic_row}"
+            f"a generic's {_label} must be {_expected}: {_generic_row}"
         )
 
     # 4j-quadrovicesimus. `type Y[torch] = torch.query(…)` — THE TYPE PARAMETER IS BOUND IN
