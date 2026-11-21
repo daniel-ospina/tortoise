@@ -1197,9 +1197,19 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
     `crossed_callable` is what separates the halves: a `def`/`lambda` between the call
     and the class means the class-body names cannot reach it, which is why the two
     METHOD controls stay `()`.
+
+    ⛔ A COMPREHENSION IS A BARRIER FOR THE CLASS HALF ONLY, and the asymmetry is
+    Python's, not a convenience: a comprehension (or genexp) in a CLASS BODY cannot see
+    the class-body names — `class C: torch = object(); rows = [torch for _ in …]` raises
+    `NameError` (measured on this interpreter) — while a comprehension inside a FUNCTION
+    DOES see that function's locals (`rows = [torch for _ in range(1)]` with `torch` a
+    function local works). So `crossed_comprehension` suppresses only the class-body
+    contribution and never a function scope's (final review of #14160, P2: the first
+    version graded the class-body shape, a false red of the `4k-`/`4l-` class).
     """
     out: set[str] = set()
     crossed_callable = False
+    crossed_comprehension = False
     node = parents.get(id(block))
     while node is not None:
         #: A `lambda` is a function scope too: its parameters are invisible to every
@@ -1230,12 +1240,17 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # set and `class C[torch]: def probe(self): torch.query(…)` kept the
             # exemption — the silent drop, one node kind over (review of #14160, P1).
             out |= _type_param_names(node)
-            if not crossed_callable:
+            if not crossed_callable and not crossed_comprehension:
                 # the OTHER half: names the class body binds reach a use in that same
                 # block. A nested `def`/`class` contributes its NAME but not its body,
                 # which is exactly the descent `_function_local_bindings` implements.
                 out |= _function_local_bindings(node)
             crossed_callable = True
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            # a comprehension is its own scope: it cannot read a CLASS BODY's names
+            # (measured `NameError`), though it does read the enclosing FUNCTION's
+            # locals, which is why this flag gates only the class-body contribution.
+            crossed_comprehension = True
         node = parents.get(id(node))
     return out
 
@@ -3616,7 +3631,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"exemption — it was also graded at the parent head: {_aliased_own_row}"
     )
 
-    # 4j-quindecies. THE OWN-CODE ROOTS ARE A DECLARED SET, and two repo packages were
+    # 4j-octodecies. THE OWN-CODE ROOTS ARE A DECLARED SET, and two repo packages were
     #     missing from it: `battery` and `benchmarks` are first-party code (both carry
     #     `__init__.py`, both import in CI with no extras, `battery/runner/setup.py:334`
     #     defines our own `query` wrapper), so `import battery.runner.setup as torch` …
@@ -3648,7 +3663,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             f"{_repo_alias_row}"
         )
 
-    # 4j-sedecies. A CLASS BODY IS TWO RULES (§4.2.2): its names reach a use DIRECTLY in
+    # 4j-novodecies. A CLASS BODY IS TWO RULES (§4.2.2): its names reach a use DIRECTLY in
     #     that block, and do NOT reach a method body. Only the second half was
     #     implemented, so a class-body rebind and a call in that same body read EXEMPT
     #     over OUR client — a fail-open the call-node refactor introduced (`3b7f3e57d426`
@@ -3698,6 +3713,54 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "the CONTROL: a class-body name does NOT reach a METHOD body, so the same shape "
         "is not evidence the method's receiver left the import — grading it is the "
         f"`4k-`/`4l-` false red: {roots(_class_body_method_control)}"
+    )
+    _class_body_comprehension_control = textwrap.dedent(
+        """
+        import falkordb as torch
+
+        def _probe():
+            try:
+                class C:
+                    torch = object()
+                    rows = [torch.query("RETURN 1") for _ in range(1)]
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe()
+        """
+    )
+    assert roots(_class_body_comprehension_control) == (), (
+        "the THIRD scope, and the one the first version of this rule got wrong: a "
+        "COMPREHENSION in a class body cannot read the class-body names — CPython "
+        "raises NameError (`class C: torch = object(); rows = [torch for _ in …]`), so "
+        "the receiver is still the module import and grading it is a false red. A "
+        "comprehension inside a FUNCTION keeps seeing that function's locals, which is "
+        "why the barrier gates only the class-body half: "
+        f"{roots(_class_body_comprehension_control)}"
+    )
+    _function_local_through_comprehension = textwrap.dedent(
+        """
+        import falkordb as torch
+
+        FALKORDB_AVAILABLE = False
+        try:
+            def _outer():
+                torch = _make_client()
+                class C:
+                    rows = [torch.query("RETURN 1") for _ in range(1)]
+                return True
+            FALKORDB_AVAILABLE = _outer()
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    _through_row = roots(_function_local_through_comprehension)
+    assert len(_through_row) == 1 and _through_row[0][1:] == ((), True, False, True), (
+        "the OTHER half of the asymmetry: a comprehension in a class body DOES see the "
+        "enclosing FUNCTION's locals (measured), so a `torch` bound by `_outer` still "
+        "reaches the call and the guard must be graded — a barrier that suppressed "
+        f"function scopes too would re-open the silent drop: {_through_row}"
     )
 
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
