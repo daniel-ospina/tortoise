@@ -5608,8 +5608,10 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     the contract, reaches no caller, and lets a test that pins it pass while the
     served text says something else. This docstring states the caller OBLIGATIONS
     (arguments and families), never a phrasing list or a qualifier rule;
-    `tests/test_13557_13558_reachable_reads.py` pins both absences so a copy
-    cannot come back.
+    `tests/test_13557_13558_reachable_reads.py` pins the two headings, the rows this
+    docstring used to restate and the qualifier rule, so a copy cannot come back —
+    scoped to those, because two phrasings ARE named above as illustrations of the
+    ending question.
 
     ⛔ AND THE SERVED TEXT IS NOT THIS DOCSTRING (#14033). FastMCP never serves it
     when the registry supplies an explicit `description=`; the caller-facing text is

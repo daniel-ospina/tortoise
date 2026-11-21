@@ -973,13 +973,16 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
 
     # …and the docstring must NOT carry a second copy: prose there reaches no caller,
     # so a re-added copy reads like the contract while the served text drifts from it.
-    # ⛔ THE ABSENCE PIN COVERS THE WHOLE PHRASE TABLE, not one head string (#14033
-    # review round-9, P2, measured): the docstring used to restate the qualifier rule
-    # WITH both of its examples, on the lines immediately above the paragraph claiming
-    # the contract "is not written here" — and the single-head check stayed green
-    # through it, so a second copy could drift with no test seeing it. Every string
-    # here is a row or phrase only the SERVED text may carry; each reds if a copy
-    # comes back (`have any claims been retracted in Q3` was the measured miss).
+    # ⛔ THE ABSENCE PIN COVERS THE SECTION HEADS, THE RESTATED ROWS AND THE QUALIFIER
+    # RULE — not one head string (#14033 review round 9, P2, measured; scope corrected
+    # round 13, P2): the docstring used to restate the qualifier rule WITH both of its
+    # examples, on the lines immediately above the paragraph claiming the contract "is
+    # not written here", and the single-head check stayed green through it. ⛔ IT IS NOT
+    # THE WHOLE TABLE, and the claim is now scoped because the docstring legitimately
+    # NAMES two phrasings as illustrations of the ending question ("has anything been
+    # withdrawn", "what ended") — a pin derived from every quoted row in `ROUTING_NOTE`
+    # would red on those. What is pinned is what must not come back: the two headings,
+    # the specific rows that were restated here, and the qualifier rule.
     _docstring = tortoise_search.__doc__ or ""
     for _copied in (
         "ROUTES — answered from the ended population",

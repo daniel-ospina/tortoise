@@ -305,9 +305,12 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #: rules above are what keep a content question out of the population, and the
 #: cost they charge is a real state question that keeps the relevance read —
 #: whose empty (or unrelated) answer is indistinguishable from the factual claim
-#: "nothing has ended". So every shape below is ALSO emitted as a PREFIX — the
-#: shape without its tail anchor — and a query that matches a prefix while
-#: matching no shape is reported as ``StateQuestion.signal``. That is the whole
+#: "nothing has ended". So every TAIL-ANCHORED shape below is ALSO emitted as a
+#: PREFIX — the shape without its tail anchor — and a query that matches a prefix
+#: while matching no shape is reported as ``StateQuestion.signal``. ⛔ NOT EVERY SHAPE
+#: HAS ONE: `do_support`'s pattern carries no end anchor to swap, so it is excluded
+#: by construction and has no signal row (see `_ENDING_SIGNALS`; the identity test
+#: pins the same asymmetry). That is the whole
 #: definition of "strong": a cue the recogniser WOULD have applied but for a
 #: guard the population cannot honour, never "an ending word somewhere in the
 #: sentence". The read path answers those queries with the relevance read it
@@ -399,7 +402,7 @@ _BLOCKED_TAIL = (
 #: it protected was exactly `<det> <noun> has|have|had been`, the asyndetic hijack
 #: `have any users reported the vendor has been deprecated`. ⛔ THE CLASS IS WIDER
 #: NOW, by the follow-up note below: the guard protects any FINITE VERB from a closed
-#: list followed by an optional `not`/`have` and then `been` (19 spellings, incl. the
+#: list followed by an optional `not`/`have` and then `been` (18 spellings, incl. the
 #: modal passive `will have been`), because bounding it to `has|have|had been` left
 #: that class open. Both classes are pinned, and each in the direction it belongs.
 #:
