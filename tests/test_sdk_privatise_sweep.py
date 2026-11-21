@@ -231,6 +231,16 @@ RESIDUE_INTERVAL_END = "d5ecef0d72"     # measured: that commit's parent, the la
 RESIDUE_PR_HEAD = "d523c9be8c"          # `refs/pull/14108/head`
 RESIDUE_REWRITE_PARENT = "2fe01fc775e"  # the capture rewrite's parent (`#14068`'s squash)
 
+# The interval's TWO published counts, as the block prints them. They live here so the PROSE arm
+# can grade the WORDS against the same numbers the PREMISES arm measures against the repository —
+# before this, `SIX`→`SEVEN` and `EIGHT`→`NINE` both left the suite GREEN (review, round 12), which
+# is the defect class the block polices in its own words: the numeral IS the substance of the
+# finding-2 fix ("six of the eight still carry the line"), not a decoration around it.
+RESIDUE_INTERVAL_COMMITS = 8            # `git rev-list --reverse 2fe01fc775e..d523c9be8c` → 8
+RESIDUE_CARRIER_COUNT = 6               # interval trees still holding `seen.update(` → 6
+# Word forms, so a change to either constant can never leave the prose silently mismatched.
+RESIDUE_COUNT_WORDS = {6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE"}
+
 
 def _residue_block() -> str:
     """The `#:` comment block immediately above `SWEEP_RESIDUE`, as text."""
@@ -468,7 +478,9 @@ def test_the_seen_update_deletion_premises_hold_in_this_clone():
     _requires(RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT, RESIDUE_INTERVAL_END,
               RESIDUE_PR_HEAD)
     revs = _git("rev-list", "--reverse", f"{RESIDUE_REWRITE_PARENT}..{RESIDUE_PR_HEAD}").split()
-    assert len(revs) == 8, "premise: `83e94826a8a` is the OLDEST of the EIGHT interval commits"
+    assert len(revs) == RESIDUE_INTERVAL_COMMITS, (
+        f"premise: `83e94826a8a` is the OLDEST of the "
+        f"{RESIDUE_COUNT_WORDS[RESIDUE_INTERVAL_COMMITS]} interval commits")
     assert revs[0].startswith(RESIDUE_ABBREV), "premise: the interval opens on that commit"
 
     def carries(rev: str) -> bool:
@@ -482,7 +494,9 @@ def test_the_seen_update_deletion_premises_hold_in_this_clone():
     droppers = [rev for rev in revs if not carries(rev)]
     assert [rev[:10] for rev in droppers] == [RESIDUE_DELETING_COMMIT, RESIDUE_PR_HEAD], (
         "premise: the deletion lands at aee14c5ceb, and d523c9be8c is one commit after it")
-    assert len(carriers) == 6, "premise: SIX of the eight trees carry the line, not one"
+    assert len(carriers) == RESIDUE_CARRIER_COUNT, (
+        f"premise: {RESIDUE_COUNT_WORDS[RESIDUE_CARRIER_COUNT]} of the eight trees carry the "
+        "line, not one")
     assert carriers[-1].startswith(RESIDUE_INTERVAL_END), (
         "premise: the last carrier is the deleting commit's parent")
 
@@ -521,6 +535,24 @@ def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
     assert re.search(rf"`{RESIDUE_ABBREV}`[^.]{{0,80}}`{RESIDUE_INTERVAL_END}`", block), (
         "the claim is interval-scoped, so the span must be named: `83e94826a8a` to "
         "`d5ecef0d72`")
+    # ⛔ AND THE TWO COUNT WORDS ARE PART OF THAT CLAIM (review, round 12 — P2). The span
+    # assertion above checks only that the two SHAs are named, and the premises arm checks 8 and 6
+    # against the repository — but NOTHING compared the words the sentence actually PUBLISHES, so
+    # `the SIX commits`→`SEVEN` and `OLDEST of the EIGHT`→`NINE` both left this file GREEN while
+    # the sentence it exists to protect went false. Graded on the block's TEXT, so it needs no git
+    # object and runs in the sharded `test` job's `fetch-depth: 1` checkout.
+    assert re.search(
+        rf"OLDEST of the {RESIDUE_COUNT_WORDS[RESIDUE_INTERVAL_COMMITS]} commits", block), (
+        f"the block must publish the interval size as "
+        f"{RESIDUE_COUNT_WORDS[RESIDUE_INTERVAL_COMMITS]!r}, matching the "
+        f"{RESIDUE_INTERVAL_COMMITS} commits the premises arm measures — a count word that does "
+        f"not match its measurement is the defect this block exists to remove")
+    assert re.search(
+        rf"holds for the {RESIDUE_COUNT_WORDS[RESIDUE_CARRIER_COUNT]} commits from", block), (
+        f"the block must publish the carrier count as "
+        f"{RESIDUE_COUNT_WORDS[RESIDUE_CARRIER_COUNT]!r}, matching the "
+        f"{RESIDUE_CARRIER_COUNT} carriers the premises arm measures — `SIX of the eight still "
+        f"carry the line` IS the finding-2 fix, so the numeral is load-bearing")
     # ⛔ CASE-INSENSITIVE, THE NOUN "deletion" MUST NOT COUNT, AND A SENTENCE SPLIT OR A LONGER
     # RUN MUST NOT HIDE IT (review, rounds 6-8): the block honestly says the interval head
     # `inherits that deletion` — only a VERB credits it — and both `… of the eight. It deletes
