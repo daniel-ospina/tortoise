@@ -10597,6 +10597,27 @@ ROWED_BY_THIS_FOLD = (
     # variant surviving a round; `test_13826_write_gate.py`'s row records the
     # sibling that was found entirely unregistered).
     "test_13094_graphevent_home.py",
+    # #14012 — the pin/outside-view trio. All ADDED by this PR and registered on `core`
+    # + `durations:` above. Listed here because the ENTRY-RULE pin above iterates this
+    # EXPLICIT tuple: a file nobody names is INVISIBLE to it, so dropping a
+    # `durations:` row would be silent. `--integrity` caught the missing SURFACE rows
+    # (`manifest drift: ['test_14012_outside_view.py', 'test_14012_resident_pin.py']`);
+    # this entry is what puts a missing DURATIONS row behind an assertion too.
+    "test_14012_outside_view.py",
+    "test_14012_resident_pin.py",
+    "test_14012_resident_cli.py",
+    # #14015 M5 (§9) — the miss-rate instrument behind the working-set allowance
+    # (`#13989`). A file this fold ADDED, registered on `core` + `tier1` + `durations:`.
+    # `tools/miss_rate_m5.py` carries no `SOURCE_PATTERNS` entry, so a tools-only diff
+    # takes the tier1 early return and selects NO surface — the `tier1` row is what
+    # makes these pins RUN on the diff that can make the instrument mis-measure.
+    # Listed here for the reason every row above states: the ENTRY-RULE pin iterates
+    # this EXPLICIT tuple, so a file nobody listed has no `durations:` row and
+    # nothing reds. ⛔ The `#14162` review found the first cut of this instrument
+    # claiming three controls it did not have — a `provenance` pin, INVARIANT 5, and
+    # a test for the published windows (`#14162` F2) — which is the same
+    # claim-without-a-pin shape this tuple exists to make impossible.
+    "test_miss_rate_m5.py",
     # ⛔ `test_usage_signal.py` IS NOT REPEATED HERE. This is the SECOND copy the merge of
     # `origin/main` created, and the #14070 argument above is why it must not stay: carrying
     # a second copy of a file that already has a row is exactly the duplicate shape that
@@ -22914,6 +22935,33 @@ def test_cache_evict_runs_on_a_tools_only_change():
     assert "test_cache_eviction_evictor.py" in (load_manifest()["uri_requiring"] or []), (
         "test_cache_eviction_evictor.py must be declared under `uri_requiring:` — it "
         "module-skips without TORTOISE_DB_URI")
+
+
+def test_resident_tool_runs_on_a_tools_only_change():
+    # #14012: `tools/resident.py` is the pin/outside-view OPERATOR VERB, and `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry matching no SOURCE_PATTERNS row — so before
+    # the `CORE_ALSO` entry, a diff touching ONLY this file filtered to
+    # `changed == []` and took the docs-only early return. MEASURED with the entry
+    # absent: `select(["tools/resident.py"], "pull_request", load_manifest())` ->
+    # `surfaces: []`, 105 files, and NONE of the three `#14012` suites. That is the
+    # #1349/#3332/#3616 silent-drop class on the file that carries every refusal this
+    # control exists to make (the `REFUSED` envelope with the number named, the
+    # UNMEASURED-vs-OK split, "a refused pin wrote nothing"), so a later weakening
+    # there would have merged green by omission.
+    #
+    # Mutation check: removing the `tools/resident.py` entry from `CORE_ALSO` fails
+    # this arm (`surfaces` becomes `[]`).
+    for path in ("tools/resident.py", "tortoise/resident_pin.py",
+                 "tortoise/outside_view.py"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r["full"])
+        assert r["surfaces"] == ["core"], (path, r["surfaces"])
+        # The three suites are HERMETIC (a statement-recording fake graph), so they are
+        # selected on the URI-less pool rather than subtracted by `uri_requiring`.
+        for suite in ("test_14012_resident_pin.py",
+                      "test_14012_outside_view.py",
+                      "test_14012_resident_cli.py"):
+            assert suite in r["test_files"], (path, suite)
 
 
 def test_entry_point_guard_census_runs_on_a_tools_only_change():

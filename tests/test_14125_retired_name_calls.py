@@ -773,11 +773,13 @@ def _skip_call_read_names(fn: ast.AST) -> set[str]:
 
     — contributed NOTHING, while the decision plainly reads `dropped`. Keying on
     arguments alone closed the residual only for skips whose message INTERPOLATES
-    the sentinel, and four live probes of exactly this class stayed ungraded
+    the sentinel, and FIVE live probes of exactly this class stayed ungraded
     (`tests/test_indexes.py:1422`, `tests/test_11682_quote_indexed.py:438`, the
     drop-procedure probe in
     `test_a_pre_existing_array_quote_is_flattened_by_the_sweep` in that same file,
-    and `tests/test_session_semantic_retrieval.py:298`). The second one is named by
+    `tests/test_session_semantic_retrieval.py:298`, and
+    `tests/test_extractor_reliability.py:898` — the last admitted because its handler
+    ASSIGNS its guard's sentinel). The drop-procedure probe is named by
     its enclosing test rather than by a line, because it was cited as `:651` and
     the four re-raise lines `#14129` added moved its `try` — a bare `file:line` is a
     stale-by-design pointer, and a third number would rot the same way (review of
@@ -793,8 +795,15 @@ def _skip_call_read_names(fn: ast.AST) -> set[str]:
     call an `ast.Name`, so a `try` whose skip uses the bare form reads `set()` here
     and is not admitted. `_skip_guard_call_names` carries the SAME `.attr`-only
     limit, and it is the helper this one now mirrors. Declared rather than widened
-    here: admitting the bare form changes the admission population and owes its own
-    witness row and population measurement.
+    here, and MEASURED before it was claimed: admitting the bare form at EVERY
+    detection site — `_skip_call_read_names`, and both skip detections of
+    `_skip_guard_call_names` — moves the census by ZERO on `72c104bcbb`: 70 rows /
+    62 roots / 58 files unchanged, no new rows, `UNARMED == ()`, import-seam reds
+    `()`, `_UNGRADABLE == []`. So the widening owes a WITNESS ROW (a separate
+    spelling needs its own assertion — nothing here grades
+    `from pytest import skip`) and NO population re-pin. The zero is the point: a
+    widening that moves no row cannot be witnessed by the census, so a later lane
+    must not read the unchanged pin as evidence the bare form is already covered.
     """
     out: set[str] = set()
     for node in _own_scope_nodes(fn):
@@ -4425,8 +4434,16 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     this tree. `_skip_call_read_names` first read only the skip call's
     #     ARGUMENTS, so a sentinel carried by the `if` that guards the skip —
     #     `if not dropped: pytest.skip("engine has no drop procedure")` — contributed
-    #     nothing and the residual stayed open for four live probes (review of
-    #     `cd75ec7144`, P1). This row is the sentinel-in-the-guard shape, a bare
+    #     nothing and the residual stayed open for FIVE live probes (review of
+    #     `cd75ec7144`, P1) — measured by removing ONLY the guard half: 70/62/58 →
+    #     65/57/55, the five lost being `tests/test_indexes.py:1422`,
+    #     `tests/test_11682_quote_indexed.py:438` and `:656`,
+    #     `tests/test_session_semantic_retrieval.py:298`, and
+    #     `tests/test_extractor_reliability.py:898`. That last one is graded because
+    #     its handler ASSIGNS its guard's sentinel, and it owes NO arm for a
+    #     DIFFERENT reason — it already RE-RAISES (`swallows=False`), so the census
+    #     charges it nothing; grading alone does not excuse an arm. This row is the
+    #     sentinel-in-the-guard shape, a bare
     #     string message that interpolates NOTHING, so only the guard reading can
     #     admit it.
     test_body_guard_carried_sentinel = roots(
