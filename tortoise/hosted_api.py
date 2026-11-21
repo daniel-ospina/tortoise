@@ -21843,44 +21843,51 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # files org-level onboarding state inside the customer's CUSTOM graph —
         # invisible to every org-level reader, and `first_capture` fires once per
         # GRAPH instead of once per org (#14086 review, P2, both halves).
-        # ⛔ AND A GRAPH-BOUND KEY SKIPS THE WHOLE BLOCK. Both halves are
-        # ORG-LEVEL surfaces, and the sibling checkpoint route REFUSES such a key
-        # outright (`_reject_graph_bound_org_surface(org, "onboarding
-        # checkpoint")` — "a graph-bound key writing it would be a cross-graph
-        # write"). The capture route cannot refuse (it must keep capturing), so it
-        # must not perform the org-level side effect either: handed the default
-        # graph, a per-graph key would mint and could COMPLETE the org's onboarding
-        # — the cross-graph leak that guard exists to prevent — and `first_capture`
-        # would be an org-level fact derived per graph (#14086 review round 3, P2).
-        # `None` means "not an org-level capture": the org-level block below does
-        # not run and `first_capture` stays False.
+        # ⛔ WHICH CREDENTIALS RUN THIS BLOCK: only those whose OWN graph IS the
+        # org's DEFAULT graph — an org-wide credential, AND a graph-BOUND key
+        # whose binding names the default row. That second class is real and
+        # `main` served it correctly: a legacy/pre-guard key bound to the default
+        # node "writes to the same physical graph an org-wide key writes to"
+        # (#3365, `_capture_session_key`), so its capture `proj` WAS the default
+        # graph — dropping the checkpoint there would silently lose it for a class
+        # that already had it (`onboarding/SKILL.md`: the capture path is the ONLY
+        # writer of `capture-disclosed`) [#14086 review round 4, P1].
+        # For a CUSTOM-bound key the block runs NEITHER half: the write would file
+        # org-level state inside the customer's graph, and the gate would read —
+        # and could COMPLETE — the org's, which is the cross-graph write
+        # `_reject_graph_bound_org_surface` answers 403 for on every sibling
+        # surface.
         #
-        # ⛔ WHAT THAT COSTS, DECLARED RATHER THAN IMPLIED (#14086 review, P2).
-        # `first_capture` is NOT only a funnel fact — it is the **trigger** for the
-        # in-conversation disclosure announcement, and the `capture-disclosed` step
-        # is that disclosure's durable signal (`tortoise/capture_disclosure.py`;
-        # `tortoise/onboarding/SKILL.md` §8 calls the flag "the only trigger"). So
-        # a graph-scoped credential now writes NO `capture-disclosed` step and
-        # never sets `first_capture` — the disclosure line does not fire for it,
-        # where on `main` it fired once per capture graph. That is a USER-FACING
-        # change and it is NOT settled here: neither target graph is legitimate
-        # (org-level state in the customer's custom graph is the cross-graph write
-        # this guard exists to prevent; the org default graph is what a per-graph
-        # key must never touch), so giving the disclosure a per-graph home is a
-        # decision, not a patch. **#14131 owns it** — filed with both options and
-        # the acceptance bar; this block is the in-code record so the merge does
-        # not land the behaviour silently.
+        # ⛔ WHAT THE CUSTOM-BOUND SKIP COSTS, DECLARED RATHER THAN IMPLIED
+        # (#14086 review, P2). `first_capture` is NOT only a funnel fact — it is
+        # the **trigger** for the in-conversation disclosure announcement, and the
+        # `capture-disclosed` step is that disclosure's durable signal
+        # (`tortoise/capture_disclosure.py`; `onboarding/SKILL.md` §8 calls the
+        # flag "the only trigger"). So a CUSTOM-graph-scoped credential writes NO
+        # `capture-disclosed` step and never sets `first_capture` — the disclosure
+        # line does not fire for it, where on `main` it fired once per capture
+        # graph. That is a USER-FACING change and it is NOT settled here: neither
+        # target graph is legitimate (org-level state in the customer's custom
+        # graph is the cross-graph write this guard exists to prevent; the org
+        # default graph is what a per-graph key must never touch), so giving the
+        # disclosure a per-graph home is a decision, not a patch. **#14131 owns
+        # it** — filed with both options and the acceptance bar; this block is the
+        # in-code record so the merge does not land the behaviour silently.
+        # (A key BOUND TO THE DEFAULT graph is NOT in that class: it keeps the
+        # checkpoint and the trigger, exactly as it did on `main`.)
         #
-        # Constructed HERE, ON the loop: `_make_sdk` must not resolve a store path
-        # in a pooled worker (#7500). Only the cold `_get_proj()` attach stays in
-        # the worker, via the handle handed to `_maybe_apply_completion`. This
-        # construction is ALSO where any `organizations.graph_name` control-plane
-        # read happens (`_org_sdk` -> `_org_default_namespace`) — ON THE LOOP, not
-        # inside the closure, and not in the gate when a handle is supplied
-        # (#14086 review round 3, P3).
-        completion_sdk = (None if org.get("graph_id")
-                          else _org_sdk(org["org_id"]))
-
+        # This construction is also where any `organizations.graph_name` read
+        # happens (`_org_default_namespace`) — ON THE LOOP, and only for a
+        # GRAPH-BOUND credential; the org-wide path takes the auth seam's
+        # published hint and reads nothing.
+        if not org.get("graph_id"):
+            completion_sdk = _org_sdk(org["org_id"])
+        else:
+            default_graph = (_org_default_namespace(org["org_id"])
+                             or _graph_name_for_namespace(org["org_id"]))
+            completion_sdk = (_org_sdk_from_name(org["org_id"], default_graph)
+                              if _data_graph_name(org) == default_graph
+                              else None)
         def _first_capture_checkpoint():
             """The capture-disclosed checkpoint — synchronous graph work, OFF the loop.
 
@@ -39363,11 +39370,17 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     ``_org_proj`` inside the inline gate) and this change neither adds nor moves
     it — but it means the SDK construction must stay on whatever thread the lane
     already runs it on, and must never move into the capture-pool worker.
-    ⛔ THE CAPTURE ROUTE NO LONGER CALLS THIS FOR A GRAPH-BOUND CREDENTIAL — and
-    that is TRUE OF THE CAPTURE ROUTE ONLY, not of every caller. The capture's
-    org-level block is skipped for such a key (``completion_sdk = None if
-    org.get("graph_id") else …``), so on THAT path no ``_org_sdk`` is
-    constructed and the ``organizations.graph_name`` read above does not happen.
+    ⛔ THE CAPTURE ROUTE SKIPS THIS FOR A **CUSTOM**-BOUND CREDENTIAL — and that
+    is TRUE OF THE CAPTURE ROUTE ONLY, not of every caller. The capture's
+    org-level block constructs no ``_org_sdk`` for such a key (the predicate in
+    ``_capture_session_impl`` keeps the block only when the credential's own
+    graph IS the org default), so on THAT path the ``organizations.graph_name``
+    read above does not happen for it. A key BOUND TO THE DEFAULT graph is NOT in
+    that class: it keeps the block, and the read it pays is the SAME single
+    pre-existing one ``main`` paid inside the inline gate — resolved ON THE LOOP,
+    once, and reused to construct the SDK via ``_org_sdk_from_name`` (no second
+    read) [#14086 review round 4, P1: the guard is a property of the binding, not
+    ``bool(graph_id)``].
     The other caller still reaches it: ``mcp_server._maybe_onboarding_auto_complete``
     calls this with ``sdk=None`` for any hosted org, and the MCP tools that reach
     it (``tortoise_create_point`` at ``mcp_server.py``'s ``_maybe_onboarding_auto_complete``
@@ -39377,11 +39390,10 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     primary-key ``organizations.graph_name`` read, exactly as
     ``_org_default_namespace``'s own docstring states for a GRAPH-BOUND
     credential. So the paragraph above remains accurate for the MCP auto-onboarding
-    lane as well as the ORG-WIDE one, and only the CAPTURE lane's graph-bound case
-    is exempt (#14086 review round 3, P2: an earlier draft of this sentence said
-    the function was "no longer called at all" for such a key, which the tree
-    refutes — the user-facing half of the capture guard is #14131).
-
+    lane as well as the ORG-WIDE one, and only the CAPTURE lane's custom-bound
+    case is exempt (#14086 review round 3, P2: an earlier draft of this sentence
+    said the function was "no longer called at all" for such a key, which the
+    tree refutes — the user-facing half of the capture guard is #14131).
     Left as ``None`` the historical behaviour is unchanged for every other
     caller."""
     try:

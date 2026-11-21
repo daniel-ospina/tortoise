@@ -720,7 +720,19 @@ SWEEP_NAMES = 66
 #: cannot be carried from a tree whose row set is not this one. 11844 + 2 = 11846 is a CROSS-CHECK of
 #: that measurement, never the evidence for it.
 #: `--check` on this tree: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11846, "921de057fd2fecfc")
+#: ⛔ AND ONE MORE ROW ON THE MERGED TREE (#14086 review round 4): the COMPLEMENT of that pin —
+#: `test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint` — issues the SAME registry probe
+#: (`ha_mod._make_sdk(namespace='registry')._.query` 11 → 12), so `--repin` here prints
+#: `(11847, '327c14afa2e43e7c')`, which is the pin below. Same class as the two rows above: a test
+#: double, not a typed reference to a swept name — no call site is legitimised by it.
+#: ⛔ RE-MEASURED, NOT INHERITED. A digest measured while a merge was half-resolved is a digest of
+#: the WRONG tree: an intermediate measurement of this block read `ea69254fe59a30ab` with the SAME
+#: count, because stale conflict markers were still embedded in `activation_scorecard.py` and added
+#: rows. Removing them returned the set to 11847 rows / `327c14afa2e43e7c` — this is the value
+#: `--repin` prints on the RESOLVED tree, and the sibling commit that reverted the inert `dispatch`
+#: note is already accounted for in it. This is the pin below; no other digest in this block is
+#: current.
+SWEEP_RESIDUE = (11847, "327c14afa2e43e7c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

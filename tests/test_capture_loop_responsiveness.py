@@ -3670,6 +3670,64 @@ def test_a_graph_bound_capture_skips_the_org_level_checkpoint_entirely(
         f"{resp.json().get('first_capture')!r}")
 
 
+def test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint(client, monkeypatch):
+    """⛔ THE SKIP IS FOR CUSTOM BINDINGS, NOT FOR "graph_id is set" (#14086 round 4, P1).
+
+    A legacy/pre-guard key BOUND TO THE DEFAULT node carries a real ``g_<hex>``
+    ``graph_id`` while writing to the SAME physical graph an org-wide key writes
+    to (``_data_graph_name`` / ``_capture_session_key``, #3365). For that class
+    the capture's graph IS the org default, so `main`'s write and gate were on one
+    graph and were CORRECT — skipping by ``bool(org["graph_id"])`` would silently
+    drop the checkpoint, the completion gate and `first_capture` for a class that
+    already had them (`onboarding/SKILL.md`: the capture path is the only writer).
+
+    This row is the other half of the pair: the custom-bound row above asserts the
+    skip, this one asserts the KEEP. A coarse predicate reds exactly one of them.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app, get_current_org
+
+    steps_written: list[str] = []
+    real_write_step = ha_mod._os.write_completed_step
+
+    def _recording_write_step(graph, org_id, step_id, **kwargs):
+        steps_written.append(step_id)
+        return real_write_step(graph, org_id, step_id, **kwargs)
+
+    monkeypatch.setattr(ha_mod._os, "write_completed_step",
+                        _recording_write_step)
+
+    previous = app.dependency_overrides.get(get_current_org)
+    app.dependency_overrides[get_current_org] = lambda: dict(
+        TEST_TEAM, graph_id=_LEGACY_DEFAULT_GID, graph_namespace="org_team-001")
+    ha_mod._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:$gid, kind:'default', "
+        "namespace:$ns, status:'active'})",
+        params={"gid": _LEGACY_DEFAULT_GID, "tid": TEST_ORG_ID,
+                "ns": "org_team-001"})
+    try:
+        resp, _records, _writer = _measure_capture_graph_work(
+            monkeypatch, 2, "bound-default-keeps-checkpoint-14086")
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_current_org] = previous
+        else:
+            app.dependency_overrides.pop(get_current_org, None)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (bound-default run)")
+    assert resp.status_code == 200, resp.text[:300]
+    assert "capture-disclosed" in steps_written, (
+        "a key BOUND TO THE DEFAULT graph lost the `capture-disclosed` checkpoint "
+        "— its graph IS the org default, so the block is not a cross-graph write "
+        "for it and `main` wrote it (#14086 review round 4, P1); steps: "
+        f"{steps_written!r}")
+    assert resp.json().get("first_capture") is True, (
+        "a key bound to the DEFAULT graph reported first_capture=False — the "
+        "org's first capture is the org's, whatever credential shape carried it; "
+        f"got {resp.json().get('first_capture')!r}")
+
+
 def test_the_pre_existing_offload_exemption_is_actually_consumed():
     """The declaration's consumer is real; nothing pins its USE in the verdict.
 

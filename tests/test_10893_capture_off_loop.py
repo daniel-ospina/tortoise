@@ -37,10 +37,12 @@ also replays the journal):
 The handler's post-write tail (`link_session_entities`, `_session_alive`,
 `_update_onboarding_state`, `_sweep_orphaned_writes`, the capture-disclosed
 checkpoint) was off-loaded in the SAME cycle, by the commit before this one.
-⛔ NO COUNT OF THE RESIDUAL IS STATED HERE — the counts that do appear below are
+⛔ NO COUNT OF THE RESIDUAL'S LEGS IS STATED HERE — the counts that do appear below are
 facts about the CODE (how many entries the table holds, how many legs one stamp
 is, how many call sites a wrapper has), not readings of what the loop carried on
-some run. An earlier cut said "that is why the residual below is a single leg and
+some run. (The `81 ms in 4 calls` figure three lines up is a reading of ONE run and
+labelled as the before/after measurement it belongs to; what this disclaimer
+refuses to state is any count of the residual's LEGS.) An earlier cut said "that is why the residual below is a single leg and
 not six", which was a reading of the observed set — the thing that re-stales
 against the run it came from, and that this file elsewhere refuses to state
 (#14086 round-2 review, R2-3; round-3 review, R3-3).
