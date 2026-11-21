@@ -407,8 +407,9 @@ conclusions in §3–§7 rest on gaps of tens of points and never on a decimal.
 
 `tests/test_miss_rate_m5.py` pins the arithmetic, the four invariants the artifact can carry
 (**2, 3, 4, 5** — the demoted-return guard, the decomposition, the delivered coverage, and the
-curve sitting above the identity that `lorenz()` refuses to go below; the bundle stores both
-operands, so that one IS checkable on it), the one it cannot (INVARIANT 1 has no subject in a
+curve sitting above the identity that `lorenz()` refuses to go below; the identity is
+`covered_mass([1] * nodes, F)` — not `F`, because the retained node count is rounded — and the
+bundle stores the coverage, the covered mass and the node count, so it IS checkable on it), the one it cannot (INVARIANT 1 has no subject in a
 bundle that stores counts rather than per-query ids), the
 tool's sha256 against `tools/miss_rate_m5.py`, and **every cell of every table above, recomputed from
 `measurement.json` at the row and column it is printed under**. A figure that is merely true somewhere
