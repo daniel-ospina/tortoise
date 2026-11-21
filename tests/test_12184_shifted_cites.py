@@ -387,7 +387,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # original comment named: `e8bacc656c` is a superseded pre-rebase copy of THIS branch's own
     # `d7d205351e` (identical `git patch-id --stable`, ac9864384136fa27), held only by local
     # `backup/14087-*` and `fix/14087-review-followups*` refs — none of them on `origin` — so it is
-    # unresolvable from a clone of this branch, which is the rule at `tools/sdk_privatise.py:369-371`.
+    # unresolvable from a clone of this branch, which is the rule at `tools/sdk_privatise.py:375-377`.
     # `d7d205351e` IS an ancestor of this head and would also be reproducible; the pair is preferred
     # because it names the CORRECTION itself rather than a replay of it, and both addresses open at
     # THIS head (`:58265` the `#8290` docstring comment, `:58272` the `rows = proj.g.query(` statement) —
