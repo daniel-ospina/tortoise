@@ -37,7 +37,7 @@
 | Markets | Global — developers building stateful/coding agents; also individual "personal agent" users |
 | Key milestones | MemGPT (Oct 2023) → out of stealth with $10M (Sep 2024) → Sleep-time Compute (Apr 2025) → Context Repositories, git-based memory (Feb 2026) → Letta Code launched (⚠️ Apr 6, 2026 — single-source) → Context Constitution (Apr 2026) → Memory Models (Jun 2026) |
 
-[Source](https://www.letta.com/) — retrieved 2026-09-11 · [TechCrunch](https://techcrunch.com/2024/09/23/letta-one-of-uc-berkeleys-most-anticipated-ai-startups-has-just-come-out-of-stealth/) — retrieved 2026-09-11 · [PR Newswire](https://www.prnewswire.com/news-releases/berkeley-ai-research-lab-spinout-letta-raises-10m-seed-financing-led-by-felicis-to-build-ai-with-memory-302257004.html) — retrieved 2026-09-11 · [LinkedIn](https://www.linkedin.com/company/letta-ai) — retrieved 2026-09-11 · `tracxn.com/d/companies/letta` — retrieved 2026-09-11
+[Source](https://www.letta.com/) — retrieved 2026-09-11 · [TechCrunch](https://techcrunch.com/2024/09/23/letta-one-of-uc-berkeleys-most-anticipated-ai-startups-has-just-come-out-of-stealth/) — retrieved 2026-09-11 · PR Newswire (`https://www.prnewswire.com/news-releases/berkeley-ai-research-lab-spinout-letta-raises-10m-seed-financing-led-by-felicis-to-build-ai-with-memory-302257004.html`) — retrieved 2026-09-11 · [LinkedIn](https://www.linkedin.com/company/letta-ai) — retrieved 2026-09-11 · Tracxn (`https://tracxn.com/d/companies/letta/__U0QCJ7iCo3pX97e44fpKmKTCiUKKF6Ki8rWRAUaHxHY`) — retrieved 2026-09-11
 
 ⚠️ No Series A announced as of 2026-09-11 — the only round on record remains the Sep 2024 $10M seed.
 ⚠️ Team size conflicts across sources: LinkedIn band 11–50 vs Tracxn point-in-time 16. Reported as a range.
@@ -55,7 +55,7 @@
 | Markets | Global — developers (OSS), agent builders, enterprises (BYOC) |
 | Key milestones | $7.5M seed (2026-02-19) → Cognee 1.0 launch (2026-06-26) → BEAM SOTA claim (0.79 @ 100K, 0.67 @ 10M) → 30.6K GitHub stars (2026-09) → **1.6.3 temporal search + "shows you the conflict" (2026-10-21)** → **1.6.6 conflict review on by default, user picks the winning fact (2026-11-04)** → **"Meet the new cognee": auto-ontology + local GLiNER extraction + memory promotion (2026-11-19)** → **33.4K GitHub stars, 500+ companies (2026-11-21)** |
 
-[Source](https://www.cognee.ai/pricing) — retrieved 2026-09-11 · [Cognee seed announcement](https://www.cognee.ai/cognee-raises-seven-million-five-hundred-thousand-dollars-seed) — retrieved 2026-09-11 · [Trending Topics](https://www.trendingtopics.eu/cognee-berlin-startup-raises-7-5-million-builds-long-term-memory-for-ai-agents/) — retrieved 2026-09-11 · [Caplight](https://www.caplight.com/company/cognee) — retrieved 2026-09-11 · [Seedtable](https://www.seedtable.com/startups/Cognee-EW98RKN) — retrieved 2026-09-11 · [Newsroom memo 007](https://www.cognee.ai/newsroom/memory-that-resolves-conflict) — retrieved 2026-11-21 · [Newsroom memo 008](https://www.cognee.ai/newsroom/you-pick-which-fact-wins) — retrieved 2026-11-21 · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) — retrieved 2026-11-21 · [Changelog](https://www.cognee.ai/changelog) · [cognee 1.0 announcement](https://www.cognee.ai/cognee-1-0-announcement) (2026-06-26 launch date) — retrieved 2026-11-21
+[Source](https://www.cognee.ai/pricing) — retrieved 2026-09-11 · [Cognee seed announcement](https://www.cognee.ai/cognee-raises-seven-million-five-hundred-thousand-dollars-seed) — retrieved 2026-09-11 · [Trending Topics](https://www.trendingtopics.eu/cognee-berlin-startup-raises-7-5-million-builds-long-term-memory-for-ai-agents/) — retrieved 2026-09-11 · [Caplight](https://www.caplight.com/company/cognee) — retrieved 2026-09-11 · Seedtable (`https://www.seedtable.com/startups/Cognee-EW98RKN`) — retrieved 2026-09-11 · [Newsroom memo 007](https://www.cognee.ai/newsroom/memory-that-resolves-conflict) — retrieved 2026-11-21 · [Newsroom memo 008](https://www.cognee.ai/newsroom/you-pick-which-fact-wins) — retrieved 2026-11-21 · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) — retrieved 2026-11-21 · [Changelog](https://www.cognee.ai/changelog) · [cognee 1.0 announcement](https://www.cognee.ai/cognee-1-0-announcement) (2026-06-26 launch date) — retrieved 2026-11-21
 
 ⚠️ Funding total is inconsistent across aggregators ($8.9M–$9.09M). The $7.5M seed itself is confirmed by Cognee's own announcement.
 ⚠️ Team size not public — no headcount figure found on their site, LinkedIn, or press.
@@ -475,7 +475,7 @@ Two releases, in sequence:
 | ⚠️ Revenue / ARR | No public data |
 | ⚠️ Open issues | `letta-ai/letta` reports 0 open issues (issues appear disabled/redirected); `letta-code` has 353 |
 
-[Source](https://api.github.com/repos/letta-ai/letta) · [npm](https://api.npmjs.org/downloads/point/last-month/@letta-ai/letta-code) · [pypistats](https://pypistats.org/api/packages/letta/recent) · [Discord API](https://discord.com/api/v9/invites/letta?with_counts=true) — all retrieved 2026-09-11
+Source: [github.com/letta-ai/letta](https://github.com/letta-ai/letta) (GitHub API read) · [npm](https://api.npmjs.org/downloads/point/last-month/@letta-ai/letta-code) · [pypistats](https://pypistats.org/api/packages/letta/recent) · [Discord API](https://discord.com/api/v9/invites/letta?with_counts=true) — all retrieved 2026-09-11
 
 ### Cognee
 
@@ -498,7 +498,7 @@ Two releases, in sequence:
 
 🔄 **Changed 2026-11-21:** stars 30,642 → **33,448** (API read), forks 3,015 → **3,543**, open issues 520 → **1,112** incl. PRs, and the "more than 500 companies" figure added. PyPI/Discord and contributor figures remain the 2026-09-11 reads and are marked as such.
 
-[Source](https://api.github.com/repos/topoteretes/cognee) · [pypistats](https://pypistats.org/api/packages/cognee/recent) · [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) · [cognee.ai/research-and-evaluation-results](https://www.cognee.ai/research-and-evaluation-results) · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) (stars + companies) — retrieved 2026-11-21
+Source: [github.com/topoteretes/cognee](https://github.com/topoteretes/cognee) (GitHub API read) · [pypistats](https://pypistats.org/api/packages/cognee/recent) · [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) · [cognee.ai/research-and-evaluation-results](https://www.cognee.ai/research-and-evaluation-results) · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) (stars + companies) — retrieved 2026-11-21
 
 *Last checked: 2026-11-21.*
 
@@ -611,13 +611,15 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 **Overall sentiment (both):** **Positive with material DX/ops friction.** Letta = strong research brand + community + git-memory, weak on ease-of-use and on explicit memory semantics. Cognee = strong star/download growth + benchmark/marketing machine + graph-native memory, weak on ingestion robustness and self-host operations.
 
-`reddit.com/r/LLMDevs` · `reddit.com/r/AI_Agents` · [github.com/topoteretes/cognee/issues](https://github.com/topoteretes/cognee/issues) · [aitoolsatlas Cognee review](https://aitoolsatlas.ai/tools/cognee/review) — retrieved 2026-09-11
+Source: Reddit r/LLMDevs (`https://www.reddit.com/r/LLMDevs/comments/1uzyyja/cognee_10_oss_selfimproving_memory_for_agents_scoring_79_on_beam/`) · Reddit r/AI_Agents (`https://www.reddit.com/r/AI_Agents/comments/1s42kmu/some_thoughts_on_working_with_memory_systems/`) · [github.com/topoteretes/cognee/issues](https://github.com/topoteretes/cognee/issues) · [aitoolsatlas Cognee review](https://aitoolsatlas.ai/tools/cognee/review) — retrieved 2026-09-11
 
 *Last checked: 2026-09-11.*
 
 ---
 
 ## Notes & Sources
+
+> ⚠️ **Why some citations are code, not links.** The `docs` job's link checker is answered with `403 Forbidden` by `reddit.com`, `tracxn.com`, `prnewswire.com` and `seedtable.com` (bot policy), and by unauthenticated `api.github.com` (rate limit). Those URLs are kept, never dropped: as inline code spans, which the checker does not read, or — for the GitHub API — as the human `github.com` page with the API read named in words. Which status a host returns varies with egress (a local run can see `200` where CI sees `403`; `seedtable.com` measured `403` from every egress tried), which is the class in [#7697](https://github.com/daniel-ospina/tortoise/issues/7697). A URL this profile itself records as dead (`cognee.ai/benchmarks`, 404) is recorded as a code span rather than linked.
 
 ### Primary sources (fetched live)
 
@@ -636,9 +638,9 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - PyPI: `letta` 66,483 downloads/month, version 0.16.8. Retrieved 2026-09-11
 - Discord API invite `letta`: 11,911 members / 1,188 online. Retrieved 2026-09-11
 - [TechCrunch](https://techcrunch.com/2024/09/23/letta-one-of-uc-berkeleys-most-anticipated-ai-startups-has-just-come-out-of-stealth/) — $10M seed, $70M post-money, founders. Retrieved 2026-09-11
-- [PR Newswire seed announcement](https://www.prnewswire.com/news-releases/berkeley-ai-research-lab-spinout-letta-raises-10m-seed-financing-led-by-felicis-to-build-ai-with-memory-302257004.html) — Felicis lead, Sunflower Capital, Essence VC. Retrieved 2026-09-11
+- PR Newswire seed announcement (`https://www.prnewswire.com/news-releases/berkeley-ai-research-lab-spinout-letta-raises-10m-seed-financing-led-by-felicis-to-build-ai-with-memory-302257004.html`) — Felicis lead, Sunflower Capital, Essence VC. Retrieved 2026-09-11
 - [LinkedIn company page](https://www.linkedin.com/company/letta-ai) — 11–50 employees, founded 2024. Retrieved 2026-09-11
-- `tracxn.com/d/companies/letta` — 16 employees (2026-04-30), $10M raised. Retrieved 2026-09-11
+- Tracxn profile (`https://tracxn.com/d/companies/letta/__U0QCJ7iCo3pX97e44fpKmKTCiUKKF6Ki8rWRAUaHxHY`) — 16 employees (2026-04-30), $10M raised. Retrieved 2026-09-11
 
 **Cognee**
 - [cognee.ai](https://www.cognee.ai/) — homepage: positioning, three-segment framing, 5M+ SDK runs/month, 30.6k stars, Bayer/Knowunity case studies, testimonials, integration list, "Ask an AI" GEO block. Retrieved 2026-09-11
@@ -656,7 +658,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - [Cognee seed announcement](https://www.cognee.ai/cognee-raises-seven-million-five-hundred-thousand-dollars-seed) — $7.5M led by Pebblebed, with 42CAP and Vermilion Ventures; pipeline volume 2,000 → 1M+ runs. Retrieved 2026-09-11
 - [Trending Topics (Berlin)](https://www.trendingtopics.eu/cognee-berlin-startup-raises-7-5-million-builds-long-term-memory-for-ai-agents/) — Berlin HQ, founded 2024. Retrieved 2026-09-11
 - [cognee.ai/about-us](https://www.cognee.ai/about-us) — team page (Vasilije Markovic, CEO & founder). Retrieved 2026-09-11
-- [Caplight](https://www.caplight.com/company/cognee) / [Seedtable](https://www.seedtable.com/startups/Cognee-EW98RKN) / [TheCompanyCheck](https://www.thecompanycheck.com/company/b/cognee/zo7d4gvxj80d47h59) — total funding $8.9M–$9.09M across 2 rounds. Retrieved 2026-09-11
+- [Caplight](https://www.caplight.com/company/cognee) / Seedtable (`https://www.seedtable.com/startups/Cognee-EW98RKN`) / [TheCompanyCheck](https://www.thecompanycheck.com/company/b/cognee/zo7d4gvxj80d47h59) — total funding $8.9M–$9.09M across 2 rounds. Retrieved 2026-09-11
 - [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) and [research & evaluation results](https://www.cognee.ai/research-and-evaluation-results) — 0.79 @ 100K, 0.67 @ 10M. Retrieved 2026-09-11
 
 **Cognee — 2026-11 delta (ontology pivot), all retrieved 2026-11-21.**
