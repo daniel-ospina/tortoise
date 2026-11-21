@@ -497,6 +497,11 @@ def test_a_pin_set_over_its_budget_is_reported_as_a_refusal():
     assert "3 node(s)" in refusal and "at most 2" in refusal
     assert "Unpin" in refusal
 
+    # The sweep that honours this set is stopped by the CALLER (see the CLI suite's
+    # `test_a_pin_set_over_its_budget_stops_the_sweep_before_evict`); what this suite owns
+    # is that the gate REASON exists and names both ways out. An earlier version asserted
+    # `g.mutating == before` here, which compared two empty lists and could not fail.
+
 
 def test_an_unreadable_pin_declaration_refuses_the_sweep():
     class _Broken(_FakeGraph):
@@ -590,3 +595,111 @@ def test_a_degree_ceiling_is_a_declaration_time_guard_and_the_budget_is_the_inva
     shrunk = read(g, budget=PinBudget(max_nodes=3, max_degree=10))
     assert shrunk.over_budget() is not None
     assert "5 node(s)" in (shrunk.gate_reason() or "")
+
+
+# ── review round 1: the refusals that were reported with the wrong cause ───────
+def test_a_truncated_declaration_is_unmeasured_even_with_no_budget():
+    """Truncation is not a budget question: it answers `over_budget` before the cap.
+
+    Reading with `budget=None` (the default) used to return "fine" for a closure nobody
+    could see in full — the fail-open direction on the one field a sweep reads.
+    """
+    g = _FakeGraph([f"k{i}" for i in range(5)])
+    g.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id",
+                             "keys": [f"k{i}" for i in range(5)]}
+    import tortoise.resident_pin as rp
+
+    original = rp.DEFAULT_KEY_LIMIT
+    rp.DEFAULT_KEY_LIMIT = 2
+    try:
+        reading = read(g)          # no budget at all
+        assert reading.truncated is True
+        assert reading.over_budget() is not None
+        assert "UNKNOWN" in (reading.gate_reason() or "")
+    finally:
+        rp.DEFAULT_KEY_LIMIT = original
+
+
+def test_a_truncated_declaration_is_never_rewritten_by_pin_or_unpin():
+    """A partial read must not be the basis of a full write — that DROPS keys."""
+    g = _FakeGraph([f"k{i}" for i in range(6)])
+    budget = PinBudget(max_nodes=100)
+    pin(g, ["k0", "k1", "k2"], budget=budget)
+    import tortoise.resident_pin as rp
+
+    original = rp.DEFAULT_KEY_LIMIT
+    rp.DEFAULT_KEY_LIMIT = 2
+    try:
+        with pytest.raises(PinRefused) as exc:
+            unpin(g, ["k0"], budget=budget)
+        assert exc.value.code == "truncated"
+        with pytest.raises(PinRefused) as exc2:
+            pin(g, ["k5"], budget=budget)
+        assert exc2.value.code == "truncated"
+    finally:
+        rp.DEFAULT_KEY_LIMIT = original
+    assert g.meta[PINS_META_KEY]["keys"] == ["k0", "k1", "k2"], (
+        "a truncated read rewrote the declaration, silently dropping keys it could not "
+        "see"
+    )
+
+
+def test_a_window_too_small_for_a_pin_names_that_rather_than_an_impossible_number():
+    with pytest.raises(PinConfigError) as exc:
+        PinBudget(max_nodes=1, window_nodes=1)
+    message = str(exc.value)
+    assert "cannot carry a pin at all" in message
+    assert "Pin at most 1" not in message, (
+        "the refusal named a value it then refuses — an instruction that cannot be "
+        "followed"
+    )
+
+
+def test_unpin_of_a_population_the_set_does_not_address_is_refused():
+    g = _FakeGraph(["a", "b"])
+    budget = PinBudget(max_nodes=10)
+    pin(g, ["a", "b"], label="Source", key_prop="url", budget=budget)
+    with pytest.raises(PinRefused) as exc:
+        unpin(g, ["a"], label="Point", key_prop="id", budget=budget)
+    assert exc.value.code == "population-mismatch"
+    assert g.meta[PINS_META_KEY]["keys"] == ["a", "b"]
+
+
+def test_a_truthy_non_boolean_pin_predicate_holds_the_node_back():
+    """The pin gate's polarity is `bool(...)`, NOT the record probe's `is True`.
+
+    There, a truthy non-bool HOLDS the node (safe); here the same spelling would DELETE
+    it, because `1`, `"pinned"` and `numpy.True_` are all truthy and none is `True`.
+    """
+    g = _FakeGraph(["p0", "p1"])
+    report = evict(
+        _assessment(nodes=1), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=lambda candidate: 1,      # truthy, not True
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=10, max_passes=2),
+    )
+    assert g.node_keys() == ["p0", "p1"], (
+        "a truthy non-boolean pin predicate authorised a delete — the predicate's "
+        "meaning is 'is this pinned', and anything truthy must hold the node"
+    )
+    assert report.deleted == ()
+
+
+def test_the_weak_assertions_are_now_behavioural():
+    """`gate is not None` asserted nothing; the over-budget test never reached `evict`.
+
+    Rep-laced here so a future edit to those two tests cannot go back to asserting that a
+    bound method exists.
+    """
+    g = _FakeGraph(["p0", "p1"])
+    g.link("p0", "p1")
+    budget = PinBudget(max_nodes=10)
+    pin(g, ["p0"], budget=budget)
+    reading = read(g, budget=budget)
+    gate = reading.gate()
+    assert gate(Candidate(node_id=0, key="p0", population=POPULATION)) is True
+    assert gate(Candidate(node_id=1, key="p1", population=POPULATION)) is True  # closure
+    assert gate(Candidate(node_id=2, key="zz", population=POPULATION)) is False
+    assert gate(Candidate(node_id=3, key=None, population=POPULATION)) is False

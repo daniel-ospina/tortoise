@@ -990,7 +990,8 @@ def evict(
             after_nodes,
             max(
                 window * 2,
-                budget + len(settled) + len(held_record_ids) + len(held_leased_ids),
+                budget + len(settled) + len(held_record_ids) + len(held_leased_ids)
+                + len(held_pinned_ids),
             ),
         )
         try:
@@ -1026,12 +1027,15 @@ def evict(
                 break
             # ⛔ GATE 6 — the PIN (#14012). Asked FIRST, because the score may not
             # overrule the user's own declaration: a pinned node is not "cold", it is
-            # exempt. A predicate that RAISES holds the node back — an unanswerable
-            # question about whether something is pinned must never authorise deleting
-            # it, which is the same polarity as gate 3's "could not ask".
+            # exempt. ⛔ The polarity is `bool(...)`, deliberately NOT gate 3's `is True`:
+            # there, anything but an explicit True HOLDS the node, so a truthy non-bool
+            # is safe; here the same spelling would DELETE it (`1`, `"pinned"`,
+            # `numpy.True_` are all truthy and none is `True`). For a pin the safe
+            # direction is the opposite one — anything truthy, or an unanswerable
+            # question, holds the node back.
             if pinned is not None:
                 try:
-                    is_pinned = pinned(candidate) is True
+                    is_pinned = bool(pinned(candidate))
                 except Exception:
                     is_pinned = True
                 if is_pinned:

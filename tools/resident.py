@@ -110,10 +110,16 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--graph-uri", required=True,
                        help="docker://[:pass@]host:port/graph (the fast layer)")
         p.add_argument("--graph", required=True, help="the graph name inside that URI")
-        p.add_argument("--label", default="Point",
-                       help="the label a pin addresses (default: Point)")
-        p.add_argument("--key-prop", default="id", metavar="PROP",
-                       help="the node property holding the record key (default: id)")
+        # ⛔ NO DEFAULTS on the pair: `pin` needs one and supplies `Point`/`id`
+        # explicitly, while `unpin` must be able to say "I named nothing", so an
+        # explicit mismatch can be refused instead of silently overriding the set's own
+        # population. A flag default here would be indistinguishable from an operator
+        # naming it (the failure `unpin` was just fixed for, one layer up).
+        p.add_argument("--label", default=None,
+                       help="the label a pin addresses (default for `pin`: Point)")
+        p.add_argument("--key-prop", default=None, metavar="PROP",
+                       help="the node property holding the record key "
+                            "(default for `pin`: id)")
         p.add_argument("--window-nodes", type=int, default=None, metavar="N",
                        help=("the residency window's node budget — the number the pin "
                              "cap is derived from. Defaults to "
@@ -183,18 +189,33 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error(
                     f"{resident_pin.EVICTION_MAX_NODES_ENV}={raw!r} is not an integer"
                 )
+    # ⛔ `show` and `unpin` do not NEED a budget: `show` reports one when it can (so an
+    # over-budget set is visible) and `unpin` is the documented REMEDY for that state —
+    # so requiring a budget for either made the remedy unreachable exactly when it was
+    # needed (a lowered window or a window too small for a pin). Only `pin` requires one.
+    budget: resident_pin.PinBudget | None
     try:
         budget = resident_pin.PinBudget.resolve(
             max_nodes=args.max_pins, max_degree=args.max_degree, window_nodes=window
         )
     except resident_pin.PinConfigError as exc:
-        _emit({"verdict": "REFUSED", "reason": f"config refused: {exc}"}, args.out)
-        return EXIT_REFUSED
+        if args.verb == "pin":
+            _emit({"verdict": "REFUSED", "reason": f"config refused: {exc}"}, args.out)
+            return EXIT_REFUSED
+        budget = None
+        if args.verb == "show":
+            print(f"#14012: no pin budget could be resolved ({exc}); the declaration is "
+                  f"reported WITHOUT a cap check", file=sys.stderr)
 
     def _refused(reason: str, code: str) -> int:
         """ONE refusal envelope, so a new refusal path cannot invent a second shape."""
         _emit({"verdict": "REFUSED", "graph": args.graph, "code": code,
-               "reason": reason, "budget": budget.as_dict()}, args.out)
+               "reason": reason,
+               # ⛔ `show`/`unpin` may hold NO budget (they do not need one — `unpin` is
+               # the documented remedy for an over-budget set), so an unconditional
+               # `budget.as_dict()` here is an AttributeError on exactly the refusal an
+               # operator reaches for the remedy.
+               "budget": budget.as_dict() if budget else None}, args.out)
         return EXIT_REFUSED
 
     client = graph = None
@@ -218,17 +239,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "pin":
             try:
                 result = resident_pin.pin(
-                    graph, args.key, label=args.label, key_prop=args.key_prop,
+                    graph, args.key,
+                    label=args.label or "Point", key_prop=args.key_prop or "id",
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:
                 return _refused(exc.reason, exc.code)
             except resident_pin.PinConfigError as exc:
-                # ⛔ A non-bare `--label`/`--key-prop` reaches `bare_identifier` INSIDE
-                # `pin` (via `_closure_for`) on a graph with no declaration yet, because
-                # `read()` validates the DECLARATION's pair and returns early when there
-                # is nothing declared. Catching it here is what turns a traceback into
-                # the declared refusal this tool's exit-code vocabulary promises.
+                # ⛔ A REFUSAL WITH A CODE, not a traceback. A non-bare
+                # `--label`/`--key-prop` reaches `bare_identifier` INSIDE `pin` (via
+                # `_closure_for`) on a graph with no declaration yet, because `read()`
+                # validates the DECLARATION's pair and returns early when there is
+                # nothing declared — and uncaught it escaped as a traceback whose exit 1
+                # is this tool's USAGE code, telling a scheduler to retry flags against a
+                # declaration that will never parse.
                 return _refused(f"config refused: {exc}", "config")
             _emit({"verdict": "OK", "graph": args.graph, "pin": result.as_dict()},
                   args.out)
@@ -287,16 +311,21 @@ def main(argv: list[str] | None = None) -> int:
                 view = outside_view.read(
                     graph, conn,
                     org_id=args.org_id, graph_id=args.graph_id,
-                    label=args.label, key_prop=args.key_prop,
+                    # ⛔ `or` the documented defaults: the flags default to `None` so
+                    # `unpin` can tell "the operator named nothing" from "the operator
+                    # named a different population" (an explicit mismatch is REFUSED, not
+                    # silently overridden). `pin`/`outside` resolve their own defaults.
+                    label=args.label or "Point", key_prop=args.key_prop or "id",
                     topic_column=args.topic_column or outside_view.TOPIC_COLUMN,
                     top=args.top or outside_view.DEFAULT_TOP_TOPICS,
                     key_limit=args.max_keys or outside_view.DEFAULT_RESIDENT_KEY_LIMIT,
                 )
             except (ValueError, resident_pin.PinConfigError) as exc:
                 # A `--label` the record has no table for, or a `--topic-column` that is
-                # not a real column of it: a FLAG mistake, so it is a usage error with
-                # the flag named — not a traceback, and not UNMEASURED (which would tell
-                # a scheduler the measurement failed rather than the command).
+                # not a real column of it: a FLAG mistake, so it is a usage error with the
+                # flag named — not a traceback, and not UNMEASURED (which would tell a
+                # scheduler the measurement failed rather than the command). `conn` is
+                # closed by the `finally` below.
                 parser.error(str(exc))
                 return EXIT_USAGE  # unreachable; parser.error exits
         finally:

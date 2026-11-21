@@ -317,7 +317,10 @@ def test_an_empty_view_says_so_rather_than_showing_a_zero_count():
     graph = _Graph(["p0"])
     view = _view(graph, _Conn(_record_rows(["p0"])))
     assert view.outside == 0
-    assert "currently held in the fast layer" in view.headline
+    # ⛔ The zero case is SCOPED to the view's label: "everything in your record" was a
+    # completeness claim made from a single-label count (#2952).
+    assert "Nothing outside the fast layer for the Point items" in view.headline
+    assert "everything in your record" not in view.headline.lower()
 
 
 def test_a_refused_record_read_is_unmeasured_not_zero():
@@ -454,3 +457,46 @@ def test_an_unmeasured_cross_check_is_not_complete():
     assert "cross-check" in view.reason, (
         f"the reason does not name what was missing — got {view.reason!r}"
     )
+
+# ── merged from review round 1 (this lane) — two cases round 2 did not cover ───
+def test_a_scope_refusal_is_unmeasured_not_a_traceback():
+    """`_apply_tenant_scope` REFUSES by design; outside the guard it escaped as one.
+
+    A DSN whose role bypasses RLS, a GUC that could not be set, or an unverifiable scope
+    makes it raise (#9600). Outside the `try`, that escaped out of the verb as a
+    traceback whose exit 1 is the USAGE code — telling a scheduler to retry FLAGS against
+    a DSN that can never work.
+    """
+    class _Mismatched(_Cursor):
+        def execute(self, sql, params=None):
+            if "bypassing" in sql:
+                self.executed.append((sql, params or ()))
+                self._last = [{"tenant": "someone_else", "bypassing": False}]
+                return
+            return super().execute(sql, params)
+
+    class _Conn2(_Conn):
+        def cursor(self):
+            cur = _Mismatched(self.rows)
+            self.cursors.append(cur)
+            return cur
+
+    view = _view(_Graph(["p0"]), _Conn2(_record_rows(["p0"])))
+    assert view.complete is False
+    assert view.outside is None
+    assert "record could not be read" in view.reason
+    assert "tenant GUC" in view.reason, "the refusal's own reason was swallowed"
+
+
+def test_complete_is_false_when_the_RESIDENT_count_alone_fails():
+    """The third number that can fail alone — round 2's arm covers `record_total`."""
+    class _NoCount(_Graph):
+        def query(self, statement, params=None):
+            if "RETURN count(n)" in statement:
+                raise RuntimeError("count blip")
+            return super().query(statement, params=params)
+
+    view = _view(_NoCount(["p0"]), _Conn(_record_rows(["p0"])))
+    assert view.resident is None
+    assert view.complete is False
+    assert "resident figure" in view.reason

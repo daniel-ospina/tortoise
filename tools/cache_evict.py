@@ -216,13 +216,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="how many nodes ONE pass may take.")
     parser.add_argument("--key-prop", default="id", metavar="PROP",
                         help="the node property holding the record key (default: id)")
-    parser.add_argument("--pins-label", default="Point", metavar="LABEL",
-                        help=("#14012: the label the pin declaration addresses "
-                              "(default: Point). A pin set declared against another "
-                              "label is NOT applied to this sweep."))
-    parser.add_argument("--pins-key-prop", default=None, metavar="PROP",
-                        help=("#14012: the key property the pin declaration uses "
-                              "(default: the same as --key-prop)"))
     parser.add_argument("--selector", required=True, metavar="MODULE:CALLABLE",
                         help=("(graph, limit, population) -> [Candidate], ordered "
                               "cold-first by a policy YOU own. No default: #10976 "
@@ -368,37 +361,67 @@ def main(argv: list[str] | None = None) -> int:
             return CACHE_EVICTION_EXIT_REFUSED
 
         # ⛔ #14012 — THE PIN, AND IT HAS NO OFF-SWITCH. What a user declared resident
-        # may not be swept by an operator flag, so there is no `--ignore-pins`: the gate
-        # is read here, always, and a pin set that cannot be read or no longer fits its
-        # budget REFUSES the sweep rather than either silently dropping the user's
-        # declaration or silently letting pins take over the fast layer.
-        pins_label = args.pins_label
-        pins_key_prop = args.pins_key_prop or args.key_prop
-        try:
-            pin_budget = resident_pin.PinBudget.resolve(window_nodes=policy.max_nodes)
-        except resident_pin.PinConfigError as exc:
+        # may not be swept by an operator flag, so there is no `--ignore-pins`: the
+        # declaration is read here, always, and one that cannot be read, cannot be read in
+        # full, or no longer fits its budget REFUSES the sweep rather than either
+        # silently dropping the user's declaration or silently letting pins take over the
+        # fast layer.
+        #
+        # ⛔ THE DECLARATION IS READ **BEFORE** A BUDGET IS RESOLVED, and the budget is
+        # only required when something is declared. Resolving it first made every sweep
+        # refuse — including sweeps with NOTHING pinned — on an unrelated
+        # `TORTOISE_PIN_MAX_NODES` typo or a window too small for a pin to exist. That is
+        # the unbounded-cache state #10976 exists to prevent, reached through a
+        # configuration value about a control the sweep was not using.
+        pins = resident_pin.read(graph)
+        pin_note = ""
+        pinned_gate = None
+        # ⛔ UNREADABLE and TRUNCATED are settled FIRST and need no budget: they are
+        # facts about the DECLARATION, not about the cap. Resolving a budget before them
+        # reported a configuration error for a declaration nobody could read — the wrong
+        # cause, on the one refusal an operator has to act on.
+        if not pins.readable or pins.truncated:
             _emit({"verdict": "REFUSED",
-                   "reason": f"the pin budget cannot be resolved: {exc}",
-                   "census": assessment.as_dict()}, args.out)
-            return CACHE_EVICTION_EXIT_REFUSED
-        pins = resident_pin.read(graph, budget=pin_budget)
-        pin_refusal = pins.gate_reason()
-        if pin_refusal is not None:
-            _emit({"verdict": "REFUSED", "reason": pin_refusal,
+                   "reason": pins.gate_reason() or "the pin declaration is unusable",
                    "pins": pins.as_dict(), "census": assessment.as_dict()}, args.out)
             return CACHE_EVICTION_EXIT_REFUSED
-        if pins.keys and (pins.label, pins.key_prop) != (pins_label, pins_key_prop):
-            # ⛔ A pin set is declared against ONE key space. Applying a `Point`-keyed
-            # declaration to a sweep that keys on `Source.url` would compare keys that
-            # mean different things — a silent no-op at best, a wrong node held at worst.
-            _emit({"verdict": "REFUSED",
-                   "reason": (f"the pin declaration addresses {pins.label!r} by "
-                              f"{pins.key_prop!r}, but this sweep addresses "
-                              f"{pins_label!r} by {pins_key_prop!r} — an unmatched pin "
-                              f"set may not be applied to it"),
-                   "pins": pins.as_dict(), "census": assessment.as_dict()}, args.out)
-            return CACHE_EVICTION_EXIT_REFUSED
-        pinned_gate = pins.gate() if pins.keys else None
+        if pins.keys:
+            try:
+                pin_budget = resident_pin.PinBudget.resolve(
+                    window_nodes=policy.max_nodes)
+            except resident_pin.PinConfigError as exc:
+                _emit({"verdict": "REFUSED",
+                       "reason": (f"a pin declaration exists and its budget cannot be "
+                                  f"resolved: {exc}"),
+                       "pins": pins.as_dict(), "census": assessment.as_dict()},
+                      args.out)
+                return CACHE_EVICTION_EXIT_REFUSED
+            pins = resident_pin.read(graph, budget=pin_budget)
+            pin_refusal = pins.gate_reason()
+            if pin_refusal is not None:
+                _emit({"verdict": "REFUSED", "reason": pin_refusal,
+                       "pins": pins.as_dict(), "census": assessment.as_dict()},
+                      args.out)
+                return CACHE_EVICTION_EXIT_REFUSED
+            # ⛔ A PIN SET ADDRESSES ONE KEY SPACE, and this sweep addresses the one its
+            # `--key-prop` names. On a mismatch the set holds nothing in THIS population,
+            # so it is NOT applied — and that is REPORTED rather than refused, because
+            # refusing would block every sweep of another population for as long as any
+            # pin exists (a per-graph set is declared once), and applying it would compare
+            # keys that mean different things. The flag pair that used to decide this is
+            # GONE: `--pins-label/--pins-key-prop` were both an over-block (any `Point`
+            # pin refused a `Source` sweep) and a bypass (naming the declaration's own pair
+            # rather than the sweep's re-armed it).
+            if pins.keys and pins.key_prop != args.key_prop:
+                pin_note = (
+                    f"the pin declaration addresses keys named by {pins.key_prop!r} "
+                    f"({len(pins.keys)} key(s) on {pins.label!r}), but this sweep keys on "
+                    f"{args.key_prop!r} — the declaration was NOT applied to it, because "
+                    f"it holds nothing in this population's key space"
+                )
+                print(f"#14012: {pin_note}", file=sys.stderr)
+            else:
+                pinned_gate = pins.gate() if pins.keys else None
 
         report = evict(assessment, client, graph,
                        population=args.population,
@@ -427,7 +450,8 @@ def main(argv: list[str] | None = None) -> int:
         # ever emits it.
         "metric": report.metric(),
         "census": assessment.as_dict(),
-        "pins": pins.as_dict(),
+        "pins": {**pins.as_dict(), "applied": pinned_gate is not None,
+                 "not_applied_reason": pin_note},
     }
     _emit(body, args.out)
 
