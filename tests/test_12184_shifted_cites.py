@@ -1520,14 +1520,11 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # extra_pairs`. `alt_drifters < drifters` saw the downward violation and was blind to every
         # overstatement: a numerator inflated by +8 or +67 over the primary's read `problems == []`, which
         # is the exact direction a stale figure takes when a denominator moves under it (`#13599` review,
-        # finding 1 — measured on this head before the fix). It is the ONLY guard on this figure: the
-        # three-mention agreement arm cannot reach the alternative basis. ⛔ This comment used to say the
-        # document publishes that figure "alone, so there is no second mention to agree with", and BOTH halves
-        # were false: the alt numerator is published TWICE (the alt-basis sentence and the `N and M are one
-        # measurement` sentence), and the `123` it quoted is the POST-re-spelling COLLISION count, not the alt
-        # numerator. So the two mentions are now graded against each other in the HISTORY-FREE arm ABOVE.
-        # ⛔ It is NOT the ONLY
-        # guard on the figure, though, and this comment claimed it was until the re-derivation landed:
+        # finding 1 — measured on this head before the fix). ⛔ The `It is the ONLY guard on this figure:`
+        # sentence is DELETED rather than softened: the paragraph claimed exclusivity while the leg above it
+        # grades the same figure against its second publication, so the block asserted two incompatible
+        # things two lines apart — the class this file exists to catch, reintroduced by the commit that
+        # fixed the previous instance. It is also not the only guard on the figure:
         # `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried` grades the alternative
         # basis from the pin's union set, so an alt numerator this BAND still contains is caught there —
         # MEASURED on this head: `230 pairs and 158 drifters` → `… and 156 drifters` sits inside
@@ -1670,8 +1667,9 @@ def test_a_carried_forward_figure_is_reported() -> None:
     arithmetic figure that stops following its pair count, a ratio naming a denominator it does not carry,
     one of the three mentions of the ratio disagreeing with the others, an alternative basis level with the
     primary, an alternative basis whose numerator is inflated past what its added pairs can
-    contribute, a two-code-span pair count stated below what the document measures, and one more of those
-    pairs claimed uncounted than the union adds. Each is applied to the sentence AS SHIPPED, by
+    contribute, the SECOND publication of that alternative numerator disagreeing with the first while both
+    stay inside the band, a two-code-span pair count stated below what the document measures, and one more
+    of those pairs claimed uncounted than the union adds. Each is applied to the sentence AS SHIPPED, by
     capture-group position.
 
     ⛔ The alternative basis is mutated on BOTH capture groups (`:1` pairs, `:2` drifters) on purpose: the
@@ -1688,13 +1686,15 @@ def test_a_carried_forward_figure_is_reported() -> None:
     alt = _ALT_BASIS.search(text)
     two_total = _TWO_SPAN_TOTAL.search(text)
     two_new = _TWO_SPAN_NEW.search(text)
+    one_measurement = _ONE_MEASUREMENT.search(text)
     for found, what in ((triple, "triple"), (quadruple, "figures sentence"), (ratio, "`N of this document's M`"),
-                        (alt, "alternative basis"), (two_total, "two-code-span pair count"),
+                        (alt, "alternative basis"), (one_measurement, "`N and M are one measurement`"),
+                        (two_total, "two-code-span pair count"),
                         (two_new, "two-code-span uncounted count")):
         assert found is not None, (
             f"the shipped document no longer carries the {what}, so this control has nothing to mutate — "
-            "re-point `_TRIPLE`/`_QUADRUPLE`/`_ALT_BASIS`/`_TWO_SPAN_TOTAL`/`_TWO_SPAN_NEW` at how it is "
-            "published now"
+            "re-point `_TRIPLE`/`_QUADRUPLE`/`_ALT_BASIS`/`_ONE_MEASUREMENT`/`_TWO_SPAN_TOTAL`/"
+            "`_TWO_SPAN_NEW` at how it is published now"
         )
 
     def _mutate(match: re.Match[str], overrides: dict[int, int]) -> str:
@@ -1758,6 +1758,13 @@ def test_a_carried_forward_figure_is_reported() -> None:
             "(the direction the one-sided bound used to be the only guard for, never exercised; the mutant "
             "is anchored to the PRIMARY numerator, not `alt - 2`, because a band wide enough for four added "
             "pairs would swallow `alt - 2` and the control would silently stop proving anything)",
+        ),
+        (
+            one_measurement,
+            {2: alt_drifters - 2},
+            "the SECOND publication of the alternative numerator disagrees with the first — and the mutant "
+            "is anchored two INSIDE the band on purpose: a value the band already rejects would let this "
+            "row pass on the BAND's red and prove nothing about the mention-agreement leg it exists for",
         ),
         (
             two_total,
