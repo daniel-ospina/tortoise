@@ -393,9 +393,9 @@ SWEEP_NAMES = 66
 #: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
 #: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
 #: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
-#: ⛔ #14086 RE-PIN, measured on this head (`65cf27c01b`) — NOT arithmetic on the block above.
-#: The pin above (11833) is 2 rows above what THIS tree derives, because it was taken on a
-#: different tree; measured today with the tool's own verbs:
+#: ⛔ #14086 RE-PIN — measured with the tool's own verbs, NOT arithmetic on the block above; the
+#: number reproduces at both `65cf27c01b` and `fb6e7a65e8`. The pin above (11833) is **1 row**
+#: above what THIS tree derives, because it was taken on a different tree:
 #:     origin/main (df0525a7a9)   derives 11831   (so main is itself 2 rows off its 11833 pin)
 #:     this head                  derives 11832   (+1 over main, the PR's own row)
 #: The +1 is attributed by a row-by-row dump of both residue sets, not by count — exactly one row

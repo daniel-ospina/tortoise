@@ -324,8 +324,8 @@ class ReadStages:
         still OPEN, and publishing a partial sum under a total it does not equal
         is the same false attribution :data:`PRE_HANDLER_PARTS` exists to
         prevent. Same filter rule as :meth:`spent_ms` (filtered on the UNROUNDED
-        value, so a part that rounds to ``0.0`` is reported as unmeasured rather
-        than free).
+        value, not on the rounded one): a part that measured a true ``0.0`` is
+        ABSENT, while one that only ROUNDS to ``0.0`` is published as ``0.0``.
         """
         with self._lock:
             if not self._armed:
