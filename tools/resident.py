@@ -42,9 +42,9 @@ Exit codes — the census's vocabulary, so a scheduler keys on one table
     4  UNMEASURED  what is outside could not be measured (a partial resident read, an
                    unreachable record). ⛔ NOT zero: a missing measurement read as a
                    healthy zero is the defect both controls exist to avoid.
-    1  usage       a flag, import or IO mistake — including a `--label`
-                   the record has no such table for, and a `--topic-column` that is
-                   not a real column of it
+    1  usage       a flag, import or IO mistake — including a `--label` the record
+                   has no table for, and a `--topic-column` that is not a real column
+                   of it
 """
 from __future__ import annotations
 
