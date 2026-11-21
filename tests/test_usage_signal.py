@@ -1609,14 +1609,19 @@ def test_no_graph_dependency() -> None:
         "subject's own import, which is the leak this leg exists to detect), and an "
         "EXTRA name is that leak (#14118 item 1)")
 
-    # ⛔ AND THE VERDICT IS ALSO GRADED ACROSS TWO IMPORTS, because the injected witness
+    # ⛔ AND THE VERDICT IS ALSO GRADED ACROSS TWO IMPORTS THROUGH `_probe` ITSELF, so a
+    # filter placed INSIDE the production path is graded here too, because the injected witness
     # above answers "is this run OBSERVED", not "would a REAL leak be SEEN". Measured on
     # the head before either row: a filter keeping only `set(injected) | <six literals>`
     # left `leaked == {'falkordb'}` satisfied while a module-level
     # `import tortoise.hosted_backup` added to `usage_signal.py` shipped GREEN — a real,
-    # executing leak, and the probe is the only leg that can see it (the AST ban does
-    # not cover a module-level import in the module under audit). The leaking import
-    # carries no injected names, so that filter empties THIS row instead of hiding it.
+    # executing leak. (The AST ban DOES catch a module-level import of a banned root —
+    # measured with this file's own `_offending`: `import tortoise.hosted_backup` added
+    # to the subject source reports `{'tortoise.hosted_backup'}`. The probe's exclusive
+    # value is the TRANSITIVE reach, a banned client pulled through a legitimately
+    # imported module, which is the declared one-hop gap in the AST ban.) The leaking
+    # import carries no injected names, so an injected-keyed filter empties THIS row
+    # instead of hiding it.
     _cases = {
         "from tortoise import usage_signal": set(),
         "import tortoise.hosted_backup": {"tortoise.hosted_backup"},
@@ -1627,7 +1632,7 @@ def test_no_graph_dependency() -> None:
         "the table must carry the known-leaking import as its positive control — without "
         "it the comparison below is satisfied by an empty expectation in both rows, "
         "which is the exact shape this row exists to prevent")
-    _observed_cases = {stmt: _matching(_probe_modules(stmt)) for stmt in _cases}
+    _observed_cases = {stmt: _probe(stmt) for stmt in _cases}
     assert {"tortoise", "tortoise.usage_signal"} <= set(
         _probe_modules("from tortoise import usage_signal")
     ), (
