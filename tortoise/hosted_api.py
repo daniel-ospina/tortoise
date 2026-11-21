@@ -21611,8 +21611,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     receipt_key = _capture_receipt_key(capture_harness)
     # ⛔ #10893 (second cycle): THE RECEIPT BLOCK IS SYNCHRONOUS GRAPH + REGISTRY
-    # WORK, and it used to run INLINE on the single uvicorn worker. Three probes
-    # (`_session_alive`), one full-graph count (`_session_count_by_harness`), and
+    # WORK, and it used to run INLINE on the single uvicorn worker. Two
+    # `_session_alive` probes, one `_session_count_by_harness` count, and
     # up to two `_update_onboarding_state` writes — which are a jsonb
     # compare-and-set against the registry AND keyed graph MERGEs — all park the
     # event loop. That is the `#2988`/`#3498` class this file offloads at every

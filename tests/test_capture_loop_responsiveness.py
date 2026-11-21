@@ -2794,13 +2794,20 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
 # state writes, the write-verb enrichment read, and the `capture_ok` stamp.
 #
 # Measured on the embedded lane at the fixing commit's parent (40 turns, every
-# third carrying a `repo#N` reference): 57 graph round trips ON the event loop,
-# 91-151 ms of loop occupancy across runs here (105.0 ms on the sample the fix
+# third carrying a `repo#N` reference): 57 graph round trips ON the event loop
+# (70-250 ms of loop occupancy across runs here; 105.0 ms on the sample the fix
 # was measured on). After the tail moved to the capture pool the on-loop residual
-# is the SCHEMA/BOOTSTRAP class only — 6 statements, 14-39 ms across runs here —
-# and every one of those six is what
-# `test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop` pins, not
-# this tail.
+# is 6 statements, ~10-40 ms across runs here — the SCHEMA/BOOTSTRAP PROBE trio,
+# 2x each of `MATCH (n) RETURN 1 LIMIT 1`, `CALL db.indexes()` and the
+# `search_keys` index MATCH. The COUNT is the stable observation (6/6 runs); the
+# millisecond figure is host-dependent and nothing asserts it.
+#
+# ⛔ THOSE SIX ARE NOT WHAT
+# `test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop` PINS. Its
+# `_is_schema_sweep` matches the index DDL (`CREATE INDEX FOR` / `DROP INDEX ON` /
+# the fulltext API) and deliberately excludes the vector-index PROBE those
+# statements are — so it never sees them, and this test's green says nothing about
+# them. They are the pre-existing bootstrap this PR does not address.
 #
 # ⛔ NO WALL-CLOCK BUDGET HERE, for the reason stated at
 # `test_capture_write_does_not_scale_loop_blocking_with_turns`: on a shared
