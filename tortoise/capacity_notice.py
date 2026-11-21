@@ -108,8 +108,9 @@ only**. Resend dedupes a repeated key against "the last **24 hours**"
 (`resend.com/docs/dashboard/emails/idempotency-keys`), so a replay that arrives
 later than that sends a SECOND copy and then stamps. ⛔ The bound is stated
 rather than implied because nothing in this code expires a key: the window is
-the PROVIDER's, and the one path that can outlive it — a ledger that cannot be
-marked at all — is named in `_ACCOUNT_DRIFT_SOFT`.
+the PROVIDER's. Two paths can outlive it — a crash-replay slower than the window
+(the process down past 24 h), and a ledger that cannot be marked at all, the
+latter named in `_ACCOUNT_DRIFT_SOFT`.
 
 BLAST CONTROL. The send budget (#1138/#3631, `email_notify.reserve_send_slot`)
 is the limiter for the first fleet-wide pass: past the daily cap the remaining
@@ -625,9 +626,10 @@ def claim_notice(cp, org_id: str, threshold: int,
     a key for "the last 24 hours"
     (`resend.com/docs/dashboard/emails/idempotency-keys`), so a crash-replay that
     arrives after the window sends a second copy and then stamps. Nothing in this
-    module expires a key, so the window is stated rather than assumed. The opposite order would permanently swallow the notice on any
-    send failure — the customer would never learn, which is the failure mode this
-    email exists to prevent.
+    module expires a key, so the window is stated rather than assumed. The
+    opposite order would permanently swallow the notice on any send failure — the
+    customer would never learn, which is the failure mode this email exists to
+    prevent.
     """
     from .supabase_control import set_org_storage_notice_pct
 
@@ -822,7 +824,8 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
             # column (code deployed before its migration) raises PostgREST 204/
             # 400 here; sending anyway would re-send the same one-shot notice on
             # EVERY pass, and the provider key only collapses a replay of the
-            # SAME threshold — it cannot make a 6-hourly re-send safe. So the
+            # SAME threshold inside its 24 h window — it cannot make a 6-hourly
+            # re-send safe. So the
             # account is reported, loudly and by name, and nothing is sent until
             # the migration applies (see the migration's deploy-order note).
             logger.error(
@@ -941,7 +944,8 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     if not stamped:
         # Another pass moved the mark between our read and our stamp. The email
         # went out; the provider key collapses only a replay of the SAME
-        # threshold (the key names it), so it bounds a duplicate of this send and
+        # threshold, and only inside its 24 h window (the key names the
+        # threshold), so it bounds a duplicate of this send inside that window and
         # says nothing about a different one. The log states exactly that rather
         # than overclaiming.
         logger.warning(

@@ -17451,8 +17451,8 @@ async def send_onboarding_offer_email_endpoint(request: Request):
                 op="set_org_onboarding_email_sent")
             if not stamped:
                 # Another process stamped concurrently (cross-replica race) —
-                # the provider Idempotency-Key collapsed the duplicate send;
-                # outcome is still exactly-once.
+                # the provider Idempotency-Key collapsed the duplicate send
+                # inside its 24 h window; after that window a replay sends again.
                 _logger.warning(
                     "onboarding email: sent for team %s but marker already "
                     "set by a concurrent sender (provider deduped)", org_id)

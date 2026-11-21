@@ -179,7 +179,7 @@ _ORG_ADDITIVE_ONBOARDING_TIER = ["onboarding_email_sent_at"]
 # as unset is right for the QUOTA path (which is what the ladder protects) and
 # wrong for the NOTICE path, which OWNS this column: without a readable ledger
 # every pass would re-send the same one-shot notice, and the provider key only
-# collapses a replay of the SAME threshold. So `capacity_notice.read_account`
+# collapses a SAME-threshold replay inside its 24 h window. So `capacity_notice.read_account`
 # deliberately has NO ladder behind it and reports `notice-mark-unavailable`
 # instead of sending — an earlier comment here claimed a "best-effort notice per
 # pass" that no code implements (#14038 review, P2).
@@ -2564,7 +2564,7 @@ def org_storage_notice_pct(cp, org_id: str) -> int | None:
     sentinel for it would invite a caller to branch on a case that cannot
     occur; an unparseable figure is read as NO MARK because a re-send is the
     safe direction (the provider Idempotency-Key collapses the duplicate inside
-    its window).
+    its 24 h window).
 
     ⛔ A row whose COLUMN is missing (one migration behind) does NOT read as
     ``None`` — it RAISES. ``cp.query`` raises ``RuntimeError`` on any status
@@ -2599,7 +2599,7 @@ def org_storage_notice_pct(cp, org_id: str) -> int | None:
     except (TypeError, ValueError):
         # An unreadable figure is NO MARK, and a re-send is the direction that is
         # safe: the provider Idempotency-Key collapses the duplicate within its
-        # window, and a customer receiving one extra capacity notice is a far
+        # 24 h window, and a customer receiving one extra capacity notice is a far
         # smaller harm than a mark that silently suppresses every future notice.
         return None
 

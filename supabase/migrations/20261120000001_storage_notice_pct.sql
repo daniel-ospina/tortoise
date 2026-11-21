@@ -30,7 +30,8 @@
 -- ⛔ THE INBOX IS NOT THE LEDGER. The send precedes the stamp (so a failure stays
 -- retryable), so two CONCURRENT passes can both read NULL, both pass the pre-send
 -- re-read, and deliver 100 % then 80 %. The re-read narrows that to one round trip
--- and the Idempotency-Key below dedupes only the SAME threshold; closing the order
+-- and the Idempotency-Key below dedupes only the SAME threshold, and only inside
+-- the provider's 24 h retention window; closing the order
 -- window needs a pre-send reservation (a stamp-first protocol with a compensating
 -- unset), which is NOT taken here — a known, ACCEPTED residual rather than a
 -- property this column gives you. It needs two live processes reading the same
@@ -61,7 +62,7 @@
 -- (`resend.com/docs/dashboard/emails/idempotency-keys`), so a replay that
 -- arrives after that window sends a SECOND copy and then stamps. The window is
 -- written into the header rather than left implied because this header is
--- append-only once applied, and the bare claim read as unbounded.
+-- append-only once applied and because the bare claim read as unbounded.
 --
 -- A SKIPPED OR FAILED SEND NEVER STAMPS — so the mark never swallows a notice
 -- the customer has not received. That is also what makes the send-budget guard
@@ -107,7 +108,7 @@
 --     reported as `notice-mark-unavailable` — a NAMED status, not a silent skip —
 --     and NOTHING is sent. That is deliberate: sending without a ledger would
 --     re-send the same one-shot notice on every pass, and the provider key only
---     collapses a replay of the SAME threshold.
+--     collapses a replay of the SAME threshold, and only inside its 24 h window.
 -- Nothing here is a licence to ship without applying it: the sweep is the ONLY
 -- path that tells a customer they are near their cap.
 -- ============================================================================
