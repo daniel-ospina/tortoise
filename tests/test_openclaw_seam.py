@@ -673,9 +673,14 @@ sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
 
 def add(stmt):
-    ev = sdk.create_point("evidence", stmt + " [supporting record]")
-    claim = sdk.create_point("statement", stmt)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    # `create_point` was RETIRED in #4282 (→ `create_entity`), and a retired
+    # name RAISES at call time (#3836 (c)) — so this seed script died on its
+    # first statement and every assertion below the `check=True` subprocess
+    # never ran. It lives in the `_SEED` STRING, which is why no AST scan saw
+    # it. The private door is the one the retired public door delegated to.
+    ev = sdk._create_point("evidence", stmt + " [supporting record]")
+    claim = sdk._create_point("statement", stmt)
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     for pid in (claim["id"], ev["id"]):
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=0.9231, "
