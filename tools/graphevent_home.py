@@ -526,10 +526,14 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
     # ⛔ THE WALK MUST PROVE IT REACHED THE END (review round 2, P1). A cursor
     # cannot see three shapes the store admits, and each makes an empty page
     # indistinguishable from the end: a NULL `seq` (never satisfies `seq > $after`),
-    # a `seq` stored as a STRING (the engine orders strings before numbers, so a
-    # numeric cursor matches no row), and a duplicated (seq, event_id) pair beyond
-    # a page boundary. Counting first makes the failure a REFUSAL instead of a
-    # shortened read that the verdict would happily call `covered`.
+    # a `seq` stored as a STRING (the engine orders strings before numbers, so the
+    # page that ends the STRING block puts a STRING on the cursor, and `seq >
+    # $after` then matches no NUMERIC row — every row sorting after the block is
+    # unreachable; measured on the lane, `ORDER BY v ASC` gives `'10', 5, 20`,
+    # `v > '10'` returns nothing and `v > 5` returns `20`, so it is the STRING
+    # cursor that strands and NOT a numeric one), and a duplicated (seq, event_id)
+    # pair beyond a page boundary. Counting first makes the failure a REFUSAL
+    # instead of a shortened read that the verdict would happily call `covered`.
     null_seq = g.query(
         "MATCH (e:GraphEvent) WHERE e.seq IS NULL RETURN count(e)").result_set[0][0]
     if int(null_seq or 0):
