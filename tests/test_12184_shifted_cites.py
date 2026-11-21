@@ -820,7 +820,7 @@ def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
     return _git_resolves(f"{rev}^{{commit}}")
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
     """*path*'s lines at *rev*; `None` when this checkout cannot produce them.
 
