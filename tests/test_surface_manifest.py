@@ -2801,6 +2801,72 @@ def test_the_2350_precision_fields_are_rendered():
         assert f"| `{response}` | `{field}` |" in text, (response, field)
 
 
+def test_the_14033_state_question_field_is_recorded():
+    """#14033's new hosted `/v1/search` key must be RECORDED, not left to the reviewing half.
+
+    ``hosted_api.search`` publishes ``state_question`` on every body where the read
+    path recognised a state cue it could not apply — a new field on a PUBLIC HTTP
+    response, always on in that case. ``check`` anchors the rows that ARE recorded
+    but cannot see a field nobody recorded (nothing inspects response bodies at
+    runtime — CONTRIBUTING.md, "Be precise about the half the machine cannot
+    check"), and ``response_fields`` is non-derivable, so a green ``check`` proved
+    nothing about it: the review found 84 rows and not one naming this field. Fails
+    on the pre-fix manifest, whose block carries no ``state_question`` row at all.
+
+    The two properties pinned separately are the ones a reader relies on: the field
+    is anchored where every other hosted `/v1/search` marker is anchored
+    (``tortoise_search``, the precedent ``status`` / ``residency`` / ``truncated``
+    set), and its absence clause does NOT over-promise byte-identity for content
+    searches — a content query that NAMES an ending (`which features are
+    deprecated in v3`) carries the notice, so a blanket "absent on content reads"
+    would be the same wrong promise the hosted comment already had to repair.
+    """
+    rows = [rf for rf in _manifest()["response_fields"]
+            if rf.get("field") == "state_question"]
+    assert rows, (
+        "the `state_question` field the hosted GET /v1/search body emits is not "
+        "recorded in config/surface-manifest.yml::response_fields")
+    assert [rf["response"] for rf in rows] == ["tortoise_search"], (
+        "`state_question` must be anchored to `tortoise_search`, the ONE anchor the "
+        "hosted /v1/search markers use (status, residency, truncated), got "
+        f"{[rf['response'] for rf in rows]!r}")
+    row = rows[0]
+    for key in ("emitted_when", "unchanged_when_off"):
+        assert row.get(key, "").strip(), (
+            f"the `state_question` row leaves `{key}` empty — an unstated absence "
+            f"clause is read as a promise the code does not keep")
+    from tortoise.state_intent import MISSED_ROUTE_REASONS
+
+    assert "MISSED_ROUTE_REASONS" in row["emitted_when"], (
+        "the row must point at the CLOSED set by name (tortoise/state_intent.py "
+        "MISSED_ROUTE_REASONS), or a reader cannot tell an enumeration from prose")
+    for reason in MISSED_ROUTE_REASONS:
+        assert f"`{reason}`" in row["emitted_when"], (
+            f"the row does not name the `reason` value {reason!r} that "
+            "MISSED_ROUTE_REASONS declares — a caller cannot know which notices "
+            "it has to handle (the value belongs in backticks: prose that merely "
+            "uses the word is not an enumeration)")
+    assert "which features are deprecated in v3" in row["unchanged_when_off"], (
+        "the absence clause must keep the MEASURED exception by naming it — a "
+        "CONTENT query that NAMES an ending (`which features are deprecated in "
+        "v3`) DOES carry the notice, so a blanket byte-identity claim for content "
+        "searches is a promise the code breaks")
+
+
+def test_the_14033_state_question_field_is_rendered():
+    """The record must reach the list the owner reviews (#14033 review P1).
+
+    A row that lives only in the YAML is not a record either: the generated table
+    is what the surface report shows. Fails on the pre-fix artifact, which renders
+    no `state_question` row.
+    """
+    text = RENDERED.read_text(encoding="utf-8")
+    assert "| `tortoise_search` | `state_question` |" in text, (
+        "the `state_question` response field is recorded but not RENDERED into "
+        "docs/product/mcp-sdk-surface.md — re-run "
+        "`python tools/surface_manifest.py render` rather than editing the document")
+
+
 def test_the_8171_alias_doors_record_the_advisory():
     """The three legacy alias doors surface `advisories` — so record them too.
 

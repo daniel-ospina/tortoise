@@ -45887,7 +45887,8 @@ class TortoiseSDK:
         receives `{routed: False, population, reason, cue, hint}` when (a) a
         strong cue matched no shape — an appended qualifier, an attributive
         ending word — or (b) a shape fired on a family with no lifecycle. `cue`
-        names the words, `hint` is `state_intent.MISSED_ROUTE_HINT`. ⛔ It is a
+        names the words, `hint` is the reason's OWN constant
+        (`state_intent.MISSED_ROUTE_HINT` / `MISSED_ROUTE_FAMILY_HINT`). ⛔ It is a
         REPORT, never a route: the rows are exactly the relevance rows the caller
         would have received without it, so no content question is re-answered and
         no qualifier is dropped. Absent sink or absent cue → no payload at all,
@@ -46323,11 +46324,17 @@ class TortoiseSDK:
                 # has ended", which is the worst of the three outcomes.
                 _state_notice = missed_route_payload(_state_q)
 
-        # ⛔ THE NOTICE IS CLEARED BEFORE IT IS DECIDED, because a sink is
-        # CALLER-OWNED and may be REUSED — the same hygiene `truncation.
-        # mark_truncation` performs on the sibling sink (#8447 round 3). Without
-        # this, a `state_question` left by an EARLIER call would ride a later
-        # clean read and claim a cue that was never seen.
+        # ⛔ THE SINK IS CLEARED AFTER THE DECISION AND BEFORE IT IS WRITTEN, on
+        # every path that REACHES this block, because a sink is CALLER-OWNED and
+        # may be REUSED — the same hygiene `truncation.mark_truncation` performs on
+        # the sibling sink (#8447 round 3). The decision above is local
+        # (`_state_notice`, recomputed from THIS query) and the clear and the write
+        # are adjacent with nothing between them that can return or raise, so a
+        # call that gets here leaves the sink describing itself: a `state_question`
+        # left by an EARLIER call cannot ride a later clean read and claim a cue
+        # that was never seen. (A call REFUSED before this block — `claim_class` on
+        # a non-Point family raises at the top — replies with an exception, never
+        # with a clean read.)
         if _state_route_out is not None:
             _state_route_out.clear()
         if read_status_out is not None:

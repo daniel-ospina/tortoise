@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: a8550d11abecc822f359f19af8bb37cac53b9f6e
+cut_at_commit: e0accb8fe6362942a0c847c7daa1829e272296a9
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -344,21 +344,22 @@ response_fields:
 - response: tortoise_search
   field: state_question
   emitted_when: '#14033 — the hosted `GET /v1/search` body ONLY, and only when the recogniser saw an ENDING-shaped
-    cue it could NOT apply: `{routed: false, population, reason, cue, hint}`, where `reason` is `shape` (a
-    strong ending cue that is not the question''s own predicate, so the relevance read answered), `cue` is
-    the whole-word signal it matched, and `hint` is the served remedy. ⛔ `reason` is a CLOSED two-value set
-    (`MISSED_ROUTE_REASONS` = shape|family) but only `shape` is REACHABLE on this response: the hosted route
-    takes no `entity_type` (`hosted_api.py` `search(q, limit, org)`), `_tortoise_fts_query` defaults it to
-    `point`, and `point` IS a lifecycle family — so `family` (the ended population has no arm for that
-    entity_type) is produced only where a caller NAMES a non-lifecycle family, i.e. on the PRIVATE SDK sink
-    below, and never on /v1/search. WHY IT EXISTS: without it a DECLINED state question is byte-identical to
-    an honest "nothing has ended", which is the defect #14033 closes. ⛔ NOT on the MCP tool reply
-    (`tortoise_search` takes no sink, and its description says so) and NOT on any PUBLIC SDK method — the
-    same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...)` `read_status_out` sink instead.
-    Recorded here because CONTRIBUTING''s carve-out is about what `check` FAILS on, not about what goes
-    unrecorded: `response_fields` is in `NON_DERIVABLE_DOC_KEYS`, so an absent row is invisible to every gate.'
-  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT unless the recogniser declined a state cue, so
-    every ordinary search response stays byte-identical'
+    cue it could NOT apply: `{routed: false, population, reason, cue, hint}`, where `reason` is `shape` (a strong
+    ending cue that is not the question''s own predicate, so the relevance read answered), `cue` is the whole-word
+    signal it matched, and `hint` is the served remedy. ⛔ `reason` is a CLOSED two-value set (`MISSED_ROUTE_REASONS`
+    = shape|family) but only `shape` is REACHABLE on this response: the hosted route takes no `entity_type` (`hosted_api.py`
+    `search(q, limit, org)`), `_tortoise_fts_query` defaults it to `point`, and `point` IS a lifecycle family —
+    so `family` (the ended population has no arm for that entity_type) is produced only where a caller NAMES a non-lifecycle
+    family, i.e. on the PRIVATE SDK sink below, and never on /v1/search. WHY IT EXISTS: without it a DECLINED state
+    question is byte-identical to an honest "nothing has ended", which is the defect #14033 closes. ⛔ NOT on the
+    MCP tool reply (`tortoise_search` takes no sink, and its description says so) and NOT on any PUBLIC SDK method
+    — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...)` `read_status_out` sink instead.
+    Recorded here because CONTRIBUTING''s carve-out is about what `check` FAILS on, not about what goes unrecorded:
+    `response_fields` is in `NON_DERIVABLE_DOC_KEYS`, so an absent row is invisible to every gate.'
+  unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT unless the recogniser declined a state cue, so every
+    ordinary search response stays byte-identical. ⛔ NOT reserved to state reads: a CONTENT query that NAMES an
+    ending (`which features are deprecated in v3`) is declined too, so it DOES carry the notice, with `routed: false`
+    — and must, because that reply would otherwise read as "nothing is deprecated"'
 - response: tortoise_search
   field: claim_class
   emitted_when: '#2351 (epic #2349 E-derived) — the claim''s asserted/derived class, emitted ONLY when the CALLER
