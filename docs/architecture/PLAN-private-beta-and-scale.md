@@ -58,7 +58,9 @@ D3 retry loop + live session writes
       → queue wait lands in pre_handler: 5,996 ms in the slow trace
          + D1 inline embed 2,078–4,003 ms
             + D2 sequential legs 1,199 ms
-               = 9.3–11.2 s, past the 10 s wait bound (owner decision #3834) → 504
+               = 9.3–11.2 s — INSIDE the 10 s wait bound (owner decision #3834) at the low end, past it
+                 only when the embed is at the top of its range (11.2 s; 11.35 s with fusion + ep,
+                 the trace this came from) → 504
 ```
 
 D5 refuses writes once the corpus outgrows the graph; D6 hides all of it behind deploy churn.
@@ -122,7 +124,7 @@ makes the later spend cheap.
 | **S1 Stateless API tier** — move the model out of the API process; drop the `/data` dependency | free | every comparable runs disposable servers. This is the prerequisite for cheap replicas, and it is a refactor that only gets harder once more depends on it |
 | **S2 Define the scaling unit in writing** — "N tenants' working sets + 1 embedder + 1 pool", with the per-tenant footprint from M5 (`#14015`) | free | turns "how many machines" into a measured number |
 | **S3 Latency budget per stage, published** — the numbers we intend to defend (Hindsight's 100–600 ms class) | free | you cannot hold a budget you never wrote down |
-| **S4 Land the nine `#1677` guards** | free | unblocks using the cores we already pay for. The scope is the **nine rows**, not three — the rate-limit buckets and the model pre-warm (≈196 s cold, `embeddings.py:885-910`) at ~N× RSS are what make N workers expensive on 4096 MB |
+| **S4 Land the `#1677` guard rows** | free | unblocks using the cores we already pay for. **Eight are landable guards; the ninth is a sizing decision**, not a bankable one (`memory envelope (P1-1)`, `worker_topology.py`), and it is S1's question — so the scope is eight guards plus one sizing call, not three — the rate-limit buckets and the model pre-warm (≈196 s cold, `embeddings.py:885-910`) at ~N× RSS are what make N workers expensive on 4096 MB |
 | **S5 Dedicated CPU** on the API box | ≈ +$8/mo | removes burst throttling (0.24 s ↔ 2.07 s spread on identical work) |
 | **S6 Second instance for survivability** | ≈ +$25/mo | a restart stops being an outage. After `#14067` (snapshot invalidation, merged) |
 | **S7 Embedder as its own deployment** (S1's payoff) | ~+$25/mo | API never embeds inline; scale it independently |
@@ -171,5 +173,5 @@ No measurement is taken "to see". Each exists to gate a phase or size a decision
 ## 8. Open decisions (owner)
 
 1. **The ~40 session-writes/min source** — wanted traffic during beta, or a runaway loop to stop?
-2. **The 916-entry spool** — drain into the graph (demo prerequisite) or discard as stale and start clean?
+2. **The capture backlog** — **1,852** spool entries (dormant since 2026-11-17T02:25Z) plus the day-file series: drain into the graph (demo prerequisite) or discard as stale and start clean?
 3. **`#1677` guards** — pull S4 forward now (free, unblocks the cores we pay for) or leave it in Track S order?

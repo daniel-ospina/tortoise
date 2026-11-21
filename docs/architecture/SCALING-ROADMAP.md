@@ -213,12 +213,14 @@ So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and
 ## 5. The one-line version
 
 **Our topology already matches the leaders — record + derived layer + hybrid legs. What differs is that they moved the expensive,
-batchable work into queues and workers, and we still do it inside the request.** Phase A is entirely free and removes **one whole
-stage** of the chain: **A3** takes the embed from 2–4 s inline to **0.36 s/item of throughput** (with both bounds — see A3), and
-**A1** takes the write off the request. ⚠️ **Nothing in Phase A touches `pre_handler`** — the queue wait that dominates the slow
-trace is Track F's job (**F0** stops the retry storm; **S4** lands the guards) — and the leg parallelisation is `#14192` (**F1**),
-which buys at most a fraction of the 1.2 s (§2.5). On the same slow trace, Phase A's own residual is therefore
-`pre_handler` 5,996 ms + ~0.36 s + ~1.2 s ≈ **7.6 s** — better, still not a budget, which is what **S3** exists to write down.
+batchable work into queues and workers, and we still do it inside the request.** Phase A is entirely free and **shrinks one
+stage**: **A3** takes the embed from 2–4 s to the batch cap — at A3's own 4–8 item ceiling that is **~1.4–2.9 s** (4–8 × 0.36 s of
+per-item throughput), not 0.36 s, which is a batch cost and not a request's latency — and **A1** takes the write off the request.
+⚠️ **Nothing in Phase A touches `pre_handler`**: the queue wait that dominates the slow trace is Track F's job (**F0** stops the
+retry storm; **S4** lands the guards), and the leg parallelisation is `#14192` (**F1**), which buys at most a fraction of the 1.2 s
+(§2.5). On the same slow trace, Phase A's own residual is therefore `pre_handler` 5,996 ms + **1.4–2.9 s** + 1.199 s ≈
+**8.6–10.1 s** — better than 11.35 s, and still not a budget, which is what **S3** exists to write down. Only **S7/C1** takes the
+embed off the request entirely; A3 keeps it inline and merely overlaps it.
 
 **Contradiction test:** no recorded decision is reversed. `STORAGE-ARCHITECTURE.md` §2.0 (record is truth, graph is derived) *requires* A1 — the fold is
 already the mechanism. `#11758` (per-account storage) and `#4495`/`#5331` (no node pricing) are untouched. A2 does not pick a
@@ -240,7 +242,7 @@ true when written ages out, so re-measure before adopting it).
 |---|---|---|
 | **"The fix was capacity, not code"** — 2 → 4 cores took search from 504@11.4 s to 200 in 0.84–1.12 s | **direction holds, figure does NOT reproduce** | machine is **4 cores / 4096 MB** (`fly scale show`). Ten searches now, in the order taken: **four timed out at the 30 s client bound**, **one 504 at 13.5 s**, then **five 200s at 2.7 / 2.9 / 3.7 / 4.5 / 7.1 s** — i.e. **5 of 10** succeeded. Their 0.84–1.12 s was measured on a *quiet* box; the box is rarely quiet (see the next row). |
 | **"Version the 4-core box — PR `#14156` is the highest priority"** | **already done** | `#14156` **MERGED** (the 2→4 step is commit `69908d006b`); `fly.toml:276` declares `cpus = 4` in `origin/main` **and** in this checkout, and `fly scale show` reports **4 cores / 4096 MB**. |
-| **"908 sessions spooled; the backlog feeds itself; serialise the drain"** | **confirmed and WORSE** | local spool is **916 entries** (was 908 in the handoff, 724 before). It grows while nothing drains. |
+| **"908 sessions spooled; the backlog feeds itself; serialise the drain"** | **confirmed in substance, wrong in every figure** | There are **two** populations and neither is 916. The capture **spool** ("`~/.tortoise/capture-spool/entries`") holds **1,852 entries** (1,852 `*.meta.json`, each with its `.turns.jsonl`) and is **dormant**: `status.json` says `updated_at 2026-11-17T02:25:31Z` and the directory's own mtime agrees, so on this box the "feeds itself" growth is **not** visible. The day-file backlog is `~/.tortoise/session-events/*.jsonl` — count it when citing it, never carry a figure. What survives the re-measurement is the part that mattered: **the backlog is large, nothing has drained it, and the drain choice is open** (`PLAN` §8). |
 | **"`#11892` is stale — the 25,000-point cap refuses every write"** | **confirmed** | `POST /v1/points` → **200** measured independently; the issue's own last comment already showed successful write-backs. |
 | **"The transport wait bound is 10 s and is a recorded owner decision (`#3834`)"** | **confirmed** | consistent with the refusals we see: `transport wait bound (10s) exceeded …`. **This is why "raise the budget" is not a fix.** |
 | **"`fly scale vm` does not survive a deploy"** | **confirmed by construction** | `fly.toml` is what a deploy applies; `#14156` fixed exactly that. |
