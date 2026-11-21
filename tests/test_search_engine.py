@@ -889,6 +889,12 @@ try:
     _probe = _FP_escape.from_uri(_FTS_LANE_URI)
     _probe.close()
     _FTS_ESCAPE_LIVE = True
+# ⛔ A moved or renamed seam — including an import of a moved module — is a
+#   PROGRAMMING error, not "no server": the flag this block sets decides a
+#   SKIP, so swallowing it is a green family over a broken tree
+#   (#14114 class 2, #14125).
+except (AttributeError, NameError, TypeError, ImportError):
+    raise
 except Exception:
     _FTS_ESCAPE_LIVE = False
 finally:

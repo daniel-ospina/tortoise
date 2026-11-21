@@ -45,6 +45,7 @@ a blanket exemption.
 from __future__ import annotations
 
 import ast
+import copy
 import functools
 import importlib.util
 import sys
@@ -107,6 +108,37 @@ def _tracked_python_files() -> list[Path]:
     return privatise.py_files()
 
 
+def _unaliased_sdk_class(tree: ast.Module) -> ast.Module:
+    """Rewrite `from tortoise.sdk import TortoiseSDK as X` so `X` types as the SDK.
+
+    `privatise.sdk_typing` types a receiver from the LITERAL class name, so an
+    ALIASED import was a hole in both this gate and the sweep: measured —
+    `from tortoise.sdk import TortoiseSDK as _ProbeSDK` + `_ProbeSDK().create_point(…)`
+    yielded `[]` while the un-aliased body yielded `[(_p.create_point)]`. That is a
+    false PASS, and the alias is not exotic: the gate's own self-test and
+    `tests/test_identifier_tokens_8933.py`'s probe both spell the SDK that way.
+
+    Only the use sites are rewritten (the import keeps its `asname`), and the
+    rewrite is on a deep copy so no other assertion in this file sees a mutated
+    tree.
+    """
+    aliases = {
+        alias.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and (node.module or "").split(".")[0] == "tortoise"
+        for alias in node.names
+        if alias.name == "TortoiseSDK" and alias.asname
+    }
+    if not aliases:
+        return tree
+    tree = copy.deepcopy(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in aliases:
+            node.id = "TortoiseSDK"
+    return tree
+
+
 def _references(tree: ast.Module, in_sdk_file: bool) -> list[tuple[int, str]]:
     """Retired-name references in one module, with the expression that carries them.
 
@@ -121,6 +153,7 @@ def _references(tree: ast.Module, in_sdk_file: bool) -> list[tuple[int, str]]:
         mentions a name (`"sdk.org_create" not in clause`) is one line and no import,
         so it is not swept: a documentation assertion is not a call.
     """
+    tree = _unaliased_sdk_class(tree)
     standins = privatise.sdk_standin_classes(tree, {})
     typing_ = privatise.sdk_typing(tree)
     ranges = privatise._class_ranges(tree)
@@ -441,14 +474,89 @@ def _skipif_conditions(tree: ast.Module) -> list[ast.expr]:
     return out
 
 
+def _skip_condition_names(tree: ast.Module) -> set[str]:
+    """Every NAME a skip condition reads — whatever the flag is spelled.
+
+    `skipif(not LIVE)` and `skipif(not _FTS_ESCAPE_LIVE)` are the same decision as
+    `skipif(not FALKORDB_AVAILABLE)`; a census keyed on the spelling graded the
+    first two as nothing (review of 9be4923 / b2ef7b0, P1).
+    """
+    out: set[str] = set()
+    for condition in _skipif_conditions(tree):
+        out |= {node.id for node in ast.walk(condition) if isinstance(node, ast.Name)}
+    return out
+
+
+def _skip_guard_call_names(tree: ast.Module) -> set[str]:
+    """Names CALLED in an `if`/`assert` guard whose branch SKIPS.
+
+    `uri = _live_target()` … `if uri is None: pytest.skip(...)` is a probe whose
+    sentinel decides the skip — a shape neither a flag nor a `skipif` condition
+    reaches (review of 76abdca, P2: `tests/test_9226_dump_paging_v6.py`).
+    """
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.If, ast.Assert)):
+            continue
+        body = getattr(node, "body", []) or []
+        orelse = getattr(node, "orelse", []) or []
+        skips = any(
+            isinstance(sub, ast.Call)
+            and getattr(sub.func, "attr", None) in {"skip", "skipif", "xfail"}
+            for stmt in list(body) + list(orelse)
+            for sub in ast.walk(stmt)
+        )
+        if not skips:
+            continue
+        for sub in ast.walk(node.test):
+            if isinstance(sub, ast.Call):
+                name = getattr(sub.func, "id", None) or getattr(sub.func, "attr", None)
+                if name:
+                    out.add(name)
+    # …and the same guard one hop away: `uri = _live_target()` … `if uri is
+    # None: pytest.skip(…)`. The sentinel is the decision, and the helper that
+    # produced it is the probe.
+    guarded: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        skips = any(
+            isinstance(sub, ast.Call)
+            and getattr(sub.func, "attr", None) in {"skip", "skipif", "xfail"}
+            for stmt in list(node.body) + list(node.orelse)
+            for sub in ast.walk(stmt)
+        )
+        if skips:
+            guarded |= {n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)}
+    for stmt in ast.walk(tree):
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = [
+            n.id
+            for target in _availability_targets(stmt)
+            for n in ast.walk(target)
+            if isinstance(n, ast.Name)
+        ]
+        if not set(targets) & guarded:
+            continue
+        value = getattr(stmt, "value", None)
+        if value is None:
+            continue
+        for node in ast.walk(value):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                out.add(node.func.id)
+    return out
+
+
 def _skip_gating_functions(tree: ast.Module) -> set[str]:
     """Module-level helpers whose value decides a SKIP at import/collection.
 
-    Two shapes, both seen in this tree: called directly in the condition
-    (`skipif(not _falkordb_available())`), or assigned to a name the condition
-    reads (`LIVE = _falkordb_available()` … `skipif(not LIVE)`).
+    Three shapes, all seen in this tree: called directly in the condition
+    (`skipif(not _falkordb_available())`), assigned to a name the condition reads
+    (`LIVE = _falkordb_available()` … `skipif(not LIVE)`), or called in an
+    `if`/`assert` guard whose branch skips (`if _live_target() is None: skip`).
     """
-    names: set[str] = set()
+    names: set[str] = set(_skip_guard_call_names(tree))
     referenced: set[str] = set()
     for condition in _skipif_conditions(tree):
         for node in ast.walk(condition):
@@ -503,6 +611,22 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
     return out
 
 
+def _bound_names(node: ast.AST) -> set[str]:
+    """Every NAME this block BINDS, in its body, handlers or `finally`."""
+    out: set[str] = set()
+    for sub in ast.walk(node):
+        targets = (
+            sub.targets
+            if isinstance(sub, ast.Assign)
+            else [sub.target]
+            if isinstance(sub, ast.AnnAssign)
+            else []
+        )
+        for target in targets:
+            out |= {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+    return out
+
+
 def _own_imported_names(nodes: list[ast.stmt]) -> set[str]:
     """Names bound by OWN-code imports anywhere in these statements."""
     out: set[str] = set()
@@ -542,8 +666,21 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     roots: list[ast.Try] = []
     resolvers = _resolver_functions(tree)
     skip_gated = _skip_gating_functions(tree)
+    skip_referenced = _skip_condition_names(tree)
     for stmt in tree.body:
         if isinstance(stmt, ast.Try) and _assigns_availability(stmt):
+            roots.append(stmt)
+        elif isinstance(stmt, ast.Try) and (
+            _bound_names(stmt) & skip_referenced
+        ) and (
+            _imports_own_code(stmt)
+            or _touches_own_code(stmt, _own_imported_names(tree.body))
+        ):
+            # A module-body probe whose flag is spelled something other than
+            # `*AVAILABLE` — `LIVE`, `_FTS_ESCAPE_LIVE` — is NOT an availability
+            # flag by name, but it IS the decision: a `skipif` reads it. The
+            # same own-code test as the helper branches applies, so a probe whose
+            # only import is an optional third-party one is still left alone.
             roots.append(stmt)
         elif (
             isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -664,12 +801,17 @@ def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool],
         except (OSError, UnicodeDecodeError):
             continue
         # A cheap text prefilter, not the rule: `AVAILABLE` is a substring of
-        # every flag spelling this tree uses (`FALKORDB_AVAILABLE`, `_AVAILABLE`,
-        # `_LIVE_AVAILABLE`), and `skipif` admits the decorator-resolved probes
-        # that have NO flag at all. Measured at this head: 218 of the 1,842
-        # tracked tests/ + tools/ `.py` files pass it and the whole census runs
-        # in 3.6 s (one `ast.parse` each, no execution).
-        if "AVAILABLE" not in src and "skipif" not in src:
+        # every `*AVAILABLE` flag spelling, `skipif` admits the
+        # decorator-resolved probes that have NO flag, and the `skip(`/`pytest.
+        # skip` markers admit the SENTINEL probes (`uri = _live_target()` …
+        # `if uri is None: pytest.skip(...)`) whose file need not mention a flag
+        # or a `skipif` at all — that omission is why
+        # `tests/test_9226_dump_paging_v6.py` was never parsed (review of
+        # 76abdca, P2).
+        if not any(
+            marker in src
+            for marker in ("AVAILABLE", "skipif", "skip(", "pytest.skip", "importorskip")
+        ):
             continue
         try:
             rows = _probe_blocks_from_source(src)
