@@ -540,7 +540,14 @@ def read(graph: Any, *, budget: PinBudget | None = None) -> PinReading:
     return PinReading(
         label=label,
         key_prop=key_prop,
-        keys=frozenset(asked),
+        # ⛔ THE DECLARED SET IS COMPLETE, THE CLOSURE MAY NOT BE. The payload is read
+        # whole (`_declaration` returns every key on the `:Meta` node); the bound exists
+        # only on the `UNWIND` probe, which resolves closures. Reporting the PROBED
+        # subset as `keys` made the declaration look truncated to a reader that then
+        # wrote it back — the tail-loss this module exists to forbid — and it also made
+        # `unpin`'s only remedy unreachable, because the writer saw the same bound the
+        # reader did. `truncated` therefore describes the CLOSURE alone.
+        keys=frozenset(keys),
         closure=closure,
         degrees=degrees,
         missing=missing,
@@ -594,23 +601,29 @@ def pin(
         )
 
     current = read(graph, budget=resolved)
-    if current.truncated:
-        # ⛔ A PARTIAL READ CANNOT BE THE BASIS OF A FULL WRITE. The rewrite at the end of
-        # this function replaces the key list wholesale, so extending a declaration that
-        # only part of which was read would DROP every key past the read bound — a silent
-        # loss of the user's declaration, from an operation that reports success.
-        raise PinRefused(
-            f"the existing pin declaration holds more keys than one read can see "
-            f"({DEFAULT_KEY_LIMIT}), so it cannot be extended without dropping the rest "
-            f"— release keys first, or raise the read bound",
-            code="truncated",
-        )
     if not current.readable:
         raise PinRefused(
             f"the existing pin declaration could not be read "
             f"({current.source or 'unreadable'}), so adding to it would silently "
             f"replace a set nobody could see",
             code="unreadable",
+        )
+    if current.truncated:
+        # ⛔ THE WRITER MAY NOT ADD FROM AN UNMEASURED FOOTPRINT. `read` bounds the
+        # CLOSURE probe at `DEFAULT_KEY_LIMIT + 1` keys and REPORTS it (`truncated`)
+        # instead of silently shortening the closure, so `current.closure` is a LOWER
+        # BOUND — and the budget below is measured over it. Admitting an addition on a
+        # lower bound would let a pin that is already over the cap grow. The declared
+        # KEYS are complete (`PinReading.keys` is the whole payload), so `unpin` stays
+        # available and is lossless — that is the way out this message names.
+        raise PinRefused(
+            f"the pinned closure could not be measured in full (one probe may resolve "
+            f"{DEFAULT_KEY_LIMIT} keys), so how much of the fast layer this set already "
+            f"claims is UNKNOWN and the budget cannot admit another pin. Nothing was "
+            f"pinned; the declaration is unchanged. `unpin` still works and is lossless "
+            f"— the declared key list is read whole — so releasing keys is the way back "
+            f"under the read bound.",
+            code="truncated",
         )
     if (current.label, current.key_prop) != (label, key_prop) and current.keys:
         raise PinRefused(
@@ -785,13 +798,13 @@ def unpin(
             f"so removing from it would silently replace a set nobody could see",
             code="unreadable",
         )
-    if current.truncated:
-        raise PinRefused(
-            f"the pin declaration holds more keys than one read can see "
-            f"({DEFAULT_KEY_LIMIT}), so releasing keys would rewrite it from a PARTIAL "
-            f"read and drop the rest",
-            code="truncated",
-        )
+    # ⛔ `truncated` is deliberately NOT a refusal HERE, and that asymmetry with `pin` is
+    # the design: `PinReading.keys` is the WHOLE declared payload even when the closure
+    # probe hit its bound (see `read`), so `keys - drop` is lossless. Refusing in both
+    # writers made a >`DEFAULT_KEY_LIMIT`-key declaration a one-way door — `pin` refusing
+    # AND `unpin` refusing the only way out of it. A truncated reading only forbids what
+    # needs the FOOTPRINT (an addition, which the budget must size); releasing keys needs
+    # the SET, which is read whole.
     # ⛔ A caller that names a DIFFERENT population is refused, not quietly obeyed: with
     # the rewrite adopting the declaration's own pair, a wrong-population `unpin` would
     # otherwise report `verdict: OK, written: false` and release nothing — the control

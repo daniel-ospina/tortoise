@@ -969,7 +969,30 @@ SWEEP_NAMES = 66
 #: two MEASURED deltas, and `11843 + 1 + 4 = 11848` is a CROSS-CHECK of the `--repin` run, never its
 #: evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11848, "91e7c7d82018c838")
+SWEEP_RESIDUE = (11856, "e9249c5490bc38d7")
+#:
+#: ⛔ MERGED `origin/main` AGAIN, at `69908d006b3d` (`#14156`, `#14164`, `#14166`) — THIS is the
+#: pin, and it is `--repin`'s output on THIS merged tree: `(11856, 'e9249c5490bc38d7')`. Neither
+#: 11848 (this branch's pre-merge tree) nor 11843 (`main` at `69908d006b3d`) is carried: a merged
+#: tree is a THIRD tree, the rule every block above cites.
+#: ⛔ THE +8 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic. `--report --base
+#: 28ca66878d… --top 5000` was run in detached worktrees at the pre-merge head `aaf341542b1b` AND
+#: at `origin/main` `69908d006b3d`, and on this tree; all three row sets sorted and diffed. Against
+#: the PRE-MERGE HEAD, EXACTLY TWO rows differ, and both are `main`'s own:
+#:   * `g.query` **1492 → 1499** (+7)
+#:   * `proj.g.query` **3642 → 3643** (+1)
+#: Those are `main`'s #14166 census P1s and #14164's change-feed reader census — ordinary-word
+#: receiver rows on graph handles, exactly the shape this counter exists to report. No other row
+#: differs, so nothing of this branch's moved through the merge and no shape was absorbed.
+#: ⛔ THE BRANCH'S OWN +13 IS UNCHANGED BY THE MERGE and is confirmed the other way, against
+#: `main`'s tree: `graph.query` 276 → 281, `super().query` 68 → 71, `self.query` 15 → 17,
+#: `props.update` 14 → 15, `self.meta.setdefault(params['key'], {}).update` 0 → 2 — EXACTLY those
+#: rows and nothing else. (`super().query` reads +3 rather than the +2 of the earlier measurement
+#: because a CONCURRENT LANE added one more fake-graph occurrence between them, not because a delta
+#: was carried from an older tree.) `11848 + 8 = 11856` and `11843 + 13 = 11856` both reconcile,
+#: which is a CROSS-CHECK of the three measurements, never their evidence.
+#: `--check` exits 0 on this tree with
+#: `typed references still pointing at a public name: 0`.
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

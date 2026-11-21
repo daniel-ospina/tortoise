@@ -37,14 +37,18 @@ Exit codes — the census's vocabulary, so a scheduler keys on one table
     0  OK          the declaration was applied / read cleanly, or the view was measured
     3  REFUSED     a DECLARED refusal: over the pin budget, over the degree ceiling, a
                    key the fast layer does not hold, an unreadable declaration, a pin
-                   set whose budget no longer covers it, or a `--label`/`--key-prop`
-                   that is not a bare identifier. Nothing was written.
+                   set whose budget no longer covers it, a closure too large to measure
+                   (so the budget cannot admit an addition — `unpin` still works), a
+                   budget that cannot be derived at all for `pin`/`unpin`/`show`, or a
+                   `--label`/`--key-prop` that is not a bare identifier. Nothing was
+                   written.
     4  UNMEASURED  what is outside could not be measured (a partial resident read, an
                    unreachable record). ⛔ NOT zero: a missing measurement read as a
                    healthy zero is the defect both controls exist to avoid.
     1  usage       a flag, import or IO mistake — including a `--label` the record
-                   has no table for, and a `--topic-column` that is not a real column
-                   of it
+                   has no table for, a `--topic-column` that is not a real column
+                   of it, and a `--top`/`--max-keys` below its floor of 1 (a zero
+                   bound would report an empty answer as a measurement)
 """
 from __future__ import annotations
 
@@ -189,23 +193,35 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error(
                     f"{resident_pin.EVICTION_MAX_NODES_ENV}={raw!r} is not an integer"
                 )
-    # ⛔ `show` and `unpin` do not NEED a budget: `show` reports one when it can (so an
-    # over-budget set is visible) and `unpin` is the documented REMEDY for that state —
-    # so requiring a budget for either made the remedy unreachable exactly when it was
-    # needed (a lowered window or a window too small for a pin). Only `pin` requires one.
+    # ⛔ `pin` AND `show` both REQUIRE a budget; `unpin` must NOT, and `outside` never
+    # reads one. The two halves are different questions:
+    #
+    #   * `show` asks "is this pin set within budget?". With no budget,
+    #     `read(graph, budget=None)` reports `over_budget() is None` and the run would
+    #     exit 0 — the gate-that-exits-0 shape, a FALSE PASS on the one question the
+    #     verb exists to answer. So `show` refuses, with a code a scheduler can classify.
+    #   * `unpin` is the documented REMEDY for an over-budget set, so requiring a budget
+    #     here would refuse the remedy exactly when it is needed (a lowered window, or a
+    #     window too small for a pin to exist). It degrades to `budget=None`, and the
+    #     release itself needs only the declared SET.
+    #   * `outside` never consults the budget at all, so resolving one for it refused this
+    #     module's own documented invocation (which names neither `--window-nodes` nor
+    #     `$TORTOISE_CACHE_MAX_NODES`) over a control the verb does not touch.
     budget: resident_pin.PinBudget | None
     try:
         budget = resident_pin.PinBudget.resolve(
             max_nodes=args.max_pins, max_degree=args.max_degree, window_nodes=window
         )
     except resident_pin.PinConfigError as exc:
-        if args.verb == "pin":
-            _emit({"verdict": "REFUSED", "reason": f"config refused: {exc}"}, args.out)
+        if args.verb in ("pin", "show"):
+            # ⛔ THE SAME ENVELOPE `_refused` WRITES, not a second shape: a refusal a
+            # scheduler cannot classify (no `graph`, no `code`) is a refusal it will
+            # treat as success. `code: "config"` is the code the `PinConfigError` arms
+            # below use for a bad `--label`/`--key-prop`.
+            _emit({"verdict": "REFUSED", "graph": args.graph, "code": "config",
+                   "reason": f"config refused: {exc}"}, args.out)
             return EXIT_REFUSED
         budget = None
-        if args.verb == "show":
-            print(f"#14012: no pin budget could be resolved ({exc}); the declaration is "
-                  f"reported WITHOUT a cap check", file=sys.stderr)
 
     def _refused(reason: str, code: str) -> int:
         """ONE refusal envelope, so a new refusal path cannot invent a second shape."""
@@ -298,6 +314,23 @@ def main(argv: list[str] | None = None) -> int:
                               "is outside cannot be measured, so nothing is claimed")},
                   args.out)
             return EXIT_UNMEASURED
+        # ⛔ Explicit `is None`, never `or`: `--max-keys 0` and `--top 0` are FALSY, so
+        # `args.max_keys or DEFAULT` silently substituted the default for the one flag
+        # whose documented meaning is a bound — and the library refuses that value, so
+        # the refusal never arrived. A value below its floor is a FLAG mistake here, at
+        # exit 1, not a measurement failure at exit 4.
+        topic_column = (outside_view.TOPIC_COLUMN if args.topic_column is None
+                        else args.topic_column)
+        top = outside_view.DEFAULT_TOP_TOPICS if args.top is None else args.top
+        key_limit = (outside_view.DEFAULT_RESIDENT_KEY_LIMIT
+                     if args.max_keys is None else args.max_keys)
+        for flag, value in (("--top", top), ("--max-keys", key_limit)):
+            if value < 1:
+                parser.error(
+                    f"{flag} {value} is below its floor of 1: it bounds how much the "
+                    f"view may read, and a bound of zero would report an empty answer "
+                    f"as if it were a measurement"
+                )
         try:
             conn = psycopg.connect(dsn)
         except Exception as exc:
@@ -315,10 +348,18 @@ def main(argv: list[str] | None = None) -> int:
                     # `unpin` can tell "the operator named nothing" from "the operator
                     # named a different population" (an explicit mismatch is REFUSED, not
                     # silently overridden). `pin`/`outside` resolve their own defaults.
+                    # ⛔ THE OUTSIDE BOUNDS RESOLVE VIA EXPLICIT `is None`, NEVER `or`:
+                    # `--max-keys 0` and `--top 0` are FALSY, so `args.top or DEFAULT`
+                    # silently substituted the default for the one flag whose documented
+                    # meaning is a bound, and the library's own refusal of a zero bound
+                    # never arrived. A value below the floor is a FLAG mistake (exit 1),
+                    # caught before the connection is opened, not a measurement failure
+                    # at exit 4 — and a bound of zero would otherwise report an empty
+                    # answer as if it were a measurement.
                     label=args.label or "Point", key_prop=args.key_prop or "id",
-                    topic_column=args.topic_column or outside_view.TOPIC_COLUMN,
-                    top=args.top or outside_view.DEFAULT_TOP_TOPICS,
-                    key_limit=args.max_keys or outside_view.DEFAULT_RESIDENT_KEY_LIMIT,
+                    topic_column=topic_column,
+                    top=top,
+                    key_limit=key_limit,
                 )
             except (ValueError, resident_pin.PinConfigError) as exc:
                 # A `--label` the record has no table for, or a `--topic-column` that is
