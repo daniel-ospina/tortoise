@@ -320,6 +320,27 @@ def test_the_sweep_is_not_vacuous():
     )
     assert len(REMOVED_SDK_METHODS) >= 77
 
+    # ⛔ THE THIRD ARM OF CLASS 1 (`review of d2d783ca`, P2). The docstring above
+    # names the script-shaped seed as "where the #14114 reds actually lived", and
+    # that arm had no pin: deleting the `ast.Constant` + recursive-parse branch
+    # left every test in this file green. Built from a JOIN so this file does not
+    # flag itself (a single literal holding a newline and an `import` IS a
+    # script-shaped string — that is the arm).
+    seed = chr(10).join(
+        [
+            "import os",
+            "from tortoise.sdk import TortoiseSDK",
+            "sdk = TortoiseSDK()",
+            "sdk." + "create_point('statement', 'x')",
+        ]
+    )
+    assert _references(ast.parse("SEED = " + repr(seed) + chr(10)), False) == [
+        (4, "sdk.create_point  [inside the script at line 1]")
+    ], (
+        "the `python -c` seed shape is no longer swept — it is the arm #14114's "
+        "reds lived in, and a node walk over the FILE cannot see it"
+    )
+
     # ⛔ THE ALIAS CASE (`review of 03fc244, P1`). `sdk_typing` types a receiver
     # from the LITERAL class name, so `from tortoise.sdk import TortoiseSDK as _P`
     # was a hole in both this gate and `tools/sdk_privatise.py`: the aliased body
@@ -1180,6 +1201,25 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     )
     assert len(nested) == 1 and nested[0][0] == 3, (
         f"a handler-less nested `try/finally` must not become a row of its own: {nested}"
+    )
+
+    # `except BaseException` swallows every programming error, so it must read as
+    # a BROAD arm. Without this pin the member can be dropped from `_BROAD` and
+    # nothing reddens (`review of d2d783ca`, P2) — measured: with `_BROAD` back to
+    # `{Exception}` this block classifies `swallows=False` and is not graded.
+    base_exc = rows(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK()
+            FALKORDB_AVAILABLE = True
+        except BaseException:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert base_exc == ((3, (), True, True, True),), (
+        f"`except BaseException:` must read as a BROAD, swallowing arm: {base_exc}"
     )
 
     # An OPTIONAL third-party import is out of scope: it must not be redded,
