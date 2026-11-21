@@ -300,19 +300,39 @@ class _AnchorHrefParser(HTMLParser):
     _UNRENDERED = frozenset({
         "datalist", "canvas", "video", "audio", "object", "meter", "progress",
     })
+    #: ⛔ THIS SET ANSWERS TWO QUESTIONS WITH OPPOSITE FAIL-OPEN DIRECTIONS, and the
+    #: reason above argues only the first (#14073 review round 6, P2):
+    #:
+    #: * the BOUNDARY question (`_unmet_by_reader`) wants a LONG slice, so refusing a
+    #:   heading inside a fallback slot is the loud side — that is the paragraph above;
+    #: * the TEXT question (`extract_visible_text`) wants the LONGEST text, so DROPPING
+    #:   fallback content is the loud side there, and it is what the recording does.
+    #:   Chromium agrees in the cases measured (`<video>`, `<canvas>`, `<audio>`,
+    #:   `<object>`, `<meter>`, `<progress>`, `<datalist>` children are not painted in a
+    #:   supporting browser), and the deliberate cost is stated at `handle_data`: a
+    #:   reader whose browser falls back DOES meet that copy, and the wording pin would
+    #:   not see it. One flag, two loud directions, named rather than assumed.
     #: Elements whose content renders only WITH an attribute: `<dialog>` without
     #: `open` is not in the rendering at all, and `<details>` without `open` shows
     #: its `<summary>` and hides the rest. Presence is what counts — an empty `open`
     #: is the rendered spelling.
     #:
-    # ⛔ THE WHOLE CLOSED SUBTREE IS REFUSED, `<summary>` INCLUDED — and that is a
-    # DELIBERATE over-refusal in the LOUD direction, not an oversight: a `<summary>`
-    # IS rendered by a closed `<details>` (this line used to say so while the code
-    # refused it, #14073 review), so a heading inside one does not bound the slice
-    # and the extra text stays pinned. Modelling "the FIRST summary of a closed
-    # details renders, a second one does not" is not attempted: recording a heading
-    # in that second summary would BOUND the slice at something no reader meets —
-    # the fail-open direction this whole rule exists to close.
+    # ⛔ THE WHOLE CLOSED SUBTREE IS REFUSED FOR THE BOUNDARY QUESTION, `<summary>`
+    # INCLUDED — and that is a DELIBERATE over-refusal in the LOUD direction, not an
+    # oversight: a `<summary>` IS rendered by a closed `<details>` (this line used to
+    # say so while the code refused it, #14073 review), so a heading inside one does
+    # not bound the slice and the extra text stays pinned. Modelling "the FIRST
+    # summary of a closed details renders, a second one does not" is not attempted:
+    # recording a heading in that second summary would BOUND the slice at something no
+    # reader meets — the fail-open direction this whole rule exists to close.
+    #
+    # ⛔ BUT THE TEXT QUESTION RUNS THE OTHER WAY, and one flag must not answer both
+    # (round-6 review, P1, measured). `<summary>`'s text IS painted, so refusing it in
+    # the TEXT recording DROPS rendered copy — a claim inside a closed
+    # `<details><summary>` left every `#storage` pin green. `_open_extent` therefore
+    # admits a `<summary>` whose immediate parent is the closed `<details>` when it
+    # records for the TEXT question only; the inheritance this frozenset drives stays
+    # total for `_unmet_by_reader`.
     _RENDERS_WITH_ATTR = frozenset({"details", "dialog"})
     #: Every recording of a DOCUMENT TREE, by attribute name. `_clear_recordings`
     #: iterates this tuple, and
@@ -903,9 +923,30 @@ class _AnchorHrefParser(HTMLParser):
             or tag in self._UNRENDERED
             or (tag in self._RENDERS_WITH_ATTR and "open" not in names)
         )
-        if self._open_elements and not self._open_elements[-1][2]:
-            # Inherited, so `<div hidden><section><h2>` hides the heading without
-            # `_unmet_by_reader` having to walk the stack to the `hidden` div.
+        # Inherited, so `<div hidden><section><h2>` hides the heading without
+        # `_unmet_by_reader` having to walk the stack to the `hidden` div.
+        #
+        # ⛔ EXCEPT A `<summary>` WHOSE PARENT IS THE CLOSED `<details>`: a closed
+        # `<details>` DOES render its first `<summary>`, so refusing the whole
+        # subtree is right for the BOUNDARY question (longer slice = loud) and
+        # WRONG for the TEXT question (dropped summary text = a claim the wording
+        # golden cannot see). Measured end-to-end before this exception:
+        # `<details><summary>FalkorDB permanently deletes…</summary>Tap to read
+        # more.</details>` inserted into `#storage` left the allowlist, the
+        # destinations, the vocabulary scan and the wording golden ALL green while
+        # Chromium painted the summary (#14073 review round 6, P1).
+        #
+        # Only the SUMMARY is admitted, and only when its immediate parent is the
+        # `<details>`; the closed BODY stays dropped, which is what the browser
+        # does too. A SECOND summary is admitted as well (browsers show the first):
+        # that over-counts text a reader may not see, i.e. the LOUD direction, and
+        # modelling "first only" needs a per-`<details>` counter in the stack for a
+        # distinction no page here makes.
+        if (
+            self._open_elements
+            and not self._open_elements[-1][2]
+            and not (tag == "summary" and self._open_elements[-1][0] == "details")
+        ):
             renders = False
         self._open_elements.append((tag, opened_container, renders))
 
@@ -1039,12 +1080,56 @@ class _AnchorHrefParser(HTMLParser):
         # inside `<svg>`/`<math>` IS rendered (only markup inside it is read by
         # different rules), and dropping it here would be the fail-open direction for
         # the wording golden.
+        #
+        # ⛔ DECLARED RESIDUAL — FOREIGN TEXT THAT IS NOT PAINTED (#14073 review
+        # round 6, P2, Chromium-verified). This paragraph used to say the opposite of
+        # what the code does: a foreign `<title>`, `<desc>`, `<style>` and `<script>`
+        # hold text a browser paints NONE of (measured: 0 non-background pixels in the
+        # `<title>/<desc>` band of an inline `<svg>`), and an HTML integration point
+        # (`<foreignObject>`) re-enters HTML, where `<template>` is inert again — yet
+        # all of it is recorded here, because the parser tracks foreign content as a
+        # DEPTH (`_foreign_roots`) and not as a per-element stack, so `handle_data`
+        # cannot tell which foreign element it is inside. The direction is the FALSE
+        # RED one (text a reader never meets moves the golden), not a fail-open, and
+        # no covered page puts svg/math text near `#storage` — the page-level ratchet
+        # fails any covered page that reaches foreign constructs at all (see
+        # `foreign_tags` and #3970). Closing it properly means a foreign element stack
+        # in `_open`/`_close_extent`; until then this is named rather than implied.
         if (
             not self.wedged_reason
             and all(tag in self._RAW_RENDERS for tag in self._suppress)
-            and all(renders for _tag, _container, renders in self._open_elements)
+            and self._text_is_painted()
         ):
             self.text.append(data)
+
+    def _text_is_painted(self) -> bool:
+        """Is the text just read inside a subtree a browser PAINTS?
+
+        ⛔ NOT `all(renders for … _open_elements)`, and the difference is a measured
+        P1 (#14073 review round 6). A closed `<details>` carries `renders=False`, which
+        is the right answer to "is this element's CONTENT painted" for the BOUNDARY
+        question — but its `<summary>` IS painted, so a plain `all()` over the stack
+        dropped a claim written in a summary and left every `#storage` pin green while
+        Chromium painted it.
+
+        The flag on `<details>` describes its BODY. So one case is carved out: the
+        current element is a `<summary>` whose immediate parent is the `<details>`, and
+        the answer is whatever the ancestors ABOVE that pair say (a `hidden` div around
+        the `<details>` still hides both). A second `<summary>` is treated the same —
+        the over-count is the loud direction, and the "first only" distinction needs a
+        per-`<details>` counter this stack does not carry.
+        """
+        stack = self._open_elements
+        if all(renders for _tag, _container, renders in stack):
+            return True
+        if (
+            len(stack) >= 2
+            and stack[-1][0] == "summary"
+            and stack[-1][2]
+            and stack[-2][0] == "details"
+        ):
+            return all(renders for _tag, _container, renders in stack[:-2])
+        return False
 
     def parse_comment(self, i: int, report: bool = True) -> int:
         """End an empty comment where the spec does (review finding, #3962).
@@ -1419,10 +1504,25 @@ def extract_visible_text(html: str) -> str:
     the pattern: a regex counts text a reader never meets as visible — a `<script>`
     body inside the section reddened the golden on legal markup (measured). Both
     directions come from the same mistake, so the answer comes from the same tree the
-    rest of this module reads: raw-text and inert regions are dropped by `_suppress`,
-    and any subtree a reader does not meet is dropped by the inherited render flag
-    (`hidden`, `_UNRENDERED`, a closed `<details>`/`<dialog>` — see
-    `_unmet_by_reader`).
+    rest of this module reads: raw-text and inert regions are dropped by `_suppress`
+    (except the ones that DO paint their text, `_RAW_RENDERS`), and a subtree a reader
+    does not meet is dropped by the inherited render flag (`hidden`, `_UNRENDERED`, a
+    closed `<dialog>` — see `_unmet_by_reader`).
+
+    ⛔ WHERE THIS DELIBERATELY DIFFERS FROM `_unmet_by_reader`, because the two
+    questions have OPPOSITE loud directions (#14073 review round 6):
+    * a `<summary>` whose parent is a CLOSED `<details>` IS recorded here — it is
+      painted, and dropping it hid a rendered claim from the wording golden (P1,
+      measured); the closed BODY stays dropped, as the browser drops it;
+    * `<datalist>`/`<canvas>`/`<video>`/`<audio>`/`<object>`/`<meter>`/`<progress>`
+      FALLBACK content is dropped here (`_UNRENDERED`) even though a browser without
+      support paints it — for the text question that is the loud side, since the
+      alternative is a wording pin that reads copy from a slot no supporting browser
+      shows. The cost is named: a fallback-only claim is invisible to the golden;
+    * FOREIGN text is recorded whatever it is (see the declared residual at
+      `handle_data`): a foreign `<title>`/`<desc>`/`<style>`/`<script>` therefore
+      contributes text a browser never paints. That is the false-red direction, not a
+      fail-open, and it is named rather than implied.
 
     Text nodes are returned joined by a single space, in document order, so an inline
     element still separates words the way the tags it replaced did. Whitespace is NOT

@@ -3339,7 +3339,7 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         ("script", "<script>var q='nothing is lost';</script>"),
         ("style", "<style>.x::after{content:'tier'}</style>"),
         ("hidden", "<p hidden>ghost claim about allowance and tier</p>"),
-        ("closed details", "<details><summary>summary</summary>ghost claim</details>"),
+        ("closed details body", "<details><summary></summary>ghost claim</details>"),
         ("noscript", "<noscript>ghost claim about allowance</noscript>"),
         ("iframe fallback", "<iframe>ghost claim about allowance</iframe>"),
     ):
@@ -3350,7 +3350,44 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"golden on legal markup, which is what the regex body did"
         )
 
-    # 3. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
+    # 3. …and the ONE over-drop that runs the OTHER way, which none of the rows
+    #    above can see: a closed `<details>` DOES paint its `<summary>`, so a claim
+    #    written there must RED the golden (#14073 review round 6, P1, measured —
+    #    before this the allowlist, the destinations, the vocabulary scan and the
+    #    wording golden were ALL green while Chromium painted the summary).
+    summary_claim = section.replace(
+        "</h2>",
+        "</h2><details><summary>FalkorDB permanently deletes your least-used items "
+        "after thirty days</summary>Tap to read more.</details>",
+        1,
+    )
+    assert summary_claim != section, "the summary control could not inject"
+    assert _attributes_outside_allowlist(summary_claim) == [], (
+        "premise: the summary adds no attribute, so the allowlist cannot be what "
+        "catches it"
+    )
+    assert "falkor" in _banned_vocabulary(summary_claim), (
+        "a `<summary>` is painted by a closed `<details>`, so the visible-text scan "
+        "must see its words"
+    )
+    with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+        _assert_storage_section_reviewed(summary_claim)
+    # …and the closed BODY really is dropped: the same details with an EMPTY summary
+    # must not move the golden, or "admit the whole subtree" would pass this test.
+    body_only = section.replace(
+        "</h2>",
+        "</h2><details><summary></summary>FalkorDB permanently deletes everything"
+        "</details>",
+        1,
+    )
+    assert body_only != section
+    assert "falkor" not in _banned_vocabulary(body_only), (
+        "the closed BODY of a `<details>` is not painted, so its words must not "
+        "reach the visible-text scan"
+    )
+    assert " ".join(_visible_text(body_only).split()) == reviewed
+
+    # 4. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
     #    element whose content a reader DOES meet must be counted. `_RAW` is
     #    suppressed for the TOKENIZER's sake, so "suppressed" is not "unreadable" —
     #    dropping `<textarea>`/`<xmp>`/`<plaintext>` text would hide a contradicting
@@ -4470,6 +4507,25 @@ def test_a_container_that_never_closes_is_refused_not_extended_to_the_page() -> 
         )
 
 
+def test_extract_visible_text_refuses_a_wedged_parse() -> None:
+    """A wedged parse must RAISE, not return the text of a partial tree.
+
+    `extract_visible_text` documents `ValueError` for the two wedge reasons
+    (`<frameset>` replacing the tree, the script-data escaped states), and that is
+    the only thing standing between an unreadable page and a TRUNCATED section: the
+    vocabulary pin is a substring scan, so a shorter text reads as clean
+    (#14073 review round 6, P2). Deleting the guard left the whole suite green —
+    measured — so both halves are driven here: the ordinary page returns its text,
+    and the wedged one raises instead of returning the part it managed to read.
+    """
+    assert extract_visible_text("<p>claim</p>") == "claim", (
+        "the control: an ordinary fragment must return its text, or 'raise always' "
+        "would satisfy the assertion below"
+    )
+    with pytest.raises(ValueError, match="wedged"):
+        extract_visible_text("<p>claim</p><frameset>")
+
+
 def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
     """An honored `<frameset>` replaces the tree, so EVERY recording is cleared.
 
@@ -4482,10 +4538,17 @@ def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
     without the frameset, which is what makes each row non-vacuous.
     """
     toc = '<div class="toc"><a href="#a">A</a></div>'
+    # `text` cannot be reached through `extract_visible_text` — that function REFUSES
+    # a wedged parse on purpose — so its row drives the recording itself. Without a
+    # row here, `_clear_recordings` skipping `text` left the whole suite green
+    # (#14073 review round 6, P2, measured).
+    text_parser = _AnchorHrefParser()
+    text_parser.feed("<p>claim</p><frameset>")
+    text_parser.close()
     # THE RATCHET, first: every public list on the parser is declared as either a
     # document recording or a diagnostic. A recording added later without a line in
     # `_RECORDINGS` reds HERE, which is what makes the rows below cover it — the
-    # enumeration of six helpers below cannot see a seventh.
+    # enumeration of helpers below cannot see a recording it does not name.
     declared = set(_AnchorHrefParser._RECORDINGS) | set(_AnchorHrefParser._DIAGNOSTICS)
     public_lists = {
         name
@@ -4504,6 +4567,9 @@ def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
     assert extract_element_attributes(toc) == [("div", "class", 1), ("a", "href", 1)]
     assert extract_heading_positions('<h2 id="h">H</h2>') == [("h", 0)]
     assert extract_anchors_within(toc, tag="div", class_token="toc") == [["#a"]]
+    assert extract_visible_text("<p>claim</p>") == "claim", (
+        "the `text` row's control: the same input DOES record without a frameset"
+    )
     assert extract_mode_dependent_regions("<noscript><p>x</p></noscript>") == [
         ("noscript", 1)
     ]
@@ -4523,6 +4589,7 @@ def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
             "containers",
             extract_anchors_within(f"{toc}<frameset>", tag="div", class_token="toc"),
         ),
+        ("text", text_parser.text),
     ):
         assert got == [], (
             f"`{label}` still reports entries from a document an honored "
