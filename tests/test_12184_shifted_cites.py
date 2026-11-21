@@ -301,6 +301,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # line's own text, and at `ccb49741b2ec` none of the four numbers carries it.
     (_AUDIT, "live.py:667", "tortoise/live.py", 667, 'EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")'),
     (_AUDIT, "sdk.py:15842", _SDK, 15842, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
+    # ⛔ The NEGATIVE CONTROL on that same row — "NOT `:15805`, which is `ChangeFeedDegraded`'s message
+    # assembly and names no node". A control is a CLAIM like any other cite: it exists to stop a reader
+    # landing on the wrong line, so it fails in the same way (it opens on prose) and it was equally
+    # unguarded. It read `:15750`, the +55 offset carried on a bare span while its sibling `:15842`
+    # got the +55 too but the ADDRESS ten lines above kept a delta from the wrong boundary. The
+    # assembly's `first = ""` is `:15805` at this head; at the pin `ccb49741b2ec` `:15750` was
+    # CHANGE_FEED docstring prose, so the sentence was false on EVERY head it declares.
+    # NON-VACUOUS, MEASURED both ways: restore the pre-fix `:15750` and the token arm reds; keep the
+    # token and move the pin's line to `15750` and the CONTENT arm reds with "that line reads 'types.
+    # It is an off-by-default additive response field' ".
+    (_AUDIT, "`:15805`", _SDK, 15805, 'first = ""'),
     (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
     # §2.6's row, re-pointed to this head by the same review: the census's `:890`/`:1182`/`:1383` do not land
@@ -486,6 +497,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # the count is here to red. Measured: `grep -o 'live.py:667' <the document> | wc -l` -> 3.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'live.py:667'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:15842'): 1,
+    # The `:GraphEventMeta` row's NEGATIVE CONTROL, one site (the row itself). It is a BARE span, so
+    # the `sdk.py:15842` count above could never reach it — the same one-token-vs-bare-span blind spot
+    # `#14089` is closing generally, pinned per address here.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:15805`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:916'): 1,
     # §2.6's re-pointed row: `:892` is written twice (the row, and the header's enumeration that promises it is
     # pinned), the other two once each. The count is what reds a re-point at any of them.
@@ -1763,7 +1778,11 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:15958-15962` and
     # `sdk.py:3777` were in neither list and unpinned, and the pin default opens on prose and on an
     # empty line respectively.
-    assert len(_PINS) == 82
+    # 82 -> 83 at the #14087 review (finding 2, this lane): the `:GraphEventMeta` row's negative
+    # control carried `:15750` where the assembly is `:15805`. Nothing graded it — the row's positive
+    # cite `sdk.py:15842` IS pinned, which is what made the pair look covered — so the control rotted
+    # through a re-derivation that fixed the address beside it.
+    assert len(_PINS) == 83
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
