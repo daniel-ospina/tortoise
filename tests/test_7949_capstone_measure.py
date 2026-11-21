@@ -7866,12 +7866,30 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # suite GREEN (measured: `:9999` in both twins -> 422 passed) while the row asserted two
     # numbers for one `git grep` hit, which is exactly the defect `count == 1` exists to
     # catch. `count == 2` makes a half-move red (1) and an all-move red (0).
-    _twin = "sits at `:9753` at this head and `:9722` on `origin/main` — ⛔ they no longer agree"
+    # ⛔ AND THE NUMBER IS DERIVED, NOT TYPED (the 2026-11-21 merge of `origin/main`): the
+    # twin used to read "this head `:9753`, `origin/main` `:9722` — they no longer agree",
+    # which was true on the branch `#13971` merged FROM and false the moment it landed —
+    # `main` moved `+31` in `tortoise/sdk.py` while this branch inserts nothing there
+    # (`git diff --numstat origin/main...HEAD -- tortoise/sdk.py` prints nothing), so the two
+    # heads carry ONE number and there is one present-tense fact to state. Typing it again
+    # would repeat the very defect D5 exists to catch, so this row reads the line out of the
+    # tree and asserts the twins against it: a half-move still reds (count 1), an all-move
+    # still reds (count 0), and a shift of `sdk.py` reds on the number.
+    _rs_hits = [
+        _n for _n, _line in enumerate(
+            _EPIC_CITE_SOURCES["sdk"].read_text(encoding="utf-8").splitlines(), start=1)
+        if "register_source(..., raw_state=...)" in _line
+    ]
+    assert _rs_hits, (
+        "`tortoise/sdk.py` carries no `register_source(..., raw_state=...)` line any more "
+        "— the D5 twin's anchor is gone, so re-derive the sentence AND this arm")
+    _twin = f"sits at `:{_rs_hits[0]}` at BOTH this head and `origin/main` — ⛔ they AGREE"
     assert _d5.count(_twin) == 2, (
-        f"05-verify.md states the `register_source(..., raw_state=...)` pair (this head `:9753`, `origin/main` `:9722`) in this "
-        f"phrasing {_d5.count(_twin)} time(s), and it must be stated exactly twice. Re-derive "
-        "BOTH twins from the tree (`sed -n 'Np' tortoise/sdk.py`) — the row's own rule is that "
-        "one present-tense fact carries one number")
+        f"05-verify.md states the `register_source(..., raw_state=...)` pair ({_rs_hits[0]} "
+        f"measured in `tortoise/sdk.py`) in this phrasing {_d5.count(_twin)} time(s), and it "
+        "must be stated exactly twice. Re-derive BOTH twins from the tree "
+        "(`grep -nF 'register_source(..., raw_state=...)' tortoise/sdk.py`) — the row's own "
+        "rule is that one present-tense fact carries one number")
 
     # ⛔ THE OTHER THREE `_honours` CURRENCY CLAIMS ON D5, READ BY A DERIVED LITERAL (#13494
     # review cycles 4 and 5). The `_pin_row_failures` row added for this clause is scoped to the
@@ -7883,7 +7901,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 280 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 278 cite-shaped `:N` tokens (the `~50` these
     # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -17580,7 +17598,7 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 280 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 278 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
     any commit moving the line off `270` reds instead of leaving four comments behind (a
@@ -17794,7 +17812,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 280 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 278 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -17827,7 +17845,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 280 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 278 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
