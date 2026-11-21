@@ -266,11 +266,18 @@ family_rank:
 #   · `create` 8 -> 6  — the same P7 batch's retirement half: the two `create_*` doors leave
 #                        and their `create` keywords leave with them (8 - 2 = 6), while neither
 #                        replacement row derives `create` — `link_entities` derives `link`.
-# `check`, `operate`, `update`, `find`, `delete` and `trace` are unmoved — `poll_events`
-# (`fetch`) replaces `events_poll` (`fetch`) one-for-one, and `delete_knowledge` replaces
-# the kept `delete` row one-for-one. Measured, not asserted: this is the check's own output
-# against the P7 registry (`fetch: 10, create: 6, update: 5, delete: 2, list: 3, find: 2,
-# trace: 1, check: 5, link: 3, operate: 2`).
+# `check`, `operate`, `update`, `find` and `delete` are unmoved, and `trace` holds at 1 — the
+# `fetch` 9 -> 10 in the first bullet is `tortoise_get_historical_knowledge`'s arrival (row 5) and
+# NOTHING ELSE. ⛔ `poll_events` is not a `fetch` row: `tortoise_poll_events` derives `trace`
+# (`keyword: trace`, rank 7), and the door it absorbs — `tortoise_events_poll` — derives `trace`
+# too, so that pair moves `trace` one-for-one and leaves both `fetch` and `trace` where they were.
+# This note used to spell both of them `(fetch)` and to call `tortoise_delete` "the KEPT `delete`
+# row": `tortoise_delete` RETIRES FORWARD into `tortoise_delete_knowledge` in this same wave
+# (`RETIRED_TOOL_REGISTRY`, `tool_registry.py`), so `delete` holds at 2 because one `delete` row
+# LEFT and one ARRIVED — reading it as a kept row tells the next author a retired door is live.
+# Both corrections are the derivation's own output, not a re-count by hand. Measured, not
+# asserted: this is the check's own output against the P7 registry (`fetch: 10, create: 6,
+# update: 5, delete: 2, list: 3, find: 2, trace: 1, check: 5, link: 3, operate: 2`).
 baseline_counts:
   fetch: 10
   create: 6
