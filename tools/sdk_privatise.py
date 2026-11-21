@@ -959,13 +959,31 @@ SWEEP_NAMES = 66
 #: block's row-by-row attribution (`--repin` at `2c0d66e2ec07` → `(11835, "891187f5a4636487")`, at
 #: `f9f480a55ab3` → `(11843, …)`, EXACTLY TWO rows moved, both FalkorDB `Graph` receivers, row
 #: SHAPE set unchanged) is CARRIED FROM THAT RECORD and is not re-measured here — the one thing
-#: re-measured on this merge tree is the pin. ⛔ NEITHER SIDE'S PAIR IS THIS TREE'S: `--repin` here
-#: prints `(11846, "0fd25aff58cf618b")`, i.e. `main`'s 11843 plus this branch's **+3** (attributed
-#: above) — a CROSS-CHECK of two measurements, never the evidence for the pin, which is `--repin`'s
-#: own output on this tree. `--check` exits 0 with `typed references still pointing at a public
+#: re-measured on this merge tree is the pin. ⛔ NEITHER SIDE'S PAIR SETTLED IT — `--repin`'s output
+#: on THAT tree did, and it printed `(11846, "0fd25aff58cf618b")` (re-measured here: `--repin` on
+#: `4b4ec1b5e6d9` alone prints exactly that, so that merge's pin WAS right on its own tree): the
+#: SAME pair the branch's side of the conflict already carried, so that merge did not move the
+#: constant at all, and that equality was `main`'s 11843 plus this branch's **+3** (attributed
+#: above) — a CROSS-CHECK of two measurements, never the evidence for the pin.
+#:
+#: ⛔ RE-PINNED AFTER THE `cc981407` RE-CUT (`origin/main` `1b0db0489408`), BECAUSE THAT MERGE MOVED
+#: THE RESIDUE AND DID NOT RE-PIN: `--check` reds on the tree it produced, `observed:
+#: (11843, "cc53ebb46ed4f709")` against the carried `(11846, …)`. The pin below is `--repin` output
+#: measured on THIS head, never arithmetic on the last one — and ⛔ ITS **COUNT** LANDS ON THE SAME
+#: 11843 AS `main`'s OWN STALE PIN WHILE ITS **DIGEST** DIFFERS, which is precisely what the
+#: `(count, digest)` pair exists to defeat, so the digest is the evidence and the count is only a
+#: cross-check. WHERE THE −3 CAME FROM, MEASURED: `main` at `1b0db0489408` is itself three below its
+#: own committed `(11843, "6aed5368ffa10513")` — `--repin` on `main` alone there prints
+#: `(11840, "b7eb08ff3acdcce4")` — and that −3 is `67dc298ec3a1` (#14194), which rewrote
+#: `tests/test_read_ledger.py` only, replaced THREE `inst.query()` receivers and re-pinned nothing;
+#: the same unpinned-drift class the block above records for #14164. ⛔ ATTRIBUTED BY ROW DIFF, NOT
+#: ARITHMETIC: `--report --base 28ca66878d… --top 5000` on `main` there AND on this tree, both row
+#: sets sorted and diffed, differs in EXACTLY TWO rows — `_truncation_out.update` 1 → 2 and
+#: `_state_route_out.update` 0 → 2 (this branch's **+3**, the `dict | None` caller sinks #14033
+#: threads out) — so this tree is `main`'s 11840 **+ 3**, and `11840 + 3 = 11843` reconciles the two
+#: measurements. `--check` exits 0 on this head with `typed references still pointing at a public
 #: name: 0`.
-#: references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11846, "0fd25aff58cf618b")
+SWEEP_RESIDUE = (11843, "cc53ebb46ed4f709")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
