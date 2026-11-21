@@ -1153,7 +1153,7 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
             return await email_notify.send_notice_email(
                 recipient, c.subject, c.html, c.text,
                 idempotency_key=f"capacity-notice:{org_id}:{notice.threshold}",
-                label=f"capacity notice {notice.threshold}%")
+                label=f"capacity notice {notice.threshold}% (team {org_id})")
     result = await sender(copy)
     status = result.get("status") if isinstance(result, dict) else None
     if status != "sent":
