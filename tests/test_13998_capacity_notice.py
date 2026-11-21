@@ -1583,10 +1583,10 @@ def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
     is what stops the third copy — and it grades the CLAIM, not a literal phrase.
     Cycle 4 shipped a PARAPHRASE ("the old/new process overlap of a rolling
     replacement") that the previous exact-string check could not see, so a
-    surviving copy passed it green. The rule is now semantic: any line mentioning
-    Cycle 6 closed the last way round it: the rule is per CLAUSE, because a
-    single line could carry both the negation and the claim (see
-    `test_the_overlap_guard_grades_each_CLAUSE_not_each_line`, which pins the
+    surviving copy passed it green — cycle 5 answered that with a semantic rule,
+    but at LINE granularity. Cycle 6 closed the last way round it: the grading is
+    per CLAUSE, because a single line could carry both the negation and the claim
+    (see `test_the_overlap_guard_grades_each_CLAUSE_not_each_line`, which pins the
     guard's own discriminating power).
 
     ⛔ WHAT THIS ROW DOES **NOT** GRADE, stated so the self-description cannot
