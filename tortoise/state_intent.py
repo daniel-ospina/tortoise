@@ -701,10 +701,11 @@ _COPULA_SUBJECT = (
     # `is the migration seed archived`, `is the deprecated feed archived`), where the
     # revision BEFORE round 20 (`e84612d43f`) routed. A SILENT refusal of an ordinary state
     # question is the second-worst outcome this module recognises and it bought exactly
-    # one spelling, so it is gone. (⛔ THE BASELINE MATTERS, AND THE FIRST CUT OF THIS NOTE
-    # NAMED IT WRONG — round-22 review, P3: HEAD~1 IS round 20, the commit that refused
-    # these; they route at HEAD~2. A trail a reader cannot reproduce reads as a fix that
-    # changed nothing.)
+    # one spelling, so it is gone. ⛔ THE PROSE NAMES ABSOLUTE REVISIONS, NEVER RELATIVE
+    # ONES (round-23 review, P3): a relative rev is stable only in the working copy it was
+    # drafted in — the first cut of this note said "HEAD~1", which by the time it was read
+    # had become round 21. The rows route at `e84612d43f`; round 20 (`6a301c4647`) refuses
+    # them; round 21 is `a6225cbad1`.
     # ⛔ AND THE WIDENED LIST REFUSED DEGREE WORDS INSIDE THE SUBJECT (round-21 review,
     # P1, measured): `is the most recent export archived` and `is the data all archived`
     # returned `population=None, signal=None` where `e84612d43f` routed. THREE POSITION
@@ -721,6 +722,13 @@ _COPULA_SUBJECT = (
     #       `is the export all but archived` and `is the export most recent archived` were
     #       SILENT while the semantically identical `is the export not archived` ROUTED —
     #       an internally inconsistent pair, with no notice on the refused half.
+    #   ⛔ AND (b) AND (c) MUST REACH THROUGH `been` (round-23 review, P2, measured): the
+    #       quantifier's post-nominal position is `has the data all BEEN archived`, and with
+    #       the participle immediately after the quantifier the guard fired on all 77/77
+    #       `has|have|had the <noun> <quantifier> been <ending>` probes — SILENT — while
+    #       both flat twins ROUTED (`has all the data been archived`, `has the data been
+    #       archived`) and are pinned as routing. So the lookahead accepts `been` + the
+    #       participle too, which is the same position one auxiliary later.
     # ⛔ AND THE RESIDUAL THIS GUARD CANNOT CLOSE IS STATED RATHER THAN CALLED CLOSED:
     # a second NP with NO determiner (`is the export customers requested archived`) and one
     # opening with an indefinite quantifier this module does not name (`several`, `fewer`,
@@ -736,7 +744,8 @@ _COPULA_SUBJECT = (
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
     rf"all|both|half|such|many|most|some|any|no|each|every)(?![-/])\b"
-    rf"(?!\s+(?:(?:longer|more|less|recent|but|yet|than)\b|(?:{_ENDING_WORDS})\b)))"
+    rf"(?!\s+(?:(?:longer|more|less|recent|but|yet|than)\b|"
+    rf"(?:been\s+)?(?:{_ENDING_WORDS})\b)))"
     # ⛔ AND A SUBJECT PRONOUN MAY ONLY **BE** THE SUBJECT (round-18 review, P1,
     # measured — the SAME #14033 defect still open after round 17's two guards, in the
     # same worst direction). Both guards above miss it: a REDUCED RELATIVE whose
