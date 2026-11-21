@@ -945,19 +945,17 @@ READ SILENCES THE REPORT, which is the other half of that boundary: a
 NON-DEFAULT retrieval argument asks for a FILTERED relevance read, and the cue
 report is raised inside the same guard that decides routing — so with any of
 them supplied you get that filtered read and NO report, and a state question
-you filtered looks exactly like an honest empty again. ⛔ THE CLOSED LIST IS
-THE AUTHORITY, NOT THIS SENTENCE: it is `_retrieval_knobs` in `tortoise/sdk.py`
-(ONE list, two readers — this guard and the ended-scope arm), and a parameter
-named here is an EXAMPLE of it, never the set: a non-default `threshold`,
-`min_confidence`, `order_by`, `relationship_filter`, `traversal_path`,
-`pool_size`, `time_aware`, … all count, so read that list before assuming a
-parameter is neutral. (A value equal to the default is not a filter and does
-not silence it — `threshold=0`, `min_confidence=0`, `order_by="relevance"`,
-`fusion_k=60`, `w4_enrich=True`.) Only THREE parameters sit OUTSIDE it, because
-the POPULATION applies them and they change WHICH rows a read returns rather
-than asking for a filtered read: `kind`, `entity_type` and `limit` never
-silence the notice. The filter and the population are different answers: send
-the question ALONE to get the population or the report. (The
+you filtered looks exactly like an honest empty again. (A value equal to the
+default — `threshold=0`, `min_confidence=0`, `order_by="relevance"` — is not a
+filter and does not silence it.) ⛔ THE CLOSED LIST IS THE AUTHORITY, NOT THIS
+SENTENCE: `_retrieval_knobs` in `tortoise/sdk.py`, and a name given here — a
+non-default `threshold`, `min_confidence`, `order_by`, `relationship_filter`,
+`traversal_path`, `pool_size`, `time_aware` — is an EXAMPLE of it, never the
+set. Only THREE parameters sit OUTSIDE it: they change WHICH rows a read
+returns rather than asking for a filtered read, because the POPULATION applies
+them — `kind`, `entity_type`, `limit` — so none silences the notice. The
+filter and the population are different answers: send the question ALONE to
+get the population or the report. (The
 hosted `GET /v1/search` route below takes only the question and `limit`,
 neither of which is a routing argument, so it is not silenced.)
 ⛔ THIS TOOL CANNOT REPORT the cue it saw
