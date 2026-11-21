@@ -3299,6 +3299,53 @@ def test_a_failed_receipt_probe_dispatch_never_500s_a_committed_capture(
         f"(saw {len(dispatch_warnings)}: {dispatch_warnings})")
 
 
+def test_a_failed_EP_pass_dispatch_never_500s_a_committed_capture(
+        client, monkeypatch):
+    """The FIFTH arm with this failure mode — the one the receipt block's fix missed.
+
+    ⛔ #14086 review (P2), found on this head AFTER the four-arm fix landed. The
+    Phase C EP pass is awaited with the plain ``_run_off_loop``, so a shut-down
+    pool raises ``RuntimeError`` straight out of the handler — 300 lines past the
+    comment that promises *"a promotion/EP hiccup never 500s a committed
+    capture"* — and ``capture_session``'s outer handler answers **500** on a
+    capture whose writes committed (and writes
+    ``session_capture_last_error_<harness>``, flipping the dashboard sub-line).
+
+    No row in this tree reached the branch, which is why it survived: the
+    fixtures stub the extractor to emit nothing, so ``if ep_ids or
+    operator_ids:`` is never entered. It is forced here at the derivation
+    (``_capture_ep_target_ids``) — the guard under test is the DISPATCH, not the
+    id derivation — and the seam stubbed is the same
+    ``_run_off_loop_fail_open`` the four fixed arms use, so a revert of THIS arm
+    cannot be masked by them.
+
+    Non-vacuity: reverting the arm to a bare ``await _run_off_loop(...)`` reds
+    this row — the RuntimeError escapes the handler (measured).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    monkeypatch.setattr(ha_mod, "_capture_ep_target_ids",
+                        lambda extracted, proj: ["ep-target-10893"])
+    real = ha_mod._run_off_loop_fail_open
+
+    async def _dispatch_fails_for_the_ep_pass(fn, /, *args, **kwargs):
+        if getattr(fn, "__name__", "") == "_capture_ep_pass":
+            return ha_mod._DISPATCH_FAILED
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_run_off_loop_fail_open",
+                        _dispatch_fails_for_the_ep_pass)
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    require_answered(resp, what="POST /v1/sessions answered (EP dispatch arm)")
+    assert resp.status_code == 200, (
+        "a committed capture 500'd because its EP pass could not be DISPATCHED "
+        f"— the arm is not fail-open: {resp.text[:300]}")
+    assert any("EP pass could not be dispatched" in w
+               for w in (resp.json().get("warnings") or [])), (
+        resp.json().get("warnings"))
+
+
 # ── the pooled checkpoint must not build a store path (#7500) ───────────────
 
 def test_the_org_projection_is_resolved_on_the_loop_not_in_the_pooled_checkpoint(

@@ -21909,7 +21909,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     operator_ids=operator_ids,
                     warn=extraction_warnings.append)
 
-        await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
+        # ⛔ The FIFTH arm with this failure mode, and the one the receipt-block
+        # fix left behind (#14086 review, P2 — found on this head after the
+        # four-arm fix landed). Its own comment above promises "a promotion/EP
+        # hiccup never 500s a committed capture" and the pass' body is fail-open,
+        # but `_run_off_loop` SUBMITS IN THE CALLING TASK: a shut-down pool raises
+        # `RuntimeError` straight out of the handler AFTER the capture committed,
+        # and `capture_session`'s outer handler then answers 500 *and* writes
+        # `session_capture_last_error_<harness>`. Same seam, same shape as the
+        # receipt block's four arms: fail open, warn, keep the 200.
+        ran = await _run_off_loop_fail_open(_capture_ep_pass)
+        if ran is _DISPATCH_FAILED:
+            extraction_warnings.append(
+                "capture EP pass could not be dispatched (non-fatal)")
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
     # verb (memory_write_v1) — protocol_version REQUIRED, provenance
     # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
@@ -51168,7 +51180,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 202 tracked files (753 distinct
+# ABSOLUTE line number from 202 tracked files (752 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
