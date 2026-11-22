@@ -2069,7 +2069,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
         not markup at all — yet EACH of them costs the note its credit. MEASURED at the r12
         head: the comment named only the tag and the code span, so the class comment described
         a narrower bound than the rule enforced, which is the same false-declaration class
-        this review round was convened on. Each spelling is now pinned, so narrowing the rule
+        the r12 review round was convened on. Each spelling is now pinned, so narrowing the rule
         to the render — if a reviewer ever asks for it — has to change these rows on purpose.
 
         ⚠️ NON-VACUITY, stated honestly: this fix corrects the DECLARATION and completes the
