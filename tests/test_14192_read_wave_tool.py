@@ -619,20 +619,27 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
 def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[int]:
     """Lines that mutate the RECORDED entries through an ALIAS of a `per_query` element.
 
-    ⛔ MEASURED GREEN before this guard (#14281 review F2), and every one of them leaves
-    `run()` returning pages the pin never inspected while `compare()` reads exactly them:
+    ⛔ MEASURED GREEN at `e66d23f539d4` — every one of these leaves `run()` returning
+    pages the pin never inspected, while `compare()` reads exactly them:
 
-        pq = per_query[-1]; pq["order"].sort()
-        pq["order"] = sorted(pq["order"], key=str)
         for _pq in per_query: _pq["order"].sort()
         for _pq in per_query: _pq["order"] = sorted(_pq["order"], key=str)
+        for _i, _pq in enumerate(per_query): _pq["order"].sort()
+        (zed,) = per_query[-1:]; zed["order"].sort()
+
+    ⛔ RE-MEASURED, not carried: the two assignment spellings
+    (`pq = per_query[-1]; pq["order"].sort()` and its `= sorted(…)` variant) were GREEN
+    when this guard was written and are RED at `e66d23f539d4` because that commit's
+    `rows` clause in `_mutated_after` reaches them — so they are NOT this guard's
+    subject and are NOT claimed as measured-green here. What is uniquely this guard's
+    is the `for`-target and unpacked-target half. (An un-remeasured sentence in a
+    guard's own evidence base is the same defect class as an unmeasured assertion —
+    which is why this paragraph cites the commit it was measured at.)
 
     `_mutated_after`'s `"per_query" in receiver` clause covers a LITERAL receiver
-    (`per_query[-1]["order"].sort()`, measured RED) and cannot see a NAME bound to an
-    element — which is exactly why the sentence that used to stand here ("in-place
-    mutation of `per_query` is already covered … only the REBIND was open") was FALSE.
-    It is now the assertion below instead of a claim: an unmeasured sentence in a guard's
-    own evidence base is the same defect class as an unmeasured assertion.
+    (`per_query[-1]["order"].sort()`, measured RED); `rows` covers a name bound to
+    `per_query[-1]`; neither covers a `for` target or an unpacked one, which is what
+    this function exists for.
     """
     element_names: set[str] = set()
     for node in ast.walk(run_def):
@@ -651,13 +658,21 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
             target, value = node.target, node.iter
         else:
             continue
-        if not isinstance(target, ast.Name):
+        if "per_query" not in _names_in(value):
             continue
-        names = _names_in(value)
-        if "per_query" not in names:
+        if not (isinstance(node, (ast.For, ast.AsyncFor))
+                or isinstance(value, ast.Subscript)):
             continue
-        if isinstance(node, (ast.For, ast.AsyncFor)) or isinstance(value, ast.Subscript):
-            element_names.add(target.id)
+        # ⛔ EVERY NAME THE TARGET BINDS, not only a bare `Name` — `for _i, _pq in
+        # enumerate(per_query):` and `(zed,) = per_query[-1:]` both name the ELEMENT and
+        # were measured GREEN while only `isinstance(target, ast.Name)` was accepted.
+        # `_mutated_after` does not cover them either: its unpack branch needs a
+        # Tuple/List VALUE of matching length, and these values are a Call / a Slice.
+        # A tuple target over a CALL marks the index too (fail-closed: a false red on an
+        # index that is never mutated, against a GREEN permuted page).
+        for bound in ast.walk(target):
+            if isinstance(bound, ast.Name):
+                element_names.add(bound.id)
     if not element_names:
         return []
     hits: list[int] = []
@@ -739,26 +754,31 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     mutators = {"clear", "pop", "popitem", "setdefault", "__delitem__", "__setitem__",
                 "update"}
     setup_pops = {"TORTOISE_API_URL", "TORTOISE_API_KEY"}
-    def _mentions_mapping(value: ast.AST) -> bool:
-        return any(isinstance(n, ast.Attribute) and n.attr == "environ"
-                   for n in ast.walk(value))
-
-    # ⛔ To a FIXPOINT, and through CONTAINERS: `_envs = [os.environ]` then
-    # `_envs[0][...] = ...`, and `_e1 = os.environ; _e2 = _e1; _e3 = _e2` were both
-    # measured green against the one-hop, bare-Name form.
-    env_alias: set[str] = set()
-    env_alias = _aliases_of(
-        tree, lambda v: _mentions_mapping(v) or bool(_names_in(v) & env_alias))
-    # ⛔ AND THE OTHER STATIC SPELLING: `from os import environ` / `... as env`. An
-    # `ImportFrom` binds the name WITHOUT any `Assign` node, so neither `_aliases_of` nor
-    # the predicate above can see it — measured GREEN against a genuinely flipped
-    # `TORTOISE_FUSED_RERANK` gate. It is the IDIOMATIC spelling, so it is the shape a
-    # reader reaches for first, not an exotic one.
+    # ⛔ THE OTHER STATIC SPELLING IS A SEED, NOT A TERMINAL NAME (#14281 review).
+    # `from os import environ` / `... as env` binds the name with NO `Assign` node, so
+    # `_aliases_of` cannot discover it — and adding it to `env_alias` AFTER the fixpoint
+    # made it a dead end: `_e = environ; _alias = _e; _alias[...] = "1"` and
+    # `_pop = environ.pop; _pop(...)` stayed GREEN, while the same shapes written as
+    # `os.environ` were RED. Seeding BEFORE the call is what makes the imported spelling
+    # as transitive as the attribute one.
+    imported_environ: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "os":
             for spec in node.names:
                 if spec.name == "environ":
-                    env_alias.add(spec.asname or "environ")
+                    imported_environ.add(spec.asname or "environ")
+
+    def _mentions_mapping(value: ast.AST) -> bool:
+        return any((isinstance(n, ast.Attribute) and n.attr == "environ")
+                   or (isinstance(n, ast.Name) and n.id in imported_environ)
+                   for n in ast.walk(value))
+
+    # ⛔ To a FIXPOINT, and through CONTAINERS: `_envs = [os.environ]` then
+    # `_envs[0][...] = ...`, `_envs = [environ]` after an import, and
+    # `_e1 = os.environ; _e2 = _e1; _e3 = _e2` were all measured green against the
+    # one-hop, bare-Name form.
+    env_alias = _aliases_of(tree, _mentions_mapping)
+    env_alias |= imported_environ
 
     def _is_environ(node: ast.AST | None) -> bool:
         if isinstance(node, ast.Attribute):
@@ -1017,6 +1037,23 @@ def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
         "getattr": (
             "import os\n"
             'getattr(os, "environ")["TORTOISE_FUSED_RERANK"] = "1"\n'),
+        # ⛔ SECOND-ORDER, and these are what makes the import a SEED rather than a
+        # terminal name (#14281 review): adding the imported name to `env_alias` AFTER
+        # `_aliases_of` had already run left every one of these GREEN, while the same
+        # shapes written as `os.environ` were RED — the guard was transitive for one
+        # spelling and one-hop for the spelling this commit adds.
+        "imported, then aliased": (
+            "from os import environ as _e\n"
+            "_alias = _e\n"
+            '_alias["TORTOISE_FUSED_RERANK"] = "1"\n'),
+        "imported, bound mutator": (
+            "from os import environ as _e\n"
+            "_pop = _e.pop\n"
+            '_pop("TORTOISE_FUSED_RERANK")\n'),
+        "imported, through a container": (
+            "from os import environ\n"
+            "_envs = [environ]\n"
+            '_envs[0]["TORTOISE_FUSED_RERANK"] = "1"\n'),
     }
     for label, src in cases.items():
         tree = ast.parse(src)
@@ -1031,25 +1068,30 @@ def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
 def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
     """The recorded `per_query` entries are watched through element aliases (#14281 F2).
 
-    ⛔ MEASURED GREEN before this guard; every shape below leaves `run()` returning a page
+    ⛔ MEASURED GREEN at `e66d23f539d4`; every shape below leaves `run()` returning a page
     the pin never inspected, and `compare()` reads exactly it:
 
-        pq = per_query[-1]; pq["order"].sort()
-        pq["order"] = sorted(pq["order"], key=str)
         for _pq in per_query: _pq["order"].sort()
+        for _pq in per_query: _pq["order"] = sorted(_pq["order"], key=str)
+        for _i, _pq in enumerate(per_query): _pq["order"].sort()
+        (zed,) = per_query[-1:]; zed["order"].sort()
 
-    `_mutated_after`'s `"per_query" in receiver` clause matches a LITERAL receiver
-    (`per_query[-1]["order"].sort()` is RED — the control) and cannot see a name bound to
-    an element. The comment that used to claim this half was "already covered" was false;
-    this pins the assertion that replaced it.
+    ⛔ RE-MEASURED rather than carried: the two ASSIGNMENT spellings
+    (`pq = per_query[-1]; pq["order"].sort()` and its `= sorted(…)` variant) were GREEN
+    when this guard was written and are RED at `e66d23f539d4`, because that commit's
+    `rows` clause in `_mutated_after` reaches them. They are pinned below as a CONTROL —
+    if `rows` is dropped they fall back to this guard — but they are not this guard's
+    subject and are not claimed as measured-green.
     """
     cases = {
-        "element alias, in-place sort": (
-            'pq = per_query[-1]\npq["order"].sort()\n'),
-        "element alias, reassigned": (
-            'pq = per_query[-1]\npq["order"] = sorted(pq["order"], key=str)\n'),
         "loop target, in-place sort": (
             'for _pq in per_query:\n    _pq["order"].sort()\n'),
+        "loop target, reassigned": (
+            'for _pq in per_query:\n    _pq["order"] = sorted(_pq["order"], key=str)\n'),
+        "enumerate target, in-place sort": (
+            'for _i, _pq in enumerate(per_query):\n    _pq["order"].sort()\n'),
+        "unpacked slice target": (
+            '(zed,) = per_query[-1:]\nzed["order"].sort()\n'),
     }
     for label, body in cases.items():
         src = "def run():\n    per_query.append({})\n" + "".join(
@@ -1063,8 +1105,8 @@ def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
             "alias after it was appended, so the returned report carries a page the pin "
             "never inspected")
 
-    # CONTROL, so a future reader can tell the literal spelling is still covered by
-    # `_mutated_after` and is not what this guard exists for.
+    # CONTROLS, so a future reader can tell these two clauses are still covered elsewhere
+    # and are not what this guard exists for.
     ctrl = ast.parse(
         "def run():\n    per_query.append({})\n    per_query[-1][\"order\"].sort()\n").body[0]
     ctrl_append = next(n for n in ast.walk(ctrl) if isinstance(n, ast.Call)
@@ -1074,6 +1116,15 @@ def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
         "the LITERAL `per_query[-1][\"order\"].sort()` is no longer caught by "
         "`_mutated_after` — the clause that comment names as the coverage for this "
         "class has been dropped, and the guard above is now standing alone")
+    rows_ctrl = ast.parse(
+        "def run():\n    per_query.append({})\n    pq = per_query[-1]\n"
+        '    pq["order"].sort()\n').body[0]
+    rows_append = next(n for n in ast.walk(rows_ctrl) if isinstance(n, ast.Call)
+                       and getattr(n.func, "attr", None) == "append")
+    assert _mutated_after(rows_ctrl, "results", 0, rows_append), (
+        "`_mutated_after`'s `rows` clause no longer catches a name bound to "
+        "`per_query[-1]` — it and this guard are the two halves of the same class, and "
+        "losing one silently widens the other")
 
 
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
