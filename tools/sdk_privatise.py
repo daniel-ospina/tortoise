@@ -1153,13 +1153,13 @@ SWEEP_NAMES = 66
 #: which is false of the tree it lands on and sends the next lane looking for a gate to BUILD
 #: instead of at the drop that already happens. ⛔ CORRECTED AGAIN (#14282 review, P3): the sentence
 #: "`surface-guard` is not a REQUIRED context, so a merge does not wait for it" is FALSE of this
-#: repository, and it is the same wrong conclusion one level down from the one above. `surface-guard`
-#: IS in the required aggregate's `needs:` (`python-ci.yml` leg-table row `surface-guard|…|-`, the
-#: `-` meaning no diff gate, so it must be SUCCESS) and is absent from `DEFERRABLE_LEGS`, so a failed
-#: non-test leg lands in `FAILED_LEGS` → `exit 1` — and `python-ci-gate` is itself the required
-#: context (`merge_conditions` in `.mergify.yml`). A red `surface-guard` therefore BLOCKS EVERY
-#: MERGE through the aggregate, which is why this repair is a merge-unblocking fix and not a
-#: cosmetic pin refresh. ⛔ THE INHERITANCE IS MEASURED,
+#: repository, and it is the same wrong conclusion one level down from the one above.
+#: `surface-guard` IS in the required aggregate's `needs:` (`python-ci.yml` leg-table row
+#: `surface-guard|…|-`, the `-` meaning no diff gate, so it must be SUCCESS) and is absent from
+#: `DEFERRABLE_LEGS`, so a failed non-test leg lands in `FAILED_LEGS` → `exit 1` — and
+#: `python-ci-gate` is itself the required context (`merge_conditions` in `.mergify.yml`). A red
+#: `surface-guard` therefore BLOCKS EVERY MERGE through the aggregate, which is why this repair is
+#: a merge-unblocking fix and not a cosmetic pin refresh. ⛔ THE INHERITANCE IS MEASURED,
 #: NOT ASSUMED: a `--repin` on `10e51693f1`'s OWN tree prints (11861, "f0647020531c078c") too, so
 #: that delta is the base's and never this lane's, and no arithmetic on the last figure was used.
 #: `typed references still pointing at a public name: 0` on both trees, so no typed call site is
@@ -1173,10 +1173,10 @@ SWEEP_NAMES = 66
 #: later `main` afterwards. Its `--repin` prints the re-cut figure. Its own pin is
 #: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair 64 s
 #: later. Its own pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already
-#: moved under it, so the pair was committed to a tree it was not a reading of. `efe5605e976a` — this branch's PRE-REBASE head,
-#: named as what it is and NOT as a relative "THIS tree": its own `--repin` prints the re-cut
-#: pair, so the MEASUREMENT was true and only its ADDRESS was stale. Its own pin is
-#: `(11858, "a1552662bf07a10b")`, the pair it COMMITS.
+#: moved under it, so the pair was committed to a tree it was not a reading of.
+#: `efe5605e976a` — this branch's PRE-REBASE head, named as what it is and NOT as a relative
+#: "THIS tree": its own `--repin` prints the re-cut pair, so the MEASUREMENT was true and only its
+#: ADDRESS was stale. Its own pin is `(11858, "a1552662bf07a10b")`, the pair it COMMITS.
 #:
 #: ⛔ THE SAME PAIR WAS INDEPENDENTLY REACHED ON `main`, AND ITS RECORD IS KEPT BELOW
 #: RATHER THAN PICKED AGAINST (#14282 merged with #14258). Both trees arrived at
