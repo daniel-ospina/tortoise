@@ -678,11 +678,14 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     this one: this probe carries a broad arm that RE-RAISES, and it is skipped only because
     that re-raise reads as propagating. ⛔ And NOT for the reason an earlier cut of this
     paragraph gave ("a HANDLER-LESS `try/finally` probe has no broad arm"): a handler-less
-    `try` is never a row at all — `_probe_blocks_from_source` skips nested blocks with
-    `not block.handlers`, measured: a module-level `try/finally` importing own code yields
-    `()`, where the same block with an `except Exception: raise` arm yields one row — so no
-    row of that shape can reach this predicate. The two statements cannot both be true, and
-    the `_probe_blocks_with_an_uncovered_import_seam` docstring says the same.
+    `try` is never a ROW, so no row of that shape can reach this predicate. Both admission
+    paths, read rather than assumed: `_control_flow_tries` emits a root only
+    `if node.handlers` and merely DESCENDS into a handler-less `try`'s guarded body (so a
+    probe nested inside such a wrapper IS still found — the `test_integration_search.py:45`
+    fix), and `_probe_blocks_from_source` skips a nested block `if not block.handlers`.
+    Measured, a module-level `try` importing own code yields `()` when the availability
+    assignment OR the handler is missing, and exactly one row `(lineno, (), False, True,
+    True)` only when it has both.
     It needs the owning `ast.Try`, not the handlers; the shape has
     0 instances in `tests/`+`tools/` (no probe there has `finally:` + `return`), so the
     machinery is deferred and this paragraph is the record. Re-read it before adding the
