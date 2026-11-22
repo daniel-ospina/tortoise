@@ -57,21 +57,26 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    round 13, P2, because the trigger was understated): when a write does not go
    through the queue, the caller folds its OWN position on its own thread, at
    ``live_write``'s inline call, while an EARLIER position may still be queued —
-   so one writer's row can be overwritten by its predecessor. ⚠️ **THERE ARE TWO
-   FAMILIES OF TRIGGER, AND ONLY ONE OF THEM IS THE BOUND.** (a) A DECLINE by the
-   bound or by a stopping worker (``queue_full`` / ``worker_stopping``), which is
-   what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls — with the bound at ``1``, or
-   once the default saturates. (b) The STRUCTURAL arms, which fold inline on EVERY
-   write at ANY depth, including an idle queue: ``tenant is None`` (the
-   ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
-   pass no tenant) and every ``record_sink`` door. So raising the bound does NOT
-   remove this residual — it only removes arm (a); a same-tenant queued write can
-   be overtaken by a structural-arm fold at zero depth. Nothing detects it: both
+   so one writer's row can be overwritten by its predecessor. ⚠️ **EVERY INLINE
+   FOLD IS A TRIGGER, IN THREE FAMILIES, AND ONLY THE FIRST IS THE BOUND.**
+   (a) A DECLINE by the bound or by a stopping worker (``queue_full`` /
+   ``worker_stopping``), which is what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls.
+   (b) A DECLINE from a FAULT, equally depth-independent: ``uncopyable`` (the
+   record could not be deep-copied) and ``queue_fault`` (the consumer could not be
+   started). (c) The STRUCTURAL arms, which fold inline on EVERY write at ANY
+   depth, including an idle queue: ``journal_skipped`` (a record-only write),
+   ``record_sink`` (a door that reads the outcome), a non-durable log, and
+   ``tenant is None`` (the ``api.EventAPI._emit`` / ``ConversationMiner._emit_event``
+   shape). ``monitoring.record_projection_inline_fallback`` counts (a) and (b) by
+   reason; (c) is this package's gate and reaches no counter. So raising the bound
+   does NOT remove this residual — it only makes (a) rarer, and a same-tenant
+   queued write can be overtaken by a fault or structural fold at zero depth.
+   Nothing detects it: both
    positions are present, so ``journal_coverage`` / ``record-reconcile`` read
    green. The alternative to that residual is a caller that WAITS on the queue —
    which is the coupling this module exists to remove — so the honest form is the
    declared one: the bound's visible cost is a slower ACK **and** a possible
-   same-tenant reorder, from either arm. Closing it needs an ordering token at
+   same-tenant reorder, from any of the three. Closing it needs an ordering token at
    the fold seam, which is a change to ``record_projection``, not to this module.
    ⚠️ ``.env.example`` states the same residual where the bound is documented.
 2. **A write's ack excludes projection time.** :func:`submit` appends to a deque

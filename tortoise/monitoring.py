@@ -1160,8 +1160,11 @@ def ensure_projection_metrics_fork_safe() -> bool:
         # prints it as `Exception ignored in: ...` on stderr and SKIPS the rest of
         # this function, `_PROJECTION_METRICS_PID` assignment included, rather than
         # raising to the caller) or is caught by a bare `except: pass` and silently
-        # drops the replacement. A leg red-lined that second shape before this
-        # fallback existed; both outcomes are the same defect.
+        # drops the replacement. Both outcomes are the same defect, and this leg
+        # caught it before the fallback existed — in the WORKING TREE, not in a
+        # committed revision (`git log -S 'REGISTRY._lock = '` shows one commit, and
+        # it already carries the fallback), so do not read that as "a past commit
+        # shipped the broken shape".
         try:
             fresh_registry_lock = type(registry_lock)()
         except Exception:      # noqa: BLE001, RUF100
@@ -1203,10 +1206,19 @@ if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
     # an earlier revision of this paragraph narrowed it into a falsehood (round-13
     # review, P2): what is repaired is the REGISTRY lock and the five projection
     # families. That is NOT "every lock this module's exposure path takes":
-    # `_Handler._handle_endpoint` touches `REQUEST_COUNT.labels(...).inc()` and
-    # `REQUEST_LATENCY.time()` BEFORE it calls `generate_latest`, and neither family
-    # is in `_PROJECTION_METRIC_FAMILIES` — so a child forked while a peer held one
-    # of THOSE blocks at the handler's first statement, before the scrape body runs.
+    # `_Handler._handle_endpoint` touches `REQUEST_COUNT` and `REQUEST_LATENCY`
+    # around `generate_latest`, and neither is in `_PROJECTION_METRIC_FAMILIES` —
+    # and they wedge in DIFFERENT places, which an earlier revision of this sentence
+    # flattened into one (round-14 review, P3):
+    #   * `REQUEST_COUNT` is a LABELLED Counter, so it HAS a family `_lock`, and
+    #     `labels(...).inc()` takes it at the handler's FIRST statement — the body
+    #     never runs;
+    #   * `REQUEST_LATENCY` is an UNLABELLED Histogram with NO family `_lock` at all
+    #     (verified: `hasattr(REQUEST_LATENCY, "_lock")` is False); only its `_sum`
+    #     MutexValue is locked, in `Timer.__exit__` — so the scrape body RUNS and the
+    #     child wedges on the way out, the response never being sent.
+    # Both still wedge, neither is repaired; they are named apart so a reader does
+    # not go looking for a handler-wide lock that does not exist.
     # Nor is any other family's `MutexValue` safe: a child forked while a peer
     # mutated some unrelated metric can still block when `generate_latest` walks to
     # that family (the registry walk itself no longer blocks, because its lock IS
@@ -3263,7 +3275,8 @@ def record_projection_worker_failure(reason: str) -> None:
     which is a different fact.
 
     ``reason`` vocabulary is CLOSED at ``projection_raised`` (the fold raised),
-    ``record_no_outcome`` (the callable answered nothing) and
+    ``record_no_outcome`` (the callable answered nothing — or answered a value
+    whose outcome could not be READ, which is the same observation) and
     ``projection_refused`` (an armed refusal — nothing was written). ⛔ The last
     two exist because `write_live_record`'s unarmed arm is deliberately silent and
     because an armed refusal still writes no row, so this is the only surface that
