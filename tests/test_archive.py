@@ -2414,7 +2414,7 @@ def test_the_CLI_refuses_to_freeze_a_leftover_scaffold(
     )
     err = capsys.readouterr().err
     assert rc == 2, f"a refusal must not read as a successful archive (exit {rc})"
-    assert "REFUSED" in err and "git checkout <base-sha> -- tortoise/x.py" in err, (
+    assert "REFUSED" in err and "git checkout <base-sha> -- <one of: tortoise/x.py" in err, (
         f"the refusal must name the route that clears the red it came from: {err}"
     )
     assert not (tree / "archive" / "modules").exists(), (
@@ -3740,8 +3740,10 @@ def test_emptying_the_PACKAGE_init_while_a_leftover_shim_exists_is_a_removal(tre
     path per dotted name, and `.` (46) sorts before `/` (47) — so a body-less leftover
     `tortoise/x.py` beat the real `tortoise/x/__init__.py`. Arm 1b read the shim, called the BASE
     "scaffolding", and `continue`d: emptying the `__init__.py` IN PLACE was GREEN in every arm
-    (`shrink_violations -> []`, `check -> OK`) with the body in no file under `archive/`. The repo
-    SHIPS this pairing (`tortoise/projection.py` beside `tortoise/projection/__init__.py`).
+    (`shrink_violations -> []`, `check -> OK`) with the body in no file under `archive/`. The
+    pairing is CONSTRUCTED here, not copied from a shipped module: measured at round 21, no module
+    in this repo has a BODYLESS shim beside another carrier (`tortoise/projection.py` is a real
+    37-line re-export shim, which carries a body).
 
     Mutation: gate arm 1b on the single preferred carrier again -> RED here (and NOTHING else in
     this suite reds — measured: 158 rows green either way, so this row is the only pin).
@@ -3965,7 +3967,8 @@ def test_a_module_truncated_to_a_bare_ASSIGNMENT_is_CONTENT_by_DECISION(
     assignment is a removal. Measured, that contradicts the archive's own stated test — "the name
     no longer resolves to any code" — because a module whose whole body is `VALUE = 1` EXPORTS a
     name a caller reaches (`from mod import VALUE`). Adopting the rule red
-    `test_a_module_split_into_a_package_can_be_archived` and eleven other rows whose fixtures are
+    `test_a_module_split_into_a_package_can_be_archived` and fifteen other rows (sixteen in all,
+    measured by the mutation that reds them) whose fixtures are
     constants-only modules.
 
     So the behaviour is pinned in the direction the rule requires: a surviving binding is content.
@@ -4159,3 +4162,66 @@ def test_an_EMPTY_pyi_sibling_does_not_rescue_a_bodyless_module(tree: Path) -> N
         arch._module_source(tree, "tortoise.c")
     assert "carries no body" in str(refused.value)
     assert "git checkout" in str(refused.value), "the refusal must name a route that works"
+
+
+def test_an_UNCHANGED_symlinked_carrier_is_not_a_body_removal(tree: Path) -> None:
+    """REGRESSION (round-21): a symlink carrier was called "code" without asking its target.
+
+    `_content_or_link` answered `not mode.startswith("100")` for mode `120000`, while the HEAD side
+    reads THROUGH the link (`Path.read_text` follows it). So an UNCHANGED `x_init.py` pointing at a
+    docstring `impl.py` — and an UNCHANGED dangling link — graded `MODULE BODY REMOVED` on a tree
+    where nothing changed, and the message asserted two false things about the file ("carries
+    statements in `tortoise/x_init.py`" / "this tree's module file carries none").
+
+    Two shapes here, because they fail for different reasons: a resolvable link to PROSE (the
+    blanket mode test), and a DANGLING link whose target `git show` cannot read at all.
+
+    Mutation: restore `return not mode.startswith("100")` -> RED here.
+    """
+    (tree / "tortoise" / "impl.py").write_text('"""just prose."""\n', encoding="utf-8")
+    (tree / "tortoise" / "x_init.py").symlink_to("impl.py")
+    (tree / "tortoise" / "gen.py").symlink_to("../build/gen.py")  # dangling on purpose
+    _commit(tree, "tortoise/impl.py", "tortoise/x_init.py", "tortoise/gen.py")
+
+    (tree / "tortoise" / "unrelated.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/unrelated.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert problems == [], (
+        f"a link to prose, and a dangling link, hold no code — nothing changed: {problems}"
+    )
+
+
+def test_the_MODULE_BODY_REMOVED_names_the_carrier_that_HELD_the_body(tree: Path) -> None:
+    """P2 (round-21): the message named the lexicographically FIRST path, not the carrier.
+
+    `base_paths_by_module[module]` is the first non-`.pyi` path and `.` (46) sorts before `/` (47),
+    so with a docstring `p.py` beside a code-carrying `p/__init__.py` the violation read "carries
+    statements in `tortoise/p.py`" — false — and the route it printed restored the docstring and
+    re-refused identically: a permanent red whose stated fact and remedy both pointed at the wrong
+    file.
+
+    The shape is CONSTRUCTED here, not copied from a shipped module: measured at round 21, no
+    module in this repo has a bodyless `.py` shim beside another carrier (`tortoise/projection.py`
+    is a real 37-line re-export shim, which counts as a body). A first draft of this docstring
+    called it "the pairing this repo SHIPS" — a false claim the VGATE refused.
+
+    Mutation: build the label from `base_paths_by_module[module]` -> RED here.
+    """
+    (tree / "tortoise" / "p").mkdir()
+    (tree / "tortoise" / "p" / "__init__.py").write_text(
+        "def real():\n    return 1\n", encoding="utf-8"
+    )
+    (tree / "tortoise" / "p.py").write_text('"""Deprecated shim."""\n', encoding="utf-8")
+    _commit(tree, "tortoise/p.py", "tortoise/p/__init__.py")
+    (tree / "tortoise" / "p" / "__init__.py").write_text('"""Gone."""\n', encoding="utf-8")
+    _commit(tree, "tortoise/p/__init__.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    row = next(p for p in problems if p.startswith("tortoise.p:") and "REMOVED" in p)
+    assert "tortoise/p/__init__.py" in row, (
+        f"the statements were in the package's __init__, not the docstring shim: {row}"
+    )
+    assert "carries statements in `tortoise/p.py`" not in row, (
+        f"the message must not assert a false fact about the shim: {row}"
+    )

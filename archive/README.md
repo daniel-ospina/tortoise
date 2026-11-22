@@ -76,7 +76,8 @@ It **composes** — it replaces neither, because they answer different questions
 | `sdk_retired.REMOVED_SDK_METHODS` | raises `AttributeError` with **no** hint (went internal or was deleted) | no | **yes for a removal** — same requirement; this map records no replacement, so it never takes the rename route |
 | **this archive** | **nothing** — the name does not resolve | **no** | **yes — this is where the code goes** |
 
-The 23 existing `RETIRED_USE_INSTEAD` entries are therefore **not** in this archive: they are
+The `RETIRED_USE_INSTEAD` entries are therefore **not** in this archive — 23 of them when this
+archive began, 73 today (measured), and none of them is among the 111 archived entries: they are
 off the advertised count already, and `canonical-mcp-tools.md` records (2026-10-27 amendment)
 that removing the forward entries "is a separate decision". Archiving them would be a different
 ruling, not this one.
@@ -180,9 +181,9 @@ existed is moved out. `tortoise/archived/` is refused by the gate for that reaso
 - the **git tag** `archive/4282-surplus-sdk-methods` — the 26 public SDK methods deleted by
   `#4282` under the 2026-10-27 ruling (owned by
   [`docs/product/archived-sdk-methods-2026-10.md`](../docs/product/archived-sdk-methods-2026-10.md)).
-  That code is **not** in this tree and this gate does not read it: `0 archived SDK methods` in
-  [`INDEX.md`](INDEX.md) is literally true, and a reader looking for one of those 26 should read
-  the tag. A later batch that removes SDK methods archives them **here**.
+  That code is **not** in this tree and this gate does not read it: none of the 26 appears in the
+  archive (`INDEX.md` counted `0 archived SDK methods` when this note was written; it counts the
+  106 archived since), and a reader looking for one of those 26 should read the tag. A later batch that removes SDK methods archives them **here**.
 
 ```bash
 # 1. Freeze the code. Run BEFORE deleting: it reads the source from the working tree and records
@@ -252,12 +253,19 @@ see it.
 > for a BINDING, an `import` and a `def`/`class` the answer is CONTENT even when the binding's value
 > is a bare constant. A module truncated to `X = 1` (or `X: int`, `import os`, `class X: pass`)
 > still EXPORTS a name a caller reaches (`from mod import X`), so "the name no longer resolves to
-> any code" is false for it; grading it a removal false-blocks every constants-only module (12 rows
-> measure this). The shrink gate grades per-symbol EXISTENCE, not proportions — so a body reduced to
+> any code" is false for it; grading it a removal false-blocks every constants-only module (16 rows
+> of `tests/test_archive.py` measure it: treating `Assign`/`AnnAssign`/`Import`/`ImportFrom` as
+> inert reds all 16). The shrink gate grades per-symbol EXISTENCE, not proportions — so a body reduced to
 > one binding is a residual this arm does not see, deliberately, and closing it needs a different
 > check rather than another inertness spelling. This arm grades ONE file shape at a time; a body
 > replaced by a file CREATED in the same commit holding an unrelated statement is the same residual
-> by a different route, and it is likewise not closed here.
+> by a different route, and it is likewise not closed here. So is a body emptied while another
+> carrier of the same module survives as a re-export shim: arm 1b asks whether ANY carrier still
+> holds a runtime body, so a shim that re-exports the same names answers yes (measured: emptying a
+> 23,899-line package `__init__.py` to a docstring while a 37-line `import_module` shim survives is
+> graded GREEN). The gate grades per-symbol EXISTENCE across a path set, not proportions, and a
+> legitimate shim is indistinguishable from a decoy without comparing the two sides' name sets —
+> which is a separate arm, not a tighter spelling rule (#14298).
 
 This check runs as part of the `surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2),
 never a quiet pass. If the deletion is already recorded somewhere this gate cannot read, state

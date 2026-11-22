@@ -42,9 +42,10 @@ HOW THIS COMPOSES WITH THE TWO EXISTING RETIREMENT MECHANISMS — AND WHAT IT RE
         `REMOVED_SDK_METHODS`, so a caller of it still fails CLEANLY and the departure is
         accounted for — enforced below. The archive adds the code; the map keeps the
         failure.
-    The existing 23 `RETIRED_USE_INSTEAD` entries are therefore NOT in this archive's
-    scope. They are off the *advertised* count (68 — it was 72 before #11609 batch 1,
-    which is the number this note was written against) already, and
+    The `RETIRED_USE_INSTEAD` entries are therefore NOT in this archive's scope. (23 of them when
+    this note was written, 73 today, measured — the pair of counts that stood here, "23" as a
+    present state and "68" as the live advertised count, were both stale by the time round 21
+    checked them; the live tool count is 39.) They are off the advertised count already, and
     `docs/product/canonical-mcp-tools.md` records (2026-10-27 amendment) that removing
     the forward entries "is a separate decision" — so archiving them here would be a
     different ruling, not this one.
@@ -128,6 +129,7 @@ import ast
 import fnmatch
 import hashlib
 import json
+import posixpath
 import re
 import subprocess
 import tomllib
@@ -1145,11 +1147,12 @@ def _init_carries_a_body(text: str) -> bool:
             return not any(isinstance(sub, _effectful) for sub in ast.walk(node.value))
         # ⛔ A BINDING IS CONTENT, EVEN A CONSTANT ONE (round-19 P2, DECLINED with evidence).
         # The review proposed treating `X = 1` as inert so a module truncated to one assignment is
-        # a removal. Measured, that rule contradicts the repo's own pinned rule and breaks 12 rows:
+        # a removal. Measured, that rule contradicts the repo's own pinned rule and breaks 16 rows
+        # (treating `Assign`/`AnnAssign`/`Import`/`ImportFrom` as inert reds 16 in `tests/test_archive.py`):
         # a module whose whole body is `VALUE = 1` EXPORTS a name a caller reaches
         # (`from mod import VALUE`), so "the name no longer resolves to any code" — the archive's
         # stated test — is false for it, and `test_a_module_split_into_a_package_can_be_archived`
-        # plus eleven fixtures depend on it being content. A module that keeps ONE binding is a
+        # plus fifteen other rows (sixteen in all, measured) depend on it being content. A module that keeps ONE binding is a
         # module that still resolves; the 40 functions are lost, and the shrink gate grades
         # SYMBOLS, not proportions. Widening it here would false-block every constants-only module.
         # Not adopted. ⚠️ The residual is REAL and NOT closed: a module reduced to `X = 1`,
@@ -1211,7 +1214,14 @@ def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
         return text
     if not out.split(None, 1)[0].startswith("120"):
         return text
-    target = (Path(path).parent / text.strip()).as_posix()
+    # ⛔ NORMALISE FIRST (round-21 review, P1 — measured). A relative link target
+    # (`../../shared/impl.py`) concatenated onto the carrier's directory yields
+    # `tortoise/x/../../shared/impl.py`, which `git show <sha>:<path>` REFUSES with
+    # `fatal: path … exists on disk` — so the read answered `None`, which the carrier tests
+    # treat as "unreadable, never cancel a removal". `posixpath.normpath` collapses the `..`
+    # segments before the ask; the result never escapes the repo root because `git show`
+    # refuses an absolute or outside path anyway.
+    target = posixpath.normpath((Path(path).parent / text.strip()).as_posix())
     resolved = _git_blob(root, sha, target)
     return resolved if resolved is not None else None
 
@@ -1236,9 +1246,20 @@ def _content_or_link(root: Path, sha: str, path: str, source: str | None) -> boo
     mode = out.split(None, 1)[0] if out.strip() else ""
     if not mode:
         return True
-    # `100644`/`100755` are files, whose (inert) content was just measured. `120000` (symlink) and
-    # `160000` (submodule) hold a TARGET, not source, so the body question cannot be asked of them
-    # — and the name still resolving to code elsewhere in the package is exactly what must not
+    if mode.startswith("120"):
+        # ⛔ ASK THE TARGET'S CONTENT, LIKE THE HEAD SIDE DOES (round-21 review, P1 — a regression
+        # this branch introduced, measured). The blanket `not mode.startswith("100")` called every
+        # symlink code WITHOUT asking what it points at, while `_head_carries_runtime_body` read
+        # through the link (`Path.read_text` follows it). So an UNCHANGED `x_init.py` → a docstring
+        # `impl.py`, and an UNCHANGED dangling link, graded `MODULE BODY REMOVED` — a false block on
+        # a tree where nothing changed, whose message asserted two false things about the file
+        # ("carries statements" / "this tree's module file carries none"). A link to real code still
+        # counts (that is what the round-19 fix was for); a link to prose or to nothing holds no
+        # code, and deleting nothing is not a removal.
+        resolved = _blob_following_links(root, sha, path)
+        return resolved is not None and _init_carries_a_body(resolved)
+    # `160000` (submodule) holds a TARGET, not source, so the body question cannot be asked of it —
+    # and the name still resolving to code elsewhere in the package is exactly what must not
     # cancel a removal.
     return not mode.startswith("100")
 
@@ -1250,8 +1271,9 @@ def _carrier_carries_a_body(root: Path, sha: str, path: str) -> bool:
     helper exists to remove (`module_name` collapses `<dotted>.py`, `<dotted>/__init__.py` and
     `<dotted>.pyi` onto the SAME symbol). A body-less `.py` beside a body-carrying
     `__init__.py` is a dead leftover, not proof that the base carried nothing: `next(...)`-ing
-    the lexicographically first non-stub carrier cancelled the deletion of the 406 lines that
-    left with it, and every other arm was blind to it (round-23 review, F1 — a removal graded
+    the lexicographically first non-stub carrier cancelled the deletion of the body that left
+    with it (measured: 23,899 lines for `tortoise/projection/__init__.py`, the one shipped module
+    with two carriers), and every other arm was blind to it (round-23 review, F1 — a removal graded
     green, which is the one direction this whole function exists to prevent).
 
     A `.pyi` COUNTS as the module's code. That is a RECORDED rule, not a preference: a stub
@@ -1307,8 +1329,12 @@ def _head_carries_runtime_body(
     # (`archive module tortoise.y`) freezes the new file and then `surface_violations` reds it as
     # `REAPPEARED as an importable module` — no green state at all, and CI passes no waiver. The
     # identical move in the OPPOSITE direction was GREEN, which is what made the asymmetry visible.
-    # `projection.py` ("DEPRECATED — This flat file is dead code") beside `projection/__init__.py` is
-    # exactly this shape, shipped in this repo.
+    # `projection.py` ("DEPRECATED — This flat file is dead code") beside `projection/__init__.py`
+    # is the CLOSEST shipped thing, but it is NOT this shape — round-21 review measured that the
+    # shim carries a body — one `importlib.import_module` call plus eight `X = _pkg.Y` re-exports
+    # (measured: 1 and 8) — so a first draft's claim that
+    # this shape is "shipped in this repo" was false and is withdrawn. The shape below is
+    # CONSTRUCTED in the test, which is what pins the defect.
     base = symbol.replace(".", "/")
     for candidate in (head_carrier, f"{base}.py", f"{base}/__init__.py"):
         if candidate.endswith(".pyi"):
@@ -1854,8 +1880,13 @@ def shrink_violations(
         #
         # ⛔ AND THE CANCELLATION IS ABOUT THE MODULE, NOT ONE CARRIER (round-23 review, F1). The
         # first cut asked `next(...)`-picked carrier — the lexicographically first non-`.pyi` path
-        # — so a 0-byte leftover `tortoise/projection.py` cancelled the deletion of a 406-line
-        # `projection/__init__.py`, and a docstring `.py` cancelled a deleted `.pyi` beside it:
+        # — so a bodyless leftover `<dotted>.py` cancelled the deletion of a code-carrying
+        # `<dotted>/__init__.py`, and a docstring `.py` cancelled a deleted `.pyi` beside it:
+        # (round-21 review: the figures that stood here — "0-byte `tortoise/projection.py`" beside
+        # a "406-line `projection/__init__.py`" — were BOTH false; measured, `projection.py` is
+        # 1360 bytes carrying a body and its `__init__.py` is 23,899 lines, while 406 is
+        # `tortoise/__init__.py`. Named shapes, no numbers, because a fabricated count is exactly
+        # the class this file keeps removing.)
         # both were `MODULE REMOVED` before this block existed, and both went green with it, with
         # no record, no waiver and no diagnostic. Nothing left the product only when NO base
         # carrier carries code, which is what `base_body_modules` answers. The `.pyi`-only case
@@ -1919,7 +1950,25 @@ def shrink_violations(
             if name not in targets or targets[name].endswith(".pyi"):
                 targets[name] = path
     for module in sorted(base_modules & head_modules):
-        base_carrier = base_paths_by_module[module]
+        # ⛔ NAME THE CARRIER THAT HELD THE BODY, NOT THE FIRST PATH (round-21 review, P2 —
+        # measured, PRE-EXISTING, fixed here only because the message is this arm's).
+        # `base_paths_by_module[module]` is the lexicographically first non-`.pyi` path and `.`
+        # (46) sorts before `/` (47), so a docstring `p.py` shim beside a code-carrying
+        # `p/__init__.py` (the shape this repo's `tortoise/__init__.py` fallback was built for,
+        # CONSTRUCTED in the test rather than copied from a shipped module — measured) made the
+        # violation read "carries statements in `tortoise/p.py`" — false — and the restore route
+        # it printed brought back the docstring and re-refused identically: a
+        # permanent red whose stated fact and remedy both pointed at the wrong file. Arm 1 already
+        # answers this by CONTENT, so the same preference order is reused here and the named file
+        # is one that carries code.
+        base_carrier = next(
+            (
+                path
+                for path in base_carriers.get(module, [])
+                if _carrier_carries_a_body(root, sha, path)
+            ),
+            base_paths_by_module[module],
+        )
         head_carrier = head_paths_by_module[module]
         stubbed = head_carrier.endswith(".pyi") and not base_carrier.endswith(".pyi")
         # ⛔ A head carrier that EXISTS but cannot be read is the removed body, not a reason
@@ -1945,8 +1994,10 @@ def shrink_violations(
         # lexicographically first non-`.pyi` path — and `.` (46) sorts before `/` (47), so a
         # body-less leftover `tortoise/x.py` beat the real `tortoise/x/__init__.py`: arm 1b called
         # the BASE "scaffolding" and `continue`d, so emptying the `__init__.py` IN PLACE was GREEN
-        # in every arm with the body in no file under `archive/` (measured, three shapes; the repo
-        # SHIPS the pairing — `tortoise/projection.py` beside `tortoise/projection/__init__.py`).
+        # in every arm with the body in no file under `archive/` (measured, three shapes; the
+        # pairing is CONSTRUCTED in the test — round-21 review measured that no module in this repo
+        # ships a BODYLESS shim beside another carrier, `tortoise/projection.py` being a real
+        # 37-line re-export shim that carries a body).
         # Arm 1 was fixed for exactly this in round 23 (`base_body_modules`); the fix went to the
         # sibling gate and not to the shared question, so the arm one gate over kept the defect.
         # ⛔ ASK THE SAME KIND OF BODY ON BOTH SIDES (round-20 P1 — a regression this branch
@@ -1958,6 +2009,18 @@ def shrink_violations(
         # stub-only base never supplies a runtime body. So: whatever KIND carried it at the base is
         # the kind the head must still carry (the stub half and the runtime half are each measured
         # by a row; the "runtime appeared" case is answered once, above, not twice).
+        #
+        # ⚠️ MEASURED RESIDUAL OF THIS ARM (round-21 review, not closed): the head test asks "does
+        # ANY surviving carrier hold a runtime body", so a RE-EXPORT SHIM that survives credits the
+        # module no matter how much of the real body left. Emptying the 23,899-line
+        # `tortoise/projection/__init__.py` to a docstring while the 37-line `tortoise/projection.py`
+        # shim (one `importlib.import_module` call, eight `X = _pkg.Y` re-exports) stays put grades
+        # GREEN. It is the same
+        # family as the declined `X = 1` case: this arm asks per-symbol EXISTENCE across a path set,
+        # not a proportion, so a shim that still resolves the same names is a legitimate answer and
+        # a decoy is indistinguishable from it without symbol-level comparison. Closing it needs an
+        # arm of its own (compare the base's and head's top-level name sets per carrier), not
+        # another body spelling. Filed as #14298.
         if module not in base_body_modules:
             continue  # nothing left the product
         if module not in base_runtime_body_modules:
@@ -2719,14 +2782,25 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
                 rel, path, source = other, other_path, other_source
                 break
         else:
-            plain = symbol.replace(".", "/") + ".py"
+            # ⛔ NAME EVERY CARRIER, NOT ONE GUESS (round-21 review, P2 — measured, pre-existing).
+            # `<dotted>.py` is only ONE of the four paths a module can live at, so with a bodyless
+            # `<dotted>.py` beside a code-carrying `<dotted>/__init__.py` (a shape CONSTRUCTED in
+            # the test: no module in this repo ships it — `tortoise/projection.py`, the nearest,
+            # carries a body) the single path named here was the empty one: restoring it satisfied the
+            # instruction and the writer refused again, identically, forever. The set is cheap to
+            # name and each member is a file a human can look for.
+            plain = [
+                symbol.replace(".", "/") + suffix
+                for suffix in (".py", "/__init__.py", ".pyi", "/__init__.pyi")
+            ]
             raise ArchiveRefused(
                 f"module {symbol} resolves to {rel}, which carries no body of its own — a "
                 "docstring alone, or nothing. Freezing it would record SCAFFOLDING as the source "
                 "of record for code that is gone, and `check --base-ref` credits a row on its "
                 "EXISTENCE, so the removal would read as recorded while no file under `archive/` "
-                "held it. Restore the source from the base revision first (`git checkout "
-                f"<base-sha> -- {plain}`), archive it, and delete it again in the same batch."
+                "held it. Restore the carrier that HELD the code from the base revision first "
+                f"(`git checkout <base-sha> -- <one of: {', '.join(plain)}>`), archive it, and "
+                "delete it again in the same batch."
             )
     return [(rel, source, None)]
 
