@@ -168,6 +168,24 @@ def test_a_tool_only_diff_selects_this_pin():
         "a diff to tools/read_wave_latency.py no longer selects its own pins — the "
         "`CORE_ALSO` entry was dropped or the prefix behaviour changed"
     )
+    _assert_not_tier1(manifest)
+
+
+def _assert_not_tier1(manifest: dict) -> None:
+    """NON-VACUITY of the surface rows the two selection pins above assert on.
+
+    `tier1` is unioned into EVERY PR selection, so if this file ever joins `tier1` the
+    `api`/`core` rows stop being what selects it — and both pins would then pass over a
+    LOST arm, which is the silent direction (#14281 review finding 3). Asserted rather
+    than left implicit; the idiom is `tests/test_ci_selection.py`'s (#9778 review P2),
+    applied in the file whose own non-vacuity it protects.
+    """
+    assert "tier1" in manifest, (
+        "the manifest no longer carries `tier1` — this non-vacuity guard has lost its "
+        "subject, so it must be re-derived rather than left passing on nothing")
+    assert "test_14192_read_wave_tool.py" not in (manifest["tier1"] or []), (
+        "this file joined `tier1` — the `api`/`core` rows are now decorative, so the "
+        "selection pins above must be RE-DERIVED rather than assumed still load-bearing")
 
 
 def test_a_door_diff_selects_this_pin():
@@ -212,6 +230,7 @@ def test_a_door_diff_selects_this_pin():
         "the door's own read contract — the `api` row in config/ci-surfaces.yml was "
         "dropped, or hosted_api.py stopped resolving to the `api` surface"
     )
+    _assert_not_tier1(manifest)
 
 
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
@@ -392,24 +411,47 @@ def _aliases_of(tree: ast.AST, predicate) -> set[str]:
     never an alias at all. Both names are STATICALLY VISIBLE, so neither is the pin's
     declared "computed at runtime" residual — this is the same false-PASS class the F2
     fix closed, one hop further out.
+
+    ⛔ UNPACK TARGETS TOO (`(page,) = (results,)`), which a `len(targets) == 1 and
+    isinstance(target, ast.Name)` bind never sees — measured GREEN on the form above
+    while `page.sort()` permuted the recorded page.
     """
-    binds: list[tuple[str, ast.AST]] = []
+    binds: list[tuple[ast.AST, ast.AST]] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
-                and isinstance(node.targets[0], ast.Name):
-            binds.append((node.targets[0].id, node.value))
-        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) \
-                and isinstance(node.target, ast.Name) and node.value is not None:
-            binds.append((node.target.id, node.value))
+        if isinstance(node, ast.Assign):
+            targets: list[ast.AST] = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            binds.append((target, node.value))
+
     out: set[str] = set()
+
+    def _bind(target: ast.AST, value: ast.AST) -> bool:
+        """Resolve one (target, value) pair; True when it named something new."""
+        if isinstance(target, ast.Name):
+            if target.id in out:
+                return False
+            if predicate(value) or (isinstance(value, ast.Name) and value.id in out):
+                out.add(target.id)
+                return True
+            return False
+        if isinstance(target, (ast.Tuple, ast.List)) \
+                and isinstance(value, (ast.Tuple, ast.List)) \
+                and len(target.elts) == len(value.elts):
+            grew = False
+            for target_elt, value_elt in zip(target.elts, value.elts, strict=True):
+                grew = _bind(target_elt, value_elt) or grew
+            return grew
+        return False
+
     changed = True
     while changed:  # fixed point: a chain of any length resolves in one call
         changed = False
-        for name, value in binds:
-            if name not in out and (predicate(value)
-                                    or (isinstance(value, ast.Name)
-                                        and value.id in out)):
-                out.add(name)
+        for target, value in binds:
+            if _bind(target, value):
                 changed = True
     return out
 
@@ -439,7 +481,11 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     DISABLED the check it was added to serve — a guard that happened to work only
     because the tool carries no alias. Measured mutant that was GREEN before this fix
     and reds now: `page_alias = results` + `random.shuffle(results)`. The intersection
-    also catches `_helper(results[0])`, which the equality form missed on arity alone.
+    also catches an argument that merely CONTAINS the collection — `_helper(results +
+    other)` was GREEN under the equality form (its name-set is two names, not one) and
+    hits now. ⛔ That is NOT an arity claim: the comparison was always per ARGUMENT, so
+    `_helper(results[0])` was caught before too (measured) — the equality form failed on
+    a name-set that was not exactly `watched`, never on the number of arguments.
     """
     aliases = _aliases_of(run_def, lambda v: isinstance(v, ast.Name) and v.id == var)
     watched = {var} | aliases
@@ -617,6 +663,35 @@ def test_a_TWO_HOP_or_WALRUS_alias_still_reaches_the_sort() -> None:
             f"{label} alias is GREEN (aliases={sorted(aliases)}, hits={hits}) — alias "
             "resolution is not transitive / walrus-aware, so a sorted page reaches the "
             "artifact while the pin reads the measured page")
+
+
+def test_an_UNPACKED_alias_still_reaches_the_sort() -> None:
+    """An UNPACK target is an alias too — `(page,) = (results,)` (#14281 finding 2).
+
+    ⛔ MEASURED GREEN on the named-target-only bind (`len(targets) == 1 and
+    isinstance(target, ast.Name)`): `aliases=[]`, so `page.sort()` permuted the recorded
+    page while the receiver and "handed" halves both saw nothing. Same false-PASS class
+    as the two-hop chain beside it; statically visible, so not the declared residual.
+    """
+    src = ("def run(sdk):\n"
+           "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+           "    (page,) = (results,)\n"
+           "    page.sort()\n")
+    run_def = ast.parse(src).body[0]
+    read = next(n for n in ast.walk(run_def)
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+    sort = next(n for n in ast.walk(run_def)
+                if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "sort")
+    aliases = _aliases_of(run_def, lambda v: isinstance(v, ast.Name) and v.id == "results")
+    assert "page" in aliases, (
+        f"the unpack target is not resolved as an alias (aliases={sorted(aliases)}) — "
+        "`(page,) = (results,)` binds the same collection and a `page.sort()` reaches "
+        "the artifact invisibly")
+    hits = _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+    assert sort.lineno in hits, (
+        f"an UNPACKED alias is GREEN (aliases={sorted(aliases)}, hits={hits}) — the "
+        "page is permuted in place before it is recorded")
 
 
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
