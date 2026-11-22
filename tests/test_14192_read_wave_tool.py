@@ -689,31 +689,37 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]]) -> list[as
         if not any(_carries_read_name(arg, consts)
                    for arg in _name_reaching_operands(n)):
             continue
-        # ⛔ THE FIRING CONDITION IS A SPLAT (#14326 round 5, three measurements). `getattr`
-        # / `setattr` were once a NAMED branch here; it was DELETED because nothing could red
-        # it: every shape it fired on was already refused by the mention census
-        # (`getattr(sdk, _pair)` over a name-carried tuple measures mentions=3), and every
-        # shape the census CANNOT see — the four round-5 escapes, each measured GREEN at
-        # `8f13cb24` with `refuses=False`, mentions=2, calls=2 — delivers the literal through
-        # a SPLAT:
+        # ⛔ TWO DELIVERY SHAPES, BOTH PINNED (#14326 round 5, corrected by the merge with
+        # `8d221fab93`). A SPLAT's arity and position are not statically knowable, so the
+        # fetcher behind it cannot be excluded by name — fail-closed on ANY non-pure callee.
+        # The NAMED pair carries the non-splat container delivery, whose operand is not a
+        # `Name` and therefore produces no mention the census can see:
         #
-        #     _g = sdk.__getattribute__(*("_tortoise_fts_query",)); _g(query=…, kind="statement")
-        #     _A = ("_tortoise_fts_query",); operator.attrgetter(*_A)(sdk)(…, kind="statement")
-        #     _A = (…); dict.get(*[sdk.__dict__, *_A])(…, kind="statement")
+        #     getattr(sdk, f"_tortoise_fts_query")(…)          # JoinedStr, not a Name
+        #     getattr(sdk, ("_tortoise_fts_query" if q else "x"))(…)
         #
-        # A splat's arity and position are not statically knowable, so the fetcher behind it
-        # cannot be excluded by name — fail-closed on ANY non-pure callee. Emptying a named
-        # set of eight fetchers left all 25 tests green, which is why it is not kept "for
-        # safety": an entry no row can red reads as coverage and is not.
-        if any(isinstance(arg, ast.Starred) for arg in n.args):
+        # ⛔ MEASURED HISTORY, because it looks removable and is not: at `4044c287` emptying
+        # this set left all 25 tests green (every shape it fired on was already refused by
+        # the mention census), so it was deleted; the merge with `8d221fab93` added the
+        # f-string / `IfExp` / `BoolOp` rows whose inline delivery ONLY reaches the pin
+        # through this branch, and emptying the set now reds
+        # `test_EVERY_static_binding_form_is_a_READ_reach` — which is what makes it
+        # load-bearing rather than decorative.
+        if (_callee in _NAMEFETCH_CALLEES
+                or any(isinstance(arg, ast.Starred) for arg in n.args)):
             out.append(n)
     return out
 
 
-# ⛔ THERE IS NO NAMED FETCHER SET HERE (#14326 round 5). `getattr`/`setattr` were a named
-# branch; it was measured DEAD twice — emptying it left 25 green, and every shape it fired
-# on was already refused by the mention census. The surviving arm in `_indirect_reads` is
-# the SPLAT delivery, which is the only container shape the census cannot see.
+#: Callees that can turn a STRING argument into an attribute read by that name. This pair
+#: carries the NON-SPLAT container delivery, which the mention census cannot see
+#: (`getattr(sdk, f"_tortoise_fts_query")` — a `JoinedStr`, not a `Name`). It is pinned by
+#: the f-string / `IfExp` / `BoolOp` rows: emptying it reds
+#: `test_EVERY_static_binding_form_is_a_READ_reach`. Every OTHER fetcher name tried
+#: (`__getattribute__`, `attrgetter`, `methodcaller`, `get`, `__getitem__`, `__call__`) was
+#: measured DEAD — those escapes all deliver through a SPLAT, which the second arm refuses
+#: under any callee name — so they are deleted rather than kept as unreachable entries.
+_NAMEFETCH_CALLEES = frozenset({"getattr", "setattr"})
 
 
 def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
@@ -3332,6 +3338,14 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "IfExp INLINE in the getattr": (
             '    getattr(sdk, ("_tortoise_fts_query" if queries else "x"))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ AND THE INLINE `BoolOp`, which had NO row (#14326 round 5, measured: deleting
+        # `_possible_strings`' `BoolOp` arm left all 25 tests green — the bound row above
+        # reaches `_values`, a DIFFERENT function, exactly as this file's own history records
+        # for the set/dict arms). The inline selection never reaches `_values`, so the
+        # `_possible_strings` arm was unpinned until this row existed.
+        "BoolOp INLINE in the getattr": (
+            '    getattr(sdk, (queries or "_tortoise_fts_query"))'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         # ⛔ BOTH ROWS BELOW BIND **BEFORE** THEIR SOURCE (#14326 review P3, measured):
         # `ast.walk` is breadth-first, not source order, so a single pass resolves only the
