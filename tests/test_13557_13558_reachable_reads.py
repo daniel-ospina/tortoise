@@ -515,6 +515,15 @@ NOT_SELECTED = [
     # supplied their notice; these are the bare frames, and they red without this pin.
     "has anyone complained billing has been just deprecated",
     "has anyone complained billing has been only deprecated",
+    # ⛔ …AND THE CLITIC-SUBJECT COPULA FRAME, WHICH WAS SILENT AT BOTH ENDS (round-8 review, P2,
+    # measured): the copula/perfect shape refuses a subject carrying an auxiliary clitic on
+    # purpose, and the comment above says the row then "falls through to `_ENDING_SIGNALS` … and
+    # reports" — true only when the question ALSO carries an existential head. With a bare copula
+    # head there was nothing to fall through to, so `has the billing's been deprecated` returned
+    # NOTHING AT ALL while its parent routed it `ended`. All 8 determiners x 4 nouns were silent;
+    # these two rows pin the class in both directions (population None AND a notice).
+    "has the billing's been deprecated",
+    "has v3's been deprecated",
     # ⛔ …AND THE AGENT-PHRASE HIJACK, WHICH THE `by` TOLERANCE RE-OPENED (round-7 review, P2,
     # measured — this lane's regression, found by a fresh reviewer within the hour): with `by`
     # tolerated, both lookaheads went blind whenever the reported clause's participle took an
@@ -1047,6 +1056,8 @@ NOTICE_ONLY = [
     "have any reported it has been in fact just about deprecated and been withdrawn",
     "has anyone complained billing has been just deprecated",
     "has anyone complained billing has been only deprecated",
+    "has the billing's been deprecated",
+    "has v3's been deprecated",
     "have any users reported it has been deprecated by legal been withdrawn",
     "have any users reported the vendor has been deprecated by legal been withdrawn",
     "have any users reported the vendor has been deprecated by legal and been withdrawn",

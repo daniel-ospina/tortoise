@@ -1453,8 +1453,23 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `been <ending>` clause supplied their notice. A signal cannot affect routing (it is only
     # computed when NO shape applies), so widening the slot here cannot create a route.
     ("existence_unguarded", re.compile(
-        _EXISTENCE_HEAD
+        "(?:"
+        + _EXISTENCE_HEAD
         + rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        # ⛔ A CLITIC SUBJECT IS ALSO A CUE THAT MUST REPORT (round-8 review, P2, measured):
+        # the copula/perfect shape refuses a clitic-bearing subject on purpose, and the
+        # comment above says the row then "falls through to `_ENDING_SIGNALS`, where the
+        # clitic alternative refuses it and reports" — true only when the question ALSO
+        # carries an existential head. With a bare copula head there is nothing to fall
+        # through TO, so `has the billing's been deprecated` returned NOTHING AT ALL
+        # (no population, no notice) while its parent routed it `ended`: measured, all of
+        # 8 determiners x 4 nouns = 32/32 silent refusals. A row with `been <ending>` in it
+        # is a state cue; this arm is what breaks that silence. It is a SIGNAL arm, not a
+        # shape, so it cannot route anything.
+        + "|"
+        + r"\b(?:has|have|had|is|are|was|were)\s+[^?]{0,40}?['\u2019](?:s|ve|d)"
+        + rf"\s+been\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        + ")"
         + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
     ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
