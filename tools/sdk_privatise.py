@@ -1128,8 +1128,9 @@ SWEEP_NAMES = 66
 #: sentence this branch has since DELETED, so a line-distance here would not reproduce): on `main`'s tree the
 #: diff against this branch adds no executable line, but THIS branch's end-proof adds THREE untyped
 #: receivers (`g.query` ×2 in `tools/graphevent_home.py`, `super().query` ×1 in the test stub), which
-#: is why `--repin` on the tree this branch resolved prints `(11860, "267dce26b4191743")` and not the
-#: `(11857, "ed40203dbbf32b87")` that `main` pins at `e74cf1d13d`. Both readings are measurements of
+#: is why `--repin` on the tree this branch resolved prints `(11860, "267dce26b4191743")` and not
+#: what `e74cf1d13d` COMMITS `(11857, "ed40203dbbf32b87")` on `main`. Both readings are
+#: measurements of
 #: different trees; read the block at the END for the live pin. ⛔ THE "NO EXECUTABLE LINE" REASONING
 #: THAT ONCE STOOD HERE IS DELETED, not reworded: it argued the resolved tree's diff against
 #: `origin/main` touched "exactly TWO files" and added "not one executable line", so "this branch
@@ -1171,8 +1172,8 @@ SWEEP_NAMES = 66
 #: measurements, never their evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
 #: ⛔ AN ERRATUM ON THE ERRATUM, MEASURED, because the correction above named the wrong tree and
-#: then drew the wrong conclusion from it. The `(11835, "891187f5a4636487")` PAIR is committed at
-#: `2c0d66e2ec` and that tree does measure it — both true, and both beside the point: the
+#: then drew the wrong conclusion from it. `2c0d66e2ec` COMMITS `(11835, "891187f5a4636487")` and
+#: that tree does measure it — both true, and both beside the point: the
 #: illustration's claim is that a tree can PIN 11835 and MEASURE 11843, and the tree that does is
 #: the MERGE `8889f1140105` — it commits `(11835, "891187f5a4636487")` inherited from `main` — and
 #: `--repin` ON THAT TREE prints `11843` / `6aed5368ffa10513`, which its successor `27cd81d55ebd`
