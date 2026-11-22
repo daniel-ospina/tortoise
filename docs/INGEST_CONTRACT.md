@@ -393,6 +393,16 @@ That judgement is `out["relation_declarations"]`.
   silently — the declared spelling is what gets WRITTEN) and every abstention
   contribute NOTHING. An empty list is the normal, common case: a bundle of
   `ownedBy`/`hasPart` edges between declared pairs reports nothing at all.
+- **Every connection ROUTE reports, the relation route included.** A
+  `{"relation": …}` connection is written through the projection primitive, so
+  it reaches no connect door — the rollup computes the same judgement for it
+  (round-3 review of PR #14284, F1: before that it stayed silent for
+  `hasPart`/`dependsOn`/`ownedBy`, all three of which are pack-declared and
+  writable on that route).
+- **`fromId`/`toId` follow the JUDGED orientation**, matching `from`/`to`. On a
+  `direction="<-"` write the relation runs target → source, so the entry
+  carries `direction: "<-"` and `fromId` is the connection's `to` — the two
+  halves of one entry never name different nodes (round-3 review, F2).
 - **A resubmission that mints nothing reports nothing.** The operator route's
   exact-dedup and partial-absorb arms write no edge, so they carry no fresh
   judgement — the same reason `ids["connections"]` is stable across a retry.

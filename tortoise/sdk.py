@@ -36556,6 +36556,38 @@ class TortoiseSDK:
                         created["connections"] += 1
                     conn_result = {"relation": rel, "from": src, "to": dsts[0],
                                    "deduped": bool(existed and existed[0][0])}
+                # ── #14263 (round-3 review, F1): the FIRST-CLASS relation route
+                # is a connect door too ───────────────────────────────────────
+                # `_relation_pair_notes`' docstring claims to be "the ONE reader
+                # every connect door shares … so a door cannot start seeing a
+                # pair the others miss" — and this route was the door it missed:
+                # it writes through `proj.create_edge` (the projection
+                # primitive), not through `sdk._create_edge`, so no verdict was
+                # computed and `relation_declarations` stayed empty for a
+                # `{"relation": …}` connection. That silence was REACHABLE with
+                # the shipped catalogs — `hasPart`, `dependsOn` and `ownedBy`
+                # are pack-declared AND in `_VALID_EDGE_PREDICATES`, the very
+                # allow-list `_check_connection` requires — and it contradicted
+                # §3.3's own sentence about `ownedBy`/`hasPart` edges "between
+                # declared pairs". Reported, never refused: the edge has already
+                # landed (`#1934`).
+                # ⚠️ Latent, stated rather than hidden: only `dsts[0]` is judged,
+                # so on the `extractedFrom` fan-out the later targets are not.
+                # Latent TODAY because `extractedFrom` is not pack-declared
+                # (``canonical_predicate`` narrows to ``[]`` before any read);
+                # it becomes a blind window the day a pack declares it.
+                _rel_notes = self._relation_pair_notes(
+                    predicate=rel, source_id=src, target_ids=[dsts[0]])
+                if _rel_notes:
+                    from tortoise.relation_guards import warning_shape
+
+                    self._carry_relation_declaration(
+                        conn_result,
+                        {"relation_declaration": _rel_notes[0],
+                         "warnings": [warning_shape(note)
+                                       for note in _rel_notes]},
+                        relation_declarations,
+                        connection=conn.get("ref") or i, source=src)
                 ids["connections"].append(conn_result)
             if results is not None:
                 results.append({"section": "connections", "index": i,
@@ -37586,7 +37618,9 @@ class TortoiseSDK:
 
         ``_create_direct_edge`` and ``_create_operator`` each return
         ``relation_declaration`` (the FIRST reported target) plus ``warnings``
-        (every reported target, one entry each). This router reads only the
+        (every reported target, one entry each); ``_ingest``'s relation route
+        (which reaches no connect door) hands this helper the same two keys
+        built inline from ``_relation_pair_notes``. This router reads only the
         write-receipt keys, so before this helper existed the leg's cost was
         paid and its verdict was dropped — on the surface that mints edges in
         bulk, which is the surface `#14263` exists for.
@@ -37628,8 +37662,16 @@ class TortoiseSDK:
                 continue
             item = dict(declaration)
             item["connection"] = connection
-            item["fromId"] = source
-            item["toId"] = declaration.get("target")
+            # ⛔ The ids follow the JUDGED orientation, matching ``from``/``to``
+            # (round-3 review, F2): on a `direction="<-"` write the relation
+            # runs target -> source, so pairing the argument order with the
+            # judged kinds named a different node than the kinds did.
+            if declaration.get("direction") == "<-":
+                item["fromId"] = declaration.get("target")
+                item["toId"] = source
+            else:
+                item["fromId"] = source
+                item["toId"] = declaration.get("target")
             collector.append(item)
 
     def _reapply_operator_promotion(self, op_id: str) -> None:
@@ -62092,7 +62134,9 @@ class TortoiseSDK:
         """The DECLARED spelling of ``predicate``, or ``None`` (#14263).
 
         The ONE resolution the three connect doors share — ``_create_edge``,
-        ``_create_direct_edge`` and ``_create_operator`` — so a re-spelling
+        ``_create_direct_edge`` and ``_create_operator`` (and ``_ingest``'s
+        resubmission key, which resolves the token it hands the dedup probe the
+        same way) — so a re-spelling
         cannot be normalised by one door and stored verbatim by another (the
         `69a9fae6c8` review, F3). ``None`` means either "no predicate" or "not a
         declared relation, under any spelling": the caller's own spelling must
@@ -62119,9 +62163,12 @@ class TortoiseSDK:
 
         The ONE reader every connect door shares — ``_create_edge`` (the
         structural arm, and so ``link_entities``' plain-edge arm),
-        ``_create_direct_edge`` and ``_create_operator`` — so a door cannot
-        start seeing a pair the others miss (the ``#12067``
-        "one reader, shared" rule, for the same reason).
+        ``_create_direct_edge``, ``_create_operator``, and ``_ingest``'s
+        FIRST-CLASS relation route (which writes through the projection
+        primitive, so it reaches no connect door and has to ask this reader
+        itself — the round-3 review's F1) — so a door cannot start seeing a pair
+        the others miss (the ``#12067`` "one reader, shared" rule, for the same
+        reason).
 
         Returns the reported AX payloads (``relation_guards.UNDECLARED_PAIR`` /
         ``REVERSED_PAIR``), in target order; ``[]`` when there is nothing to
@@ -62132,11 +62179,14 @@ class TortoiseSDK:
 
         **Two narrowings keep this off the hot path.** (1) The predicate must be
         OR SPELL a pack-declared relation at all — every structural predicate
-        (``hasPart``, ``related``, ``references`` …) and every invented verb
-        abstains BEFORE any graph read, because the ``#1934``/``#7551``
-        predicate leg already owns those and a pair check has no premise for
-        them. (2) Only endpoints whose id resolves are read, and only when (1)
-        allowed it.
+        the packs do NOT declare (``related``, ``references`` …) and every
+        invented verb abstains BEFORE any graph read, because the
+        ``#1934``/``#7551`` predicate leg already owns those and a pair check has
+        no premise for them. ⛔ ``hasPart`` is NOT in that set despite being a
+        structural predicate: a pack declares it (``dev:theme -> dev:epic``), so
+        it is judged like any other declared verb — it was named here once as an
+        example of the abstaining class, which was false. (2) Only endpoints
+        whose id resolves are read, and only when (1) allowed it.
 
         ``predicate`` is the DOMAIN verb: the ``label`` on the operator paths
         (the mechanism ``op_type`` is not a relation) and the ``relation`` on
@@ -62218,6 +62268,13 @@ class TortoiseSDK:
                     # on the prior review's finding 3).
                     note = dict(verdict.payload)
                     note["target"] = target_id
+                    # The ORIENTATION the pair was judged in travels too: on a
+                    # `direction="<-"` write the judged ends are
+                    # (target, source), so a rollup that stamps `fromId` from
+                    # the connection's arguments would name a different node
+                    # than ``from`` does (round-3 review, F2).
+                    if direction is not None:
+                        note["direction"] = direction
                     notes.append(note)
             return notes
         except Exception:  # noqa: BLE001, RUF100 — never raise into a write
@@ -62242,7 +62299,9 @@ class TortoiseSDK:
         aboutEvent, aboutDocument, aboutSource, aboutAction
         (``from``/``to`` are Python keywords — mapped to from_id/to_id).
 
-        Returns {edge: {relation, from, to}, created: bool, nudges: [...]}.
+        Returns {edge: {relation, from, to}, created: bool, nudges: [...]} — plus
+        ``relation_declaration`` and ``warnings`` when the pair leg has a
+        reportable verdict (see ``_relation_pair_notes``).
 
         ⚠️ **A derivation ``references`` edge minted HERE carries no
         ``sourceVersion`` anchor, and nothing will add one later.** ``references``

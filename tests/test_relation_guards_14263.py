@@ -716,6 +716,59 @@ class TestIngestCarriesTheReport:
             "the field is part of the STABLE key set — always present")
         assert out["relation_declarations"] == []
 
+    def test_the_RELATION_route_reports_too(self, sdk):
+        """Round-3 review F1 — `{"relation": …}` is a connect door as well.
+
+        That connection is written through the projection primitive, so it
+        reaches no connect door and the leg never ran: `hasPart`/`dependsOn`/
+        `ownedBy` are all pack-declared AND in `_VALID_EDGE_PREDICATES` (the
+        allow-list `_check_connection` requires), so the silence was reachable
+        with the shipped catalogs — the exact fail-silent class #14263 exists
+        for.
+        """
+        out = sdk._ingest(_relation_bundle("hasPart"))
+        assert out["relation_declarations"], (
+            "the relation route wrote the edge and reported NOTHING — the "
+            "silence #14263 exists to close")
+        entry = out["relation_declarations"][0]
+        assert entry["outcome"] == UNDECLARED_PAIR
+        assert entry["predicate"] == "hasPart"
+        assert entry["from"] == "dev:epic" and entry["to"] == "dev:issue"
+        assert entry["connection"] == "c1"
+        # …and the EDGE really landed: reported, never refused (#1934).
+        refs = out["ids"]["refs"]
+        assert _edge_exists(sdk, refs["e1"], refs["e2"], "hasPart")
+        # the per-connection view (granular mode) agrees with the rollup
+        gran = sdk._ingest(_relation_bundle("hasPart"), granularity="granular")
+        conn_result = next(r for r in gran["results"]
+                           if r["section"] == "connections")["result"]
+        assert conn_result["relation_declaration"]["outcome"] == UNDECLARED_PAIR
+
+    def test_a_declared_pair_on_the_relation_route_stays_silent(self, sdk):
+        """The other direction: the new door must not start inventing reports."""
+        out = sdk._ingest(_relation_bundle("dependsOn", from_kind="dev:api",
+                                          to_kind="dev:database"))
+        assert out["relation_declarations"] == []
+
+    def test_a_reversed_rollup_entry_names_the_JUDGED_ends(self, sdk):
+        """Round-3 review F2 — `from`/`to` and `fromId`/`toId` must agree.
+
+        With `direction="<-"` the relation runs target → source, so the
+        judgement is about `(target, source)`. Stamping `fromId` from the
+        connection's ARGUMENTS paired a database KIND with an API NODE: two
+        halves of one entry naming different nodes.
+        """
+        out = sdk._ingest(_pair_bundle(reify=True, label="dependsOn",
+                                       direction="<-"))
+        entry = out["relation_declarations"][0]
+        assert entry["outcome"] == REVERSED_PAIR, entry
+        assert entry["from"] == "dev:database" and entry["to"] == "dev:api"
+        refs = out["ids"]["refs"]
+        assert entry["fromId"] == refs["oB"], (
+            "`fromId` must be the node `from` names (the connection's `to`)")
+        assert entry["toId"] == refs["oA"]
+        assert entry["direction"] == "<-"
+
 
 class TestTheContractExampleIsTheEmittedPayload:
     """Review F2 — the documented `rule` named a field the payload does not carry.
@@ -785,10 +838,26 @@ class TestAResubmissionOfAReSpellingDedupes:
     """
 
     @staticmethod
-    def _operator_labels(sdk, op_type):
+    def _operators_over(sdk, op_type, ids):
+        """The operators of ``op_type`` that carry BOTH ``ids`` — scope-bounded.
+
+        ⛔ NOT "every operator of this type in the graph": on a lane that sets
+        `TORTOISE_DB_URI` these tests share one container graph (the epic-#1647
+        redirect), so an absolute count reads operators minted by OTHER tests
+        and the pin fails for a reason that has nothing to do with this one.
+        Bounding the read to the two endpoint ids this test just minted keeps
+        the assertion about THIS pair on every lane.
+        """
+        # the STORAGE rel type, mapped exactly as the writer writes it
+        # (`MECHANISM_REL_TYPES`: a `composedOf` leg is stored as `hasPart`)
+        from tortoise.ep import MECHANISM_REL_TYPES
+
+        rel = MECHANISM_REL_TYPES.get(op_type, "hasPart")
         rows = sdk._get_proj().g.query(
-            "MATCH (o:Point {is_operator:true, op_type:$t}) RETURN o.id, o.label",
-            params={"t": op_type}).result_set
+            f"MATCH (o:Point {{is_operator:true, op_type:$t}})-[:{rel}]->(n) "
+            "WHERE n.id IN $ids WITH o, count(DISTINCT n.id) AS ends "
+            "WHERE ends = size($ids) RETURN o.id, o.label",
+            params={"t": op_type, "ids": list(ids)}).result_set
         return [(row[0], row[1]) for row in rows]
 
     def test_the_operator_route_dedupes_a_re_spelled_resubmission(self, sdk):
@@ -801,7 +870,8 @@ class TestAResubmissionOfAReSpellingDedupes:
             f"{first['ids']['connections']}")
         assert second["deduped"]["connections"] == 1
         assert second["created"]["connections"] == 0
-        operators = self._operator_labels(sdk, "IMPL")
+        pair = [first["ids"]["refs"]["oA"], first["ids"]["refs"]["oB"]]
+        operators = self._operators_over(sdk, "IMPL", pair)
         assert len(operators) == 1, (
             "one pair must never carry two live mechanisms (#9750): "
             f"{operators}")
@@ -814,7 +884,9 @@ class TestAResubmissionOfAReSpellingDedupes:
         bundle = _pair_bundle(reify=True, label="CONTAINS", operator="composedOf")
         first = sdk._ingest(bundle)
         second = sdk._ingest(bundle)
-        operators = self._operator_labels(sdk, "composedOf")
+        operators = self._operators_over(
+            sdk, "composedOf",
+            [first["ids"]["refs"]["oA"], first["ids"]["refs"]["oB"]])
         assert len(operators) == 1, (
             "the resubmission minted a duplicate part/whole operator: "
             f"{operators}")
@@ -828,7 +900,9 @@ class TestAResubmissionOfAReSpellingDedupes:
         first = sdk._ingest(bundle)
         second = sdk._ingest(bundle)
         assert second["ids"]["connections"] == first["ids"]["connections"]
-        assert len(self._operator_labels(sdk, "IMPL")) == 1
+        assert len(self._operators_over(
+            sdk, "IMPL",
+            [first["ids"]["refs"]["oA"], first["ids"]["refs"]["oB"]])) == 1
 
     def test_a_LEGACY_operator_stored_under_the_raw_spelling_is_still_found(self, sdk):
         """The SECOND probe (round-3 review, VGATE F-3): pre-resolution graphs.
@@ -852,7 +926,9 @@ class TestAResubmissionOfAReSpellingDedupes:
         assert second["ids"]["connections"] == [oid], (
             "a legacy operator keyed under the caller's spelling must still be "
             "adopted — this retry exact-hit it before the fix")
-        assert len(self._operator_labels(sdk, "IMPL")) == 1, (
+        assert len(self._operators_over(
+            sdk, "IMPL",
+            [first["ids"]["refs"]["oA"], first["ids"]["refs"]["oB"]])) == 1, (
             "the legacy arm minted a duplicate instead of adopting the row")
 
 
@@ -896,7 +972,8 @@ class TestTheJudgedPairFollowsTheDeclaredDirection:
         assert out["relation_declaration"]["outcome"] == REVERSED_PAIR
 
 
-def _pair_bundle(*, reify: bool, label: str, operator: str = "IMPL") -> dict:
+def _pair_bundle(*, reify: bool, label: str, operator: str = "IMPL",
+                 direction: str | None = None) -> dict:
     """Two Object endpoints of DECLARED kinds, and one connection by label.
 
     `dev:api` / `dev:database` occur in the declared vocabulary (as
@@ -911,6 +988,8 @@ def _pair_bundle(*, reify: bool, label: str, operator: str = "IMPL") -> dict:
             "operator": operator, "label": label}
     if reify:
         conn["reify"] = True
+    if direction is not None:
+        conn["direction"] = direction
     return {
         "entities": [
             {"ref": "oA", "type": "object", "name": "The API spec",
@@ -919,6 +998,30 @@ def _pair_bundle(*, reify: bool, label: str, operator: str = "IMPL") -> dict:
              "objectKind": "dev:database"},
         ],
         "connections": [conn],
+    }
+
+
+def _relation_bundle(predicate: str, *, from_kind: str = "dev:epic",
+                     to_kind: str = "dev:issue") -> dict:
+    """Two Object endpoints of DECLARED kinds joined by a `{"relation": …}`
+    connection — the route that writes through the projection primitive.
+
+    `hasPart`/`dependsOn`/`ownedBy` are BOTH pack-declared and in
+    `_VALID_EDGE_PREDICATES` (the allow-list `_check_connection` requires), so
+    this route really lands the edge. The default kinds (`dev:epic`,
+    `dev:issue`) are declared kinds but NOT `hasPart`'s declared pair
+    (`dev:theme -> dev:epic`), so the leg reaches an UNDECLARED verdict; the
+    declared case passes `dev:api`/`dev:database` (the `dependsOn` pair).
+    """
+    return {
+        "entities": [
+            {"ref": "e1", "type": "object", "name": "The epic",
+             "objectKind": from_kind},
+            {"ref": "e2", "type": "object", "name": "The issue",
+             "objectKind": to_kind},
+        ],
+        "connections": [{"ref": "c1", "from": "e1", "to": "e2",
+                         "relation": predicate}],
     }
 
 
