@@ -880,11 +880,14 @@ def _skip_call_read_names(fn: ast.AST) -> set[str]:
 #: Measured before the widening: the identical probe differing only in the
 #: handler keyword gave `()` for `except*` and `((3, (), True, True, True),)` for
 #: `except`; population elsewhere unchanged (70 rows / 62 roots / 58 files).
-#: THE CLASS IS LATENT — at this writing **no** tracked `*.py` file contains an
-#: executable `except*`: an AST scan of all 2545 of them finds `ast.TryStar` in
-#: none (10 files mention the TEXT, in comments and string literals), so the
-#: population changes by zero and the row below is the only thing that can red
-#: if this widening is ever reverted.
+#: THE CLASS IS LATENT — no tracked `*.py` file contains an executable
+#: `except*` at this writing: the text appears in 10 files, and every occurrence
+#: sits in a COMMENT or a STRING literal (`tokenize`-checked) — this file's own
+#: witness snippets are string literals too. Nothing can hide in the
+#: 110 `archive/` files that do not parse (`pyproject.toml:303-304`: verbatim
+#: fragments, `SyntaxError: unexpected indent`): none of them contains the text.
+#: So the population changes by ZERO, and the `4e-bis` row below is the only
+#: thing that can red if this widening is reverted.
 _TRY_NODE_KINDS: tuple[type[ast.AST], ...] = (ast.Try, ast.TryStar)
 
 
