@@ -1902,7 +1902,18 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
         f"the header says the statement moved from `main`'s {_prov_main_line} to {_prov_head_line} "
         f"here — a `+{_prov_delta}` — but the two addresses differ by {_prov_head_line - _prov_main_line}. "
         "Either the delta or an address is stale, and the delta is what names the branch's own lines.")
-    if _main_readable and "hosted_api" in _main_sizes:
+    # ⛔ Keyed by FULL path (`tortoise/hosted_api.py`), so a bare-name membership test is always
+    # False and this whole main-side half is DEAD CODE that reports green (#14038 cycle 14, P1:
+    # `"hosted_api" in _main_sizes` never held, and a `51,507 -> 51,622` header plus a
+    # `main` address on `params["uid"] = actor_filter` both stayed green). Resolve the key, or
+    # this arm is the inert enforcer it exists to catch.
+    _main_hosted_key = next((_k for _k in _main_sizes if _k.endswith("hosted_api.py")), None)
+    assert _main_readable is False or _main_hosted_key is not None, (
+        "`origin/main` was readable and its `hosted_api.py` measured, but no key in "
+        f"`_main_sizes` ends with `hosted_api.py` (keys: {sorted(_main_sizes)}) — the "
+        "main-side provenance arms below would silently not run."
+    )
+    if _main_readable and _main_hosted_key is not None:
         _main_hosted = _pin_blob_lines("tortoise/hosted_api.py", "origin/main") or []
         assert _prov_main_len == len(_main_hosted), (
             f"the header says `main`'s `hosted_api.py` is {_prov_main_len} lines; it measures "
@@ -1952,8 +1963,11 @@ def test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries() -> None:
     ⛔ IT LIVES HERE, NOT THERE, on purpose: `test_7949_capstone_measure.py`'s `durations` row pins that
     file's own `^def test_` count in handwritten prose, so adding a case there would demand a re-write of
     that row's long enumeration for no benefit — and an arm placed INSIDE the existing bundle test would
-    be INERT the moment that function reds, which it does at this head for reasons that are `main`-side,
-    not this PR's. A separate case in this file always runs.
+    be INERT the moment that function reds — and a guard that is dead exactly when its sibling is
+    failing is the shape this file exists to catch, whatever the cause of the sibling's red.
+    (Measured at this head: that sibling is green, `1 passed, 443 deselected`; the placement is a
+    structural argument, not a claim about its current colour. Cycle 14 corrected this line,
+    which had asserted the red as a fact.) A separate case in this file always runs.
 
     Head-free on purpose: the rule is "the citation labelled `at this head` equals the row's", so it
     needs no history, no `main` and no pin — and it cannot pass by agreeing with itself, because the ROW
