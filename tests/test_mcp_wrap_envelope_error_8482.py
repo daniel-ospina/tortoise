@@ -438,10 +438,21 @@ async def test_no_registry_tool_can_deliver_a_payload_its_schema_rejects(
     # therefore reds on a recorded decision, and accidental surface shrinkage is
     # already the canonical gate's verdict (`tools/surface-guard.py` against the
     # frozen baseline, plus `config/surface-manifest.yml`) — not this file's.
-    assert repaired >= 11, (
-        f"sweep saw only {repaired} wrap-envelope tools; 11 was the measured "
-        "baseline when this guard was written, and they are the population "
-        "#8482 actually occurs in")
+    #
+    # ⛔ 11 -> 10 at #11609 lane P7, and MEASURED rather than inferred: the wrap set
+    # at `b4da1f5c018d^` (the commit before P7 landed on main) held ELEVEN names and
+    # the extra one was `tortoise_list_graphs` — the door P7 retired FORWARD into
+    # `tortoise_graph_overview`. A retired door keeps answering through its shim
+    # (#3883) but is no longer ADVERTISED, and this sweep reads the advertised
+    # registry, so the population legitimately lost that row. The floor moves WITH
+    # the record because its job is non-vacuity (the population #8482 lives in is
+    # still measured, and it is still ten doors), not volume: main was RED here from
+    # b4da1f5c018d until this re-pin — the same squash-merge residue `e9efc38ddc2c`
+    # landed for P6.
+    assert repaired >= 10, (
+        f"sweep saw only {repaired} wrap-envelope tools; 10 is the measured "
+        "baseline after #11609 P7 retired `tortoise_list_graphs` (11 before it), "
+        "and they are the population #8482 actually occurs in")
 
 
 def test_the_sweep_helper_can_reject_a_non_wrap_payload():
@@ -629,11 +640,22 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # floor, and the copy is what goes stale — this message still claimed "10 + 2"
     # long after P6 took `unions` to 1, which steered the next operator to a
     # population that no longer existed (review finding, #13648).
-    floor_typed, floor_unions = 10, 1
+    # `unions` 2 -> 1 came with P6 and `typed` 10 -> 9 with P7; BOTH are recorded here
+    # because a floor that moves without its reason is indistinguishable from a gate
+    # quietly widened to pass.
+    # ⛔ `typed` 10 -> 9 at #11609 lane P7, MEASURED: the same retirement moved BOTH
+    # numbers, because `tortoise_list_graphs` (`-> list[dict]`, i.e. a typed
+    # wrap envelope) was the door P7 retired forward into `tortoise_graph_overview`.
+    # The sweep reads the ADVERTISED registry, so a shim-only retired name is out of
+    # this population. Verified end to end rather than assumed: the wrap-name set at
+    # `b4da1f5c018d^` is this head's ten plus `tortoise_list_graphs`, and the whole
+    # module passes there (21 passed) — main went RED here at `b4da1f5c018d`.
+    floor_typed, floor_unions = 9, 1
     assert typed >= floor_typed and unions >= floor_unions, (
         f"sweep found {typed} typed + {unions} union envelopes; the floors are "
         f"{floor_typed} + {floor_unions}, each sitting ON its measured value "
-        "(#11609 P6 retired the second `anyOf` door, so `unions` moved 2 -> 1). "
+        "(#11609 P6 retired the second `anyOf` door, so `unions` moved 2 -> 1; P7 "
+        "retired `tortoise_list_graphs`, so `typed` moved 10 -> 9). "
         "Shrinkage is what this floor guards, so it follows a deliberate "
         "removal; growth is covered by the loop itself.")
 
