@@ -377,6 +377,26 @@ _PREPOSITIONS = (
 #: `\b` that follows it.
 _PREPOSITION_RE = "|".join(sorted(_PREPOSITIONS, key=lambda w: (-len(w), w)))
 
+#: ⛔ THE MEMBERS OF :data:`_PREPOSITIONS` THAT CAN ALSO HEAD A CLAUSE — and therefore may NOT
+#: be treated as a bare qualifier inside the `is_copula` subject (re-cut review, P1, measured):
+#: `during`, `until`, `as` and `than` introduce a second clause (`is the report as the board
+#: archived`), so exempting them let the shape swallow a whole clause and serve the ended
+#: population with the caller's own predicate dropped and NO notice — #14033's own defect in the
+#: worst direction. Declared as a ROLE, not a second hand-typed list: the exemption is DERIVED
+#: below, so a new member of :data:`_PREPOSITIONS` is covered by default and only a member that can
+#: head a clause has to be named here.
+_CLAUSE_HEADING_PREPOSITIONS = ("as", "during", "than", "until")
+
+#: :data:`_PREPOSITIONS` MINUS the clause-heading members — the qualifier class the `is_copula`
+#: subject guard may treat as one noun phrase. Longest-first for the same reason as
+#: :data:`_PREPOSITION_RE`.
+_QUALIFIER_PREPOSITION_RE = "|".join(
+    sorted(
+        (p for p in _PREPOSITIONS if p not in _CLAUSE_HEADING_PREPOSITIONS),
+        key=lambda w: (-len(w), w),
+    )
+)
+
 #: …and the tail a BLOCKED state question has INSTEAD of the end: punctuation, or
 #: a FUNCTION WORD the caller appended (`by legal`, `in Q3`, `when challenged`).
 #: ⛔ This is what keeps the notice off an ATTRIBUTIVE use — `is the archived
@@ -603,7 +623,20 @@ _EXISTENCE_GUARD = (
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
     rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
 )
-_EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
+# ⛔ THE PASSIVE PERFECT WITH AN ADVERB (re-cut review, P1, measured): the window required
+# `been` ADJACENT to the participle, so `have any claims been already retracted`,
+# `has anything been already withdrawn`, `have any of our bookings been already cancelled` and
+# `have any claims been ever retracted` came back `population=None, signal=None` while `main`
+# routes every one of them to `ended` — #14033's own defect (an unrouted state question that
+# is indistinguishable from "nothing has ended") reintroduced by a guard fixing a different
+# spelling. The slot is ONE adverbial (the fixed set below, not the whole `_EXISTENCE_ADVERB`
+# class: those are the ones a customer writes between the auxiliary and the participle, and a
+# wider slot here would swallow a second clause). `have any reports already archived` — where
+# `already` is the AUXILIARY and `archived` stays ATTRIBUTIVE — is `main`'s behaviour traded
+# away deliberately and is pinned in NOT_SELECTED.
+_EXISTENCE_WINDOW = (
+    rf"[^?]{{0,60}}?\bbeen\s+(?:(?:already|ever|recently)\s+)?(?:{_ENDING_WORDS})\b"
+)
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
 
 #: "what ended" / "what has been withdrawn" / "what was retracted" — the WHOLE
@@ -918,7 +951,7 @@ _COPULA_SUBJECT = (
     # before a nominal (`since the merger`) and `SCONJ` before a clause (`since the
     # merger closed`), so the tags separate them only after the fact.
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|"
-    rf"{_PREPOSITION_RE}|"
+    rf"{_QUALIFIER_PREPOSITION_RE}|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"

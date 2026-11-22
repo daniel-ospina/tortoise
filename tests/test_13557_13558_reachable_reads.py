@@ -183,6 +183,16 @@ SELECTED = [
     # …and the example the ``existence`` docstring gives, made executable so the
     # contract it states cannot drift from the words it cites (round-4 review P3).
     ("have any claims been retracted", "ended", "existence"),
+    # ⛔ …and the PASSIVE PERFECT WITH AN ADVERB between the auxiliary and the participle
+    # (re-cut review, P1, measured). All four routed on `main` (`ended`) and were SILENT on this
+    # branch — `population=None, signal=None` — which is #14033's own defect reintroduced by a
+    # guard fixing a different spelling. The window now carries the adverb slot; the round-7
+    # ACTIVE reading (`have any customers ever cancelled`, no `been`) stays refused, and the
+    # `already`-as-AUXILIARY spelling is pinned in NOT_SELECTED as a stated loss.
+    ("have any claims been already retracted", "ended", "existence"),
+    ("have any claims been ever retracted", "ended", "existence"),
+    ("has anything been already withdrawn", "ended", "existence"),
+    ("have any of our bookings been already cancelled", "ended", "existence"),
     # …and the RELATIVE CLAUSE on the head, which the round-14 relativizer guard must
     # NOT refuse: `that` directly after the quantifier modifies it, so this is the
     # window's DOCUMENTED legitimate content (`state_intent.py:176`) and the question
@@ -419,6 +429,22 @@ def test_a_state_question_selects_its_population(query, population, shape):
 #: commitment with "due this week" dropped. Each one is pinned here so that
 #: regression cannot come back quietly.
 NOT_SELECTED = [
+    # ⛔ THE `<preposition> the <noun>` QUALIFIER class on `is_copula`, GIVEN UP by the re-cut
+    # review's P1 fix (measured): `as`/`than`/`during`/`until` also head a CLAUSE, so exempting
+    # them from the second-NP refusal routed `is the report as the board archived` to the WHOLE
+    # ended population with no notice. The exemption therefore carries only prepositions that do
+    # not head a clause, and these four spellings are silent — `main`'s behaviour, stated and
+    # pinned rather than claimed as coverage. Open on #14033 with the rest of the class.
+    "is the export archived during the migration",
+    "is the export archived until the merger",
+    "is the export archived as the old policy",
+    "is the export archived than the old sharepoint",
+    # …and the one spelling the adverb slot above still gives up, PINNED because "silent" is
+    # the claim (measured): `already` as the AUXILIARY with no `been` leaves the participle
+    # ATTRIBUTIVE (`reports already archived` = a noun phrase), and admitting that adverb back is
+    # the round-7 ACTIVE reading two lines down. `main` routed it, so this is a stated recall
+    # loss, not an advertent one.
+    "have any reports already archived",
     "launch event",
     "onboarding flow",
     "beach club confirmed booking",
@@ -1073,10 +1099,12 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
         ("is the billing service deprecated for the new plans", "is_copula"),
         ("is the Q3 export archived in the old sharepoint", "is_copula"),
         ("is the data archived on the old server", "is_copula"),
-        ("is the export archived during the migration", "is_copula"),
-        ("is the export archived until the merger", "is_copula"),
-        ("is the export archived as the old policy", "is_copula"),
-        ("is the export archived than the old sharepoint", "is_copula"),
+        # ⛔ THE FOUR `<prep> the <noun>` SPELLINGS MOVED TO `NOT_SELECTED` (re-cut review, P1,
+        # measured): they report `is_copula` only while `during|until|as|than` are exempt from the
+        # second-NP refusal — and that exemption is exactly what routed
+        # `is the report as the board archived` to the whole ended population with no notice. A
+        # silence that is a DELIBERATE trade is pinned where the silences live, not in the table
+        # that asserts the cue is REPORTED.
         ("list what we retired in Q3", "imperative_what"),
         # …and the compound question the table has always refused
         ("what ended, and what replaced it", "wh_whole_question"),
@@ -1368,7 +1396,7 @@ def test_every_preposition_the_module_declares_reports_the_qualifier_it_introduc
     subordinators, and their silence is the guard-A trade the module records.
     """
     from tortoise import state_intent
-    from tortoise.state_intent import detect_state_question
+    from tortoise.state_intent import _CLAUSE_HEADING_PREPOSITIONS, detect_state_question
 
     declared = state_intent._PREPOSITIONS
     # ⛔ THE CLASS ITSELF IS PINNED, NOT JUST EACH MEMBER'S WIRING (round-26 review, P2,
@@ -1397,7 +1425,17 @@ def test_every_preposition_the_module_declares_reports_the_qualifier_it_introduc
     assert len(set(declared)) == len(declared), (
         "a duplicated member is a copy-paste artefact, not a class")
 
+    # ⛔ THE EXEMPTION CLASS IS THE DECLARED CLASS MINUS THE MEMBERS THAT CAN HEAD A CLAUSE
+    # (re-cut review, P1, measured): `as`, `during`, `than` and `until` introduce a second CLAUSE
+    # as readily as a qualifier, so exempting them let `is the report as the board archived`
+    # become ONE copula subject and ROUTE the whole ended population with the caller's predicate
+    # dropped and no notice — #14033's own defect, in the worst direction. The guard derives
+    # its exemption from `_PREPOSITIONS` minus `_CLAUSE_HEADING_PREPOSITIONS`; those four are
+    # graded by the block BELOW instead of this loop, and the `<prep> the <noun>` spelling they
+    # cost is pinned in `NOT_SELECTED` rather than claimed as covered.
     for prep in declared:
+        if prep in _CLAUSE_HEADING_PREPOSITIONS:
+            continue
         # …the shape this PR adds, whose guard read a prepositional qualifier as a
         # second noun phrase and swallowed the cue.
         got = detect_state_question(f"is the export archived {prep} the migration")
@@ -1428,6 +1466,34 @@ def test_every_preposition_the_module_declares_reports_the_qualifier_it_introduc
             f"{prep!r}: `has anything we promised been withdrawn {prep} legal` "
             f"reports {other.signal!r} — the shape's own notice lost this preposition, "
             f"which `_BLOCKED_TAIL` inherits from `_PREPOSITIONS`")
+
+    # ⛔ THE CLAUSE-HEADING MEMBERS: BOTH directions pinned, because the failure is directional
+    # (re-cut review, P1, measured). (a) On the CLAUSE shape the shape must REFUSE — routing it
+    # serves the whole ended population with the caller's predicate dropped and no notice
+    # (measured: all four routed with `signal=None` before this fix) — and it refuses AND
+    # reports `is_copula_long_subject`, which is what a reader can act on. (b) On the QUALIFIER
+    # shape (`is the export archived as the migration`) the answer is `main`'s — SILENT — and
+    # that is declared as a stated recall loss in `NOT_SELECTED`, never as coverage: telling "as
+    # the migration" from "as the board archived" needs a predicate, not another word list.
+    for prep in _CLAUSE_HEADING_PREPOSITIONS:
+        assert prep in declared, (
+            f"{prep!r} is in `_CLAUSE_HEADING_PREPOSITIONS` but not in `_PREPOSITIONS` — the "
+            f"exemption is derived by subtraction, so a name that is not a member subtracts "
+            f"nothing and the role list silently stops describing the class")
+        clause = detect_state_question(f"is the report {prep} the board archived")
+        assert clause.population is None, (
+            f"{prep!r}: `is the report {prep} the board archived` was ROUTED to "
+            f"{clause.population!r} — a second CLAUSE was read as one copula subject, which "
+            f"serves the whole ended population with the caller's own predicate dropped")
+        assert clause.signal == "is_copula_long_subject", (
+            f"{prep!r}: the clause shape reports {clause.signal!r}, not "
+            f"'is_copula_long_subject' — a refusal the caller cannot see is the same silence "
+            f"this class exists to remove")
+        qualifier = detect_state_question(f"is the export archived {prep} the migration")
+        assert qualifier.population is None and qualifier.signal is None, (
+            f"{prep!r}: `is the export archived {prep} the migration` now reports "
+            f"{qualifier.signal!r}. It is pinned as a STATED silence in `NOT_SELECTED`; if that "
+            f"is deliberately closed, remove the pin and say so there")
 
     # ⛔ THE DEPARTURE, PINNED SO IT READS AS A DECISION: these three are prepositions
     # in this position and still SILENCE the shape, because guard A refuses a
