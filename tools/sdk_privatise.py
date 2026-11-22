@@ -1255,6 +1255,14 @@ SWEEP_NAMES = 66
 #: measures **11861** at the commit this merge takes. A carried figure would have been 3 short and
 #: six rows were the difference between guessing and measuring.
 #: `--check` exits 0 here with `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ MERGED `origin/main` (`5e83c2a2f697`) — RE-DERIVED on the MERGED tree, and NEITHER PARENT'S PAIR
+#: IS INHERITED: `--repin` prints `(11860, "d2d8707a7cc07e96")` at this branch's pre-merge head
+#: `58e7049e0f` and `(11861, "f0647020531c078c")` at `main`'s `5e83c2a2f697`, so the merged tree's
+#: `(11864, "f3eda429035b1999")` is the UNION of both sides' insertions rather than a delta either side
+#: could be handed. That is why the pair is MEASURED here and not computed: a merge of two branches
+#: that each add residue rows moves the pin by the sum, and an arithmetic resolution (`this side's
+#: number + that side's delta`) answers a tree that never existed.
 SWEEP_RESIDUE = (11864, "f3eda429035b1999")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

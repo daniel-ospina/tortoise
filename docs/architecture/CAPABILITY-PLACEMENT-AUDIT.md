@@ -104,14 +104,17 @@ produced the `96 of 218` this header carried before the `#13124` review**, which
 naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
 was itself measured false; a range cite counts once, by its **start** line), which dedupes the **345** as-written spellings to 234 — **111**
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
-text; **all 224 comparable ones resolve at BOTH heads** — every written path resolves to a module that
-exists at `ccb49741b2ec` — and **the ten that are NOT comparable are this branch's own**, each named at the address this
-document writes for it: `sdk.py:57951`, `:58198` (the `entity_type="event"` FTS call), `:58414`/`:58416` (the session-detail
+text; **all 223 comparable ones resolve at BOTH heads** — every written path resolves to a module that
+exists at `ccb49741b2ec` — and **the eleven that are NOT comparable are addresses written at a head past the pin's EOF** — ten of
+them this branch's own, the eleventh (`mcp_server.py`'s `:Tag` traversal) moved past the pin by `main`'s `#14169` and re-pointed here
+by this branch's own `mcp_server.py` insertions — each
+named at the address this document writes for it: `sdk.py:57951`, `:58198` (the `entity_type="event"` FTS call), `:58414`/`:58416` (the session-detail
 read's `proj.g.query(` call and its column list), `sdk.py:59065` (the `:Source` traversal), `:61999`/`:62019` (the `:Meta` read and
-its `_config_reset_state` delegate), `search_engine.py`'s `:7196`/`:7198`, and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid`
+its `_config_reset_state` delegate), `search_engine.py`'s `:7560`/`:7562`, `mcp_server.py`'s `:11597` (the `:Tag` traversal §2.5's row
+quotes — the ONE of the eleven that `main` moved first, not this branch), and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid`
 condition) — every one of their written lines sits past the pin's copy of its file
-(`git show ccb49741b2ec:tortoise/sdk.py | wc -l` -> `56415`; `…/search_engine.py` -> `7071`; `…/hosted_api.py` -> `49851`), and all ten
-were re-derived at a head that has since grown. So the drift is **131 of the 224 comparable, plus seven of those ten pairs** (the
+(`git show ccb49741b2ec:tortoise/sdk.py | wc -l` -> `56415`; `…/search_engine.py` -> `7071`; `…/mcp_server.py` -> `11466`; `…/hosted_api.py` -> `49851`), so all eleven
+were re-derived at a head the pin predates. So the drift is **130 of the 223 comparable, plus eight of those eleven pairs** (the
 three that do not exist at `main` either are `sdk.py`'s `:61999`/`:62019` and `hosted_api.py`'s `:50935`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
@@ -177,7 +180,7 @@ that nothing else is at `main`** — and a range entry spans every line it cover
 `:6974-6990` (the block), `:6984` (`Event`), `:6985` (`Subject`), `:6989` (`Object`), `:6990` (`Source`);
 `record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37883`/`:37906` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5250`/`:8522`/`:11597`; `goal_judgement.py:1128`; and §2.1's own table, which carries
-two of this class as well — `sdk.py:24626` and `search_engine.py:6891`, both open at this revision and neither
+two of this class as well — `sdk.py:24626` and `search_engine.py:7184`, both open at this revision and neither
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at **this head** (⚠️ NOT at
 `main` `ae54df166d`, where `hosted_api.py`'s `:23046` is `for ev in (payload.events or []):` and the commit
 door's `MERGE (s:Source {url:$did})` is the integration head's line) but
@@ -204,7 +207,9 @@ member — `sdk.py`: `:31551`
 (`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})`), `:31533` (the tag list with
 counts — `MATCH (t:Tag)` + `OPTIONAL MATCH (p:Point)-[:TAGGED]->(t)`), `:24513` (the tag-name match —
 its `WHERE t.name IN $names` filter is the line below it) and `:24857` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the
-orphan GC), and `mcp_server.py`: `:11597` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`). The four
+orphan GC), and `mcp_server.py`: `:11597` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`, re-derived by
+`grep -nF 'OPTIONAL MATCH (t)<-[:TAGGED]-(q)' tortoise/mcp_server.py` on the MERGED tree, where `#14169`'s move and
+this branch's own `mcp_server.py` insertions both apply — neither side's number is inherited). The four
 `sdk.py` ones are spelled as bare `:NNNN` siblings behind one path, as the `mcp_server.py` group above
 does, and NOT as new `path.py:NNNN` pairs (a bare sibling is not counted at all — that is the point):
 a pair spelling would
@@ -214,9 +219,11 @@ way, because each of the five already carries its pair from §2.5. A bare siblin
 agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
 §2.5 token, so a second one-token spelling would red it. Each was
 opened at this head, and ⛔ **none of them
-opens at the pin**: at `ccb49741b2ec` all five of those numbers
-read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31551p;31533p;24513p;24857p'`,
-and `…:tortoise/mcp_server.py | sed -n '11597p'` prints NOTHING at all — the pin's `mcp_server.py` is 11,466 lines, so the address is past its end), so the head these five belong to is this one, and a
+opens at the pin**: at `ccb49741b2ec` the four `sdk.py` numbers
+read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31551p;31533p;24513p;24857p'`),
+and the fifth has **no line there at all** — `git show ccb49741b2ec:tortoise/mcp_server.py | wc -l` -> `11466`, so
+`:11597` is past the pin's EOF and the address that list carried at the pin was `:11281`, which reads an unrelated
+statement (`git show ccb49741b2ec:tortoise/mcp_server.py | sed -n '11281p'`) — so the head these five belong to is this one, and a
 reader sent to the pin would have found a different line at every one of them — which is why they are
 enumerated here rather than left to the paragraph's own say-so. ⚠️ **And nine MORE addresses this revision writes at THIS head were in neither list — this PR's own review found them — so they are enumerated here now**: `live.py`: `:667` (the `EPISTEMIC_LABELS` tuple the EP walk is swept per label from; the pin's `:667` is a docstring line), `sdk.py`: `:15787` (the `MATCH (m:GraphEventMeta) RETURN m.first_seq` watermark arm; the pin's `:15787` is a comment), `hosted_backup.py`: `:844` (the `max(m.last_seq), max(m.first_seq)` read, the pin's line being an `if not rows` guard) and `:916` (the `MERGE (m:GraphEventMeta) SET …` restore writer, the pin's line being a bare `)`), and — from §2.6, whose row this revision re-pointed to this head — `hosted_backup.py:892` (the `max(e.seq), min(e.seq)` aggregate; the pin's `:892` is `max_seq, min_seq = (rows[0] if rows else (None, None))`), `hosted_backup.py:1333` and `hosted_backup.py:1534` (the two whole-graph export scans, the pin's `:1316` being `dropped_vectors += 1` and its `:1517` a blank line). and §6.3's `sdk.py`: `:15958-15962` (the `_emit_event` docstring's JSONL contract — the pin's `:15958` is unrelated prose) and `:3777` (the turn hard delete that emits `PointRetracted`; the pin's `:3777` is an empty line). All nine are pinned by content in `tests/test_12184_shifted_cites.py`, which is what stops them becoming the next unguarded promise. ⛔ **One class this revision writes is NOT head-relative, and is pinned anyway — do not read the sentence above as covering it.** The five addresses in this revision's new §2.2 `:Source` reader row and in row 13 — `session_source_prose_migration.py`: `:218-223` (the `_SOURCE_ROWS` census read `find_session_sources_carrying_prose` issues), `:1263-1268` (the `_HITS_ROWS` read — keyed on the urls the FTS leg RETURNED, so it is the follow-up to `run_fts_query` and not the FTS read itself), `:274-281` (the `_REPAIR_PAIR` block, a `SET` that READS the node) with its inner `:277-279` (the `AND coalesce(s.summary,'')=$old_sum … SET s.summary=$sum` pair row 13 quotes), and `:1292-1300` (`_CONTROL_LEXICON_ROWS`, the prefix predicate over exactly this episodic population) — **all open at the pin `ccb49741b2ec` exactly as they open here**, because `tortoise/session_source_prose_migration.py` is the SAME FILE at both heads (`git rev-parse ccb49741b2ec:tortoise/session_source_prose_migration.py HEAD:tortoise/session_source_prose_migration.py` → one blob, `77c86b24e5`). They need **no head declaration**: what was missing is the GUARD, not the head. They are named here once, only so a reader is not left to the default on a cite this revision wrote, and each is pinned by content in `tests/test_12184_shifted_cites.py` — because a cite that resolves at the pin is still UNPINNED, and the next merge that inserts into that file moves all five with nothing red. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin
 `ccb49741b2ec` is where the census USUALLY wrote it, not where it provably IS.** Open it there first, but
@@ -277,7 +284,9 @@ five are *at risk* of drifting silently: no symbol will be there to re-find — 
 citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
 to bite: of the line-numbered cites in these five rows, **ten no longer name the same line at `main`**
 (re-measured at `main` `ae54df166d`, the head this header's own lists are written at, and RE-MEASURED again for this edition — the `111-of-217` this clause used to defer to has been retired) — row 15's `hosted_api.py:32965`, whose
-`MERGE (p:PackInstall …)` is at `:33583` there (`:34306` at this head), and **9 of row 18's 16** (that row's `hosted_api.py`, `sdk.py` and `pipeline.py` addresses moved; its seven `metering.py` / `cohort_cost.py` ones are unchanged) — while rows 10, 11 and 14 and row
+`MERGE (p:PackInstall …)` is at `:33583` there (`:34306` at this head — re-derived by content on the MERGED tree
+(`grep -nF 'MERGE (p:PackInstall {namespace: $ns})' tortoise/hosted_api.py`), where `#14169`'s move and this branch's
+own `hosted_api.py` insertions both apply, so neither side's number is inherited), and **9 of row 18's 16** (that row's `hosted_api.py`, `sdk.py` and `pipeline.py` addresses moved; its seven `metering.py` / `cohort_cost.py` ones are unchanged) — while rows 10, 11 and 14 and row
 15's `pack_manifest_store.py:467` still do. ⚠️ **The comparison this count is taken on is the PIN against `main`, never `main` against this head** — `git show ccb49741b2ec:tortoise/pipeline.py | sed -n '529p'` is `"k": pipe.pipeline_key, "kind": pipe.pipeline_key,`, while `ae54df166d` holds `"MATCH (p:Pipeline {pipelineKey:$k}) RETURN p.defaultStageId, "` on that line: it MOVED, which is what makes it the ninth of row 18's sixteen, even though `main` and this head agree on it.
 ⚠️ **Row 14 does NOT, and this clause is measured at `ae54df166d`, not at THIS head**: `63bc13edb44` — the +8 shift of `webhook_delivery.py` that §2.7 records — is not an ancestor of `ae54df166d` (`git merge-base --is-ancestor 63bc13edb44 ae54df166d` → 1), so at `ae54df166d` row 14's census address `:487` still opens on its quoted `CREATE`, while §2.7 re-derived it to `:495` for THIS head. Every other address this document carried into that file moved in the same pass, and §2.7's `:GraphEventMeta` row records the whole old→new mapping. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
@@ -392,9 +401,9 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/projection/edges.py:1888` | `(p:Point {id:$pid})-[:TAGGED]->(t:Tag)` | **traversal** |
 | `tortoise/sdk.py:24626` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
 | `tortoise/search_engine.py:4950-4954` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
-| `tortoise/search_engine.py:6837` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW | **adjacency** |
-| `tortoise/search_engine.py:6891` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:6834` inside the same function | **adjacency** |
-| `tortoise/search_engine.py:7196` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7195-7198`, consumed only by `subject_binding_available()` at `:7201-7214`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
+| `tortoise/search_engine.py:7153` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW | **adjacency** |
+| `tortoise/search_engine.py:7184` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:7150` inside the same function | **adjacency** |
+| `tortoise/search_engine.py:7560` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7559-7562`, consumed only by `subject_binding_available()` at `:7565-7578`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
 | `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
 | `tortoise/search_engine.py:4878-4880` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
 | `tortoise/search_engine.py:4293` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
@@ -464,7 +473,7 @@ mechanism, not a citation nicety.
 | reader (`file:line`) | what it does | capability |
 |---|---|---|
 | `tortoise/goal_judgement.py:1128` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
-| `tortoise/search_engine.py:7198` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
+| `tortoise/search_engine.py:7562` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
 | `tortoise/assembly.py:2632` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
 | `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3062` derives the label from `entity_type`; `sdk.py:58198` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6984` | **fulltext index** |
 
@@ -626,9 +635,12 @@ read resolves the node **through the edge** — `sdk.py:31551`
 addresses opened at this head and re-checked in this pass (#13879 review, P2): the `mcp_server.py`
 one was stale at main's head, at `:11280` → `:11281` (`#13991`), and this branch's own `sdk.py`
 insertions then moved the four `sdk.py` addresses by `+31` — each re-derived by the fragment it
-quotes (`grep -nF`), never by applying that delta — while the `mcp_server.py` one landed where
-`#13991` left it — and this branch's own `mcp_server.py` insertions have since moved it by `+7`
-(re-derived by `grep -nF 'OPTIONAL MATCH (t)<-[:TAGGED]-(q)' tortoise/mcp_server.py`, not by the delta). ⚠️ **The correction did not arrive on `main` from this pass.** This pass
+quotes (`grep -nF`), never by applying that delta — while the `mcp_server.py` one stayed where
+`#13991` left it only down to `#14169`: `b4da1f5c01` then moved it, and this branch's own
+`mcp_server.py` insertions moved it again at the merge, so the address here is RE-DERIVED on the
+merged tree by `grep -nF 'OPTIONAL MATCH (t)<-[:TAGGED]-(q)' tortoise/mcp_server.py` — not carried
+from either side — and the `#13991` address is HISTORY, the provenance below being its record, not a
+second cite. ⚠️ **The correction did not arrive on `main` from this pass.** This pass
 re-derived the address itself (commit `143b1fea07`, 12:26Z) on parent `1f7ae03e`, where this document
 still carried the stale address and not the corrected one; **#13992** (`8747965ad5`) put the same
 address on `main` at 16:14Z, 63 minutes before this pass merged, sweeping a second site — the header

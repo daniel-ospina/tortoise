@@ -973,8 +973,22 @@ class _NoDuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]
     """
 
     def construct_mapping(self, node, deep=False):
+        # ⛔ SKIP THE MERGE TAG, DO NOT FLATTEN BEFORE THE SCAN (round-25 review, P3).
+        # `<<:` is not a constructor: handing this pre-scan the raw merge tag makes
+        # `construct_object` die with "could not determine a constructor for the tag
+        # 'tag:yaml.org,2002:merge'" — a diagnosis that names PyYAML instead of the
+        # problem, on a file with no duplicate at all, and merge keys are the natural
+        # way to de-duplicate 39 near-identical rows.
+        # ⛔ AND FLATTENING FIRST WOULD BE A FALSE BLOCK TOO, measured: `flatten_mapping`
+        # REPLACES `<<: *base` with the merged pairs, so the standard `<<: *base` plus an
+        # explicit OVERRIDE of one key reads as a duplicate and is refused. YAML says an
+        # explicit key beats a merged one, so the scan runs over the pairs the file
+        # actually WROTE (merge tags excluded) and the parent constructor then flattens
+        # for itself, which is what supplies the merged values.
         seen: set = set()
         for key_node, _value_node in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
             try:
                 key = self.construct_object(key_node, deep=deep)
                 hash(key)
@@ -4617,9 +4631,21 @@ def cmd_check(args: argparse.Namespace) -> int:
         # got a bare `was DROPPED with no record` line and no step to take, while the archive
         # tool prints its route INSIDE every violation and this file's own design note says a new
         # class needs "a runnable route in `REMOVAL_WAYS`, or the operator gets a refusal they can
-        # act on". Printed only when a SHRINK row is present: the structural findings above have
-        # their own remedies, and a route block under them would be noise.
-        if _shrink_problems:
+        # act on".
+        #
+        # ⛔ SCOPED TO A ROW THAT WAS ACTUALLY DROPPED (round-18 review, P3 — measured). The first
+        # cut keyed on `_shrink_problems` being non-empty, but that list also carries the tail's
+        # `--allow-surface-shrink … waives nothing` rows, which are NOT dropped rows: a stale
+        # waiver printed "Account for the row(s) above reported as dropped by exactly one of:"
+        # over a finding whose remedy is "drop the flag", sending the operator to write an archive
+        # entry for a row that never left. The structural findings above have their own remedies,
+        # and a route block under them would be noise.
+        _needs_a_record = [
+            p
+            for p in _shrink_problems
+            if "DROPPED with no record" in str(p) or "is archived but absent" in str(p)
+        ]
+        if _needs_a_record:
             print("\nAccount for the row(s) above reported as dropped by exactly one of:")
             for way in REMOVAL_WAYS:
                 print(f"  - {way}")

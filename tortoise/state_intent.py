@@ -347,8 +347,10 @@ _TAIL_END = r"\s*[?.!]*$"
 #:   fix, while the prose above the guard claimed the class was closed.
 #:
 #: A third hand-typed copy drifts a third time, so BOTH sites now interpolate this
-#: tuple (:data:`_PREPOSITION_RE`), and the membership is pinned by driving every
-#: member through the detector — see
+#: tuple (:data:`_PREPOSITION_RE`), and the membership is pinned TWICE: the tuple is
+#: asserted verbatim (so a member can neither vanish nor appear without the commit
+#: saying why), and every member is then driven through the detector on both consumers
+#: (so a member that stops reaching one of them reds). See
 #: `tests/test_13557_13558_reachable_reads.py::test_every_preposition_the_module_declares_reports_the_qualifier_it_introduces`.
 #: ⛔ THE DELIBERATE OMISSIONS ARE NAMED, so the departure reads as a decision rather
 #: than an oversight: `after`, `before` and `since` are prepositions AND subordinators;
@@ -517,11 +519,24 @@ _EXISTENCE_HEAD = (
     r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
 _EXISTENCE_ADVERB = (
-    r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet)"
+    r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet|"
+    # ⛔ THE `-ly` CLASS IS NOT THE ADVERB CLASS (round-24 review, P1, measured):
+    # `very`, `quite`, `almost`, `just about`, `in fact` are adverbials that END IN
+    # SOMETHING ELSE, so the first cut of this slot was blind to the commonest English
+    # spelling — `have any users reported the vendor has very recently been deprecated`
+    # still routed the whole ended population with the caller's predicate dropped and
+    # `signal=None`, i.e. the round-23 defect one spelling over. Measured over 7 verbs x
+    # 7 subjects x 12 spellings: 291 of 588 routed before this list was widened.
+    r"very|quite|rather|almost|nearly|too|much|all|as|so|about|in|fact|practice|"
+    r"effect|good|long|since|far)"
 )
 _EXISTENCE_HELPER = (
-    rf"(?:not\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}"
-    rf"(?:have\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}been\b"
+    # …and the REPETITION BOUND is 5, not 3: `only just very recently` is four adverbials,
+    # and a count bound is a spelling this guard is blind to if it is one short (measured
+    # in the same round). The bound exists to keep the window from swallowing a whole
+    # clause, not to grade English.
+    rf"(?:not\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}"
+    rf"(?:have\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}been\b"
 )
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
@@ -542,7 +557,14 @@ _EXISTENCE_GUARD = (
     r"that)\s+)?(?!it\b|they\b|he\b|she\b|we\b|you\b|i\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    rf"must|should)\s+{_EXISTENCE_HELPER})"
+    # ⛔ AND THE CLAUSE'S OWN PARTICIPLE ANCHORS IT (round-24 review, P2, measured):
+    # without the `been <ENDING>` anchor the widened adverb slot refused a RELATIVE
+    # clause whose own verb is `<aux> <adverb> been <other participle>`, which is the
+    # window content the module allows on purpose — `has anything the board has recently
+    # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
+    # after. The anchor is the same one the pronoun branch below already uses: the
+    # lookahead fires only when the second clause's passive ends an ENDING participle.
+    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -855,13 +877,27 @@ _COPULA_SUBJECT = (
     # `signal=None` — measured, on the unchanged head. Both sites now interpolate
     # `_PREPOSITIONS`, and the membership is pinned by driving every member through the
     # detector, so a fourth drift reddens instead of shipping.
-    # ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: a CONJUNCTION or SUBORDINATOR
-    # (`because`, `when`, `if`, `and`, and the three words that are both — `after`,
-    # `before`, `since`) still silences this shape, because guard A refuses inside the
-    # subject and cannot tell a tail from a subject without bounding itself at the
-    # participle — measured to re-route the round-16 hijack. Those three are the notice
-    # genuinely still owed, which is why they stand OUTSIDE `_PREPOSITIONS` rather than
-    # being quietly counted as covered by it.
+    # ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED — AND IT HAS TWO CAUSES, NOT
+    # ONE (review at `5b82bcdf03`, P2, measured: the previous draft of this sentence
+    # gave BOTH groups the subordinator reason, which is false for the second):
+    #   (a) SUBORDINATOR members (`because`, `when`, `if`, and the three that are both
+    #       preposition and subordinator — `after`, `before`, `since`) are refused by the
+    #       SUBORDINATOR lookahead above, which refuses inside the subject and cannot
+    #       tell a tail from a subject without bounding itself at the participle —
+    #       measured to re-route the round-16 hijack. Those three are the notice
+    #       genuinely still owed, which is why they stand OUTSIDE `_PREPOSITIONS` rather
+    #       than being quietly counted as covered by it. Excluding them HERE is a
+    #       NO-OP: measured, adding all three flips 0 of 277 probe outcomes.
+    #   (b) CONJUNCTIONS (`and|or|but|so|yet`) are NOT in that lookahead at all. What
+    #       refuses them is the "second noun phrase" test BELOW reading a coordination
+    #       as one — a LIST decision, not that guard's participle bound: excluding them
+    #       here DOES report them (measured: 5 probes flip, 0 pinned rows change). That
+    #       is a recall widening with its own review, so it is stated rather than made,
+    #       and `test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound`
+    #       pins it.
+    # ⛔ AND A WORD LIST CANNOT SETTLE (a) EITHER: `after`/`before`/`since` are `ADP`
+    # before a nominal (`since the merger`) and `SCONJ` before a clause (`since the
+    # merger closed`), so the tags separate them only after the fact.
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|"
     rf"{_PREPOSITION_RE}|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
