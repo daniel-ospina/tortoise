@@ -611,8 +611,8 @@ def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
     names unreachable for the very failure they name — the caller would see
     `error` and the cause would live only in a log line nothing aggregates.
 
-    MEASURED before the guard existed: the RuntimeError below escaped
-    `evaluate`, which is why this row is the pin and not a restatement.
+    MEASURED before the guard existed: each of these raises escaped `evaluate`,
+    which is why they are the pins and not a restatement.
 
     ⛔ THREE EXCEPTION CLASSES, because the guard's BREADTH is what is pinned:
     `OrgNotFoundError` is a `QuotaCheckError` (not a `RuntimeError`), and the third
