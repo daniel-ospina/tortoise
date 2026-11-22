@@ -2336,9 +2336,12 @@ def _unarmed_from_rows(
 
     Split out of `_unarmed_probe_blocks` so the gate VERDICT itself can be witnessed from
     synthetic source (`_probe_blocks_from_source` rows) and not only from the real tree's
-    census. Every self-test in this file used to exercise a PREDICATE and never a gate
-    verdict, which is why a shape BOTH gates passed could have no red row anywhere
-    (review of PR #14287, F1's second half).
+    census. Before this split, every self-test here exercised a PREDICATE, or a gate verdict
+    over the REAL TREE's rows — never one over a SYNTHETIC row population — which is why a
+    shape BOTH gates passed could have no red row anywhere (review of PR #14287, F1's second
+    half; corrected in cycle 2, whose review measured the two real-tree gate witnesses on
+    `origin/main`'s copy, `_unarmed_probe_blocks()` at :2239 and
+    `_probe_blocks_with_an_uncovered_import_seam()` at :2269).
     """
     return tuple(
         (rel, lineno)
@@ -2450,7 +2453,9 @@ def test_a_probe_that_imports_inside_its_try_covers_the_import_seam():
             "import DOES clear this red, but for a DIFFERENT reason than the missing "
             "spelling — the block stops importing own code inside the `try`, so the seam "
             "gate drops out — so it clears the red without the earlier dropper being the "
-            "cause. Otherwise re-raise or delete the EARLIER dropping arm. "
+            "cause (graded below: `test_the_import_seam_census_sees_the_shapes_it_grades` "
+            "pins the hoisted row at `own_code_import` False with both gates clear). "
+            "Otherwise re-raise or delete the EARLIER dropping arm. "
             "(A third-party import is out of scope here: for an optional extra, "
             "a skip is the correct outcome.) ⛔ NEITHER REPAIR FITS AN EXTRA-GATED OWN "
             "MODULE (`tortoise.embeddings`, numpy only in the `embeddings` extra) — see "
@@ -2610,6 +2615,39 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     assert _seam_from_rows(tuple((_witness, *row) for row in _local_dropped)) == (), (
         "the import seam IS covered here, so the seam gate stays green — the local family is "
         "the unarmed gate's question"
+    )
+
+    # ⛔ CYCLE-2 REVIEW (PR #14287): the gates' own repair text used to call HOISTING a no-op
+    #     for this shape ("Adding it again, or hoisting, changes nothing"). Measured, it is
+    #     not: hoisting the import above the `try` leaves no seam (`own_code_import` False),
+    #     so BOTH gates clear — the verdict CHANGES, by removing the seam rather than covering
+    #     it. The prose is corrected at the seam gate's message; this pair is what grades the
+    #     correction, so the claim cannot drift back to "changes nothing" unreddened.
+    hoisted = rows(
+        """
+        from tortoise.sdk import TortoiseSDK as _ProbeSDK
+        FALKORDB_AVAILABLE = False
+        try:
+            _ProbeSDK()
+            FALKORDB_AVAILABLE = True
+        except ModuleNotFoundError:
+            pass
+        except (AttributeError, NameError, TypeError, ImportError):
+            raise
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert hoisted == ((4, ("AttributeError", "NameError", "TypeError"), True, False, True),), (
+        "a hoisted own-code import leaves NO seam (`own_code_import` False): "
+        f"{hoisted}"
+    )
+    assert _unarmed_from_rows(tuple((_witness, *row) for row in hoisted)) == (), (
+        "with the import hoisted above the `try`, `ImportError` is no longer required and "
+        f"the UNARMED gate clears: {hoisted}"
+    )
+    assert _seam_from_rows(tuple((_witness, *row) for row in hoisted)) == (), (
+        f"with the import hoisted there is no seam left to cover: {hoisted}"
     )
 
     # A bare `except:` covers NOTHING and swallows everything — the worst shape.
