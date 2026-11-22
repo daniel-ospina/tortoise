@@ -1134,9 +1134,14 @@ SWEEP_NAMES = 66
 #: between that merge and the squash.
 #: THE +3 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic, and the ISOLATING pair of trees
 #: is the branch tip against `main` — NOT `9f83a63bfab7`, which predates this branch's own declared
-#: `out.update` row and so reads a delta of four. `c5e84ad180f2` (#14160's tip) commits
+#: `out.update` row and so reads a delta of four. `0351fe856942` (#14160's PRE-squash tip,
+#: resolvable through `refs/pull/14160/head` — `git fetch origin refs/pull/14160/head`) commits
 #: `(11858, "a1552662bf07a10b")`, and `--repin` in a detached worktree there prints that same
-#: pair, so the red is a property of the LANDING tree rather than of the branch. `--report --base
+#: pair, so the red is a property of the LANDING tree rather than of the branch. ⛔ NOT the
+#: post-squash tip `c5e84ad180f2`, which is where `origin/fix/14125-census-p1s` stands TODAY: it is
+#: a DESCENDANT of `0351fe856942`, pushed after the squash, whose own content never landed, and it
+#: happens to commit the same pair — which is why it reads the same and is still the wrong tree to
+#: name (an earlier cut of this paragraph did, review round 2, P2). `--report --base
 #: 28ca66878d… --top 5000` was run there and on `main` at `70fbd1a27dd5`
 #: (`(11861, "f0647020531c078c")`), both row sets sorted and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
@@ -1149,10 +1154,12 @@ SWEEP_NAMES = 66
 #:     those inside DOCSTRING text in `tests/test_14125_retired_name_calls.py`, which is a string
 #:     the AST counter does not read — and **0** for each of the other eight of the ten
 #:     `.py`-touching revs in that range (`git log --oneline 9f83a63bfab7..10e51693f166 -- '*.py'
-#:     | wc -l` → 10). A FalkorDB `Graph` receiver chain is this sweep's documented edge — a `Graph`
-#:     is never the SDK — and the ROW already existed, so a count moved; no shape appeared.
+#:     | wc -l` → 10). A `proj.g` receiver chain is this sweep's documented edge — `proj.g` binds a
+#:     `_GuardedGraph` over the FalkorDB `Graph`, and a graph handle is never the SDK — and the ROW
+#:     already existed, so a count moved; no shape appeared.
 #: ⛔ `out.update` IS NOT PART OF THAT DELTA, and saying it was is the inversion this paragraph was
-#: rewritten to remove: the row reads **43** on the branch tip `c5e84ad180f2` AND on `main` at
+#: rewritten to remove: the row reads **43** on `#14160`'s pre-squash tip `0351fe856942` AND on
+#: `main` at
 #: `70fbd1a27dd5`, so it sits INSIDE the committed pair rather than on top of it. It moves only
 #: against `9f83a63bfab7` (**42 → 43**), the merge base this branch carried — `#14160`'s own row,
 #: which the block above already DECLARES (`_global_declarations` in

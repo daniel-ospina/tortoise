@@ -1644,12 +1644,16 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # on `Its own pin is` alone, so the re-pin block's `10e51693f166` (#14160) `commits
     # (11858, "a1552662bf07a10b")` — the same class of claim, written in a different honest form —
     # was ungraded: a rev published with another tree's pair would have passed in that spelling.
-    # `c5e84ad180f2` is #14160's PRE-SQUASH tip and `10e51693f166` the squash that landed it; both
-    # commit the same pair, measured with `git show <rev>:tools/sdk_privatise.py | grep
-    # '^SWEEP_RESIDUE'`, and `--repin` at either tree prints it — which is what makes the squash
-    # tree's red `main`'s drift and not the branch's.
+    # `0351fe856942` is #14160's PRE-squash tip (`refs/pull/14160/head`) and `10e51693f166` the
+    # squash that landed it; both commit the same pair, measured with `git show
+    # <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`. ⛔ `--repin` at the SQUASH tree prints
+    # `(11861, "f0647020531c078c")` — that is the drift this re-pin repairs, so it is `--repin` at
+    # `0351fe856942` alone that reproduces the pair, and an earlier cut of this comment said
+    # "either tree" (review round 2, P2). ⛔ AND NOT `c5e84ad180f2`, where
+    # `origin/fix/14125-census-p1s` stands today: it is a DESCENDANT of `0351fe856942`, pushed
+    # after the squash, and its content never landed.
     "10e51693f166": (11858, "a1552662bf07a10b"),
-    "c5e84ad180f2": (11858, "a1552662bf07a10b"),
+    "0351fe856942": (11858, "a1552662bf07a10b"),
 }
 
 
