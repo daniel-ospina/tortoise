@@ -377,6 +377,26 @@ _PREPOSITIONS = (
 #: `\b` that follows it.
 _PREPOSITION_RE = "|".join(sorted(_PREPOSITIONS, key=lambda w: (-len(w), w)))
 
+#: ⛔ THE MEMBERS OF :data:`_PREPOSITIONS` THAT CAN ALSO HEAD A CLAUSE — and therefore may NOT
+#: be treated as a bare qualifier inside the `is_copula` subject (re-cut review, P1, measured):
+#: `during`, `until`, `as` and `than` introduce a second clause (`is the report as the board
+#: archived`), so exempting them let the shape swallow a whole clause and serve the ended
+#: population with the caller's own predicate dropped and NO notice — #14033's own defect in the
+#: worst direction. Declared as a ROLE, not a second hand-typed list: the exemption is DERIVED
+#: below, so a new member of :data:`_PREPOSITIONS` is covered by default and only a member that can
+#: head a clause has to be named here.
+_CLAUSE_HEADING_PREPOSITIONS = ("as", "during", "than", "until")
+
+#: :data:`_PREPOSITIONS` MINUS the clause-heading members — the qualifier class the `is_copula`
+#: subject guard may treat as one noun phrase. Longest-first for the same reason as
+#: :data:`_PREPOSITION_RE`.
+_QUALIFIER_PREPOSITION_RE = "|".join(
+    sorted(
+        (p for p in _PREPOSITIONS if p not in _CLAUSE_HEADING_PREPOSITIONS),
+        key=lambda w: (-len(w), w),
+    )
+)
+
 #: …and the tail a BLOCKED state question has INSTEAD of the end: punctuation, or
 #: a FUNCTION WORD the caller appended (`by legal`, `in Q3`, `when challenged`).
 #: ⛔ This is what keeps the notice off an ATTRIBUTIVE use — `is the archived
@@ -528,16 +548,61 @@ _EXISTENCE_ADVERB = (
     # `signal=None`, i.e. the round-23 defect one spelling over. Measured over 7 verbs x
     # 7 subjects x 12 spellings: 291 of 588 routed before this list was widened.
     r"very|quite|rather|almost|nearly|too|much|all|as|so|about|in|fact|practice|"
-    r"effect|good|long|since|far)"
+    r"effect|good|long|since|far|"
+    # ⛔ AND THE LIST IS STILL AN ENUMERATION, WHICH IS THE POINT (round-25 review, P1,
+    # measured): `often`, `always`, `sometimes`, `seldom`, `soon`, `again`, `twice`,
+    # `then`, `no longer`, `to date`, `of late`, `at last` are adverbials in NO `-ly`
+    # shape and were not named, so twelve of twelve still routed the whole ended
+    # population with the caller's predicate dropped and `signal=None` — the same defect
+    # one spelling over, for the third round running. The tokens below close the
+    # spellings this review measured; the RESIDUAL is stated rather than called closed:
+    # an adverbial this list does not name still routes, because telling an adverbial
+    # from a noun without a lexicon is the limit `_COPULA_SUBJECT` already states.
+    r"often|always|sometimes|seldom|rarely|soon|again|twice|then|longer|date|late|"
+    # …and the MULTI-WORD adverbials need their own leading word in the gap (`no longer`,
+    # `to date`, `of late`, `at last`): the gap consumes ONE token per iteration, so a
+    # two-word adverbial matched neither half alone. These four join the slot for exactly
+    # that reason; a two-word adverbial this list does not lead is the stated residual.
+    r"last|first|no|to|of|at)"
 )
 _EXISTENCE_HELPER = (
-    # …and the REPETITION BOUND is 5, not 3: `only just very recently` is four adverbials,
-    # and a count bound is a spelling this guard is blind to if it is one short (measured
-    # in the same round). The bound exists to keep the window from swallowing a whole
-    # clause, not to grade English.
-    rf"(?:not\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}"
-    rf"(?:have\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}been\b"
+    # ⛔ `not` IS POSITIONAL, NOT FIRST (round-25 review, P1, measured): the slot used to
+    # accept `(?:not\s+)?` only at the FRONT of the gap, so `has still not been` and
+    # `has recently not been` both routed — a negation after any adverbial re-opened the
+    # hole. `have` joins the same gap alternation for the same reason (the modal passives
+    # `will have recently been`, where `have` is not adjacent to `been`).
+    # …and the REPETITION BOUND is 8, not 5: `has, in fact, only just very recently been`
+    # is five adverbials plus punctuation, and a count bound one short is a spelling this
+    # guard is blind to (measured in three consecutive rounds). The bound keeps the window
+    # from swallowing a whole clause; it does not grade English.
+    rf"(?:[,\s]*(?:not|have|{_EXISTENCE_ADVERB})\b[,\s]+){{0,8}}been\b"
 )
+# ⛔ THE PASSIVE PERFECT WITH AN ADVERB (re-cut review, P1, measured): the window required
+# `been` ADJACENT to the participle, so `have any claims been already retracted`,
+# `has anything been already withdrawn`, `have any of our bookings been already cancelled` and
+# `have any claims been ever retracted` came back `population=None, signal=None` while `main`
+# routes every one of them to `ended` — #14033's own defect (an unrouted state question that
+# is indistinguishable from "nothing has ended") reintroduced by a guard fixing a different
+# spelling. The slot is ONE adverbial (the fixed set below, not the whole `_EXISTENCE_ADVERB`
+# class: those are the ones a customer writes between the auxiliary and the participle, and a
+# wider slot here would swallow a second clause). `have any reports already archived` — where
+# `already` is the AUXILIARY and `archived` stays ATTRIBUTIVE — is `main`'s behaviour traded
+# away deliberately and is pinned in NOT_SELECTED.
+#: ⛔ TWO SLOTS, AND THE ASYMMETRY IS THE POINT (two rounds of review, both measured).
+#: The WINDOW is RECALL: its slot is the narrow set a customer actually writes between the auxiliary
+#: and the participle (`already|ever|recently`), because a wider slot there would let the window
+#: swallow a second clause.
+#: The two LOOKAHEADS are REFUSAL: they only ever ADD a refusal, so their slot is the WHOLE
+#: :data:`_EXISTENCE_ADVERB` class. Giving them the narrow slot was a measured hole — `just` and
+#: `only` are members of that class (so `{_EXISTENCE_HELPER}` already accepts them BEFORE `been`)
+#: but were not in the narrow slot, so they blinded both lookaheads and
+#: `have any users reported it has been just deprecated and been withdrawn` ROUTED the whole ended
+#: population with the caller's predicate dropped and `signal=None`, while the `already` spelling of
+#: the same string was refused. Refusal-side widening cannot create a route: it can only over-refuse,
+#: which the canonical relative-clause rows below measure.
+_EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
+#: The refusal-side slot: ANY adverbial the guard's own class knows, one of them.
+_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+)?"
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -556,7 +621,22 @@ _EXISTENCE_GUARD = (
     # lookahead below, which owns that boundary).
     r"that)\s+)?(?!it\b|they\b|he\b|she\b|we\b|you\b|i\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
-    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
+    # ⛔ A CONTRACTION IS NOT A `not` TOKEN (round-26 review, P1, measured): the negation
+    # slot accepts `not` anywhere in the gap, but `hasn't` carries its negation INSIDE
+    # the auxiliary, so an anchor spelled `has` followed by space/punctuation never
+    # matched it, and all 18 contracted twins — `have any users reported the vendor
+    # hasn't been deprecated` — routed the whole ended population with the caller's
+    # predicate dropped and `signal=None`, while every UN-contracted twin was refused.
+    # This is a CLOSED set, unlike the open adverbial class: one alternation closes it.
+    r"(?:hasn't|hadn't|haven't|isn't|aren't|wasn't|weren't|doesn't|didn't|don't|"
+    r"won't|wouldn't|can't|couldn't|mightn't|mustn't|shouldn't|"
+    # ⛔ AND `do|does|did` ARE NOT HERE (round-26 review, P2, measured): none of them can
+    # precede `been`, so they add NO detection power to a guard whose window requires
+    # `been` — their only effect was to let an ordinary verb fill the noun slot and the
+    # next verb fill the auxiliary: `has anything we said we would do been cancelled`
+    # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
+    # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
+    r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
     # ⛔ AND THE CLAUSE'S OWN PARTICIPLE ANCHORS IT (round-24 review, P2, measured):
     # without the `been <ENDING>` anchor the widened adverb slot refused a RELATIVE
     # clause whose own verb is `<aux> <adverb> been <other participle>`, which is the
@@ -564,7 +644,7 @@ _EXISTENCE_GUARD = (
     # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
     # after. The anchor is the same one the pronoun branch below already uses: the
     # lookahead fires only when the second clause's passive ends an ENDING participle.
-    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -581,10 +661,28 @@ _EXISTENCE_GUARD = (
     # relative clause's) from `we have been tracking` (relative: the ending is still the
     # question's).
     rf"(?![^?]{{0,60}}?\b(?:it|they|he|she|we|you)\s+"
-    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
+    # ⛔ A CONTRACTION IS NOT A `not` TOKEN (round-26 review, P1, measured): the negation
+    # slot accepts `not` anywhere in the gap, but `hasn't` carries its negation INSIDE
+    # the auxiliary, so an anchor spelled `has` followed by space/punctuation never
+    # matched it, and all 18 contracted twins — `have any users reported the vendor
+    # hasn't been deprecated` — routed the whole ended population with the caller's
+    # predicate dropped and `signal=None`, while every UN-contracted twin was refused.
+    # This is a CLOSED set, unlike the open adverbial class: one alternation closes it.
+    r"(?:hasn't|hadn't|haven't|isn't|aren't|wasn't|weren't|doesn't|didn't|don't|"
+    r"won't|wouldn't|can't|couldn't|mightn't|mustn't|shouldn't|"
+    # ⛔ AND `do|does|did` ARE NOT HERE (round-26 review, P2, measured): none of them can
+    # precede `been`, so they add NO detection power to a guard whose window requires
+    # `been` — their only effect was to let an ordinary verb fill the noun slot and the
+    # next verb fill the auxiliary: `has anything we said we would do been cancelled`
+    # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
+    # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
+    r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
 )
-_EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
+
+_EXISTENCE_WINDOW = (
+    rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+)
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
 
 #: "what ended" / "what has been withdrawn" / "what was retracted" — the WHOLE
@@ -917,7 +1015,7 @@ _COPULA_SUBJECT = (
     # before a nominal (`since the merger`) and `SCONJ` before a clause (`since the
     # merger closed`), so the tags separate them only after the fact.
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|"
-    rf"{_PREPOSITION_RE}|"
+    rf"{_QUALIFIER_PREPOSITION_RE}|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
