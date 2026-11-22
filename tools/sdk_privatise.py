@@ -1120,7 +1120,24 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#:
+#: RE-PINNED (11858, "a1552662bf07a10b") → (11861, "f0647020531c078c"), measured with `--repin` on
+#: TWO trees rather than derived by arithmetic. `main`'s OWN tree at `5e83c2a2f6` prints the new
+#: figure, and so does this lane's tree, so the +3 belongs to the BASE and this change contributes
+#: NO row at all.
+#: THE THREE ROWS, named: `proj.g.query` 3643 → 3646, all three in `tools/read_wave_latency.py` —
+#: a file ADDED by `94d75667dc` (`#14224`), which merged ONE MINUTE BEFORE `10e51693f1` (`#14160`)
+#: committed the pair this one replaces. So the pair it replaced was false of the tree it landed on
+#: from the moment it landed, and this is the recurrence the block above records, not a new class:
+#: the pin is graded on PULL REQUESTS only, so `main` drifts off it with nothing measuring it, and
+#: every open PR then grades `main`'s rows as its own (`#14062`). ⛔ THE INHERITANCE IS MEASURED,
+#: NOT ASSUMED: a `--repin` on `10e51693f1`'s OWN tree prints (11861, "f0647020531c078c") too, so
+#: that delta is the base's and never this lane's, and no arithmetic on the last figure was used.
+#: `typed references still pointing at a public name: 0` on both trees, so no typed call site is
+#: legitimised by re-cutting: the three rows are `proj.g.query` on a FalkorDB project handle, the
+#: ordinary-word receiver shape this pin exists to DECLARE and deliberately leaves alone.
+#: Measured with `--repin` on THIS tree (`efe5605e976a`), never by arithmetic on the last pin.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
