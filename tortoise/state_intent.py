@@ -688,6 +688,15 @@ _EXISTENCE_GUARD = (
     # next verb fill the auxiliary: `has anything we said we would do been cancelled`
     # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
     # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
+    # ⛔ AND THE CLITIC SPELLINGS (round-27 review, P2, measured): `'s`, `'ve` and `'d`
+    # are the COMMONEST English spelling of exactly these auxiliaries — `have any users
+    # reported the vendor's been deprecated`, `have any customers said they've been
+    # cancelled` — and all 5 of 5 constructed rows routed with the caller's predicate
+    # dropped and `signal=None`. The clitic attaches to the SUBJECT, so the noun slot
+    # takes the noun and the auxiliary alternation takes `<noun>'s`, which is why this is
+    # one pattern and not a new lookahead. The apostrophe inventory is normalised above,
+    # so `’` is already `'` by the time any of this runs.
+    r"[a-z0-9][a-z0-9'’._/-]*['’](?:s|ve|d)|"
     r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
     # ⛔ AND THE CLAUSE'S OWN PARTICIPLE ANCHORS IT (round-24 review, P2, measured):
     # without the `been <ENDING>` anchor the widened adverb slot refused a RELATIVE
@@ -727,6 +736,15 @@ _EXISTENCE_GUARD = (
     # next verb fill the auxiliary: `has anything we said we would do been cancelled`
     # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
     # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
+    # ⛔ AND THE CLITIC SPELLINGS (round-27 review, P2, measured): `'s`, `'ve` and `'d`
+    # are the COMMONEST English spelling of exactly these auxiliaries — `have any users
+    # reported the vendor's been deprecated`, `have any customers said they've been
+    # cancelled` — and all 5 of 5 constructed rows routed with the caller's predicate
+    # dropped and `signal=None`. The clitic attaches to the SUBJECT, so the noun slot
+    # takes the noun and the auxiliary alternation takes `<noun>'s`, which is why this is
+    # one pattern and not a new lookahead. The apostrophe inventory is normalised above,
+    # so `’` is already `'` by the time any of this runs.
+    r"[a-z0-9][a-z0-9'’._/-]*['’](?:s|ve|d)|"
     r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
     rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
 )
@@ -1604,7 +1622,22 @@ def detect_state_question(text: str | None) -> StateQuestion:
     """
     if not text or not str(text).strip():
         return StateQuestion()
-    t = " ".join(str(text).lower().split())
+    # ⛔ THE APOSTROPHE IS NOT ONE CHARACTER, AND THIS IS THE ONE CONSUMER THAT SEES THE
+    # CALLER'S RAW TEXT (round-27 review, P1, measured). The contraction class is closed
+    # over `'` (U+0027), but the product routinely RECEIVES U+2019 — `tortoise/
+    # extractor_v2.py` normalises the whole `‘’‚‛` inventory before tokenising for exactly
+    # that reason, and this module's own token classes admit `’` beside `'` in eleven
+    # places. `detect_state_question` receives the string from `sdk.py` untouched, so
+    # `have any users reported the vendor hasn’t been deprecated` (U+2019) routed the whole
+    # ended population with the caller's predicate dropped and `signal=None` — 384 of 384
+    # rows in a 6-spelling × 8-subject × 8-verb population — while its ASCII twin was
+    # refused. One normalisation step closes the family, so it is done HERE rather than by
+    # widening every alternation with a second apostrophe.
+    _t = str(text).lower()
+    for _apostrophe in ("\u2019", "\u2018", "\u02bc", "\u055a", "\u02be", "\u02bf",
+                        "\uff07"):
+        _t = _t.replace(_apostrophe, "'")
+    t = " ".join(_t.split())
     for shape, pattern in _ENDING_SHAPES:
         m = pattern.search(t)
         if m:

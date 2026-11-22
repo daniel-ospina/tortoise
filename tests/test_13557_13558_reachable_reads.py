@@ -1550,7 +1550,11 @@ def test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound():
 
     for member in sorted(_CONJUNCTION_TAIL_MEMBERS):
         # A FIXED FRAME, so the probe is mechanical rather than a claim about which
-        # sentences people say; the natural spellings are pinned in `NOT_SELECTED`.
+        # sentences people say. ⛔ NOT ALSO PINNED IN `NOT_SELECTED` — the earlier cut of
+        # this comment said the natural spellings were, and they were not: the same commit
+        # that added the `NOTICE_ONLY` subset invariant deleted them, because they measure
+        # `signal is None` and that is what THIS loop asserts. A comment naming a list
+        # that does not contain the rows is a claim nothing holds.
         query = f"is the export archived {member} the migration"
         got = detect_state_question(query)
         assert got.population is None, (
@@ -3609,6 +3613,31 @@ def test_the_asyndetic_gap_is_blind_to_neither_a_contraction_nor_a_measured_adve
         assert missed_route_payload(got) is not None, (
             f"{query!r} is refused but reports nothing — a silent drop is the same defect "
             f"one layer down")
+    # ⛔ THE SAME SENTENCE IN THE APOSTROPHE THE PRODUCT ACTUALLY RECEIVES (round-27
+    # review, P1, measured): 384 of 384 rows in a 6-spelling × 8-subject × 8-verb
+    # population routed on U+2019 while the ASCII twin was refused. `tortoise/
+    # extractor_v2.py` normalises the same inventory before tokenising, for the same
+    # reason; this module is the consumer that sees raw caller text.
+    for member in ("hasn\u2019t", "hadn\u2019t", "wasn\u2019t", "couldn\u2019t",
+                   "hasn\u02bct", "hasn\u2018t", "hasn\uff07t"):
+        query = f"have any users reported the vendor {member} been deprecated"
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} ROUTED (population={got.population!r}, signal={got.signal!r}) — "
+            f"the apostrophe here is not U+0027, and a class closed over one codepoint is "
+            f"not closed over the family the caller sends")
+    # ⛔ AND THE CLITIC SPELLINGS (`'s`, `'ve`, `'d`) — the commonest English form of
+    # exactly these auxiliaries, and all of them routed before the clitic pattern.
+    for query in (
+        "have any users reported the vendor's been deprecated",
+        "have any users said the feature's been deprecated",
+        "have any customers said they've been cancelled",
+        "has anyone noticed the plan's been withdrawn",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} ROUTED (population={got.population!r}, signal={got.signal!r}) — a "
+            f"clitic attaches to the SUBJECT, not to a separable auxiliary")
     for member in _MEASURED_ADVERBIALS:
         query = f"have any users reported the vendor has {member} been deprecated"
         got = detect_state_question(query)
