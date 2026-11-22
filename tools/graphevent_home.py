@@ -116,15 +116,41 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
-#: ⛔ ONE DEFINITION of "what is a comment or a string literal inside a Cypher
-#: statement". The write gate needs exactly this normalisation for exactly the
-#: same reason — a comment or a literal must not be read as code — so it is
-#: IMPORTED rather than re-spelled here. ⚠️ It is the GATE variant, which KEEPS
-#: backtick-quoted identifiers: `_NO_WS` below strips those deliberately (so
-#: `` CALL `algo.pageRank` `` matches `call algo`), and a stripper that removed
-#: them first would delete the very text that arm reads. 0.16 s of import, which
-#: this tool already pays wherever it touches `tortoise/`.
-from tortoise.projection import _GATE_LITERAL_OR_COMMENT_RE as _LITERAL_OR_COMMENT
+#: ⛔ THIS IS THE WRITE GATE'S GRAMMAR, ONE BRANCH WIDER — copied rather than
+#: imported, and the copy is held to the original by a test, because the two
+#: cannot share a single pass. The canonical spelling is
+#: `tortoise/projection/__init__.py`'s `_GATE_LITERAL_OR_COMMENT_RE`:
+#: `'…' | "…" | //… | /*…*/`. Two of its three possible treatments of a
+#: backtick-quoted identifier are wrong HERE — KEEPING it (the gate's own choice)
+#: leaves a `//` inside `` `a//b` `` to fire the `//` branch and swallow the rest of
+#: the line, pattern and arms included; DELETING it (the sibling regex's choice)
+#: kills the `` CALL `algo.pageRank` `` arm the round-8 control row exists to pin.
+#: So a backtick branch is added that substitutes the identifier's CONTENT, and it
+#: must live in the SAME alternation: alone, a later pass cannot prevent a comment
+#: from opening inside text an earlier pass already consumed.
+#: ⚠️ Measured, both directions: `MATCH (n) WHERE n.`a//b` = 1 MATCH (e)-[r:T]-(p)`
+#: returned `None` under the canonical regex alone (the `//` ate the pattern) and
+#: `` CALL `algo.pageRank`(…) `` returns `call algo` here and would return `None`
+#: under a deleting stripper. `tests/test_13094_graphevent_home.py` pins the
+#: agreement of the two grammars on every non-backtick input, so a change to the
+#: gate's spelling reds here rather than drifting silently.
+_LITERAL_COMMENT_OR_IDENT_RE = re.compile(
+    r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`([^`]*)`|//[^\n]*|/\*.*?\*/",
+    re.S,
+)
+
+
+def _strip_noise(statement: str) -> str:
+    """Drop string literals, comments and backtick quoting — the ONE pre-pass.
+
+    Backtick quoting is UNWRAPPED, not deleted: the identifier's name survives as
+    text (`` `algo.pageRank` `` -> `algo.pageRank`) while the quoting cannot start a
+    comment. See `_LITERAL_COMMENT_OR_IDENT_RE` for the measurement that forces the
+    backtick branch.
+    """
+    return _LITERAL_COMMENT_OR_IDENT_RE.sub(
+        lambda match: match.group(1) or "", statement
+    )
 
 #: ── THE READER CENSUS ─────────────────────────────────────────────────────
 #:
@@ -800,11 +826,13 @@ def superset(graph_rows: list[dict[str, Any]],
 #: `None` for both `-/*hop*/[r:T]-` and the line-comment form `-//hop\n[r:T]-`,
 #: while the same pattern re-spaced (`- [r] -`, the round-8 row) was caught. The
 #: engine executes both comment spellings, and this repo already strips comments
-#: for exactly this reason elsewhere (the `_LITERAL_OR_COMMENT_RE` shape imported
-#: at the top of this module). So the snippet is COMMENT- and LITERAL-stripped
-#: BEFORE the whitespace/backtick strip. ⚠️ String literals go too: a `//` inside
-#: `'https://…'` would otherwise open a line comment and swallow every arm after
-#: it on that line.
+#: for exactly this reason elsewhere (`tortoise/projection/__init__.py`'s
+#: `_GATE_LITERAL_OR_COMMENT_RE`). So the snippet is COMMENT- and LITERAL-stripped
+#: BEFORE the whitespace/backtick strip — by `_strip_noise` above, which is that
+#: grammar PLUS the backtick branch it cannot express (see that regex's block for
+#: why a `//` inside `` `a//b` `` makes a straight reuse a hole of its own).
+#: ⚠️ String literals go too: a `//` inside `'https://…'` would otherwise open a
+#: line comment and swallow every arm after it on that line.
 _NO_WS = re.compile(r"[\s`]+")
 GRAPH_CAPABILITY_CYPHER = (
     "-[*",                # a variable-length traversal
@@ -851,9 +879,11 @@ def graph_capability(row: Mapping[str, Any]) -> str | None:
         # the same pattern.
         # ⛔ A COMMENT IS NOT A BYPASS EITHER (round 12). `-/* hop */[r:T]-` and
         # `-//hop\n[r:T]-` are engine-accepted and carry no contiguous arm, so the
-        # snippet is stripped of comments and string literals FIRST — see the
-        # `_NO_WS` block above for the measurement.
-        haystack = _NO_WS.sub("", _LITERAL_OR_COMMENT.sub("", snippet.lower()))
+        # snippet is stripped of comments, string literals and backtick quoting
+        # FIRST — see `_LITERAL_COMMENT_OR_IDENT_RE` above for the measurement,
+        # including the `//`-inside-a-backtick-identifier case that the canonical
+        # write-gate regex alone does not cover.
+        haystack = _NO_WS.sub("", _strip_noise(snippet.lower()))
         for shape in GRAPH_CAPABILITY_CYPHER:
             if _NO_WS.sub("", shape) in haystack:
                 return f"cypher:{shape}"
