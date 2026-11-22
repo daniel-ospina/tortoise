@@ -5152,17 +5152,20 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
         "where only the row counts would be a false RED) (#14027 review round 2, P2 — MEASURED)")
 
     # ⛔ (2) BOTH SNAPSHOTS, HERMETICALLY — so each consequence is exercised on EVERY platform
-    # rather than only on the one the runner happens to ship. The walk reads `_d5_all_long_options`
-    # from this module's namespace at call time, which is the dict patched here.
+    # rather than only on the one the runner happens to ship. ⛔ EXACTLY ONE NAME IS PATCHED, and
+    # it is the only one this walk reads: `_d5_all_long_options` is looked up in this module's
+    # namespace at CALL time (its own docstring), and it is the SOLE caller of
+    # `_d5_undocumented_long_options`. Patching the allowance as well pinned NOTHING — the universe
+    # is replaced whole, so that function cannot be reached inside this window (MEASURED: a raising
+    # sentinel in its place leaves this file `33 passed`). A second input that no assertion can
+    # attribute to the behaviour it claims to guard is dead weight (agent-infra#3442 rule 3), so it
+    # is gone rather than explained away.
     snapshots = (
-        (_D5_DOCUMENTED_LONG_OPTIONS | {"--unix-byte-offsets"}, frozenset({"--unix-byte-offsets"}),
-         True),
-        (frozenset(_D5_DOCUMENTED_LONG_OPTIONS), frozenset(), False),
+        (_D5_DOCUMENTED_LONG_OPTIONS | {"--unix-byte-offsets"}, True),
+        (frozenset(_D5_DOCUMENTED_LONG_OPTIONS), False),
     )
-    for universe, allowance, accepted in snapshots:
+    for universe, accepted in snapshots:
         monkeypatch.setitem(globals(), "_d5_all_long_options", lambda universe=universe: universe)
-        monkeypatch.setitem(globals(), "_d5_undocumented_long_options", lambda allowance=allowance:
-                            allowance)
         for spelling in alias_spellings:
             read = _d5_count_prescriptions(f"a count: `grep -c {spelling} '^[+-]$'`\n")
             assert read == (["^[+-]$"] if accepted else []), (
