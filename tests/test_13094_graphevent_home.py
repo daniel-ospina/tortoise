@@ -121,6 +121,14 @@ CAPABILITY_CONTROLS = (
      "MATCH (e:GraphEvent)-/* hop */[r:TOUCHED]-(p:Point) RETURN p", "cypher:-["),
     ("adjacency with a LINE comment inside the hop",
      "MATCH (e:GraphEvent)-//hop\n[r:TOUCHED]-(p:Point) RETURN p", "cypher:-["),
+    # ⛔ A `//` INSIDE A BACKTICK-QUOTED IDENTIFIER, the one spelling the write
+    # gate's comment grammar alone cannot survive: it has no backtick branch, so
+    # its `//` branch fires INSIDE `` `a//b` `` and eats the rest of the statement —
+    # the pattern included. Measured: `None` before the guard's backtick branch,
+    # `cypher:-[` after. `test_the_noise_stripper_is_the_write_gates_grammar_plus_
+    # one_backtick_branch` pins the same delta from the grammar side.
+    ("pattern after a backtick identifier containing `//`",
+     "MATCH (n) WHERE n.`a//b` = 1 MATCH (e)-[r:T]-(p)", "cypher:-["),
     # The DIRECTED re-spaced spelling pins the SECOND half: raw it is caught by
     # `]->` alone, and on the stripped form by the earlier `-[` arm — so the
     # literal expectation here fixes arm PRECEDENCE, not just detection.
@@ -1466,3 +1474,59 @@ def test_the_evidence_docs_pin_count_is_this_files_own_count():
         f"the README declares {declared.group(1)} pins but this file holds {actual}"
         " — update the count and the enumeration in"
         " docs/evidence/13094-graphevent/README.md §6")
+
+
+def test_the_noise_stripper_is_the_write_gates_grammar_plus_one_backtick_branch():
+    """The guard's pre-pass is the write gate's comment/literal grammar, one branch wider.
+
+    WHY THIS IS PINNED RATHER THAN TRUSTED. `tools/graphevent_home.py` carries its
+    own copy of that grammar (`_LITERAL_COMMENT_OR_IDENT_RE`) instead of importing
+    `tortoise.projection`'s `_GATE_LITERAL_OR_COMMENT_RE`, because it needs ONE
+    alternation in which a backtick-quoted identifier is UNWRAPPED: the gate KEEPS
+    the identifier (so a `//` inside `` `a//b` `` opens a line comment that eats the
+    rest of the statement, pattern and arms included) and the sibling
+    `_LITERAL_OR_COMMENT_RE` DELETES it (so `` CALL `algo.pageRank` `` loses the very
+    name the `call algo` arm reads). A copy is a drift risk, so the agreement is
+    MEASURED: on every input with no backtick in it the two grammars must produce
+    the same normalised haystack, and a change to the gate's spelling reds here
+    rather than silently widening the guard's blind spot.
+
+    NON-VACUOUS, and it has two arms that fail in opposite directions: the corpus
+    loop reds if the copy drifts, and the `delta` assertion below reds if the copy
+    ever collapses back to the gate's own treatment of backticks — which is what a
+    "just import it" tidy-up would do.
+    """
+    from tortoise.projection import _GATE_LITERAL_OR_COMMENT_RE as gate
+
+    tool = _tool()
+    corpus = (
+        "MATCH (e)-[r:T]->(p) RETURN p",
+        "MATCH (e) - /* hop */ [r:T] - (p) RETURN p",
+        "MATCH (e)-//hop\n[r:T]-(p) RETURN p",
+        "MATCH (e) WHERE e.p = 'a // not a comment' RETURN e",
+        'MATCH (e) WHERE e.p = "a /* not a comment */" RETURN e',
+        "MATCH (e) WHERE e.url = 'https://x/y' AND e.z = '/*' RETURN e",
+        "CALL db.idx.fulltext.queryNodes('i', $q)",
+        "MATCH (e) RETURN size((e)-->())",
+    )
+    for text in corpus:
+        ours = tool._NO_WS.sub("", tool._strip_noise(text))
+        theirs = tool._NO_WS.sub("", gate.sub("", text))
+        assert ours == theirs, (
+            f"the guard's grammar drifts from the write gate's on {text!r}:\n"
+            f"  graphevent_home: {ours!r}\n"
+            f"  projection gate: {theirs!r}\n"
+            "The two must agree wherever no backtick is involved; do not 'fix' this"
+            " by deleting the copy without also giving the guard a backtick branch.")
+
+    # The delta itself: a `//` inside a backticked identifier. The gate's grammar
+    # has no backtick branch, so its `//` eats the pattern; the guard's unwraps the
+    # identifier and still sees `-[`.
+    delta = "MATCH (n) WHERE n.`a//b` = 1 MATCH (e)-[r:T]-(p)"
+    ours = tool._NO_WS.sub("", tool._strip_noise(delta))
+    theirs = tool._NO_WS.sub("", gate.sub("", delta))
+    assert ours != theirs, (
+        "the backtick branch is gone — without it a `//` inside a backticked"
+        " identifier opens a line comment and a capability pattern after it"
+        f" becomes invisible (both sides now {ours!r})")
+    assert "-[" in ours and "-[" not in theirs
