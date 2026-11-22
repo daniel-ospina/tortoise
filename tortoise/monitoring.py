@@ -940,9 +940,11 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   an event-published one: it is recomputed on collect, because the value drifts
 #:   with the clock and the loop that would push it is the thread a wedge blocks
 #:   (#14222 review cycle 5, ISSUE 1).
-#: * ``PROJECTION_INLINE_FALLBACK_COUNT`` — writes that fell back to folding on
-#:   their own thread because the queue was FULL (or the worker was stopping).
-#:   ⛔ NOTHING IS DROPPED when the bound is reached — a dropped item would be a
+#: * ``PROJECTION_INLINE_FALLBACK_COUNT`` — writes that folded the record on
+#:   their OWN thread: the queue was FULL, the worker was STOPPING, the record
+#:   could not be COPIED for the queue, or ``submit`` FAULTED before it could
+#:   queue (see the reason vocabulary below).
+#:   ⛔ NOTHING IS DROPPED on any of the four — a dropped item would be a
 #:   silently short record — so the visible cost is a slower ACK, and this counter
 #:   is what makes it attributable rather than an unexplained latency.
 #:   ``reason`` is a closed vocabulary of FOUR, one per way an ACK can end up
@@ -1019,8 +1021,9 @@ PROJECTION_WORKER_FAILURE_COUNT = Counter(
 )
 PROJECTION_INLINE_FALLBACK_COUNT = Counter(
     "tortoise_record_projection_inline_fallbacks_total",
-    "Writes that folded the record on their OWN thread because the projection "
-    "queue was FULL or the worker was STOPPING (#14185) — a slower ack, never a "
+    "Writes that folded the record on their OWN thread — the queue was full, the "
+    "worker was stopping, the record could not be copied for the queue, or the "
+    "submit faulted before it could queue (#14185) — a slower ack, never a "
     "dropped record",
     ["reason"],
 )
