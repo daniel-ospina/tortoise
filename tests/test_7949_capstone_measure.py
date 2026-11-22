@@ -18072,6 +18072,13 @@ _D5_TRIPLE_RE = re.compile(
     r"`(?P<fa>[^`]+)`, `(?P<fb>[^`]+)` and `(?P<fc>[^`]+)` respectively")
 
 
+#: The I7 range D5 cites inside `04-plan.md`, and the string every membership read of that
+#: document is decided against. MODULE level because more than one reader uses it: the membership
+#: guard below, `_d5_net_adds_target`, and the net-addition arm that pins the difference between
+#: "this diff adds the pair" and "this diff re-touched the line that already holds it".
+_I7_TARGET = "hosted_api.py:15449-15526"
+
+
 def _d5_membership_verdict(
     *, numstat: str, base_has: bool, diff_carries_target: bool
 ) -> str:
@@ -18108,6 +18115,34 @@ def _d5_membership_verdict(
     if diff_carries_target:
         return "double" if base_has else "repointed"
     return "landed" if base_has else "dropped"
+
+
+def _d5_net_adds_target(diff_stdout: str) -> bool:
+    """Whether a `-U0` diff NET-ADDS the I7 target, rather than re-touching a line holding it.
+
+    The decider above takes a BOOLEAN `diff_carries_target`, which is the right shape for its
+    table, and this helper answers the half of that question a boolean cannot: a `-U0` read
+    emits BOTH sides of an edited line, so a lane that merely REWORDS the 630-char I7 row on
+    `04-plan.md` produces one `-` and one `+` that each carry the target. A bare `any()`
+    therefore says "this diff adds it" and the decider returns `double` against a base that
+    carries it once — redding an ordinary wording fix with a message that is false for it, a
+    state the lane cannot escape (it can neither stop the base from carrying the pair nor edit
+    that row without producing the `-`/`+` pair). Measured on a wording-only edit of that row:
+    `+`=1, `-`=1 against a base that carries it once (#14269 review, finding 2).
+
+    A genuine duplicate cite is `+` lines OUTNUMBERING `-`; a re-touch is equal counts.
+    """
+    plus = minus = 0
+    for line in diff_stdout.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if _I7_TARGET not in line:
+            continue
+        if line.startswith("+"):
+            plus += 1
+        elif line.startswith("-"):
+            minus += 1
+    return plus > minus
 
 
 def test_the_D5_current_head_anchors_are_the_lines_they_name():
@@ -18349,7 +18384,6 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # and every older head are absent by CONSTRUCTION (`git rev-parse --is-shallow-repository`),
     # so absence there is the clone's shape and never read as a pass.
     _MEMBER_DOC = ("docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md")
-    _I7_TARGET = "hosted_api.py:15449-15526"
     _member = re.search(
         r"IS in this diff at the head this was read at \(`(?P<head>[0-9a-f]{40})`\), "
         r"by its PAIR", text)
@@ -18440,10 +18474,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                     f"(exit {_diff.returncode}), so D5's membership is UNMEASURED here "
                     f"— nothing measured is not a pass (#14260 fix lane, finding 3)")
             else:
-                _diff_carries_target = any(
-                    line[:1] in "+-" and _I7_TARGET in line
-                    for line in _diff.stdout.splitlines()
-                    if not line.startswith(("+++", "---")))
+                # NET addition, not any `^[+-]` occurrence: a wording edit of the I7 row emits
+                # one `-` and one `+` that BOTH carry the target, which a bare `any()` reads as
+                # "this diff adds it" and reds an ordinary fix against a base that already
+                # carries it (#14269 review, finding 2).
+                _diff_carries_target = _d5_net_adds_target(_diff.stdout)
                 _verdict = _d5_membership_verdict(
                     numstat=_numstat.stdout,
                     base_has=_base_has,
@@ -18570,6 +18605,50 @@ def test_the_D5_membership_decider_separates_a_landed_file_from_a_re_point():
     # The class is CLOSED: a fourth value would be a state nothing rules on, which is how
     # an unread verdict gets mistaken for coverage.
     assert {c[3] for c in _cases} == {"landed", "repointed", "double", "dropped"}
+
+
+def test_the_D5_membership_reads_a_NET_addition_not_a_re_touch():
+    """A wording edit of the I7 row is `landed`, not `double` (#14269 review, finding 2).
+
+    ⛔ WHY THIS ARM EXISTS. `_d5_membership_verdict` takes a BOOLEAN `diff_carries_target`, and
+    the caller used to answer it with `any(^[+-] line carries the target)`. A `-U0` read emits
+    BOTH sides of an edited line, so a lane that only REWORDS the 630-char I7 row produces one
+    `-` and one `+` that each carry the target — `any()` says yes, the decider returns `double`
+    against a base that carries it once, and an ordinary wording fix becomes a RED the lane
+    cannot escape: it can neither stop the base from carrying the pair nor edit that row
+    without producing the `-`/`+` pair. That is the same "no commit can satisfy it" class
+    commit `d0539a142f17` removed for a DIFFERENT-line edit, one shape over — and it was
+    unguarded, because the decider's own table is by INPUT and cannot see how the caller
+    computed its boolean.
+
+    The distinction is a NET addition (`+` outnumbers `-`), which is what a duplicate cite
+    actually looks like; a re-touch is equal counts.
+    """
+    _wording = (
+        "--- a/docs/x.md\n+++ b/docs/x.md\n"
+        f"-old wording {_I7_TARGET} tail\n+new wording {_I7_TARGET} tail\n"
+    )
+    _duplicate = (
+        "--- a/docs/x.md\n+++ b/docs/x.md\n"
+        f"+{_I7_TARGET} added a second time\n"
+    )
+    assert _d5_net_adds_target(_wording) is False, (
+        "a wording-only re-touch of the line that already carries the I7 target must not read "
+        "as this diff ADDING it — one `+` against one `-` is `landed`, and treating it as "
+        "`double` reds an ordinary prose fix with a message that is false for it (#14269 "
+        "review, finding 2)")
+    assert _d5_net_adds_target(_duplicate) is True, (
+        "a real duplicate cite — `+` lines outnumbering `-` — must still read as this diff "
+        "adding the target, so `double` keeps its discriminating power (#14269 review, "
+        "finding 2)")
+    # And the decider still rules the two shapes differently, which is exactly why the caller's
+    # answer has to be the NET one rather than `any()`.
+    assert _d5_membership_verdict(
+        numstat="2\t2\tdocs/x.md", base_has=True,
+        diff_carries_target=_d5_net_adds_target(_wording)) == "landed"
+    assert _d5_membership_verdict(
+        numstat="1\t0\tdocs/x.md", base_has=True,
+        diff_carries_target=_d5_net_adds_target(_duplicate)) == "double"
 
 
 #: The D5 clause that states a `the ONLY …` population of TWO numbers:
