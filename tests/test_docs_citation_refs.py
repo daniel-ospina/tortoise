@@ -3303,9 +3303,37 @@ def _d5_grep_verdict(ran: subprocess.CompletedProcess, name: str, grep: str = "g
         # PARSES OPTIONS BEFORE IT HANDLES `--version`, so the version pairing separates the two
         # shapes by exit code alone, with no reliance on grep's (translated) message: recognized
         # spelling -> `--version` answers 0 -> the count failure is a NON-ANSWER and must RAISE;
-        # refused spelling -> `--version` answers 2 as well -> a genuine refusal.
+        # refused spelling -> `--version` answers 2 as well -> a genuine refusal. Any THIRD answer
+        # is neither, and is handled as the error this docstring already says it is.
+        #
+        # ⛔ THE PROBE'S OWN ANSWER SET IS `{0, 2}` — ITS THIRD CODE IS AN ERROR TOO (#14327 review,
+        # P2 — MEASURED). An `if rc == 0: raise` followed by an unconditional `return False` reads
+        # EVERY other code as "refused", which is the very fail-open this pairing exists to close,
+        # one call deeper: a grep that refuses the spelling on the count probe (rc 2) and answers a
+        # third code to `--version` (rc 3 — the code the `confused` stub uses for "this probe did
+        # not answer") would still empty the allowance with NO cell red. The rule this docstring
+        # states at the top — a third exit code is an ERROR, not a refusal — is applied here to the
+        # probe as well, so both runs of this discriminator answer only in `{0, 1, 2}`-terms.
+        #
+        # ⛔ AND IT MUST NOT INHERIT STDIN (#14327 review, P2 — MEASURED). This is the only `grep`
+        # `subprocess.run` in this file that feeds no `input=` (compare the count runs above/below
+        # and `_d5_grade_alias_spelling`), while the stubs it is driven with begin `cat >/dev/null`
+        # — so with an inherited fd 0 those stubs block until `timeout=60` and raise
+        # `TimeoutExpired`, which is NOT an `AssertionError`: the cell ERRORS instead of asserting
+        # on any box whose fd 0 is a tty or an open pipe. pytest's default `fd` capture builds
+        # `in_=False`, so a developer running this file by hand hits it; CI's fd 0 is `/dev/null`,
+        # which is why this survived there. MEASURED with the `grep-refuses` stub body at a 2 s
+        # bound: `sleep 4 | <stub> --unix-byte-offsets --version` -> rc 124 (no answer), and the
+        # same run `< /dev/null` -> rc 2, the answer this arm expects.
         recognized = subprocess.run([grep, name, "--version"], capture_output=True, text=True,
-                                    timeout=60)
+                                    stdin=subprocess.DEVNULL, timeout=60)
+        if recognized.returncode not in (0, 2):
+            raise AssertionError(
+                f"`{grep} {name} --version` exited {recognized.returncode}, which is neither 0 "
+                "(recognized) nor 2 (refused) — grep parses options before it handles "
+                "`--version`, so only those two codes answer whether the spelling is recognized. "
+                "A NON-ANSWER cannot decide the reader's option universe, and reading it as "
+                "'refused' is the fail-open direction (#14138, #14327 review, P2)")
         if recognized.returncode == 0:
             raise AssertionError(
                 f"`{grep} -c {name} '^[+-]$'` exited 2, but `{grep} {name} --version` exited 0 — "
@@ -3570,10 +3598,13 @@ def _d5_documented_long_options(completed: subprocess.CompletedProcess) -> set[s
     if completed.returncode != 0:
         raise _D5NoDocumentedUniverse(
             f"`grep --help` published only {len(documented)} long options and exited "
-            f"{completed.returncode} — its usage lists no long options, so this host has no "
-            "documented universe to pin the option set against (BSD grep 2.6.0-FreeBSD prints a "
-            "SHORT-flag-only `usage:` line on stderr and exits 2, which is read above — the "
-            "stream is not the problem; the list is) (#14303 review round 15, P3)")
+            f"{completed.returncode} — its usage lists fewer than {_D5_LONG_OPTION_FLOOR} long "
+            "options, so this host has no documented universe to pin the option set against "
+            "(BSD grep 2.6.0-FreeBSD prints its `usage:` line on stderr and exits 2, which is read "
+            "above — the stream is not the problem; the list is too short for the floor. It does "
+            "not publish NO long options: macOS/BSD grep's usage names `--binary-files`, "
+            "`--color`, `--context`, … and merely fewer of them than GNU grep) "
+            "(#14303 review round 15, P3; #14327 review, P3)")
     raise AssertionError(
         f"only {len(documented)} long options were parsed out of a `grep --help` that exited 0 — "
         "the derivation is broken, and a broken derivation must not be able to certify anything "
@@ -5339,6 +5370,24 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     with pytest.raises(_D5NoDocumentedUniverse, match="exited 2"):
         not_a_skip(_d5_documented_long_options, reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    # ⛔ AND THAT MESSAGE MAY NOT REFUTE ITS OWN INTERPOLATED COUNT (#14327 review, P3 — MEASURED).
+    # It used to render "published only 15 long options … its usage lists no long options": a
+    # self-contradiction, and wrong about the platform it cites — macOS/BSD grep's usage DOES name
+    # long options (`--binary-files`, `--color`, `--context`, …), just fewer of them than the floor.
+    # The causable fact is the SHORTFALL, so the text has to say `fewer than <floor>`; asserting on
+    # the rendered message is what makes the wording non-revertible. This branch is reached whenever
+    # `1 <= len(documented) < _D5_LONG_OPTION_FLOOR`, so 15 is the shortest real shape that shows it.
+    with pytest.raises(_D5NoDocumentedUniverse) as short_universe:
+        _d5_documented_long_options(reported(2, usage(15)))
+    short_message = str(short_universe.value)
+    assert "15 long options" in short_message and (
+        f"fewer than {_D5_LONG_OPTION_FLOOR} long options" in short_message), (
+        "the no-universe message must name the SHORTFALL against the floor beside the count it "
+        f"interpolated — got {short_message!r} (#14327 review, P3)")
+    assert "lists no long options" not in short_message, (
+        "the no-universe message claims the usage lists NO long options while interpolating a "
+        f"count of 15 of them — it refutes itself: {short_message!r}. BSD grep publishes fewer "
+        "long options than the floor, not none (#14327 review, P3)")
     # ⛔ AND THE CELL'S OWN TURNING OF THAT RAISE INTO A SKIP IS WITNESSED HERE (#14303 review round
     # 14, P2 — MEASURED). Every arm above pins the DERIVATION; none of them ran the call site that
     # converts "no universe published" into `pytest.skip`, so replacing that skip with a bare `raise`
@@ -5711,6 +5760,18 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
                           + 'if [ "$2" = "--version" ]; then exit 0; fi\nexit 2')
     with pytest.raises(AssertionError, match="NON-ANSWER"):
         _d5_grep_runs_long_option("--unix-byte-offsets", runs_but_fails)
+    #: ⛔ AND THE PROBE'S OWN THIRD CODE IS NOT A REFUSAL EITHER (#14327 review, P2 — MEASURED).
+    #: The `--version` pairing is only a discriminator if both of its ANSWERS are the two it names;
+    #: an `if rc == 0: raise` followed by an unconditional `return False` reads every other code as
+    #: "refused" — the same fail-open one call deeper. This stub refuses the spelling on the count
+    #: run (rc 2, the shape that reaches the probe at all) and answers a THIRD code to `--version`,
+    #: which no arm reached before: the `confused` stub raises on the count run and never gets here.
+    #: Without the `not in (0, 2)` clause this arm reads `False` and the allowance EMPTIES silently,
+    #: so removing the clause reds HERE.
+    version_confused = stub("grep-version-confused", "cat >/dev/null; " + answers_count
+                            + 'if [ "$2" = "--version" ]; then exit 3; fi\nexit 2')
+    with pytest.raises(AssertionError, match="neither 0"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", version_confused)
     # …and the GENUINE refusal still answers False above (`refuses`), because a grep that refuses
     # the spelling answers 2 to the `--version` probe as well — GNU 3.12's shape, unchanged.
     # …and a binary that is not there at all is a NON-ANSWER too, which is why it is pinned rather
@@ -5718,6 +5779,55 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     # emptied by a probe that could not run (#14138 review, P3).
     with pytest.raises(OSError):
         _d5_grep_runs_long_option("--unix-byte-offsets", str(tmp_path / "grep-that-is-not-here"))
+
+
+def test_the_version_probe_answers_without_reading_stdin(monkeypatch):
+    """The `--version` probe feeds NOBODY its fd 0, because the stubs it drives `cat` (#14327 review, P2).
+
+    ⛔ MEASURED ON THE SHAPE THIS CLOSES. `_d5_grep_verdict`'s `--version` probe was the only `grep`
+    `subprocess.run` in this file with neither `input=` nor `stdin=` — and the two stubs it is now
+    driven with (`refuses`, `runs_but_fails`) begin `cat >/dev/null`, so an inherited fd 0 made both
+    block until `timeout=60` and raise `TimeoutExpired`, which is NOT an `AssertionError`: the cell
+    ERRORS instead of asserting. Under pytest's default `fd` capture fd 0 is not redirected, so this
+    fires on any box whose fd 0 is a tty or an open pipe — CI's `/dev/null` is why it survived there.
+    MEASURED with the `refuses` stub body at a 2 s bound: inherited stdin -> rc 124, `< /dev/null`
+    -> rc 2.
+
+    ⛔ IT RECORDS RATHER THAN EXECUTES ON PURPOSE. A recorder answers every run with a
+    `CompletedProcess`, so the MUTANT (no `stdin=` kwarg) reds on the missing kwarg WITHOUT anyone
+    waiting out the 60 s timeout the real stub would block for — a witness that costs a timeout to
+    observe is a witness nobody runs. The recorder does not weaken the claim: this cell is about the
+    CALL SHAPE, and the three-way reading of the answers is pinned separately, against real stub
+    binaries, in `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`.
+    """
+    calls: list[dict] = []
+
+    def recorder(args, **kwargs):
+        argv = list(args)
+        calls.append({"argv": argv, **kwargs})
+        if argv[-1] == "--version":
+            # the shape under test: the probe is reached because the count run said `refused`
+            return subprocess.CompletedProcess(args=argv, returncode=2, stdout="", stderr="")
+        if "--count" in argv:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="2\n", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=2, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", recorder)
+    assert _d5_grep_runs_long_option("--unix-byte-offsets", "grep") is False, (
+        "the recorder answers `2` to the count run and `2` to `--version`, which is a genuine "
+        "refusal — anything else here means the probe path under test was not reached "
+        "(#14138)")
+    probes = [call for call in calls if call["argv"][-1] == "--version"]
+    assert probes, (
+        "the `--version` probe was never reached, so this cell would pin nothing: the recorder's "
+        "count run must answer the control and then a refusal (#14327 review, P2)")
+    for call in probes:
+        assert call.get("stdin") is subprocess.DEVNULL, (
+            f"the `--version` probe ran as {call['argv']!r} with stdin={call.get('stdin')!r} — its "
+            "stubs begin `cat >/dev/null`, so an inherited fd 0 blocks them until the 60 s timeout "
+            "and raises TimeoutExpired (not an AssertionError), turning the cell into an ERROR on "
+            "any box whose fd 0 is a tty or an open pipe. Pass `stdin=subprocess.DEVNULL` "
+            "(#14327 review, P2)")
 
 
 def test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal(tmp_path: Path):
