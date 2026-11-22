@@ -644,6 +644,12 @@ _EXISTENCE_HELPER = (
 # wider slot here would swallow a second clause). `have any reports already archived` — where
 # `already` is the AUXILIARY and `archived` stays ATTRIBUTIVE — is `main`'s behaviour traded
 # away deliberately and is pinned in NOT_SELECTED.
+#: ⛔ AND THAT TRADE WAS SILENT, WHICH IS THE DEFECT ONE LEVEL DOWN (turn-3, P2, measured):
+#: every row of that class came back `population=None, signal=None` where `main` routes it to
+#: `ended`/`existence`, so a caller could not tell "no records ended" from "I saw your ending
+#: cue and did not answer it" — #14033 duty (b). The DECISION is kept (nothing here routes
+#: this class); the SILENCE is closed by :data:`_ALREADY_EVER_AUX`'s arm in
+#: ``existence_unguarded``.
 #: ⛔ TWO SLOTS, AND THE ASYMMETRY IS THE POINT (two rounds of review, both measured).
 #: The WINDOW is RECALL: its slot is the narrow set a customer actually writes between the auxiliary
 #: and the participle (`already|ever|recently`), because a wider slot there would let the window
@@ -697,6 +703,20 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: OUTSIDE this slot. So the `by` tolerance is WITHDRAWN and its cost is stated rather than hidden:
 #: a relative clause whose own participle takes an agent is refused AND REPORTED (a recall loss in
 #: the module's preferred direction), pinned in `NOT_SELECTED` + `NOTICE_ONLY`;
+#: ⛔ `already`/`ever` AS THE AUXILIARY IS A REFUSED CUE, AND A REFUSAL NOBODY REPORTS IS
+#: #14033's OWN DEFECT (turn-3, P2, measured at `34b339c75d` vs `main` `70fbd1a27d`). This
+#: branch made the existence WINDOW's auxiliary the literal `been` (the round-7 active-reading
+#: decision — KEPT, not reversed), and that left the spellings where `already`/`ever` IS the
+#: auxiliary matching nothing at all: `have any reports already archived`, `have any reports ever
+#: archived`, `have any claims already retracted`, `have any reports already retracted`,
+#: `have any reports ever withdrawn` and `have any customers ever cancelled` all returned
+#: `population=None, signal=None` while `main` routes every one of them to `ended`/`existence`.
+#: `main`'s answer was WRONG (the active reading) and at least VISIBLE; silence is
+#: indistinguishable from "nothing has ended", which is duty (b) exactly. This constant feeds
+#: the `existence_unguarded` SIGNAL only — a signal is computed after every shape has declined
+#: and can never create a route, so the round-7 refusal is untouched — though it can change
+#: WHICH notice a compound question gets, because the signal rows are ordered (see ARM C).
+_ALREADY_EVER_AUX = r"(?:already|ever)"
 _EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,8}}"
 #: ⛔ A CONTRACTED AUXILIARY CARRIES ITS NEGATION INSIDE THE WORD (round-26 review, P1; round-28
 #: at `feb2c740bb`, P1, measured — the SAME class, one guard over). One home, THREE consumers:
@@ -1758,6 +1778,36 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # silence one word further out.)
         + r"(?:[a-z]+(?:ed|en)\s+)?"
         + rf"{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        # ⛔ ARM C — `already|ever` AS THE AUXILIARY, with no `been` (turn-3, P2, measured —
+        # see :data:`_ALREADY_EVER_AUX`). This is the class ``_ENDING_SHAPES`` refuses on
+        # purpose since round 7 and used to refuse SILENTLY: `have any reports already
+        # archived` / `have any reports ever archived` / `have any claims already retracted` /
+        # `have any reports ever withdrawn` / `have any customers ever cancelled` were
+        # `population=None, signal=None` at `34b339c75d`, every one of them `ended`/`existence`
+        # on `main` `70fbd1a27d`. The two older arms cannot cover it: both require `been`, and
+        # in this class the adverb IS the auxiliary. A SIGNAL cannot ROUTE — the refusal itself
+        # stays exactly as the decision left it — but ⛔ IT IS NOT "ONLY ADDS A NOTICE" EITHER
+        # (fresh review, P2 at turn 3, measured): the signal rows are ORDERED and this row sits
+        # BEFORE ``which_modified_noun``, so a COMPOUND question that matched a later row now
+        # reports THIS name instead — `which customer claims has been archived and have any
+        # reports already archived` was `which_modified_noun` (`cue` = `which customer claims has
+        # been archived`) and is `existence_unguarded` (`cue` = `have any reports already
+        # archived`), with POPULATION and HINT unchanged. Both names are a notice about the same
+        # question, so the effect is a NAMING one, and it is pinned rather than described as
+        # additive. Ordering it after ``which_modified_noun`` would trade this for a count this
+        # module pins (`at MOST 18 compiled patterns`) and for the row's own first-match contract.
+        # ⛔ AND THE ATTRIBUTIVE CONTENT LOOKUP IS SILENT ONLY IN THE ADJACENT SPELLING (fresh
+        # review, P2, measured): `been` is not a member of :data:`_BLOCKED_TAIL`, so
+        # `have any reports already archived been published` — an ending word MODIFYING the
+        # quantifier's noun, the question's own predicate being `published` — fails the tail and
+        # reports nothing. But a QUALIFIER between the two (`… already archived in Q3 been
+        # published`, `… by legal been published`) puts a tail MEMBER there, so it DOES report.
+        # That is not new to this arm: the pre-existing `been` arm reports the same shape on
+        # `main`'s head (`have any reports been archived in Q3 been published` -> `existence`).
+        # The residual is a notice on a content query (the safe direction) and is pinned.
+        + "|"
+        + _EXISTENCE_HEAD
+        + rf"[^?]{{0,60}}?\b{_ALREADY_EVER_AUX}\s+(?:{_ENDING_WORDS})\b"
         + ")"
         + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
