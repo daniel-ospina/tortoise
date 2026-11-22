@@ -1419,7 +1419,15 @@ SWEEP_NAMES = 66
 #: did not happen: the one new shape is the declared one. A plain `cp` handle and a `set[str]`-style
 #: `.update` are the ordinary-word receivers this sweep deliberately leaves alone; `typed
 #: references still pointing at a public name` is **0** on this tree.
-SWEEP_RESIDUE = (11870, "6da40999bb5162fa")
+#: ⛔ RE-MEASURED AGAIN ON THE MERGE WITH `origin/main` `588cf7aeb6` — every numeral above is the
+#: PREVIOUS resolution's (the `0467ba32` fold) and is kept as history, NOT carried: `--repin` on
+#: THIS merged tree prints **(11873, 'b617f45a195476a6')** and `--check` exits 0 with
+#: `typed references still pointing at a public name: 0`, so the pair below is a measurement of the
+#: tree that ships and never an inheritance of either parent's line (the parents DISAGREE — the
+#: branch's 11870 against `main`'s 11861 — so arithmetic across them is a cross-check at most).
+#: Re-pin after any fold that touches this sweep's receivers; the direction the pin exists to catch
+#: is a NEW row SHAPE, and `--repin`'s own row report remains the only thing that attributes a net.
+SWEEP_RESIDUE = (11873, "b617f45a195476a6")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
