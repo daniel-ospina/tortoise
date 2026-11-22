@@ -17958,6 +17958,20 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "sdk",
         "# whose payload points ALL fold as PARAPHRASE noops",
     ),
+    # ⛔ THE GATE'S ADDRESS, BOUND THROUGH THE ARITHMETIC THAT PRODUCES IT (#14183 review, cycle 6,
+    # P2 — MEASURED). The row states that address twice and BOTH times as the result of an
+    # expression, and no entry named it: `grep -c 20412 <this file>` was `0`, so restoring the
+    # pre-`+21` value kept every arm green — the two anchors above had readers and the gate they
+    # are compared against did not. Each sibling row binds a `sits at \`:N\`` address; this one
+    # binds through the phrase that carries the number, which is why the pattern is arithmetic
+    # rather than a colon-token. The needle is still the line's own text, so the number and the
+    # statement it describes are graded by the same arm.
+    (
+        'the `if meta.get("route"):` gate (via `20236 + 176`)',
+        r'`20236 \+ 176 = (?P<n>\d+)` for the `if meta\.get\("route"\):` gate',
+        "sdk",
+        'if meta.get("route"):',
+    ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
     # carries 279 cite-shaped `:N` tokens at this head (re-derived from the row this branch
@@ -18030,6 +18044,7 @@ _D5_CURRENT_CLAIM_LABELS = frozenset({
     "the `sdk.py` import's OTHER hit",
     'the `f"session entity-linking failed: …"` line',
     "the paragraph the cut quoted (`whose payload points ALL fold as PARAPHRASE noops`)",
+    'the `if meta.get("route"):` gate (via `20236 + 176`)',
     "the replay-skips-capture `sed -n` quote",
     "the `# then resolved to the row it replaced.` `sed -n` quote",
 })
