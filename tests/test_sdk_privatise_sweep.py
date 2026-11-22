@@ -1947,8 +1947,13 @@ _OWN_PIN_CLAIM_RE = re.compile(
 #: claims (the clause was invisible to the loose pattern too, because it carries the same phrase),
 #: and the orphan arm saw no missing key because the rev was never in `OWN_PINS` either. So a wrong
 #: pair typed into that clause would have passed everything. Scoped to the PHRASE, deliberately:
-#: the digest class stays `[0-9a-f]{16}` lowercase, so a capitalised HEX DIGEST is still a RED (the
-#: uppercase-digest mutant reds the claims-vs-clauses parity arm — one clause with no claim).
+#: the digest class stays `[0-9a-f]{16}` lowercase, so a capitalised HEX DIGEST is still a RED —
+#: the uppercase-digest mutant reds the claims-vs-clauses parity arm (one clause with no claim).
+#: GRADED, not restated: `test_the_scoped_case_fold_still_reds_a_capitalised_digest` asserts the
+#: loose clause pattern counts one MORE clause than the claim pattern parses, which is what fires
+#: that arm. This sentence used to publish the mutant's two observed counts, measured at cycle 6's
+#: head; cycle 7 added two clauses and made the figure FALSE without touching the sentence — the
+#: same drift the extent figure is graded against (#14282), so no count is typed here at all.
 #: How many clauses the pattern must match is NOT typed: it is counted off the block below.
 #: ⛔ THE WRAP IS GRADED HERE BECAUSE A RE-WRAP SILENTLY DISARMS THIS ARM (#14282 review cycle 4,
 #: P1, measured). The pattern was `Its own pin[\s#:]+is` — it tolerated a wrap between `pin` and
@@ -2077,6 +2082,31 @@ def _own_pin_claims(block: str) -> list[tuple[str, int, str]]:
         if revs:
             claims.append((revs[-1], int(claim.group(1)), claim.group(2)))
     return claims
+
+
+def test_the_scoped_case_fold_still_reds_a_capitalised_digest():
+    """`(?i:…)` is scoped to the PHRASE, so a capitalised HEX DIGEST stays a RED.
+
+    ⛔ WHY THIS IS AN ASSERTION AND NOT A SENTENCE. The comment above `_OWN_PIN_CLAIM_RE` used to
+    publish this mutant's observed counts, and the commit that added the next two clauses made
+    that figure FALSE without touching the sentence (#14282 review cycle 7: the same mutant then
+    counted two more on each side). A typed observation of a mutant goes stale exactly like the
+    extent figure does — this file's own subject — so the CLAIM is graded instead of restated: the
+    loose clause pattern must count one clause MORE than the claim pattern parses, which is what
+    reds the parity arm rather than letting a capitalised digest pass ungraded. Widening the digest
+    class to `[0-9a-fA-F]` — the reason `(?i:…)` is scoped and not global — makes the two counts
+    AGREE and this arm red.
+    """
+    block = _residue_block()
+    claim = _OWN_PIN_CLAIM_RE.search(block)
+    assert claim, "non-vacuity: the block still carries a graded claim to mutate"
+    mutated = block[:claim.start(2)] + claim.group(2).upper() + block[claim.end(2):]
+    assert mutated != block, "non-vacuity: the digest class is already case-insensitive"
+    assert len(_OWN_PIN_CLAUSE_TEXT_RE.findall(mutated)) > len(_own_pin_claims(mutated)), (
+        "a CAPITALISED digest must still be RED: the loose clause pattern counts the clause, the "
+        "pair-grading pattern does not, so the parity arm fires. These two agreeing means the "
+        "digest class was widened (or the phrase widened to a global `(?i)`) and a capitalised "
+        "digest now passes ungraded.")
 
 
 def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
