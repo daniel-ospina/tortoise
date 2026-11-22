@@ -467,17 +467,22 @@ That judgement is `out["relation_declarations"]`.
   stable across a retry. ⛔ The **direct-edge** route is the opposite:
   `_create_direct_edge` runs on every attempt and judges the pair whether or not
   the MERGE created anything, so a `reify: false` connection that dedups
-  (`deduped: true`, `created.connections` unchanged) still carries its entry —
-  which is what makes `relation_declarations` STABLE across a retry, the same
-  property the `ids["connections"]` descriptor has. Read the payload as "the pairs
-  this pass JUDGED", never as "the pairs this pass wrote": on the direct route the
-  two differ exactly on a dedup hit (round-8 review, P3 — this bullet previously
-  stated the absolute "a resubmission that mints nothing reports nothing", which
-  the direct route contradicts). ⛔ And the **partial-absorb** arm DOES write: it
-  completes an existing operator's input set with one edge per target it did not
-  already hold, so it judges exactly those newly wired targets and reports them
-  like any other write (round-5 review, P1 — this bullet previously claimed the
-  arm "writes no edge", which was false and left a caller growing an operator
+  (`deduped: true`, `created.connections` unchanged) still carries its entry, so
+  THAT route's report is IDEMPOTENT — the same entry on the first write and on
+  every retry. ⛔ Scoped to that route: on the operator route the identical
+  resubmission reports NOTHING (pass 1's entry is not re-emitted, because no door
+  ran), so read stability as per-route, never as a property of the field — a
+  client diffing rollups across a retry must not read a vanished operator-route
+  entry as a graph change. Read the payload as "the pairs this pass JUDGED", never
+  as "the pairs this pass wrote": on the direct route the two differ exactly on a
+  dedup hit (round-8 review, P3, corrected by round-9 review — this bullet
+  previously stated the absolute "a resubmission that mints nothing reports
+  nothing", and then an equally absolute "relation_declarations is STABLE across a
+  retry"; the code contradicts both). ⛔ And the **partial-absorb** arm DOES write:
+  it completes an existing operator's input set with one edge per target it did
+  not already hold, so it judges exactly those newly wired targets and reports
+  them like any other write (round-5 review, P1 — this bullet previously claimed
+  the arm "writes no edge", which was false and left a caller growing an operator
   uninformed about the pair it had just created).
 - **`warnings[].code` keeps the REVERSED and UNDECLARED states DISTINCT.**
   A per-connection warning carries `code: "reversed_relation_pair"` when the
