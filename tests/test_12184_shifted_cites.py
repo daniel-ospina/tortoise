@@ -427,7 +427,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    # 2, both THIS-TREE (#14220): the header's parenthetical paren and §2.5's term. The HISTORY
+    # 2, both THIS-TREE (#14220): the header's parenthetical paren and §2.4's term (the
+    # `:Session` section — the document's own §2.5 row says "§2.4 counts it for
+    # `capture_redactions`"). The HISTORY
     # address before the paren (`:2876` at `main ae54df166d`) is unchanged and the header arm
     # pins that string verbatim — so the count here is of the TREE value, never of history.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2950`'): 2,
