@@ -1738,9 +1738,11 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
 
     WHAT IT GRADES. (1) Every pair in `_PIN_EOF_PAIRS` is still a census pair — a dropped or re-pointed cite
     must re-derive this table rather than leave it describing a population the document no longer has.
-    (2) The header NAMES each of them at the address it writes, inside the non-comparable enumeration (the
-    header's own prose is the only place the twelve are listed, so the guarantee is structural:
-    a re-pointed cite that leaves the sentence unchanged reds arm 2). (3) The published
+    (2) The header NAMES each of them at the address it writes, inside the non-comparable enumeration.
+    The guarantee is structural: a re-pointed cite that leaves the enumeration unchanged reds arm 2.
+    ⛔ It is NOT "the only place the twelve are written" — `mcp_server.py`'s `:11590` alone also appears
+    at five other sites in this document, outside the graded region. That is exactly why arm 2 grades
+    the ENUMERATION REGION and never claims uniqueness across the prose at large. (3) The published
     counts agree with the table: comparable + non-comparable == the pairs the file measures, and the four
     pinned `wc -l` values are the ones the header states for those files.
 
