@@ -2047,6 +2047,18 @@ def attribtarget(sdk):
         pass
     _Obj.attr = sdk._tortoise_fts_query
 
+def subscriptname(sdk):
+    _fn2 = sdk._tortoise_fts_query
+    _bag7 = {}
+    _bag7[_fn2] = 1
+
+def yieldescape(sdk):
+    yield sdk._tortoise_fts_query
+
+def resultplumbing(sdk):
+    _r = sdk._tortoise_fts_query(query="plumbing", limit=10)
+    _r(query="result-plumbing", limit=10)
+
 def annotparam(sdk):
     def _g(_x: sdk._tortoise_fts_query):
         pass
@@ -2090,6 +2102,8 @@ def retann(sdk) -> sdk._tortoise_fts_query:
         (0, True, []),                  # `with open() as _bag5[SEAM]` — OBJECT target of a With
         (0, True, []),                  # `[… for _bag6[SEAM] in []]` — OBJECT target of a comprehension
         (0, True, []),                  # `_Obj.attr = SEAM` — ATTRIBUTE target
+        (0, True, []),                  # `_bag7[_fn2] = 1` — SUBSCRIPT target indexed by a carrier NAME
+        (0, True, []),                  # `yield SEAM` — a value escaping as a generator result
         (0, True, []),                  # MODULE-scope `_bare_module: SEAM` — evaluated + stored
         (0, True, []),                  # `_bare: SEAM` annotation, no value (func-local: over-block)
         (0, True, []),                  # `def _g(_x: SEAM)` parameter annotation
@@ -2100,6 +2114,7 @@ def retann(sdk) -> sdk._tortoise_fts_query:
         (1, False, ["for-target"]),     # `for _fn in (SEAM,): _fn(…)`
         (1, False, ["helper-arg"]),     # `_helper(SEAM, query=…)` — an ARGUMENT
         (1, False, ["one-hop"]),        # `_opt = SEAM; _opt(…)`
+        (1, False, ["plumbing"]),       # `_r = SEAM(…); _r(…)` — the CALL boundary
         (1, False, ["two-hop"]),        # `_n = _m` ABOVE `_m = SEAM`
         (1, False, ["walrus"]),         # `if (_w := SEAM): _w(…)`
         (1, False, ["warm"]),           # the direct call
