@@ -234,7 +234,7 @@ private helpers still has those call sites to consider.
 
 `vet_gate.py` is consequently **not** a `depends on` leaf: it carries one
 internal dependency of its own — `value_gate`, the stdlib-only identifier
-predicate that both it and `extractor_v2` import (`vet_gate.py:149`).
+predicate that both it and `extractor_v2` import (`vet_gate.py:150`).
 `tools/substrate_map_check.py`'s `check_leaf_rows` re-measures exactly this: a
 row whose `depends on` cell says `*leaf*` must import nothing under `tortoise/`
 at module level, and a row that does is a drift (§10).
