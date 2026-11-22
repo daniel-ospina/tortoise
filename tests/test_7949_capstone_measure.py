@@ -18214,17 +18214,25 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ THE PAIR IS THE MEASURED ONE, AND ONLY ONE (#13879 review, cycle 3 — MEASURED).
     # This loop used to pin `sdk.py:28682` -> `:28913` AND the I7 range
     # `:15262-15339` -> `:15346-15423` as "the pair 04-plan.md carries at this head". Both
-    # halves were false: naming `:15346-15423` as this diff's pair was a CHIMERA of two
-    # heads — `main` made that move, so both ends read identically at `origin/main` and
-    # here.
-    # ⛔ RE-MEASURED AT THIS HEAD (measured, never carried): `main`'s `#13854` (issue `#13826`,
-    # `ae26adf963`) re-derived `04-plan.md`'s own row from `sdk.py:28718` to `sdk.py:28935`,
-    # and `main`'s `#13971` (`e0accb8fe6`) then moved both the file and that row to
-    # `sdk.py:29121` — so at this head the row AGREES with `main` and the file is NOT in the
-    # diff (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). An earlier
-    # cut of this block stated the opposite in both halves (once "NOT in this diff at all", once
-    # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
-    # arm has been wrong in both directions on.
+    # halves were false: `:15346-15423` is not this diff's TARGET (at this head the document
+    # carries `:15449-15526`, and `:15346-15423` survives only on `origin/main`), and
+    # `:15262-15339` was a PREVIOUS head's span — so that sentence fused two heads' spans.
+    # ⛔ BOTH HALVES RE-MEASURED AT THIS HEAD (#14260 fix lane, finding 1 — MEASURED), because
+    # the cut of this note that stood here was itself stale in the opposite direction:
+    # `main`'s `#13854` (issue `#13826`, `ae26adf963`) re-derived `04-plan.md`'s own row from
+    # `sdk.py:28718` to `sdk.py:28935`, and `main`'s `#13971` (`e0accb8fe6`) then moved that
+    # ROW to `sdk.py:29121` — so the row still agrees with `main`. But the FILE IS in the diff,
+    # because this branch re-pointed its I7 range: `git diff --numstat origin/main...HEAD --
+    # …/04-plan.md` prints `1 1` here. It printed nothing only while the row's sole change was
+    # the `sdk.py:29121` provenance; the I7 re-point makes "NOT in this diff" false, which is
+    # the head-bound-membership class this arm has now been wrong in BOTH directions on.
+    # ⛔ SO THE MEMBERSHIP CARRIES THE HEAD IT WAS READ AT, and never stands as "at this head":
+    # a headless membership is true until this branch merges and false the moment it does
+    # (`origin/main...HEAD` for that file is then EMPTY while a phrase-assertion stays green) —
+    # exactly the "a phrase-only assertion was green over the claim" class the block's own
+    # `NOT TYPED AS CURRENT` note above names. Naming the head makes it a READING rather than a claim about the
+    # reader's head, and the assertion below re-runs it at the named head instead of trusting
+    # it; the headless spelling is refused outright.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
     # "CARRIES". Both ends are still pinned so the row cannot drift back to the base's value,
     # which is what a re-derivation-by-offset produces — and `sdk.py:28935` is NOT
@@ -18239,15 +18247,60 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "(#13750 review, cycle 3; re-measured at this head)")
     assert "is the pair `04-plan.md` carries at this head" not in text, (
         "D5 has gone back to claiming `04-plan.md` carries a re-point PAIR at this "
-        "head, while its row reads ONE address and the file is not in this diff at all "
-        "(`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). "
-        "That sentence was deleted for being false at this head (#13879 review, cycle 3)")
-    assert "IS in this diff at this head, by its PAIR" in text, (
-        "D5 no longer states that `04-plan.md` IS in this diff. At this head it IS: the I7 "
-        "range is re-pointed `:15346-15423` -> `:15449-15526`, so `git diff --numstat "
-        "origin/main...HEAD -- docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1`. "
-        "The older 'NOT in this diff' membership held only while the row's sole change was the "
-        "`sdk.py:29121` provenance; a re-point makes it false (#14260 repair, re-derived)")
+        "head, while its row reads ONE address (`sdk.py:29121`) and the one re-point it "
+        "carries is the I7 RANGE, not a `sdk.py` pair. ⛔ Do not restore the old reason "
+        "beside this refusal: the file IS in this diff at this head — `git diff --numstat "
+        "origin/main...HEAD -- …/04-plan.md` prints `1 1` — so 'the file is not in this "
+        "diff at all' is false here. The sentence is refused because its row reads ONE "
+        "address, not because the file is absent (#13879 review, cycle 3; reason re-derived "
+        "at the #14260 fix lane, finding 1)")
+    # ⛔ THE MEMBERSHIP IS A READING AT A NAMED HEAD, NOT A HEADLESS "at this head"
+    # (#14260 fix lane, finding 1 — MEASURED). The sentence this arm required used to read
+    # "IS in this diff AT THIS HEAD": true at the head it was written for, and FALSE the
+    # moment this branch merges, when `origin/main...HEAD` for that file is EMPTY while the
+    # phrase-assertion stayed green. D5's rule is that a figure carries the head it was READ
+    # at, so the membership carries one too — and the named head is then MEASURED, not
+    # trusted, against its own immutable blob.
+    _member = re.search(
+        r"IS in this diff at the head this was read at \(`(?P<head>[0-9a-f]{7,40})`\), "
+        r"by its PAIR", text)
+    if _member is None:
+        failures.append(
+            "D5 no longer states `04-plan.md`'s membership AS OF A NAMED HEAD and by its "
+            "PAIR — the spelling this arm reads is 'IS in this diff at the head this was "
+            "read at (`<sha>`), by its PAIR'. Re-derive the sentence and name the head you "
+            "read the numstat at; a headless 'at this head' inverts the moment this branch "
+            "merges and is refused by the next assertion (#14260 fix lane, finding 1)")
+    else:
+        _member_head = _member.group("head")
+        _member_blob = subprocess.run(
+            ["git", "show", f"{_member_head}:docs/epics/2026-11-04-7949-extractor-v4-"
+                             f"capstone/04-plan.md"],
+            cwd=_REPO, capture_output=True, text=True)
+        if _member_blob.returncode != 0:
+            # ⛔ THE COVERAGE LIMIT IS STATED, NOT IMPLIED: CI checks this repo out at
+            # `fetch-depth: 1`, where an older head is absent by construction, so this half
+            # SKIPS there. An absent object is UNMEASURED, never a pass — the phrase arms
+            # above and below still hold, and the blob is re-checkable on any full clone.
+            pass
+        else:
+            # The claim is that this document carries the I7 RE-POINT at that head. Its
+            # target is what makes the file's membership real, and it is read out of the
+            # immutable blob rather than out of the reader's tree.
+            if "hosted_api.py:15449-15526" not in _member_blob.stdout:
+                failures.append(
+                    f"D5 says `04-plan.md` IS in this diff by its PAIR at the head it "
+                    f"names (`{_member_head}`), but that head's copy does not carry the "
+                    f"I7 re-point's target — so the named head is not the head this was "
+                    f"measured at. Re-derive the head and the range together "
+                    f"(#14260 fix lane, finding 1)")
+    assert "IS in this diff at this head, by its PAIR" not in text, (
+        "D5 has gone back to stating `04-plan.md`'s membership WITHOUT the head it was read "
+        "at ('at this head, by its PAIR'). That spelling is true only until this branch "
+        "merges: `origin/main...HEAD` for that file is EMPTY afterwards, so the membership "
+        "becomes false while a phrase-assertion over it stays green — the class the block's "
+        "own rule forbids ('a phrase-only assertion was green over the old claim, re-landed, "
+        "and was green again'). Name the head (#14260 fix lane, finding 1)")
     # and the chimera is refused, not merely absent from the message above
     # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
     # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
@@ -18255,10 +18308,13 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # exactly where this arm is supposed to be red. Measured by mutating a /tmp copy: the
     # exact old spelling fired, and all three variants stayed green under the literal.
     assert re.search(r":15262-15339`?\s*(?:→|->)\s*`?:15346-15423", text) is None, (
-        "D5 names the I7 range as one of THIS diff's re-points. It is not one: "
-        "`:15346-15423` reads identically on `origin/main` and at this head, because "
-        "`main` made that move — a pair whose two halves come from two different heads "
-        "is the chimera D5 exists to forbid (#13879 review, cycle 3)")
+        "D5 names `:15262-15339` -> `:15346-15423` as one of THIS diff's re-points. It is "
+        "not one, and ⛔ the reason is NOT that both ends read identically at `origin/main` "
+        "and at this head — they do not: `:15346-15423` survives only on `origin/main`, "
+        "while this head's document carries `:15449-15526`, and `:15262-15339` was a "
+        "PREVIOUS head's span. A pair whose two halves come from two different heads is the "
+        "chimera D5 exists to forbid (#13879 review, cycle 3; both halves re-derived at the "
+        "#14260 fix lane, finding 1)")
     assert "sdk.py:29121" in text, (
         "D5 no longer names `sdk.py:29121`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
