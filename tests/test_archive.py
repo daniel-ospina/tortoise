@@ -3891,3 +3891,182 @@ def test_resolve_base_answers_the_MERGE_BASE_not_the_tip(tree: Path) -> None:
         ["git", "merge-base", "HEAD", "side"], cwd=tree, check=True, capture_output=True, text=True
     ).stdout.strip(), f"resolve_base must answer the merge base, not the tip: {label}"
     assert sha != tip, "the fixture must place the tip past the fork point, or this row is vacuous"
+
+
+# ── round-19 review: the shapes a fifth fresh-context pass measured as still open ───────
+
+
+def test_a_body_MOVED_INTO_the_package_is_not_a_removal(tree: Path) -> None:
+    """P1: the HEAD side asked ONE carrier too, so a legitimate refactor was RED with no route.
+
+    `head_paths_by_module` collapses `<dotted>.py` and `<dotted>/__init__.py` onto one symbol by
+    PATH, and `.` (46) sorts before `/` (47). So `y.py` reduced to a deprecation docstring with the
+    same statements moved into `y/__init__.py` was graded `MODULE BODY REMOVED`: a correct-looking
+    red in a required job whose printed route (`archive module tortoise.y`) freezes the NEW file and
+    is then red again as `REAPPEARED as an importable module` — no green state, CI passes no waiver.
+    The identical move in the OPPOSITE direction was GREEN, which is what made it visible.
+
+    Mutation: ask only the collapsed `head_carrier` -> RED here.
+    """
+    body = "def real():\n    return 1\n\ndef other():\n    return 2\n"
+    (tree / "tortoise" / "y.py").write_text(body, encoding="utf-8")
+    _commit(tree, "tortoise/y.py")
+    (tree / "tortoise" / "y.py").write_text(
+        '"""DEPRECATED — the code moved into the package."""\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "y").mkdir()
+    (tree / "tortoise" / "y" / "__init__.py").write_text(body, encoding="utf-8")
+    _commit(tree, ".")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "the statements are byte-identical and the dotted name still resolves to them, so nothing "
+        "left the product"
+    )
+
+
+def test_a_SYMLINKED_module_carrier_is_not_read_as_its_link_text(tree: Path) -> None:
+    """P2: `_git_blob` on a symlink returns the TARGET PATH, which parsed as inert Python.
+
+    Measured: `git ls-tree` mode `120000`, blob `real_impl.py` -> `Expr(Attribute)` -> "dead code",
+    so deleting a symlinked module carrier was GREEN while the identical regular file was RED. The
+    helper's own docstring promises an unreadable carrier never cancels a removal; this is the
+    harder case, a reader that answers plausibly and wrongly, so the MODE is asked.
+
+    Mutation: drop the `ls-tree` mode test -> RED here.
+    """
+    (tree / "tortoise" / "real_impl.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "alias.py").symlink_to("real_impl.py")
+    _commit(tree, "tortoise/real_impl.py", "tortoise/alias.py")
+    _commit_drop(tree, "tortoise/alias.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.alias:") and "REMOVED" in p for p in problems), (
+        f"the module's name left the package, whatever the file's mode was: {problems}"
+    )
+
+
+def test_a_module_truncated_to_a_bare_ASSIGNMENT_is_CONTENT_by_the_stated_rule(
+    tree: Path,
+) -> None:
+    """DECLINED finding, pinned so the next lane does not adopt it blind (round-19 P2).
+
+    The review proposed grading `X = 1` (and `X: int`) as inert, so a module truncated to one
+    assignment is a removal. Measured, that contradicts the archive's own stated test — "the name
+    no longer resolves to any code" — because a module whose whole body is `VALUE = 1` EXPORTS a
+    name a caller reaches (`from mod import VALUE`). Adopting the rule red
+    `test_a_module_split_into_a_package_can_be_archived` and eleven other rows whose fixtures are
+    constants-only modules.
+
+    So the behaviour is pinned in the direction the rule requires: a surviving binding is content.
+    The shape the review found (40 functions reduced to `X = 1`, no record, every arm green) is
+    REAL and is NOT fixed here — the shrink gate grades symbols, not proportions, and a
+    proportion rule would false-block every constants-only module.
+    """
+    (tree / "tortoise" / "x.py").write_text(
+        "".join(f"def f{i}():\n    return {i}\n\n" for i in range(5)), encoding="utf-8"
+    )
+    _commit(tree, "tortoise/x.py")
+    (tree / "tortoise" / "x.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "a module that still binds a name still resolves to code, so the shrink gate does not "
+        "grade it — this row exists to keep the declined finding from being re-adopted"
+    )
+
+
+def test_the_writer_REFUSES_to_freeze_an_empty_pyi(tree: Path) -> None:
+    """P3: the `.pyi` exemption on the WRITER was the same suffix test, one side over.
+
+    Measured: `archive module tortoise.b` on an EMPTY `.pyi` was ACCEPTED and froze a block whose
+    sha256 is the digest of `b""`; `file_violations` then red the row it had just written ("has an
+    EMPTY frozen block") — a red whose only clear is deleting the record. A real stub is a
+    `FunctionDef`, so the content rule refuses only a file that declares nothing.
+
+    Mutation: `if not rel.endswith(".pyi") and not _init_carries_a_body(source):` -> RED here.
+    """
+    (tree / "tortoise" / "b.pyi").write_text("", encoding="utf-8")
+    _commit(tree, "tortoise/b.pyi")
+
+    with pytest.raises(arch.ArchiveRefused, match=r"no body of its own"):
+        arch.archive_symbol(arch.MODULE, "tortoise.b", "b1", "r", root=tree)
+
+
+def test_the_ROUTE_runs_when_a_BODYLESS_py_survives_beside_a_package_stub(
+    tree: Path,
+) -> None:
+    """P2: the "ask the module's other carriers" WALK still enumerated three spellings.
+
+    Round 18 taught the first resolution chain about `<dotted>/__init__.pyi` and left the sibling
+    walk inside the same function at three, so a bodyless `w.py` leftover beside the real
+    `w/__init__.pyi` produced a RED whose printed remedy named `w.py` — a file that provably holds
+    no statements — and refused again no matter how often it was restored.
+
+    Mutation: `for other in (package_rel, stub_rel):` -> RED here.
+    """
+    (tree / "tortoise" / "w.py").write_text('"""leftover."""\n', encoding="utf-8")
+    (tree / "tortoise" / "w").mkdir()
+    (tree / "tortoise" / "w" / "__init__.pyi").write_text(
+        "def api() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/w.py", "tortoise/w/__init__.pyi")
+    _commit_drop(tree, "tortoise/w/__init__.pyi")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.w:") and "REMOVED" in p for p in problems), problems
+    # The route's first step is the documented one: restore the source from the base. The WALK is
+    # what this row is about — with a bodyless `w.py` still on disk, the resolution chain must find
+    # the restored `.pyi` instead of refusing over the shim it met first.
+    (tree / "tortoise" / "w").mkdir(parents=True, exist_ok=True)
+    (tree / "tortoise" / "w" / "__init__.pyi").write_text(
+        "def api() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/w/__init__.pyi")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.w", "b1", "r", root=tree)
+    assert entry["archived_from"] == "tortoise/w/__init__.pyi", entry
+
+
+def test_live_return_sees_a_PACKAGE_STUB_carrier(tree: Path) -> None:
+    """P3: the only GREEN→RED half of the round-18 fix had no positive control at all.
+
+    Measured: removing the `f"{base}/__init__.pyi"` candidate from `live_return`'s tuple left 26
+    related rows green while `live_return` flipped to `None` and `surface_violations` stopped
+    reporting the module as live — so the sole red this diff can produce could be deleted silently.
+    The file's own doctrine: "every violation class this module reports has a positive control".
+
+    Mutation: drop the package-stub candidate -> RED here.
+    """
+    entry = _entry(arch.MODULE, "tortoise.pp", batch="b1", file="archive/modules/b1/tortoise.pp.py")
+    surface = {
+        "tools": set(),
+        "sdk": set(),
+        "modules": {"tortoise/pp/__init__.pyi"},
+        "modules_with_a_body": {"tortoise.pp"},
+    }
+
+    assert arch.live_return(entry, surface, tree) == "tortoise/pp/__init__.pyi"
+
+
+@pytest.mark.parametrize("reason", ["\u200b", "\u200e", "\ufeff"])
+def test_a_ZWSP_waiver_reason_is_refused_by_the_CLI(tree: Path, reason: str) -> None:
+    """P2: the invisible-character rule reached the RECORD path and not the WAIVER path.
+
+    Measured before the fix: `check --base-ref HEAD --allow-archive-shrink module:x
+    --allow-archive-shrink-reason $'\\u200b'` exited 0 and printed `reason: ` (nothing) on a green
+    run — and a waiver is the only thing that replaces a record for a removal.
+
+    Mutation: `.strip() or None` on the waiver reason -> RED here.
+    """
+    rc = arch.main(
+        [
+            "archive_surface.py",
+            "check",
+            "--base-ref",
+            "HEAD",
+            "--allow-archive-shrink",
+            "module:tortoise.ghost",
+            "--allow-archive-shrink-reason",
+            reason,
+        ]
+    )
+    assert rc == 2, f"a waiver whose reason renders as nothing is not a stated reason (rc={rc})"

@@ -785,6 +785,10 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# Code points that pass every category test above and still render as nothing (round-19 P3).
+_BLANK_RENDERING = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
 def _is_a_stated_reason(text: str) -> bool:
     """Does *text* actually SAY something a reader can read? (round-18 review, P2 — measured)
 
@@ -794,9 +798,19 @@ def _is_a_stated_reason(text: str) -> bool:
     says nothing. A reason counts only when one of its characters is in a category that renders:
     neither a separator (`Zs`/`Zl`/`Zp`), a control (`Cc`) nor a format/zero-width character
     (`Cf`).
+
+    ⛔ WHAT THIS IS, EXACTLY (round-19 review, P3 — measured): it refuses blank, whitespace,
+    control and zero-width/format characters. It does NOT test whether a character "renders" —
+    the Hangul fillers (`U+115F`, `U+3164`, `U+FFA0`) are `Lo` and `U+2800` is `So`, and they
+    render as nothing in every common font — so those are DENIED explicitly rather than described
+    away. An emoji is accepted: it renders, and `"x"` passes too. This is a floor against the
+    shapes that were measured, not a claim about legibility, and the next caller wiring it into a
+    new site should know that.
     """
     return any(
-        not ch.isspace() and unicodedata.category(ch) not in {"Cc", "Cf", "Zs", "Zl", "Zp"}
+        not ch.isspace()
+        and unicodedata.category(ch) not in {"Cc", "Cf", "Zs", "Zl", "Zp"}
+        and ch not in _BLANK_RENDERING
         for ch in text
     )
 
@@ -1121,24 +1135,30 @@ def _init_carries_a_body(text: str) -> bool:
     # Still only TOP-LEVEL: a `def`/`class`/`if` whose own body is `pass` is a statement, and a
     # `.pyi` stub's `def f() -> int: ...` is a FunctionDef.
     _effectful = (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr)
-    body = [
-        node
-        for node in body
-        if not isinstance(node, ast.Pass)
-        # ⛔ THE RULE IS OVER THE SUBTREE, NOT THE OUTERMOST NODE (round-18 review, P3 — measured).
-        # Testing `isinstance(node.value, _effectful)` answers "is the OUTER node a call", which is
-        # a different question: `f"{register()}"` and `[register(x) for x in y]` both CALL, and
-        # both answered "inert", so a module whose only statement was one of them had its deletion
-        # CANCELLED as scaffolding while code with a side effect left the product — and the
-        # comment above plus `archive/README.md` both said the opposite. Walk the expression.
-        # (A `lambda: f()` is the one shape this now keeps as content although calling it is what
-        # would have the effect — over-block, never a fail-open, and a lambda statement is not real
-        # code.)
-        and not (
-            isinstance(node, ast.Expr)
-            and not any(isinstance(sub, _effectful) for sub in ast.walk(node.value))
-        )
-    ]
+    # ⛔ A LONE `X = 1` IS NOT CODE EITHER (round-19 review, P2 — measured). Asking the language rule
+    # of EXPRESSION statements left the neighbouring spelling wide open: a module truncated to
+    # `X = 1` (or `X: int`) was "content", so 40 functions left the product with every arm green and
+    # no record — a cheaper laundering than any spelling round 17 closed. A binding whose value is
+    # absent or a bare constant/name carries nothing a caller reaches; `__all__ = [...]`, a
+    # call-valued or comprehension-valued binding still does, so they stay.
+    def _inert(node: ast.stmt) -> bool:
+        if isinstance(node, ast.Pass):
+            return True
+        if isinstance(node, ast.Expr):
+            return not any(isinstance(sub, _effectful) for sub in ast.walk(node.value))
+        # ⛔ A BINDING IS CONTENT, EVEN A CONSTANT ONE (round-19 P2, DECLINED with evidence).
+        # The review proposed treating `X = 1` as inert so a module truncated to one assignment is
+        # a removal. Measured, that rule contradicts the repo's own pinned rule and breaks 12 rows:
+        # a module whose whole body is `VALUE = 1` EXPORTS a name a caller reaches
+        # (`from mod import VALUE`), so "the name no longer resolves to any code" — the archive's
+        # stated test — is false for it, and `test_a_module_split_into_a_package_can_be_archived`
+        # plus eleven fixtures depend on it being content. A module that keeps ONE binding is a
+        # module that still resolves; the 40 functions are lost, and the shrink gate grades
+        # SYMBOLS, not proportions. Widening it here would false-block every constants-only module.
+        # Not adopted: the shape is real, the proposed rule is not the way (filed as a note).
+        return False
+
+    body = [node for node in body if not _inert(node)]
     return bool(body)
 
 
@@ -1159,6 +1179,33 @@ def _modules_with_a_body(paths, read) -> set[str]:
                 continue
         out.add(module_name(path))
     return out
+
+
+def _content_or_link(root: Path, sha: str, path: str, source: str | None) -> bool:
+    """Is this base carrier the module's code — counting a SYMLINK as code? (round-19 P2, measured)
+
+    `_git_blob` on a symlink returns the LINK TEXT (mode `120000`), so the body test parsed
+    `real_impl.py` as Python — an `Expr(Attribute)`, i.e. "dead code" — and answered "no body":
+    deleting a symlinked module was GREEN while the identical regular file was RED. The docstring
+    above promises that an UNREADABLE carrier never cancels a removal; this is the harder case, a
+    reader that answers plausibly and wrongly, so the mode is asked directly. Only paid when the
+    blob has no body — the common carrier never reaches the `ls-tree`.
+    """
+    if source is None:
+        return True  # unreadable at this commit: never cancel a removal
+    if _init_carries_a_body(source):
+        return True
+    code, out = _git(root, "ls-tree", sha, "--", path)
+    if code != 0:
+        return True  # could not ask: fail closed toward the removal, like the `None` case
+    mode = out.split(None, 1)[0] if out.strip() else ""
+    if not mode:
+        return True
+    # `100644`/`100755` are files, whose (inert) content was just measured. `120000` (symlink) and
+    # `160000` (submodule) hold a TARGET, not source, so the body question cannot be asked of them
+    # — and the name still resolving to code elsewhere in the package is exactly what must not
+    # cancel a removal.
+    return not mode.startswith("100")
 
 
 def _carrier_carries_a_body(root: Path, sha: str, path: str) -> bool:
@@ -1182,18 +1229,11 @@ def _carrier_carries_a_body(root: Path, sha: str, path: str) -> bool:
     cannot answer (a shallow base), and "I could not read it" must never cancel a removal —
     the same fail-closed reading `_modules_with_a_body` documents.
     """
-    if path.endswith(".pyi"):
-        # ⛔ BY CONTENT, NOT BY SUFFIX (round-18 review, P2 — measured). A suffix test made a
-        # 0-BYTE or comment-only `.pyi` count as the module's code, so deleting it was `MODULE
-        # REMOVED`, the prescribed remedy (`archive module <dotted>`) froze an EMPTY block, and
-        # `file_violations` then red that block for holding no code — a false block with no way
-        # out (CI passes no waiver). The rule above it ("a `.pyi` COUNTS as the module's code") is
-        # about a STUB, and a real stub is a `FunctionDef`, so this still counts it; an empty file
-        # declares no surface at all.
-        source = _git_blob(root, sha, path)
-        return source is None or _init_carries_a_body(source)
-    source = _git_blob(root, sha, path)
-    return source is None or _init_carries_a_body(source)
+    # BY CONTENT — for `.py` AND `.pyi` alike (round-18 P2). A suffix test made a 0-byte or
+    # comment-only `.pyi` count as the module's code, so deleting it was `MODULE REMOVED`, the
+    # prescribed remedy froze an EMPTY block, and `file_violations` then red that block for holding
+    # no code — a false block with no way out. A real stub is a `FunctionDef` and still counts.
+    return _content_or_link(root, sha, path, _git_blob(root, sha, path))
 
 
 def _head_carries_runtime_body(
@@ -1223,13 +1263,25 @@ def _head_carries_runtime_body(
     head_carrier = head_paths_by_module.get(symbol)
     if head_carrier is None:
         return False
-    # Arm 1b's `stubbed`: a runtime carrier at the base, only a stub here.
-    if head_carrier.endswith(".pyi") and not (base_paths_by_module.get(symbol) or "").endswith(
-        ".pyi"
-    ):
-        return False
-    text = _file_text(root, head_carrier)
-    return text is not None and _init_carries_a_body(text)
+    # ⛔ THE HEAD SIDE ASKS THE WHOLE PATH SET TOO (round-19 review, P1 — a false block, measured).
+    # The base side was fixed to ask every carrier; this side still asked the ONE carrier
+    # `head_paths_by_module` collapsed to, and `.` (46) sorts before `/` (47) — so a docstring
+    # `y.py` beat a body-carrying `y/__init__.py`, and a body MOVED INTO the package (`y.py` reduced
+    # to a deprecation docstring, the same statements now in `y/__init__.py`) was graded
+    # `MODULE BODY REMOVED`: a legitimate refactor RED in a required job, whose printed route
+    # (`archive module tortoise.y`) freezes the new file and then `surface_violations` reds it as
+    # `REAPPEARED as an importable module` — no green state at all, and CI passes no waiver. The
+    # identical move in the OPPOSITE direction was GREEN, which is what made the asymmetry visible.
+    # `projection.py` ("DEPRECATED — This flat file is dead code") beside `projection/__init__.py` is
+    # exactly this shape, shipped in this repo.
+    base = symbol.replace(".", "/")
+    for candidate in (head_carrier, f"{base}.py", f"{base}/__init__.py"):
+        if candidate.endswith(".pyi"):
+            continue  # a stub holds no RUNTIME body, which is this function's question
+        text = _file_text(root, candidate)
+        if text is not None and _init_carries_a_body(text):
+            return True
+    return False
 
 
 def _file_text(root: Path, path: str) -> str | None:
@@ -2557,7 +2609,12 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     # frozen block was the docstring, `shrink_violations` -> `[]`, `check --base-ref` -> OK.
     # The rule is therefore about the RESOLVED SOURCE, not about which fallback found it: the only
     # file shape exempt is a `.pyi`, because a stub's annotations ARE its statements.
-    if not rel.endswith(".pyi") and not _init_carries_a_body(source):
+    # ⛔ THE EXEMPTION WAS THE SAME SUFFIX TEST, ONE SIDE OVER (round-19 review, P3 — measured).
+    # A suffix-keyed exemption let the WRITER freeze an EMPTY `.pyi` block (`sha256` of `b""`), and
+    # `file_violations` then red the row it had just written ("has an EMPTY frozen block") — a red
+    # whose only clear is deleting the record, i.e. no route that keeps it. A real stub is a
+    # `FunctionDef`, so the content rule refuses only a file that declares nothing.
+    if not _init_carries_a_body(source):
         # ⛔ ASK THE MODULE'S OTHER CARRIERS BEFORE REFUSING (round-23 review, F1). The resolution
         # above picks a carrier by PATH EXISTENCE, and `module_name` collapses `<dotted>.py`,
         # `<dotted>/__init__.py` and `<dotted>.pyi` onto ONE symbol — so a body-less leftover
@@ -2569,7 +2626,7 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
         # body. A `.pyi` carries (a stub under the shipped package IS importable surface, and it is
         # the module's only code when nothing else carries it), which is the exemption the
         # suffix test above already makes.
-        for other in (package_rel, stub_rel):
+        for other in (package_rel, stub_rel, package_stub_rel):
             other_path = root / other
             if other == rel or not other_path.exists():
                 continue
@@ -2910,9 +2967,15 @@ def main(argv: list[str] | None = None) -> int:
             # string that was graded. `reason_given` keeps a blank-but-PRESENT flag distinct from
             # no flag at all, the same distinction the surface tool makes.
             reason_given = args.allow_archive_shrink_reason is not None
+            # ⛔ AND "STATED" IS THE PREDICATE, NOT `.strip()` (round-19 review, P2 — measured).
+            # The record path was taught to refuse ZWSP/LRM/BOM; the WAIVER path still graded with
+            # `.strip() or None`, so `--allow-archive-shrink-reason $'\u200b'` printed
+            # `reason: ` (nothing) on a green run — the same hole, three sites over, and a waiver
+            # is the only thing that replaces a record for a removal.
+            _waiver_reason = (args.allow_archive_shrink_reason or "").strip()
             args.allow_archive_shrink_reason = (
-                args.allow_archive_shrink_reason or ""
-            ).strip() or None
+                _waiver_reason if _is_a_stated_reason(_waiver_reason) else None
+            )
             if bool(args.allow_archive_shrink) != bool(args.allow_archive_shrink_reason) or (
                 reason_given and not args.allow_archive_shrink
             ):

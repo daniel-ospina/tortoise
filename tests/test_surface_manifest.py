@@ -8579,7 +8579,11 @@ def test_the_shrink_refusal_PRINTS_the_route(checker, tmp_path, monkeypatch):
     sm = checker
     with MANIFEST.open() as fh:
         doc = yaml.safe_load(fh)
-    problem = "tortoise_ghost (tool) was DROPPED with no record — it is gone from both"
+    # ⛔ A REAL `RemovalProblem`, because the block is now gated on `.kind` (round-19 P3): a plain
+    # string has no kind, and the row must exercise the class the filter keys on.
+    problem = sm.RemovalProblem(
+        "no-record", "tortoise_ghost (tool) was DROPPED with no record — it is gone from both"
+    )
     monkeypatch.setattr(
         sm, "shrink_report", lambda *a, **k: ([problem], "origin/main (merge base abc)", True)
     )
@@ -8624,4 +8628,36 @@ def test_the_ROUTE_BLOCK_is_absent_when_nothing_was_DROPPED(checker, tmp_path, m
     assert "reported as dropped by exactly one of" not in out, (
         "a stale waiver is not a dropped row: its remedy is to drop the flag, and no archive "
         f"route can clear it: {out}"
+    )
+
+
+def test_the_route_block_covers_EVERY_no_record_KIND(checker, tmp_path, monkeypatch):
+    """Round-19 review, P3: filtering by message TEXT missed two `no-record` rows.
+
+    `shrink_problems` used to `str()` its problems, throwing away `RemovalProblem.kind`, so `check`
+    re-derived the class from substrings that only cover two of the messages `removal_report`
+    produces. Measured: the rows `… has no departure record: --allow-surface-shrink states the
+    rename …` and `… is in REMOVED_SDK_METHODS … but its code is NOT archived` printed no route at
+    all, while `cut` (which filters by KIND) printed one for both.
+
+    Mutation: filter by the two substrings instead of `.kind` -> RED here.
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    problem = sm.RemovalProblem(
+        "no-record",
+        "tortoise_ghost (tool) has no departure record: `--allow-surface-shrink` states the "
+        "rename on the command line and nowhere a reader can find it",
+    )
+    monkeypatch.setattr(
+        sm, "shrink_report", lambda *a, **k: ([problem], "origin/main (merge base abc)", True)
+    )
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="origin/main")
+
+    assert rc == 1, out
+    assert "has no departure record" in out, out
+    assert "reported as dropped by exactly one of" in out, (
+        f"a `no-record` row needs the freeze route whatever its wording: {out}"
     )
