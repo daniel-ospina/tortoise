@@ -2414,6 +2414,24 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     )
 
 
+def _published_table_length() -> int:
+    """The row count `CAPABILITY-PLACEMENT-AUDIT.md` publishes for `_REDEFINED_13854`.
+
+    DERIVED from the document, never typed: the paragraph states the figure so a reader does not
+    have to count, and the point of the arm below is that the two cannot disagree. A regex that
+    stops matching is a FAILURE (`assert` with the phrase), not a silent zero — a published figure
+    this cannot find is a figure nothing grades, which is the defect class the arm exists to close.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    match = re.search(r"\*\*(\d+) rows, which is the TABLE's own length", text)
+    assert match is not None, (
+        f"`{_AUDIT}` no longer publishes the table's length in the graded form "
+        "(\"**N rows, which is the TABLE's own length\") — re-point this reader at the sentence "
+        "that states it rather than dropping the arm"
+    )
+    return int(match.group(1))
+
+
 def test_the_redefined_13854_table_length_is_the_figure_the_document_publishes() -> None:
     """`_REDEFINED_13854`'s row count is a PUBLISHED figure, so it gets an arm (#14269 review).
 
@@ -2423,11 +2441,24 @@ def test_the_redefined_13854_table_length_is_the_figure_the_document_publishes()
     enumerated addresses left this file at 32 passed. The count is asserted here so it cannot
     drift from the document again; the document states the table's length, not the population
     above it, because a range address is one row.
+
+    ⛔ And it reads the document (#14269 review, cycle 13): this arm compared the table to a
+    LITERAL and never opened `CAPABILITY-PLACEMENT-AUDIT.md`, so the doc could publish any figure
+    it liked — measured on a throwaway copy, setting the document's `**35 rows**` (and its mirror)
+    to `33` left the whole gate green, which is the original defect (doc said 34, table held 33)
+    still shipping through the direction it was found in. Both inputs are now read: the literal
+    pins the POPULATION so a row cannot be dropped quietly, and the document's own figure must
+    equal it, so neither side can move alone.
     """
     assert len(_REDEFINED_13854) == 35, (
-        f"`_REDEFINED_13854` carries {len(_REDEFINED_13854)} rows, not the 35 the audit document "
-        "publishes — update the document's figure in the same change, and re-derive every new "
-        "row by content rather than by a delta."
+        f"`_REDEFINED_13854` carries {len(_REDEFINED_13854)} rows, not 35 — a row was added or "
+        "dropped. Re-derive every new row by content rather than by a delta."
+    )
+    published = _published_table_length()
+    assert published == len(_REDEFINED_13854), (
+        f"`{_AUDIT}` publishes `**{published} rows**` as this table's length while the table "
+        f"holds {len(_REDEFINED_13854)} — the figure the document states and the figure the arm "
+        "reads must be the same one, which is what this arm is for"
     )
 
 
