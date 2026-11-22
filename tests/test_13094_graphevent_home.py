@@ -148,13 +148,13 @@ CAPABILITY_CONTROLS = (
      "cypher:-["),
     # a typed variable-length pattern (no `-[*` literal)
     ("typed var-length", "MATCH (e:GraphEvent)-[r:NEXT*]->(n)", "cypher:*]"),
-    # edge-existence predicate, node-existence predicate, adjacency aggregate,
-    # and the audit's own undirected hop (`NOT (n)--()`)
+    # edge-existence predicate, adjacency aggregate, and the audit's own undirected
+    # hop (`NOT (n)--()`). ⛔ A NODE-existence row is NOT here: it walks nothing, so
+    # its arm was removed (#14183 round-16 review, P3) — it is a NEGATIVE control
+    # now, in `test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing`.
     ("edge existence",
      "MATCH (e:GraphEvent) WHERE EXISTS { (e)-[:TOUCHED]->(:Point) } RETURN e",
      "cypher:-["),
-    ("node existence", "MATCH (n:Point) WHERE EXISTS { (n:Point) } RETURN n",
-     "cypher:exists {"),
     ("adjacency aggregate", "MATCH (e:GraphEvent) RETURN size((e)-->())",
      "cypher:)-->" ),
     ("undirected hop", "MATCH (n:Point) WHERE NOT (n)--() RETURN n", "cypher:)--("),
@@ -167,6 +167,24 @@ CAPABILITY_CONTROLS = (
     # not widened to `<--(`: that spelling carries `)<-` too and would otherwise be
     # lost from detection.
     ("inbound hop", "MATCH (a:Point)<--(b) RETURN a", "cypher:)<-"),
+    # ⛔ THE UNBRACKETED HOPS GET THEIR OWN ARMS (#14183 round-16 review, P2). A
+    # literal hop need not be bracketed — `(a)-r->(b)` and `(a)-r-(b)` are
+    # engine-accepted legacy spellings, and this table already pins the INBOUND
+    # `(a)<-r-(b)` as real, so the outbound and undirected siblings cannot go
+    # uncensused. Before these arms existed only the EXISTS-wrapped forms were
+    # caught (incidentally, by the removed `exists {` arm) and the bare forms were
+    # caught by nothing: measured `MATCH (a)-r->(b)` and `MATCH (a)-r-(b)` → `None`.
+    ("outbound UNBRACKETED hop", "MATCH (a)-r->(b) RETURN a", "cypher:->("),
+    ("undirected UNBRACKETED hop", "MATCH (a)-r-(b) RETURN a", "cypher:)-r-("),
+    # the same shape under an existence predicate, which is where the removed
+    # `exists {` arm used to catch it by accident
+    ("undirected UNBRACKETED hop in EXISTS",
+     "MATCH (e) WHERE EXISTS { (e)-r-(p) } RETURN e", "cypher:)-r-("),
+    # the PATTERN arm admits a type suffix on the relationship variable, and this
+    # row is why: without it the typed legacy spelling would be the one shape that
+    # slipped between `-[` and the untyped pattern
+    ("undirected UNBRACKETED hop with a type",
+     "MATCH (a)-r:IMPL-(b) RETURN a", "cypher:)-r-("),
     # procedures and algorithms. `apoc.` is the shape the census's own
     # before/after table advertises, so it is the one that must not ship untested.
     ("path procedure",
@@ -474,7 +492,12 @@ def test_every_capability_arm_is_pinned_or_declared_unreachable():
     describe an arm that no longer exists.
     """
     module = _tool()
-    arms = set(module.GRAPH_CAPABILITY_CYPHER)
+    # ⛔ THE PATTERN ARMS COUNT TOO. A pattern with no control row is an unpinned
+    # claim for exactly the reason a substring is, so its TOKEN joins the arm set
+    # the completeness pin grades (#14183 round-16, P2).
+    arms = set(module.GRAPH_CAPABILITY_CYPHER) | {
+        token.split("cypher:", 1)[1] for token, _ in module.GRAPH_CAPABILITY_PATTERNS
+    }
     pinned = {arm.split("cypher:", 1)[1] for _, _, arm in CAPABILITY_CONTROLS}
     assert not pinned - arms, (
         "a control row pins an arm the tool no longer has — the table is "
@@ -1550,14 +1573,16 @@ def test_the_noise_stripper_is_the_write_gates_grammar_plus_one_backtick_branch(
 def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
     """The arms must not misfile an honest row — the FALSE-BLOCK direction.
 
-    WHY THIS EXISTS. Three arms in this guard's history were contiguous punctuation
-    (``--``, ``<-``, ``size((``) matched against a haystack with ALL whitespace and
-    backtick quoting removed. That normalisation is what closes the false-PASS holes
-    the rows above pin, and it is also what turns punctuation inside ordinary Cypher
-    into an apparent relationship: `$after - -1` becomes ``--1``, `e.ts < -1`
-    becomes ``s<-1``, `` n.`a--b` `` and `` n.`a<-b` `` unwrap to a property NAME
-    carrying the same characters, and `RETURN size((collect(n)))` is a grouping
-    paren with no relationship anywhere.
+    WHY THIS EXISTS. Four arms in this guard's history were contiguous punctuation
+    (``--``, ``<-``, ``size((``, ``exists {``) matched against a haystack with ALL
+    whitespace and backtick quoting removed. That normalisation is what closes the
+    false-PASS holes the rows above pin, and it is also what turns punctuation inside
+    ordinary Cypher into an apparent relationship: `$after - -1` becomes ``--1``,
+    `e.ts < -1` becomes ``s<-1``, `` n.`a--b` `` and `` n.`a<-b` `` unwrap to a
+    property NAME carrying the same characters, `RETURN size((collect(n)))` is a
+    grouping paren with no relationship anywhere, and `EXISTS { (n:Point) }` is a
+    NODE-existence test — an EDGE-existence predicate never reaches that arm,
+    because `-[` / `)<-` / `)--(` decide it first (#14183 round-16 review, P3).
 
     WHAT IT WOULD BE FALSE WITHOUT. `readers_report()` derives its verdict from this
     predicate, so one misfiled row does not merely red a test: it publishes
@@ -1568,9 +1593,21 @@ def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
     false PASS is loud and this one is quiet. The arms are therefore anchored on the
     NODE (`)--(`, `)-->`, `)<-`) rather than on the dashes.
 
-    NON-VACUOUS: each case below returned a `cypher:` arm before its anchoring, and
-    the positive control at the end shows the anchoring did not simply switch the
-    detect side off.
+    NON-VACUOUS: each case below returned a `cypher:` arm before its ARM WAS
+    ANCHORED OR REMOVED, and the positive control at the end shows the anchoring
+    did not simply switch the detect side off.
+    ⛔ A RESIDUAL IS ACCEPTED HERE, NOT CLOSED, and it is named so no reader treats
+    this list as exhaustive: a PARENTHESISED arithmetic operand ends in `)` too, so
+    `(n.ts - n.start) < -5` and `(x) < -1` still strip to `)<-` (sibling: `-[` on
+    `RETURN [1,2][0] - [3,4][0]`). The direction is fail-CLOSED — a row that walks
+    nothing is refused, nothing that walks is smuggled past — and no row in this
+    tree reaches it, so it stays a documented residual rather than a rewrite of the
+    arm set into a grammar (#14183 round-16 review, P3; see the tool's `)<-` note).
+    ⚠️ The PATTERN arm has its own, ONE, and it is inherent rather than a choice: a
+    real undirected unbracketed hop `(a)-r-(b)` and a subtraction between
+    parenthesised operands `(total) - n - (subtotal)` are the same `)-ident-(`
+    shape, so no syntax-only arm can separate them. It fires (fail-closed) and the
+    tool names it there.
     """
     tool = _tool()
     walks_nothing = (
@@ -1582,6 +1619,22 @@ def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
          "MATCH (n) WHERE n.`a<-b` = 1 RETURN n"),
         ("a grouping paren, not a pattern",
          "RETURN size((collect(n)))"),
+        # ⛔ THE ARM THIS ONE PINS IS GONE, and this row is why it is measurably
+        # gone: the node-existence predicate reached `cypher:exists {` before the
+        # arm was removed and returns `None` after (#14183 round-16 review, P3).
+        ("a NODE-existence predicate, which walks nothing",
+         "MATCH (n:Point) WHERE EXISTS { (n:Point) } RETURN n"),
+        # ⛔ THE PATTERN ARM'S OWN FALSE-POSITIVE GUARD (#14183 round-16, P2).
+        # `)\-(` and `-r-` would both misfile these; the pattern requires an
+        # IDENTIFIER (`[A-Za-z_]\w*`, never a literal) between the dashes, so it
+        # does not.
+        ("a subtraction of two parenthesised operands", "RETURN (a)-(b)"),
+        ("a literal subtracted between parenthesised operands",
+         "RETURN (a) - 1 - (b)"),
+        # ⚠️ NOT `RETURN (total) - n - (subtotal)`: that is INDISTINGUISHABLE from a
+        # real `(a)-r-(b)` hop by syntax alone — both are `)-ident-(`. The pattern
+        # arm accepts it (fail-closed), and the tool's `GRAPH_CAPABILITY_PATTERNS`
+        # block names it as its ONE residual rather than pretending it is closed.
     )
     misfiled = [
         f"{label}: {cypher!r} — {tool.graph_capability({'snippets': (cypher,)})!r}"

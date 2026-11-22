@@ -39,8 +39,8 @@ managed to read.
 ⛔ THE VERDICT IS NOT A LICENCE TO RE-POINT. Even at ``covered`` this verb cannot
 see the two refusals `#13083` §6.3 established from the code, which are properties
 of the PRODUCER and not of any tenant's data: `_emit_event` skips the journal
-entirely when a payload-only emit carries no `point`/`id`/`turns` (`sdk.py:16204`),
-and the hard-delete lane deliberately writes `PointRetracted` to the store and
+entirely when a payload-only emit carries no `point`/`id`/`turns`
+(`sdk.py:16225-16226`), and the hard-delete lane deliberately writes `PointRetracted` to the store and
 `EntityMutated` to the journal (`sdk.py:3786-3801`, "two stores, one meaning
 each"). ``covered`` on a tenant therefore means "this tenant's history happens to
 be reproducible", never "the producers agree".
@@ -852,11 +852,59 @@ GRAPH_CAPABILITY_CYPHER = (
     # ⚠️ Cypher always parenthesises the node to the LEFT of an inbound hop, so
     # anchoring on that closing paren keeps every real spelling — `(a)<--(b)`,
     # `(a)<-[r:T]-(b)` (also caught by `-[`) and the legacy unbracketed
-    # `(a)<-r-(b)` — and drops both false shapes, which carry a property or digit
-    # in that position rather than a `)`. Same rule for the outbound forms below.
+    # `(a)<-r-(b)` — and drops the two shapes that made the bare `<-` a
+    # false-block: a comparison whose LEFT operand is not a parenthesised node
+    # (`e.ts < -1` → `s<-1`) and a property NAME carrying the punctuation
+    # (`` n.`a<-b` `` → `a<-b`).
+    # ⛔ WHAT THE ANCHOR DOES *NOT* GUARANTEE, stated rather than implied (#14183
+    # round-16 review, P3): the note that used to sit here said a false shape
+    # carries "a property or digit in that position rather than a `)`", which is
+    # not exhaustive — a PARENTHESISED arithmetic operand ends in `)` too, so
+    # `(n.ts - n.start) < -5` and `(x) < -1` still strip to `)<-` and are filed
+    # as capability readers. ⚠️ THE RESIDUAL IS ACCEPTED, NOT CLOSED: it is the
+    # fail-CLOSED direction (a row that walks nothing is refused; nothing that
+    # walks is smuggled past), no row in this tree reaches it, and closing it needs
+    # an OPERAND-AWARE exclusion — "nothing that is an expression follows the `<-`"
+    # — which is a second definition of "a hop" beside this substring list (a
+    # "not followed by a digit" test does not close it: `(e.x) < -e.y` strips to
+    # `)<-` with no digit anywhere after it). The sibling residual for
+    # the `[` form is `RETURN [1,2][0] - [3,4][0]` (`-[`), named for the same
+    # reason. Same anchor rule for the outbound forms below.
     ")<-",                 # an INBOUND hop, `(a)<--(b)` / `(a)<-r-(b)`
     ")--(", ")-->",          # an UNDIRECTED / directed node-to-node hop
-    "exists {",           # a pattern-existence predicate over an edge
+    # ⛔ THE ANCHOR IS NOT THE WHOLE STORY, and the two arms below close the rest of
+    # it (#14183 round-16 review, P2). Anchoring on the node excludes the two
+    # recorded false shapes, but a LITERAL HOP NEED NOT BE BRACKETED: `(a)-r->(b)`
+    # and `(a)-r-(b)` are engine-accepted legacy spellings (this file already pins
+    # the inbound `(a)<-r-(b)` as REAL, `tests/test_13094_graphevent_home.py`), and
+    # a bare `-r->` carries NONE of `-[`, `]->`, `)-<`, `)--(`, `)-->`. Before the
+    # `exists {` arm was removed, only an EXISTS-WRAPPED `-r->` / `-r-` was caught
+    # (by that arm, incidentally) and the bare forms were caught by nothing: measured
+    # `MATCH (a)-r->(b)` and `MATCH (a)-r-(b)` → `None`. So the unbracketed hops get
+    # arms of their own rather than depending on an arm about existence:
+    "->(",                # an UNBRACKETED outbound hop, `(a)-r->(b)`
+    # ⛔ AND THE UNDIRECTED UNBRACKETED HOP IS A PATTERN, NOT A SUBSTRING — the only
+    # arm in this guard that is, because a substring list cannot say "an IDENTIFIER
+    # between two dashes" and every substring that gets close (`)-(`, `-r-`) is a
+    # false-positive surface: `(a)-(b)` is a subtraction of two parenthesised
+    # operands and `(x)-(y)` is the same shape the `)<-` note above accepts as a
+    # fail-closed residual. See `GRAPH_CAPABILITY_PATTERNS` below, which is measured
+    # and pinned like every arm here.
+    # ⛔ `exists {` WAS AN ARM AND IS GONE (#14183 round-16 review, P3) — the SAME
+    # argument as `size((` below, one arm over. First-match ordering puts `-[`,
+    # `]->`, `)<-`, `)--(`, `)-->`, `->(` and the pattern arm BEFORE it, so every
+    # EDGE-bearing existence predicate over a BRACKETED or UNBRACKETED hop is
+    # decided earlier (`EXISTS { (e)-[:TOUCHED]->(:Point) }` → `-[`,
+    # `EXISTS { (e)-r->(p) }` → `->(`, `EXISTS { (e)-r-(p) }` → the pattern), and the
+    # only shape left that reaches an `exists {` arm is a NODE-existence test
+    # (`EXISTS { (n:Point) }`), which needs no graph capability at all — while the
+    # comment here claimed "a pattern-existence predicate over an EDGE". The two
+    # halves could not both be true, and a row misfiled by it makes
+    # `readers_report()` publish "reader(s) NEED a graph capability" over a
+    # predicate that walks nothing (measured: node-existence → `cypher:exists {`
+    # before this change, `None` after; the edge-existence spellings above are
+    # decided by their own hop arms). An arm nothing can reach that only ever
+    # false-positives is not a spare.
     # ⛔ `size((` WAS AN ARM AND IS GONE (#14183 round-13 review, P3): it contributed
     # ZERO detection — every real adjacency aggregate carries a relationship inside
     # it, so `-[` or the hop arms decide first — while `RETURN size((collect(n)))`
@@ -870,6 +918,32 @@ GRAPH_CAPABILITY_CYPHER = (
     "call algo", "apoc.",  # a graph algorithm / path procedure
     "call db.idx.fulltext", "db.idx.fulltext",
     "call db.idx.vector", "db.idx.vector",
+)
+
+#: ⛔ THE ONE ARM THAT IS A PATTERN rather than a substring (`#14183` round-16
+#: review, P2): an UNDIRECTED UNBRACKETED hop, `(a)-r-(b)`. A substring list cannot
+#: say "an IDENTIFIER between two dashes", and the near misses are false-positive
+#: surfaces (`)-( `matches `(a)-(b)`, a subtraction of two parenthesised operands;
+#: `-r-` matches a property name and any two-dash arithmetic). The identifier is
+#: `[A-Za-z_]\w*` and NOT `\w+`, so a literal operand (`(a)-1-(b)`, i.e.
+#: `(a) - 1 - (b)`) does not match — measured, both directions, by
+#: `test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing` and its
+#: positive controls.
+#:
+#: It carries a TOKEN, exactly as a substring arm does, and the completeness pin
+#: counts these tokens among the arms — a pattern with no control row is an
+#: unpinned claim for the same reason a substring is.
+#:
+#: ⚠️ ITS ONE RESIDUAL IS INHERENT, not a choice: a real undirected unbracketed hop
+#: `(a)-r-(b)` and a subtraction between parenthesised operands
+#: `(total) - n - (subtotal)` are the SAME `)-ident-(` shape, so no syntax-only arm
+#: can separate them. Measured: the second fires `cypher:)-r-(`. That is the
+#: fail-CLOSED direction (a row that walks nothing is refused, nothing that walks
+#: is smuggled past) and separating them would need to know that `r` is a
+#: relationship rather than a value — a schema fact this guard deliberately never
+#: assumes.
+GRAPH_CAPABILITY_PATTERNS = (
+    ("cypher:)-r-(", re.compile(r"\)-[A-Za-z_]\w*(?::[A-Za-z_]\w*)?-\(")),
 )
 
 #: The audit's own vocabulary (`#13083` §2) — a graph engine's four capabilities
@@ -911,6 +985,11 @@ def graph_capability(row: Mapping[str, Any]) -> str | None:
         for shape in GRAPH_CAPABILITY_CYPHER:
             if _NO_WS.sub("", shape) in haystack:
                 return f"cypher:{shape}"
+        # The substring arms cannot express an unbracketed UNDIRECTED hop; see
+        # `GRAPH_CAPABILITY_PATTERNS` for why it is a pattern and what it costs.
+        for token, pattern in GRAPH_CAPABILITY_PATTERNS:
+            if pattern.search(haystack):
+                return token
     return None
 
 
