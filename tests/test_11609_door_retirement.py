@@ -1187,10 +1187,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
         paragraph, and a hard-wrapped line stays inside it.
 
         ⚠️ DECLARED RESIDUALS of this model, stated not tuned (#14237 r6 review): a PROSE
-        line containing a `|` is read as a table row and split into cells (over-block),
-        and a list item absorbs a nested sub-item, so a mention in the sub-item may be
-        cleared by the parent's replacement — the deliberate over-allow that stops the
-        model refusing correct, hard-wrapped notes (three of them in `docs/` today).
+        line containing a `|` is read as a table row and split into cells (over-block).
+        A nested list item is deliberately NOT a continuation (it is its own block), because
+        letting it join its parent let the parent's replacement clear a bare instruction in
+        the sub-item — a fail-open; `test_a_nested_list_item_is_its_own_block` pins that.
         """
         blocks: list[tuple[int, int, str]] = []
         offset = 0
@@ -1266,7 +1266,14 @@ class TestEveryReaderNamesTheLiveListingDoor:
             # An INDENTED line after a list item is that item's CONTINUATION: markdown
             # keeps it inside the item, so splitting it out refused correct, hard-wrapped
             # migration notes (#14237 r6 review P2, three measured in `docs/`).
-            if item and line[:1] in (" ", "\t"):
+            # ⛔ A NESTED LIST ITEM IS NOT A CONTINUATION (measured, #14237 r6 review's
+            # residual closed rather than declared): markdown puts `  - sub` in the parent
+            # `<li>` as its own list, and the round-6 model let it JOIN the parent block —
+            # so a note naming the replacement in the parent cleared a BARE instruction in
+            # the sub-item, which is a fail-OPEN, the one direction this guard may not err
+            # in. It is a marker line, so it falls through to the item branch below.
+            if item and line[:1] in (" ", "\t") \
+                    and re.match(r"[-*+] |\d+\. ", stripped) is None:
                 item.append(line)
                 offset = ends
                 continue
@@ -1496,6 +1503,34 @@ class TestEveryReaderNamesTheLiveListingDoor:
         assert len(note_cell) == 1 and "tortoise_graph_overview" in note_cell[0], (
             "the migration note's own cell must name the replacement and must be its own "
             "block")
+
+    def test_a_nested_list_item_is_its_own_block(self):
+        """A SUB-item is a unit of its own, so the parent's replacement cannot clear it.
+
+        Measured fail-OPEN in the round-6 model (which joined every indented line to the
+        parent item): the parent names `tortoise_graph_overview`, the nested line is a BARE
+        instruction to call `tortoise_list_graphs`, and R2 accepted it on the parent's
+        word. A hard-wrapped CONTINUATION (no marker) must still join its item — that half
+        is pinned by the three real notes the round-6 review measured and by
+        `test_the_block_splitter_is_structure_not_punctuation`.
+        """
+        text = (
+            "- The listing door is `tortoise_graph_overview(section=\"graphs\")`; use it.\n"
+            "  - Call `tortoise_list_graphs` for names.\n"
+        )
+        assert not self.retired_call_forms(text), (
+            "the fixture must stay a BARE mention — otherwise R1, not the block split, is "
+            "what reds it")
+        assert self.notes_missing_replacement(text), (
+            "the nested sub-item borrowed its parent item's replacement — a fail-open: the "
+            "reader is told to call a retired door and R2 accepts it")
+        continuation = (
+            "- The listing door is `tortoise_list_graphs`, retired forward into\n"
+            "  `tortoise_graph_overview(section=\"graphs\")`, which lists names.\n"
+        )
+        assert not self.notes_missing_replacement(continuation), (
+            "a hard-wrapped CONTINUATION was split off its item, so a correct note reds — "
+            "the over-block the round-6 review measured in three `docs/` notes")
 
     def test_the_PRE_FIX_text_is_a_violation(self):
         """R2 catches the defect this guard exists for — measured from commit b4da1f5c01.
