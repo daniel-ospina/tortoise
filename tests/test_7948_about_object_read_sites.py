@@ -2635,13 +2635,18 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     hops left nine legitimate rows false-red (seven if the
 #     `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e. only the global budget is
 #     lowered) — and every true attribution beyond 3 belonged to a reader named in
-#     `_DISTANCE_EXCEPTIONS`, with the code fact that earns each. ⛔ DATED ON PURPOSE,
-#     and the pair is left as measured rather than re-cut: the numbers no longer
-#     reproduce at this head (`#13899` re-cut the door occurrences and two further
-#     table re-cuts landed since, and
-#     this file's fourth exception moves the exceptions' worth), so they are HISTORY
-#     for the decision they record, and the LIVE figures are the arm's own — a lane
-#     that re-measures at HEAD and finds no discrimination there has not refuted it.
+#     `_DISTANCE_EXCEPTIONS`, with the code fact that earns each. ⛔ DATED ON PURPOSE:
+#     the pair is HISTORY for the decision it records, and the LIVE figures are the
+#     arm's own — a lane that re-measures at HEAD and finds no discrimination there
+#     has not refuted it.
+#     ⚠️ But the pair is NOT uniformly stale, and the wording here used to say it was
+#     (`#14249` review P2-2). Re-measured at this head, a uniform 2 with the
+#     `_DISTANCE_EXCEPTIONS` budgets HONOURED still refuses the own cell door of
+#     exactly SEVEN customer-callable rows — rows 1, 2, 3, 5, 28, 30 and 45 — so
+#     `seven` REPRODUCES and only `nine` has moved (the exceptions-DISABLED arm counts
+#     more rows today, because this file's fourth exception and `#13899`'s re-cut of
+#     the door occurrences change how many the budgets rescue). Do not read a
+#     re-measured `7` as a stale figure: it is the half that still holds.
 #     ⚠️ This is why the bound is pinned on BOTH sides: the
 #     acceptance count is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
