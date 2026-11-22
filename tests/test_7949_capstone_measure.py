@@ -18631,6 +18631,13 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     # reds an unrelated pin (MEASURED: a 57-line block placed above it moved the value and
     # the record's two cites stopped matching). An arm about rot must not itself rot a
     # citation, so it appends below the number it must not move.
+    #
+    # ⛔ AND FOLDING THIS INTO THE HONOURS CASE ABOVE — the tidier shape, and the one that
+    # file's own convention prefers (`test_the_merge_head_honours_line_is_what_that_head_
+    # carries` already reads this same blob and already skips with the measured remedy) — is
+    # NOT available: that case sits above `:16615`, so moving this arm into it would insert
+    # lines above the derivation line and re-stale the record's two cites. Named here rather
+    # than left for the next lane to rediscover (14183 delta review, P3).
     _d5 = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
     _registry = re.search(
         r"`sdk\.py:(?P<merge>\d+)` is `_registry_cache = PackRegistry\(packs_dir\)` "
@@ -18652,6 +18659,22 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
         "'_registry_cache = PackRegistry'` and correct the side that disagrees with the "
         "head, never by copying the other side forward")
     _r_head = _registry.group("head")
+    # ⛔ THE HEAD IS PINNED, and this is the one typed constant this arm carries — because an
+    # unpinned one FAILS OPEN (14183 delta review, P2 — MEASURED: move the sha in the
+    # document to an absent value with both numbers untouched, and this arm reported
+    # `1 skipped`, not a failure — the only reader of `_registry_cache`, disarmed by the very
+    # text it grades). A COMMIT SHA is immutable, so typing it does not rot the way a LINE
+    # NUMBER does: this file's derive-never-type rule is about values an insertion moves under
+    # the reader, and `2584a86ec1` cannot move. If the document is ever re-pointed to a
+    # different merge head this REDS and the arm is re-derived with that head — which is the
+    # behaviour an arm exists to have, and the opposite of a silent skip.
+    assert _r_head == "2584a86ec1", (
+        f"05-verify.md now quotes `{_r_head}` as the head its `_registry_cache` figure is "
+        "stated at, while this arm is armed on `2584a86ec1`. Re-arm it on the new head "
+        "(`git show <that-sha>:tortoise/sdk.py | grep -n '_registry_cache = "
+        "PackRegistry'`) — and do not let that turn into a skip: an absent sha here was "
+        "MEASURED reading as `1 skipped` with both numbers untouched, which is a fail-OPEN "
+        "arm (14183 review, P2)")
     _r_show = subprocess.run(
         ["git", "show", f"{_r_head}:tortoise/sdk.py"],
         cwd=_REPO, capture_output=True, text=True)
@@ -18659,7 +18682,9 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
         pytest.skip(
             f"{_r_head} (the branch head D5 quotes its `_registry_cache` figure for) is "
             "not carried by this clone, so the figure is UNCHECKED here, not disproved — "
-            f"CI's `fetch-depth: 1` checkout lacks it by construction. git: "
+            "CI's `fetch-depth: 1` checkout lacks it by construction, and it is a rebase "
+            "orphan a default refspec does not fetch (`git fetch origin "
+            "refs/pull/12950/head` re-arms it, as the honours case above records). git: "
             f"{_r_show.stderr.strip()}")
     _r_hits = [
         _n for _n, _line in enumerate(_r_show.stdout.splitlines(), 1)
