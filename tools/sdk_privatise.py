@@ -1120,7 +1120,39 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#:
+#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
+#: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
+#: and the tree are both green at the moment it is taken. `10e51693f166` (#14160) commits
+#: `(11858, "a1552662bf07a10b")`, and `--check` in a detached worktree AT THAT COMMIT reds against
+#: that committed pair: it prints observed `(11861, "f0647020531c078c")`, the identical pair
+#: `--check` prints on `main` at `70fbd1a27dd5` and the pair the required `surface-guard` job
+#: printed for this branch's run. So the committed pair was true of the tree `--repin` was run on
+#: (the branch head, which carried `main` at `9f83a63bfab7` merged in) and false of the tree the
+#: squash landed on: `SWEEP_RESIDUE` is a WHOLE-TREE census, so a commit that adds an untyped
+#: receiver anywhere moves it while having no reason to touch this file — and one did, on `main`,
+#: between that merge and the squash.
+#: THE +3 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic: `--report --base 28ca66878d…
+#: --top 5000` was run at `9f83a63bfab7` → `(11857, "ed40203dbbf32b87")` and on `main` at
+#: `70fbd1a27dd5` → `(11861, "f0647020531c078c")`, both row sets sorted and diffed, and EXACTLY
+#: TWO rows differ out of an UNCHANGED 856-row SHAPE set on both sides:
+#:   * `proj.g.query` **3643 → 3646** (+3). `94d75667dc76` (#14224) adds three
+#:     `proj.g.query("MATCH (n:Point) RETURN count(n)")` sites in the new
+#:     `tools/read_wave_latency.py`, and it is the ONLY commit in `9f83a63bfab7..10e51693f166`
+#:     that adds a `proj.g.query` line (measured per rev: `git show <rev> --format='' -- '*.py' |
+#:     grep -c '^+.*proj\.g\.query'` → 3 for that rev, 0 for each of the other four
+#:     `.py`-touching revs in the range). A FalkorDB `Graph` receiver chain is this sweep's
+#:     documented edge — a `Graph` is never the SDK — and the ROW already existed, so a count
+#:     moved; no shape appeared.
+#:   * `out.update` **42 → 43** (+1), the row the `#14160` block above already DECLARES
+#:     (`_global_declarations` in `tests/test_14125_retired_name_calls.py`) — which is why the
+#:     branch tree read the committed pair plus one rather than the committed pair.
+#: No other row differs in either direction, so nothing was absorbed: `typed references still
+#: pointing at a public name` is **0** on this tree, and the direction the pin exists to catch — a
+#: NEW row SHAPE — is not what happened here. Re-measured on the MERGED tree with `--repin`,
+#: never carried from the pair quoted above by arithmetic: `(11861, "f0647020531c078c")`, and
+#: `--check` exits 0 on it.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
