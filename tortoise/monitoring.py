@@ -970,10 +970,10 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   depth and move no counter at all — `live_write._submitted_to_worker` returns
 #:   `False` at the `journal_skipped or record_sink is not None or not durable`
 #:   gate and at the `tenant is None` gate, both BEFORE any queue or counter is
-#:   touched (⛔ cited by TEXT, not by `file:line`: three citations here were wrong
-#:   by five lines in round 14, and a gate's text does not rot when a docstring
-#:   above it grows) (measured: armed loop, durable journal, no carried
-#:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
+#:   touched (⛔ cited by TEXT, not by `file:line`: three citations here were five
+#:   lines off in round 14 — the numbers rot the moment a docstring above them
+#:   grows, the gate's text does not) (measured: armed loop, durable journal, no
+#:   carried tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
 #:   declines, so an operator reconciling "inline folds" against this counter will
 #:   find the structural arms missing from it — which is the correct shape (they
 #:   are the pre-#14185 path, not a degradation) and a wrong sentence if this
@@ -8847,11 +8847,11 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # the loop's own failures and the writes that folded the record on their OWN
         # thread, BY REASON (``queue_full`` / ``worker_stopping`` / ``uncopyable`` /
         # ``queue_fault`` — the four the counter's HELP declares). ⛔ NOT "because the
-        # queue was at its bound": only ``queue_full`` is that, and an operator who
-        # reads the narrowed sentence sizes `TORTOISE_PROJECTION_QUEUE_MAX` up to fix
-        # a `uncopyable` record shape and a `queue_fault`'s thread exhaustion, which
-        # are not bound problems at all (round-15 review, P3). ⚠️ The ``armed`` key
-        # reports whether an operator armed the loop at all: ``{"armed": false}`` means these
+        # queue was at its bound": only ``queue_full`` is that, and a reader of the old
+        # wording would size `TORTOISE_PROJECTION_QUEUE_MAX` up to fix an `uncopyable`
+        # record shape and a `queue_fault`'s thread exhaustion, which are not bound
+        # problems at all (round-15 review, P3). ⚠️ The ``armed`` key reports whether
+        # an operator armed the loop at all: ``{"armed": false}`` means these
         # gauges are a leftover from a previous arming, not a live reading.
         "record_projection_worker": _projection_worker_metrics(),
         # #13417: the DERIVED-entity vector's own channel. #13229 made a cold
