@@ -1138,6 +1138,41 @@ def ensure_projection_metrics_fork_safe() -> bool:
     return replaced > 0
 
 
+if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
+    # ⛔ THE HOOK, NOT A CALL SITE, and the difference is a live wedge (#14222
+    # review round 11, P2-1). The repair above is reached from the five
+    # projection-metric helpers, which covers the publish arm, the health read
+    # (`metrics()` -> `projection_worker_gauges`) and that function's own
+    # `collect()`. It does NOT cover the TEXT exposition: `/metrics` calls
+    # `generate_latest(REGISTRY)`, whose walk takes the same inherited locks
+    # (`_child_samples` -> `MutexValue.get` -> `with self._lock`, and
+    # `_multi_samples`' own `with self._lock`) but never passes through a helper
+    # here — so the first scrape from a child forked while a peer held one of
+    # these locks blocked FOREVER, on the one surface Prometheus actually reads.
+    #
+    # Registering the repair at `fork()` replaces the locks BEFORE any of our code
+    # runs in the child, so NO path can reach an inherited one — the scrape
+    # included — and a future collect entry point cannot rediscover the hole. It is
+    # the shape the field converges on (client_python#431's own first fix, and
+    # Gunicorn's `post_fork` re-init of process-sensitive telemetry), and the same
+    # one `projection_worker` already uses for its module lock.
+    #
+    # ⛔ The call sites stay: they are the belt to this suspender, and the function
+    # is idempotent by pid (it returns `False` once the process is valid), so a
+    # second call costs one `getpid()`. Removing them is a valid future cleanup
+    # ONLY together with a leg that proves the hook fires on every fork path —
+    # today `test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang`
+    # simulates the fork by moving the pid, which the hook cannot see.
+    #
+    # ⛔ Residual, stated rather than hidden: ONLY the projection families are
+    # repaired. A child forked while a peer held a lock on some OTHER family's
+    # `MutexValue` can still block in `generate_latest`. Making the whole registry
+    # fork-safe means rebuilding every metric, which would fork-bomb the values an
+    # operator is watching; the scoped fix is what keeps the families this module
+    # documents honest, and the hook is what makes it hold on every path.
+    os.register_at_fork(after_in_child=ensure_projection_metrics_fork_safe)
+
+
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
 #:
 #: The counter above is CUMULATIVE since process start and is never reset — that
