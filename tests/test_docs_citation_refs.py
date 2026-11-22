@@ -5290,11 +5290,15 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
 
         ⛔ AND THE IMPERATIVE `pytest.xfail` IS THE SAME HOLE WITH A DIFFERENT REPORT (#14328 review,
         P3 — MEASURED, pre-existing). `XFailed` subclasses `Failed`, so it is neither `Skipped` nor
-        `AssertionError`: it escapes this arm AND the `pytest.raises(pytest.skip.Exception)` witness
-        below, and the cell is merely reported `xfailed` — exit 0. MEASURED at `16e6afbf`: the
-        helper's body replaced by `pytest.xfail(...)` left `35 passed, 2 xfailed` at exit 0, the
-        same deletion-the-fix signature as the skip. Both are caught here; `pytest.xfail()` is never
-        how a platform fact is declared, and `MARK.xfail` (a decorator, not a raise) is unaffected.
+        `AssertionError`: it escaped this arm, and it escaped the `pytest.raises(pytest.skip.Exception)`
+        witness the silent-grep arm used to be — which THIS change replaced with the
+        `try/except BaseException` form that pins the exception KIND instead. The cell was then
+        merely reported `xfailed` — exit 0. MEASURED at `16e6afbf`: the helper's body replaced by
+        `pytest.xfail(...)` left `35 passed, 2 xfailed` at exit 0, the same deletion-the-fix
+        signature as the skip. An `xfail` raised by the HELPER is caught here; one raised on the
+        silent-grep arm is caught by that arm's own kind assertion, not here. `pytest.xfail()` is
+        never how a platform fact is declared, and `pytest.mark.xfail` (a decorator, not a raise) is
+        unaffected.
         """
         try:
             return fn(*args)
@@ -5330,6 +5334,15 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     try:
         _d5_pinned_universe(reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    except (KeyboardInterrupt, SystemExit):
+        # ⛔ A TERMINAL SIGNAL IS NOT A VERDICT (#14328 review, P3 — MEASURED). The shape below must
+        # catch `BaseException` to pin the exception KIND, but that also swallows Ctrl-C and
+        # `pytest.exit` into an `AssertionError` that claims the platform branch misbehaved. The
+        # `pytest.raises(pytest.skip.Exception)` arm this replaced propagated both, so draining them
+        # here is a regression rather than a pin. Re-raising FIRST keeps the kind assertion intact
+        # for `Skipped`/`XFailed`/`Failed` (all `BaseException` subclasses) while an interrupt still
+        # aborts the run.
+        raise
     except BaseException as outcome:  # the exception KIND is what this arm pins
         assert type(outcome) is pytest.skip.Exception, (
             f"the platform-fact branch must SKIP with `Skipped`, not raise "
