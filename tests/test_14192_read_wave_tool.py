@@ -1511,7 +1511,8 @@ def _builds_new_container(value: ast.AST, rebound: frozenset[str] = frozenset())
 
 
 def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
-                copy_is_alias: bool = False) -> set[str]:
+                copy_is_alias: bool = False,
+                rebound: frozenset[str] = frozenset()) -> set[str]:
     """Names bound to a matching expression, TRANSITIVELY — `a = results`, `b = a`,
     `(c := results)`, `env = os.environ`, `env2 = env`.
 
@@ -1584,8 +1585,7 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
             # (`_is_scalar_producer`), and that gate stays on in both modes.
             resolves = (not _is_scalar_producer(value)
                         and (copy_is_alias
-                             or not _builds_new_container(
-                                 value, _rebound_callee_names(tree))) and (
+                             or not _builds_new_container(value, rebound)) and (
                             predicate(value)
                             or bool(_names_in(value) & out)
                             or any(predicate(operand)
@@ -1925,7 +1925,8 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     direction, filed from a parallel lane). This pin is the static half, and the honest
     form of a static half is to say where it stops.
     """
-    aliases = _aliases_of(run_def, _collection_alias_predicate(var), loops=True)
+    aliases = _aliases_of(run_def, _collection_alias_predicate(var), loops=True,
+                          rebound=_rebound_callee_names(run_def))
     watched = {var} | aliases
     # ⛔ THE RECORDED ROWS ARE A COLLECTION TOO: `_row = per_query[-1]` then
     # `_row["order"] = _row["order"][:5]` truncated the page the verdict reads, with
@@ -1933,7 +1934,8 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # ANY expression mentioning `per_query`.
     scalars = _scalar_bound_names(run_def)
     rows = ({"per_query"} | _aliases_of(
-        run_def, lambda v: "per_query" in _names_in(v), loops=True)) - scalars
+        run_def, lambda v: "per_query" in _names_in(v), loops=True,
+        rebound=_rebound_callee_names(run_def))) - scalars
     # ⛔ ITERATION TARGETS ARE THE SAME COLLECTION, TO A FIXPOINT — for the MEASURED
     # collections as well as the recorded rows (#14281 review P1, measured). A `for`
     # target binds nothing that `_aliases_of` resolves, so an element rewrite through one
@@ -1976,7 +1978,8 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     shallow_copies = _aliases_of(
         run_def,
         lambda v: _builds_new_container(v) and bool(_names_in(v) & watched),
-        loops=True, copy_is_alias=True) - watched
+        loops=True, copy_is_alias=True,
+        rebound=_rebound_callee_names(run_def)) - watched
     # ⛔ A CONTAINER THAT HOLDS THE COLLECTION IS NOT THE COLLECTION — it is an INDEX into
     # the same object graph, so it joins a SECOND set (`holders`), never `muts` (#14281
     # review P1, measured). The distinction is load-bearing in both directions:
@@ -2198,7 +2201,8 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return any(_bound_mutator_expr(e) for e in v.elts)
         return False
 
-    bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True)
+    bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True,
+                                rebound=_rebound_callee_names(run_def))
 
     def _mutator_slot_keys(tree: ast.AST) -> dict[str, frozenset[str] | None]:
         """CONTAINER name -> the SLOT KEYS that were ASSIGNED a bound mutator.
@@ -2327,7 +2331,8 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     #: `holders` tracks SLOTS; this tracks a container NAMED in an assignment, and
     #: `_element_only` needs both — `_box = [results]; random.shuffle(_box[0])` was GREEN
     #: with only `holders` (#14281 review P2, measured).
-    page_container = holders | _aliases_of(run_def, _container_of_page, loops=True)
+    page_container = holders | _aliases_of(run_def, _container_of_page, loops=True,
+                                           rebound=_rebound_callee_names(run_def))
     hits: list[int] = []
     for node in ast.walk(run_def):
         if node is artifact_append:
