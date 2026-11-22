@@ -401,6 +401,34 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
             "(#2296)")
 
 
+def test_a_caller_write_sink_prop_is_not_bound_as_the_internal_sink(env):
+    """A caller ``write_sink`` prop must be DROPPED, never reinterpreted (#14111).
+
+    ``write_sink`` is an append-only OUTCOME sink, not a write target (see
+    `_RESERVED_EMIT_CALL_PROPS`): `_emit_event`'s only use of the parameter is
+    ``write_sink.append(write)``, on the far side of ``live_write.write`` — the
+    destination of the write is already decided when the sink is filled. So the
+    harm an unreserved caller prop of that name does is REINTERPRETATION: the
+    prop binds the parameter at the splat, the emit delivers the chokepoint's
+    own ``LiveWrite`` into the CALLER's value, and the sink the caller actually
+    named is starved.
+
+    A LIST is the value that makes this observable: a forged scalar only makes
+    it loud, because the door's ``except Exception`` swallows the resulting
+    ``AttributeError`` as a WARNING (``source journal emission failed for …``)
+    while the journal line has already committed — measured. Pre-fix, the bag
+    below came back holding a ``LiveWrite``.
+    """
+    sdk, _events = env
+    _caller_bag: list = []
+    sdk.register_source("https://example.com/write-sink-prop", "document",
+                        write_sink=_caller_bag)
+    assert _caller_bag == [], (
+        "a caller `write_sink` prop was bound as the INTERNAL sink: the emit "
+        f"appended its own verdict into caller data ({_caller_bag!r}) instead "
+        "of the strip dropping the reserved name (#14111)")
+
+
 def test_a_caller_seq_prop_cannot_forge_a_journal_position(env):
     """A caller ``seq`` prop must never reach the journal line's TOP level (#12894).
 
@@ -498,8 +526,18 @@ def test_the_two_chokepoints_strip_a_caller_seq_that_bypasses_intake(env,
     # ORDINAL `_carried_position` reads. Captured, not asserted against a fake
     # writer, so the strip is what the assertion is about.
     captured: list[dict] = []
-    monkeypatch.setattr(sdk, "_write_record_projection",
-                        lambda event, seq=None: captured.append(dict(event)))
+    # The stand-in must honour the REAL seam's signature —
+    # `_write_record_projection(record, seq, *, journal_skipped=False)` (#14002),
+    # which `live_write` calls with that keyword on EVERY arm. A narrower fake
+    # raises `TypeError` inside the record `try`; `live_write` correctly
+    # swallows it as a NAMED projection fault, and this leg then asserts over an
+    # EMPTY capture — i.e. it reports "the strip is unproven" instead of testing
+    # the strip. The sibling suites' fakes already take it
+    # (`tests/test_13829_cache_cap_at_fold.py:239,255`) — #14111.
+    monkeypatch.setattr(
+        sdk, "_write_record_projection",
+        lambda event, seq=None, *, journal_skipped=False:
+            captured.append(dict(event)))
     sdk._emit_event("PointRevised", id="p-extra", seq=44, content="x")
     assert captured, (
         "the emit produced no record payload to inspect — this leg proves "

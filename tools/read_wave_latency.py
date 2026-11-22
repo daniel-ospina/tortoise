@@ -174,7 +174,7 @@ def _git_sha() -> str:
             ["git", "rev-parse", "--short=12", "HEAD"],
             cwd=_REPO_ROOT, capture_output=True, text=True, check=False,
         ).stdout.strip()
-    except Exception:  # noqa: BLE001 — provenance only
+    except Exception:  # provenance only
         return "unknown"
 
 
@@ -232,7 +232,9 @@ def _load_pre_change_search_engine(rev: str):
 def seed(proj, points_n: int, corpus_seed: int) -> int:
     """Seed the deterministic corpus ONCE; a re-run reuses what is there."""
     from benchmarks.synthetic_corpus import (
-        generate_points, seed_corpus, seed_operator_edges,
+        generate_points,
+        seed_corpus,
+        seed_operator_edges,
     )
 
     existing = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
@@ -379,9 +381,22 @@ def compare(new: dict, base: dict) -> dict:
         if other is None:
             continue
         if other["order"] != pq["order"]:
+            # ⛔ ``strict=False``, and the truncation it implies is neutralised
+            # rather than tolerated. A short page is EXPECTED here: ``limit=10``
+            # is a cap, so a page is ``min(10, hits)`` long, and the two arms
+            # returning a different NUMBER of hits is one of the answer changes
+            # this verdict exists to report — not a state to raise on, which
+            # would destroy both arms' measurement in ``--ab-full-read-from``
+            # (the ``compare`` call precedes the artifact write there). So the
+            # shorter list is not an accident, but a truncating compare would
+            # hide it: when one page is a prefix of the other no pair differs,
+            # so the divergence is recorded at ``min(len)`` — the index where
+            # the shorter page ends — instead of as "none".
+            la, lb = len(pq["order"]), len(other["order"])
             first = next(
-                (i for i, (a, b) in enumerate(zip(pq["order"], other["order"]))
-                 if a != b), None)
+                (i for i, (a, b) in enumerate(
+                    zip(pq["order"], other["order"], strict=False))
+                 if a != b), min(la, lb) if la != lb else None)
             rank_diff.append({
                 "qid": pq["qid"],
                 "first_divergence_idx": first,

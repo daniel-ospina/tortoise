@@ -86,6 +86,30 @@ def test_rank_identity_goes_red_when_a_page_is_permuted() -> None:
     assert verdict["rank_divergent_queries"][0]["first_divergence_idx"] == 0
 
 
+def test_a_shorter_page_diverges_at_its_length() -> None:
+    """A hit-count change is an ANSWER change — and it must not raise.
+
+    ``limit=10`` is a cap, so a page is ``min(10, hits)`` long and the two arms
+    returning a different NUMBER of hits is exactly the class this verdict
+    exists to report. A comparing ``zip`` sees no differing PAIR when one page
+    is a prefix of the other, so without the length term the divergence index
+    reads ``None`` — "nothing diverged" on pages that do. Raising instead would
+    be worse: ``main()``'s ``--ab-full-read-from`` arm calls ``compare`` BEFORE
+    it writes the artifact, so a raise discards both finished runs.
+    """
+    base = _report([_query("q001", ["a", "b", "c", "d"])])
+    after = _report([_query("q001", ["a", "b", "c"])])
+
+    verdict = tool.compare(after, base)
+    assert verdict["comparable"] is True
+    assert verdict["rank_identical"] is False
+    assert verdict["rank_divergent_queries"][0]["first_divergence_idx"] == 3
+    # The other direction is the same divergence at the same index.
+    verdict = tool.compare(base, after)
+    assert verdict["rank_identical"] is False
+    assert verdict["rank_divergent_queries"][0]["first_divergence_idx"] == 3
+
+
 def test_identical_pages_stay_green() -> None:
     base = _report([_query("q001", ["a", "b", "c"])])
     after = _report([_query("q001", ["a", "b", "c"])])
