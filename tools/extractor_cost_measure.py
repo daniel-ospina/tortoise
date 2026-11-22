@@ -937,6 +937,10 @@ def escape_dollars_outside_code(markdown: str) -> str:
       tracked as code, so a ``$`` inside one IS escaped — the fence rules above
       are applied, indentation-based code blocks are not. This module emits
       neither shape.
+    * A ``$`` preceded by an ESCAPED backslash (``\\$``) stays bare: the
+      lookbehind that keeps this function idempotent cannot tell it from an
+      already-escaped ``$``, so that ``$`` is left unescaped and can still pair
+      with a later one. This module never emits it.
 
     Neither of the first two shapes is emitted by this module today: it prints
     no fences, and every line of its output has an even number of backtick runs
