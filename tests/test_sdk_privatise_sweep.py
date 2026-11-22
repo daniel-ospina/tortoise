@@ -162,6 +162,59 @@ def test_the_residue_pin_is_a_reading_of_the_whole_set():
     ), "the digest must carry the counts, or a new site is invisible"
 
 
+#: The last re-pin in the block above attributes THIS TREE's drift to a FILE rather than to the
+#: branch: three `proj.g.query` rows in `tools/read_wave_latency.py`, added to `main` by
+#: `94d75667dc76` (`#14224`) before the pin that missed them was written. Naming the file and the
+#: row is what makes the attribution checkable without the tree-wide walk, so both are graded
+#: here.
+DECLARED_DRIFT_FILE = ROOT / "tools" / "read_wave_latency.py"
+DECLARED_DRIFT_ROW = "proj.g.query"
+DECLARED_DRIFT_ROWS = 3
+
+
+def test_the_declared_source_of_the_pin_drift_reproduces_into_its_own_file(tmp_path):
+    """The pin's declared +3 must reproduce from the ONE file the block names.
+
+    ⛔ WHAT THIS ARM IS AND IS NOT (stated so it is not read as the pin's own grader). It does
+    NOT re-derive `SWEEP_RESIDUE`: that is the whole-tree walk, it needs the `SWEEP_BASE` object
+    (absent in the `fetch-depth: 1` `test` job), and it costs ~70 s — the per-PR grader for the
+    pair is the `surface-guard` job's own `python3 tools/sdk_privatise.py --check` step, which
+    is exactly what went red and what a re-pin turns green. What nothing graded before is the
+    ATTRIBUTION — the prose that says WHERE the drift came from — and prose that outlives its
+    measurement is this block's own recorded defect class. So this arm grades the declared
+    source: the file still exists, it still holds exactly that many rows of that shape, and the
+    receiver is still UNTYPED (`edits_for` proves nothing there), which is the only reason a
+    `Graph` read may sit in the census instead of being swept.
+
+    Falsifiable without the walk: if the three reads are re-pointed, move, or gain an SDK
+    binding, this reds and the block's attribution has to be re-measured — the recurrence the
+    pin chain above keeps recording.
+    """
+    assert DECLARED_DRIFT_FILE.is_file(), (
+        f"`{DECLARED_DRIFT_FILE.relative_to(ROOT)}` is the file the block attributes this tree's "
+        "+3 to; if it was moved or deleted the attribution is stale")
+    block = _residue_block()
+    assert DECLARED_DRIFT_FILE.name in block, "the block no longer names the file it attributes to"
+    assert DECLARED_DRIFT_ROW in block, "the block no longer names the row it declares"
+    edits = privatise.edits_for(DECLARED_DRIFT_FILE, {"query": "_query"})
+    assert dict(edits.residue) == {DECLARED_DRIFT_ROW: DECLARED_DRIFT_ROWS}, (
+        f"the block declares `{DECLARED_DRIFT_ROW}` x{DECLARED_DRIFT_ROWS} in "
+        "`tools/read_wave_latency.py`; the file now yields "
+        f"{dict(edits.residue)!r} — re-measure the attribution instead of leaving it stale")
+    assert not (edits.attrs or edits.defs or edits.strings), (
+        "a TYPED rewrite in this file means those reads are no longer the untyped edge the block "
+        "declares them as, so the pin is absorbing a reference the sweep should have made")
+    # ⛔ NON-VACUITY: the same call DOES report a typed rewrite when the receiver is provably an
+    # SDK, so `not edits.attrs` above is a measurement of this file and not a dead arm.
+    typed = privatise.edits_for(
+        _module(tmp_path, "def f(sdk):\n    return sdk.query('k')\n"),
+        {"query": "_query"},
+    )
+    assert [repl for *_span, repl in typed.attrs] == ["._query"] and not typed.residue, (
+        "the falsifier: an SDK-typed receiver must be REWRITTEN and leave no residue, or the "
+        "arm above cannot tell this file's `Graph` reads from a typed reference")
+
+
 # ── F2: typing is per SCOPE; ambiguity is not rewritten ─────────────────────────
 
 
