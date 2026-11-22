@@ -2742,11 +2742,12 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
     "mcp_server.py::_preview_delete_edges": (
         4,
         "#11609 lane P7 renamed the KEPT delete entry to `tortoise_delete_knowledge` "
-        "(`tool_registry.py`: 'the kept delete entry took the approved target's "
-        "spelling') and left `tortoise_delete` as a #3883 FORWARDING shim "
-        "(`mcp_server.py`: 'this name forwards to it so a caller of the old spelling "
-        "keeps the SAME preview-then-confirm protocol'). The row's cell names the "
-        "spelling callers use, so its chain is `tortoise_delete` -> "
+        "(`tool_registry.py`: 'the kept entry takes the target's own name') and left "
+        "`tortoise_delete` as a #3883 FORWARDING shim (`mcp_server.py`: 'The kept "
+        "delete entry took the approved target's spelling'; 'this name forwards to it "
+        "so a caller of the old spelling keeps the SAME preview-then-confirm "
+        "protocol'). The row's cell names the spelling callers use, so its chain is "
+        "`tortoise_delete` -> "
         "`tortoise_delete_knowledge` -> `_preview_delete` -> `_preview_delete_entity` "
         "-> `_preview_delete_edges`: one reference longer than the live door's own "
         "three. The extra hop IS the shim, not a weaker chain — and dropping the "
@@ -5629,7 +5630,12 @@ def test_the_module_filter_admits_a_split_traversal():
     # ⚠️ NOT `#14169`'s P7 batch — this was attributed to it when the move was
     # found, and the measurement refutes that: the pre-P7 tree `605d9ebffbe1`
     # already derives 29/43, `e74cf1d13da7`'s parent `dea00903b50f` derives 27/41,
-    # and P7 touches no file in the derived set's closure.
+    # and the two keys the move adds live in `tortoise/resident_pin.py`, a file
+    # P7 never touches. P7's delta is `audit.py`, `hosted_api.py`,
+    # `mcp_server.py`, `tool_registry.py`, and every key the derived set already
+    # carries in those files — `_export_graph_snapshot`,
+    # `_load_commit_graph_state`, `_preview_supersede`, `_preview_delete_edges` —
+    # is PRE-EXISTING, so P7 added none of them.
     assert (len(sites), sum(len(lines) for lines in sites.values())) == (29, 43), (
         "the empty-pattern derivation moved off 29 symbol keys / 43 site rows "
         f"({len(sites)} keys, "

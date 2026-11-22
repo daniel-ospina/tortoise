@@ -1268,15 +1268,18 @@ class TestStdioEntrypointToolRegistration:
             #   42 -  2 + 0 = 40   (#11609 P6's DELETE pair — `delete_point` /
             #                       `delete_entity` retire into the `tortoise_delete`
             #                       entry the #9660 ruling KEEPS)
-            #   40 -  1 + 0 = 39   (#11609 lane P7: FOUR targets registered and FIVE
-            #                       doors retired, so the listing moves by the NET of
-            #                       the two — the one door that left with no container
-            #                       row behind it is `tortoise_list_graphs`, retired
-            #                       forward into `tortoise_graph_overview(section=
-            #                       "graphs")`, whose section arm has dispatched to
-            #                       that body since #4282)
-            # ⛔ Not the HTTP-filtered view: that one is 35 at this head
-            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 35
+            #   40 -  5 + 4 = 39   (#11609 lane P7: FIVE advertised doors retire forward
+            #                       (`create_edge`, `create_operator`, `events_poll`,
+            #                       `delete`, `list_graphs`) and FOUR targets register
+            #                       (`poll_events`, `delete_knowledge`,
+            #                       `get_historical_knowledge`, `link_entities`), so the
+            #                       listing moves by the NET of the two. The one door that
+            #                       left with no container row behind it is
+            #                       `tortoise_list_graphs`, retired forward into
+            #                       `tortoise_graph_overview(section="graphs")`, whose
+            #                       section arm has dispatched to that body since #4282)
+            # ⛔ Not the HTTP-filtered view: that one is 34 at this head
+            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 34
             # and 32 respectively), and
             # the two differ by the five `http_policy=False` rows. Writing one view's
             # base with the other's head lands on a number no population has.
