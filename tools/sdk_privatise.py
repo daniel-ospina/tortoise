@@ -1126,9 +1126,12 @@ SWEEP_NAMES = 66
 #: and a parenthetical reading `this branch's base` went stale at the very next merge (measured:
 #: written naming `0467ba329d`, false the moment `47e28b549e76` was merged).
 #:
-#: ⛔ SUPERSEDED BY THE RE-CUT BELOW — the sentence above ends "`--check` exits 0 at this head on
-#: the SAME pair", and that reading did NOT survive the commits merged beside it: the census moved
-#: three rows before the pin commit itself landed. Read the re-cut, not that sentence.
+#: ⛔ SUPERSEDED BY THE RE-CUT BELOW — the sentence this note was originally written against read
+#: "`--check` exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that
+#: carries them, not carried forward", and that reading did NOT survive the commits merged beside
+#: it: the census moved three rows before the pin commit itself landed. That sentence is GONE, and
+#: deliberately: 11858 is the wrong pair on the integrated tree (it reads 11861), so the paragraph
+#: above now states the re-measured `(11861, ...)` instead. Read the re-cut, not that sentence.
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
 #: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
