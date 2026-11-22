@@ -1138,7 +1138,11 @@ SWEEP_NAMES = 66
 #: them), which is exactly why main is red. Only `917ae19efd` reproduces it. So "the tree that
 #: commits it" is not one tree, and this sentence may not say it is. On `10e51693f1`, `--check` in
 #: a detached worktree reports 11861 against its own 11858 — so the red `94d75667dc` started was
-#: still there at the commit that re-pinned over it, and every PR cut from that tree inherits it.
+#: still there at the commit that re-pinned over it, and every PR cut from that tree inherits the
+#: stale pair UNTIL IT RE-PINS (`10e51693f1` is an ancestor of this head and `--check` exits 0 here,
+#: so "inherits it" is false of this PR — the escape is the one this block prescribes at its own
+#: `A re-pin is a READING of the tree that will commit it` clause, and a universal that its own
+#: instance falsifies is the class the paragraph above removes).
 #: Whatever reading produced 11858, it was not a reading of THIS tree.
 #: THE THREE ROWS, ATTRIBUTED BY MEASUREMENT, one commit: `--check` on `94d75667dc^` exits 0 and
 #: on `94d75667dc` reports (11860, "57e0960ca6f20f5a") — so `94d75667dc` (#14224, the read-wave
@@ -1151,8 +1155,12 @@ SWEEP_NAMES = 66
 #: ⛔ CITED BY TEXT AND BY SHA, NEVER BY A TYPED LINE NUMBER — this file's own rule, stated in the
 #: `captured.update` note above. The first cut of THIS block typed them as `:238`/`:245`/`:439`,
 #: and those were ALREADY STALE on the tree it merges into: they hold at `94d75667dc` and moved
-#: when `9a771c59db` reflowed that same harness on `main` afterwards. Reproduce the position,
-#: never restate it — `git show <sha>:tools/read_wave_latency.py | grep -n 'proj\.g\.query'`
+#: when `9a771c59db` fixed three ruff findings in that same harness on `main` afterwards — and ⛔
+#: NOT by a reflow alone, which is the mis-attribution this clause had first: its I001 hunk reflows
+#: the import and carries the two census reads `:238`→240 / `:245`→247, while the third moves
+#: `:439`→454 because its B905 hunk INSERTS the `compare()` divergence index (`git show 9a771c59db
+#: --numstat -- tools/read_wave_latency.py` → `19 4`; its message names all three findings).
+#: Reproduce the position, never restate it — `git show <sha>:tools/read_wave_latency.py | grep -n 'proj\.g\.query'`
 #: (no hits before `94d75667dc`, three after; the numbers move, the texts do not).
 #: (`tests/test_relationships_bounded.py` carries one `proj.g.query` too — the same
 #: `proj.g.query("MATCH (n) DETACH DELETE n")` row on both sides — but that ROW does not move, so it
