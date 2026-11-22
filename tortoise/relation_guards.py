@@ -30,9 +30,13 @@ outcome          when                                             reported?
 ``reversed``     the predicate is declared for the reverse pair   always —
                  and not for the pair as asked                    a DIFFERENT
                                                                   state (§2)
-``abstained``    the declarations cannot answer (predicate not    never
-                 declared at all, kinds unresolved, registry
-                 unreadable)
+``abstained``    the declarations cannot answer, in ANY of four       never
+                 ways: the predicate is not declared at all (the
+                 #1934/#7551 predicate leg owns it); it is a declared
+                 word that declares no kind pair; neither endpoint
+                 kind occurs anywhere in the declared vocabulary
+                 (the pair is outside the packs' domain); or the
+                 kinds/registry could not be read
 ===============  ===============================================  ============
 
 ⛔ **NO REFUSAL IS PRODUCIBLE HERE.** ``#1934`` (owner decision, governance
@@ -136,6 +140,9 @@ ABSTAIN_UNREADABLE = "declarations-unreadable"
 #: The predicate is a declared WORD but declares no kind pair (a
 #: ``declarationOnly: true`` row, or a row naming no endpoints).
 ABSTAIN_NO_DECLARED_PAIR = "predicate-declares-no-pair"
+#: Neither endpoint kind occurs anywhere in the declared relation vocabulary —
+#: the pairs are not talking about the packs' domain at all.
+ABSTAIN_OUTSIDE_SCOPE = "outside-declared-scope"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -404,6 +411,28 @@ def _predicates_between(declared: dict[str, tuple[tuple[str, str], ...]],
     return sorted(out)
 
 
+def _declared_endpoint_locals(
+        declared: dict[str, tuple[tuple[str, str], ...]]) -> frozenset[str]:
+    """The LOCAL names of every kind/label any pack uses as a relation endpoint.
+
+    The scope test below asks a narrower question than "is this pair declared?"
+    — it asks *is the caller speaking the packs' domain language at all?* A
+    write between two Base point kinds (``evidence`` -> ``statement``) is
+    outside the declarations entirely: no pack declares any pair involving
+    them, so the declarations cannot speak to the pair, and the honest answer is
+    to abstain (`#12060` R4's shape — a missing pack target abstains, it does not
+    report). Reporting there would put a warning on the ordinary
+    ``create_operator(label=\'addresses\')`` write, which is the noise class
+    that makes a warning stop carrying information.
+    """
+    out: set[str] = set()
+    for pairs in declared.values():
+        for one, two in pairs:
+            out.add(_local(one))
+            out.add(_local(two))
+    return frozenset(name for name in out if name)
+
+
 def _human_block(*, outcome: str, predicate: str, from_kind: str, to_kind: str,
                  declared_for: list[dict], between: list[str]) -> str:
     """The AX human block — what happened, why, and what IS declared.
@@ -518,6 +547,10 @@ def relation_pair_verdict(
         # leg abstains rather than reporting a pair it never had a declaration
         # for.
         return _abstain(ABSTAIN_NO_DECLARED_PAIR, canonical, from_kind, to_kind)
+    in_scope = _declared_endpoint_locals(declared)
+    if (_local(from_kind) not in in_scope and _local(to_kind) not in in_scope
+            and from_label not in in_scope and to_label not in in_scope):
+        return _abstain(ABSTAIN_OUTSIDE_SCOPE, canonical, from_kind, to_kind)
     matched = _pair_matches(pairs, from_kind, to_kind, from_label, to_label)
     if matched is not None:
         # A pure re-spelling (of the predicate or of a bare endpoint kind) is
@@ -580,6 +613,7 @@ __all__ = [
     "ABSTAIN_NO_DECLARED_PAIR",
     "ABSTAIN_NO_KINDS",
     "ABSTAIN_NO_PREDICATE",
+    "ABSTAIN_OUTSIDE_SCOPE",
     "ABSTAIN_UNREADABLE",
     "ACCEPT",
     "NORMALISED",
