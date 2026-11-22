@@ -150,8 +150,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is one of the THIRTEEN that are
     # incomparable at the pin — the whole `_PIN_EOF_PAIRS` table, not this pair alone. Measured at this
-    # head: 13 non-comparable of 234, 221 comparable, and the drift is 128 of the 221 comparable plus
-    # 8 of the 13 = 136 of the 234. ⛔ This comment said "ONE OF THREE … 211 comparable, 119 of them
+    # head: 13 non-comparable of 232, 219 comparable, and the drift is 127 of the 219 comparable plus
+    # 8 of the 13 = 135 of the 232. ⛔ That numerator was `128` (and the total `136` of `234` pairs) for the
+    # editions up to `3c60ec9207`, and it went stale at `5171be0d53` — the commit that re-pointed the audit's
+    # sibling-file cites: re-measured at this head by the header's own rule (per pair, `git show
+    # ccb49741b2ec:<path>` against `git show ae54df166d:<path>`, line text for line text, comparability
+    # against the PIN's copy length) it is 127, and the two-code-span basis is 138 of 235. The denominators
+    # moved again when the `session_schema.py` cluster was re-pointed (`234`/`111` -> `232`/`113`), so these
+    # literals are re-derived by hand whenever the document's cites move — no arm applies this rule. ⛔ This comment said "ONE OF THREE … 211 comparable, 119 of them
     # drifted … 122 of the 214": that was the PRE-re-derivation split, it survived the pass that moved
     # `_PIN_EOF_PAIRS` 11 → 13, and its denominator reconciles with no table this file holds — which is
     # the `#14269` review's finding (a figure block is the one place a stale value cannot be caught by
@@ -682,21 +688,23 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        # ⛔ The drift NUMERATOR (`128`) was the one figure in this header that no arm
-        # could catch, and it was measured rather than assumed: mutating it to `129`
+        # ⛔ The drift NUMERATOR (`127`) was the one figure in this header that no arm
+        # could catch, and it was measured rather than assumed: mutating it to `128`
         # left all 31 arms of `tests/test_12184_shifted_cites.py` GREEN (the split arm
         # grades both DENOMINATORS — `221` against `_PIN_EOF_PAIRS`, the ratio's own
         # `of the 221` — and the `8`/`5` partition, but never the count of the 221 that
-        # drift). It is a coverage gap and not a wrong number: `128` is correct by the
-        # header's own rule. Graded as a literal because deriving it needs two
+        # drift). It is a coverage gap, and the number is whatever the header's own rule
+        # measures at this head: `127` (it read `128` until `5171be0d53` re-pointed the
+        # audit's sibling-file cites; the two-code-span basis moved with it, 139 → 138).
+        # Graded as a literal because deriving it needs two
         # historical blobs per pair (`git show <head>:<path> | sed -n '<N>p'` at each,
         # text for text), which this suite refuses to do 221 times — the docstring
         # above already states that this file's job is change-detection, not
         # re-measurement.
-        "128 of the 221 comparable",
-        "136 of this document's 234",
-        "dedupes the **345** as-written spellings to 234 — **111**",
-        "345 written spellings → 234 pairs → 111 collisions → 136 drifters of the 234",
+        "127 of the 219 comparable",
+        "135 of this document's 232",
+        "dedupes the **345** as-written spellings to 232 — **113**",
+        "345 written spellings → 232 pairs → 113 collisions → 135 drifters of the 232",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
