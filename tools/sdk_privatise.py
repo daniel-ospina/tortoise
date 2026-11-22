@@ -1147,8 +1147,15 @@ SWEEP_NAMES = 66
 #: every open PR then grades `main`'s rows as its own (`#14062`). ⛔ CORRECTED: this sentence read
 #: "the pin is graded on PULL REQUESTS only, so `main` drifts off it with nothing measuring it",
 #: which is false of the tree it lands on and sends the next lane looking for a gate to BUILD
-#: instead of at the drop that already happens. What IS true, and different: `surface-guard` is not
-#: a REQUIRED context, so a merge does not wait for it. ⛔ THE INHERITANCE IS MEASURED,
+#: instead of at the drop that already happens. ⛔ CORRECTED AGAIN (#14282 review, P3): the sentence
+#: "`surface-guard` is not a REQUIRED context, so a merge does not wait for it" is FALSE of this
+#: repository, and it is the same wrong conclusion one level down from the one above. `surface-guard`
+#: IS in the required aggregate's `needs:` (`python-ci.yml` leg-table row `surface-guard|…|-`, the
+#: `-` meaning no diff gate, so it must be SUCCESS) and is absent from `DEFERRABLE_LEGS`, so a failed
+#: non-test leg lands in `FAILED_LEGS` → `exit 1` — and `python-ci-gate` is itself the required
+#: context (`merge_conditions` in `.mergify.yml`). A red `surface-guard` therefore BLOCKS EVERY
+#: MERGE through the aggregate, which is why this repair is a merge-unblocking fix and not a
+#: cosmetic pin refresh. ⛔ THE INHERITANCE IS MEASURED,
 #: NOT ASSUMED: a `--repin` on `10e51693f1`'s OWN tree prints (11861, "f0647020531c078c") too, so
 #: that delta is the base's and never this lane's, and no arithmetic on the last figure was used.
 #: `typed references still pointing at a public name: 0` on both trees, so no typed call site is

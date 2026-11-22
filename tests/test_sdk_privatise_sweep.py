@@ -1523,6 +1523,15 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     left this arm GREEN — the loss surfacing at best as a `KeyError` out of `_rearm_command` on
     the skip path, never as an assertion. `expected` is now the six UNION every `OWN_PINS` key,
     because a rev the block publishes an OWN PIN for is exactly a rev a skip may name.
+
+    ⛔ AND AN ABBREVIATED SOURCE IS THE SAME HOLE ONE SHAPE OVER (#14282 review, P3). The
+    wrong-source guard matches `[0-9a-f]{7,40}`, which admits a 7-to-39-char prefix, and
+    `startswith(rev)` is TRUE for the key's OWN abbreviation — so
+    `+5e83c2a2f6:refs/remotes/origin/5e83c2a2f6` satisfied EVERY assertion in this arm while
+    `git fetch --dry-run origin "+5e83c2a2f6:…"` returns
+    `fatal: couldn't find remote ref 5e83c2a2f6`. A source that IS a sha must therefore be the
+    full 40 hex, never in between; the negative control below drives this very arm over each
+    inert shape so the hole cannot quietly reopen.
     """
     expected = {RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
                 RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"} | set(OWN_PINS)
@@ -1548,12 +1557,53 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
         # `2fe01fc775e`, `aee14c5ceb`, `d5ecef0d72`, `d523c9be8c`) and `origin/main` addresses a
         # branch name, so SIX of the map's nine entries carry a non-sha source and are excused.
         if re.fullmatch(r"[0-9a-f]{7,40}", source):
+            # ⛔ `{7,40}` ADMITS AN ABBREVIATION, and `startswith(rev)` is TRUE for the key's own
+            # (#14282 review, P3): `+5e83c2a2f6:refs/remotes/origin/5e83c2a2f6` passed every
+            # assertion here while `git fetch` refuses it. A sha source must be the FULL 40 hex.
+            assert re.fullmatch(r"[0-9a-f]{40}", source), (
+                f"{rev} is mapped to SOURCE {source!r}, an ABBREVIATION git cannot `want` — "
+                "a full 40-hex sha or a ref NAME, never in between")
             assert source.startswith(rev), (
                 f"{rev} is mapped to a refspec whose SOURCE is {source[:12]} — a DIFFERENT "
                 "commit, so a skip re-arming off it fetches the wrong tree")
     assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
         "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
     assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
+
+
+def test_the_refspec_shape_guards_red_every_inert_shape_and_pass_every_live_one(monkeypatch):
+    """The negative control for the shape guards in
+    `test_every_addressed_rev_names_a_fetchable_refspec` (#14282 review, P3).
+
+    A guard whose negative case cannot be reached proves the code ran, not that the map is
+    FETCHABLE, so this drives the REAL arm over mutated copies of `_ARM_REFSPECS` held in memory:
+    every inert shape must red and every live shape must pass. The abbreviation case is the one
+    that satisfied every assertion in the arm while `git fetch` refused it, which is why it is
+    pinned here rather than only described in the docstring.
+    """
+    original = dict(_ARM_REFSPECS)
+
+    def arm_with(refspec: str) -> None:
+        mutated = {**original, "5e83c2a2f6": refspec}
+        monkeypatch.setattr(sys.modules[__name__], "_ARM_REFSPECS", mutated)
+        test_every_addressed_rev_names_a_fetchable_refspec()
+
+    for refspec in (
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/remotes/origin/5e83c2a2f6",  # full sha
+        "+main:refs/remotes/origin/main",                                            # ref NAME
+        "+refs/pull/14108/head:refs/pull/14108/head",                                # ref NAME
+    ):
+        arm_with(refspec)  # must not raise
+
+    for refspec in (
+        "+5e83c2a2f6:refs/remotes/origin/5e83c2a2f6",  # ABBREVIATED SOURCE + destination: the hole
+        "5e83c2a2f6",                                  # bare abbreviation
+        "+5e83c2a2f6",                                 # source-only abbreviation
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616",    # source-only full sha: creates no local ref
+        "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/remotes/origin/5e83c2a2f6",  # wrong sha
+    ):
+        with pytest.raises(AssertionError):
+            arm_with(refspec)
 
 
 def test_the_skip_instruction_is_a_command_git_can_actually_run(monkeypatch):
