@@ -7999,14 +7999,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # is DERIVED below from the source — never typed here, because a typed one rots: this block
     # records `:28395`, `:28581` and `:28067` all having been the "live" value at some head),
     # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
-    # scoped line — and D5 IS ONE LINE carrying that filter figure SEVEN times (split across the
-    # chain's values, so no single one of them is the clause's), so a row satisfied by any of them
-    # cannot tell the clause being re-pointed from another occurrence staying put.
+    # scoped line — and D5 IS ONE LINE carrying that filter's figure SEVEN times, split across the
+    # chain's values: `:28602` three times and its previous value `:28395` four times
+    # (`grep -o` on the row). No single one of them is the clause's, so a row satisfied by any of
+    # them cannot tell the clause being re-pointed from another occurrence staying put.
     # ⛔ `:28067` is NOT the live cite here, and an earlier cut of this comment called it the
     # file's only `dedup_reviewed IS NULL` (#13746 review, P2). At `#13589`'s head
     # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` printed `28395` as its only hit — the
-    # number is quoted AS THAT HEAD'S, and this block's other `:28xxx` values are stamped the
-    # same way — while
+    # number is quoted AS THAT HEAD'S (`#13988`, `4326d7f14611`; `#13589`'s own head printed
+    # `28067`), and this block's other values FOR THE FILTER are stamped the same way — while
     # `sed -n '28067p'` -> a docstring line of `_belief_timeline` (opens `:28048`) naming `entity_identity.resolve_entity_id`, not a line of that module.
     # `:28067` is a MIDDLE waypoint of D5's own re-point chain, and it takes FOUR commits, not
     # two: `:28019` -> `:28067` (main's `#13551`), `:28067` -> `:28142` (`#13755`), `:28142` ->
@@ -8018,7 +8019,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # of defect as the premise it replaced, one layer down (`#13746` re-review, P1). So D5 still
     # prints `:28067` six times and it is still not what the clause says. The live value is
     # DERIVED below from the source and NOT typed here — the arm's own failure message prints it,
-    # which is the only place a head-current value may appear. The `def` is `:28565` and its
+    # which is the only place a head-current value OF THIS CLAUSE may appear (the `def`/signature
+    # and belief-query fragments two sentences down ARE typed, and are true at this head). The `def` is `:28565` and its
     # signature continuation `:28566` — a different statement again; this comment used to conflate
     # all three, and `:28395` became a fourth: it is `continue`, inside the `related`/NAND loop
     # over `other_id`, not the filter and not the `entries[-limit:]` paging window.
@@ -8026,7 +8028,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # are a `WHERE` clause and an `AND` fragment inside the belief query opening at `:28355`
     # (`#14269` review, P3: the correction above made that parenthetical the ONLY artifact still
     # naming the wrong pair).
-    # MEASURED (#13589 review, at that head — the clause reads `sdk.py:28395` here): deleting
+    # MEASURED (#13589 review, re-taken on #13988's tree `4326d7f14611`, where the clause reads
+    # `sdk.py:28395`; at #13589's own head it read `:28067`): deleting
     # the clause's own "sits at `sdk.py:28178`" left the row GREEN. The sentence is therefore
     # read WHOLE, with its number DERIVED from the source, so both halves are graded: a source move the document did not follow reds, and a document re-point the source did not make reds.
     _dedup_filter_lines = [
