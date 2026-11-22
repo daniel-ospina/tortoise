@@ -118,10 +118,18 @@ now fast".
    `spent_ms` reports it.
 2. **`session_projection`: additive phase.** `SESSION_EXTRACTION_PHASES = ("queued", "extracting")`
    declared beside the outcome set; `session_extraction_status(..., *, phase=None, phase_at=None)`
-   publishes `phase`/`phase_at` **only** while `capture_ok is None` — ABSENT, not `null`, on a
-   terminal row, so the `#3520` exact-key-set pins (`set(row["extraction"]) == {"status",
-   "extractor", "outcome_known"}`, `tests/test_session_capture_status.py:194`) stay true for a
-   processed session and the 3-member set is untouched.
+   publishes `phase`/`phase_at` **whenever the record carries one** — ABSENT, not `null`, on a terminal
+   row (the phase is CLEARED in the same statement that records the outcome), so the `#3520`
+   exact-key-set pins (`set(row["extraction"]) == {"status", "extractor", "outcome_known"}`,
+   `tests/test_session_capture_status.py:194`) stay true for a processed session and the 3-member set
+   is untouched.
+   ⛔ **NOT `capture_ok is None and phase`** — that was the first cut and round 1 removed it: the `#2335`
+   TRUE-retry lane re-extracts a session whose record ALREADY carries `capture_ok = False`, so guarding
+   on `capture_ok is None` suppressed the phase on the one lane where a reader most needs to see that
+   extraction is running, and left the ACK and its own `status_url` disagreeing about the same capture.
+   The shipped guard is `if phase:` (`session_projection.py`), pinned by
+   `test_a_retry_in_flight_says_so_on_the_ack_AND_on_the_status_url`. A fixer must not reinstate the
+   `capture_ok is None` guard from an earlier revision of this plan.
    ⛔ **The persisted property is `capture_extraction_phase`, NOT `capture_phase`** — `capture_phase`
    is already an occupied name on this exact path: `graph_ops.PHASES` (four members,
    `graph_ops.py:101`) and the `graph_ops.capture_phase()` context manager that RAISES on an unknown
@@ -131,9 +139,12 @@ now fast".
    three-member set is untouched; a terminal outcome never publishes a phase; the phase vocabulary
    is closed and `assert`ed.
 3. **Read surfaces.** Append `s.capture_extraction_phase, s.capture_extraction_phase_at` to the three reads and pass them.
+
    *Test (real graph):* a session at `capture_extraction_phase='extracting'` reads back
-   `phase: "extracting"` + `outcome_known: false`; a session with `capture_ok=true` and a stale phase
-   reads `stored-and-processed` with no phase.
+   `phase: "extracting"` + `outcome_known: false` on ALL THREE surfaces (list, detail, SDK); a session
+   with `capture_ok=true` and a phase left behind (the retry lane) reads `stored-and-processed` WITH the
+   phase and `outcome_known: false` — the phase is published whenever the record carries one, and
+   `outcome_known` is what carries the "not yet" half.
 4. **The split (bounded join).** Inside `_capture_session_impl`, after the record write and before
    the extraction branches, arm `state["attempted"]/["proj"]/["lane"]` — **at the defer point, never
    above the branch chain** (see 4b) — then:

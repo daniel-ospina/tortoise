@@ -238,11 +238,16 @@ def extraction_outcome_known(detail: Any) -> bool | None:
 
     ``GET /v1/sessions/<id>`` serves ``extraction: {status, extractor,
     outcome_known}`` (``tortoise/session_projection.py``), where
-    ``outcome_known`` is ``capture_ok IS NOT NULL``: ``True`` when the server
-    recorded whether extraction ran, ``False`` when it has recorded NOTHING yet
-    (the abandoned handler behind a transport 504, a commit-created session, a
-    demo seed), and ``None`` here when the field is absent entirely — a
-    pre-#3520 server, or a fake that never served the block.
+    ``outcome_known`` is ``capture_ok IS NOT NULL AND no extraction is in
+    flight`` — the second half is `#14232`'s: a `#2335` TRUE retry re-extracts a
+    session whose record already carries `capture_ok = False` and publishes the
+    in-flight ``phase``, so the record alone would report the previous attempt's
+    outcome for the capture running right now. ``True`` when the server recorded
+    whether extraction ran and nothing is running; ``False`` when it has recorded
+    NOTHING yet (the abandoned handler behind a transport 504, a commit-created
+    session, a demo seed) or when a capture is in flight; and ``None`` here when
+    the field is absent entirely — a pre-#3520 server, or a fake that never served
+    the block.
 
     Only an explicit boolean is returned. A malformed block reads as ``None``
     on purpose: an invented ``False`` would turn garbage into the PENDING state

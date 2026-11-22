@@ -87,6 +87,26 @@ def _force_ack(monkeypatch):
     monkeypatch.setattr(ha, "_capture_ack_grace_s", lambda _request: 0.0)
 
 
+def _force_join(monkeypatch, seconds: float):
+    """Force the JOIN path at a REAL deadline — the symmetric twin of `_force_ack`.
+
+    `_force_ack` takes the window to zero so the join can never land; this one
+    leaves `_capture_ack_grace_s` REAL and pins the deadline to a chosen value,
+    so the join must land for a local mock capture. It exists because the suite's
+    autouse fixture opens `_CAPTURE_ACK_DEADLINE_S` to 30 s (see its docstring:
+    no pre-existing assertion may race a deadline, `#5049` rule 1) — and that
+    fixture, left alone, means the PRODUCTION 0.5 s is exercised by no row at
+    all, so a value too tight for the joined receipt would keep every suite
+    green.
+
+    The transport ceiling is pinned to its production value too
+    (`_TRANSPORT_WAIT_BOUND_S` = 10 s), so the clamp under test is
+    `min(seconds, 5.0)` rather than whatever a neighbouring test left behind.
+    """
+    monkeypatch.setattr(ha, "_CAPTURE_ACK_DEADLINE_S", seconds)
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 10.0)
+
+
 def _drain_tails(timeout: float = 30.0) -> None:
     """Wait for every scheduled capture completion to finish."""
     deadline = time.monotonic() + timeout
@@ -345,6 +365,71 @@ def test_a_raised_completion_does_NOT_write_the_marker(client, monkeypatch):
         "and for a real one it must leave capture_ok NULL")
 
 
+def test_a_raised_completion_retires_the_phase_but_leaves_the_outcome_unrecorded(
+        client, monkeypatch):
+    """F2's RAISE arm: no outcome recorded — and nothing still claiming to run.
+
+    The marker's scope is CANCELLATION, so a raised tail deliberately writes no
+    `capture_ok` (the NULL→legacy-replay contract pinned by the row above). But
+    the in-flight phase is a claim that WORK IS RUNNING, and a raised tail is as
+    over as a cancelled one: if the phase survives, every read surface publishes
+    `phase: "extracting"` with `outcome_known: false` for a capture nothing is
+    doing, forever — and the client the ACK told to poll `status_url` waits on a
+    corpse. Comparable async-job APIs retire an in-progress state on every exit
+    (success, failure, cancellation) rather than from a success-only writer.
+
+    ⛔ The two halves are asserted TOGETHER on purpose: clearing the phase must
+    NOT become a second outcome writer. A fix that set `capture_ok=false` here
+    would turn every failed extraction into a `#2335` TRUE-retry (re-extracting
+    on top of an already-written record) and reds the `is None` row below.
+    """
+    _force_ack(monkeypatch)
+    session_id = "s-14232-raised-phase"
+
+    with _ParkedExtractor() as parked:
+        r = client.post("/v1/sessions", json={
+            "conversation": _CONV, "session_id": session_id})
+        assert r.status_code == 200, r.text
+        assert parked.started.wait(30.0), "the tail never reached the extractor"
+
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            row = _session_row(session_id)
+            if row and row[0][3] == "extracting":
+                break
+            time.sleep(0.02)
+        assert row and row[0][3] == "extracting", (
+            f"precondition: the parked tail must be publishing a live phase: {row}")
+
+        class _Failed:
+            def cancelled(self) -> bool:
+                return False
+
+            def exception(self):
+                return RuntimeError("the extractor raised behind the ACK")
+
+        state = {"attempted": True, "finalized": False, "lane": "v2"}
+        ha._capture_tail_failed(_Failed(), _proj(), session_id, state)
+
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            row = _session_row(session_id)
+            if row and row[0][3] is None:
+                break
+            time.sleep(0.02)
+        assert row and row[0][3] is None and row[0][4] is None, (
+            f"a raised tail must retire the phase pair, got {row}")
+        assert row[0][1] is None, (
+            "…and must NOT record an outcome: the raise arm keeps its "
+            f"NULL→legacy-replay shape, got capture_ok={row[0][1]!r}")
+        block = client.get(f"/v1/sessions/{session_id}").json()["extraction"]
+        assert block["outcome_known"] is False, block
+        assert "phase" not in block, (
+            f"nothing is running, so no phase may be published: {block}")
+        parked.release.set()
+    _drain_tails()
+
+
 # ── R3 / R3b: what the ACK body says, and what it refuses to say ──────────
 
 def test_the_ack_body_cannot_be_read_as_extracted_nothing(client, monkeypatch):
@@ -408,14 +493,22 @@ def test_the_ack_body_cannot_be_read_as_extracted_nothing(client, monkeypatch):
 
 
 def test_completion_inside_the_window_still_returns_todays_receipt(client):
-    """R3b — the in-budget half. No monkeypatching of the window at all.
+    """R3b — the in-budget half. No forcing of the join: it must land.
 
-    With the real (1 s) window and the offline mock extractor, completion lands
-    inside it and the caller gets the SAME body shape as before this change:
-    `status ok/partial`, a real `extracted` count, the extraction mode, and NO
-    in-flight phase. That is what keeps 34 test files and every capture client
-    reading what they read yesterday — and it is asserted here by cause (the
-    window was not forced) rather than by timing the test.
+    With the suite's OPENED window (see the autouse
+    `_capture_ack_window_is_deterministic` fixture: `_CAPTURE_ACK_DEADLINE_S` is
+    30 s for the whole suite, because whether a local mock capture beats a 0.5 s
+    deadline is a question about HOST LOAD and `#5049` rule 1 forbids a deadline
+    expiry from producing a verdict) and the offline mock extractor, completion
+    lands inside it and the caller gets the SAME body shape as before this
+    change: `status ok/partial`, a real `extracted` count, the extraction mode,
+    and NO in-flight phase. That is what keeps 34 test files and every capture
+    client reading what they read yesterday — and it is asserted here by cause
+    (the window was not forced) rather than by timing the test.
+
+    ⛔ The PRODUCTION deadline is exercised by
+    `test_the_in_budget_receipt_survives_the_production_deadline` below, not
+    here: this row is the shape assertion, that row is the deadline assertion.
     """
     r = client.post("/v1/sessions", json={
         "conversation": _CONV, "session_id": "s-14232-in-budget"})
@@ -437,6 +530,42 @@ def test_completion_inside_the_window_still_returns_todays_receipt(client):
     assert "extraction_outcome" not in body, (
         "a completed capture's outcome IS known — the unrecorded marker must be "
         "absent, not false")
+
+
+def test_the_in_budget_receipt_survives_the_production_deadline(
+        client, monkeypatch):
+    """F4 — the PRODUCTION window (0.5 s), not the suite's opened one (30 s).
+
+    Every other row in this module runs with the autouse fixture's opened
+    deadline, so without this one the constant the DEPLOYED handler uses is
+    exercised by nothing: a value too tight for the joined receipt would keep
+    every suite green while production clients silently stopped getting today's
+    body. `_force_join` pins the deadline to the production value and leaves
+    `_capture_ack_grace_s` real, so the join has to land on its own merits.
+
+    The warm-up capture is not decoration: the first capture in a process pays
+    the mock seam's import/first-call cost, and that cost is not what the
+    deadline is a claim about. Measured with the window at 0.5 s the local mock
+    capture completes in single-digit milliseconds, two orders of magnitude
+    inside the deadline — so a red here means the deadline is genuinely too
+    tight on this host, which is the finding.
+    """
+    warm = client.post("/v1/sessions", json={
+        "conversation": _CONV, "session_id": "s-14232-prod-window-warm"})
+    assert warm.status_code == 200, warm.text
+    _drain_tails()
+
+    _force_join(monkeypatch, 0.5)
+    r = client.post("/v1/sessions", json={
+        "conversation": _CONV, "session_id": "s-14232-prod-window"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "extraction" not in body, (
+        "the join missed the PRODUCTION 0.5 s deadline on an offline mock "
+        f"capture — that deadline is too tight: {sorted(body)}")
+    assert body["status"] in ("ok", "partial"), body
+    assert body["extracted"] >= 1, body
+    _drain_tails()
 
 
 # ── R4: the in-flight key outlives the tail ──────────────────────────────
@@ -495,6 +624,24 @@ def test_the_phase_moves_queued_to_extracting_and_then_clears(client, monkeypatc
         assert row["extraction"]["phase"] == "extracting", (
             "the LIST read must agree with the detail read — one derivation, "
             f"three surfaces: {row['extraction']}")
+        # ⛔ THE THIRD SURFACE: the SDK read. The parity row
+        # (`test_hosted_api.py::test_sdk_session_read_parity_with_the_hosted_projection`)
+        # captures through the INLINE lane — a terminal row, where the phase is
+        # absent on BOTH sides — so it cannot red a deleted or mis-indexed phase
+        # leg in `sdk._read_captured_session`. This is the only row that reads an
+        # IN-FLIGHT session through the SDK: deleting `phase=sess[13]` or reading
+        # the neighbouring index reds it here.
+        sdk_read = ha._make_sdk(namespace=TEST_ORG_ID)._get_session(session_id)
+        assert sdk_read is not None, (
+            "the SDK must read back a session the handler just captured")
+        sdk_block = sdk_read["extraction"]
+        assert sdk_block["phase"] == "extracting", (
+            "the SDK read must carry the phase the hosted pair carries — one "
+            f"derivation, three surfaces: {sdk_block}")
+        assert sdk_block["outcome_known"] is False, sdk_block
+        assert sdk_block["phase_at"] == detail["extraction"]["phase_at"], (
+            "the phase TIMESTAMP leg is the index-sensitive half: a wrong "
+            f"positional would put it under another key: {sdk_block}")
         parked.release.set()
     _drain_tails()
 

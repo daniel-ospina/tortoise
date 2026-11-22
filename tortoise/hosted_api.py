@@ -784,14 +784,21 @@ def _capture_tail_failed(task, proj, session_id, state) -> None:
     1. RETRIEVE the exception. A task nobody awaits reports "exception was never
        retrieved" at GC time and the traceback is lost; this callback is the only
        reader.
-    2. WRITE THE ABANDONED MARKER, but ONLY when the defer point armed it. A
-       replay / store-only lane never sets ``state["attempted"]`` and never sets
-       ``state["finalized"]`` either (there is no outcome write on that path), so
-       a callback keyed on ``not finalized`` alone would stamp
-       ``capture_ok=false`` over an ALREADY-PROCESSED session — and the next
-       re-POST would take the #2335 TRUE-retry and re-extract on top of it. The
-       arming guard's own words (`_capture_session_impl`, #3129): *"arm the
-       abandoned-capture marker for a genuine FRESH attempt only"*.
+    2. RETIRE THE ATTEMPT, in the direction this arm owns. A CANCELLED armed task
+       writes the abandoned marker (``capture_ok=false`` + the phase pair in one
+       statement). An ARMED task that RAISED clears the phase pair and leaves
+       ``capture_ok`` NULL (``_clear_capture_phase``) — nothing is running either
+       way, and a phase left on the record makes every read surface claim work in
+       flight forever.
+
+    Both writes are gated on the defer point having ARMED the attempt. A replay /
+    store-only lane never sets ``state["attempted"]`` and never sets
+    ``state["finalized"]`` either (there is no outcome write on that path), so a
+    callback keyed on ``not finalized`` alone would stamp ``capture_ok=false``
+    over an ALREADY-PROCESSED session — and the next re-POST would take the #2335
+    TRUE-retry and re-extract on top of it. The arming guard's own words
+    (`_capture_session_impl`, #3129): *"arm the abandoned-capture marker for a
+    genuine FRESH attempt only"*.
     """
     cancelled = task.cancelled()
     exc: BaseException | None = None
@@ -804,7 +811,8 @@ def _capture_tail_failed(task, proj, session_id, state) -> None:
     # pins it: a re-POST of a raise-shaped session must not re-extract). Writing
     # the marker on an exception would turn every failed extraction into a
     # TRUE-retry-eligible record, which is a behaviour change nobody asked for —
-    # so a raised tail is only REPORTED here.
+    # so a raised tail records NO outcome here. It DOES retire the in-flight
+    # phase (below): "no outcome" must not read as "still working".
     if (cancelled and state is not None and state.get("attempted")
             and not state.get("finalized")):
         # Never on the loop: the marker is a sync graph write, and this callback
@@ -817,6 +825,22 @@ def _capture_tail_failed(task, proj, session_id, state) -> None:
             _logger.exception(
                 "abandoned-capture marker submit failed (session %s)",
                 session_id)
+    if (exc is not None and state is not None and state.get("attempted")
+            and not state.get("finalized")):
+        # ⛔ THE PHASE IS RETIRED ON THIS EXIT TOO (#14232 review F2). An
+        # ARMED attempt that raised is over: nothing is running, so a phase
+        # left on the record makes every read surface claim work in flight and
+        # `outcome_known` stay False forever, while the client the ACK told to
+        # poll gets no terminal answer. `capture_ok` is NOT written here — the
+        # raise arm keeps its documented NULL→legacy-replay shape ("deliberately
+        # scoped to CANCELLATION, not to failures", `_capture_abandoned_marker`).
+        try:
+            _submit_off_loop(
+                _CAPTURE_MARKER_EXECUTOR, _clear_capture_phase,
+                proj, session_id)
+        except Exception:  # pragma: no cover — pool shut down
+            _logger.exception(
+                "capture phase clear submit failed (session %s)", session_id)
     if exc is not None:
         _logger.error(
             "capture completion failed after its record landed (session %s) — "
@@ -20234,6 +20258,45 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
         _logger.exception(
             "abandoned-capture marker write failed (session %s) — a later "
             "same-session retry would legacy-replay (#3129)", session_id)
+
+
+def _clear_capture_phase(proj, session_id: str) -> None:
+    """Drop the in-flight phase pair and NOTHING ELSE (#14232 review F2).
+
+    The phase is a claim that work is RUNNING (``queued`` / ``extracting``), and
+    every exit of the tail must retire that claim or the record keeps asserting
+    it after the work is gone: the read path publishes a phase whenever the
+    record carries one (`session_projection.session_extraction_status`), so
+    ``outcome_known`` stays ``False`` and every client that was told to poll the
+    ACK's ``status_url`` waits on a capture that died — the exact "cannot tell
+    still-working from dead" confusion `#12362` is about, in the other
+    direction. Comparable async-job APIs hold the same rule: an in-progress
+    state is transient and must be retired on EVERY exit (success, failure,
+    cancellation), never left for a success-only writer to clear.
+
+    ⛔ ``capture_ok`` IS DELIBERATELY UNTOUCHED. The raise arm keeps its
+    documented NULL→legacy-replay shape (`_capture_abandoned_marker`'s docstring
+    and `test_hosted_api.py::TestSessionActorStamp2600` raise-shape (ii): a
+    re-POST of a raise-shaped session must not re-extract), so this clears the
+    transient claim only. Cancellation is NOT routed here — the terminal marker
+    is the writer on that arm, and it clears the pair in the SAME statement that
+    records ``capture_ok=false``.
+
+    Synchronous graph write; the caller submits it off the loop.
+    """
+    if proj is None or not session_id:
+        return
+    try:
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) "
+            "SET s.capture_extraction_phase=null, "
+            "    s.capture_extraction_phase_at=null",
+            params={"sid": session_id},
+            timeout=_CAPTURE_ABANDON_MARKER_TIMEOUT_MS)
+    except Exception:  # pragma: no cover - graph hiccup
+        _logger.exception(
+            "capture phase clear failed (session %s) — a dead tail's phase "
+            "outlives it", session_id)
 
 
 # ── #11808: the CONNECTION half of a capture's receipt ────────────────────
