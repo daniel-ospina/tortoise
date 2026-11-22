@@ -478,6 +478,32 @@ def _runs_within(seconds: float, fn) -> bool:
     return done.wait(seconds)
 
 
+def _require_prometheus_lock(holder) -> threading.Lock:
+    """The REAL ``_lock`` on a prometheus object, or a red that names the rename.
+
+    ⛔ Review round 11, P3: these legs PLANT a fresh ``_lock`` on the object and
+    then assert the repair replaced it. Under a prometheus_client that renames the
+    attribute that plant is vacuous in the worst way — the leg creates a ``_lock``
+    nothing in the library touches, the repair "replaces" the plants, every
+    assertion holds, and the REAL lock is still inherited, so the forever-hang is
+    back while the suite is green (reproduced against ``prometheus_client`` 0.26.0
+    with ``_lock`` renamed to ``_mutex``). Reading the real attribute FIRST turns
+    that into a red with a sentence that says what happened.
+
+    ``pyproject.toml`` pins ``prometheus-client>=0.16`` with no upper bound, so a
+    rename arrives on a dependency move rather than on a code change: whoever bumps
+    it gets this message instead of a silently dead repair.
+    """
+    lock = getattr(holder, "_lock", None)
+    assert lock is not None, (
+        f"{type(holder).__name__} has no `_lock` — prometheus_client moved or "
+        "renamed it, so (a) this leg no longer pins the fork repair and (b) "
+        "`monitoring.ensure_projection_metrics_fork_safe` is now replacing nothing, "
+        "which restores the inherited-lock wedge silently. Read the real attribute "
+        "name off the installed package and update BOTH the repair and this helper.")
+    return lock
+
+
 def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed, monkeypatch):
     """⛔ ROUND 10'S P2 + two P3s: the wedge is prometheus_client's OWN lock.
 
@@ -504,8 +530,15 @@ def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed,
     gauge = monitoring.PROJECTION_QUEUE_DEPTH
     positions = monitoring.PROJECTION_PENDING_POSITIONS
 
+    # ⛔ THE OBJECTS THAT ACTUALLY CARRY A LOCK: every ``MutexValue``, plus the
+    # ``Counter`` families. A plain ``Gauge`` FAMILY has no ``_lock`` in 0.26.0, so
+    # there is nothing there to inherit — and planting one (as an earlier revision
+    # did) is what made this leg vacuous under a rename.
     held = []
-    for holder in (gauge, gauge._value, positions, positions._value):
+    for holder in (gauge._value, positions._value,
+                   monitoring.PROJECTION_WORKER_FAILURE_COUNT,
+                   monitoring.PROJECTION_INLINE_FALLBACK_COUNT):
+        _require_prometheus_lock(holder)     # the REAL attribute, or a red naming it
         lock = threading.Lock()
         lock.acquire()               # the peer thread's lock, held at `fork()`
         holder._lock = lock
@@ -552,14 +585,15 @@ def test_the_RESET_ITSELF_replaces_prometheus_locks_not_a_publisher_behind_it(
     requires the inherited locks to be gone afterwards.
     """
     worker = projection_worker.worker()
-    holders = (
-        monitoring.PROJECTION_QUEUE_DEPTH,
+    holders = (                       # the objects that really carry a `_lock`
         monitoring.PROJECTION_QUEUE_DEPTH._value,
-        monitoring.PROJECTION_PENDING_POSITIONS,
         monitoring.PROJECTION_PENDING_POSITIONS._value,
+        monitoring.PROJECTION_WORKER_FAILURE_COUNT,
+        monitoring.PROJECTION_INLINE_FALLBACK_COUNT,
     )
     held = []
     for holder in holders:
+        _require_prometheus_lock(holder)     # the REAL attribute, or a red naming it
         lock = threading.Lock()
         lock.acquire()               # the peer thread's lock, held at `fork()`
         holder._lock = lock
@@ -583,6 +617,24 @@ def test_the_RESET_ITSELF_replaces_prometheus_locks_not_a_publisher_behind_it(
         for lock in held:
             if lock.locked():
                 lock.release()
+
+
+def test_a_RENAMED_prometheus_lock_REDS_the_guard_instead_of_passing_vacuously():
+    """The guard on the legs above must fire, and on a REAL object.
+
+    ⛔ Review round 11, P3: the legs plant a ``_lock`` and assert it was replaced, so
+    under a prometheus_client that renames ``_lock`` they would pin nothing.
+    ``_require_prometheus_lock`` reads the real attribute; this leg pins its RED
+    path on an object that genuinely does not carry one — a plain ``Gauge`` FAMILY
+    (measured: ``"_lock" in dir(Gauge(...))`` → ``False``; only a ``Counter``
+    family and every ``MutexValue`` carry one in 0.26.0).
+
+    So the same assert fires for both reasons that matter: a renamed attribute, and
+    a family whose shape changed. Both mean "the repair is replacing nothing", which
+    is the wedge coming back behind a green suite.
+    """
+    with pytest.raises(AssertionError, match="prometheus_client moved or renamed"):
+        _require_prometheus_lock(monitoring.PROJECTION_QUEUE_DEPTH)
 
 
 def test_a_metrics_failure_never_escapes_into_the_loop(armed, monkeypatch):
@@ -1442,7 +1494,7 @@ def test_the_fork_hook_replaces_prometheus_locks_before_the_METRICS_SCRAPE():
     release = threading.Event()
 
     def hold() -> None:
-        with gauge._value._lock:
+        with _require_prometheus_lock(gauge._value):   # the REAL lock, not a plant
             holding.set()
             release.wait(10)
 
