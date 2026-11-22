@@ -1651,9 +1651,10 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # reach of the read as a literal/bound literal (a name COMPUTED at runtime is the
         # pin's declared residual), on the artifact's `order`/`legs` iterating the measured
         # page/trace only through a helper or after a rebind, on a second artifact dict
-        # carrying both, and on an `os.environ` mutation in `run()` through any STATIC
-        # spelling the guard resolves (`os.environ`, `from os import environ` incl. `as`,
-        # `getattr(os, "environ")`, and their alias/container/bound-mutator chains — its
+        # carrying both, and on an `os.environ` mutation ANYWHERE in the file through any
+        # STATIC spelling the guard resolves (`os.environ`, `from os import environ` incl.
+        # `as`, `getattr(os, "environ")`, and their alias/container/bound-mutator chains —
+        # the composed `{"p": os.environ.pop}` slot included, #14281 review P2 — its
         # residuals are declared on `_environ_mutations`) — "which arm was in force" is not
         # recorded, see #14289.
         # Out-sinks (`read_status_out`, `_truncation_out`) are instruments, not levers: the

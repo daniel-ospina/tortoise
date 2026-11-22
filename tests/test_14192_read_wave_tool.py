@@ -626,10 +626,13 @@ def _collection_alias_predicate(var: str):
       passed only because it ran a DIFFERENT lambda from the one production runs — no
       mutant of the guard could red it (rule 3).
 
-    A bare `Subscript` value is that element. `first.sort()` stays GREEN (it re-orders an
-    element's own inner list, which the artifact's `_result_id(r)` does not read), while
-    the LITERAL `results[0].sort()` is still RED through the receiver arm — a subscript
-    expression is not a bind.
+    A bare `Subscript` value is that element. ⛔ `first = results[0]; first.sort()` is RED,
+    not green: the mention-based predicate makes `first` an alias of `results`, and the
+    receiver arm then sees `first` — so the ELEMENT path is conservative in the same
+    direction as everything else here (a false red, against a page permutation that would
+    otherwise be invisible). This docstring claimed the opposite and was wrong (#14281
+    review P2, measured). The LITERAL `results[0].sort()` is RED through the receiver arm
+    too — a subscript expression is not a bind.
     """
     def _predicate(value: ast.AST) -> bool:
         if isinstance(value, ast.Subscript):
@@ -771,12 +774,46 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 if not _unpacked or not (_names_in(_iter) & muts):
                     continue
                 _target = _unpacked[0]
+            elif isinstance(_node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef)):
+                # ⛔ A DEFAULT ARGUMENT BINDS THE COLLECTION INTO THE CALLEE (#14281
+                # review P1, measured GREEN): `_f = (lambda _l=results: _l.sort()); _f()`
+                # permutes the page and every other arm passes, because inside the lambda
+                # the receiver is a PARAMETER and nothing ties it to `results`. A default
+                # that mentions a tainted name taints the parameter names of that scope —
+                # conservative on purpose: one tainted default reds every parameter, and a
+                # false red needs a lambda in `run()` that this tool does not have.
+                _args = _node.args
+                _defaults = list(_args.defaults) + [d for d in _args.kw_defaults
+                                                    if d is not None]
+                if not any(_names_in(d) & muts for d in _defaults):
+                    continue
+                _target = ast.Tuple(elts=[ast.Name(id=a.arg) for a in
+                                          list(_args.posonlyargs) + list(_args.args)
+                                          + list(_args.kwonlyargs) + [a for a in
+                                          (_args.vararg, _args.kwarg) if a is not None]],
+                                    ctx=ast.Load())
             else:
                 continue
             fresh = _names_in(_target) - muts
             if fresh:
                 muts |= fresh
                 changed = True
+    # ⛔ A BOUND MUTATOR OF THE PAGE IS THE SAME POINTER (#14281 review P1, four shapes
+    # measured GREEN and each permuting the page before `order` reads it, so `compare()`
+    # reports `rank_identical: True` over a genuinely permuted pair):
+    #
+    #     _s = results.sort; _s()          _a = results; _s = _a.sort; _s()
+    #     _f = (lambda _l=results: _l.sort()); _f()          _c = trace.clear; _c()
+    #
+    # `results.sort` is an `Attribute` on the value, not an `Attribute` call, so the
+    # receiver arm below never fired; `_aliases_of` binds the NAME `_s` and the call is a
+    # bare `Name`. `_environ_mutations` already carries this arm for `os.environ.pop`, and
+    # `_per_query_element_mutations` calls the same shape a hole rather than a residual.
+    bound_mutator = _aliases_of(
+        run_def,
+        lambda v: (isinstance(v, ast.Attribute) and v.attr in _MUTATORS
+                   and bool(_names_in(v.value) & muts)),
+        loops=True)
     hits: list[int] = []
     for node in ast.walk(run_def):
         if node is artifact_append:
@@ -794,6 +831,9 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             receiver = _names_in(node.func.value)
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
             receiver = _names_in(node.value)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in bound_mutator:
+            receiver = _names_in(node.func)  # a bound mutator CALL is the mutation
         # ⛔ THE AUGMENTED SPELLING IS THE SAME MECHANISM (#14281 review P1, measured).
         # `dict |= other` is PEP 584's in-place merge — the exact semantics of `update`,
         # which `_MUTATORS` already carries — but an `AugAssign` whose target is a BARE
@@ -866,12 +906,15 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
         for _i, _pq in enumerate(per_query): _pq["order"].sort()
         (zed,) = per_query[-1:]; zed["order"].sort()
 
-    ⛔ WHAT IS UNIQUELY THIS GUARD'S IS THE UNPACKED TARGET — re-measured at
-    `bb14ebfc501c`, not carried. The `for` shapes below are PINS of this guard, but their
-    coverage is `_mutated_after`'s `rows` clause (that commit widened `rows` with every
-    loop/comprehension target over `per_query`), which fires FIRST and reports its own
-    message. Deleting the element guard still leaves them RED. The unpacked slice is the
-    only listed shape it alone catches.
+    ⛔ IT IS NOT THE COVERAGE — IT IS THE MESSAGE, AND THAT HAD TO BE MEASURED (#14281
+    review P2). This said the UNPACKED target was "the only listed shape it alone
+    catches"; substituting `element_mutations = []` leaves ALL FIVE listed shapes RED
+    through `_mutated_after`'s `rows`/`muts` fixpoint (measured), including
+    `(zed,) = per_query[-1:]; zed["order"].sort()` — the fixpoint keys on the TARGET being
+    a Tuple, not on a value of matching length. What this guard uniquely reds is a REBIND
+    of an element name (`(zed,) = per_query[-1:]; zed = {}`), which mutates nothing: an
+    accepted, conservative false red. It stays because it reports the element-specific
+    diagnosis FIRST and is asserted on its own; it is not the guard that holds the class.
 
     `_mutated_after` covers a LITERAL receiver (`per_query[-1]["order"].sort()`) and, since
     `bb14ebfc501c`, a name bound to `per_query[-1]` and a `for` target — all through
@@ -914,8 +957,9 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
         # ⛔ EVERY NAME THE TARGET BINDS, not only a bare `Name` — `for _i, _pq in
         # enumerate(per_query):` and `(zed,) = per_query[-1:]` both name the ELEMENT and
         # were measured GREEN while only `isinstance(target, ast.Name)` was accepted.
-        # `_mutated_after` does not cover them either: its unpack branch needs a
-        # Tuple/List VALUE of matching length, and these values are a Call / a Slice.
+        # ⛔ `_mutated_after` DOES cover them (measured with this guard neutered: all five
+        # shapes stay RED) — the text here claimed its unpack branch needed a Tuple/List
+        # VALUE of matching length, and it keys on the TARGET instead (#14281 review P2).
         # A tuple target over a CALL marks the index too (fail-closed: a false red on an
         # index that is never mutated, against a GREEN permuted page).
         for bound in ast.walk(target):
@@ -1185,9 +1229,22 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     # The identical "its-predicate-is-narrower-than-its-check" shape the docstring above
     # says it fixed for `getattr`, left standing one spelling over. `loops=True` is what
     # resolves the `for`-bound spelling.
-    bound = _aliases_of(
-        tree, lambda v: (isinstance(v, ast.Attribute) and v.attr in mutators
-                         and _is_environ(v.value)), loops=True)
+    # ⛔ …AND THROUGH A CONTAINER SLOT (#14281 review P2, measured GREEN):
+    #     _ops = {"p": os.environ.pop}; _ops["p"]("TORTOISE_FUSED_RERANK")
+    # The docstring advertised "alias/container/bound-mutator chains" while the seed
+    # matched only a bare `Attribute`, so the COMPOSITION was uncaught — each ingredient
+    # alone was. The seed is now container-aware and the call arm resolves a `Subscript`
+    # function back to the container.
+    def _bound_mutator_expr(v: ast.AST) -> bool:
+        if isinstance(v, ast.Attribute):
+            return v.attr in mutators and _reaches_mapping(v.value)
+        if isinstance(v, ast.Dict):
+            return any(e is not None and _bound_mutator_expr(e) for e in v.values)
+        if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
+            return any(_bound_mutator_expr(e) for e in v.elts)
+        return False
+
+    bound = _aliases_of(tree, _bound_mutator_expr, loops=True)
 
     hits: list[int] = []
     for node in ast.walk(tree):
@@ -1198,8 +1255,10 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
                   and getattr(node.func, "attr", None) in mutators
                   and _is_environ(getattr(node.func, "value", None)))
         aug = isinstance(node, ast.AugAssign) and _is_environ(node.target)
-        bound_call = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                      and node.func.id in bound)
+        bound_call = (isinstance(node, ast.Call) and (
+            (isinstance(node.func, ast.Name) and node.func.id in bound)
+            or (isinstance(node.func, ast.Subscript)
+                and bool(_names_in(node.func.value) & bound))))
         # ⛔ …and so does a setattr/vars() spelling of the same assignment (#14281 review
         # P2, both measured green): `setattr(os, "environ", {…})` and
         # `vars(os)["environ"] = {…}` swap the whole mapping without an `Assign` target.
@@ -1751,8 +1810,10 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     argument must be a keyword (a positional one is invisible to a kwargs check), the
     measured read must be the one inside the loop, its page and trace must be iterated
     AS THEMSELVES by the ``order``/``legs`` comprehensions of the one artifact dict (and
-    never rebound after the read), and no ``os.environ`` mutation may happen in ``run()``
-    at all — which arm of the fused-rerank gate was in force is not recorded (#14289).
+    never rebound after the read), and no ``os.environ`` mutation may happen ANYWHERE in
+    the file (only the two module-level setup pops are exempt — this text said ``in
+    ``run()``,`` while the scan is over the whole file, #14281 review P3) — which arm of
+    the fused-rerank gate was in force is not recorded (#14289).
     That last clause is scoped to the STATIC spellings the guard resolves (`os.environ`,
     `from os import environ`, `getattr(os, "environ")` and their alias/container chains);
     its declared residuals are on `_environ_mutations`.
@@ -1822,7 +1883,8 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
                 in ("getattr", "setattr")
                 and len(n.args) >= 2 and _resolved(n.args[1]) in _READ_NAMES]
     assert not indirect, (
-        f"the tool reaches the read through {indirect[0].func.id}() by name — that bypasses "
+        f"the tool reaches the read through "
+        f"{getattr(indirect[0].func, 'id', None) or indirect[0].func.attr}() by name — that bypasses "
         "every check in this pin")
 
     mentions = [n for n in ast.walk(tree) if _is_read_ref(n)]
@@ -1872,8 +1934,9 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             and limit_kw.value.value == 10), (
         f"the measured read (line {measured.lineno}) does not pin `limit=10` "
         f"({ast.unparse(limit_kw.value) if limit_kw is not None else 'omitted'}) — the "
-        "artifact would hold a shallower page than the verdict assumes, and a reorder "
-        "below the surviving depth becomes unobservable")
+        "DEPTH is a deliberate shape pin: the verdict assumes the same page size on every "
+        "arm and on the rerankable pool (`DEFAULT_FUSED_RERANK_POOL = 40`), so a changed "
+        "depth silently re-scopes what `rank_identical` is a claim about")
     assert "leg_trace" not in {k.arg for k in warm.keywords if k.arg}, (
         f"the warm-up (line {warm.lineno}) collects a `leg_trace` — its result is "
         "discarded, so that trace is not the measurement")
@@ -1895,13 +1958,17 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         "name, so a shadow inside `run()` records a constant page and `compare()` reports "
         "`rank_identical: True` for ever")
     holder = parents.get(id(measured))
-    while holder is not None and not isinstance(holder, ast.Assign):
+    while holder is not None and not isinstance(holder, (ast.Assign, ast.AnnAssign)):
         holder = parents.get(id(holder))
-    assert isinstance(holder, ast.Assign) and len(holder.targets) == 1 \
-        and isinstance(holder.targets[0], ast.Name), (
+    # ⛔ AnnAssign COUNTS: `results: list[dict] = sdk._tortoise_fts_query(…)` IS assigned to
+    # a name, and it was a false RED (measured) while the function's own `trace: list[dict]
+    # = []` two lines above uses exactly that style.
+    _holder_target = (holder.targets[0] if isinstance(holder, ast.Assign)
+                      else getattr(holder, "target", None))
+    assert isinstance(_holder_target, ast.Name), (
         f"the measured read (line {measured.lineno}) is not assigned to a name — the pin "
         "cannot follow its page into the artifact")
-    page_var = holder.targets[0].id
+    page_var = _holder_target.id
     lt = next((k for k in measured.keywords if k.arg == "leg_trace"), None)
     assert lt is not None and isinstance(lt.value, ast.Name), (
         f"the measured read (line {measured.lineno}) collects `leg_trace` into "
@@ -1974,10 +2041,15 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
                 "only the hit itself or its id mapper is provably the measured page; a "
                 "mention (a BoolOp arm, a tuple index, a constant branch) can record a "
                 "constant and make a permuted page compare as identical")
-        assert _used & _names_in(gen.target), (
-            f"the artifact's `{key}` does not derive its element from the loop target "
-            f"`{ast.unparse(gen.target)}`: {ast.unparse(value.elt)}")
         if key == "legs":
+            # ⛔ MOVED INSIDE THE `legs` BRANCH, because for `order` it can never be the
+            # failing row (#14281 review P3, measured: it fires only with `_ok` neutered):
+            # `_ok` above already implies the element names the target. A clause that can
+            # never red reads to the next lane as an independent guard and is not one — the
+            # reason two other clauses were deleted earlier in this file.
+            assert _used & _names_in(gen.target), (
+                f"the artifact's `{key}` does not derive its element from the loop target "
+                f"`{ast.unparse(gen.target)}`: {ast.unparse(value.elt)}")
             # `leg` IS the declared-legs key: a constant there folds every leg into one
             # name, and `compare()` never reads `legs`, so nothing downstream notices.
             leg_item = next((v for k, v in zip(value.elt.keys, value.elt.values, strict=True)
@@ -2008,9 +2080,10 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     # on every call — so it was deleted rather than left as a clause no mutant can red
     # (#14281 review F3, measured: deleting it red nothing). What covers the shapes is
     # `rows`: the literal receiver, a name bound to `per_query[-1]`, and (since
-    # `bb14ebfc501c`) every `for`/comprehension target over `per_query`. What is uniquely
-    # `_per_query_element_mutations`'s is the UNPACKED target. Both halves are assertions;
-    # neither is a sentence.
+    # `bb14ebfc501c`) every `for`/comprehension target over `per_query`. NOTHING is
+    # uniquely `_per_query_element_mutations`'s but its message and an element REBIND
+    # (measured with it neutered: every listed shape stays RED — #14281 review P2). Both
+    # halves are assertions; neither is a sentence.
     #
     # ⛔ BOTH ANCHORED AT THE READ, NOT AT THE `append` (#14281 review P1, measured). The
     # first form filtered on `artifact_append.lineno`, so a rebind placed INSIDE the loop
