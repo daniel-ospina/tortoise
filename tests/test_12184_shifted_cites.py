@@ -700,8 +700,8 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
         "136 of this document's 234",
-        "dedupes the **345** as-written spellings to 234 — **111**",
-        "345 written spellings → 234 pairs → 111 collisions → 136 drifters of the 234",
+        "dedupes the **344** as-written spellings to 234 — **110**",
+        "344 written spellings → 234 pairs → 110 collisions → 136 drifters of the 234",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -2589,7 +2589,7 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     (":28720", "tortoise/sdk.py", 28720, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 2),
     (":30378", "tortoise/sdk.py", 30378, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\",", 2),
     (":30474", "tortoise/sdk.py", 30474, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\"", 2),
-    (":30573", "tortoise/sdk.py", 30573, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 2),
+    (":30573", "tortoise/sdk.py", 30573, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
     (":44202", "tortoise/sdk.py", 44202, "\"RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim\",", 2),
     ("entities.py:1292", "tortoise/projection/entities.py", 1292, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
     ("entities.py:2068-2076", "tortoise/projection/entities.py", 2068, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
