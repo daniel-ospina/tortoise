@@ -1955,10 +1955,10 @@ _OWN_PIN_CLAUSE_TEXT_RE = re.compile(
 #: defect class as the wrap it was written to catch, one level up. ⛔ AND NO POPULATION COUNT IS
 #: PUBLISHED HERE (#14282 review, P3): this sentence published one and a fresh reader measured it
 #: wrong at the same head. Publishing the correction would be the same defect with a newer number,
-#: and nothing in this file grades a number written in prose — measured: a fifth claim would leave
-#: this sentence wrong with every arm still green, the same shape as the orphaned `OWN_PINS` entry
-#: above. So the shape is described and left uncounted, and the assertion below measures it
-#: directly instead of trusting a number written here.
+#: and nothing in this file grades a number written in prose — measured: adding one more such
+#: claim would leave this sentence wrong with every arm still green, the same shape as the
+#: orphaned `OWN_PINS` entry above. So the shape is described and left uncounted, and the
+#: assertion below measures it directly instead of trusting a number written here.
 #: ⛔ AND IT USES `[\s#:]+` BETWEEN
 #: THE PHRASE'S OWN WORDS, not `\s+`: this block's line breaks are `\n#: `, so the `#:` is INSIDE the
 #: gap and `\s+` alone matched one claim fewer than the matcher did — measured, and that asymmetry
