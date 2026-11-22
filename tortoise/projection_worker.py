@@ -80,17 +80,26 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    bound or by a stopping worker (``queue_full`` / ``worker_stopping``), which is
    what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls — with the bound at ``1``, or
    once the default saturates. (b) The STRUCTURAL arms, which fold inline on EVERY
-   write at ANY depth, including an idle queue — ALL FOUR of the SIX conditions
+   write at ANY depth, including an idle queue — FIVE OF THE SEVEN conditions
    :func:`tortoise.live_write._submitted_to_worker` tests before it touches the
-   queue (the four that are CORRECTNESS, not configuration — the other two are the
-   unarmed loop and an unarmed record, which move no counter either):
-   ``journal_skipped`` (a record-only write, whose durable copy IS the
-   record), a ``record_sink`` door (it reads the outcome), a NON-DURABLE log (a
-   scratch buffer, which the seam itself declines), and ``tenant is None`` (the
-   ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
-   pass no tenant). ⛔ FOUR, not the two this paragraph used to name — a reader who
-   took ``tenant is None`` + ``record_sink`` as the whole family would think a
-   record-only write or a scratch log was counted, and neither is. (c) An inline
+   queue. ⛔ FIVE OF SEVEN, not four of six (#14222 review cycle 9, P2): the four
+   that are CORRECTNESS — ``journal_skipped`` (a record-only write, whose durable
+   copy IS the record), a ``record_sink`` door (it reads the outcome), a
+   NON-DURABLE log (a scratch buffer, which the seam itself declines), and
+   ``tenant is None`` (the ``api.EventAPI._emit`` / ``ConversationMiner._emit_event``
+   shape, whose doors pass no tenant) — plus the UNIMPORTABLE loop, whose
+   ``except Exception`` around ``from . import projection_worker`` folds inline and
+   moves NO counter either. The two remaining conditions are the SWITCHES (the
+   unarmed loop and an unarmed record), which also move no counter. ⛔ The
+   unimportable arm is easy to lose because it is an ``except`` rather than an
+   ``if``, and it was the one this paragraph omitted; it recurses into the same
+   residual — an inline fold can overtake an earlier queued position — so a reader
+   told "three families" would not have looked for it. The PR's own test counts
+   the same five declines by gate text:
+   ``tests/test_14185_projection_worker.py::test_a_queue_fault_folds_inline_instead_of_breaking_the_write``.
+   ⛔ The four correctness arms are not two, which this paragraph used to imply — a
+   reader who took ``tenant is None`` + ``record_sink`` as the whole family would
+   think a record-only write or a scratch log was counted, and neither is. (c) An inline
    fold the bound
    cannot reach at all: an UNCOPYABLE record (the deep snapshot in :func:`submit`
    fails, so a write that would otherwise already be queued folds inline instead)
@@ -586,7 +595,16 @@ class ProjectionWorker:
     # ── the read side (never blocks on the fold) ───────────────────────────
 
     def stats(self) -> ProjectionStats:
-        """A consistent snapshot for the metrics surface. Holds NO lock the fold holds."""
+        """A consistent snapshot for the metrics surface. Holds NO lock the FOLD holds.
+
+        ⛔ THREE WORDS THAT MATTER (#14222 review cycle 9, P2): the fold CALL runs
+        with no lock held, so this read can never wait on a projection. It DOES
+        take ``self._cond`` — the loop\'s own lock — for the two O(1) bookkeeping
+        critical sections the loop holds it for (the pop, and the
+        failure/clear/increment block after the fold). So the honest statement is
+        "cannot block on a WEDGED projection", which is the property that matters,
+        not "takes no lock the loop touches", which was false.
+        """
         self._ensure_not_inherited()
         with self._cond:
             return ProjectionStats(
@@ -603,21 +621,37 @@ class ProjectionWorker:
     def oldest_pending_seconds(self) -> float:
         """Just the lag in TIME, read live at collect time (#14222 cycle 5, ISSUE 1).
 
-        A read path: ``_cond`` is only ever held here for a critical section the
-        fold never occupies, so this cannot block on a wedged projection.
+        A read path: ``_cond`` is taken here, and the loop takes that SAME lock for
+        its two O(1) critical sections (the pop, and the post-fold
+        increment/clear) — so this can wait on either of them, briefly. It cannot
+        wait on the FOLD, which runs with no lock held, so a wedged projection
+        cannot block this read. (#14222 review cycle 9, P2: the earlier wording
+        claimed the fold never occupies ``_cond``, which the loop itself
+        contradicts.)
         """
         self._ensure_not_inherited()
         with self._cond:
             return self._oldest_age_locked()
 
     def wait_for_drain(self, timeout: float | None = None) -> bool:
-        """Block until the queue is empty. ⛔ FOR TESTS AND SHUTDOWN ONLY.
+        """Block until the queue is empty. ⛔ NEVER A READ PATH — a BOUNDED consumer may.
 
         A READ PATH MUST NEVER CALL THIS. Waiting here is precisely the coupling
         the worker exists to remove: it makes a reader's latency a function of
-        the fold's, which is the pre-#14185 shape wearing a new name. The only
-        two legitimate callers are :func:`shutdown` (and its ``atexit`` hook)
-        and a test that needs the fold to have finished.
+        the fold's, which is the pre-#14185 shape wearing a new name.
+
+        ⛔ THREE LEGITIMATE CALLERS, not the two this docstring used to name
+        (#14222 review cycle 9, P2 — and the third is IN THIS PR, so a reader who
+        trusted the old sentence would have deleted a real call):
+        :func:`shutdown` (and its ``atexit`` hook); a test that needs the fold to
+        have finished; and an OPERATOR TOOL that must not report on a record the
+        queue has not reached — ``tools/claim_dense_leg_13732.py`` drains for at
+        most 120 s at the end of a bounded seed and REPORTS an incomplete drain
+        rather than assuming it. The rule that separates the third from a read
+        path is the BOUND and the direction of the dependency: a tool that would
+        otherwise print a half-folded population WAITS for the fold, whereas a
+        reader must not let the fold set its latency. See ``wait_for_drain``\'s
+        module-level twin for the same rule.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
@@ -688,7 +722,16 @@ class ProjectionWorker:
         # callable that stops its own worker skips the join entirely and then
         # cleared `_thread` while the consumer (itself) was still alive, which is
         # the double-consumer hazard this method was just fixed for, back again.
-        if thread is not None and thread is not threading.current_thread():
+        # ⛔ JOIN ONLY A THREAD THAT RUNS (#14222 review cycle 9, P1).
+        # ``Thread.join`` raises ``RuntimeError: cannot join thread before it is
+        # started``, and this is the SHUTDOWN path: a raise here propagates out of
+        # ``shutdown()`` AFTER it has already marked the instance ``_closed``,
+        # which strands the worker permanently. A thread that is not alive is
+        # either UNSTARTED (there is nothing to wait for) or ALREADY FINISHED
+        # (there is nothing to wait for), so skipping the join cannot skip work —
+        # ``gone`` below is derived from liveness either way.
+        if (thread is not None and thread.is_alive()
+                and thread is not threading.current_thread()):
             thread.join(timeout)
         gone = thread is None or not thread.is_alive()
         if not gone:
@@ -745,8 +788,25 @@ class ProjectionWorker:
                     self._stopping = False
                     thread = threading.Thread(target=self._run, name=self._name,
                                               daemon=True)
-                    self._thread = thread
+                    # ⛔ START BEFORE YOU PUBLISH THE SLOT (#14222 review cycle 9,
+                    # P1). `thread.start()` RAISES under thread/fd exhaustion —
+                    # that is the arm `submit` names as `queue_fault` — and the
+                    # earlier order (`self._thread = thread` THEN `start()`) left
+                    # an UNSTARTED `Thread` in the slot. `stop()` then raised
+                    # ``RuntimeError: cannot join thread before it is started``,
+                    # and because `shutdown()` marks `_closed` BEFORE it calls
+                    # `stop()`, that raise skipped the reopen/clear block and left
+                    # the instance CLOSED with no consumer for the life of the
+                    # process: every later write declined `worker_stopping` and
+                    # paid the inline fold, with no path back to the loop.
+                    # Assigning only AFTER a successful start leaves the slot
+                    # `None` on failure, which `stop()` already treats as "no
+                    # consumer to join".
+                    # ⛔ The new thread cannot observe the unassigned slot: it
+                    # opens with `with self._cond`, which THIS frame holds, so it
+                    # blocks until this line has run and the block is released.
                     thread.start()
+                    self._thread = thread
                     if not self._atexit_installed:
                         self._atexit_installed = True
                         self._quietly(
@@ -931,7 +991,17 @@ class ProjectionWorker:
                                       journal_skipped=item.journal_skipped)
             except Exception as exc:
                 failure = "projection_raised"
-                LOGGER.warning(
+                # ⛔ THE REPORT ITSELF IS GUARDED (#14222 review cycle 9, P2).
+                # The classifier below is guarded for exactly this hazard, and the
+                # reasoning applies to the WARNING that reports it: `Logger.handle`
+                # runs every `filter()` OUTSIDE `handleError`, so a raising filter
+                # (or a handler) propagates out of `LOGGER.warning` — and by then
+                # this frame is past the pop, so the escape would leave `_inflight`
+                # SET and kill the consumer thread. That is the phantom-gauge +
+                # uncounted-failure + never-drains state the classifier's guard
+                # exists to prevent, so the log calls are guarded the same way
+                # rather than assumed safe.
+                self._quietly(lambda: LOGGER.warning(
                     "projection_worker: the deferred record projection RAISED "
                     "(%s: %s) for journal position %s — the journal holds the "
                     "line and the record does not. This is the named "
@@ -939,7 +1009,7 @@ class ProjectionWorker:
                     "`tools/record_runner.py apply` re-creates the row idempotently "
                     "(the row only — a fold passed no `derived` leaves `embedding` "
                     "NULL) (#14185)",
-                    type(exc).__name__, exc, item.seq)
+                    type(exc).__name__, exc, item.seq))
             else:
                 # ⛔ THE CLASSIFIER IS INSIDE ITS OWN GUARD (round-13 review, P3):
                 # it asks the door's return value what happened, and a door whose
@@ -957,12 +1027,14 @@ class ProjectionWorker:
                     failure = _classify_fold_outcome(result, item.seq)
                 except Exception as exc:      # noqa: BLE001, RUF100
                     failure = "record_no_outcome"
-                    LOGGER.warning(
+                    # Guarded for the reason stated above, and for the reason the
+                    # classifier is: an escape here leaves `_inflight` set.
+                    self._quietly(lambda: LOGGER.warning(
                         "projection_worker: the fold's OUTCOME could not be "
                         "classified (%s: %s) for journal position %s — counted "
                         "as a failure rather than assumed to have written "
                         "(#14185)",
-                        type(exc).__name__, exc, item.seq)
+                        type(exc).__name__, exc, item.seq))
             # ⛔ BOTH VALUE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
             # never from a value captured at POP time (#14222 review P1-1). ⛔ TWO,
             # not three (review round 11, P3): `_stamp_locked` carries epoch, seq,
