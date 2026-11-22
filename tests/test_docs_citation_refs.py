@@ -4935,9 +4935,15 @@ def _d5_documented_long_options(
     if completed.returncode != 0:
         raise _D5NoDocumentedUniverse(
             f"`grep --help` published only {len(documented)} long options and exited "
-            f"{completed.returncode}: this grep answers its usage on another stream or not at "
-            "all (BSD grep 2.6.0-FreeBSD writes usage to stderr and exits 2), so there is no "
-            "documented universe here to pin `_D5_ALL_LONG_OPTIONS` against (#14027, #14306 F1)")
+            f"{completed.returncode}: this grep publishes no option universe to pin "
+            "`_D5_ALL_LONG_OPTIONS` against (#14027, #14306 F1)")
+        # ⛔ THE DISCRIMINATOR IS THE EXIT CODE **AND** THE PARSE, AND THIS MESSAGE NOW SAYS BOTH
+        # (#14306 review F7, P3). An earlier draft blamed the STREAM — "this grep answers its usage
+        # on another stream" — which is false of the helper above: it parses `stdout + stderr`, so
+        # usage published on EITHER stream is read. What actually decides the skip is that the
+        # command did not succeed AND fewer than `_D5_LONG_OPTION_FLOOR` long options came out of
+        # both streams together. BSD grep 2.6.0-FreeBSD is the case this exists for (usage on
+        # stderr, exit 2), and its usage carries no `--long` spelling at all.
     raise AssertionError(
         f"only {len(documented)} long options were parsed out of a `grep --help` that exited 0 — "
         "the derivation is broken, and a broken derivation must not be able to certify anything "
@@ -4980,6 +4986,7 @@ def _d5_grep_declined_the_spelling(
     stderr = completed.stderr or ""
     return (
         completed.returncode not in (0, 1)
+        and bool(spelling)
         and spelling in stderr
         and any(marker in stderr for marker in _D5_GREP_OPTION_REFUSAL_MARKERS))
 
@@ -5090,6 +5097,12 @@ def test_the_d5_grep_portability_tolerance_covers_a_REFUSAL_and_nothing_else():
         "a grep that RAN the spelling (rc 0) has not declined it, whatever an unrelated warning "
         "says — the exit code still separates 'did not run it' from 'ran it and counted wrong'")
 
+    assert not _d5_grep_declined_the_spelling(
+        ran(2, "grep: invalid option -- 'x'\n"), ""), (
+        "an EMPTY spelling is a substring of every stderr, so without the `bool(spelling)` guard "
+        "this predicate answers True for 'some option I do not know' and licenses any refusal at "
+        "all — latent today (the cell iterates a literal tuple of real spellings), one call away "
+        "from live (#14306 review F7, P3)")
     assert _d5_measured_or_declined_conflict(
         {"--unix-byte-offsets": "2", "--u": "2"}, {}) is None
     assert _d5_measured_or_declined_conflict(
@@ -5164,11 +5177,7 @@ def test_the_alias_cell_reds_a_MEASUREMENT_FAILURE_it_must_not_call_portability(
     measurement failure was reported as "not portable" and STAYED GREEN. That is the same gap the
     F5 arms closed for the floor and the skip position, still open for F2's own fix.
     """
-    real_run = subprocess.run
-
     def measurement_failure(cmd, *args, **kwargs):
-        if "--help" in cmd:  # the option universe is derived for real
-            return real_run(cmd, *args, **kwargs)
         if cmd[2] == "--fixed-regexp":
             return subprocess.CompletedProcess(
                 args=cmd, returncode=2, stdout="",
@@ -5192,11 +5201,7 @@ def test_the_alias_cell_reds_one_spelling_measured_and_its_mate_declined(monkeyp
     docstring — `--u` counting `2` while `--unix-byte-offsets` is refused means `--u` was measured
     against some OTHER option — so an unwired `_conflict` would let exactly that pass as measured.
     """
-    real_run = subprocess.run
-
     def one_sided_unix_verdict(cmd, *args, **kwargs):
-        if "--help" in cmd:
-            return real_run(cmd, *args, **kwargs)
         spelling = cmd[2]
         if spelling == "--unix-byte-offsets":
             return subprocess.CompletedProcess(
@@ -5241,7 +5246,7 @@ def test_the_cell_itself_reds_on_a_SUCCESSFUL_help_that_parsed_too_little(monkey
     r"""The `>= 40` floor is reachable THROUGH THE CELL, not only through the helper.
 
     ⛔ #14306 REVIEW F5 (P2 — MEASURED BY MUTATION), AND IT IS THE SAME INERT-ENFORCER SHAPE ONE
-    LEVEL UP. The sibling arm below pins `_d5_documented_long_options` ITSELF, which is not the
+    LEVEL UP. The helper-level arm ABOVE pins `_d5_documented_long_options` ITSELF, which is not the
     same claim as the cell USING it: restoring the old cell body verbatim — parse `stdout` inline,
     `pytest.skip` when fewer than 40 options, `assert` after the skip — left the WHOLE suite green,
     because `pytest.skip` RAISES and the cell never reached the helper at all. The sentence that
@@ -5271,29 +5276,62 @@ def test_the_alias_cell_reds_a_broken_reader_claim_even_when_grep_declines_every
     grep that declines every spelling — so the prose claim that "the reader's own behaviour is
     asserted unconditionally ABOVE this point" was witnessed by no test at all.
 
-    Here every spelling is refused AND the reader's declared allowance is corrupted, so the two
-    behaviours the claim distinguishes have OPPOSITE outcomes: the fixed cell reaches
-    `assert {"--unix-byte-offsets"} == set(_D5_UNDOCUMENTED_LONG_OPTIONS)` and REDS, while a cell
-    whose skip sits above that row SKIPS first. `pytest.raises(AssertionError)` refuses a skip,
-    which is what makes the position a measurement instead of a sentence.
+    Here every spelling is refused AND the reader's declared allowances are corrupted **at the LAST
+    reader row**, so the two behaviours the claim distinguishes have OPPOSITE outcomes: the fixed
+    cell reaches that row and REDS, while a cell whose skip sits anywhere ABOVE it SKIPS first.
+    ⛔ AIMED AT THE LAST ROW ON PURPOSE (#14306 review F7, P3 — MEASURED BY MUTATION). The first
+    draft corrupted only the FIRST reader row (the declared allowance), and a skip moved to just
+    BELOW that row — above the other five — came back GREEN: five reader assertions could be
+    skipped with the whole suite green, the same green-skip class one row down. Corrupting the
+    LAST row bounds every position at or above it, which is the claim.
+    ⛔ AND A SKIP IS CHARGED AS A FAILURE BY `_d5_drive_the_cell`, not by `pytest.raises`: a skip
+    raised inside the cell is reported as SKIPPED, so an earlier draft of this very arm passed on
+    the mutants it exists to catch (#14306 review F5, P2).
     """
-    real_run = subprocess.run
-
     def declines_every_spelling(cmd, *args, **kwargs):
-        if "--help" in cmd:  # the option universe is derived for real; only verdicts are stubbed
-            return real_run(cmd, *args, **kwargs)
+        spelling = cmd[2]
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=2, stdout="",
+            stderr=f"grep: unrecognized option '{spelling}'\n")
+
+    real_prescriptions = _d5_count_prescriptions
+
+    def miscounts_fixed_regexp(text, *args, **kwargs):
+        # The LAST row asserts that a `--fixed-regexp` count reads NO prescription (`0` of this
+        # class). Answering one is that row's failure, and no earlier row asks about this spelling.
+        if "--fixed-regexp" in text:
+            return ["^[+-]$"]
+        return real_prescriptions(text, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", declines_every_spelling)
+    monkeypatch.setitem(globals(), "_d5_count_prescriptions", miscounts_fixed_regexp)
+    _d5_drive_the_cell(
+        test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS,
+        match="counts `0` of this class on the probe",
+        what="a broken LAST reader row under a grep that declines every spelling")
+
+
+def test_the_alias_cell_SKIPS_when_grep_runs_none_of_the_spellings(monkeypatch):
+    r"""The alias cell's OWN skip fires — a claim this file's standard requires witnessed.
+
+    ⛔ #14306 REVIEW F7 (P3 — MEASURED BY MUTATION). The arm above holds the POSITION of the final
+    skip by requiring a RED, which means the skip could be DELETED outright with the whole file
+    still green (measured: 39 passed). On a grep that runs none of the three spellings the cell
+    then reports PASSED instead of SKIPPED — certifying a subject it measured nothing about, which
+    is the false PASS this file refuses. This is the positive half: drive the cell with an
+    all-declining grep and require the skip, with its stated reason.
+    """
+    def declines_every_spelling(cmd, *args, **kwargs):
         spelling = cmd[2]
         return subprocess.CompletedProcess(
             args=cmd, returncode=2, stdout="",
             stderr=f"grep: unrecognized option '{spelling}'\n")
 
     monkeypatch.setattr(subprocess, "run", declines_every_spelling)
-    monkeypatch.setitem(globals(), "_D5_UNDOCUMENTED_LONG_OPTIONS",
-                        frozenset({"--unix-byte-offsets", "--u"}))
-    _d5_drive_the_cell(
+    _d5_drive_the_cell_expecting_skip(
         test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS,
-        match="undocumented allowance",
-        what="a corrupted reader declaration under a grep that declines every spelling")
+        match="runs NONE of the three spellings",
+        what="a grep that declines all three spellings")
 
 
 def test_the_d5_count_reader_knows_every_long_option_grep_documents():
