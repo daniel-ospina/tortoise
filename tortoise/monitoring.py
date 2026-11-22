@@ -945,10 +945,15 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   ⛔ NOTHING IS DROPPED when the bound is reached — a dropped item would be a
 #:   silently short record — so the visible cost is a slower ACK, and this counter
 #:   is what makes it attributable rather than an unexplained latency.
-#:   ``reason`` is a closed vocabulary of two: ``queue_full`` (the bound in
-#:   ``projection_worker.ENV_QUEUE_MAX`` was reached) and ``worker_stopping`` (the
+#:   ``reason`` is a closed vocabulary of FOUR, one per way an ACK can end up
+#:   folding on its own thread: ``queue_full`` (the bound in
+#:   ``projection_worker.ENV_QUEUE_MAX`` was reached), ``worker_stopping`` (the
 #:   loop was being shut down, or a wedged consumer kept it from restarting —
-#:   `stop()` does not clear its thread after a timed-out join).
+#:   `stop()` does not clear its thread after a timed-out join), ``uncopyable``
+#:   (the record's deep snapshot could not be made, so it was folded inline
+#:   rather than aliased) and ``queue_fault`` (``submit`` raised before it could
+#:   queue — thread/fd exhaustion in ``thread.start()``; the caller answers it
+#:   inline, so the row is still written and only the latency is lost).
 #:
 #: ``PROJECTION_WORKER_FAILURE_COUNT`` is separate from both: it counts deferred
 #: folds that did NOT WRITE A ROW. Unlike a lagging queue that is a real gap the
@@ -3106,10 +3111,17 @@ def projection_worker_failure_counts() -> dict[str, int]:
 def record_projection_inline_fallback(reason: str) -> None:
     """Count one write that folded the record on its OWN thread (#14185).
 
-    Single writer: ``tortoise.projection_worker.ProjectionWorker.submit``.
+    Writers: ``tortoise.projection_worker.ProjectionWorker.submit`` for
+    ``queue_full`` / ``worker_stopping``, and the module-level
+    ``tortoise.projection_worker.submit`` for ``uncopyable`` / ``queue_fault`` —
+    the two declines that never reach the instance.
     ``reason`` vocabulary: ``queue_full`` (the bound in
-    ``projection_worker.ENV_QUEUE_MAX`` was reached) or ``worker_stopping`` (the
-    loop was shutting down, or a wedged consumer kept it from being restarted).
+    ``projection_worker.ENV_QUEUE_MAX`` was reached), ``worker_stopping`` (the
+    loop was shutting down, or a wedged consumer kept it from being restarted),
+    ``uncopyable`` (the deep snapshot failed, so the item folds inline rather
+    than aliasing the caller's dict) or ``queue_fault`` (``submit`` raised before
+    it could queue — the caller's ``except Exception: return False`` still folds
+    inline, so nothing is lost).
 
     ⛔ This is a LATENCY event, not a loss: nothing was dropped and nothing needs
     a replay — the caller simply paid the fold it would have paid before #14185.

@@ -106,7 +106,12 @@ compromise:
   to do with it) — the trade the issue itself asks for.
 
 The inline fallback is counted (``inline_fallbacks{reason="queue_full"}``), so
-"the worker is not keeping up" is a number rather than an inference.
+"the worker is not keeping up" is a number rather than an inference. The
+DECLINES that never reach the queue are counted on the same family, because they
+are the same fact — this ACK paid the fold — and a silent one would read as a
+caught-up idle loop: ``uncopyable`` (the deep snapshot could not be made, so the
+item is folded inline rather than aliased) and ``queue_fault`` (``submit`` raised
+before it could queue, e.g. ``thread.start()`` under thread exhaustion).
 
 WHAT MAKES A WRITE DEFERRABLE AT ALL
 ====================================
@@ -969,8 +974,10 @@ def submit(*, record: Mapping[str, Any], seq: int | None,
     # fold would then fold the record from different content than the cache saw,
     # with nothing able to detect the divergence. `write_live_record` writes the
     # same dict it is handed, so the copy must be DEEP — a shallow `dict()` keeps
-    # every nested object shared. A copy that cannot be made falls back to the
-    # reference rather than failing a write whose line has already committed.
+    # every nested object shared. A copy that cannot be made is DECLINED by the
+    # arm below, never aliased: the reference is the very thing this snapshot
+    # exists to remove, and a write whose line has already committed must not be
+    # failed to avoid it.
     try:
         snapshot = copy.deepcopy(record)
     except Exception:
@@ -979,11 +986,30 @@ def submit(*, record: Mapping[str, Any], seq: int | None,
         # and taking it would restore the undetectable divergence SILENTLY. Fold
         # inline instead: byte-identical to the pre-#14185 write, with no window
         # at all, and the caller pays only the fold it always used to pay.
+        # ⛔ AND COUNT IT (#14222 review cycle 10, P2). The decline is a LATENCY
+        # event exactly like the queue's own, so it rides the same counter; an
+        # uncounted one let a process whose every record is uncopyable read as
+        # byte-identically healthy on every exported signal while every ACK paid
+        # the fold this worker exists to remove.
+        _publish_inline_fallback("uncopyable")
         return False
-    return worker().submit(PendingProjection(
-        record=snapshot, seq=seq, tenant=tenant,
-        journal_skipped=journal_skipped, project=project,
-        enqueued_at=time.monotonic()))
+    try:
+        return worker().submit(PendingProjection(
+            record=snapshot, seq=seq, tenant=tenant,
+            journal_skipped=journal_skipped, project=project,
+            enqueued_at=time.monotonic()))
+    except Exception:
+        # ⛔ THE ONE RAISING ARM IS COUNTED BEFORE IT PROPAGATES (#14222 review
+        # cycle 10, P2). :meth:`ProjectionWorker.submit` raises only from
+        # ``_ensure_started`` (``thread.start()`` under thread/fd exhaustion), and
+        # :func:`tortoise.live_write._submitted_to_worker` answers it with a bare
+        # ``except Exception: return False`` — fail-safe, and UNCCOUNTED, so every
+        # ACK folded inline while ``stats()`` and ``inline_fallbacks{}`` read
+        # exactly like a caught-up idle loop. Publish the reason here and let the
+        # raise travel: the caller's ``except`` still decides the write, and this
+        # wrapper does not change the answer.
+        _publish_inline_fallback("queue_fault")
+        raise
 
 
 def stats() -> ProjectionStats:

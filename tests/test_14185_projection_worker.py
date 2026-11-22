@@ -1415,6 +1415,53 @@ def test_a_record_that_cannot_be_copied_folds_inline_rather_than_aliasing(armed)
     assert projection_worker.stats().submitted == 0
 
 
+def test_an_uncopyable_record_is_COUNTED_when_it_folds_inline(armed):
+    """⛔ #14222 review cycle 10, P2: the decline must be a NUMBER, not a silence.
+
+    Every other observable reads healthy when this arm fires: `submitted` never
+    moves (the item never reached the queue), `pending_positions` is 0, and the
+    fold happens on the caller's thread. Without this counter a process whose
+    every record is uncopyable pays the pre-#14185 fold on every ACK while the
+    exported channel reports a caught-up idle loop — the silent-green shape this
+    module refuses elsewhere. Deleting the publish reds this.
+    """
+    class _Uncopyable(dict):
+        def __deepcopy__(self, memo):
+            raise TypeError("this value refuses to be copied")
+
+    before = monitoring.projection_inline_fallback_counts().get("uncopyable", 0)
+    assert projection_worker.submit(
+        record=_Uncopyable({"type": "PointAdded"}), seq=1, tenant=_TENANT,
+        journal_skipped=False, project=lambda *a, **k: None) is False
+    assert monitoring.projection_inline_fallback_counts().get(
+        "uncopyable", 0) == before + 1
+
+
+def test_a_queue_fault_is_COUNTED_before_it_propagates(armed, monkeypatch):
+    """⛔ #14222 review cycle 10, P2: the ONE raising arm is counted on its way out.
+
+    `ProjectionWorker.submit` raises only from `_ensure_started` (thread/fd
+    exhaustion in `thread.start()`), and `live_write._submitted_to_worker`
+    answers it with a bare `except Exception: return False`. Fail-safe — the
+    write still folds — but nothing recorded WHY, which is the same silent-green
+    shape as the uncopyable arm: every write pays the inline fold, every gauge
+    reads idle. The counter is emitted BEFORE the re-raise, and the raise still
+    travels, so `live_write`'s answer is unchanged. Deleting the publish reds this.
+    """
+    before = monitoring.projection_inline_fallback_counts().get("queue_fault", 0)
+
+    def _boom(self, item):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(projection_worker.ProjectionWorker, "submit", _boom)
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        projection_worker.submit(
+            record={"type": "PointAdded"}, seq=1, tenant=_TENANT,
+            journal_skipped=False, project=lambda *a, **k: None)
+    assert monitoring.projection_inline_fallback_counts().get(
+        "queue_fault", 0) == before + 1
+
+
 def test_an_UNIMPORTABLE_loop_folds_inline_instead_of_breaking_the_write(
         monkeypatch):
     """The `except ImportError` arm at `live_write.py:340-342`, on its own.
