@@ -718,6 +718,28 @@ _NONFINITE_COPULA = (
     r"|being|getting|becoming|staying|remaining|keeping"
     r"|ending\s+up|winding\s+up|turning\s+out)"
 )
+#: ⛔ THE FRAME'S ADVERB GAP IS THE MODULE'S OWN ADVERB CLASS, NOT A FRESH HAND-TYPED LIST
+#: (round-12 review, P1, measured). The frame-aware guard spelled its gap as
+#: `[a-z]+ly|already|ever|really|still|actually|just|only|never|not` — a hand-typed list, not
+#: the adverb class :data:`_EXISTENCE_ADVERB` already consolidated across four review rounds
+#: for exactly this failure ("THE `-ly` CLASS IS NOT THE ADVERB CLASS"). Any adverbial outside
+#: it re-opened the fail-open the guard exists to close: measured at `faa8b3fef96c` and again
+#: at `9dedcf60e7` (whose own fix bounded the COUNT to four and left the CLASS untouched),
+#: each of these ROUTED the whole ended population with the caller's qualifier dropped and
+#: `signal=None`, while the parent refused them — `is the export being very archived`,
+#: `is the export to be very archived`, `is the export being almost archived`,
+#: `is the export being no longer archived`, `is the export being often archived`,
+#: `is the export becoming soon archived`. Two axes, two fixes: the bound is the consumer's
+#: (four, as `_COPULA_PREFIX` absorbs), and the CLASS is the module's shared one.
+#: ⛔ AND THE COMMA IS PART OF THE GAP (round-12 review, P2, measured): `is the export being,
+#: in fact, archived` was refused with NO report at BOTH head and parent, because `\s+` between
+#: the members does not match `, `. A cue that reaches no answer must REPORT, so the separator
+#: is `[,\s]+` — the idiom :data:`_EXISTENCE_HELPER` already uses for the same reason.
+#: ⛔ ONE SLOT FOR BOTH CONSUMERS, because a report arm narrower than the refusal arm converts
+#: a fail-open into a SILENCE (measured: widening only the refusal answers
+#: `is the export being very archived` with `(None, None, None)`).
+_COPULA_FRAME_ADVERB_SLOT = rf"[,\s]+(?:(?:{_EXISTENCE_ADVERB})\b[,\s]+){{0,4}}"
+
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -1342,7 +1364,7 @@ _COPULA_INFINITIVE_REFUSAL = (
     # not claimed away: this rule discriminates on POSITION, and position cannot tell a
     # predicate participle from a modifying one.
     rf"(?!(?:[a-z0-9][a-z0-9'\u2019._/-]*\s+){{0,6}}{_NONFINITE_COPULA}(?![-/])\b"
-    rf"\s+(?:(?:[a-z]+ly|already|ever|really|still|actually|just|only|never|not)\s+){{0,4}}"
+    rf"{_COPULA_FRAME_ADVERB_SLOT}"
     rf"(?:{_ENDING_WORDS})\b)"
 )
 _COPULA_PREFIX = (
@@ -1520,7 +1542,11 @@ _COPULA_LONG_SUBJECT = re.compile(
     rf"(?!.*\b(?:because|that|given|since|when|while|if|unless|which|who|whom|"
     rf"whose|where)\b)"
     rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{0,5}}{_NONFINITE_COPULA}"
-    rf"\s+(?:(?:[a-z]+ly|already|ever|just|only|still|never|not)\s+){{0,2}}"
+    # ⛔ THE SAME SLOT AS THE REFUSAL, because the two consumers must move together
+    # (round-12 review, P2, measured): widening only the refusal turns the fail-open into
+    # SILENCE — `is the export being very archived` with the refusal widened and arm B left
+    # narrow answers `(None, None, None)`, a strong cue reaching no answer and saying nothing.
+    rf"{_COPULA_FRAME_ADVERB_SLOT}"
     rf"(?:{_ENDING_WORDS})\b"
     rf")"
     rf"{_BLOCKED_TAIL}"

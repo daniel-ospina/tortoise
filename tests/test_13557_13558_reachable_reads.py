@@ -1079,6 +1079,27 @@ NOT_SELECTED = [
     "is the export being quietly archived",
     "is the data being constantly archived",
     "is the export getting officially retired",
+    # ── …and the ADVERB-CLASS hole in the FRAME-AWARE guard (round-12 review, P1,
+    # measured — the module's OWN round-24 lesson, one frame over) ─────────────────
+    # The frame's gap was spelled as a hand-typed list (`[a-z]+ly|already|ever|really|
+    # still|actually|just|only|never|not`), not as the adverb class `_EXISTENCE_ADVERB`
+    # already consolidated for exactly this failure. Round 12 bounded the COUNT to four and
+    # left the CLASS untouched, so any adverbial outside the list still re-opened the
+    # fail-open the guard exists to close: measured at `9dedcf60e7`, each of these ROUTED
+    # the whole ended population with the caller's qualifier dropped and `signal=None`.
+    # The slot is now the shared class with `_COPULA_PREFIX`'s own bound (four), and the
+    # comma is part of the gap (`\s+` cannot match `, `, so `is the export being, in fact,
+    # archived` was refused with NO notice at BOTH this head and its parent — a cue reaching
+    # no answer and saying nothing). Non-vacuity: revert the slot to the hand-typed pair and
+    # all seven rows red; narrow arm B alone and five red (silence); drop the comma and one
+    # reds. Measured, not asserted.
+    "is the export being very archived",
+    "is the export to be very archived",
+    "is the export being no longer archived",
+    "is the export being almost archived",
+    "is the export being often archived",
+    "is the export becoming soon archived",
+    "is the export being, in fact, archived",
     # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (round-3 review, P3, measured): the
     # refusal lookahead allows `{0,6}` words before `_NONFINITE_COPULA` (`to be|to get|to
     # become|being|getting`, plus up to two modifiers — NOT the three-spelling literal an
@@ -1296,6 +1317,15 @@ NOTICE_ONLY = [
     "is the export being quietly archived",
     "is the data being constantly archived",
     "is the export getting officially retired",
+    # …the ADVERB-CLASS rows from the frame-aware guard's shared slot (round-12 review,
+    # P1): refused AND reported, so they stand in both lists.
+    "is the export being very archived",
+    "is the export to be very archived",
+    "is the export being no longer archived",
+    "is the export being almost archived",
+    "is the export being often archived",
+    "is the export becoming soon archived",
+    "is the export being, in fact, archived",
     # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
     # that is now stated and machine-checked (review at `5b82bcdf03`, P2, measured) ──
     # The PREPOSITIONS `_BLOCKED_TAIL` names are REPORTED on this shape (see the
