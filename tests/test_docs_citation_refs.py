@@ -5399,7 +5399,11 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     # long options (`--binary-files`, `--color`, `--context`, …), just fewer of them than the floor.
     # The causable fact is the SHORTFALL, so the text has to say `fewer than <floor>`; asserting on
     # the rendered message is what makes the wording non-revertible. This branch is reached whenever
-    # `1 <= len(documented) < _D5_LONG_OPTION_FLOOR`, so 15 is the shortest real shape that shows it.
+    # `0 <= len(documented) < _D5_LONG_OPTION_FLOOR`, so `usage(15)` is ONE shape in that range and
+    # not the shortest of them — counts 1 and 2 reach it and render the same shortfall wording, which
+    # is why the assertions below pin the RENDERING rather than claiming this count is special
+    # (#14327 review round 5, P3 — MEASURED: counts 1, 2 and 15 all render `fewer than 40`, none
+    # rendering `none at all` or `lists no long options`).
     with pytest.raises(_D5NoDocumentedUniverse) as short_universe:
         _d5_documented_long_options(reported(2, usage(15)))
     short_message = str(short_universe.value)
