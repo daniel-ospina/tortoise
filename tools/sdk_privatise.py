@@ -1133,8 +1133,11 @@ SWEEP_NAMES = 66
 #: rather than rewritten away: `proj.g.query` is an ordinary-word receiver on a FalkorDB `Graph`
 #: handle in `#14224`'s own measurement harness, the shape this sweep deliberately leaves alone,
 #: and `typed references still pointing at a public name` stays **0**. Measured on THIS tree and
-#: on `origin/main` `70fbd1a27dd5` (`#14257`), where the same pair prints — this PR's own diff is
-#: docstrings and comments, so it moves no residue row in either direction.
+#: on `origin/main` `70fbd1a27dd5` (`#14257`), where the same pair prints. The sentence here used to
+#: justify that with "this PR's own diff is docstrings and comments" — TRUE when it was written and
+#: FALSE once this PR grew executable arms, so it is corrected rather than left as a reason nothing
+#: recomputes. The CONCLUSION is re-measured, not restated: `--check` exits **0** on this head, so
+#: this PR's own diff still moves no residue row in either direction.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
