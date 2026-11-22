@@ -263,6 +263,12 @@ class _ResolutionDidNotConverge(RuntimeError):
 #: diverging shape a failed test instead of a hung one.
 _FIXPOINT_MAX_PASSES = 64
 
+#: Combinations the JOIN forms (an f-string's parts, a `%` template's operands, a
+#: `.format` call's arguments) may build before the resolver refuses. A real file joins a
+#: handful of literals — 4096 combinations is far past anything in `tools/` — and the same
+#: argument as `_FIXPOINT_MAX_PASSES` applies: an unbounded product is a timeout, not a red.
+_PRODUCT_MAX_COMBINATIONS = 4096
+
 
 def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     """Every statically POSSIBLE string literal each name may hold, anywhere in the file.
@@ -734,11 +740,24 @@ def _string_products(option_sets) -> list[tuple[str, ...]]:
     operands, ``str.format``'s arguments). Returning ``[]`` when ONE operand is unresolvable
     is what keeps the declared residual (``_N + "_x"`` with a parameter ``_N``) out of the
     census without a guard clause restating it (#14326 round 11).
+
+    ⛔ THE PRODUCT IS BUDGETED, like the bind fixpoint (#14326 round 13): an unbounded
+    cartesian product over a pathological source is a HANG, and a hung pin answers nothing —
+    the same defect `_FIXPOINT_MAX_PASSES` refuses one function up. A source whose parts
+    multiply past the budget has no useful verdict to give here, so it REFUSES.
     """
     combos: list[tuple[str, ...]] = [()]
     for options in option_sets:
         if not options:
             return []
+        if len(combos) * len(options) > _PRODUCT_MAX_COMBINATIONS:
+            raise _ResolutionDidNotConverge(
+                f"the string JOIN resolver would build more than "
+                f"{_PRODUCT_MAX_COMBINATIONS} combinations from {len(option_sets)} operands "
+                "(an f-string, a `%` template or a `.format` call whose parts are each a "
+                "selection of literals): no useful verdict comes from materialising it, so "
+                "the pin REFUSES rather than spin — an unbounded product is a timeout, not "
+                "a red.")
         combos = [(*combo, option) for combo in combos for option in sorted(options)]
     return combos
 
@@ -5473,6 +5492,23 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a literal unpack pairs ELEMENT-WISE — `_pair` is the FIRST element and can only "
         "hold `\"a\"`, so binding it the container's whole value set is a FALSE RED")
 
+
+def test_a_PRODUCT_that_outgrows_its_budget_REFUSES_instead_of_spinning() -> None:
+    """An unbounded JOIN product is a timeout, not a red — so the resolver REFUSES.
+
+    ⛔ THE BUDGET IS THE VERDICT (#14326 round 13, the rule `_FIXPOINT_MAX_PASSES` states for
+    the bind fixpoint): an f-string whose every part is a SELECTION of literals is a LINEAR
+    source that costs an EXPONENTIAL walk — 40 two-valued parts are 10^12 combinations and
+    never return — so a guard that materialises it HANGS instead of answering. Measured with
+    `_PRODUCT_MAX_COMBINATIONS` deleted: this 13-part source resolves its 8192 combinations
+    and the next part multiplies again; with it, the resolver raises the ordinary test
+    failure the pin already uses for a diverging bind.
+    """
+    many = "".join("{'a', 'b'}" for _ in range(13))
+    body = (f'    getattr(sdk, f"{many}")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n')
+    with pytest.raises(_ResolutionDidNotConverge):
+        _read_reach(_pin_source(body))
 
 
 def test_the_READ_side_of_str_is_NOT_a_MUTATION() -> None:
