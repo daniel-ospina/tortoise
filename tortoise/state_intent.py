@@ -1660,7 +1660,13 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         #   hasn't the billing's been deprecated   -> NOTHING
         # Same root as every other report arm this PR has de-duplicated: a hand-typed copy of a
         # closed class drifts from its one home.
-        + rf"\b(?:{_CONTRACTED_AUX}|has|have|had|is|are|was|were)\s+[^?]{{0,40}}?['’](?:s|ve|d)"
+        # ⛔ A MODAL PERFECT IS THE SAME CUE (round-32 review, P3, measured): the head class
+        # was `has|have|had|is|are|was|were`, so `could the vendor's supply have been
+        # archived`, `will the client's report have been archived` and `will billing's just
+        # been deprecated` reported NOTHING — a strong state cue inside the class this arm's
+        # own comment calls absolute. Signal-only, so it cannot route.
+        + rf"\b(?:{_CONTRACTED_AUX}|has|have|had|is|are|was|were|"
+        + r"will|would|should|could|can|may|might|must)\s+[^?]{0,40}?['’](?:s|ve|d)"
         # ⛔ THE CLITIC AND `been` NEED NOT BE ADJACENT (round-31 review, P1/P2, measured):
         # this arm required `['’](?:s|ve|d)` then `\s+been`, so ONE word between them
         # blinded it and the row was refused with NOTHING reported — `has billing's JUST
@@ -1672,7 +1678,16 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # head: 2,400 of 5,600 possessive rows and 240 of 400 hijack rows silent.
         # A SIGNAL arm can only ever ADD a report — a signal is computed only after every
         # shape has declined — so widening the gap cannot route anything.
-        + r"\s+(?:[a-z0-9'’._/-]+\s+){0,3}been"
+        # ⛔ THE SEPARATOR AND TOKEN CLASS ARE THE GUARD'S, NOT A NARROWER ONE (round-32
+        # review, P3, measured): `[a-z0-9'’._/-]+` covered only bare words, so a comma, a
+        # non-ASCII letter, `#` or `$` in the gap blinded the arm and the row stayed
+        # SILENT — while the GUARD at `_COPULA_SUBJECT` already treats `,` as the same gap.
+        # `has the vendor's recently, been deprecated`, `has the client's café been
+        # archived`, `has the vendor's report #12 been archived` all returned no
+        # population, no signal and no payload. One gap spelled in two places is how the
+        # two drift apart; this arm takes any non-space token, which is what the
+        # `[^?]{0,60}?` in the arm above it already means.
+        + r"[,\s]+(?:[^?\s]+[,\s]+){0,3}been"
         # ⛔ THE WIDE REFUSAL SLOT, NOT THE NARROW WINDOW ONE (round-9 review, P2, measured): the
         # first cut of this arm used `_EXISTENCE_ADVERB_SLOT` (`already|ever|recently`), so the
         # adverb class the guard itself refuses on blinded it — `has the billing's been just
