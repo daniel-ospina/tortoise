@@ -6998,10 +6998,15 @@ def get_relationships_bounded(
     #: (`verdict.member_delta.post_relationships` / `baseline_total.p50` in
     #: ``docs/evidence/14192-read-wave/ab-full-read.json``) -- and 3 of the
     #: members walk the same operator fan-out independently.
-    #: ⛔ No figure here may come from anywhere but that artifact: an earlier cut
-    #: of this comment said "159 ms of a 231 ms search", and neither number is a
-    #: cell of either JSON, for the same reason ``beta_variance_sum_bound`` below
-    #: withdraws its own. THE ARTIFACT IS THE AUTHORITY.
+    #: ⛔ No figure here may come from anywhere but that artifact -- and it must say
+    #: WHICH READ the artifact measured. ``162.305``/``118.826`` are the cells of
+    #: `5c9cfe5407`, the rev the JSONs were recorded at; `7d276aa07a` and `6ec51de9ec`
+    #: then changed this function WITHOUT re-recording, so they are that rev's read,
+    #: not this head's. An earlier cut of this comment said "159 ms of a 231 ms
+    #: search": `231` is a cell of NEITHER artifact (0 of 1290 cells), and the
+    #: `159`s that do occur (`baseline.stage_table.retrieval.mean = 159.658`,
+    #: `baseline.per_query[16].total_ms = 159.651`) are a retrieval mean and one
+    #: query's whole read, not this wave. THE ARTIFACT IS THE AUTHORITY.
     _wave = _ReadWave()
 
     try:
@@ -7046,11 +7051,17 @@ def get_relationships_bounded(
         # keyed on ``op_ids``/``expand_ops``), so they are SUBMITTED here and
         # CONSUMED below: five reads, ONE wave, ``max(read)`` instead of
         # ``sum(read)``. The read this wave shortens is the one whose
-        # relationships member measured 143.0 -> 101.2 ms p50 of a
-        # 162.3 -> 118.8 ms whole read (``member_delta.post_relationships`` and
-        # ``baseline_total``/``after_total`` in
+        # relationships member measured 143.048 -> 101.185 ms p50 of a
+        # 162.305 -> 118.826 ms whole read (``verdict.member_delta.post_relationships``
+        # and ``verdict.baseline_total``/``after_total`` in
         # ``docs/evidence/14192-read-wave/ab-full-read.json``), and three of the
         # members walk the same operator fan-out independently.
+        #: ⚠️ **Those are the AFTER-arm cells of `5c9cfe5407`, the rev the artifacts
+        #: were recorded at.** `7d276aa07a` (one emission of the prune predicate) and
+        #: `6ec51de9ec` (the inline fallback) changed this function afterwards without
+        #: re-recording, so the after-arm OVER-STATES what this head costs — in the
+        #: direction that flatters the change. Quoted as that rev's measurement, never
+        #: as this head's; re-measure before claiming the head's numbers.
         #
         # ⛔ Q1a is deliberately NOT in this wave: its rows are what ``op_ids``
         # IS, so the three operator reads cannot be named before it answers.

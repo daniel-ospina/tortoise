@@ -8,11 +8,28 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 > directory, not from an earlier run. If a number is not in a JSON here, it is
 > not claimed here.
 >
-> ⛔ **The one deliberate exception, because silence about it is how this file
-> drifted before:** the bullet pair under "What the first measurement found"
-> quotes the FIRST measurement's `159 ms` / `231 ms` / `167 ms`. Those are **not**
-> cells of either JSON — they are kept because this file's history records them,
-> and they are marked there as such. Nothing else here is outside the JSONs.
+> ⛔ **What is NOT in the JSONs, named one by one — a blanket "nothing else" was tried
+> here twice and was false both times, so the exceptions are enumerated instead:**
+>
+> 1. The bullet pair under `## Result — ab-full-read.json` quotes the FIRST
+>    measurement's `159 ms` / `231 ms` / `167 ms`. Measured against both artifacts:
+>    `231` and `167` are in **neither** JSON (0 cells), and the `159`s that do occur in
+>    `ab-full-read.json` (`baseline.stage_table.retrieval.mean = 159.658`,
+>    `baseline.per_query[16].total_ms = 159.651`) are **other** cells — a retrieval mean
+>    and one query's whole read — not that wave. They are kept because this file's
+>    history records them, and they are marked there as such.
+> 2. The Q2-crit query's `26,463 → 14,732` chars (below) is a measurement of the query
+>    BUILDER on this tree, not a cell: `no JSON here carries either count`. It is
+>    reproducible (`len(...)` of the emitted query at each rev) and is how that way-round
+>    was verified; it is not an artifact.
+> 3. The run-to-run totals `−68.6`, `−48.4`, `−43.5 ms` p50 (below) are successive A/B
+>    runs on a shared box. None is a cell of the committed pair — the committed artifacts
+>    are the two runs whose JSONs are HERE — so they are stated as variance, not quoted as
+>    a result.
+> 4. `−68.6`, `−48.4` in the "earlier cut" note are that same run set's totals; they are
+>    arithmetic on each run's own two arms, not cells of these files.
+>
+> Everything else in the two tables IS copied from the two JSONs in this directory.
 
 ## What was measured, and on what
 
@@ -97,10 +114,12 @@ this file's history records them), not cells of the artifact above — the
 artifact's own figures for the same function are
 `verdict.member_delta.post_relationships`:
 
-- **the WAVE was ~69 % of the read** — 159 ms of a 231 ms search in the first
-  measurement, which is the figure `search_engine.py`'s own comment quotes
-  (`159 / 231 = 68.8 %`). The wave is the post-Q1a portion the re-schedule
-  covers, not the whole member.
+- **the WAVE was ~69 % of the read** — `159 ms` of a `231 ms` search in the first
+  measurement (`159 / 231 = 68.8 %`). ⚠️ **Do not look for the corroboration this
+  line used to offer:** it cited `search_engine.py`'s comment as quoting the same
+  pair, and that comment now WITHDRAWS the pair (`231` is a cell of neither
+  artifact). The figure stands only as this file's own historical record. The wave
+  is the post-Q1a portion the re-schedule covers, not the whole member.
 - **the MEMBER was 167 ms p50 of that same 231 ms search** (`167 / 231 =
   72.3 %`). Its movement on the current head is
   `verdict.member_delta.post_relationships` in `ab-full-read.json`.

@@ -4,17 +4,32 @@
 persisted Beta width exceeds ``CONTESTED_VARIANCE_THRESHOLD``. That width is a
 division over ``α+β``, evaluated once per candidate row, and it was the cost this
 change targeted. #14192 put a NECESSARY precondition in front of it, so that the
-division, the coercion CASE and the band checks are skipped on the rows that were
-always going to be rejected:
+division and the band checks are skipped on the rows that were always going to be
+rejected.
+
+⛔ **NOT the coercion `CASE`.** An earlier cut of this docstring listed it as skipped too,
+and that is false against the query the guard emits: `beta_variance_gt_cypher` builds the
+bound from the SAME `numeric_operand_cypher` expressions the division uses, so the
+coercion runs on every candidate row **inside the guard itself** — measured on the
+emitted predicate, **8 `CASE WHEN` occurrences before `$contested_sum_bound`**. What the
+bound spares is everything AFTER it: the division (`1/(α+β+1)`), whose position is pinned
+by `test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division`, and
+`_beta_variance`'s band. The coercion's cost is the price of the guard, not a saving.
 
     α+β < 1/(4·threshold) − 1        (`beta_variance_sum_bound`)
 
 ⛔ **NO MILLISECOND FIGURE IS QUOTED HERE.** The committed artifacts
 (`docs/evidence/14192-read-wave/`) measure the WHOLE function and its isolated
 A/B, never this expression alone. An earlier cut of this docstring said "160 ms
-of a 231 ms search"; neither number appears in either JSON, and `160 ms` could
-not have been right anyway — it exceeded the `159 ms` wave that was supposed to
-contain it. Both are WITHDRAWN rather than restated, which is the same rule
+of a 231 ms search": `231` is a cell of NEITHER artifact (0 of 1290 numeric
+cells in `ab-full-read.json`, 0 of 14 in `ab-relationships.json`), and the `160`
+could not have been right anyway — it exceeded the `159 ms` wave that was
+supposed to contain it. ⚠️ The blanket "neither number appears in either JSON"
+that replaced it was ALSO wrong: `ab-full-read.json` does carry `159.x` values
+(`baseline.stage_table.retrieval.mean = 159.658`,
+`baseline.per_query[16].total_ms = 159.651`), which are a retrieval mean and one
+query's whole read — not that wave, and not this bound. Both figures are
+WITHDRAWN rather than restated, which is the same rule
 `beta_variance_sum_bound`'s own docstring applies to its own earlier figures.
 
 The guard is only sound if it can NEVER reject a pair whose width clears the
