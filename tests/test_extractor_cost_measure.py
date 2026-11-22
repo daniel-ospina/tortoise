@@ -89,8 +89,7 @@ def _row(**kw) -> dict:
                               "completion_tokens": 3_000,
                               "cache_hit_tokens": 12_000,
                               "cache_miss_tokens": 11_000}}}
-    base.update(kw)
-    return base
+    return {**base, **kw}
 
 
 def test_measurement_cost_uses_the_measured_cache_share():

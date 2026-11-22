@@ -333,11 +333,12 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
             conversation = item["turns"]
         rec = measure_one(model, conversation,
                           session_date="2026-11-21T00:00:00+00:00")
-        rec.update({"arm": arm, "kind": kind, "id": item["path"],
-                    "item_tokens": item["tokens"],
-                    "turns": len(conversation),
-                    "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                 time.gmtime())})
+        rec["arm"] = arm
+        rec["kind"] = kind
+        rec["id"] = item["path"]
+        rec["item_tokens"] = item["tokens"]
+        rec["turns"] = len(conversation)
+        rec["measured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _emit(rec)
         return rec
 
@@ -422,13 +423,13 @@ def _measure_long_split(out: Path, docs: list[dict], arms: tuple[str, ...],
         rec = measure_one(model,
                           [{"role": "user", "content": t} for t in turns],
                           session_date="2026-11-21T00:00:00+00:00")
-        rec.update({"arm": arm, "kind": "doc_split",
-                    "id": f"{longest['path']}#{len(turns)}turns",
-                    "item_tokens": longest["tokens"],
-                    "turns": len(turns),
-                    "paragraphs": len(paras),
-                    "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                 time.gmtime())})
+        rec["arm"] = arm
+        rec["kind"] = "doc_split"
+        rec["id"] = f"{longest['path']}#{len(turns)}turns"
+        rec["item_tokens"] = longest["tokens"]
+        rec["turns"] = len(turns)
+        rec["paragraphs"] = len(paras)
+        rec["measured_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         emit(rec)
         print(f"  long-split {arm}: {len(turns)} turns of {len(paras)} "
               f"paragraphs, in={rec['prompt_tokens']} "
