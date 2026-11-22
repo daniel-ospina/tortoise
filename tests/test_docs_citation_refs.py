@@ -5128,6 +5128,115 @@ def _d5_drive_the_cell(cell, *, match: str, what: str) -> None:
             "assertion (#14306 review F5, P2)")
 
 
+def _d5_drive_the_cell_expecting_skip(cell, *, match: str, what: str) -> None:
+    """Drive a CELL and require it to SKIP — the inverse of `_d5_drive_the_cell`.
+
+    ⛔ THE INVERSE ARM IS NOT SYMMETRY FOR ITS OWN SAKE (#14306 review F6, P3 — MEASURED). The
+    `except _D5NoDocumentedUniverse: pytest.skip(...)` around the universe cell was held by NO arm:
+    replacing it with a bare call stayed GREEN on GNU grep 3.11, because that grep SUCCEEDS and the
+    arm never runs. What it protects is a platform fact — BSD grep answers `--help` on stderr with
+    rc 2 — and without the skip that platform goes RED, a false block on the very lane this fix
+    exists to unblock, invisible on Linux CI. So the skip is asserted here, from a BSD-shaped
+    `CompletedProcess`, and an `AssertionError` (the false block) is a FAILURE.
+    """
+    try:
+        cell()
+    except pytest.skip.Exception as exc:  # type: ignore[attr-defined]
+        assert match in str(exc), (
+            f"the cell skipped for a DIFFERENT reason than {what}: {exc}")
+    except AssertionError as exc:
+        pytest.fail(
+            f"the cell went RED on {what} instead of skipping — on that platform this is a FALSE "
+            f"BLOCK, the failure mode the skip exists to avoid: {exc}")
+    else:
+        pytest.fail(
+            f"the cell completed without skipping on {what} — nothing witnessed the skip arm "
+            "(#14306 review F6, P3)")
+
+
+def test_the_alias_cell_reds_a_MEASUREMENT_FAILURE_it_must_not_call_portability(monkeypatch):
+    r"""A broken probe still REDS the cell, and that wiring is witnessed rather than assumed.
+
+    ⛔ #14306 REVIEW F6 (P2 — MEASURED BY MUTATION). The tolerance was fixed at the HELPER and
+    pinned only there, so reverting the CELL's call site to the pre-fix
+    `if ran.returncode not in (0, 1): declined[...]; continue` left the whole file GREEN — and
+    driving the mutant cell with `grep: /tmp: Is a directory` proved the consequence: a genuine
+    measurement failure was reported as "not portable" and STAYED GREEN. That is the same gap the
+    F5 arms closed for the floor and the skip position, still open for F2's own fix.
+    """
+    real_run = subprocess.run
+
+    def measurement_failure(cmd, *args, **kwargs):
+        if "--help" in cmd:  # the option universe is derived for real
+            return real_run(cmd, *args, **kwargs)
+        if cmd[2] == "--fixed-regexp":
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=2, stdout="",
+                stderr="grep: /tmp: Is a directory\n")
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout="2\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", measurement_failure)
+    _d5_drive_the_cell(
+        test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS,
+        match="MEASUREMENT FAILURE",
+        what="a genuine measurement failure (rc 2, a message that names no option)")
+
+
+def test_the_alias_cell_reds_one_spelling_measured_and_its_mate_declined(monkeypatch):
+    r"""A verdict for only ONE of the two `-u` spellings REDS the cell — the conflict is wired in.
+
+    ⛔ #14306 REVIEW F6 (P2 — MEASURED BY MUTATION). Deleting the `_d5_measured_or_declined_conflict`
+    assertion from the cell left the whole file GREEN: the helper was pinned, the call site was not.
+    The instance it exists to refuse is stated in `_d5_measured_or_declined_conflict`'s own
+    docstring — `--u` counting `2` while `--unix-byte-offsets` is refused means `--u` was measured
+    against some OTHER option — so an unwired `_conflict` would let exactly that pass as measured.
+    """
+    real_run = subprocess.run
+
+    def one_sided_unix_verdict(cmd, *args, **kwargs):
+        if "--help" in cmd:
+            return real_run(cmd, *args, **kwargs)
+        spelling = cmd[2]
+        if spelling == "--unix-byte-offsets":
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=2, stdout="",
+                stderr="grep: unrecognized option '--unix-byte-offsets'\n")
+        # `--u` and `--fixed-regexp` are stubbed RATHER THAN delegated to the real grep, so this
+        # arm means the same thing on a 3.12 host: there `--u` is refused too, both `-u` spellings
+        # would be declined, and the conflict this arm exists to create could not be constructed.
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0 if spelling == "--u" else 1,
+            stdout="2\n" if spelling == "--u" else "0\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", one_sided_unix_verdict)
+    _d5_drive_the_cell(
+        test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS,
+        match="two spellings of ONE option",
+        what="one `-u` spelling measured while its mate is declined")
+
+
+def test_the_universe_cell_SKIPS_a_grep_that_publishes_no_usage(monkeypatch):
+    r"""A `--help` that FAILED skips the cell — and that skip is witnessed, not just described.
+
+    ⛔ #14306 REVIEW F6 (P3 — MEASURED BY MUTATION). The `except _D5NoDocumentedUniverse` arm was
+    held by no test: replacing it with a bare call stayed GREEN here, because this box's grep
+    answers `--help` on stdout with rc 0 and the arm never runs. It is the arm that keeps a BSD
+    grep (usage on stderr, rc 2) a SKIP instead of a RED, so an unwitnessed one is a false block on
+    the platform under repair, invisible on Linux CI.
+    """
+    def bsd_usage(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=2, stdout="",
+            stderr="usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n")
+
+    monkeypatch.setattr(subprocess, "run", bsd_usage)
+    _d5_drive_the_cell_expecting_skip(
+        test_the_d5_count_reader_knows_every_long_option_grep_documents,
+        match="published only 0 long options and exited 2",
+        what="a `--help` that FAILED with its usage on stderr (BSD grep's shape)")
+
+
 def test_the_cell_itself_reds_on_a_SUCCESSFUL_help_that_parsed_too_little(monkeypatch):
     r"""The `>= 40` floor is reachable THROUGH THE CELL, not only through the helper.
 
@@ -5219,7 +5328,12 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     # could never run on macOS at all; GNU grep answers on stdout with exit 0. The universe is
     # derived from whichever stream carries the option list (`_d5_documented_long_options`), and a
     # grep that published no usage at all SKIPS rather than failing, because the pin cannot be
-    # checked against a universe this grep does not publish (#14027).
+    # checked against a universe this grep does not publish (#14027). ⛔ THAT SKIP IS WITNESSED, not
+    # just described (#14306 review F6, P3 — MEASURED BY MUTATION): replacing this cell's
+    # `except _D5NoDocumentedUniverse` arm with a bare call stayed GREEN here, because this box's
+    # grep SUCCEEDS and the arm never ran — leaving the BSD lane this fix exists to unblock a RED
+    # instead of a skip, invisible on Linux CI. `test_the_universe_cell_SKIPS_a_grep_that_publishes_no_usage`
+    # drives the cell with a BSD-shaped `--help` and fails if it goes red.
     # ⛔ BUT THE `>= 40` FLOOR MUST STAY REACHABLE, AND IN THE FIRST CUT OF THIS FIX IT WAS NOT
     # (#14306 review F1, P1 — THE INERT-ENFORCER SHAPE). `pytest.skip` RAISES, so
     # `if len(documented) < 40: pytest.skip(...)` made the `assert len(documented) >= 40` below it
@@ -5335,6 +5449,13 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
     # exactly that diagnostic before this fix). The tolerance is now scoped to the ONE cause that is
     # a platform fact — grep's own stderr naming THIS spelling as one it does not know
     # (`_d5_grep_declined_the_spelling`) — and every other non-0/1 code REDS with its diagnostic.
+    # ⛔ AND THAT WIRING IS WITNESSED AT THE CELL, NOT ONLY AT THE HELPER (#14306 review F6, P2 —
+    # MEASURED BY MUTATION): reverting the loop below to the pre-fix `continue` left the whole file
+    # GREEN, and driving the mutant cell with `grep: /tmp: Is a directory` proved the consequence —
+    # a real measurement failure reported as "not portable" and staying GREEN.
+    # `test_the_alias_cell_reds_a_MEASUREMENT_FAILURE_it_must_not_call_portability` reds on that
+    # mutant; `test_the_alias_cell_reds_one_spelling_measured_and_its_mate_declined` holds the
+    # `_conflict` assertion below, which deleting also left the file green.
     # ⛔ A DECLINED SPELLING IS RECORDED, NOT DROPPED (#14306 review F2, P1). `declined` keeps the
     # per-spelling reason, so the omission is STATED rather than inferred from a `continue`, and
     # `_d5_measured_or_declined_conflict` asserts the two `-u` spellings are answered CONSISTENTLY:
