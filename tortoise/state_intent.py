@@ -1718,10 +1718,23 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # `been` exclusion lives in the `is|are|was|were` branch, so `<has|have|had> … been` is
         # NOT this silence — and letting the alternative take those heads made it PREEMPT
         # another row's signal: `which customer claims has been archived` is pinned to report
-        # `which_modified_noun` and started reporting `existence_unguarded` instead, because
-        # this row is FIRST in `_ENDING_SIGNALS`. Narrowed to the copula heads, that row is
-        # untouched (the suite caught it, and the narrow scope is what it measured).
-        + r"|\b(?:is|are|was|were)\s+[^?]{0,40}?\bbeen(?![-/])\b\s+"
+        # `which_modified_noun` and started reporting `existence_unguarded` instead, because this
+        # row is evaluated BEFORE that one (index 6 of 9 vs 7 of 9; the round-32 review corrected
+        # an earlier "FIRST in `_ENDING_SIGNALS`" here, which was false). Narrowed to the copula
+        # heads, that row is untouched (the suite caught it, and the narrow scope is what it
+        # measured).
+        # ⛔ AND THE CONTRACTED COPULAS ARE THE SAME HEAD (round-32 review, P2, measured): the
+        # first cut spelled `is|are|was|were` by hand, so EVERY contracted spelling stayed silent
+        # — 108 of 108 `{isn't,aren't,wasn't,weren't} x {the,a,its} x {export,report,plan} x
+        # {archived,deprecated,retired} been <ending>` rows returned `population=None,
+        # signal=None, payload=None`, while the uncontracted twin reported: the same
+        # hand-typed-copy drift the sibling arm above was widened to `_CONTRACTED_AUX` for, one
+        # line over. The contraction is spelled HERE rather than by taking the whole
+        # `_CONTRACTED_AUX` class on purpose: the auxiliary members (`hasn't`/`haven't`/
+        # `hadn't`) must NOT enter this arm, because they are what preempts
+        # `which_modified_noun` (measured both ways) — only the four copulas belong to this
+        # silence.
+        + r"|\b(?:is|are|was|were)(?:n['’]t)?\s+[^?]{0,40}?\bbeen(?![-/])\b\s+"
         # (one `-ed/-en` participle is allowed between `been` and the ending word: the refused
         # spelling that reached this arm was `is the report been reviewed archived`, the same
         # silence one word further out.)
