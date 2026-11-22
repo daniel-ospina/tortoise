@@ -1672,6 +1672,62 @@ class _FakeProc:
         return None
 
 
+class TestTheSharedPathWarningNamesThePlatform:
+    """⛔ Two warnings that contradicted each other (review P2, cycle 7).
+
+    `_warn_if_shared_parent` fires exactly when the `0700` directory stops
+    applying (an operator pointed `TORTOISE_EMBED_WORKER_SOCKET` at a shared
+    path) and told them "reliance is on the client's peer-credential check" —
+    which on a kernel without `SO_PEERCRED` is the no-op the client's own note
+    reports. An operator who reads both lines was told, in the same run, that the
+    check protects them and that it cannot run. The warning must name which belt
+    is left, so the two statements can never disagree again.
+    """
+
+    def test_a_shared_path_ON_such_a_kernel_names_the_real_remedy(
+            self, tmp_path, monkeypatch, caplog):
+        import logging as _logging
+        import socket as _socket
+
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o777)
+        monkeypatch.delattr(_socket, "SO_PEERCRED", raising=False)
+        embed_seam.WorkerBacking._peer_note_emitted = False
+        with caplog.at_level(_logging.WARNING, logger="tortoise.embed_seam"):
+            embed_seam.WorkerBacking._warn_if_shared_parent(
+                str(shared / "embed.sock"))
+        lines = [r.getMessage() for r in caplog.records
+                 if "does not own privately" in r.getMessage()]
+        assert len(lines) == 1, lines
+        message = lines[0]
+        assert "NO SO_PEERCRED" in message, (
+            "the shared-path warning promised a peer-credential check this "
+            f"kernel cannot run: {message!r}")
+        assert "TORTOISE_EMBED_WORKER_REQUIRE_PEER=1" in message, (
+            f"the remedy an operator can actually apply is not named: {message!r}")
+        assert "reliance is on the client's peer-credential check" not in message
+
+    def test_a_shared_path_WHERE_the_kernel_reports_it_still_names_the_check(
+            self, tmp_path, caplog):
+        import logging as _logging
+        import socket as _socket
+
+        if not hasattr(_socket, "SO_PEERCRED"):  # pragma: no cover — platform
+            pytest.skip("this kernel has no SO_PEERCRED to report")
+        shared = tmp_path / "shared2"
+        shared.mkdir()
+        shared.chmod(0o777)
+        with caplog.at_level(_logging.WARNING, logger="tortoise.embed_seam"):
+            embed_seam.WorkerBacking._warn_if_shared_parent(
+                str(shared / "embed.sock"))
+        lines = [r.getMessage() for r in caplog.records
+                 if "does not own privately" in r.getMessage()]
+        assert len(lines) == 1, lines
+        assert "SO_PEERCRED" in lines[0] and "NO SO_PEERCRED" not in lines[0], (
+            f"the warning does not say the check DOES run here: {lines[0]!r}")
+
+
 class TestTheClientSaysWhenItCannotVerifyThePeer:
     """⛔ An ABSENT credential is not a pass (review P3, cycle 6).
 

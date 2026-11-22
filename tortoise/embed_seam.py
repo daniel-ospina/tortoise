@@ -847,9 +847,15 @@ class WorkerBacking:
 
         A ``0700`` directory owned by this uid closes that: another user cannot
         traverse it, so it cannot create the socket inside it either. The
-        worker's peer-credential check (:func:`tortoise.embed_worker._peer_allowed`)
-        is the belt for the one case the directory cannot cover — an operator who
-        points ``TORTOISE_EMBED_WORKER_SOCKET`` at a shared path.
+        peer-credential checks (:func:`tortoise.embed_worker._peer_allowed` and
+        :class:`_LineJSONClient`'s ``connect``-side check) are the belt for the one
+        case the directory cannot cover — an operator who points
+        ``TORTOISE_EMBED_WORKER_SOCKET`` at a shared path. ⛔ AND THAT BELT NEEDS A
+        KERNEL THAT REPORTS THE CREDENTIAL (review P2, cycle 7): without
+        ``SO_PEERCRED`` (macOS's ``LOCAL_PEERCRED`` is not implemented here) both
+        checks are no-ops by construction, so on such a host a SHARED path leaves
+        the ``0700`` directory's protection genuinely absent — which is why
+        ``_warn_if_shared_parent`` names that case instead of promising the check.
         """
         path = os.environ.get(ENV_WORKER_SOCKET)
         if path and path.strip():
@@ -864,10 +870,13 @@ class WorkerBacking:
 
         The ``0700`` directory is the PRIMARY control, and an operator who points
         the lever elsewhere gives it up. Nothing is refused here — the path is a
-        documented lever and the client's own peer check
-        (:class:`_LineJSONClient`) is the belt that still holds — but the reason
-        the peer check exists is worth saying out loud once, at the path where an
-        operator would look.
+        documented lever — but the belt that replaces it only exists on a kernel
+        that reports the peer credential (``SO_PEERCRED``; macOS's
+        ``LOCAL_PEERCRED`` is not implemented here). So the warning names the
+        PLATFORM, not just the check: telling an operator on such a host to rely on
+        a check that cannot run is how "cannot be hijacked" becomes false at
+        exactly the moment the private directory stops applying (review P2,
+        cycle 7).
         """
         parent = os.path.dirname(os.path.abspath(path)) or "/"
         try:
@@ -875,12 +884,20 @@ class WorkerBacking:
         except OSError:  # pragma: no cover — parent not created yet
             return
         if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            peer_check_available = getattr(socket, "SO_PEERCRED", None) is not None
             _logger.warning(
                 "%s=%r is inside %s, which this uid does not own privately "
                 "(uid %s, mode %s) — the socket's directory is NOT protecting "
-                "it; reliance is on the client's peer-credential check (#14186)",
+                "it; %s (#14186)",
                 ENV_WORKER_SOCKET, path, parent, info.st_uid,
-                oct(info.st_mode & 0o777))
+                oct(info.st_mode & 0o777),
+                "reliance is on the peer-credential check, which this kernel "
+                "reports (SO_PEERCRED)"
+                if peer_check_available else
+                "this kernel reports NO SO_PEERCRED, so NEITHER the worker's nor "
+                "the client's peer check can run — leave this path unshared, or "
+                "set TORTOISE_EMBED_WORKER_REQUIRE_PEER=1 to refuse peers whose "
+                "uid is unknown")
 
     def described_socket_path(self) -> str | None:
         """The socket path WITHOUT minting anything — for diagnostics.

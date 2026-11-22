@@ -1315,7 +1315,10 @@ retired, so read them as "this is what it did last time", not as "this is what i
 `worker` backing is not a verdict either. The caller-facing contract for a dense leg that cannot run
 is #2952's per-read declaration, and this change does not touch it. If `seam_status()` itself raises,
 the block arrives with the SAME key set, every value `null`, plus `error`, and `/health` is still a
-**200** — read `backing: null` as INCONCLUSIVE, never as "in-process".
+**200** — read `backing: null` as INCONCLUSIVE, never as "in-process". ⛔ The ONE exception is
+`injected: false`, which a failed read still answers: nothing was injected before the read failed, so
+the field is not a claim about the seam, and a `jq .embed_seam.injected` on a degraded block must not
+be read as "the seam is live and un-injected" (the `error` key is the verdict).
 
 #### The two levers
 
