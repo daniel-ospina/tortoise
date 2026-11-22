@@ -1117,9 +1117,11 @@ SWEEP_NAMES = 66
 #: merged in, and `--repin` printed the same pair before and after that merge, so the merge
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
 #: branch's census file, and named by log rather than counted here, because a count restated in this
-#: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
-#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
-#: not carried forward.
+#: block goes stale at the next sibling push, the class `2465cda150` was written to stop). The
+#: pin is RE-DERIVED after every integration rather than carried forward: integrating
+#: `origin/main` (`0467ba329d`, this branch's base) re-measured `--repin` at
+#: `(11861, "f0647020531c078c")` — the SAME pair — and `--check` exits 0 on the integrated tree,
+#: so that integration added no untyped receiver either.
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
 #: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
