@@ -5814,8 +5814,9 @@ def beta_variance_sum_bound(threshold: float) -> float:
     always going to be rejected. ⛔ NO MILLISECOND FIGURE AND NO ROW COUNT IS
     QUOTED HERE. The shipped artifacts measure the WHOLE function and its
     isolated A/B (``docs/evidence/14192-read-wave/``), never this query alone,
-    and this directory's own rule is "if a number is not in a JSON here, it is
-    not claimed here". An earlier cut of this docstring said "~160 ms to ~58 ms
+    and the rule that directory now carries is per-figure, not global: a figure
+    that is not a cell of one of its JSONs says at the point it appears where it
+    came from. An earlier cut of this docstring said "~160 ms to ~58 ms
     with the row set BYTE-IDENTICAL (79 rows both ways)"; neither number nor
     that row count appears in any committed artifact, so both are WITHDRAWN
     rather than restated. The property that IS pinned is the one that makes the
@@ -6992,10 +6993,16 @@ def get_relationships_bounded(
     #: member — it is the read the wave waits on). They are all anchored on
     #: ``point_ids``/``op_ids``; only the operator reads DEPEND on Q1a, so the
     #: wave is opened once Q1a has answered and everything that can then be
-    #: named is submitted -- measured, the FOUR operator reads sat inside a
-    #: chain of 6 sequential round trips on a read whose p50 was 159 ms of a
-    #: 231 ms search, and 3 of them walk the same operator fan-out
-    #: independently.
+    #: named is submitted. The read's dominant POST-FUSION cost was the
+    #: relationships member this wave carries: measured, it was 143.0 ms p50 of
+    #: a 162.3 ms read -- 88 % of it
+    #: (`verdict.member_delta.post_relationships` / `verdict.baseline_total.p50` in
+    #: ``docs/evidence/14192-read-wave/ab-full-read.json``) -- and 3 of the
+    #: members walk the same operator fan-out independently.
+    #: ⛔ No figure here may come from anywhere but that artifact: an earlier cut
+    #: of this comment said "159 ms of a 231 ms search", and neither number is a
+    #: cell of either JSON, for the same reason ``beta_variance_sum_bound`` above
+    #: withdraws its own. THE ARTIFACT IS THE AUTHORITY.
     _wave = _ReadWave()
 
     try:
@@ -7039,9 +7046,19 @@ def get_relationships_bounded(
         # Q2b/Q2-crit/Q2-family/Q2-support are INDEPENDENT of one another (all
         # keyed on ``op_ids``/``expand_ops``), so they are SUBMITTED here and
         # CONSUMED below: five reads, ONE wave, ``max(read)`` instead of
-        # ``sum(read)``. Measured on the #14192 corpus, this wave was 159 ms of
-        # a 231 ms search — 69 % of the read — and three of its members walk
-        # the same operator fan-out independently.
+        # ``sum(read)``. The read this wave shortens is the one whose
+        # relationships member measured 143.0 -> 101.2 ms p50 of a
+        # 162.3 -> 118.8 ms whole read (``verdict.member_delta.post_relationships``
+        # and ``verdict.baseline_total``/``verdict.after_total`` in
+        # ``docs/evidence/14192-read-wave/ab-full-read.json``), and three of the
+        # members walk the same operator fan-out independently. ⚠️ Both
+        # artifacts were measured at ``5c9cfe5407``, and TWO later commits
+        # (``6ec51de9ec``'s ``_InlineMember`` inline fallback, then
+        # ``7d276aa07a``'s de-duplicated predicate) changed the code they price
+        # without re-running them — so the
+        # 101.2 / 118.8 after cells price code THIS head no longer runs. The
+        # artifact is the authority for what was measured, NOT for what this
+        # head's numbers are; re-measure before quoting the after arm.
         #
         # ⛔ Q1a is deliberately NOT in this wave: its rows are what ``op_ids``
         # IS, so the three operator reads cannot be named before it answers.
