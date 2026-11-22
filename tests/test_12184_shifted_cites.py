@@ -81,11 +81,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "search_engine.py:7170", _SE, 7170, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
     (_AUDIT, "search_engine.py:7577", _SE, 7577, "(n:Point)-[r:aboutSubject]->(:Subject)"),
     (_AUDIT, "search_engine.py:7579", _SE, 7579, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
-    # Row 149's TWO BARE range cites carry no `search_engine.py` prefix, so the token-level pins for
-    # `6659`/`6661` above do not reach them — they are the only shifted mentions in this document the
-    # first pin set missed. Both were already correct at the pre-fix head, so these two are
-    # COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this class (`:4549`
-    # re-pointed to `:4552`), which is the failure the whole file exists for.
+    # Row 149's TWO BARE range cites carry no `search_engine.py` prefix, so no token-level pin reaches
+    # them. Both are COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this
+    # class (`:4549` re-pointed to `:4552`), which is the failure the whole file exists for.
+    # ⛔ The `6659`/`6661` this comment used to name were a LATER edition's addresses for these same two
+    # rows; a re-derivation moved the rows and left the prose, so the comment vouched for a pin set that
+    # no longer exists (`grep '6659\|6661'` matched nothing but this comment). Name what the rows carry now.
     (_AUDIT, "`:7576-7579`", _SE, 7576, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
     (_AUDIT, "`:7582-7595`", _SE, 7582, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3157", _SE, 3157, "CALL db.idx.fulltext.queryNodes"),
@@ -239,6 +240,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37568", "tortoise/sdk.py", 37568, "``:Document`` node)."),
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37610` in `_file_human_approval`", "tortoise/sdk.py", 37610, "``:Document`` node)."),
+    # ⛔ Review cycle 2 (P1): these four were RE-POINTED by this branch and left with no content pin, so a
+    # one-line regression shipped green — MEASURED by mutating each destination by one line and watching the
+    # whole suite stay at `31 passed`. A re-point nobody grades is the `#13854` class this file exists for.
+    # Each pin's token is unique in its document (count 1), so the occurrence map is exact.
+    (_AUDIT, "tortoise/sdk.py:38228", _SDK, 38228, "(p:Point)-[:extractedFrom]->(s:Source)"),
+    (_INDEX, "sdk.py:22094", _SDK, 22094, '"stats": _capture_stats_with_step_witness('),
+    (_SUBSTRATE, "opening `:37548`", _SDK, 37548, "def record_decision(self, approver_id: str, artifact_id: str,"),
+    (_SUBSTRATE, "opening `:37588`", _SDK, 37588, "def _file_human_approval(self, approver_id: str, artifact_id: str,"),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -473,6 +482,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37568'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37610` in `_file_human_approval`'): 1,
+    # review cycle 2: the four re-points that had no content pin
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'tortoise/sdk.py:38228'): 1,
+    ('docs/00_index.md', 'sdk.py:22094'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'opening `:37548`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'opening `:37588`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2945'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2787'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:5074'): 1,
@@ -2175,7 +2189,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # and NOTHING read it — its `sdk.py:28581` sibling was pinned and the neighbour was not, so a
     # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
     # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
-    assert len(_PINS) == 83
+    assert len(_PINS) == 87, (
+        f"_PINS carries {len(_PINS)} rows, not 87 — a re-pointed cite was added or dropped without "
+        "this count. Every re-point this branch writes must carry a content pin (review cycle 2)."
+    )
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
