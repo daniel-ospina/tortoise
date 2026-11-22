@@ -314,9 +314,13 @@ jobs:
           # `tiktoken` is the case that proved it (#14277):
           # `tools/extractor_cost_measure.py::_encoding` imports it lazily, so the two corpus
           # cases in `tests/test_extractor_cost_measure.py` — NOT in `slow_files`, so this leg
-          # collects them — reddened with `ModuleNotFoundError`. The `test` extra declares it
-          # for the python-ci shards for the same reason in a different place: those legs DO
-          # install through that extra, and it simply did not carry the entry.
+          # collects them — would red with `ModuleNotFoundError`. ⚠️ That is PREDICTED for THIS
+          # leg, not observed: the measurement is the shard leg (run 45007564269, `test (f)`:
+          # both cases fail at `tools/extractor_cost_measure.py:120`), and no post-merge run
+          # has completed since #14295 merged — the one at `ee0e460f` was cancelled 11 s in.
+          # The `test` extra declares it for the python-ci shards for the same reason in a
+          # different place: those legs DO install through that extra, and it simply did not
+          # carry the entry.
           #
           # Switching this leg to `'.[test,embeddings]'` would end the drift class, and is
           # NOT done here: that is a separate decision, because it also installs

@@ -630,12 +630,21 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
     # substring arm would be dead code and would red the very remediation the docstring
     # blesses.
     pmv = (_REPO_ROOT / ".github" / "workflows" / "post-merge-validation.yml").read_text()
-    installs = [ln for ln in pmv.splitlines()
-                if "pip install -e" in ln and not ln.lstrip().startswith("#")]
-    assert installs, "no live `pip install -e` line found in post-merge-validation.yml"
+    live = [ln for ln in pmv.splitlines() if not ln.lstrip().startswith("#")]
+    installs = [ln for ln in live if "pip install -e" in ln]
+    if not installs:
+        # The leg may legitimately be rewritten to `uv sync … --extra test`, which installs the
+        # extra without any `pip install -e` line. Refusing that shape would red the very
+        # remediation this docstring blesses.
+        installs = [ln for ln in live if "uv sync" in ln and "--extra test" in ln]
+    assert installs, (
+        "post-merge-validation.yml has neither a `pip install -e` line nor a `uv sync … "
+        "--extra test` line, so this arm cannot judge it either way — if the leg moved to a "
+        "third install shape, extend this guard rather than deleting it (#14277)")
     test_extra = re.compile(r"\.\[[^\]]*\btest\b[^\]]*\]")
     for line in installs:
-        assert test_extra.search(line) or "tiktoken" in line, (
+        assert (test_extra.search(line) or "--extra test" in line
+                or "tiktoken" in line), (
             "post-merge-validation.yml installs this leg WITHOUT the `test` extra and "
             "without `tiktoken`, but it runs `python -m pytest tests/` over the fast tree "
             "on the ambient interpreter and `tests/test_extractor_cost_measure.py` is not "
