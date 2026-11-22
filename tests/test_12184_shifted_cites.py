@@ -49,8 +49,6 @@ import re
 import subprocess
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parent.parent
 
 _AUDIT = "docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md"
@@ -1345,12 +1343,83 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
         )
 
 
+#: The pin's copy of EVERY file this document cites, in lines — the SAME rule `_pin_line_count`
+#: measures, carried as a constant because the arm that uses it must grade where `git show` cannot run.
+#: MEASURED once per file at the pin (`git show ccb49741b2ec:<path> | wc -l`, i.e.
+#: `len(text.splitlines())` — the number `sed -n '<N>p'` answers to, which is what membership means).
+#:
+#: ⛔ WHY A CONSTANT AND NOT JUST THE `git show`: this file runs in the `test` job, whose checkout is
+#: `actions/checkout@v4` with NO `with: fetch-depth` (`.github/workflows/python-ci.yml`, the `test` job)
+#: — the default depth 1, where the pin's objects are absent. An arm that reads history there SKIPS, and
+#: a skip over every measurement is the `#3442` rule-3 shape this file exists to refuse: the class would
+#: stay open in the ONE place that gates the PR. A length of an IMMUTABLE commit does not rot (membership
+#: does, and membership is what is derived), so this constant grades in CI and the `git show` grades
+#: everywhere else; where both exist they are asserted equal, and neither can drift unnoticed.
+#:
+#: A cite on a file this map does not carry REDS demanding its measurement rather than escaping the arm.
+_PIN_LENGTHS: dict[str, int] = {
+    "tests/test_10853_session_source_prose.py": 1657,
+    "tests/test_cache_projection.py": 3688,
+    "tests/test_capture_secret_redaction_4911.py": 2369,
+    "tests/test_search_engine_gaps.py": 2759,
+    "tools/backfill_copy_turns.py": 1285,
+    "tortoise/activation_scorecard.py": 1711,
+    "tortoise/aggregate.py": 705,
+    "tortoise/api.py": 3057,
+    "tortoise/assembly.py": 4821,
+    "tortoise/audit.py": 3057,
+    "tortoise/cache_eviction.py": 1677,
+    "tortoise/cache_projection.py": 4022,
+    "tortoise/cohort_cost.py": 495,
+    "tortoise/commit_idempotency.py": 229,
+    "tortoise/coverage_loop.py": 749,
+    "tortoise/definite_description_backfill.py": 947,
+    "tortoise/domain_validators.py": 748,
+    "tortoise/embed_compose.py": 327,
+    "tortoise/ep.py": 3150,
+    "tortoise/event_store.py": 1114,
+    "tortoise/export.py": 289,
+    "tortoise/goal_judgement.py": 2137,
+    "tortoise/hosted_api.py": 49851,
+    "tortoise/hosted_backup.py": 3758,
+    "tortoise/live.py": 1299,
+    "tortoise/mcp_server.py": 11466,
+    "tortoise/metering.py": 2971,
+    "tortoise/migrate_kinds.py": 601,
+    "tortoise/mining.py": 1616,
+    "tortoise/onboarding/seed.py": 455,
+    "tortoise/onboarding/state.py": 1857,
+    "tortoise/pack_manifest_store.py": 670,
+    "tortoise/pack_state.py": 1671,
+    "tortoise/pipeline.py": 985,
+    "tortoise/projection/__init__.py": 22857,
+    "tortoise/projection/edges.py": 3212,
+    "tortoise/projection/entities.py": 7475,
+    "tortoise/projection/propagation.py": 143,
+    "tortoise/quota.py": 2442,
+    "tortoise/record_read.py": 1142,
+    "tortoise/record_reconcile.py": 977,
+    "tortoise/record_serve.py": 1685,
+    "tortoise/residency.py": 301,
+    "tortoise/sdk.py": 56415,
+    "tortoise/search_engine.py": 7071,
+    "tortoise/session_indexer.py": 866,
+    "tortoise/session_projection.py": 195,
+    "tortoise/session_reinjection.py": 905,
+    "tortoise/session_schema.py": 1008,
+    "tortoise/session_source_migration.py": 698,
+    "tortoise/session_source_prose_migration.py": 2563,
+    "tortoise/webhook_delivery.py": 1388,
+    "tortoise/why_snapshot.py": 572,
+}
+
 def _pin_line_count(path: str) -> int | None:
     """`git show ccb49741b2ec:<path> | wc -l` — the comparability split's membership rule, as code.
 
-    `None` when this clone cannot read the pin's copy (a shallow or partial clone): the caller turns
-    that into a SKIP that names the fetch, never into a pass — `tests/test_sdk_privatise_sweep.py`'s
-    idiom, where a `git show` absent from the clone reports UNCHECKED instead of grading nothing.
+    `None` when this clone cannot read the pin's copy (a shallow or partial clone, which is the CI case):
+    the caller falls back to `_PIN_LENGTHS` and REDS only when that carries no figure either. A fallback to
+    a measurement of an immutable commit is not an unchecked pass — `test_the_split_membership_…` asserts
+    the two agree wherever both are available.
     """
     shown = subprocess.run(
         ["git", "show", f"{_PIN_COMMIT}:{path}"],
@@ -1379,26 +1448,48 @@ def test_the_split_membership_is_derived_from_the_pins_own_line_counts() -> None
     untouched is caught by `crossed`; a table entry whose pin-side figure was typed rather than measured
     (or left behind by a re-point that moved a pair back inside the file) is caught by `wrong`.
 
-    ⛔ SKIPS, not passes, when the pin's blobs are absent from this clone — a shallow checkout can answer
-    neither question, and a green arm over zero measurements is the `#3442` rule-3 shape this file exists
-    to refuse.
+    ⛔ IT GRADES WHERE `git show` CANNOT RUN. The pin-side figure per file is `_pin_line_count` when this
+    clone has the object, and `_PIN_LENGTHS` when it does not — and the second is the case that matters:
+    the `test` job checks out at `fetch-depth: 1`, so a history-only arm SKIPS on every CI run, which is a
+    green arm over zero measurements — the `#3442` rule-3 shape this file exists to refuse, in the one
+    place that gates the PR. Where both are available they must AGREE (`stale_constants`), so the constant
+    cannot rot silently either; a file the map does not carry and the clone cannot read REDS with the
+    measurement to take, rather than skipping the pair it would have graded.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     _spellings, pairs = _resolved_pairs(text)
-    counts = {path: _pin_line_count(path) for path in sorted({path for path, _line in pairs})}
-    unreadable = sorted(path for path, count in counts.items() if count is None)
-    if unreadable:
-        pytest.skip(
-            f"{len(unreadable)} of the {len(counts)} files this document cites are not readable at "
-            f"`{_PIN_COMMIT}` from this clone ({', '.join(unreadable[:3])}…). Re-arm with "
-            f"`git fetch origin {_PIN_COMMIT}`. The comparability split's MEMBERSHIP was NOT checked "
-            "here — this is UNCHECKED, not a pass."
-        )
+    counts: dict[str, int] = {}
+    stale_constants: list[tuple[str, int, int]] = []
+    unmeasured: list[str] = []
+    for path in sorted({path for path, _line in pairs}):
+        measured = _pin_line_count(path)
+        stated = _PIN_LENGTHS.get(path)
+        if measured is not None:
+            counts[path] = measured
+            if stated is not None and stated != measured:
+                stale_constants.append((path, measured, stated))
+        elif stated is not None:
+            counts[path] = stated
+        else:
+            unmeasured.append(path)
+    assert not unmeasured, (
+        f"{len(unmeasured)} of the files this document cites have no pin-side length this test can read: "
+        f"`{_PIN_COMMIT}`'s copy of {unmeasured[:3]} is absent from this clone (a shallow checkout), and "
+        "`_PIN_LENGTHS` does not carry it either — so whether their pairs sit past the pin's EOF CANNOT be "
+        "decided, and a pair crossing it would escape this arm. Measure each (`git show "
+        "ccb49741b2ec:<path> | wc -l`, which needs only the object) and add it to `_PIN_LENGTHS`."
+    )
+    assert not stale_constants, (
+        f"`_PIN_LENGTHS` disagrees with the pin for {stale_constants} (path, measured now, constant): the "
+        "map is a measurement of an IMMUTABLE commit, so a disagreement means it was typed rather than "
+        "measured — correct the constant to the measured figure."
+    )
 
     crossed = sorted(pair for pair in pairs if pair[1] > counts[pair[0]] and pair not in _PIN_EOF_PAIRS)
     assert not crossed, (
         f"{crossed} sit past the pin `{_PIN_COMMIT}`'s own copy of their file "
-        "(`git show <pin>:<path> | wc -l` measured here), so they are NOT comparable — but "
+        "(`git show <pin>:<path> | wc -l`, or `_PIN_LENGTHS` where the clone is shallow), so they are NOT "
+        "comparable — but "
         "`_PIN_EOF_PAIRS` does not carry them, so the header publishes a comparable denominator that "
         "counts them. Add each pair to the table, name it in the header's non-comparable enumeration, "
         "and re-measure the four published figures — do not re-point the cites back inside the pin."
