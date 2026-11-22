@@ -285,9 +285,30 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     the read name (#14279 review F2/F3 — the container-carried name that the
     executable-parent narrowing in `_is_read_ref` no longer reaches directly).
 
+    ⛔ THE BIND FORMS WITHOUT AN `Assign` NODE ARE NOT EXHAUSTED BY `for` (#14326, each
+    MEASURED GREEN at `3b98c08ce2` — a lever reached the read and the pin passed `1 passed`):
+
+        match "_tortoise_fts_query":              # a `match` CAPTURE
+            case _N: …getattr(sdk, _N)(…, kind="statement")
+        _P = ("_tortoise_fts_query", "x")         # an unpack of a NAME-HELD sequence
+        _N, _M = _P                               # (the pairing arm needs a literal VALUE)
+
+    A capture binds a PART OF THE SUBJECT it matches (`case _N:` the whole of it, a mapping
+    value, a sequence element, an attribute, `rest=`/`*_r` the remainder) — never a pattern
+    literal, since an OR-pattern may not mix a literal with a capture. So the subject is the
+    source, bound lazily: the fixpoint re-reads it, which is what catches `match _V: case
+    _N:` where `_V` holds the literal, and it is what keeps `case {"read":
+    "_tortoise_fts_query"}: _mode = 1` beside a capture in ANOTHER case green. An unpack
+    whose sequence is a name/literal has NO statically knowable pairing, so every element
+    (nested, starred included) takes the UNION of the sequence's values. All of it is
+    over-approximate, which is the fail-closed direction this map exists to take; the
+    `for`-target arm above is the same argument one statement earlier.
+
     RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`, an
-    f-string, `_N + "_x"`, a parameter) and a value read out of a container or an attribute
-    (`_CFG["read"]`, `self._read`) are not resolved here.
+    f-string, `_N + "_x"`, a parameter), a value read out of a container or an attribute
+    (`_CFG["read"]`, `self._read`) and an unpack whose RIGHT-HAND SIDE is an attribute or a
+    call (`_N, _M = cfg.pair`, `_a, _b = pair()`) are not resolved here — nothing about
+    them is statically pairable, and they are named rather than implied (#14326 review P3).
 
     A literal ITERABLE is not residual, whatever its type: a `for`/comprehension target over
     a tuple, a list, a SET or a DICT resolves, because CPython's grammar gives `iter` as an
@@ -303,6 +324,42 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         # carries no `Assign` node at all, so no assignment arm above could ever see it.
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
             binds.append((node.target, node.iter))
+        # ⛔ A PARAMETER DEFAULT IS A STATIC BIND TOO (#14326 review P6, MEASURED GREEN):
+        # `def _f(_N="_tortoise_fts_query"): getattr(sdk, _N)(…)` binds a literal with no
+        # `Assign` node — the last static form without one. Positional defaults align to the
+        # TAIL of the positional parameters; keyword-only defaults are per-name with `None`
+        # standing for "no default"; `lambda` carries the same `arguments` node. The runtime
+        # PARAMETER (a passed-in value) stays a residual below — a default does not.
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            positional = [*node.args.posonlyargs, *node.args.args]
+            first = len(positional) - len(node.args.defaults)
+            for index, default in enumerate(node.args.defaults):
+                binds.append((ast.Name(id=positional[first + index].arg,
+                                       ctx=ast.Store()), default))
+            for index, kdefault in enumerate(node.args.kw_defaults):
+                if kdefault is not None:
+                    binds.append((ast.Name(id=node.args.kwonlyargs[index].arg,
+                                           ctx=ast.Store()), kdefault))
+        # ⛔ SO IS A `match` CAPTURE (#14326 same-class, MEASURED GREEN at 3b98c08):
+        # `match "_tortoise_fts_query": case _N: getattr(sdk, _N)(…, kind="statement")`
+        # bound nothing, so a lever reached the read and the pin passed 1 passed — the
+        # `for`-target arm's own rationale, one statement later in the language.
+        # ⛔ THE SUBJECT IS THE ONLY SOURCE (#14326 review P2, cycle 2 — MEASURED GREEN for a
+        # dict/set-literal subject, and a FALSE RED when pattern literals were credited): a
+        # capture binds a PART of the subject — the whole subject (`case _N:`), a mapping
+        # value, a sequence element, an attribute, the remainder (`rest=`/`*_r`) — and a
+        # pattern LITERAL never binds a name (an OR-pattern may not mix a literal with a
+        # capture). Crediting pattern literals was therefore both unsound and cross-branch:
+        # `case {"read": "_tortoise_fts_query", "n": _v}` red `_v` on a KEY it can never
+        # receive. The subject's whole literal is the source, so a capture may be any string
+        # the subject holds — over-approximate, which is the declared polarity here.
+        elif isinstance(node, ast.Match):
+            for case in node.cases:
+                for capture in ast.walk(case.pattern):
+                    name = getattr(capture, "name", None) or getattr(capture, "rest", None)
+                    if not isinstance(name, str):
+                        continue  # `case 1:` / `case _:` bind nothing
+                    binds.append((ast.Name(id=name, ctx=ast.Store()), node.subject))
     out: dict[str, set[str]] = {}
 
     def _values(value: ast.AST) -> set[str]:
@@ -311,6 +368,12 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             return {value.value}
         if isinstance(value, ast.Name):
             return set(out.get(value.id, ()))  # a chain resolves on the next pass
+        # ⛔ A SPLATTED LITERAL IS THAT LITERAL (#14326 review P5, MEASURED GREEN):
+        # `_P = [sdk, *("_tortoise_fts_query",)]; getattr(*_P)(…)` left `_P` unresolved, and
+        # the sibling `_possible_strings` in this file already carries this arm (#14279 review
+        # F3) — an in-file asymmetry, not a declared boundary.
+        if isinstance(value, ast.Starred):
+            return _values(value.value)
         if isinstance(value, (ast.Tuple, ast.List)):
             # A `for`/COMPREHENSION target over a literal sequence binds each element in
             # turn, so every element is a possible value — the fail-closed reading, and the
@@ -321,12 +384,32 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         # arbitrary `expr`, so `for _N in {"_tortoise_fts_query"}` and
         # `for _N in {"_tortoise_fts_query": 1}` are binds with no `Assign` node whose
         # value is statically visible — not the "computed at runtime" residual. Iterating a
-        # dict yields its KEYS, and a `**spread` key is `None`.
+        # dict yields its KEYS and a `**spread` key is `None`; a CAPTURE over a mapping reads
+        # its VALUES (`case {"read": _N}`) and `rest=` the remaining KEYS, so BOTH sides are
+        # candidates here. The union deliberately over-approximates the iteration spelling
+        # (a value can never be yielded by `for _N in {…}:`) — the fail-closed direction this
+        # map exists to take, and what keeps `match _m: case {"read": _N}:` resolvable.
         if isinstance(value, ast.Set):
             return set().union(*(_values(elt) for elt in value.elts))
         if isinstance(value, ast.Dict):
-            return set().union(*(_values(key) for key in value.keys if key is not None))
+            sides = [*value.keys, *value.values]
+            return set().union(*(_values(item) for item in sides if item is not None))
         return set()
+
+    def _store_names(target: ast.AST) -> list[ast.Name]:
+        """Every NAME a (possibly NESTED) unpack target actually binds.
+
+        `(_a, (_N, *_rest))` binds all three (#14326 review P1); `box[_i]` and `obj._n`
+        bind no name — the names inside them are LOADs — so only
+        `Name`/`Starred`/`Tuple`/`List` are walked.
+        """
+        if isinstance(target, ast.Name):
+            return [target]
+        if isinstance(target, ast.Starred):
+            return _store_names(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [name for element in target.elts for name in _store_names(element)]
+        return []
 
     def _bind(target: ast.AST, value: ast.AST) -> bool:
         """Add every possible value of `value` to `target`; True when the map GREW."""
@@ -342,10 +425,39 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         # ruff's B905 requires it (#14279 review P3).
         if (isinstance(target, (ast.Tuple, ast.List))
                 and isinstance(value, (ast.Tuple, ast.List))
-                and len(target.elts) == len(value.elts)):
+                and len(target.elts) == len(value.elts)
+                # ⛔ A STARRED TARGET IS NOT PAIRABLE (#14326 review P4, MEASURED GREEN):
+                # `(*_r, _b) = ("_tortoise_fts_query", "x")` has equal LENGTHS, so the
+                # pairing arm took it and `_bind(Starred)` bound nothing — `_r` stayed
+                # unresolved and a lever reached the read with the pin green. A star makes
+                # the element positions depend on the RUNTIME length, so fall through to the
+                # union arm below, which walks `_store_names`.
+                and not any(isinstance(item, ast.Starred) for item in ast.walk(target))):
             grew = False
             for index in range(len(target.elts)):
                 grew = _bind(target.elts[index], value.elts[index]) or grew
+            return grew
+        # ⛔ …AND WHEN THE SEQUENCE IS NOT A LITERAL THE PAIRING IS UNKNOWABLE, so every
+        # element gets the UNION (#14326, MEASURED GREEN at 3b98c08):
+        # `_P = ("_tortoise_fts_query", "x"); _N, _M = _P` left `_N` unresolved because
+        # the pairing arm above requires a `Tuple`/`List` VALUE, and the unpack is the P2
+        # class — a name carried through a container — one direction further out. Every
+        # element gets every value the sequence can hold: over-approximate (fail-closed),
+        # never silent.
+        if isinstance(target, (ast.Tuple, ast.List)):
+            values = _values(value)
+            grew = False
+            for element in target.elts:
+                # ⛔ A NESTED TARGET IS AN UNPACK TOO (#14326 review P1, MEASURED GREEN):
+                # `(_a, (_N, _o)) = _P` left `_N` unresolved when only the top level was
+                # read. Every STORE name under the element takes the union — a subscript or
+                # attribute target binds no name, so only `Name`/`Starred`/sequence shapes
+                # are walked (a name inside `box[_i] = …` is a LOAD, not a bind).
+                for name in _store_names(element):
+                    have = out.setdefault(name.id, set())
+                    before = len(have)
+                    have |= values
+                    grew = len(have) != before or grew
             return grew
         return False
 
@@ -2913,7 +3025,9 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
 
       - revert `_str_constants` to its previous form -> the `for`-target, comprehension,
         re-bind, subscript-store, name-chain, tuple-unpack and name-carried rows all pass
-        (the third reach goes uncensused);
+        (the third reach goes uncensused), as does every #14326 row added below (the
+        `match`-capture pair, the NAME-HELD and NESTED unpacks, the dict/set and SPLATTED
+        literals, the STARRED target, and the PARAMETER DEFAULT);
       - revert `_values`' SET/DICT arms -> the three literal-iterable rows pass (#14326
         review F2: a `for` target over `{"…"}` / `{"…": 1}` was GREEN);
       - revert `_indirect_reads` to its arity test -> the two `getattr(*…)` splat rows pass;
@@ -2957,6 +3071,40 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "literal carried into a splat": ('    _N = "_tortoise_fts_query"\n'
                                          '    getattr(*[sdk, _N])(query=queries[0]["query"], '
                                          'limit=10, kind="statement")\n'),
+        # ⛔ THE BIND FORMS THAT CARRY NO `Assign` NODE AT ALL (#14326, each MEASURED green
+        # at `3b98c08ce2` — a lever reached the read and this pin passed):
+        "match capture of a bound name": ('    _V = "_tortoise_fts_query"\n'
+                                          '    match _V:\n'
+                                          '        case _N:\n'
+                                          f'            {reach.format(name="_N")}\n'),
+        "match capture of the literal": ('    match "_tortoise_fts_query":\n'
+                                         '        case _N:\n'
+                                         f'            {reach.format(name="_N")}\n'),
+        "unpack from a NAME-HELD sequence": ('    _P = ("_tortoise_fts_query", "x")\n'
+                                            '    _N, _M = _P\n'
+                                            f'    {reach.format(name="_N")}\n'),
+        "NESTED unpack of a NAME-HELD sequence": (
+            '    _P = (("a", "b"), ("_tortoise_fts_query", "x"))\n'
+            '    (_a, (_N, _o)) = _P\n'
+            f'    {reach.format(name="_N")}\n'),
+        "match capture of a DICT literal's value": (
+            '    _m = {"read": "_tortoise_fts_query"}\n'
+            '    match _m:\n'
+            '        case {"read": _N}:\n'
+            f'            {reach.format(name="_N")}\n'),
+        "for target over a SET literal": ('    for _N in {"_tortoise_fts_query"}:\n'
+                                          f'        {reach.format(name="_N")}\n'),
+        "STARRED target against a literal": (
+            '    (*_r, _b) = ("_tortoise_fts_query", "x")\n'
+            f'    {reach.format(name="_r")}\n'),
+        "SPLATTED literal into a container": (
+            '    _P = [sdk, *("_tortoise_fts_query",)]\n'
+            '    getattr(*_P)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "PARAMETER DEFAULT": (
+            '    def _f(_N="_tortoise_fts_query", *, _k="x"):\n'
+            '        getattr(sdk, _N)(query=queries[0]["query"], limit=10, '
+            'kind="statement")\n'
+            '    _f()\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -2970,6 +3118,37 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     assert not _pin_refuses(_pin_source(inert)), (
         "a provenance constant beside `git_sha`/`db_uri` is a FALSE RED — the read is named "
         "and never executed, and this pin's job is to bound executable reaches")
+
+    # ⛔ THE SECOND AND THIRD CONTROLS: PATTERN LITERALS ARE NOT BINDS (#14326 review P2,
+    # measured). A capture binds a PART OF THE SUBJECT and can never receive a pattern
+    # literal, so crediting one reds the recording direction #14289 asks for. Both
+    # directions are pinned — a literal in an UNRELATED case, and a literal in a mapping
+    # KEY of the SAME case whose capture reads a VALUE; a code path that credited pattern
+    # literals would red the second one while the first stayed green.
+    other_case = ('    _cfg = {"read": "x"}\n'
+                  '    match _cfg:\n'
+                  '        case {"read": "_tortoise_fts_query"}:\n'
+                  '            _mode = 1\n'
+                  '        case _label:\n'
+                  '            _legs.append(_label)\n')
+    same_case = ('    _cfg = {"read": "x", "n": "y"}\n'
+                 '    match _cfg:\n'
+                 '        case {"read": "_tortoise_fts_query", "n": _v}:\n'
+                 '            _legs.append(_v)\n')
+    for label, body in (("another case", other_case), ("the same case's KEY", same_case)):
+        assert not _pin_refuses(_pin_source(body)), (
+            f"a `match` literal in {label} is a FALSE RED — the capture takes the SUBJECT's "
+            "values only, so a pattern literal does not bind it")
+
+    # ⛔ THE FOURTH CONTROL: a DEFAULT that only NAMES the read (#14326 review P6). Resolving
+    # defaults must not turn `def _f(_N="_tortoise_fts_query"): print(_N)` into a red — the
+    # name is handed to a known non-executor, exactly like the provenance constant above.
+    named_default = ('    def _f(_N="_tortoise_fts_query"):\n'
+                     '        print(f"measuring {_N}")\n'
+                     '    _f()\n')
+    assert not _pin_refuses(_pin_source(named_default)), (
+        "a parameter default that is merely PRINTED is a FALSE RED — the default is a bind, "
+        "and this pin still bounds EXECUTABLE reaches")
 
 
 def test_the_READ_side_of_str_is_NOT_a_MUTATION() -> None:
