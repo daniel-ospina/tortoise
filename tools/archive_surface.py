@@ -426,7 +426,14 @@ def _anchor_violations(
     sha = str(entry.get("archived_at") or "")
     if not _git_has_commit(root, sha):
         return []
-    blob = _git_blob(root, sha, source_path)
+    # ⛔ READ THROUGH THE LINK, LIKE THE WRITER DOES (round-24 review, P1 — measured). The writer
+    # freezes `path.read_text()`, which FOLLOWS a symlink; reading the raw blob here returns the LINK
+    # TEXT, so `expected_block` could never match the frozen body. Measured: `archive module` on a
+    # symlinked carrier SUCCEEDED (`archived_from=tortoise/x/__init__.py`, body = the real code),
+    # and `check` then red the row it had just written — "the recorded commit does not describe this
+    # body" — with no remedy that clears it, since re-archiving reproduces it byte-identically. This
+    # is the same class the `block_holds` docstring names, fixed at the writer and not at the gate.
+    blob = _blob_following_links(root, sha, source_path)
     if blob is None:
         return [
             f"{symbol}: {rel}'s block cites {sha}:{source_path}, which the anchored commit does "
@@ -1209,6 +1216,14 @@ def _modules_with_a_body(paths, read) -> set[str]:
 #: and so a chain that IS truncated answers `None` rather than a plausible-looking link text.
 _LINK_HOPS = 8
 
+#: Two failures a link read can have, and they are NOT the same answer:
+#: `_DANGLING` — the target does not exist at that commit, so the carrier provably holds no code;
+#: `_UNREADABLE` — a cycle bound or an unresolvable path, where nothing is known, so the caller must
+#: fail CLOSED (never cancel a removal). Returning `None` for both is what let a 7-link chain to
+#: real code grade GREEN (round-24 review, measured).
+_DANGLING = ""
+_UNREADABLE: str | None = None
+
 
 def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
     """The commit's text for *path*, following a SYMLINK to its target in the same commit.
@@ -1244,7 +1259,7 @@ def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
     if text is None:
         return None
     seen = {path}
-    for _ in range(_LINK_HOPS):
+    for _ in range(_LINK_HOPS + 1):  # +1 so the FINAL target's mode is tested, not assumed
         if not _blob_mode(root, sha, path).startswith("120"):
             return text
         # ⛔ NORMALISE BEFORE THE ASK (round-21 review, P1 — measured). A relative link target
@@ -1260,9 +1275,16 @@ def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
         seen.add(target)
         resolved = _git_blob(root, sha, target)
         if resolved is None:
-            return None  # dangles: unreadable, never a plausible reading
+            return _DANGLING  # dangles: it holds no code, and that is a KNOWN reading
         path, text = target, resolved
-    return None
+    # ⛔ A CHAIN AT THE BOUND IS UNKNOWN, NOT EMPTY (round-24 review, P1 — measured). This used to
+    # answer `None`, which `_content_or_link` read as "not the module's code" while
+    # `_modules_with_a_body` read the SAME `None` as content — two polarities on one datum, and the
+    # cancelling one decided the verdict. Measured: a 6-link chain deleted was RED, a 7-link chain
+    # to real code was GREEN with the body in no file under `archive/`. `_UNREADABLE` is the
+    # fail-closed reading for both askers; `_DANGLING` is the one case where "holds no code" is a
+    # fact rather than a guess.
+    return _UNREADABLE
 
 
 #: A FULL object name is immutable, which is the whole reason it is a legal cache key; anything
@@ -1350,7 +1372,9 @@ def _content_or_link(root: Path, sha: str, path: str, source: str | None) -> boo
         # counts (that is what the round-19 fix was for); a link to prose or to nothing holds no
         # code, and deleting nothing is not a removal.
         resolved = _blob_following_links(root, sha, path)
-        return resolved is not None and _init_carries_a_body(resolved)
+        if resolved is _UNREADABLE:
+            return True  # cannot tell: fail CLOSED toward the removal
+        return _init_carries_a_body(resolved)  # a dangling link's "" holds no code
     if mode.startswith("100"):
         return _init_carries_a_body(source)  # a regular file: ask its text, as before
     # `160000` (submodule) holds a TARGET, not source, so the body question cannot be asked of it —

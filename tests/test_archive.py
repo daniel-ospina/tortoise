@@ -4363,3 +4363,75 @@ def test_a_symlink_whose_TARGET_TEXT_parses_as_a_STATEMENT_is_not_code(tree: Pat
     assert problems == [], (
         f"link TEXT is not source — neither link resolves to anything: {problems}"
     )
+
+
+def test_a_link_CHAIN_AT_the_HOP_BOUND_whose_TARGET_holds_code_is_a_removal(tree: Path) -> None:
+    """P1 (round-24): the hop loop stepped onto the final target and exited WITHOUT testing it.
+
+    `for _ in range(_LINK_HOPS)` walks `_LINK_HOPS` links and then returns `None` — never asking the
+    mode of the node it is standing on. So a chain of exactly `_LINK_HOPS` links to a real file
+    answered `None`, and `None` meant two different things to the two askers: `_content_or_link`
+    read it as "not the module's code" (dropping the module from `base_body_modules`, so arm 1
+    `continue`d) while `_modules_with_a_body` read it as content. Measured: a 6-link chain deleted
+    was RED; a 7-link chain to `def real(...)` was GREEN with the body in no file under `archive/`.
+
+    The bound is now `_LINK_HOPS + 1` so the final target's mode is ASKED, and an exhausted bound
+    answers `_UNREADABLE` (fail closed) instead of "no code".
+
+    Mutation: `range(_LINK_HOPS)` (drop the +1) -> RED here.
+    """
+    # the CARRIER link counts too: `x/__init__.py -> link0 -> ... -> real.py` must be exactly
+    # `_LINK_HOPS` links in total, so the loop needs `_LINK_HOPS` steps plus one mode test.
+    links = arch._LINK_HOPS - 1
+    for i in range(links):
+        (tree / "tortoise" / f"link{i}.py").symlink_to(
+            "real.py" if i == links - 1 else f"link{i + 1}.py"
+        )
+    (tree / "tortoise" / "real.py").write_text(
+        "def real(x):\n    return x * 2\n\nCONST = 7\n", encoding="utf-8"
+    )
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../link0.py")
+    _commit(tree, *(f"tortoise/link{i}.py" for i in range(links)), "tortoise/real.py",
+            "tortoise/x/__init__.py")
+    subprocess.run(
+        ["git", "rm", "-r", "-q", "tortoise/x", "tortoise/real.py"]
+        + [f"tortoise/link{i}.py" for i in range(links)],
+        cwd=tree, check=True,
+    )
+    _commit(tree, ".")
+
+    # ⛔ AND THE READ ITSELF MUST RESOLVE, not merely fail closed (round-24 P1, measured). With the
+    # polarity fix alone a bounded read answers `_UNREADABLE`, which keeps this row RED for the wrong
+    # reason — so the resolution is asserted directly, and THAT is what the `+1` is for.
+    resolved = arch._blob_following_links(tree, "HEAD~1", "tortoise/x/__init__.py")
+    assert "def real(x)" in (resolved or ""), (
+        f"a chain of exactly _LINK_HOPS links must resolve to its target, got {resolved!r}"
+    )
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.x:") and "REMOVED" in p for p in problems), (
+        f"a chain at the bound still reaches real code: {problems}"
+    )
+
+
+def test_an_archived_module_from_a_SYMLINKED_carrier_is_CLEAN(tree: Path) -> None:
+    """P1 (round-24): the anchor read the RAW blob, so the gate red a record the writer had just made.
+
+    The writer freezes `path.read_text()`, which FOLLOWS a symlink; `_anchor_violations` compared
+    that frozen body against `_git_blob`, the LINK TEXT for mode `120000`. Measured: `archive module`
+    on a symlinked carrier SUCCEEDED (`archived_from=tortoise/x/__init__.py`, frozen body = the real
+    code), and `check` then reported "the recorded commit does not describe this body" — a red with
+    no route, since re-archiving reproduces it byte-identically.
+
+    Mutation: read the anchor with `_git_blob` -> RED here.
+    """
+    (tree / "tortoise" / "impl.py").write_text("def real():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../impl.py")
+    _commit(tree, "tortoise/impl.py", "tortoise/x/__init__.py")
+
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.x", "batch-a", "r", root=tree)
+    frozen = (tree / entry["file"]).read_text(encoding="utf-8")
+    assert "def real()" in frozen, "the frozen body must be the TARGET's code"
+    assert arch.file_violations([entry], tree / "archive", tree) == []
