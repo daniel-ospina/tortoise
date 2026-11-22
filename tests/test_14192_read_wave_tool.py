@@ -235,6 +235,13 @@ def _str_constants(tree: ast.AST) -> dict[str, str]:
     return out
 
 
+#: The kwargs `tortoise/hosted_api.py::search` hands the read, as of this pin. A LITERAL
+#: on purpose: `_door_read_contract()` derives the same set from the door, and this is the
+#: independent statement that reds when the DOOR moves — a derivation checked only against
+#: itself cannot tell "unchanged" from "widened".
+_EXPECTED_DOOR_ARGS = frozenset({"query", "limit", "read_status_out", "_truncation_out"})
+
+
 def _door_read_contract() -> set[str]:
     """The kwargs the SHIPPED door hands the read — DERIVED from `hosted_api.py`.
 
@@ -286,7 +293,26 @@ def _door_read_contract() -> set[str]:
     for call in door_calls:
         allowed |= {k.arg for k in call.keywords if k.arg is not None}
         allowed |= set(positional[:len(call.args)])  # positional → the read's own names
-    assert {"query", "limit", "read_status_out", "_truncation_out"} <= allowed, sorted(allowed)
+    # ⛔ THE DERIVATION IS ITSELF PINNED TO A LITERAL (#14281 review P2, measured). The
+    # checks below are DERIVED, so they cannot see the door MOVING: `named_levers` is an
+    # intersection with `bool_levers`, which holds only bool-defaulted parameters, so of
+    # the seven levers this file's docstring enumerates (`kind`, `_elevated_timeout_ms`,
+    # `pool_size`, `order_by`, `claim_class`, `exclude_status`) exactly ZERO are visible
+    # to it. MEASURED on the pre-fix form: `order_by="relevance"` added to
+    # `hosted_api.py::search`'s read call AND to the harness's measured read left the pin
+    # GREEN — the door widened the allow-list, which is the one direction that matters,
+    # because the harness is then free to name the new lever and keep passing.
+    #
+    # This is the fail-closed backstop the `named_levers` message already claims to be
+    # ("re-derive this contract"): a door change now reds REGARDLESS of the parameter's
+    # type or default, and the red says to re-derive rather than silently widening. The
+    # accepted cost is a FALSE RED on a door change that adds a kwarg without meaning to
+    # — cheap and loud, against a silent widening that no diff class would ever surface.
+    assert allowed == _EXPECTED_DOOR_ARGS, (
+        f"`hosted_api.py::search` now hands the read {sorted(allowed)}, not "
+        f"{sorted(_EXPECTED_DOOR_ARGS)} — re-derive this contract and the harness's "
+        "allowed arguments together, deliberately: an added keyword here WIDENS what the "
+        "mirror may name, so a silent door change would let a lever in without a red")
     named_levers = allowed & bool_levers
     assert not named_levers, (
         f"the door itself already names {sorted(named_levers)} — the mirror cannot be "
@@ -804,6 +830,21 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         assert not mutations, (
             f"line(s) {mutations} mutate a collection AFTER the measured read — an in-place "
             f"sort/clear reaches the artifact while the measured {what} no longer matches it")
+
+    # ⛔ AND THE COLLECTED LIST ITSELF (`per_query`), AFTER THE LAST `append` (#14281 review
+    # P2, measured). Every structural check above is scoped to the dict the `append`
+    # builds, so REBINDING the list afterwards — `per_query = [dict(pq, order=sorted(
+    # pq["order"], key=str)) for pq in per_query]`, or the same with `list(reversed(…))` —
+    # re-orders every page after the pin's last look and still read GREEN on this head,
+    # while `run()` returns (and `compare()` reads) the re-ordered pages. That is exactly
+    # the expensive direction the docstring names, one level out from `results`, and it was
+    # undeclared as a residual. In-place mutation of `per_query` is already covered by
+    # `_mutated_after`'s `"per_query" in receiver` clause; only the REBIND was open.
+    per_query_rebinds = _rebound_after(run_defs[0], "per_query", artifact_append.lineno)
+    assert not per_query_rebinds, (
+        f"`per_query` is rebound at line(s) {per_query_rebinds} after the artifact dict is "
+        "appended — a re-sorted/reversed copy would reach the returned report while every "
+        "page the pin inspected was the measured one")
 
     # ⛔ No `os.environ` mutation ANYWHERE (except the module-level setup pops): reports
     # `git_sha`/`db_uri`/`points`/
