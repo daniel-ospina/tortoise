@@ -224,16 +224,26 @@ def test_the_ack_never_WALKS_the_queue_it_is_acked_behind(armed, monkeypatch):
     # `submit` is called exactly as the chokepoint calls it.
     monkeypatch.setattr(instance, "_ensure_started", lambda: None)
 
-    assert instance.submit(item(bound)) is True, "the queue was full at bound-1"
+    try:
+        assert instance.submit(item(bound)) is True, "the queue was full at bound-1"
 
-    assert counting.iteration_count == 0, (
-        "the ACK iterated the queue while holding `_cond` — the ack is O(queue "
-        "depth), and it is the consumer's own lock (property 2 says otherwise)")
-    assert instance._pending_positions_locked() == bound, (
-        "the maintained position count disagrees with what was enqueued")
-    assert len(counting) == bound
-    stats = instance.stats()
-    assert (stats.pending_positions, stats.queue_depth) == (bound, bound)
+        assert counting.iteration_count == 0, (
+            "the ACK iterated the queue while holding `_cond` — the ack is O(queue "
+            "depth), and it is the consumer's own lock (property 2 says otherwise)")
+        assert instance._pending_positions_locked() == bound, (
+            "the maintained position count disagrees with what was enqueued")
+        assert len(counting) == bound
+        stats = instance.stats()
+        assert (stats.pending_positions, stats.queue_depth) == (bound, bound)
+    finally:
+        # ⛔ PUT THE SINGLETON BACK, or the fixture's `shutdown(drain=True)`
+        # spends its whole 5 s timeout folding a synthetic backlog this leg
+        # built and no production path would ever queue (#14222 review round 9,
+        # the category-B observation: wall-clock paid by every later run).
+        # The queue is a process singleton, so a leg that leaves 9 999 items in
+        # it is a cost every test after it inherits.
+        instance._pending = collections.deque()
+        instance._pending_positioned = 0
 
 
 def test_the_settled_projection_is_reported_as_armed_not_as_an_unarmed_write(armed):
