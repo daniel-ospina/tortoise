@@ -695,19 +695,21 @@ def test_an_INDETERMINATE_applied_is_REFUSED_not_counted_as_a_projection():
         types.SimpleNamespace(applied=False, refusal=decline), 1) is None
     # ⛔ AND WITH NO READABLE `applied` AT ALL (#14222 review round 19, P3): the
     # absent-attribute arm returned `record_no_outcome` before the decline was
-    # ever consulted, so this shape was the last false loss among outcomes whose
-    # `applied` READ does not RAISE — while `live_write` reads the token
-    # independently of `applied`. ⛔ NOT the last false loss, full stop: an outcome
-    # whose `applied` property RAISES is read before this arm, so the caller's
-    # `try` maps it to `record_no_outcome` and it is still counted as a loss
-    # (deliberate, see the production comment) — that shape is pinned by the
+    # ever consulted, so this shape was a false loss among outcomes whose `applied`
+    # READ does not RAISE. `live_write` has no such divergence, and not because it
+    # reads the token independently — its `not getattr(outcome, "applied", False)`
+    # gate makes an ABSENT attribute FALSY, so that write reaches the falsy branch
+    # and the decline is consulted there. ⛔ NOT the last false loss, full stop: an
+    # outcome whose `applied` property RAISES is read before this arm, so the
+    # caller's `try` maps it to `record_no_outcome` and it is still counted as a
+    # loss (deliberate, see the production comment) — that shape is pinned by the
     # caller, not by this leg.
     assert projection_worker._classify_fold_outcome(
         types.SimpleNamespace(refusal=decline), 1) is None, (
         "an outcome carrying the seam's healthy-decline token but no readable "
-        "`applied` was counted as a LOSS; `live_write._is_durable_decline` reads "
-        "the token independently of `applied`, so the decline must survive the "
-        "absent-attribute arm too")
+        "`applied` was counted as a LOSS; `live_write` reaches the same decline "
+        "because its `False` default makes an absent `applied` falsy, so the "
+        "decline must survive this arm too")
     # ⛔ AND **ONLY** THE DECLINE IS EXEMPT (#14222 review round 19, P3): a real
     # ARMED refusal with no readable `applied` is still a LOSS. Without this the
     # arm could be widened to `if refusal is not None:` and stay green, publishing
