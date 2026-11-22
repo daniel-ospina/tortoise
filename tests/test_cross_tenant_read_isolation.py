@@ -71,6 +71,7 @@ import contextlib
 import contextvars
 import json
 import os
+import time
 import uuid
 
 import pytest
@@ -268,6 +269,57 @@ def xtenant(tmp_path_factory):
 
 # ── Capture (the "capture" half of capture -> read) ──────────────────────────
 
+def _await_extraction(client: TestClient, body: dict, deadline_s: float = 90.0) -> dict:
+    """Return the session record once the extraction's outcome is RECORDED.
+
+    ⛔ The POST MAY be an ACK rather than a receipt (#14232): when the extraction
+    does not finish inside the 0.5 s ack budget, the extractor runs BEHIND the
+    answer and `body["extracted"]` is the count *so far* — `0` — with
+    `extraction.outcome_known False` and `phase` naming what is happening. That
+    is the shape CI produced (job `test-carve-out`, head `2285bebc1e`:
+    `832 passed, 9 errors`, every error this fixture reading the ack's zero as
+    "extraction produced nothing"); the record itself was fine.
+
+    Both shapes are legal and this function handles whichever arrives, because
+    the SAME endpoint still returns today's receipt when the join lands in time
+    (`status: ok`, a real `extracted`, and NO `status_url`) — indexing
+    `status_url` unconditionally would make a fast host the mirror image of the
+    slow one: `KeyError`, a host-dependent verdict in the other direction.
+
+    Terminal state is the phase pair's absence with `outcome_known` true — the
+    same predicate `test_14232_ingest_ack_split.py` pins for this record. A
+    record with NO phase and `outcome_known` false is the opposite: a settled
+    capture that recorded no outcome (a dead tail, `_clear_capture_phase`'s
+    contract), so it fails HERE, naming that, instead of burning the deadline
+    and reporting it as "still running".
+    """
+    block = body.get("extraction") or {}
+    if block.get("phase") is None and block.get("outcome_known") is True:
+        return body  # the in-budget receipt already carries the answer
+    url = body.get("status_url")
+    assert url, (
+        "deferred extraction with no `status_url` — the ACK contract this "
+        f"fixture polls is broken: {json.dumps(body, sort_keys=True)}")
+    deadline = time.monotonic() + deadline_s
+    while True:
+        r = client.get(url)
+        assert r.status_code == 200, (
+            f"GET {url} raised the status poll: {r.status_code} {r.text}")
+        detail = r.json()
+        block = detail.get("extraction") or {}
+        if block.get("phase") is None:
+            assert block.get("outcome_known") is True, (
+                "the capture settled with NO outcome recorded — phase absent "
+                f"and outcome_known false (a dead tail): {json.dumps(detail, sort_keys=True)}")
+            return detail
+        assert time.monotonic() < deadline, (
+            f"extraction did not finish within {deadline_s}s: "
+            f"{json.dumps(block, sort_keys=True)}")
+        # ~4 polls/s: one poll is five graph queries (`SESSION_DETAIL_FIELDS`),
+        # so a tighter cadence is load the runner does not need.
+        time.sleep(0.2)
+
+
 def _capture(h: _TenantHarness, tenant: str) -> None:
     """Capture a session as `tenant` whose transcript carries its marker."""
     client = h.as_tenant(tenant)
@@ -286,7 +338,12 @@ def _capture(h: _TenantHarness, tenant: str) -> None:
     assert r.status_code == 200, f"capture as {tenant} failed: {r.status_code} {r.text}"
     body = r.json()
     assert body["session_id"] == session_id, body
-    assert body["extracted"] >= 1, f"capture as {tenant} extracted nothing: {body}"
+    # The seed must have LANDED before any read surface is probed (the presence
+    # half of every test below depends on it), so wait for the record rather
+    # than reading the ack's partial count.
+    detail = _await_extraction(client, body)
+    assert detail["extracted"] >= 1, (
+        f"capture as {tenant} extracted nothing: ack={body} detail={detail}")
 
 
 def _seed_both_tenants(h: _TenantHarness) -> None:
