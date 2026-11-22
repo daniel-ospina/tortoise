@@ -1120,35 +1120,66 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
+#:
 #: ⛔ SUPERSEDED BY THE RE-CUT BELOW — the sentence above ends "`--check` exits 0 at this head on
 #: the SAME pair", and that reading did NOT survive the commits merged beside it: the census moved
 #: three rows before the pin commit itself landed. Read the re-cut, not that sentence.
 #:
-#: ⛔ RE-CUT → (11861, "f0647020531c078c"), and NONE of the THREE rows between the 11858 pin and
-#: this reading belongs to this change: the pin commit is a tree that does not hold its own number.
-#: MEASURED, never carried forward — `--report --base 28ca66878d7c --top 5000` was run on THREE
-#: trees, each printed row set sorted and diffed. All three print 856 distinct residue SHAPES, so
-#: no shape was added or retired anywhere in the range and only two rows moved their count:
-#:   * `e74cf1d13d` — the commit whose own pin is 11857 — re-derives `(11857, "ed40203dbbf32b87")`
-#:     on its own tree, so that pin was TRUE where it was cut, and the 11857 reading is validated by
-#:     re-measurement rather than assumed;
-#:   * `10e51693f1`, the commit that set 11858, re-derives 11861 on its OWN tree — so 11858 was
-#:     stale at birth, by exactly the three rows the two bullets below name.
-#: THE DELTA IS ATTRIBUTED BY THE ROW DIFF, never by arithmetic on the last pin:
-#:   * `out.update` 42 → 43 (+1), the row `10e51693f1`'s own block declares (the `out: set[str]`
-#:     accumulator in `_global_declarations`, `tests/test_14125_retired_name_calls.py`). That is why
-#:     11858 = 11857 + 1 was the right pair for the tree THAT lane measured: the other three rows
-#:     were not in it yet;
-#:   * `proj.g.query` 3643 → 3646 (+3), all three in `tools/read_wave_latency.py`, added by
-#:     `94d75667dc` (#14224) — an ANCESTOR of the pin commit (`git merge-base --is-ancestor
-#:     94d75667dc 10e51693f1` exits 0) that re-pinned nothing. The sites are two
-#:     `proj.g.query("MATCH (n:Point) RETURN count(n)")` reads in `seed` and one in the corpus id
-#:     read, where `proj = sdk._get_proj()`, so `proj.g` is a FalkorDB `Graph` — this sweep's
-#:     documented edge (a `Graph` is never the SDK), and exactly the ordinary-word receiver the
-#:     counter exists to REPORT rather than rewrite. No public name is legitimised by these rows.
-#: `11857 + 1 + 3 = 11861` is a CROSS-CHECK of the two measured row sets, never their evidence; the
-#: evidence is those `--report` readings and the sort-then-diff between them. `--check` on this tree
-#: now exits 0 with `typed references still pointing at a public name: 0`, measured.
+#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
+#: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
+#: and the tree are both green at the moment it is taken. `10e51693f166` (#14160) commits
+#: `(11858, "a1552662bf07a10b")`, and `--check` in a detached worktree AT THAT COMMIT reds against
+#: that committed pair: it prints observed `(11861, "f0647020531c078c")`, the identical pair
+#: `--check` prints on `main` at `70fbd1a27dd5` and the pair the required `surface-guard` job
+#: printed for this branch's run. So the committed pair was true of the tree `--repin` was run on
+#: (the branch head, which carried `main` at `9f83a63bfab7` merged in) and false of the tree the
+#: squash landed on: `SWEEP_RESIDUE` is a WHOLE-TREE census, so a commit that adds an untyped
+#: receiver anywhere moves it while having no reason to touch this file — and one did, on `main`,
+#: between that merge and the squash.
+#: THE +3 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic, and the ISOLATING pair of trees
+#: is the branch tip against `main` — NOT `9f83a63bfab7`, which predates this branch's own declared
+#: `out.update` row and so reads a delta of four. `0351fe856942` (#14160's PRE-squash tip,
+#: resolvable through `refs/pull/14160/head` — `git fetch origin refs/pull/14160/head`) commits
+#: `(11858, "a1552662bf07a10b")`, and `--repin` in a detached worktree there prints that same
+#: pair, so the red is a property of the LANDING tree rather than of the branch. ⛔ NOT the
+#: post-squash tip `c5e84ad180f2`, which is where `origin/fix/14125-census-p1s` stands TODAY: it is
+#: a DESCENDANT of `0351fe856942`, pushed after the squash, whose own content never landed, and it
+#: happens to commit the same pair — which is why it reads the same and is still the wrong tree to
+#: name (an earlier cut of this paragraph did, review round 2, P2). `main` at `70fbd1a27dd5`
+#: re-measured with `--repin` reads `(11861, "f0647020531c078c")`.
+#: ⛔ THE PAIRS COME FROM `--repin`, NOT `--report`. `--report` prints the untyped COUNT and the
+#: rows and NO digest at all (measured: `--report --base 28ca66878d… --top 5 | grep -c
+#: f0647020531c078c` → **0**), so a pair quoted as `--report`'s output sends a reader to a command
+#: that cannot reproduce it. `--repin` prints `SWEEP_RESIDUE = (n, digest)`; `--check` prints an
+#: observed digest ONLY on its failure path (`observed: (n, digest)` on stderr), never on a
+#: passing run — so a pair quoted from a green tree is `--repin`'s or nothing.
+#: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
+#: and diffed, and EXACTLY ONE row differs
+#: out of an UNCHANGED 856-row SHAPE set on both sides:
+#:   * `proj.g.query` **3643 → 3646** (+3). `94d75667dc76` (#14224) adds three `proj.g.query(...)`
+#:     call sites in the new `tools/read_wave_latency.py` (two pass a `count(n)` query, the third a
+#:     multiline A/B id query), and it is the only commit in `9f83a63bfab7..10e51693f166` that adds
+#:     a `proj.g.query` call SITE. Measured per rev, with BOTH non-zero readings printed rather
+#:     than one: `git show <rev> --format='' -- '*.py' | grep -c '^+.*proj\.g\.query'` reads **3**
+#:     for `94d75667dc76` (the three sites above) and **2** for `10e51693f166` itself — both of
+#:     those inside DOCSTRING text in `tests/test_14125_retired_name_calls.py`, which is a string
+#:     the AST counter does not read — and **0** for each of the other eight of the ten
+#:     `.py`-touching revs in that range (`git log --oneline 9f83a63bfab7..10e51693f166 -- '*.py'
+#:     | wc -l` → 10). A `proj.g` receiver chain is this sweep's documented edge — `proj.g` binds a
+#:     `_GuardedGraph` over the FalkorDB `Graph`, and a graph handle is never the SDK — and the ROW
+#:     already existed, so a count moved; no shape appeared.
+#: ⛔ `out.update` IS NOT PART OF THAT DELTA, and saying it was is the inversion this paragraph was
+#: rewritten to remove: the row reads **43** on `#14160`'s pre-squash tip `0351fe856942` AND on
+#: `main` at
+#: `70fbd1a27dd5`, so it sits INSIDE the committed pair rather than on top of it. It moves only
+#: against `9f83a63bfab7` (**42 → 43**), the merge base this branch carried — `#14160`'s own row,
+#: which the block above already DECLARES (`_global_declarations` in
+#: `tests/test_14125_retired_name_calls.py`), and never the reason the squash reds.
+#: No other row differs in either direction, so nothing was absorbed: `typed references still
+#: pointing at a public name` is **0** on this tree, and the direction the pin exists to catch — a
+#: NEW row SHAPE — is not what happened here. Re-measured on the MERGED tree with `--repin`,
+#: never carried from the pair quoted above by arithmetic: `(11861, "f0647020531c078c")`, and
+#: `--check` exits 0 on it.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
