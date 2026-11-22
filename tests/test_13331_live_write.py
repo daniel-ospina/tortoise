@@ -314,6 +314,12 @@ def test_the_outcome_serializes_what_it_claims():
     infer it from a missing key. The denied arm — the one that publishes a dict —
     is pinned in ``tests/test_13829_cache_cap_at_fold.py``, where the gate that
     mints it is in scope.
+
+    ⛔ ``deferred`` was ADDED by #14185 (the record's fold can be handed to the
+    projection worker), and both rows here carry ``False``: neither write armed
+    the worker, so both folded inline exactly as before. Its ``True`` arm — and
+    the ``unprojected=1``/``armed`` answers that go with it — is pinned in
+    ``tests/test_14185_projection_worker.py``, where the worker is in scope.
     """
     refused = _outcome(applied=False, refusal="write_failed", outcome="refused")
     armed = live_write.write({"type": "PointAdded"}, log=_Log(seq=9),
@@ -321,14 +327,14 @@ def test_the_outcome_serializes_what_it_claims():
     assert armed.as_dict() == {
         "seq": 9, "appended": True, "record": "refused",
         "refusal": "write_failed", "folded": False, "unprojected": 1,
-        "cache_fold": None}
+        "deferred": False, "cache_fold": None}
 
     unarmed = live_write.write({"type": "PointAdded"}, log=_Log(seq=3),
                                project=lambda e, s, journal_skipped=False: None)
     assert unarmed.as_dict() == {
         "seq": 3, "appended": True, "record": None,
         "refusal": None, "folded": False, "unprojected": 0,
-        "cache_fold": None}
+        "deferred": False, "cache_fold": None}
 
 
 def test_the_record_outcome_travels_to_the_capture_sink():

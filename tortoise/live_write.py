@@ -247,6 +247,124 @@ def _record_owns_position(*, durable: bool, tenant: tuple[str, str] | None,
         return False
 
 
+def _record_armed() -> bool:
+    """Is a record DSN configured? ``False`` on every doubt (#14222 review P1-3).
+
+    The same question `write_live_record` asks first, asked HERE because the
+    deferral decision needs it: a queued write on an unarmed record is a write
+    whose fold will answer "nothing was armed", so the ack would have been
+    deferred for a projection nobody was going to run. Guarded and fail-closed to
+    INLINE, which is the pre-#14185 path and therefore always correct — a
+    malformed DSN raises in `record_dsn`, and an unimportable `record_writer` is
+    a fault the inline arm already handles one frame down.
+    """
+    try:
+        from . import record_writer
+
+        return record_writer.record_dsn() is not None
+    except Exception:  # noqa: BLE001, RUF100
+        return False
+
+
+def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
+                         project: Any, durable: bool,
+                         journal_skipped: bool,
+                         tenant: tuple[str, str] | None,
+                         record_sink: list | None) -> bool:
+    """Hand this record's fold to the projection worker (#14185). Never raises.
+
+    ``True`` ⇒ the fold is QUEUED and this write must not wait for it. ``False``
+    ⇒ the caller folds inline, exactly as before the worker existed.
+
+    ⛔ FOUR OF THE SIX CONDITIONS ARE CORRECTNESS, NOT CONFIGURATION, and each
+    of those four is a fact only this chokepoint holds:
+
+    1. **A journal LINE exists** (``not journal_skipped``). On a cut-over graph
+       the record IS the write's durable copy (#14002) — there is no line to
+       replay — so deferring would acknowledge a write that exists in neither
+       store for the length of the lag. This arm always folds inline.
+    2. **No door reads the outcome** (``record_sink is None``). The capture
+       writer branches on ``RecordWrite.applied`` to decide whether the turn
+       lives in the record or must be written to the graph (#10000/#10021). A
+       deferred write has not applied, so handing that consumer a deferred
+       outcome would put the turn in the graph AND the record; handing it
+       ``applied=True`` would be an attestation nothing has verified. Neither is
+       acceptable, so a write whose outcome is consumed is never deferred.
+    3. **The log is a JOURNAL** (``durable``). A scratch buffer is declined by the
+       seam itself (``no_durable_journal``), so queueing it buys nothing and only
+       risks the row being filed from a lane that a replay can never reproduce
+       (#9231).
+    4. **The tenant is carried BY VALUE** (``tenant is not None``). ⛔ THIS ONE
+       IS NOT PARANOIA: a ``threading.Thread`` does not inherit the caller's
+       contextvars, so a write whose tenant would be resolved AMBIENTLY
+       (``record_writer.record_tenant_effective``: carried > scope > env pair) is
+       resolved AGAIN in the worker — and a ``contextvars``-carried tenant is
+       simply ABSENT there, leaving the env pair to answer. That is either a
+       ``no_tenant`` refusal (fail-closed, safe) or, on a single-tenant box, a row
+       filed under the env tenant rather than the request's — the #9192
+       mis-scoping class, reached through a thread instead of a parameter. So a
+       door that does not pass its tenant cannot be deferred; it folds inline,
+       which is where its tenant resolution already worked. The SDK door passes
+       ``tenant=self._record_tenant`` and defers; ``api.EventAPI._emit`` does not
+       and does not.
+    5. **The RECORD is armed** (a `TORTOISE_RECORD_DSN`) — ⛔ A SEPARATE SWITCH
+       FROM THE WORKER FLAG (#14222 review P1-3). `write_live_record` returns
+       ``None`` when no DSN is configured, so on a deployment with the loop
+       flagged on and the record off, the fold answers "nothing was armed" — and
+       the deferred arm would have had to report either ``armed=False`` (a lie
+       about a queued write) or ``armed=True``/``unprojected=1`` (a loss claim
+       for a write nothing was ever going to take). Both are wrong, and both
+       would have MOVED every write on such a box from "nothing claimed it,
+       nothing lost" to a permanent false alarm in
+       :attr:`LiveWrite.unprojected` — read by `tools/claim_dense_leg_13732.py`
+       as an unprojected position. Asking the record's own arming as a CONDITION
+       keeps that deployment byte-identical: it folds inline and reports exactly
+       what it reported before.
+    6. **An operator armed the loop and the queue accepted the item.** Unset or
+       typo'd reads OFF (:func:`tortoise.env_truthy.env_flag`), which keeps every
+       unarmed deployment byte-identical to the pre-#14185 inline fold. The flag
+       is asked HERE as well as in :func:`projection_worker.submit` because it is
+       the CHEAPEST test of the six — a bare env read — so asking it before
+       condition 5 stops the default (loop off) deployment paying an uncached
+       `record_writer.record_dsn()` parse per write for a fold it was never going
+       to defer (#14222 review, finding 8). The conjunction is unchanged.
+
+    ⛔ EVERY FAILURE ANSWERS ``False`` (fold inline). The journal has already
+    committed by the time this is called, so a raise here would hand the producer
+    an exception for a write that persisted AND skip the fold — the write would
+    be missing from the record with nothing queued to put it there. Inline is the
+    safe direction: it is only slower, and it is what the deployment did before
+    this worker existed.
+    """
+    if journal_skipped or record_sink is not None or not durable:
+        return False
+    if tenant is None:
+        return False
+    try:
+        from . import projection_worker
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable loop is not a fault
+        return False
+    # ⛔ ASK THE FREE SWITCH FIRST (#14222 review, finding 8, and P1 of the round
+    # that read this hunk before it was committed — the check was added in the
+    # WRONG PLACE first, BELOW `_record_armed()`). `record_writer.record_dsn()` is
+    # UNCACHED — an env read, a scheme check and the host rule — so the default
+    # deployment (loop OFF, record armed) paid that parse on every ACK before the
+    # gate could decline, which is the ACK path this worker exists to keep short.
+    # `projection_worker.armed()` is a bare `env_flag` read, `submit` asks it again,
+    # and the conjunction is the same one — only its cheapest test moved in front
+    # of its most expensive.
+    if not projection_worker.armed():
+        return False
+    if not _record_armed():
+        return False
+    try:
+        return projection_worker.submit(
+            record=event, seq=seq, tenant=tenant,
+            journal_skipped=journal_skipped, project=project)
+    except Exception:  # noqa: BLE001, RUF100
+        return False
+
+
 @dataclass(frozen=True)
 class LiveWrite:
     """What ONE write did, in the order the contract requires it.
@@ -267,16 +385,20 @@ class LiveWrite:
     an unprojected line). The door's WARNING and `record_write_failures` are what
     an operator sees for it.
 
-    ``record`` is ``None`` on THREE arms, and they are NOT the same fact
-    (#13345 review P3-1/P3-3): the UNARMED deployment (no DSN) — the one case
-    `write_live_record` returns ``None`` for; the ``projection_raised`` arm,
-    where the seam never ANSWERED at all (it raised, or could not be imported),
-    so whether this deployment is armed is UNMEASURED there and
-    :attr:`LiveWrite.armed` answers ``None``; and a door that supplies its own
-    ``project=`` whose callable returns ``None`` (the SDK's
+    ``record`` is ``None`` on FOUR arms, and they are NOT the same fact
+    (#13345 review P3-1/P3-3; the fourth arrived with #14185 and this list said
+    THREE until #14222's round-9 review found it): the UNARMED deployment (no
+    DSN) — the one case `write_live_record` returns ``None`` for; the
+    ``projection_raised`` arm, where the seam never ANSWERED at all (it raised,
+    or could not be imported), so whether this deployment is armed is
+    UNMEASURED there and :attr:`LiveWrite.armed` answers ``None``; a door that
+    supplies its own ``project=`` whose callable returns ``None`` (the SDK's
     ``seam_unimportable`` arm is the live one), where :attr:`armed` answers
     ``False`` — because from this module's position the record was never asked,
-    which is a different fact from "nothing was armed". ⛔ Never infer
+    which is a different fact from "nothing was armed"; and the ``deferred`` arm,
+    where the record has not ANSWERED **YET** — the line is committed and the fold
+    is queued, so ``armed`` is ``True`` (deferral requires an armed record) and
+    :attr:`LiveWrite.deferred` is ``True``. ⛔ Never infer
     "unarmed" from ``record is None``: read :attr:`armed`, which is the
     three-state answer for this module's own path and is ``False`` — never
     ``None`` — on a door's ``None``-returning project. A DECLINE is a
@@ -315,6 +437,28 @@ class LiveWrite:
     #: because the org's derived layer is at/over its hard stop. Reads for it fall
     #: back to the record until a replay folds it — projection lag.
     cache_fold: Any | None = None
+    #: ⛔ The record's fold was HANDED TO THE PROJECTION WORKER instead of run
+    #: here (#14185). ``True`` means: the journal line is committed, the fold is
+    #: QUEUED, and ``record`` is ``None`` because nothing has ANSWERED yet — not
+    #: because nothing is armed. It is a separate field rather than a FOURTH
+    #: meaning of ``record is None`` precisely so that "deferred" and "unarmed"
+    #: cannot be confused by a caller or by :attr:`armed`. (The class docstring's
+    #: list of arms was still saying THREE when this field made it four; #14222's
+    #: round-9 review found the two sentences contradicting each other, and both
+    #: now count four.)
+    #:
+    #: A deferred write is a LANDED write (the line exists, and
+    #: ``derived = replay(journal)`` guarantees the record can be rebuilt to
+    #: include it) whose record row appears after a measured lag. The lag is
+    #: `monitoring`'s ``record_projection_*`` gauges; the gap it leaves is the
+    #: same ``unprojected`` position `journal_coverage` counts, so the state is
+    #: observable without this process's memory.
+    #:
+    #: ⚠️ ``applied`` is ``False`` on this arm — the record has not applied it
+    #: yet, and reporting ``True`` would be an attestation nothing has verified.
+    #: That is why a write whose outcome a door CONSUMES is never deferred: see
+    #: ``live_write._submitted_to_worker`` condition 2.
+    deferred: bool = False
 
     @property
     def applied(self) -> bool:
@@ -325,10 +469,23 @@ class LiveWrite:
     def armed(self) -> bool | None:
         """Was the RECORD armed for this write? ``True``/``False``/``None`` (unmeasured).
 
-        ``True`` — the seam ANSWERED, and only an armed call answers: an unarmed
-        deployment returns ``None`` from ``write_live_record``, so any
-        ``RecordWrite`` held here — APPLIED, any refusal, or the healthy
-        ``no_durable_journal`` decline — is an armed record.
+        ``True`` — the record is armed for this write, by ONE of two evidence
+        routes, and the docstring below used to claim only the first:
+
+        1. the seam ANSWERED, and only an armed call answers: an unarmed
+           deployment returns ``None`` from ``write_live_record``, so any
+           ``RecordWrite`` held here — APPLIED, any refusal, or the healthy
+           ``no_durable_journal`` decline — is an armed record; **or**
+        2. the fold is QUEUED (``deferred``, #14185) and the seam has simply not
+           answered yet. This is not an inference: :func:`_submitted_to_worker`
+           refuses to defer unless ``_record_armed()`` holds, so the deployment's
+           arming is already established when the write is queued. Answering
+           ``False`` here would make a deferred write read as an UNARMED
+           deployment, which is the one thing it is not.
+
+        ⛔ Keep both routes in view when editing this property: the contract text
+        above was written for route 1 alone and went stale the moment ``deferred``
+        existed — the "stated-but-false invariant" class this branch keeps closing.
 
         ``False`` — nothing came back and nothing is at stake: the unarmed path.
 
@@ -347,6 +504,11 @@ class LiveWrite:
         """
         if self.record is not None:
             return True
+        if self.deferred:
+            # Armed, and the fold is queued — the seam simply has not answered.
+            # Answering ``False`` here would let a deferred write read as an
+            # UNARMED deployment, which is the one thing it is not.
+            return True
         if self.refusal == PROJECTION_RAISED:
             return None
         return False
@@ -359,6 +521,7 @@ class LiveWrite:
             "refusal": self.refusal,
             "folded": self.folded,
             "unprojected": self.unprojected,
+            "deferred": self.deferred,
             # ``None`` = the fold was not asked, or it applied. A dict = the
             # cache declined and NAMES why (dimension + the figures compared).
             "cache_fold": (None if self.cache_fold is None
@@ -461,6 +624,7 @@ def write(event: Mapping[str, Any], *,
         seq = append() if append is not None else log.append(event)
 
     # ── 2. THE RECORD, on ONE transaction, after the append. ───────────────
+    deferred = False
     try:
         # ⛔ THE SEAM IS IMPORTED *INSIDE* THIS TRY, not above it (#13345 review
         # P2). A door that passes no `project=` reaches the real
@@ -483,7 +647,24 @@ def write(event: Mapping[str, Any], *,
                     journal_skipped=journal_skipped)
 
             project = _default_project
-        outcome = project(event, seq, journal_skipped=journal_skipped)
+        outcome = None
+        # ⛔ #14185: THE FOLD MOVES OFF THIS THREAD WHEN IT MAY. The append is the
+        # commit point (#7951), so once the line exists the record's fold is
+        # bookkeeping the caller need not await; `_submitted_to_worker` decides
+        # whether THIS write may hand it over (and says why not when it may not),
+        # and answers False on every doubt — which folds inline, the pre-#14185
+        # shape. The lag this creates is EXPORTED
+        # (`monitoring`'s `record_projection_*` gauges) and DECLARED by every
+        # reader that compares the journal with the record (#2952's rule):
+        # `journal_coverage`, `record-reconcile --journal`, `record_runner
+        # status`.
+        if _submitted_to_worker(
+                event=event, seq=seq, project=project, durable=durable,
+                journal_skipped=journal_skipped, tenant=tenant,
+                record_sink=record_sink):
+            deferred = True
+        else:
+            outcome = project(event, seq, journal_skipped=journal_skipped)
     except Exception as exc:
         # ⛔ NEVER RAISE AFTER THE APPEND. The line is committed; a raise would
         # hand the producer an exception for a write that persisted, and would
@@ -539,7 +720,15 @@ def write(event: Mapping[str, Any], *,
     # reads as "in neither store" rather than as "one replay away". Setting 1
     # here would make a LOST write indistinguishable from a recoverable one.
     unprojected = 0
-    if (outcome is not None and not getattr(outcome, "applied", False)
+    if deferred:
+        # ⛔ A LINE THE RECORD HAS NOT TAKEN *YET* — which is the deferred arm's
+        # whole point, so it is spelled as the same quantity rather than as a
+        # second one. It is NOT a loss and must not be read as one: the item is
+        # QUEUED, the loop's own ``failures`` counter is the loss signal, and
+        # `record_reconcile` watches the same positions converge as the queue
+        # drains. Setting 0 here would make a lagging record look caught-up.
+        unprojected = 1
+    elif (outcome is not None and not getattr(outcome, "applied", False)
             and not _is_durable_decline(outcome)):
         unprojected = 0 if journal_skipped else 1
         refusal = refusal or "write_failed"
@@ -547,6 +736,11 @@ def write(event: Mapping[str, Any], *,
         unprojected = 0 if journal_skipped else 1
         refusal = PROJECTION_RAISED
 
+    # ⛔ UNREACHABLE ON THE DEFERRED ARM BY CONSTRUCTION, not by luck: a write
+    # whose outcome a door consumes is never deferred (`_submitted_to_worker`
+    # condition 2), so `outcome` is a real `RecordWrite` here whenever a sink
+    # exists. Appending on the deferred arm would hand the capture writer the
+    # `None` that means UNARMED and send a record-held turn to the graph.
     if record_sink is not None:
         record_sink.append(outcome)
 
@@ -609,4 +803,5 @@ def write(event: Mapping[str, Any], *,
 
     return LiveWrite(event=event, seq=seq, appended=not journal_skipped,
                      record=outcome, folded=folded, refusal=refusal,
-                     unprojected=unprojected, cache_fold=denial)
+                     unprojected=unprojected, cache_fold=denial,
+                     deferred=deferred)

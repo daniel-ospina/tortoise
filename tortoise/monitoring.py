@@ -908,6 +908,233 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
     ["decline"],
 )
 
+#: THE PROJECTION WORKER'S OWN FOUR FAMILIES (#14185), and why the record's
+#: existing counters cannot answer any of them.
+#:
+#: Once the record's fold runs on its own loop (`tortoise/projection_worker.py`)
+#: a write can be ACKNOWLEDGED while the record is still behind it, so the
+#: questions an operator now needs are about a QUEUE, and every one of them is
+#: invisible to `RECORD_WRITE_FAILURE_COUNT`: that counter answers "did a record
+#: row never reach Postgres?", and a queued-but-not-yet-folded record is not a
+#: failure — it is the healthy shape of a lagging projection, healed by the fold
+#: it is waiting for. Folding lag into the failure counter would make a working
+#: deployment read as a failing one on every burst, which is the
+#: `CACHE_LEG_FAILURE_COUNT` misattribution lesson ("the record's counters read
+#: perfectly healthy") pointed the other way.
+#:
+#: FOUR families, four different questions — none of them a sum of the others:
+#:
+#: * ``PROJECTION_QUEUE_DEPTH`` — items the loop still OWES: queued PLUS the one
+#:   being folded (a wedged fold must not report depth 0 and read as caught-up).
+#:   A GAUGE, because it can go down.
+#: * ``PROJECTION_PENDING_POSITIONS`` — the JOURNAL POSITIONS the record has not
+#:   taken yet, i.e. the lag in POSITIONS. It is the process-side reading of the
+#:   same quantity `record_projection.JournalCoverage.unprojected` measures
+#:   against the record (`record_reconcile`'s `unprojected_journal` verdict), so
+#:   the two can be compared when an operator asks whether the queue and the
+#:   record agree.
+#: * ``PROJECTION_OLDEST_PENDING_SECONDS`` — the lag in TIME: how old the item at
+#:   the head is. Positions alone cannot distinguish a burst of 500 fast folds
+#:   from 500 records stuck behind one wedged statement; this is the number that
+#:   can. ⛔ It is a CALLBACK gauge (``set_function``, bottom of this module), not
+#:   an event-published one: it is recomputed on collect, because the value drifts
+#:   with the clock and the loop that would push it is the thread a wedge blocks
+#:   (#14222 review cycle 5, ISSUE 1).
+#: * ``PROJECTION_INLINE_FALLBACK_COUNT`` — writes that fell back to folding on
+#:   their own thread because the queue was FULL (or the worker was stopping).
+#:   ⛔ NOTHING IS DROPPED when the bound is reached — a dropped item would be a
+#:   silently short record — so the visible cost is a slower ACK, and this counter
+#:   is what makes it attributable rather than an unexplained latency.
+#:   ``reason`` is a closed vocabulary of FOUR, one per way an ACK can end up
+#:   folding on its own thread: ``queue_full`` (the bound in
+#:   ``projection_worker.ENV_QUEUE_MAX`` was reached), ``worker_stopping`` (the
+#:   loop was being shut down, or a wedged consumer kept it from restarting —
+#:   `stop()` does not clear its thread after a timed-out join), ``uncopyable``
+#:   (the record's deep snapshot could not be made, so it was folded inline
+#:   rather than aliased) and ``queue_fault`` (``submit`` raised before it could
+#:   queue — thread/fd exhaustion in ``thread.start()``; the caller answers it
+#:   inline, so the row is still written and only the latency is lost).
+#:
+#: ``PROJECTION_WORKER_FAILURE_COUNT`` is separate from both: it counts deferred
+#: folds that did NOT WRITE A ROW. Unlike a lagging queue that is a real gap the
+#: journal heals (`tools/record_runner.py apply`), and unlike the inline path's
+#: failures it is counted by the LOOP rather than by `write_live_record`'s own
+#: door — the seam swallows its own armed failures and reports them through
+#: ``record_write_failures``, so a projection failing out of the loop is the one
+#: shape only the worker can see. ⛔ THE CLASSIFICATION READS THE OUTCOME, NOT
+#: ``None`` ALONE (#14222 review cycle 3): an ARMED REFUSAL also wrote nothing —
+#: ``circuit_open`` is the realistic one, where a record outage refuses every fold
+#: without a socket — and counting those as `projected` made this channel read
+#: ``armed: true, failures: {}`` ("caught up") through a total outage.
+#:
+#: ``reason`` vocabulary is CLOSED at three, one per observed answer:
+#:
+#:   ``projection_raised``     the fold raised. The journal holds the line.
+#:   ``record_no_outcome``     the callable answered NOTHING (no `RecordWrite`).
+#:                             Named for what was OBSERVED rather than for a cause
+#:                             it did not check: `write_live_record` answers
+#:                             ``None`` when unarmed, but a door's own `project`
+#:                             callable can answer ``None`` for its own reasons
+#:                             (the SDK's unimportable-record-half arm, #10000).
+#:   ``projection_refused``    an ARMED refusal (`applied=False` with a
+#:                             ``refusal`` token that is not the seam's healthy
+#:                             ``no_durable_journal`` decline, #9231). Counted
+#:                             here as well as on `record_write_failures` on
+#:                             purpose: the two answer different questions ("was a
+#:                             row lost?" vs "did the LOOP's fold land?"), and an
+#:                             operator reading THIS loop's channel needs the
+#:                             second one to be true.
+#:
+#: ⛔ Each of these is counted HERE rather than only at the seam because the seam's
+#: unarmed arm is deliberately SILENT (no counter, no log — §2.0's byte-identical
+#: deployment), so without this the row would vanish with nothing observably
+#: wrong. A lane that scopes `TORTOISE_RECORD_DSN` for one run and restores it in
+#: a `finally` is the live shape.
+#:
+#: Single writers: ``record_projection_queue_state``,
+#: ``record_projection_worker_failure`` and ``record_projection_inline_fallback``,
+#: all called from ``tortoise.projection_worker`` (the #501/#3677 house shape).
+PROJECTION_QUEUE_DEPTH = Gauge(
+    "tortoise_record_projection_queue_depth",
+    "Record projections the projection worker still OWES — queued plus the one "
+    "being folded (#14185). Includes the in-flight item on purpose: a wedged "
+    "fold that reported depth 0 would read as a caught-up record.",
+)
+PROJECTION_PENDING_POSITIONS = Gauge(
+    "tortoise_record_projection_pending_positions",
+    "Journal positions queued for the record but not yet folded — the lag in "
+    "POSITIONS (#14185); the process-side reading of "
+    "`JournalCoverage.unprojected`",
+)
+PROJECTION_OLDEST_PENDING_SECONDS = Gauge(
+    "tortoise_record_projection_oldest_pending_seconds",
+    "Age of the OLDEST queued record projection — the lag in TIME (#14185)",
+)
+PROJECTION_WORKER_FAILURE_COUNT = Counter(
+    "tortoise_record_projection_worker_failures_total",
+    "Deferred record projections that did NOT WRITE A ROW on the projection "
+    "worker's loop (#14185) — raised, answered nothing, or were refused; the "
+    "journal holds the line and a replay heals it",
+    ["reason"],
+)
+PROJECTION_INLINE_FALLBACK_COUNT = Counter(
+    "tortoise_record_projection_inline_fallbacks_total",
+    "Writes that folded the record on their OWN thread because the projection "
+    "queue was FULL or the worker was STOPPING (#14185) — a slower ack, never a "
+    "dropped record",
+    ["reason"],
+)
+
+#: ⛔ THE TIME GAUGE IS COMPUTED AT COLLECT, NOT PUSHED (#14222 review cycle 5,
+#: ISSUE 1). ``Gauge.set_function`` makes every other method of this family a
+#: no-op and recomputes the value whenever the metric is collected, which is the
+#: only shape that stays truthful through a wedge: the loop that would push an
+#: update is the very thread that is blocked, and the case the family exists for
+#: — one record wedged behind a 30 s statement with nothing new arriving — is
+#: precisely the case in which no enqueue or completed fold ever happens. The
+#: callback imports lazily because `projection_worker` imports THIS module; the
+#: import is per collect and cheap (a `sys.modules` hit), and any failure answers
+#: 0.0 rather than breaking a scrape.
+def _live_oldest_pending_seconds() -> float:
+    """The age of the queue head, read when the metric is COLLECTED (#14185)."""
+    try:
+        from . import projection_worker
+    except Exception:      # noqa: BLE001, RUF100 — a scrape never fails on this
+        return 0.0
+    try:
+        return projection_worker.oldest_pending_seconds()
+    except Exception:      # noqa: BLE001, RUF100
+        return 0.0
+
+
+PROJECTION_OLDEST_PENDING_SECONDS.set_function(_live_oldest_pending_seconds)
+
+#: The families whose locks must be replaced in a forked child — see
+#: :func:`ensure_projection_metrics_fork_safe`.
+_PROJECTION_METRIC_FAMILIES = (
+    PROJECTION_QUEUE_DEPTH,
+    PROJECTION_PENDING_POSITIONS,
+    PROJECTION_OLDEST_PENDING_SECONDS,
+    PROJECTION_WORKER_FAILURE_COUNT,
+    PROJECTION_INLINE_FALLBACK_COUNT,
+)
+
+#: The pid these families' locks were last made valid for. A mismatch means this
+#: process is a forked child and inherited them.
+_PROJECTION_METRICS_PID = os.getpid()
+
+
+def _lock_holders(family) -> list:
+    """Every object under *family* that carries one of prometheus_client's locks.
+
+    TWO kinds, and both are inherited across ``fork()``:
+
+    * the FAMILY's own ``_lock`` — taken by ``Counter.labels()`` and by
+      ``_multi_samples()`` while a labelled family is collected;
+    * each ``MutexValue``'s ``_lock`` — taken by ``set``/``inc``/``get``, so it is
+      what a publish AND a collect touch.
+    """
+    holders = [family, *getattr(family, "_metrics", {}).values()]
+    values = [getattr(h, "_value", None) for h in holders]
+    return holders + [v for v in values if v is not None]
+
+
+def ensure_projection_metrics_fork_safe() -> bool:
+    """Replace prometheus_client's inherited locks after a ``fork()`` (#14222).
+
+    ⛔ ``prometheus_client`` IS NOT FORK-SAFE, and this is the whole finding: every
+    ``MutexValue`` and every metric family owns a plain ``threading.Lock``. A child
+    that forked while a PEER THREAD held one inherits a lock with no owner, so the
+    child's next ``set``/``inc``/``get``/``labels``/``collect`` blocks FOREVER — and
+    ``contextlib.suppress`` cannot help, because a blocked lock is not an exception.
+    Measured on ``prometheus-client`` 0.26.0 with a peer holding
+    ``PROJECTION_QUEUE_DEPTH._value._lock`` at ``fork()``: the child blocked in
+    ``values.py``'s ``MutexValue.set`` from the ACK path and in ``get`` from
+    ``projection_worker_gauges()`` (a health read).
+
+    So the projection worker's own fork reset replaces the two locks it OWNS, and
+    this replaces the THIRD PARTY's — the same reasoning, one layer down, which is
+    what the earlier revision of this fix got wrong: dropping the publish from the
+    read path only moved the wedge onto the write and collect paths.
+
+    ⛔ PRIVATE ATTRIBUTES, deliberately and with the guard stated: ``_lock``,
+    ``_value`` and ``_metrics`` are what ``metrics.py``/``values.py`` use in 0.26.0.
+    Every attribute is read with ``getattr`` so a future release that renames one
+    degrades to "no replacement here" instead of raising inside an ACK or a
+    scrape. ``tests/test_14185_projection_worker.py`` pins the replacement by
+    HOLDING a lock across the reset, so a rename reds a test rather than silently
+    restoring the wedge.
+
+    Only the LOCKS are replaced: the inherited VALUES are left alone, because the
+    fork reset republishes them from the child's own state (and a read-only child's
+    stale values are a declared residual of the worker's, not this function's).
+
+    RETURNS whether this call replaced anything (``False`` = already valid here).
+    """
+    global _PROJECTION_METRICS_PID
+    pid = os.getpid()
+    if pid == _PROJECTION_METRICS_PID:
+        return False
+    seen: set = set()
+    replaced = 0
+    for family in _PROJECTION_METRIC_FAMILIES:
+        for holder in _lock_holders(family):
+            if id(holder) in seen:
+                continue
+            seen.add(id(holder))
+            lock = getattr(holder, "_lock", None)
+            if lock is None:
+                continue
+            try:
+                fresh = type(lock)()
+            except Exception:      # noqa: BLE001, RUF100
+                fresh = threading.Lock()
+            holder._lock = fresh
+            replaced += 1
+    _PROJECTION_METRICS_PID = pid
+    return replaced > 0
+
+
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
 #:
 #: The counter above is CUMULATIVE since process start and is never reset — that
@@ -2916,6 +3143,133 @@ def record_cache_leg_failure(reason: str) -> None:
 def cache_leg_failure_counts() -> dict[str, int]:
     """In-process snapshot of ``CACHE_LEG_FAILURE_COUNT``, by reason (#12943)."""
     return _collect_by_label(CACHE_LEG_FAILURE_COUNT, "reason")
+
+
+def record_projection_queue_state(*, depth: int, pending_positions: int) -> None:
+    """Publish the projection worker's two EVENT gauges (#14185).
+
+    Called from ``tortoise.projection_worker`` on every queue transition — an
+    enqueue and a completed fold — so the exported numbers are the loop's own
+    state rather than a sampler's guess. Both can go DOWN, which is what makes
+    them gauges: a depth and a count of positions.
+
+    ⛔ THE THIRD FAMILY IS NOT PUBLISHED HERE ANY MORE (#14222 review cycle 5,
+    ISSUE 1). ``PROJECTION_OLDEST_PENDING_SECONDS`` is a function of the CLOCK, so
+    a pushed value is only as fresh as its last publish — and the loop publishes
+    at exactly the two moments a wedge rules out (it is inside ``project``, with
+    nothing else waking it). It is registered with ``Gauge.set_function`` at the
+    bottom of this module and recomputed on COLLECT instead: the gauge then
+    represents current state, which is what a Prometheus gauge is for and what
+    makes an ``oldest_pending_seconds > N`` alert able to fire on a quiescent
+    wedge. Depths and positions stay event-published because they do not drift
+    with time.
+    """
+    ensure_projection_metrics_fork_safe()
+    PROJECTION_QUEUE_DEPTH.set(depth)
+    PROJECTION_PENDING_POSITIONS.set(pending_positions)
+
+def record_projection_worker_failure(reason: str) -> None:
+    """Count one DEFERRED record projection that did not write a row (#14185).
+
+    Single writer: ``tortoise.projection_worker.ProjectionWorker._run``. ⛔ It is
+    NOT a value in ``RECORD_WRITE_FAILURE_COUNT``: the seam counts its own armed
+    failures there, so a worker-side raise reaching that family twice would
+    double-count one record, and a raise that the seam swallowed
+    (``write_live_record`` never raises for its own refusals) would never appear
+    at all — this counter is the only surface that sees the LOOP's own failures,
+    which is a different fact.
+
+    ``reason`` vocabulary is CLOSED at ``projection_raised`` (the fold raised),
+    ``record_no_outcome`` (the callable answered nothing) and
+    ``projection_refused`` (an armed refusal — nothing was written). ⛔ The last
+    two exist because `write_live_record`'s unarmed arm is deliberately silent and
+    because an armed refusal still writes no row, so this is the only surface that
+    can see a deferred fold that did not land (#14222 review cycles 2 and 3).
+    """
+    ensure_projection_metrics_fork_safe()
+    PROJECTION_WORKER_FAILURE_COUNT.labels(reason=reason).inc()
+
+
+def projection_worker_failure_counts() -> dict[str, int]:
+    """In-process snapshot of ``PROJECTION_WORKER_FAILURE_COUNT`` (#14185)."""
+    ensure_projection_metrics_fork_safe()
+    return _collect_by_label(PROJECTION_WORKER_FAILURE_COUNT, "reason")
+
+
+def record_projection_inline_fallback(reason: str) -> None:
+    """Count one write that folded the record on its OWN thread (#14185).
+
+    Writers: ``tortoise.projection_worker.ProjectionWorker.submit`` for
+    ``queue_full`` / ``worker_stopping``, and the module-level
+    ``tortoise.projection_worker.submit`` for ``uncopyable`` / ``queue_fault`` —
+    the two declines that never reach the instance.
+    ``reason`` vocabulary: ``queue_full`` (the bound in
+    ``projection_worker.ENV_QUEUE_MAX`` was reached), ``worker_stopping`` (the
+    loop was shutting down, or a wedged consumer kept it from being restarted),
+    ``uncopyable`` (the deep snapshot failed, so the item folds inline rather
+    than aliasing the caller's dict) or ``queue_fault`` (``submit`` raised before
+    it could queue — the caller's ``except Exception: return False`` still folds
+    inline, so nothing is lost).
+
+    ⛔ This is a LATENCY event, not a loss: nothing was dropped and nothing needs
+    a replay — the caller simply paid the fold it would have paid before #14185.
+    That is why it gets its own counter instead of riding the write-failure
+    family, whose non-zero means a row is missing.
+    """
+    ensure_projection_metrics_fork_safe()
+    PROJECTION_INLINE_FALLBACK_COUNT.labels(reason=reason).inc()
+
+
+def projection_inline_fallback_counts() -> dict[str, int]:
+    """In-process snapshot of ``PROJECTION_INLINE_FALLBACK_COUNT`` (#14185)."""
+    ensure_projection_metrics_fork_safe()
+    return _collect_by_label(PROJECTION_INLINE_FALLBACK_COUNT, "reason")
+
+
+def projection_worker_gauges() -> dict[str, float]:
+    """The three projection-worker gauges, read WITHOUT a label (#14185).
+
+    They are unlabelled families, so ``_collect_by_label`` (which assumes one
+    sample per label value) cannot read them; this is the unlabelled analogue and
+    it filters on the exported sample suffix the same way, for the same reason
+    ``_collect_by_label`` does: a ``Gauge`` exports ``…_created`` beside its
+    value, and reading the wrong sample would report a timestamp as a depth.
+    """
+    ensure_projection_metrics_fork_safe()
+    out: dict[str, float] = {}
+    for key, metric in (
+        ("queue_depth", PROJECTION_QUEUE_DEPTH),
+        ("pending_positions", PROJECTION_PENDING_POSITIONS),
+        ("oldest_pending_seconds", PROJECTION_OLDEST_PENDING_SECONDS),
+    ):
+        for family in metric.collect():
+            for sample in family.samples:
+                if sample.name.endswith("_created") or sample.name.endswith("_total"):
+                    continue
+                out[key] = float(sample.value)
+    return out
+
+
+def _projection_worker_metrics() -> dict[str, object]:
+    """The ``metrics()`` key for the projection worker (#14185).
+
+    The ARMED flag is read through ``projection_worker.armed()`` rather than
+    through a second spelling of the variable name here: one flag, one reader —
+    so ``metrics()`` and the worker cannot disagree about whether the loop is
+    supposed to be running. ``armed: false`` means the gauges below are a
+    leftover from an earlier arming (or never moved), NOT a live reading, and
+    that is stated in the value rather than left to an operator to infer.
+    """
+    try:
+        from . import projection_worker
+    except Exception:
+        return {"armed": None, "error": "projection_worker_unimportable"}
+    return {
+        "armed": bool(projection_worker.armed()),
+        **projection_worker_gauges(),
+        "failures": projection_worker_failure_counts(),
+        "inline_fallbacks": projection_inline_fallback_counts(),
+    }
 
 
 def record_derived_embed_decline(scope: str, reason: str) -> None:
@@ -8357,6 +8711,18 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # the measured shape (record 2 objects/3 points, cache 0/0) — so the
         # derived store gets its own key rather than a reason on the record's.
         "cache_leg_failures": cache_leg_failure_counts(),
+        # #14185: the PROJECTION WORKER's channel. Once the record's fold runs on
+        # its own loop, "is the record behind the journal?" is a queue question,
+        # and none of the counters above can answer it — a queued-but-not-yet-
+        # folded record was never lost, so `record_write_failures` correctly stays
+        # zero through a long lag. The lag is reported in POSITIONS (comparable
+        # with `record_reconcile`'s `unprojected_journal`) and in SECONDS (the
+        # only figure that distinguishes a fast burst from a wedged fold), plus
+        # the loop's own failures and the writes that fell back to folding inline
+        # because the queue was at its bound. ⚠️ `worker` reports whether an
+        # operator armed the loop at all: ``{"armed": false}`` means these
+        # gauges are a leftover from a previous arming, not a live reading.
+        "record_projection_worker": _projection_worker_metrics(),
         # #13417: the DERIVED-entity vector's own channel. #13229 made a cold
         # write return without a vector instead of blocking on a 13.5 s model
         # load (p95 20,414 ms → 268 ms) — a trade that LEAVES ROWS the dense leg

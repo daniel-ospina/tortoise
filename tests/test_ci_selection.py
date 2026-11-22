@@ -10645,6 +10645,15 @@ ROWED_BY_THIS_FOLD = (
     # after `--integrity` stayed green over the missing REGISTRATION itself, the
     # #13854 shape — a file in no surface is never selected at all).
     "test_14186_embedder_seam_batching.py",
+    # #14185 (PR #14222) — the record fold's OWN loop: the projection worker and the six
+    # conditions under which a write may be deferred. A file this fold ADDED and registered
+    # on `core`, which is what puts it in `fast_pool()`; it shipped WITHOUT a `durations:`
+    # row, and `--integrity` stayed green over the absence (it is a 0.90 RATIO check), so
+    # only this tuple can make the ENTRY-RULE pin see the file at all — the #14222 review's
+    # P3 finding. ⛔ The row it now carries is the flat `DEFAULT_FAST_WEIGHT`, not a local
+    # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
+    # cannot have a junit figure yet (#3400/#4348).
+    "test_14185_projection_worker.py",
 )
 
 
