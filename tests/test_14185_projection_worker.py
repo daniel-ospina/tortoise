@@ -1157,6 +1157,8 @@ def test_a_fold_whose_OUTCOME_cannot_be_read_is_counted_not_absorbed(armed):
         return types.SimpleNamespace(applied=True, refusal=None,
                                      outcome="applied")
 
+    before = monitoring.projection_worker_failure_counts().get(
+        "record_no_outcome", 0)
     log = _Log()
     live_write.write({"type": "A"}, log=log, project=project, tenant=_TENANT)
     live_write.write({"type": "B"}, log=log, project=project, tenant=_TENANT)
@@ -1169,6 +1171,13 @@ def test_a_fold_whose_OUTCOME_cannot_be_read_is_counted_not_absorbed(armed):
     assert stats.failures == 1, (
         "an unclassifiable fold must be counted as a failure, never assumed to "
         "have written a row")
+    # ⛔ THE OPERATOR-VISIBLE COUNTER, not only the in-process stat (#14222
+    # round-14 review, P3). `stats.failures` is the loop's own tally; a change
+    # that dropped `_publish_failure` on this arm would leave every assertion
+    # above green while the metric an operator actually reads stayed flat. The
+    # sibling leg above pins `projection_raised` in exactly this shape.
+    assert (monitoring.projection_worker_failure_counts().get(
+        "record_no_outcome", 0) - before) == 1
     assert stats.projected == 1
     assert stats.queue_depth == 0 and stats.pending_positions == 0
 
@@ -1483,8 +1492,8 @@ def test_the_fork_hook_replaces_the_REGISTRY_lock_the_scrape_takes_FIRST():
     The repair replaced the locks of the five projection families — ⛔ NOT "every
     family this module's exposure path touches": `_handle_endpoint` touches
     `REQUEST_COUNT` / `REQUEST_LATENCY` BEFORE `generate_latest`, and neither is
-    repaired (see `monitoring`'s residual), which is why this leg holds a
-    projection family and the registry leg below holds the registry. What those
+    repaired (see `monitoring`'s residual), which is why the leg ABOVE holds a
+    projection family and THIS leg holds the registry. What those
     five did not cover is the registry: `CollectorRegistry.collect()` opens with
     `with self._lock:` (a lock that is
     neither a family's nor a `MutexValue`'s) to copy `_collector_to_names`, so a

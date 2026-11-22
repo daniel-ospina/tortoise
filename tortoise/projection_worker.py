@@ -57,16 +57,20 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    round 13, P2, because the trigger was understated): when a write does not go
    through the queue, the caller folds its OWN position on its own thread, at
    ``live_write``'s inline call, while an EARLIER position may still be queued —
-   so one writer's row can be overwritten by its predecessor. ⚠️ **THERE ARE TWO
+   so one writer's row can be overwritten by its predecessor. ⚠️ **THERE ARE THREE
    FAMILIES OF TRIGGER, AND ONLY ONE OF THEM IS THE BOUND.** (a) A DECLINE by the
    bound or by a stopping worker (``queue_full`` / ``worker_stopping``), which is
    what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls — with the bound at ``1``, or
    once the default saturates. (b) The STRUCTURAL arms, which fold inline on EVERY
    write at ANY depth, including an idle queue: ``tenant is None`` (the
    ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
-   pass no tenant) and every ``record_sink`` door. So raising the bound does NOT
-   remove this residual — it only removes arm (a); a same-tenant queued write can
-   be overtaken by a structural-arm fold at zero depth. Nothing detects it: both
+   pass no tenant) and every ``record_sink`` door. (c) An inline fold the bound
+   cannot reach at all: an UNCOPYABLE record (the deep snapshot above fails, so a
+   write that would otherwise already be queued folds inline instead) and a
+   ``submit`` FAULT (the ``queue_fault`` arm below, published before it
+   propagates). So raising the bound does NOT remove this residual — it only
+   removes arm (a); a same-tenant queued write can be overtaken by a structural-arm
+   fold at zero depth, or by a (c) fold at any depth. Nothing detects it: both
    positions are present, so ``journal_coverage`` / ``record-reconcile`` read
    green. The alternative to that residual is a caller that WAITS on the queue —
    which is the coupling this module exists to remove — so the honest form is the
