@@ -1109,9 +1109,10 @@ SWEEP_NAMES = 66
 #: this branch's own `a4e97d6f5b`, which is why the block above can still claim this branch's census
 #: contribution is "ZERO ROWS" and be wrong at this head — that reading was taken before the row
 #: existed and was never re-measured, the recurrence this pin chain keeps recording.
-#: ⛔ ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: the residue counter was derived over the whole tree
-#: and the SINGLE row removed; `11858 − out.update` prints `(11857, "ed40203dbbf32b87")` — the pinned
-#: pair EXACTLY — so that one row is the whole delta and no other shape moved in either direction.
+#: ⛔ ATTRIBUTED BY MEASUREMENT, AND CROSS-CHECKED BY ONE ROW: `--repin` on `917ae19efd` prints
+#: `(11858, "a1552662bf07a10b")`, and removing its single `out.update` row reproduces
+#: `(11857, "ed40203dbbf32b87")` — the pair `e74cf1d13d` pins — so that one row is the whole delta
+#: and no other shape moved in either direction.
 #: The row is DECLARED rather than rewritten away, as `main` declared `terms.update` 0 → 1:
 #: a plain `set[str]` in a test helper is the ordinary-word receiver this sweep deliberately leaves
 #: alone, neither an SDK handle nor a FalkorDB `Graph`, and `typed references still pointing at a
