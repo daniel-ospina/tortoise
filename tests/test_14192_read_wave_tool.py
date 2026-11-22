@@ -304,20 +304,31 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     over-approximate, which is the fail-closed direction this map exists to take; the
     `for`-target arm above is the same argument one statement earlier.
 
-    RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`, an
-    f-string WITH A PLACEHOLDER (`f"{p}_tortoise_fts_query"`), `_N + "_x"`, a parameter), a
-    value read out of a container or an attribute (`_CFG["read"]`, `self._read`) and an
-    unpack whose RIGHT-HAND SIDE is an attribute or a call (`_N, _M = cfg.pair`,
-    `_a, _b = pair()`) are not resolved here — nothing about them is statically pairable, and
-    they are named rather than implied (#14326 review P3).
+    RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`,
+    `_N + "_x"`, a parameter), a value read out of a container or an attribute
+    (`_CFG["read"]`, `self._read`) and an unpack whose RIGHT-HAND SIDE is an attribute or a
+    call (`_N, _M = cfg.pair`, `_a, _b = pair()`) are not resolved here — nothing about them
+    is statically pairable, and they are named rather than implied (#14326 review P3).
+
+    ⛔ AN f-STRING IS OVER-APPROXIMATED, NOT RESIDUAL, AND THE DOCSTRING USED TO CLAIM THE
+    OPPOSITE (#14326 round 5, MEASURED at `6f66ac53`): the `JoinedStr` arms feed every part
+    to the resolver, a `FormattedValue` part yields nothing of its own, and a CONSTANT
+    fragment is resolved — so `_N = f"{p}_tortoise_fts_query"` yields `{'_tortoise_fts_query'}`
+    for `_N`. That is the fail-CLOSED direction this file takes everywhere: used as a
+    reach it REDS (`getattr(sdk, _N)(…, kind="statement")`, measured `indirect=1`), while a
+    name that merely LABELS the read stays GREEN because the `Name` arm requires an
+    executable position (`_lbl = f"{p}_tortoise_fts_query"; logging.info(_lbl)` measured
+    `refuses=False`). Stated this way because the alternative — resolving `JoinedStr` only
+    when every part is a `Constant` — would make a RUNTIME-COMPUTED read name fail OPEN,
+    which is the class this whole pin exists to close.
 
     ⛔ A PLACEHOLDER-FREE f-STRING IS NOT RESIDUAL, AND NEITHER IS A SELECTION BETWEEN
     LITERALS (#14326 review P6, each MEASURED GREEN at `8f13cb24`): `f"_tortoise_fts_query"`
     parses to `JoinedStr([Constant(...)])` — nothing is computed — and `IfExp`/`BoolOp` only
     SELECT between literal operands, which this file's own `_collection_operands` already
     expands. All three resolve here now, in `_values` AND in `_possible_strings` (the
-    inline-operand path); what stays residual is the `FormattedValue` case, which resolves
-    to nothing.
+    inline-operand path). A placeholder-bearing f-string is over-approximated by its
+    CONSTANT fragments rather than left unresolved — see the residual note above.
 
     A literal ITERABLE is not residual, whatever its type: a `for`/comprehension target over
     a tuple, a list, a SET or a DICT resolves, because CPython's grammar gives `iter` as an
@@ -425,9 +436,15 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         if isinstance(value, ast.BoolOp):
             return set().union(*(_values(operand) for operand in value.values))
         if isinstance(value, ast.JoinedStr):
-            # Every part that IS a constant is statically known; a `FormattedValue` part
-            # yields `set()` from the fall-through, so `f"{p}_tortoise_fts_query"` resolves
-            # to nothing here and stays inside the declared residual.
+            # ⛔ EVERY CONSTANT FRAGMENT IS STATICALLY KNOWN, AND A `FormattedValue` PART
+            # CONTRIBUTES NOTHING OF ITS OWN — it does NOT disable the whole arm (#14326
+            # round 5, MEASURED at `6f66ac53`): `f"{p}_tortoise_fts_query"` therefore
+            # yields `{'_tortoise_fts_query'}`, which REDS when the name is executed and
+            # leaves an inert label GREEN (the `Name` arm needs an executable position).
+            # This comment previously claimed the placeholder case "resolves to nothing",
+            # which contradicted the code and the residual list — the over-approximation is
+            # the fail-closed direction and is deliberate; narrowing it to `Constant`-only
+            # would fail OPEN on a runtime-computed read name.
             return set().union(*(_values(part) for part in value.values))
         return set()
 
@@ -544,8 +561,11 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     # `getattr(sdk, f"_tortoise_fts_query")(…)` and `getattr(sdk, (A if c else B))(…)`
     # reach the read with the name inline and never touch `_values` at all. `_collection_operands`
     # already expands the first two, so resolving them here closes the asymmetry; the
-    # `JoinedStr` arm only ever contributes a part that is EXACTLY a constant, so a
-    # `f"{x}_tortoise_fts_query"` still resolves to nothing (the declared residual).
+    # `JoinedStr` arm feeds every part through, so a CONSTANT fragment is resolved while a
+    # `FormattedValue` contributes nothing — `f"{x}_tortoise_fts_query"` is therefore
+    # OVER-APPROXIMATED to the name (fail-closed, RED when executed, GREEN as an inert
+    # label), NOT residual (#14326 round 5, measured at `6f66ac53`; the claim that it
+    # "resolves to nothing" contradicted this very code).
     if isinstance(node, ast.IfExp):
         return _possible_strings(node.body, consts) | _possible_strings(node.orelse, consts)
     if isinstance(node, ast.BoolOp):
