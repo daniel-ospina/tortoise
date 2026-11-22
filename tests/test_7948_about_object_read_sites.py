@@ -3731,8 +3731,12 @@ def test_every_customer_callable_row_reaches_a_declared_door():
             for door in _doors(str(row["reach"]))
         ]
         assert exception_doors, (
-            f"`_DISTANCE_EXCEPTIONS` carries {exception_reader!r}, but no customer-callable "
-            "row names that reader — a budget for a row that no longer exists is debt"
+            f"`_DISTANCE_EXCEPTIONS` carries {exception_reader!r}, but no row in the table "
+            "names that reader — a budget for a row that no longer exists is debt. (This "
+            "comprehension deliberately admits ANY reach class, not only "
+            "`customer-callable`: a reader can be re-pointed off §13's customer-callable "
+            "cells, and the clause below reports that as an unresolved door rather than as "
+            "a missing row.)"
         )
         # ⛔ `or 0` would be WRONG here: `_door_distance` returns `None` for "not found
         # within `_DISTANCE_SEARCH_CAP` hops", and `0` is a LEGITIMATE distance (a door
@@ -3742,19 +3746,34 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         # zero-hop door, which is the exact confusion the sibling arm above
         # (`if distance is None:` → "is not found within the … search cap") was written
         # to prevent.
-        # ⚠️ NO `assert ... is not None` HERE, ON PURPOSE (`#14249` review, mutation
-        # attribution rule 3). Every door in `exception_doors` belongs to a
-        # customer-callable row — `assert exception_doors` above refuses a budget for a
-        # reader no such row names — and `assert not broken` above ALREADY refused any
-        # door of a customer-callable row that is unresolved at the cap, with the same
-        # "UNVERIFIED here, not wrong" wording. So a `None` cannot reach this line, and
-        # an assertion for it would be a clause no mutation can red: it would read as
-        # coverage of the `or 0` hazard while supplying none (measured: dropping
-        # `_DISTANCE_SEARCH_CAP` 12 -> 3 reds at the `broken` arm, and a None-clause's
-        # message never appears). `max()` over a list holding a `None` raises
-        # `TypeError` instead, so if either arm above is ever weakened this line fails
-        # LOUDLY and attributably rather than inventing a zero-hop door.
+        # ⛔ `or 0` would be WRONG here: `_door_distance` returns `None` for "not found
+        # within `_DISTANCE_SEARCH_CAP` hops", and `0` is a LEGITIMATE distance (a door
+        # that IS the reader) — see `_door_distance:3056` and `_DISTANCE_SEARCH_CAP`'s
+        # docstring. Collapsing `None` into `0` would report a capped search as a
+        # zero-hop door.
+        #
+        # ⚠️ THIS CLAUSE IS LIVE, and it was nearly deleted on a false negative. A
+        # reviewer argued it was dead because `assert not broken` above covers "the same
+        # door set" — it does NOT: that loop walks only `_reach(row) ==
+        # "customer-callable"` rows, while `exception_doors` above admits ANY reach
+        # class on purpose. A reader re-pointed off §13's customer-callable cells (row 39
+        # `domain_validators.py::validate_portfolio_shape`, reach class `ops audit`, both
+        # its doors `None` at the cap) reaches this line and produces `None` here.
+        # MEASURED both ways: with this clause, an entry for such a reader reds with
+        # "2 of 2 door(s) are not found within the 12-hop search cap …"; without it, the
+        # same entry crashes with a bare `TypeError: '>' not supported between instances
+        # of 'NoneType' and 'NoneType'` naming neither the reader nor the remedy.
         distances = [_door_distance(door, exception_reader) for door in exception_doors]
+        unresolved = sum(1 for distance in distances if distance is None)
+        assert not unresolved, (
+            f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]`: {unresolved} of "
+            f"{len(distances)} door(s) are not found within the "
+            f"{_DISTANCE_SEARCH_CAP}-hop search cap, so they are UNVERIFIED here — this "
+            "arm cannot tell 'no chain' from 'a chain longer than it looked'. Raise "
+            "`_DISTANCE_SEARCH_CAP` (and re-derive the pinned figures) or shorten the "
+            "chain. ⛔ A `_DISTANCE_EXCEPTIONS` entry cannot help: it raises the reader's "
+            "BUDGET, and the search stops at the cap before any budget is consulted."
+        )
         deepest = max(distances)
         assert deepest == exception_budget, (
             f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]` budgets {exception_budget} "
