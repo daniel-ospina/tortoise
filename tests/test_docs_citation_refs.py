@@ -196,7 +196,9 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 import unicodedata
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -3241,32 +3243,232 @@ _ARG_TAKING_LONG_FLAGS = frozenset({
     "--group-separator", "--include", "--label", "--max-count", "--regexp",
 })
 
-#: GNU grep's ONE undocumented alias that this reader ACCEPTS, declared on its own so that the
-#: block below stays a description of the UNION rather than of this one-element allowance —
+#: GNU grep's undocumented long-alias CANDIDATES, kept apart from the measured allowance so that
+#: the allowance stays a MEASUREMENT of the grep on PATH rather than a declaration (#14138) —
 #: `_comment_block_above` scopes a prose guard to the comment run above its anchor, so a description
 #: sitting between a constant and its set would be read as that constant's (#14027 review, P3).
 #:
-#: ⛔ IT IS HERE BECAUSE GREP RUNS IT, AND LEAVING IT OUT LOST A REAL COUNT
-#: (#14027 review round 2, P2 — MEASURED). `grep --help` never mentions `--unix-byte-offsets`, but
-#: grep accepts it — and every prefix of it, `--u`/`--un`/`--uni`/`--unix` — as the obsolete `-u`
-#: (`warning: --unix-byte-offsets (-u) is obsolete`), and `grep -c --unix-byte-offsets '^[+-]$'`
-#: really counts the blank class (`2`). Declined as unknown, a SECOND blank-class prescription in
-#: that spelling sat invisible beside the one that was read — the false PASS this cell exists to
-#: refuse. `--fixed-regexp` is the other undocumented alias and stays OUT deliberately: it shares
+#: ⛔ WHY THE SPELLING IS KNOWN AT ALL, AND WHY IT IS NO LONGER DECLARED — BOTH MEASURED.
+#: `grep --help` never mentions `--unix-byte-offsets`, but GNU grep 3.11 ACCEPTED it — and every
+#: prefix of it, `--u`/`--un`/`--uni`/`--unix` — as the obsolete `-u` (`warning:
+#: --unix-byte-offsets (-u) is obsolete`), and `grep -c --unix-byte-offsets '^[+-]$'` really counted
+#: the blank class (`2`). Declined as unknown, a SECOND blank-class prescription in that spelling
+#: sat invisible beside the one that was read — the false PASS this cell exists to refuse (#14027
+#: review round 2, P2).
+#: ⛔ GNU grep 3.12 REMOVED it, and 3.12 is what `ubuntu-latest` (Ubuntu 26.04) now ships: there
+#: `grep -c --unix-byte-offsets '^[+-]$'` is `grep: unrecognized option` and exits 2. A hardcoded
+#: allowance then made this reader grade a command grep will not run — the false RED its own
+#: acceptance rule refuses — and turned a fact about the local binary into a CI-only crash (#14138).
+#: So the allowance is MEASURED against the grep that would run the command, and it is EMPTY
+#: wherever that grep refuses the spelling.
+#: `--fixed-regexp` is the other undocumented alias and stays OUT deliberately: it shares
 #: `-F`'s identity, so admitting it would make `--fixed-` falsely ambiguous (measured: `grep -c
-#: --fixed-` is ACCEPTED), and it retargets the match semantics rather than the arity.
-_D5_UNDOCUMENTED_LONG_OPTIONS = frozenset({"--unix-byte-offsets"})
+#: --fixed-` is ACCEPTED), and it retargets the match semantics rather than the arity. That is a
+#: SEMANTIC exclusion no grep version decides, so it is not a candidate here — it is excluded even
+#: where grep accepts it.
+_D5_UNDOCUMENTED_ALIAS_CANDIDATES = ("--unix-byte-offsets",)
 
-#: Every long option `grep --help` documents PLUS `_D5_UNDOCUMENTED_LONG_OPTIONS`, for ONE
-#: purpose: whether a prefix is AMBIGUOUS.
+
+#: The probe the measurement below and the alias cell both feed to `grep -c`: two lines of the blank
+#: class, plus lines that are not. `grep -c '^[+-]$'` on it prints `2`, which is what makes the
+#: control run below decisive. ⛔ ONE FIXTURE, ONE LITERAL (#14138 review round 4, P3): the cell used
+#: to spell the same bytes out again, so a change to one copy would have silently diverged from the
+#: other while both still claimed to be the same measurement.
+_D5_GREP_PROBE = "++\n+\nxx\n-\n\n"
+
+
+def _d5_grep_verdict(ran: subprocess.CompletedProcess, name: str, grep: str = "grep") -> bool:
+    """Read one probe run: True = `grep` RAN `name`, False = it REFUSED it, a THIRD code RAISES.
+
+    ⛔ A THIRD EXIT CODE IS AN ERROR, NOT A REFUSAL (#14138): reading it as "refused" would
+    silently empty the allowance, so a real prescription in the alias spelling would go unread.
+
+    ⛔ ONE IMPLEMENTATION, TWO READERS — and they are different readers on purpose. The allowance
+    probe below asks this question of the alias candidates, where a `False` removes a spelling from
+    the option universe; the alias cell asks it of every spelling the alias answers to, where a
+    `False` is the refusal arm of its own assertion. A second copy of the rule would let the two
+    disagree about what a given exit code means, which is the drift this file bans by name (#14138
+    review round 8, P2 — MEASURED: with a grep that answers a third code for a PREFIX spelling only,
+    a two-way `if rc in (0, 1) … else` read it as a refusal — and the assertion it then reached
+    interpolates the code it actually SAW, so it printed "(measured: exit 3)" over a run that exited
+    3: a refusal claimed about a measurement that was never taken).
+    """
+    if ran.returncode in (0, 1):
+        return True
+    if ran.returncode == 2:
+        return False
+    raise AssertionError(
+        f"`{grep} -c {name} '^[+-]$'` exited {ran.returncode}, which is neither a count (0/1) nor "
+        f"grep's invalid-option code (2): {ran.stderr.strip()!r} — a NON-ANSWER cannot decide the "
+        "reader's option universe, and reading it as 'refused' is the fail-open direction (#14138)")
+
+
+def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
+    """Does `grep` RUN this long-option spelling? Measured, never remembered (#14138).
+
+    ⛔ THE VERDICT COMES FROM THE BINARY THAT WOULD RUN THE DOCUMENT'S COMMAND (#14138 — MEASURED).
+    `grep -c --unix-byte-offsets '^[+-]$'` exits 0/1 on GNU grep 3.11 and exits 2
+    (`unrecognized option`) on GNU grep 3.12, which `ubuntu-latest` now ships. A LONG spelling is
+    graded only when grep would run it, so the version split has to be READ FROM GREP rather than
+    baked in: a baked-in table is wrong on one of the two platforms whichever way it is written.
+
+    ⛔ A CONTROL RUN MAKES A BARE RC 2 ATTRIBUTABLE TO GREP ANSWERING AT ALL — NOT TO THIS OPTION
+    (#14138 review round 3, P2; #14303 review, P2 — the heading that stood here said "attributable
+    to this option", and the residual below refutes that, MEASURED). grep exits 2 for ANY error,
+    not just an invalid option: `grep -c --count '^[+-]$' <&-` is
+    `grep: (standard input): Bad file descriptor`, rc 2, on a fully documented spelling, and
+    `-f /nonexistent` is the same. Reading a bare rc 2 as "refused" would then EMPTY the allowance
+    on a grep that is merely broken — the fail-open direction, and exactly what the paragraph below
+    refuses. So a DOCUMENTED spelling that must count this class (`--count`: `2` on this probe) is
+    run FIRST: if that run does not answer `2`, the probe itself did not work and NOTHING is
+    concluded from the second run. Discriminating this way is locale-proof, unlike matching grep's
+    translated `unrecognized option` text.
+
+    ⛔ STATED RESIDUAL — THE CONTROL PROVES grep ANSWERS, NOT THAT rc 2 ON THE SPELLING UNDER TEST IS
+    A REFUSAL (#14303 review, P2 — MEASURED). A grep that RUNS the alias but fails that one
+    invocation for an unrelated reason is read as "refused", the allowance empties, and NO CELL
+    REDS: the alias cell's `runs == (grep_probe(…).returncode in (0, 1))` compares this helper
+    against the same raw exit code, so the two agree on the wrong answer. Measured on a `PATH`
+    `grep` that delegates every other spelling (the control answers `2`, rc 0) and exits 2 for
+    `--unix-byte-offsets` and its four prefixes: this file stays GREEN (37 passed at head
+    `f61447b0b09`), which is the same shape GNU grep 3.12 presents LEGITIMATELY — so there is no
+    exit-code discriminator to close it with, and grep's own message is translated (which is why
+    matching text is refused above). Recorded rather than papered over: the gap is real, it is the
+    same fail-open direction the control narrows, and the control narrows it to "grep answered
+    `--count` and refused this" instead of "grep is broken".
+
+    ⛔ A THIRD EXIT CODE IS AN ERROR, NOT A REFUSAL: reading it as "refused" would silently empty
+    the allowance, so a real prescription in the alias spelling would go unread.
+
+    ⛔ STATED RESIDUAL — SHORT SPELLINGS ARE NOT MEASURED (#14138 review, P2). This function answers
+    about LONG options only. `-u` is the SHORT spelling of the option grep 3.12 removed, and the
+    cluster walk (`_d5_flag_word`, `_requests_a_count`) has no per-grep short-flag universe, so
+    `grep -c -u '^[+-]$'` is still graded where a 3.12 grep would refuse it — the false-RED axis
+    this function closes for `--unix-byte-offsets`, one spelling over. It is LATENT rather than
+    live: no document in this tree carries that invocation (`rg -n 'grep -c -u|grep -cu' docs/
+    tools/` finds nothing, and `unix-byte-offsets` occurs only in this file), and closing it needs
+    a cluster-level grep oracle rather than one more candidate here — the measurement is recorded on
+    #14138 (issuecomment-7073577176), where it outlives this fix.
+    """
+
+    def run(spelling: str) -> subprocess.CompletedProcess:
+        return subprocess.run([grep, "-c", spelling, "^[+-]$"], input=_D5_GREP_PROBE,
+                              capture_output=True, text=True, timeout=60)
+
+    control = run("--count")
+    if control.returncode not in (0, 1) or control.stdout.strip() != "2":
+        raise AssertionError(
+            f"the control probe `{grep} -c --count '^[+-]$'` answered rc {control.returncode}, "
+            f"stdout {control.stdout.strip()!r}, stderr {control.stderr.strip()!r} — `--count` is a "
+            "DOCUMENTED spelling and prints `2` on this probe wherever grep works, so this grep is "
+            "broken or the probe is, and rc 2 on the spelling under test would then be an "
+            "UNRELATED error read as a refusal (#14138)")
+    ran = run(name)
+    return _d5_grep_verdict(ran, name, grep)
+
+
+def _d5_grade_alias_spelling(
+    spelling: str, grep: str = "grep",
+) -> tuple[subprocess.CompletedProcess, bool]:
+    """Run one alias spelling on `grep` and return `(the run, its THREE-WAY verdict)`.
+
+    ⛔ THE SEAM EXISTS SO THE RULE HAS A WITNESS AT ITS CALL SITE (#14303 review round 3, P3 —
+    MEASURED). The alias cell classifies every spelling the alias answers to. Pinning
+    `_d5_grep_verdict` on its own did NOT pin that cell's USE of it: replacing the loop's verdict
+    with a two-way `ran.returncode in (0, 1)` branch left this whole file GREEN on GNU grep 3.11 AND
+    under a 3.12 shim — the round-8 fail-open read, reinstated with nothing to red it, because no
+    shipped grep answers a third code for a PREFIX spelling. Routing the loop through this function
+    means the cell and `test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal` share ONE
+    grading path, so the rule is pinned where it is APPLIED.
+
+    ⛔ THE STUB DRIVES THIS FUNCTION, SO THE LOOP'S USE OF IT HAS ITS OWN WITNESS (#14303 review
+    round 4, P3 — MEASURED). A stub can only reach the helper, so pinning it here does NOT pin what
+    the CELL calls: replacing the loop body with a local `subprocess.run` plus a two-way
+    `rc in (0, 1)` left this file green on GNU grep 3.11 AND under a 3.12 shim. The alias cell
+    therefore installs a RECORDER over this name and asserts it was called once per spelling — a
+    loop-local two-way records NOTHING and reds, which is what makes "witness at its call site" true
+    of the loop and not only of the rule.
+
+    ⛔ AND IT IS NOT TRUE THAT "EVERY SPELLING GOES THROUGH THE UNIVERSE" (#14303 review round 10,
+    P3 — MEASURED: the candidate tuple has ONE member and the alias cell probes six spellings). Only
+    `--unix-byte-offsets` is measured by `_d5_grep_runs_long_option`; the four PREFIX spellings and
+    `--fixed-regexp` reach the three-way rule through HERE and nowhere else.
+    """
+    ran = subprocess.run([grep, "-c", spelling, "^[+-]$"], input=_D5_GREP_PROBE,
+                         capture_output=True, text=True, timeout=60)
+    return ran, _d5_grep_verdict(ran, spelling, grep)
+
+
+#: The undocumented aliases the grep ON PATH actually RUNS — the allowance, MEASURED from
+#: `_D5_UNDOCUMENTED_ALIAS_CANDIDATES` (#14138). It is the single candidate on GNU grep <= 3.11 and
+#: EMPTY on grep >= 3.12, which is why it cannot be a literal: the literal was right on exactly one
+#: of the two platforms and red on the other.
+#: ⛔ DERIVED LAZILY, NOT AT IMPORT (#14138 review round 2, P3 — MEASURED). A module-level probe made
+#: this WHOLE file uncollectable on a box with no `grep` (`--collect-only` -> `FileNotFoundError:
+#: 'grep'`), taking every citation guard in it down with the cells that need grep; and it ran
+#: outside any pytest item, so a `grep` that blocked on PATH hung collection instead of failing it.
+#: Deferred, the blast radius is the cells that grep, MEASURED with a `grep` on PATH that exits 3
+#: for every call (so no probe can answer): **eight** cells fail, ONE skips, and the other **28**
+#: still pass (37 cells at this head — re-measure rather than trusting these integers whenever a cell
+#: is added to this file).
+#: The eight are the SIX `test_the_d5_count_reader_*` cells that consult the option universe, plus
+#: `test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have` and
+#: `test_the_D5_row_types_no_verdict_about_the_head_being_merged` — and SIX of the eight report the
+#: diagnostic from this file, while those last two fail on their OWN direct grep calls and carry
+#: their own messages, so "inherits the probe" is true of six, not of eight.
+#: ⛔ THE ONE SKIP IS `test_the_d5_count_reader_knows_every_long_option_grep_documents`, AND IT IS
+#: THE PORTABILITY FIX, NOT A HOLE (#14303 review, P2 — MEASURED at this same hostile grep: it used
+#: to be a ninth FAILURE, on its own direct `grep --help` through `check=True`). A grep that exits 3
+#: for `--help` published no option list at all, so it has no documented universe to pin the option
+#: set against, and `_d5_documented_long_options` raises `_D5NoDocumentedUniverse` for exactly that
+#: case — the same shape BSD grep presents (usage on stderr, exit 2). ⛔ THE FLOOR IS NOT SKIPPED
+#: WITH IT: a `--help` that SUCCEEDED and parsed too little is the derivation breaking, and that
+#: still RAISES (see the docstring there, and the cell that reds it).
+#: `test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal` PASSES here on purpose: it
+#: hands `_d5_grade_alias_spelling` a stub PATH of its own rather than reading the host grep, so it
+#: is independent of the installed binary by construction.
+#: `test_the_d5_count_reader_does_not_describe_itself_as_complete` still PASSES: it greps this file's
+#: source TEXT and never reaches the universe. What the import-time probe did instead was abort
+#: COLLECTION, so NONE of the file's cells ran — that is the difference the laziness buys, not a
+#: count of 8.
+#: A binary that is MISSING outright raises `OSError` from `subprocess` before this function can say
+#: anything (pinned by
+#: `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`). Cached because the probe
+#: spawns a process and nothing within a session changes its answer (the `grep` parameter is part
+#: of the cache key, so a stub's answer and the local binary's are cached separately).
+@cache
+def _d5_undocumented_long_options(grep: str = "grep") -> frozenset[str]:
+    """The allowance for `grep`, MEASURED from the binary — never remembered from a version.
+
+    ⛔ `grep` IS A PARAMETER, NOT A CLOSED-OVER LITERAL (#14303 review, P2 — MEASURED). Every
+    consumer reads the default, so the live behaviour is unchanged; the parameter exists so a STUB
+    can drive the derivation. Without it the only witness was the alias cell's
+    `rederived == _d5_undocumented_long_options()`, and on GNU grep >= 3.12 — the platform CI runs —
+    BOTH sides of that comparison are `frozenset()`. A mutant that hardcodes `return frozenset()`
+    therefore leaves CI green (at head `35b7769e`, `-k "d5 or D5 or undocumented"` under the 3.12
+    shim reported `10 passed`) and reds only on a <= 3.11 box, so
+    the exact regression this derivation exists to prevent (a remembered table coming back, the
+    #14027 false PASS of an unread blank-class prescription) was unguarded where it mattered most.
+    `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer` now drives it with a
+    stub that RUNS the spelling and one that REFUSES it, which distinguishes "measured" from
+    "remembered" on every platform.
+    """
+    return frozenset(
+        alias for alias in _D5_UNDOCUMENTED_ALIAS_CANDIDATES
+        if _d5_grep_runs_long_option(alias, grep))
+
+#: Every long option `grep --help` documents (GNU grep 3.11 and 3.12 document the same set, pinned
+#: against the binary by `test_the_d5_count_reader_knows_every_long_option_grep_documents`).
+#: `_d5_all_long_options()` below is this set UNIONED with the measured allowance, and the union
+#: exists for ONE purpose: whether a prefix is AMBIGUOUS.
 #: `_resolved_long_option` may only resolve a prefix that names a single option in this whole set,
 #: because that is the rule `getopt_long` applies — `--re` names `--regexp` in the arity set but is
 #: refused by grep as ambiguous against `--recursive` (measured), and certifying it graded a
 #: command grep will not run (#13995, MEASURED). Pinned against `grep --help` by
 #: `test_the_d5_count_reader_knows_every_long_option_grep_documents`, so a grep that adds one
 #: reds there rather than quietly making a new prefix ambiguous — and that cell asserts the union
-#: equals `grep --help` ∪ the declared allowance, so an allowance member the universe lost reds by name.
-_D5_ALL_LONG_OPTIONS = frozenset({
+#: equals `grep --help` ∪ the allowance, so an allowance member the universe lost reds by name.
+_D5_DOCUMENTED_LONG_OPTIONS = frozenset({
     "--after-context", "--basic-regexp", "--before-context", "--binary", "--binary-files",
     "--byte-offset",
     "--color", "--colour", "--context", "--count", "--devices", "--directories",
@@ -3277,9 +3479,78 @@ _D5_ALL_LONG_OPTIONS = frozenset({
     "--line-regexp", "--max-count", "--no-filename", "--no-group-separator", "--no-ignore-case",
     "--no-messages",
     "--null", "--null-data", "--only-matching", "--perl-regexp", "--quiet", "--recursive",
-    "--regexp", "--silent", "--text", "--unix-byte-offsets", "--version", "--with-filename",
+    "--regexp", "--silent", "--text", "--version", "--with-filename",
     "--word-regexp",
 })
+
+#: `grep --help`'s set plus the MEASURED undocumented allowance — composed rather than written out
+#: because on a grep that refuses the alias the allowance is empty and this is exactly `grep
+#: --help`'s set (#14138). ⛔ A FUNCTION, not a constant, for the lazy-derivation reason recorded on
+#: `_d5_undocumented_long_options`; `_d5_long_option_candidates` looks it up by name at CALL time, so
+#: a caller that replaces it sees the whole walk follow.
+#: ⛔ `grep` IS A PARAMETER HERE TOO, AND THIS IS THE UNION'S OWN WITNESS (#14303 review, P2 —
+#: MEASURED). Passing it through to the derivation is not decoration: without it the composition —
+#: DOCUMENTED plus the measured allowance — could be replaced by `_D5_DOCUMENTED_LONG_OPTIONS` alone
+#: and every cell stayed GREEN on the platform CI runs, because on grep >= 3.12 the allowance IS
+#: empty, so dropping it is unobservable there. On that platform the union's only remaining content
+#: is a set it would equal anyway. Driving both arms through a stub grep makes the composition
+#: separable on EVERY platform, which is what
+#: `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer` now does.
+def _d5_all_long_options(grep: str = "grep") -> frozenset[str]:
+    return _D5_DOCUMENTED_LONG_OPTIONS | _d5_undocumented_long_options(grep)
+
+
+#: The floor below which a parsed `grep --help` is not a universe at all. GNU grep 3.11 publishes
+#: **48** long options (MEASURED), so this is a "the parser or grep's help layout broke" floor, not
+#: a description of any one grep (#14303 review, P2 — the finding that the `--help` read was not
+#: portable; #14306 review F1 for the inert-floor shape it guards against).
+_D5_LONG_OPTION_FLOOR = 40
+
+
+class _D5NoDocumentedUniverse(RuntimeError):
+    """This grep published no parsable usage, so there is no option universe to pin against.
+
+    ⛔ IT IS A DISTINCT EXIT, NOT A VERDICT, AND IT EXISTS SO THE FLOOR STAYS REACHABLE (#14303
+    review, P2 — the portability residual from #14306; its review F1 found the trap the naive fix
+    walks into). The cell used to read `grep --help` with `check=True`, which turns BSD grep's usage
+    text on **stderr** with exit **2** into `CalledProcessError`: on such a box the cell errors
+    before any assertion, and it takes the module's other citation guards down with it. The naive
+    repair — `pytest.skip` whenever fewer than 40 options were parsed — moves the floor's failure
+    mode from RED to GREEN, so a broken derivation would silently certify nothing. Discriminating
+    on the EXIT CODE keeps both honest: `--help` FAILED and published no usage is a platform fact
+    (this exception, which the cell skips); `--help` SUCCEEDED and still parsed too little is our
+    derivation breaking (`AssertionError`).
+    """
+
+
+def _d5_documented_long_options(completed: subprocess.CompletedProcess) -> set[str]:
+    """The long options `grep --help` published, read from WHICHEVER STREAM carried them.
+
+    ⛔ `grep --help` IS ITSELF NOT PORTABLE (MEASURED via the #14306 handover, and it is the whole
+    finding): GNU grep writes the option list to stdout and exits 0; BSD grep
+    (`grep (BSD grep, GNU compatible) 2.6.0-FreeBSD`, macOS) writes a `usage:` line to **stderr**
+    and exits **2**. Reading only stdout under `check=True` therefore makes this cell unrunnable on
+    macOS rather than merely indifferent to it. Parsing the union of the two streams costs nothing
+    on GNU grep (stderr is empty) and is what lets the same derivation answer there.
+
+    ⛔ THE FLOOR AND THE EXIT CODE ANSWER DIFFERENT QUESTIONS, AND BOTH ARE LOAD-BEARING. A count
+    alone cannot tell "this grep published no long options" from "our regex stopped matching"; the
+    exit code can, so the floor never degenerates into an excuse.
+    """
+    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)",
+                                (completed.stdout or "") + "\n" + (completed.stderr or "")))
+    if len(documented) >= _D5_LONG_OPTION_FLOOR:
+        return documented
+    if completed.returncode != 0:
+        raise _D5NoDocumentedUniverse(
+            f"`grep --help` published only {len(documented)} long options and exited "
+            f"{completed.returncode} — this grep answers its usage on another stream or not at "
+            "all (BSD grep 2.6.0-FreeBSD writes usage to stderr and exits 2), so this host has no "
+            "documented universe to pin the option set against (#14303 review, P2)")
+    raise AssertionError(
+        f"only {len(documented)} long options were parsed out of a `grep --help` that exited 0 — "
+        "the derivation is broken, and a broken derivation must not be able to certify anything "
+        f"(the floor is {_D5_LONG_OPTION_FLOOR}; #14027, #14303 review P2)")
 
 
 def _d5_long_option_candidates(name: str) -> list[str]:
@@ -3298,13 +3569,13 @@ def _d5_long_option_candidates(name: str) -> list[str]:
         possibilities, while `--re` is refused naming `--recursive` and `--regexp` — so ambiguity
         is counted over the distinct options minus the alias, which is what this returns.
     """
-    if name in _D5_ALL_LONG_OPTIONS:
+    if name in _d5_all_long_options():
         # ⛔ AN EXACT NAME IS UNAMBIGUOUS EVEN WHEN IT PREFIXES LONGER ONES (#13995, MEASURED):
         # `--exclude` IS an option while `--exclude-dir` and `--exclude-from` also start with it,
         # and getopt takes the exact match — counting the longer names as rivals declined
         # `grep -c --exclude '*.md' '^[+-]$'`, which grep runs and counts (measured: 2).
         return [name]
-    candidates = [option for option in _D5_ALL_LONG_OPTIONS
+    candidates = [option for option in _d5_all_long_options()
                   if option != "--colour" and option.startswith(name)]
     if not candidates and "--colour".startswith(name):
         candidates = ["--colour"]
@@ -3331,9 +3602,9 @@ def _resolved_long_option(option: str) -> str | None:
     prescription in that spelling left the arm GREEN. The rule is getopt's own: a prefix that
     names EXACTLY ONE member names that member; one that names several (`--ex`, `--d`) is
     ambiguous and answered `None` rather than guessed. The set searched is grep's WHOLE
-    long-option universe — every name `grep --help` documents, PLUS the one declared undocumented
-    alias grep still accepts (`_D5_UNDOCUMENTED_LONG_OPTIONS`, which `_D5_ALL_LONG_OPTIONS` now
-    carries), — ⛔ NOT the `_ARG_TAKING_LONG_FLAGS` ∪
+    long-option universe — every name `grep --help` documents, PLUS whatever undocumented alias the
+    grep ON PATH actually runs (`_d5_undocumented_long_options()`, MEASURED and empty on
+    grep ≥ 3.12, which removed `-u`; #14138), — ⛔ NOT the `_ARG_TAKING_LONG_FLAGS` ∪
     `_PATTERN_SUPPLYING_LONG_FLAGS` pair, which answer a DIFFERENT question (what a resolved
     option's ARGUMENT is, in `_d5_argument_role`) and are too narrow to decide ambiguity: `--re`
     names `--regexp` among them and still names `--recursive` in grep's own terms. A sentence here
@@ -3343,7 +3614,7 @@ def _resolved_long_option(option: str) -> str | None:
 
     ⛔ AND THE ARITY SET GETS NO SHORT-CIRCUIT (#14027 review round 7 — MEASURED): the line
     `if option in _ARG_TAKING_LONG_FLAGS: return option` used to sit here and was INERT — every
-    member of that set is one exact word of `_D5_ALL_LONG_OPTIONS`, so the candidate rule below
+    member of that set is one exact word of `_d5_all_long_options()`, so the candidate rule below
     answers `[option]` for each of them (measured over all fifteen; deleting the line reds 0 of
     the 8 cells that touch this function). A member the arity set could reach but the universe
     could not would be exactly the drift `test_…knows_every_long_option_grep_documents` pins, so
@@ -3875,7 +4146,7 @@ def _inverts_the_match_set(flags: str) -> bool:
 #: graded on WHAT IT COUNTS, never on the literal it prints beside the count.
 #: ⛔ `--fixed-regexp` IS `--fixed-strings` UNDER ANOTHER NAME, AND IS DELIBERATELY NOT A MEMBER
 #: (#13995 review, P2 — MEASURED). grep ACCEPTS it (`grep -c --fixed-regexp '^[+-]$'` -> rc 1,
-#: prints 0), but `grep --help` does not document it, so it is absent from `_D5_ALL_LONG_OPTIONS`
+#: prints 0), but `grep --help` does not document it, so it is absent from `_d5_all_long_options()`
 #: — deliberately, because LISTING it there would make `--fixed-` falsely ambiguous (grep accepts
 #: `--fixed-`, measured) and decline a command grep runs. The consequence is that
 #: `_long_option_is_accepted` declines every alias spelling (`--fixed-regexp`, `--fixed-r`,
@@ -4882,18 +5153,19 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
 
 
 def test_the_d5_count_reader_knows_every_long_option_grep_documents():
-    r"""`_D5_ALL_LONG_OPTIONS` matches `grep --help`, and not through the argument-taking oracle.
+    r"""`_d5_all_long_options()` matches `grep --help`, and not through the argument-taking oracle.
 
     ⛔ WHY THIS EXISTS (#13995, final-head review P1/P3 — MEASURED). `_resolved_long_option` and
     `_long_option_is_accepted` need to know whether a prefix is AMBIGUOUS *in grep's own terms*,
     and the answer is only correct against grep's whole DOCUMENTED set (`grep --help`) — not
     against the smaller set whose arity this reader happens to need. ⛔ GREP HAS TWO UNDOCUMENTED
-    ALIASES, and only one of them belongs here: `--fixed-regexp` (`grep --f` lists it among the
-    possibilities, measured, while `grep --help` does not mention it) is deliberately ABSENT,
-    because it shares `-F`'s identity — including it would make `--fixed-` falsely ambiguous
-    (measured: `grep -c --fixed-` is ACCEPTED) and it counts nothing of this class;
-    `--unix-byte-offsets` is PRESENT, in `_D5_UNDOCUMENTED_LONG_OPTIONS`, because grep runs it and
-    it really counts the blank class. Measured on GNU grep 3.11:
+    ALIASES (measured on GNU grep 3.11), and only one of them may belong here: `--fixed-regexp`
+    (`grep --f` lists it among the possibilities, measured, while `grep --help` does not mention it)
+    is deliberately ABSENT, because it shares `-F`'s identity — including it would make `--fixed-`
+    falsely ambiguous (measured: `grep -c --fixed-` is ACCEPTED) and it counts nothing of this
+    class; `--unix-byte-offsets` is in `_d5_undocumented_long_options()` **where the grep on PATH runs
+    it** — the allowance is MEASURED, not declared, and it is EMPTY on grep >= 3.12, which removed
+    the option (#14138). Measured on GNU grep 3.11:
       * `grep -c --context 2 '^[+-]$'` prints `2` and exits 0, so `--context` DOES take a separate
         word — it was excluded on a `--color` measurement, and the reader then took the `2` as the
         EXPRESSION and the invocation vanished (false PASS);
@@ -4901,26 +5173,46 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
         '--regexp'`) although `--regexp` is the only rival inside the arity set, so certifying
         `--re` graded a command grep will not run.
     Two specifiers cannot both be right, so this test derives the set from `grep --help` itself.
-    Non-vacuity: adding a long option to grep, or dropping one from `_D5_ALL_LONG_OPTIONS`, reds
+    Non-vacuity: adding a long option to grep, or dropping one from `_d5_all_long_options()`, reds
     here by name; the derived set also has to be big enough to be a real universe (≥ 40), so a
     parser that silently matched nothing cannot pass.
+
+    ⛔ `grep --help` IS NOT PORTABLE, AND THE FLOOR IS NOT A SKIP (#14303 review, P2 — MEASURED via
+    the #14306 handover). BSD grep 2.6.0-FreeBSD publishes a `usage:` line on **stderr** and exits
+    **2**, so the `check=True` form this cell used raised `CalledProcessError` there — the cell could
+    not run on macOS at all, and the module's other citation guards lost the run with it. The read
+    now comes from whichever stream carried the list (`_d5_documented_long_options`), and the two
+    cases the count alone confuses are separated by EXIT CODE: a `--help` that FAILED published no
+    usage and there is nothing to pin (skipped, as the platform fact it is); a `--help` that
+    SUCCEEDED and still parsed fewer than 40 is this derivation breaking, and that RAISES. The floor
+    therefore still fires — witnessed by
+    `test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a_silent_grep`.
     """
-    completed = subprocess.run(["grep", "--help"], capture_output=True, text=True, check=True)
-    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", completed.stdout))
-    assert len(documented) >= 40, (
-        f"only {len(documented)} long options were parsed out of `grep --help` — the derivation "
-        "is broken, and a broken derivation must not be able to certify anything")
-    # ⛔ THE UNDOCUMENTED ALLOWANCE IS EXACTLY THE SPELLING THIS READER MUST SEE, AND IT IS PINNED
-    # (#14027 review round 2, P2 — MEASURED). `grep --help` is silent about `--unix-byte-offsets`
-    # while grep runs it, so the set is `documented` PLUS that one spelling; a second undocumented
-    # spelling may not be added without adding it here, and grep's ACCEPTANCE of it is measured
-    # against the binary in the alias test below rather than asserted from memory (#14027 round 3,
-    # P3 — this comment used to point at a "grep call below" that did not exist).
-    assert documented | _D5_UNDOCUMENTED_LONG_OPTIONS == set(_D5_ALL_LONG_OPTIONS), (
-        f"`_D5_ALL_LONG_OPTIONS` has drifted from `grep --help` + the declared undocumented "
+    completed = subprocess.run(["grep", "--help"], capture_output=True, text=True, timeout=60)
+    documented = _d5_pinned_universe(completed)
+    universe = _d5_all_long_options()
+    allowance = _d5_undocumented_long_options()
+    # ⛔ THE UNDOCUMENTED ALLOWANCE IS A MEASUREMENT, AND ITS CANDIDATES ARE PINNED AS GENUINELY
+    # UNDOCUMENTED (#14027 review round 2, P2; #14138). `grep --help` is silent about
+    # `--unix-byte-offsets`, so the universe is `documented` PLUS the MEASURED allowance, and a
+    # spelling `grep --help` DOES document may never be a candidate: it would be a second name for a
+    # documented option, and the union below would not move because the name is already there. ⛔ WHAT
+    # CATCHES IT IS NOT THIS ROW ALONE (#14303 review, P3 — MEASURED at head `f61447b0b09`): adding
+    # `--colour` to the candidates reds this row AND the stub cell, whose `accepts` stub runs ANY
+    # spelling, so the allowance would carry a documented name there (`2 failed, 35 passed`). The
+    # citation that stood here — "adding `--colour` … left every cell green" — was true before that
+    # stub existed and is false now; this row is the better MESSAGE (it names the spelling), never
+    # the unique witness.
+    assert not (set(_D5_UNDOCUMENTED_ALIAS_CANDIDATES) & documented), (
+        f"{sorted(set(_D5_UNDOCUMENTED_ALIAS_CANDIDATES) & documented)} is declared an undocumented "
+        "candidate while `grep --help` DOCUMENTS it — a candidate is by definition a spelling the "
+        "help text omits, and admitting a documented one is invisible to the union assertion below "
+        "(#14138)")
+    assert documented | allowance == set(universe), (
+        f"`_d5_all_long_options()` has drifted from `grep --help` + the MEASURED undocumented "
         f"allowance: missing "
-        f"{sorted((documented | _D5_UNDOCUMENTED_LONG_OPTIONS) - _D5_ALL_LONG_OPTIONS)}, extra "
-        f"{sorted(set(_D5_ALL_LONG_OPTIONS) - documented - _D5_UNDOCUMENTED_LONG_OPTIONS)}. "
+        f"{sorted((documented | allowance) - universe)}, extra "
+        f"{sorted(set(universe) - documented - allowance)}. "
         f"The ambiguity test is only as correct as "
         "this universe (#13995)")
     # ⛔ EVERY ARITY ENTRY IS IN THAT UNIVERSE, AND IT IS PINNED (#14027 review round 7, P3 —
@@ -4929,76 +5221,654 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     # of the arity set that grep does not document would have been resolved by the short-circuit
     # and not by the universe. With the subset pinned, the short-circuit's removal is safe and a
     # future member added outside grep's set reds HERE rather than silently changing resolution.
-    assert _ARG_TAKING_LONG_FLAGS <= _D5_ALL_LONG_OPTIONS, (
+    assert universe >= _ARG_TAKING_LONG_FLAGS, (
         f"`_ARG_TAKING_LONG_FLAGS` names spellings outside the universe grep documents: "
-        f"{sorted(_ARG_TAKING_LONG_FLAGS - _D5_ALL_LONG_OPTIONS)} — `_resolved_long_option` "
+        f"{sorted(_ARG_TAKING_LONG_FLAGS - universe)} — `_resolved_long_option` "
         "resolves every arity entry through `_d5_long_option_candidates`, which can only answer "
         "about documented names (#14027 review round 7, P3 — MEASURED)")
 
 
-def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
-    r"""The declared undocumented allowance is exactly one spelling, and it is the one grep RUNS.
+def _d5_pinned_universe(completed: subprocess.CompletedProcess) -> set[str]:
+    """Read the documented universe from a `grep --help` run, or SKIP where it published none.
 
-    ⛔ BOTH DIRECTIONS MEASURED ON GNU grep 3.11 (#14027 review round 2, P2 and P3):
-      * `--unix-byte-offsets` (`-u`) is absent from `grep --help` and ACCEPTED by grep — at every
-        prefix, `--u`/`--un`/`--uni`/`--unix` — and `grep -c --unix-byte-offsets '^[+-]$'` really
-        counts the blank class (`2` on the probe). Declined as unknown, a SECOND blank-class
-        prescription in that spelling sat invisible beside the one that was read: the false PASS
-        this whole cell exists to refuse. It is IN the universe, and the "exactly one" arm now
-        counts two prescriptions for such a document.
-      * `--fixed-regexp` is the other undocumented alias and stays OUT: it shares `-F`'s identity
-        (so admitting it would make `--fixed-` falsely ambiguous — measured: `grep -c --fixed-` is
-        ACCEPTED) and it counts NOTHING of this class: `grep -c --fixed-regexp '^[+-]$'` prints `0`
-        on the same probe because a literal pattern matches no line. Declining it cannot hide a
-        prescription, which is what makes the exclusion safe rather than merely convenient.
-    Non-vacuity: dropping `--unix-byte-offsets` from `_D5_UNDOCUMENTED_LONG_OPTIONS` and the
-    universe reds the first assertion AND the two-prescription row; adding `--fixed-regexp` to the
-    universe reds the `--fixed-` row.
+    ⛔ THE SKIP IS THE PORTABILITY FIX, AND IT NEEDED ITS OWN WITNESS (#14303 review round 14, P2 —
+    MEASURED). BSD grep 2.6.0-FreeBSD answers `--help` with a `usage:` line on STDERR and exit 2, so
+    there is no option list to pin and this cell must SKIP rather than ERROR — which is what made it
+    runnable on macOS at all (#14306's handover). Pinning `_d5_documented_long_options` on its own
+    did not pin THIS conversion: replacing the `pytest.skip` below with a bare `raise` left this
+    file at `37 passed` on every platform CI runs, because no shipped GNU grep fails `--help`, so
+    the cell would error on a BSD box with a green rail — the regression this fix exists to close,
+    reintroduced with nothing to red it.
+
+    `test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a_silent_grep` now
+    drives this helper with both a universe and a silent grep, so the skip is a witnessed behaviour
+    rather than an unreachable branch.
     """
-    # ⛔ GREP'S OWN VERDICT IS MEASURED HERE, NOT REMEMBERED (#14027 round 3, P3). The two
-    # directions the exclusion rests on are exactly what a future grep could change: if `-u` were
-    # dropped, this alias would be a spelling grep REFUSES that the reader still grades (the worse
-    # direction); if `--fixed-regexp` ever retargeted the arity, excluding it would lose a count.
-    probe = "++\n+\nxx\n-\n\n"
-    for accepted, expected in (("--unix-byte-offsets", "2"), ("--u", "2"), ("--fixed-regexp", "0")):
-        ran = subprocess.run(["grep", "-c", accepted, "^[+-]$"], input=probe, capture_output=True,
-                             text=True)
-        assert ran.returncode in (0, 1), (
-            f"`grep -c {accepted} '^[+-]$'` was REFUSED by this grep ({ran.stderr.strip()}) — the "
-            "reader's treatment of it is calibrated on the measurements named here, so this reds "
-            "rather than silently grading a command grep will not run (#14027)")
-        assert ran.stdout.strip() == expected, (
-            f"`grep -c {accepted} '^[+-]$'` printed {ran.stdout.strip()!r} on the probe "
-            f"({expected!r} expected) — `--unix-byte-offsets` must count THIS class for the false "
-            "PASS argument to hold, and `--fixed-regexp` must count NOTHING for its exclusion to "
-            "be safe (#14027, MEASURED)")
-    assert {"--unix-byte-offsets"} == set(_D5_UNDOCUMENTED_LONG_OPTIONS), (
-        "the undocumented allowance is a DECLARED set of the spellings THIS READER accepts although "
-        "`grep --help` omits them; a second one needs its own measurement here (#14027) — grep has "
-        "two such aliases in total and `--fixed-regexp` is excluded below")
-    for spelling in ("grep -c --unix-byte-offsets '^[+-]$'", "grep -c --u '^[+-]$'",
-                     "grep -c --un '^[+-]$'", "grep -c --uni '^[+-]$'",
-                     "grep -c --unix '^[+-]$'"):
-        assert _d5_count_prescriptions(f"a count: `{spelling}`\n") == ["^[+-]$"], (
-            f"{spelling!r} is the obsolete `-u` and grep runs it (measured: `2` printed, one "
-            "warning) — declining it left a real blank-class prescription unread (#14027, P2)")
+    try:
+        return _d5_documented_long_options(completed)
+    except _D5NoDocumentedUniverse as no_universe:
+        pytest.skip(str(no_universe))
+
+
+def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a_silent_grep():
+    """The `>= 40` floor is REACHABLE, and it is not the skip it can be confused with.
+
+    ⛔ THIS IS THE GUARD THE FIRST CUT OF THE PORTABILITY FIX KILLED (#14303 review, P2 — the
+    #14306 handover; its own review F1 for the mechanism). `pytest.skip` RAISES, so a cell that
+    skips on `len(documented) < 40` makes every assertion below that line unreachable and moves the
+    floor's failure mode from RED to GREEN — the inert-enforcer shape. The two arms below are the
+    mutant that distinguishes them, and neither runs a real grep, so both fire on every platform:
+
+      * a `--help` that SUCCEEDED carrying exactly the floor's worth of long options IS a universe;
+      * a `--help` that SUCCEEDED one short of it is THIS DERIVATION breaking and must RAISE;
+      * a `--help` that FAILED (rc 2, usage on stderr — BSD grep's shape) published no universe at
+        all, which is the ONLY case the skip is allowed to excuse.
+
+    The third arm is also what pins the fix's actual claim: the option list is read from whichever
+    stream carried it, so a usage line on stderr is parsed and counted rather than lost.
+    """
+    def reported(returncode: int, text: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["grep", "--help"], returncode=returncode,
+            stdout=text if returncode == 0 else "", stderr="" if returncode == 0 else text)
+
+    def usage(count: int) -> str:
+        return "Usage: grep [OPTION]... PATTERNS [FILE]...\n" + "\n".join(
+            f"  --opt-{'a' * n} <x>" for n in range(1, count + 1))
+
+    def not_a_skip(fn, *args):
+        """Call `fn`, turning a `pytest.skip` into a FAILURE.
+
+        ⛔ THE SKIP IS THE LAUNDERING HOLE (#14303 review round 5, P2 — MEASURED). `pytest.skip`
+        raises `Skipped`, which is NOT an `AssertionError`, so it escapes every `pytest.raises`
+        arm below and skips the WHOLE cell — the suite exits 0 and the floor's failure mode moves
+        from RED to GREEN, which is exactly the inert-enforcer shape this cell exists to refuse.
+        MEASURED: reinstating `pytest.skip` where the derivation must raise reported
+        `36 passed, 1 skipped` (exit 0) against a baseline of `37 passed`. `pytest.fail` raises
+        `Failed`, which is not an `AssertionError` either, so it escapes the `pytest.raises` and
+        reds the cell.
+        """
+        try:
+            return fn(*args)
+        except pytest.skip.Exception as exc:  # the shape under test
+            pytest.fail(
+                "the derivation SKIPPED where it must RAISE — a skip makes every assertion below "
+                f"it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
+
+    assert len(_d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
+        _D5_LONG_OPTION_FLOOR), (
+        "a successful `grep --help` carrying exactly the floor's worth of long options must be a "
+        "universe, or the floor is not a floor (#14303 review, P2)")
+    with pytest.raises(AssertionError, match="broken derivation must not be able to certify"):
+        not_a_skip(_d5_documented_long_options, reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
+    # ⛔ THE STDERR HALF, READ RATHER THAN TOLERATED: a FAILED `--help` whose usage still yields the
+    # floor is a universe, which is the whole point of dropping `check=True`. This arm is the
+    # mutant-killer for "parse `stdout` only": with `completed.stdout` alone it raises.
+    assert len(_d5_documented_long_options(
+        reported(2, usage(_D5_LONG_OPTION_FLOOR)))) == _D5_LONG_OPTION_FLOOR, (
+        "a `--help` that exited non-zero but PUBLISHED a full option list on stderr must still be "
+        "read — BSD grep's usage goes to stderr, and ignoring that stream is what made this cell "
+        "unrunnable on macOS (#14303 review, P2)")
+    with pytest.raises(_D5NoDocumentedUniverse, match="exited 2"):
+        not_a_skip(_d5_documented_long_options, reported(
+            2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    # ⛔ AND THE CELL'S OWN TURNING OF THAT RAISE INTO A SKIP IS WITNESSED HERE (#14303 review round
+    # 14, P2 — MEASURED). Every arm above pins the DERIVATION; none of them ran the call site that
+    # converts "no universe published" into `pytest.skip`, so replacing that skip with a bare `raise`
+    # left this file at `37 passed` and only a BSD-grep box would ever have noticed. That is the same
+    # P2-whose-fix-has-no-call-site-witness shape this PR catalogues, so it is pinned in both
+    # directions: a silent grep SKIPS, a real universe is RETURNED.
+    with pytest.raises(pytest.skip.Exception):
+        _d5_pinned_universe(reported(
+            2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    full_help = reported(0, usage(_D5_LONG_OPTION_FLOOR))
+    assert _d5_pinned_universe(full_help) == _d5_documented_long_options(full_help), (
+        "a `grep --help` that PUBLISHED a universe must be RETURNED, not skipped — the skip excuses "
+        "only the platform that published nothing (#14303)")
+
+    # ⛔ THE TWO STREAMS ARE JOINED WITH A SEPARATOR, AND THAT SEPARATOR HAS ITS OWN WITNESS (#14303
+    # review round 6, P2 — MEASURED). Reading "whichever stream carried it" is not enough when a
+    # grep SPLITS a list across both: `(stdout or "") + (stderr or "")` fuses the last name of one
+    # with the first of the other (`--opt-b` + `--last` parsed as `['--opt-b--last']`, silently
+    # dropping `--last`). Only a BSD-shaped grep publishes on stderr, and no real one splits a word,
+    # so removing the separator was green on EVERY platform the fleet runs — a silent revert of the
+    # portability fix. The boundary is exercised here instead of waited for.
+    boundary_stdout = usage(_D5_LONG_OPTION_FLOOR - 1) + "\n  --null"
+    split_help = subprocess.CompletedProcess(
+        args=["grep", "--help"], returncode=2,
+        stdout=boundary_stdout,
+        stderr="data   terminate lines with NUL byte and continue the same option list\n")
+    split = not_a_skip(_d5_documented_long_options, split_help)
+    assert "--null" in split, (
+        "a long option ending `stdout` was LOST when the list continued on `stderr` — the two "
+        "streams are being concatenated without a separator, so the boundary fuses the last name "
+        "of one with the first word of the other (#14303 review round 6, P2 — MEASURED)")
+    assert "--nulldata" not in split, (
+        "the streams FUSED at the boundary: `--null` and the first word on `stderr` were parsed as "
+        "one long option, which invents a spelling `grep --help` never published and drops the real "
+        "one — the separator the two streams are joined with is what prevents it (#14303)")
+
+
+def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypatch):
+    r"""The allowance tracks the grep that would RUN the command — measured, never hardcoded.
+
+    ⛔ WHY THIS CELL ASSERTS A CONSEQUENCE AND NOT ONE PLATFORM'S ANSWER (#14138, MEASURED). GNU grep
+    3.11 ACCEPTED `--unix-byte-offsets` (`-u`), accepted every prefix of it
+    (`--u`/`--un`/`--uni`/`--unix`), and `grep -c --unix-byte-offsets '^[+-]$'` really counted the
+    blank class (`2`). GNU grep **3.12 REMOVED the option**: it answers `grep: unrecognized option
+    '--unix-byte-offsets'` and exits 2, and Ubuntu 26.04 — what `ubuntu-latest` now provisions —
+    ships 3.12. A hardcoded answer to "does grep run it" is therefore wrong on one of the two
+    platforms whichever way it is written, and that is what reddened `test (a)` on main
+    `70fbd1a27dd5`.
+
+    ⛔ AND IT IS NOT A SKIP, because the platform is a REAL INPUT to the code under test: this
+    reader decides whether a `grep` invocation in a document is one it may grade, so BOTH grep
+    answers are consequences it owes (#13995, #14027 round 2 P2 — MEASURED):
+      * where grep RUNS the spelling, it is a spelling of `-u` that counts this class, so the
+        reader must READ it — declining it left a SECOND blank-class prescription invisible beside
+        the one that was read: the false PASS this cell exists to refuse;
+      * where grep REFUSES the spelling, the command is one grep will not run, so the reader must
+        DECLINE it — grading that expression is the false RED `_long_option_is_accepted` is written
+        to refuse.
+    So the live platform is pinned against the measured allowance, and BOTH snapshots are pinned
+    hermetically, which is what keeps either consequence from being vacuous on whichever grep is
+    installed. `--fixed-regexp` stays OUT on BOTH platforms: that exclusion is SEMANTIC (`-F` counts
+    `0` of this class, and admitting the alias would make `--fixed-` falsely ambiguous), so no grep
+    version decides it.
+    """
+    alias_spellings = ("--unix-byte-offsets", "--u", "--un", "--uni", "--unix")
+
+    # ⛔ (1) THE LIVE PLATFORM. `runs` is grep's own answer, never this file's memory of a version,
+    # and the import-time allowance must be exactly what it re-derives to — a stale allowance is how
+    # a hardcoded table would come back (#14138). ⛔ THIS COMPARES THE SNAPSHOT, NOT THE HELPER'S
+    # HONESTY (#14138 review, P3 — measured: a helper mutated to answer `True` unconditionally leaves
+    # this cell GREEN where the grep under it accepts the spelling, because the comparison would then
+    # be a helper against itself). The helper's three arms are pinned independently, by stub greps,
+    # in `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`; what this pair of
+    # assertions refuses is the other failure — a CONSTANT that no longer matches the live binary.
+    runs = _d5_grep_runs_long_option("--unix-byte-offsets")
+    # ⛔ THIS `rc in (0, 1)` IS A DELIBERATE SECOND, INDEPENDENT READ, not a third copy of the rule
+    # (#14303 review round 10, P3 — MEASURED). The point of the pair is two reads of the SAME binary
+    # disagreeing, so this one must NOT go through `_d5_grep_verdict`: a row that asked the helper to
+    # confirm itself would be a helper against itself. `_d5_grade_alias_spelling` raises above on a
+    # third code, so the restated test cannot misfire on one.
+    assert runs == (
+        _d5_grade_alias_spelling("--unix-byte-offsets")[0].returncode in (0, 1)), (
+        "`_d5_grep_runs_long_option` disagrees with a raw probe of the SAME binary — one of the "
+        "two reads a refused spelling as a count, or the reverse (#14138)")
+    rederived = frozenset(
+        alias for alias in _D5_UNDOCUMENTED_ALIAS_CANDIDATES if _d5_grep_runs_long_option(alias))
+    assert rederived == _d5_undocumented_long_options(), (
+        f"the allowance is {sorted(_d5_undocumented_long_options())} but this grep re-derives "
+        f"{sorted(rederived)} "
+        "— the universe must follow the binary, and grep has no undocumented alias this reader "
+        "may add without a candidate entry and this cell (#14138)")
+    # ⛔ AND `allowance ⊆ candidates` IS NOT A SECOND GUARD: `rederived` is built by FILTERING the
+    # candidate tuple, so the assertion above already entails it and no mutant can red it first
+    # (#14138 mutation review, P3 — MEASURED: an allowance containing a non-candidate reds the row
+    # above, never here). Deleting a row that can never be the one that fires is rule 3, not a
+    # weakening — the membership claim it made is in the message above, by name.
+
+    # Every spelling the alias answers to, on the LIVE grep: READ where grep runs it (and it counts
+    # this class `2`), DECLINED where grep REFUSES it — and a THIRD exit code is NEITHER, which is
+    # why the verdict comes from `_d5_grep_verdict` rather than a local two-way branch. Only
+    # `--unix-byte-offsets` itself passes through the allowance probe; the four PREFIX spellings
+    # reach this loop without ever meeting its three-way rule, so a two-way branch here would read a
+    # non-answer as a refusal and report it as one — the message interpolates whatever code was
+    # actually seen, so it never says `exit 2` unless the run really exited 2.
+    # ⛔ AND THE LOOP'S USE OF THE SEAM HAS ITS OWN WITNESS (#14303 review round 4, P3 — MEASURED).
+    # Pinning `_d5_grade_alias_spelling` with a stub does NOT pin what THIS loop calls: replacing the
+    # loop body with a local `subprocess.run` plus a two-way `rc in (0, 1)` left this file GREEN on
+    # both platforms (`36 passed`) — the exact fail-open read the seam exists to prevent, reinstated
+    # at the call site with nothing reding, because a stub can only reach the helper.
+    # ⛔ AND CALLING IS NOT USING (#14303 review round 5, P2 — MEASURED). Recording the CALLS alone
+    # left a loop that kept the call and re-derived `accepted = ran.returncode in (0, 1)` from the
+    # returned run completely green — it records every spelling and reads the wrong answer. So the
+    # recorder hands back a verdict that RECORDS ITS OWN CONSUMPTION: the loop's `if accepted:` is
+    # the only thing that asks what the verdict means, and a locally re-derived one is never asked,
+    # leaving `seam_verdicts` short and reding here.
+    seam_calls: list[str] = []
+    seam_verdicts: list[str] = []
+    real_grade = _d5_grade_alias_spelling
+
+    class _RecordingVerdict:
+        """A verdict that RECORDS being consulted, so the loop's USE of it is attributable."""
+
+        __slots__ = ("_spelling", "_verdict")
+
+        def __init__(self, verdict: bool, spelling: str) -> None:
+            self._verdict = verdict
+            self._spelling = spelling
+
+        def __bool__(self) -> bool:
+            seam_verdicts.append(self._spelling)
+            return self._verdict
+
+    def recording_grade(spelling: str, grep: str = "grep"):
+        seam_calls.append(spelling)
+        ran, verdict = real_grade(spelling, grep)
+        return ran, _RecordingVerdict(verdict, spelling)
+
+    monkeypatch.setitem(globals(), "_d5_grade_alias_spelling", recording_grade)
+    for spelling in alias_spellings:
+        ran, accepted = _d5_grade_alias_spelling(spelling)
+        read = _d5_count_prescriptions(f"a count: `grep -c {spelling} '^[+-]$'`\n")
+        if accepted:
+            assert ran.stdout.strip() == "2", (
+                f"`grep -c {spelling} '^[+-]$'` printed {ran.stdout.strip()!r} on the probe — the "
+                "alias must count THIS class for the false-PASS argument to hold, so an accepted "
+                "spelling that counts something else needs its own treatment here (#14027)")
+            assert read == ["^[+-]$"], (
+                f"{spelling!r} is the obsolete `-u` and THIS grep runs it (measured: `2` printed) "
+                "— declining it leaves a real blank-class prescription unread (#14027, P2)")
+        else:
+            assert read == [], (
+                f"{spelling!r} is REFUSED by this grep (measured: exit {ran.returncode}) and the "
+                "reader still graded it — grading the expression of a command grep will not run is "
+                "a false RED on a document that merely mentions it (#13995, MEASURED)")
+
+    assert seam_calls == list(alias_spellings), (
+        "the alias loop did not classify every spelling through `_d5_grade_alias_spelling` — a "
+        "loop-local two-way `rc in (0, 1)` reads a NON-ANSWER as a refusal and reinstates the "
+        f"fail-open read the seam exists to prevent (#14303 round 4): seam called for {seam_calls!r}")
+    assert seam_verdicts == list(alias_spellings), (
+        "the alias loop called `_d5_grade_alias_spelling` but did not USE its verdict — keeping the "
+        "call and re-deriving `accepted = ran.returncode in (0, 1)` from the returned run records "
+        "every spelling and still reads a NON-ANSWER as a refusal, which is the same fail-open read "
+        f"one layer down (#14303 round 5): verdict consulted for {seam_verdicts!r}")
+
     hidden = ("row: `grep -c '^[+-]$'`\n"
               "and: `grep -c --unix-byte-offsets '^[+-]$'`\n")
-    assert _d5_blank_class_prescriptions(hidden) == ["^[+-]$", "^[+-]$"], (
+    expected_hidden = ["^[+-]$", "^[+-]$"] if runs else ["^[+-]$"]
+    assert _d5_blank_class_prescriptions(hidden) == expected_hidden, (
         "a document carrying the row's command AND the alias spelling prescribes the blank class "
-        "TWICE (both really count it), so the `exactly one` arm must see two and RED — seeing one "
-        "is the false PASS this cell exists to refuse (#14027 review round 2, P2 — MEASURED)")
+        f"{'TWICE (both really count it), so the `exactly one` arm must RED on it' if runs else 'ONCE (this grep refuses the alias, so only the row counts), so the `exactly one` arm must stay GREEN'}"
+        " — and seeing ONE where both run is the false PASS this cell exists to refuse (seeing two "
+        "where only the row counts would be a false RED) (#14027 review round 2, P2 — MEASURED)")
 
-    assert "--fixed-regexp" not in _D5_ALL_LONG_OPTIONS, (
+    # ⛔ (2) BOTH SNAPSHOTS, HERMETICALLY — so each consequence is exercised on EVERY platform
+    # rather than only on the one the runner happens to ship. ⛔ EXACTLY ONE NAME IS PATCHED, and
+    # it is the only input this walk reads: `_d5_long_option_candidates` resolves
+    # `_d5_all_long_options` by NAME from this module's namespace at CALL time (the `#:` block above
+    # that function states the contract; it has no docstring), so replacing it replaces the whole
+    # universe the walk sees. Patching the allowance as well pinned NOTHING — `_d5_all_long_options`
+    # is replaced whole, so its call to `_d5_undocumented_long_options` cannot be reached inside
+    # this window (MEASURED: a raising sentinel in that slot leaves this file green). ⛔ AND IT IS
+    # NOT THE SOLE CALLER of `_d5_undocumented_long_options`, which is why the dead patch was dead
+    # for a LOCAL reason and not a global one: the module calls it from `_resolved_long_option`'s
+    # prose path, from this cell, and from the stub cell — several callers, none of them reachable
+    # from inside this window. A second input that no assertion can attribute to the behaviour it
+    # claims to guard is dead weight (agent-infra#3442 rule 3), so it is gone rather than explained
+    # away.
+    #   (#14303 review, P3 — the sentence that stood here called that function the "SOLE caller"
+    #   and cited "its own docstring" for a `#:` comment block, both of which the source contradicts
+    #   one screen away; the measurement it justified was right and is kept.)
+    snapshots = (
+        (_D5_DOCUMENTED_LONG_OPTIONS | {"--unix-byte-offsets"}, True),
+        (frozenset(_D5_DOCUMENTED_LONG_OPTIONS), False),
+    )
+    for universe, accepted in snapshots:
+        monkeypatch.setitem(globals(), "_d5_all_long_options", lambda universe=universe: universe)
+        for spelling in alias_spellings:
+            read = _d5_count_prescriptions(f"a count: `grep -c {spelling} '^[+-]$'`\n")
+            assert read == (["^[+-]$"] if accepted else []), (
+                f"with `--unix-byte-offsets` {'IN' if accepted else 'OUT of'} the universe, "
+                f"`grep -c {spelling}` must be {'READ' if accepted else 'DECLINED'} — the "
+                f"{'reading' if accepted else 'declining'} arm is the one that keeps a real "
+                "prescription visible (or a command grep will not run out of the count) (#14138)")
+        assert _d5_blank_class_prescriptions(hidden) == (
+            ["^[+-]$", "^[+-]$"] if accepted else ["^[+-]$"]), (
+            "the two-prescription row must follow the same snapshot: TWO where the alias counts "
+            "the class, ONE where grep would not run it (#14027, #14138)")
+    monkeypatch.undo()
+
+    # `--fixed-regexp` is the CONTROL, and it is excluded on both platforms for a reason no grep
+    # version decides: it is `-F` (a LITERAL pattern), which counts `0` of this class on the same
+    # probe (measured on 3.11 AND 3.12), so declining it cannot hide a prescription — and listing it
+    # would make `--fixed-` falsely ambiguous against `--fixed-strings`, which grep ACCEPTS.
+    # ⛔ THE COUNTING FACT IS ASSERTED ONLY WHERE grep RUNS THE SPELLING (#14138 review round 9, P2
+    # — MEASURED). Requiring `rc in (0, 1)` in the SAME `and` made acceptance a hard PLATFORM
+    # REQUIREMENT: a grep that DROPS this obsolete alias — the way GNU 3.12 dropped
+    # `--unix-byte-offsets` — reds this cell while the reader is untouched and still CORRECT,
+    # because declining a spelling grep will not run cannot hide anything, so the exclusion stays
+    # fail-closed there. That is the #13995 false RED this cell exists to end, one alias over.
+    # Reproduced with a stub that refuses `--fixed-regexp` alone (rc 2, everything else delegated):
+    # one cell red. The exit-code rule is READ FROM `_d5_grep_verdict` rather than restated, so a
+    # third code still RAISES here instead of deciding.
+    fixed_regexp, fixed_accepted = _d5_grade_alias_spelling("--fixed-regexp")
+    if fixed_accepted:
+        assert fixed_regexp.stdout.strip() == "0", (
+            f"`grep -c --fixed-regexp '^[+-]$'` runs on this grep and printed "
+            f"{fixed_regexp.stdout.strip()!r} — the exclusion of this alias rests on it counting "
+            "NOTHING of this class, so if that changed, declining it could hide a blank-class "
+            "prescription and the exclusion needs its own treatment (#14027, MEASURED)")
+    assert "--fixed-regexp" not in _d5_all_long_options(), (
         "`--fixed-regexp` would make `--fixed-` falsely ambiguous against `--fixed-strings`, and "
-        "grep ACCEPTS `--fixed-` (measured) — the alias must stay out of the universe")
+        "grep ACCEPTS `--fixed-` (measured) — the alias must stay out of the universe, which means "
+        "it must also stay out of `_D5_UNDOCUMENTED_ALIAS_CANDIDATES`: the candidate list is the "
+        "only door into the measured allowance, so a candidate entry for it reds HERE first "
+        "(#14027; #14138 mutation review, P3 — the separate candidate-membership row was deleted "
+        "because this one always fires before it)")
     assert _d5_long_option_candidates("--fixed-") == ["--fixed-strings"], (
         "`--fixed-` abbreviates `--fixed-strings` and nothing else in the universe — the reason "
         "`--fixed-regexp` may not be added (#14027)")
+    # ⛔ THIS ROW WITNESSES MEMBERSHIP, NOT THE COUNTING FACT (#14138 review round 9, P3). The
+    # reader declines `--fixed-regexp` because it is absent from the measured universe, so the row
+    # answers `[]` whether or not the alias counts this class — crediting it to the `counts 0`
+    # measurement (as the previous wording did) named a witness that cannot observe the claim. The
+    # counting fact is witnessed above, and only where grep runs the spelling.
     assert _d5_count_prescriptions("a count: `grep -c --fixed-regexp '^[+-]$'`\n") == [], (
-        "`--fixed-regexp` is `-F`: a LITERAL pattern, which counts `0` of this class on the probe "
-        "(measured), so declining it cannot hide a blank-class prescription — that measurement is "
-        "what makes the exclusion safe (#14027)")
+        "`--fixed-regexp` is not in the measured option universe, so the reader DECLINES this "
+        "unknown spelling — this is the candidate-membership door, and it must stay closed "
+        "(#14027)")
+
+
+def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_path: Path):
+    """`_d5_grep_runs_long_option` reads grep's verdict, and refuses to read anything else.
+
+    ⛔ THE FAIL-OPEN ARM (#14138). The allowance is what keeps a prescription in the alias spelling
+    visible, so a probe that answered `False` whenever it was confused would EMPTY it — a second
+    blank-class prescription goes unread and nothing reds. grep exits 2 for an invalid option and
+    0/1 for a real count, so this cell drives SEVEN stub greps: one that COUNTS, one that REFUSES
+    the alias (and answers `--count` normally), one that answers a THIRD code, one that is BROKEN
+    for every spelling, one that answers `--count` with rc 0 and NO OUTPUT, one that PRINTS the
+    count but still fails the run (rc 2 with stdout `2`), and one that answers a REAL count and
+    exits 1 — grep RAN the spelling and selected nothing, which is an ANSWER, not a refusal.
+    The `broken`, `silent` and `counts_then_fails` stubs must raise on the CONTROL run — a bare
+    rc 2 is grep's generic error code, a wrapper that swallows stdin prints nothing, and a wrapper
+    that counts and then fails is not a refusal either — because reading any of them as "refused"
+    empties the allowance just the same.
+    """
+
+    def stub(name: str, body: str) -> str:
+        path = tmp_path / name
+        path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    # `--count` is the control probe's spelling, so every stub that is meant to reach the SECOND run
+    # has to answer it normally — otherwise it is testing the control, not the verdict.
+    answers_count = 'if [ "$2" = "--count" ]; then echo 2; exit 0; fi\n'
+    accepts = stub("grep-accepts", "cat >/dev/null; echo 2; exit 0")
+    refuses = stub("grep-refuses", "cat >/dev/null; " + answers_count
+                   + 'echo "grep: unrecognized option" >&2; exit 2')
+    ran_zero = stub("grep-ran-zero", "cat >/dev/null; " + answers_count + "echo 0; exit 1")
+    confused = stub("grep-confused", "cat >/dev/null; " + answers_count + "exit 3")
+    broken = stub("grep-broken", 'cat >/dev/null; echo "grep: (standard input): Bad file '
+                                 'descriptor" >&2; exit 2')
+    silent = stub("grep-silent", "cat >/dev/null; exit 0")
+    counts_then_fails = stub("grep-counts-then-fails", "cat >/dev/null; echo 2; exit 2")
+    assert _d5_grep_runs_long_option("--unix-byte-offsets", accepts) is True, (
+        "a stub grep that counts (`2`, exit 0) must read as ACCEPTED — anything else empties the "
+        "allowance on a grep that runs the spelling (#14138)")
+    assert _d5_grep_runs_long_option("--unix-byte-offsets", refuses) is False, (
+        "a stub grep that answers `unrecognized option`, exit 2, must read as REFUSED — that is "
+        "the GNU grep 3.12 case this allowance exists to follow (#14138)")
+    # ⛔ rc 1 IS AN ANSWER (#14303 review round 10, P3 — MEASURED). grep exits 1 when it RAN the
+    # spelling and selected no lines; only exit 2 means "I will not run that option". Nothing
+    # witnessed that distinction: reading rc 1 as `refused` left this file at `34 passed`, because
+    # the one place a real rc 1 is consumed — the `--fixed-regexp` control, which prints `0` and
+    # exits 1 on GNU grep 3.11 — has its assertion gated on the very arm being flipped. The
+    # fail-open consequence is concrete: an accepted spelling that STOPS counting the class would
+    # then be classified "refused", so the `--fixed-regexp` counting guard would stop executing and
+    # the wrong retargeted-alias class `_d5_grep_verdict`'s docstring forbids could ship unseen.
+    assert _d5_grep_runs_long_option("--unix-byte-offsets", ran_zero) is True, (
+        "a stub grep that prints `0` and exits 1 RAN the spelling and selected nothing — that is "
+        "ACCEPTED, the same as exit 0. Classifying it as `refused` is the fail-open direction: the "
+        "allowance would drop a spelling grep really runs, and every consumer gated on this arm "
+        "(#14138)")
+    # ⛔ AND `MEASURED` MUST BE DISTINGUISHABLE FROM `REMEMBERED` ON THE PLATFORM CI RUNS (#14303
+    # review, P2 — MEASURED). On GNU grep >= 3.12 the live allowance is `frozenset()`, so the alias
+    # cell's `rederived == _d5_undocumented_long_options()` is two EMPTY sets compared and no mutant
+    # of the derivation can red it there. Driving the derivation through its `grep` parameter is what
+    # makes the two outcomes separable on every platform: a grep that RUNS the spelling must yield
+    # it, and a grep that REFUSES it must yield the empty set. ⛔ THE ROWS ARE NOT EACH OTHER'S
+    # ONLY WITNESS (#14303 review round 5, P3 — MEASURED): dropping either row still leaves a
+    # hardcoded `frozenset()` RED under the 3.12 shim, because the OTHER row and the alias cell's
+    # `rederived == …` comparison also fire. What the rows buy is ATTRIBUTION — they name the
+    # derivation as the thing that broke, instead of leaving a downstream comparison to report it.
+    assert _d5_undocumented_long_options(accepts) == {"--unix-byte-offsets"}, (
+        "a grep that RUNS `--unix-byte-offsets` must produce it in the measured allowance — an "
+        "empty allowance on such a box leaves a second blank-class prescription unread (#14138)")
+    assert _d5_undocumented_long_options(refuses) == frozenset(), (
+        "a grep that REFUSES `--unix-byte-offsets` must produce an EMPTY allowance — anything else "
+        "grades the expression of a command grep will not run (#14138)")
+    # ⛔ AND THE COMPOSITION IS ITS OWN CLAIM, NOT A CONSEQUENCE OF THE DERIVATION (#14303 review,
+    # P2 — MEASURED). `_d5_all_long_options()` is `_D5_DOCUMENTED_LONG_OPTIONS | allowance`, and
+    # the two rows above pin only the right-hand side. The composition mutant — `return
+    # _D5_DOCUMENTED_LONG_OPTIONS`, dropping the allowance — left every cell GREEN on grep >= 3.12,
+    # because there the allowance IS empty, so the union equals the left-hand side anyway: the
+    # platform CI runs is exactly the one that could not see it. These two arms make the union
+    # observable on EVERY platform, which is what threading `grep` through `_d5_all_long_options`
+    # was for.
+    assert _d5_all_long_options(accepts) == _D5_DOCUMENTED_LONG_OPTIONS | {"--unix-byte-offsets"}, (
+        "a grep that RUNS `--unix-byte-offsets` must have it in the WHOLE universe, not only in the "
+        "allowance — a union that drops the measured half is how the documented-alias regression "
+        "came back unobserved on grep >= 3.12 (#14303 review, P2)")
+    assert _d5_all_long_options(refuses) == _D5_DOCUMENTED_LONG_OPTIONS, (
+        "a grep that REFUSES `--unix-byte-offsets` must compose to EXACTLY `grep --help`'s set — "
+        "the allowance is empty there, and a union that still carried the spelling would grade a "
+        "command this grep will not run (#14303 review, P2)")
+    with pytest.raises(AssertionError, match="neither a count"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", confused)
+    # ⛔ AND A GREP THAT IS BROKEN FOR *EVERY* SPELLING IS NOT A GREP THAT REFUSED THIS ONE (#14138
+    # review round 3, P2 — MEASURED). rc 2 is grep's generic error code: `grep -c --count '^[+-]$'
+    # <&-` is `Bad file descriptor`, rc 2, on a fully DOCUMENTED option. A bare rc 2 read as
+    # "refused" empties the allowance on such a box, so the control run has to catch it first.
+    with pytest.raises(AssertionError, match="control probe"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", broken)
+    # ⛔ AND A PROBE THAT ANSWERS rc 0 WITH NO COUNT IS NOT A WORKING PROBE EITHER (#14138 review
+    # round 5, P3 — MEASURED). The control run requires stdout `2` as well as rc 0/1: a wrapper that
+    # swallows stdin exits 0 and prints nothing, and a control that read only the RETURN CODE would
+    # wave the second run through — whose rc 2 on such a grep would empty the allowance. Removing the
+    # `stdout` half of the control leaves every other stub green, which is why this arm exists.
+    with pytest.raises(AssertionError, match="control probe"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", silent)
+    # ⛔ AND THE CONTROL'S EXIT-CODE HALF HAS ITS OWN WITNESS (#14138 mutation review, P3 — MEASURED).
+    # Without this stub the `returncode not in (0, 1)` clause of the control is INERT: every other
+    # stub that gets past the stdout check answers rc 0/1, so deleting the rc clause left the suite
+    # green. This one prints the count and still exits 2, which only the rc clause catches —
+    # a grep that reports a count and then fails is not a grep that refused the spelling.
+    with pytest.raises(AssertionError, match="control probe"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", counts_then_fails)
+    # …and a binary that is not there at all is a NON-ANSWER too, which is why it is pinned rather
+    # than left to `subprocess` to raise something nobody counted on: the allowance must never be
+    # emptied by a probe that could not run (#14138 review, P3).
+    with pytest.raises(OSError):
+        _d5_grep_runs_long_option("--unix-byte-offsets", str(tmp_path / "grep-that-is-not-here"))
+
+
+def test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal(tmp_path: Path):
+    """The alias cell's THREE-WAY rule, witnessed where it is actually used (#14303 round 3, P3).
+
+    ⛔ THE GAP THIS CLOSES, MEASURED. `_d5_grep_verdict`'s own docstring records the round-8 P2: a
+    two-way `if rc in (0, 1) … else` read a THIRD exit code as a REFUSAL and printed
+    "(measured: exit 3)" — the code it interpolated — over a run that was not a refusal at all.
+    Pinning the helper did not pin the alias
+    cell's use of it — replacing the loop's verdict with that two-way branch left the whole file
+    GREEN on GNU grep 3.11 AND under the 3.12 shim, because no shipped grep answers a third code for
+    a PREFIX spelling. So the fix for a P2 was itself unwitnessed.
+
+    This stub answers a third code for `--u` ONLY, the smallest input that separates the two forms:
+    the three-way rule RAISES, the two-way one reads a refusal and would then assert
+    `"--u" is REFUSED by this grep (measured: exit 3)` — a false RED over a probe that merely
+    failed. The second half drives a DIFFERENT spelling through the same stub and requires it to be
+    graded normally, so the raise above is attributable to the third code and not to a stub that is
+    simply broken.
+    """
+    stub = tmp_path / "grep-nonanswer-for-one-prefix"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'if [ "$2" = "--u" ]; then echo "grep: input/output error" >&2; exit 3; fi\n'
+        "cat >/dev/null; echo 2; exit 0\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    with pytest.raises(AssertionError, match="neither a count"):
+        _d5_grade_alias_spelling("--u", str(stub))
+    ran, accepted = _d5_grade_alias_spelling("--uni", str(stub))
+    assert (ran.returncode, ran.stdout.strip(), accepted) == (0, "2", True), (
+        "the same stub must be graded normally for a spelling it answers — otherwise the raise "
+        f"above proves nothing about the third code (#14138): got rc={ran.returncode} "
+        f"stdout={ran.stdout.strip()!r} accepted={accepted}")
+
+
+def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
+    """The lazy derivation is a CONTRACT, and nothing else pinned it (#14303 review, P3 — MEASURED).
+
+    ⛔ WHY THIS CELL EXISTS. `_d5_undocumented_long_options` is deliberately lazy: an IMPORT-TIME
+    probe made this WHOLE file uncollectable on a box with no `grep`, taking every citation guard in
+    it down with the cells that need grep, and a `grep` that blocked on PATH hung COLLECTION instead
+    of failing one cell (the consequence is recorded on that function). No cell asserted it, so it
+    could be silently undone: before this cell and the collect-only cell below existed, prepending a
+    module-level `_D5_ALL = _d5_all_long_options()` left every cell green on a box that HAS grep, and
+    only a grep-less box ever noticed — which is exactly the platform this file is least often run
+    on. At THIS head the hoist is visible, and the two child-process cells are what made it so
+    (MEASURED, and stated WITHOUT a count because a cell added to this file falsifies one: the raising
+    hoist reds this cell and the collect-only one; the hoist that swallows its error reds arm (a)
+    alone).
+
+    ⛔ MEASURED IN CHILD INTERPRETERS, not in-process: this module's own import has already happened
+    by the time any cell runs, so an in-process check could never observe it. TWO children, because
+    the two observable consequences are different and either one alone is escapable:
+
+      (a) **the spawn.** The child's `PATH` puts a `grep` that RECORDS that it ran first. An
+          import-time probe that RAISES is caught by (b), but one that SWALLOWS its error — a
+          module-level `try: … except Exception: pass` — leaves `currsize == 0` exactly as a lazy
+          file does (a cache does not record a raising call) while genuinely spawning grep at
+          import. That is the shape that HANGS collection behind a blocking `grep`, so the marker
+          is what decides: it must not exist after the import. Inferring "no spawn" from "the child
+          did not raise" is what the previous round's cell did, and it could not see this shape.
+      (b) **the no-grep box.** A `PATH` with no `grep` at all — the box the docstring describes —
+          must import successfully AND leave the allowance underived (`currsize == 0`).
+
+    (a) fails a spawn, (b) fails a raise or a derivation; neither alone is sufficient.
+
+    ⛔ (b) IS KEPT FOR ITS INPUT, NOT AS A SECOND WITNESS. No mutant reaches it alone: the raising
+    hoist reds (a) first, so (b) has no independently attributable row (#14303 review, P2 — MEASURED).
+    It stays because its INPUT is different — no `grep` on PATH at all, against a `grep` that answers
+    wrongly — and that is the box the historical failure happened on. Saying so here is cheaper than
+    letting a later reader count two witnesses where there is one.
+    """
+    source = str(Path(__file__).resolve())
+    import_probe = (
+        "import importlib.util, sys\n"
+        f"source = {source!r}\n"
+        "spec = importlib.util.spec_from_file_location('d5_import_probe', source)\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "sys.modules['d5_import_probe'] = mod\n"
+        "spec.loader.exec_module(mod)\n"
+        "print('IMPORT-OK', mod._d5_undocumented_long_options.cache_info().currsize)\n"
+    )
+
+    # (a) A `grep` that RECORDS its own invocation. The ordinary PATH stays behind it so the stub's
+    # own `sh` and `touch` still resolve, and nothing else can shadow the recording grep.
+    # ⛔ THE MARKER PATH IS QUOTED. Unquoted, a `tmp_path` containing a space makes `touch` fail, the
+    # marker is never created, and this guard then passes VACUOUSLY while grep really was spawned
+    # (#14303 review, P2 — reproduced by hand with a spaced path). pytest's basetemp is pinned under
+    # `/tmp/tt_<hex>` by the suite's conftest, so it takes an explicit `--basetemp` with a space to
+    # reach; that makes the quoting hardening, not a live fix, which is why it is stated rather than
+    # silently tightened.
+    spy_dir = tmp_path / "spy-bin"
+    spy_dir.mkdir()
+    marker = tmp_path / "grep-was-spawned"
+    spy = spy_dir / "grep"
+    spy.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 0\n', encoding="utf-8")
+    spy.chmod(0o755)
+    spy_run = subprocess.run(
+        [sys.executable, "-c", import_probe],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ,
+             "PATH": spy_dir.as_posix() + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")},
+    )
+    assert spy_run.returncode == 0, (
+        "importing this module with a `grep` on PATH must SUCCEED (#14138): "
+        f"rc={spy_run.returncode} stderr={spy_run.stderr.strip()[-500:]!r}")
+    assert not marker.exists(), (
+        "`grep` was SPAWNED AT IMPORT TIME — the derivation must stay lazy, or a `grep` that blocks "
+        "on PATH hangs COLLECTION of this whole file instead of failing one cell (#14138); the "
+        f"recording stub left {marker.name} behind, so a probe ran during import")
+
+    # (b) …and a box with NO `grep` at all must still import, with the allowance underived.
+    grep_free = tmp_path / "no-grep-on-this-path"
+    grep_free.mkdir()
+    done = subprocess.run(
+        [sys.executable, "-c", import_probe],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "PATH": str(grep_free)},
+    )
+    assert done.returncode == 0 and "IMPORT-OK" in done.stdout, (
+        "importing this module with NO `grep` on PATH must SUCCEED — an import-time probe aborts "
+        "COLLECTION of this whole file, so 0 of its citation guards run (#14138): "
+        f"rc={done.returncode} stderr={done.stderr.strip()[-500:]!r}")
+    assert done.stdout.strip().endswith("IMPORT-OK 0"), (
+        "the allowance was DERIVED AT IMPORT: the derivation must stay lazy so a box without `grep` "
+        f"still collects this file (#14138): child said {done.stdout.strip()!r}")
+
+
+def test_the_d5_alias_cells_still_COLLECT_when_grep_cannot_answer(tmp_path):
+    r"""A grep that is a NON-ANSWER for every spelling must cost its cells, not the WHOLE FILE.
+
+    ⛔ THE COMPLEMENT of `test_the_allowance_is_not_derived_at_import`, and both are needed (#14138).
+    That cell removes `grep` from `PATH` entirely, so the failure it pins is an eager probe that
+    RAISES. This one leaves a `grep` ON the path that exits 3 for every call — the "non-answer" the
+    allowance probe refuses to read as a refusal — so the failure it pins is an eager probe that
+    aborts collection where grep is PRESENT but broken. Different hosts, and the second is the shape
+    that made this file uncollectable once already.
+
+    ⛔ WHY IT CANNOT BE AN IN-PROCESS ASSERTION. Before the two child-process cells existed, an eager
+    `_D5_ALL_LONG_OPTIONS_EAGER = _D5_DOCUMENTED_LONG_OPTIONS | _d5_undocumented_long_options()`
+    left the whole suite green on a working grep — nothing in-process could observe it — and only a
+    collection of the file on a hostile host did (MEASURED: `no tests collected, 1 error` for the
+    eager form, against a full collection for the deferred one). At this head the hoist reds this
+    cell and the import-time one by name; the point of the paragraph is why the observation has to
+    leave the process, not that the guard is still missing.
+
+    ⛔ MEASURED BY COMPARING, NOT BY ASSERTING A COUNT. The cell count is not written down here: a
+    later test added to this file would silently falsify it. The same `--collect-only` run is made
+    twice — once on the real PATH, once behind the hostile stub — and the two must AGREE. The floor
+    keeps a parser that collected nothing from certifying agreement with itself.
+
+    ⛔ NOT A MUTANT-DRIVEN ROW, and stated so rather than passed off as covered: no edit to this
+    file changes what a NORMAL grep answers, so the only mutant it reddens is the hoist above.
+    """
+    stub = tmp_path / "grep"
+    stub.write_text("#!/bin/sh\ncat >/dev/null\nexit 3\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    def collect(env_path: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", str(Path(__file__)), "--collect-only", "-q",
+             "-p", "no:cacheprovider"],
+            capture_output=True, text=True, timeout=300,
+            env={**os.environ, "PATH": env_path, "TORTOISE_TEST_CARVE_OUT": "1"},
+        )
+
+    normal = collect(os.environ["PATH"])
+    assert normal.returncode == 0, (
+        f"this file did not collect on an ordinary PATH, so the comparison below cannot say "
+        f"anything about the host that matters: rc {normal.returncode}\n"
+        f"{normal.stdout[-2000:]}\n{normal.stderr[-2000:]}")
+    hostile = collect(f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    assert hostile.returncode == 0, (
+        "a grep that exits 3 for EVERY call — the non-answer the allowance probe refuses to read "
+        "as a refusal — aborted COLLECTION of this file, so every citation guard in it was lost "
+        "with the cells that need grep. The allowance must be derived LAZILY, at the point a cell "
+        "asks for it, never at import (#14138): "
+        f"rc {hostile.returncode}\n{hostile.stdout[-2000:]}\n{hostile.stderr[-2000:]}")
+
+    def collected(proc: subprocess.CompletedProcess) -> int:
+        found = re.findall(r"^(\d+) tests? collected", proc.stdout, re.MULTILINE)
+        assert found, f"no collection count in the output: {proc.stdout[-2000:]!r}"
+        return int(found[-1])
+
+    have, also_have = collected(normal), collected(hostile)
+    assert have >= 30, (
+        f"only {have} cells collected on an ordinary PATH — the floor exists so a parser that "
+        "collected nothing cannot certify that two empty collections agree (#14138)")
+    assert also_have == have, (
+        f"a grep that cannot answer for any spelling changed what COLLECTS: {also_have} cells "
+        f"behind the stub against {have} on an ordinary PATH. Collection must not depend on grep "
+        "at all — only the cells that measure it may (#14138)")
 
 
 def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_prefix():
@@ -5494,7 +6364,7 @@ def test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REG
     # or the member is UNREACHABLE and nothing witnesses it (#13995 final-head review, P2 —
     # MEASURED). This is the invariant, not an example: `--fixed-regexp` used to sit in the table
     # while `_long_option_is_accepted` declined it (grep accepts the alias, but `grep --help`
-    # does not document it, so it is absent from `_D5_ALL_LONG_OPTIONS` deliberately — listing it
+    # does not document it, so it is absent from `_d5_all_long_options()` deliberately — listing it
     # would make `--fixed-` falsely ambiguous and decline a command grep RUNS). A member the walk
     # can never reach is the inert-narration defect this file bans, and its mutant was silent:
     # dropping it from the table left the whole suite green. Re-adding it — or any other declined
