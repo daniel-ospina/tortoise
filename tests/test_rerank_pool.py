@@ -1632,16 +1632,19 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # width-1 WARM-UP, whose result is discarded.
         "tools/miss_rate_m5.py": frozenset({"query"}),
         # ⛔ A MIRROR of the shipped door, and the one A/B harness whose WHOLE
-        # subject is this read's latency (#14192). `run` calls
-        # `sdk._tortoise_fts_query(query=…, limit=10)` twice: once as a warm-up
-        # and once as the baseline leg of the A/B — both are the read `/v1/search`
-        # performs, from the tree under measurement, and opting out would measure
-        # a reader neither door runs. The delta it reports is base-rev vs head
-        # through the SAME seam, so an armed gate is common to both arms and
-        # cancels; the absolute p50/p95 it publishes are the shipped numbers, which
-        # is exactly what the issue's *Done when* asks for. Listed rather than
-        # opted out for the same ground `capstone_12186_recall.py` and
-        # `miss_rate_m5.py` hold above.
+        # subject is this read's latency (#14192). `run` reads through
+        # `sdk._tortoise_fts_query(query=…, limit=10)` at TWO sites: the warm-up
+        # (`:296`, result discarded) and the per-query measurement loop (`:305`,
+        # one call per query — 24 at the recorded width). Both are the read
+        # `/v1/search` performs, from the tree under measurement, and opting out
+        # would measure a reader neither door runs. Under `--ab-full-read-from`
+        # each arm is ONE `run()` (`:541`, `:556`) over the SAME seam, so an armed
+        # gate is common to both arms and cancels. What the issue's *Done when*
+        # asks for is the p50/p95 DELTA against the current chain
+        # (`verdict.total_delta_p50_ms` / `…_p95_ms`) plus a rank-identity verdict;
+        # the absolute p50/p95 it also publishes are each arm's own shipped read.
+        # Listed rather than opted out for the same ground
+        # `capstone_12186_recall.py` and `miss_rate_m5.py` hold above.
         "tools/read_wave_latency.py": frozenset({"run"}),
     }
     seen_external: set[str] = set()
