@@ -2446,8 +2446,11 @@ def test_a_probe_that_imports_inside_its_try_covers_the_import_seam():
             "`ImportError` but an EARLIER narrow arm drops the same family (e.g. "
             "`except ModuleNotFoundError: FLAG = False` above it), the name is absent "
             "from the covered set because the earlier arm handled it — not because "
-            "the spelling is missing. Adding it again, or hoisting, changes nothing; "
-            "re-raise or delete the EARLIER dropping arm. "
+            "the spelling is missing. Adding the name again changes nothing; HOISTING the "
+            "import DOES clear this red, but for a DIFFERENT reason than the missing "
+            "spelling — the block stops importing own code inside the `try`, so the seam "
+            "gate drops out — so it clears the red without the earlier dropper being the "
+            "cause. Otherwise re-raise or delete the EARLIER dropping arm. "
             "(A third-party import is out of scope here: for an optional extra, "
             "a skip is the correct outcome.) ⛔ NEITHER REPAIR FITS AN EXTRA-GATED OWN "
             "MODULE (`tortoise.embeddings`, numpy only in the `embeddings` extra) — see "
@@ -5017,9 +5020,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     broad arm was invisible to both gates, which skip on the charge. RE-RAISING the
     #     precise arm changed nothing: `swallows` was already False and the coverage credit
     #     already returned the raw spelling, so the spelling produced no red on either side
-    #     of the fix. The one "red when it re-raised" shape — a precise re-raise above a
-    #     broad arm that DROPS — is red on BOTH trees, and its red is the broad arm's drop,
-    #     not the spelling (measured, review of PR #14287, P2 `4j-octovicesimus-bis`). The
+    #     of the fix. The one "red when it re-raised" shape — a precise re-raise above an
+    #     arm that DROPS — is red on BOTH trees, and its red is the dropping arm's drop,
+    #     not the spelling (measured, review of PR #14287, P2 `4j-octovicesimus-bis`). A
+    #     NARROW dropper reds identically (measured: `except ModuleNotFoundError: raise` /
+    #     `except ImportError: <drop>`), so the shape is not restricted to a broad arm. The
     #     CHARGE, not the credit, is what closed it (review of #14160, cycle 10, P1-2, as
     #     corrected for `raise exc`).
     #     ⛔ Do NOT read this as licence to credit the subclass as its PARENT: that is the
