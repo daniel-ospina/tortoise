@@ -303,7 +303,19 @@ jobs:
           set -o pipefail  # don't let `tail` mask a pip failure
           # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
           # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
-          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio uv 2>&1 | tail -2
+          #
+          # ⛔ HAND-ENUMERATED ON PURPOSE, AND THAT IS A STANDING HAZARD. This leg
+          # deliberately does NOT install the whole `test` extra (playwright ships no
+          # browsers here), so every package that a test this leg COLLECTS imports has to
+          # be named on the line below. It runs `python -m pytest tests/` (step "Run tests")
+          # on the AMBIENT interpreter — `uv sync --frozen` fills `.venv`, and nothing in
+          # this workflow activates or exports it — so a package that is declared only in
+          # the `dev` group is NOT importable here. `tiktoken` is the case that proved it
+          # (#14277): `tools/extractor_cost_measure.py::_encoding` imports it lazily, so the
+          # two corpus cases in `tests/test_extractor_cost_measure.py` (NOT in `slow_files`,
+          # so this leg collects them) reddened with `ModuleNotFoundError` — and the same
+          # absence is why the `test` extra now declares it for the python-ci shards.
+          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 'tiktoken>=0.14.0' uv 2>&1 | tail -2
           # uv (#2216): test_battery_corpus.py::test_builder_determinism_cross_process
           # and tests/eval/retrieval/test_gate_1349.py::test_cli_python_dash_m_entrypoint
           # shell out to bare `uv run` (default groups = dev included) — the runner

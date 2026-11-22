@@ -557,7 +557,7 @@ def _s7_cost_cells(text: str) -> dict[str, dict[str, int | float]]:
 #: `uv sync` venv, a test importing it reddened with `ModuleNotFoundError`. Since `#14277` the
 #: `test` extra declares it and `pip install -e '.[test]'` is what a sharded CI leg runs, so
 #: that reason is GONE — do not restate it. The reason that SURVIVES is the FETCH:
-#: `tiktoken.get_encoding("cl100k_base")` DOWNLOADS its ~1.1 MB BPE ranks from
+#: `tiktoken.get_encoding("cl100k_base")` DOWNLOADS its ~1.6 MB BPE ranks from
 #: `https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken` at construction
 #: whenever `$TMPDIR/data-gym-cache` is cold — and every ephemeral runner's cache is cold. That
 #: fetch goes over `requests`/`urllib`, not `httpx`, so the hermetic egress guard in

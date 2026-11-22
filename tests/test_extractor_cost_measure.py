@@ -594,6 +594,16 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
 
     Non-vacuous: at the pre-fix head `project.optional-dependencies.test` carries no
     `tiktoken` entry at all, so the first path reds before the second is ever reached.
+
+    ⛔ THERE IS A THIRD PATH, and pinning the two declarations is not enough without it.
+    `post-merge-validation.yml` hand-enumerates its install as
+    `pip install -e '.[embeddings]' <packages…>` — it deliberately does not take the whole
+    `test` extra, because playwright ships no browsers on that runner — and then runs the
+    WHOLE tree on the ambient interpreter. This file is not in `slow_files`, so that leg
+    collects it, and a package reachable only through `dev` or the `test` extra is missing
+    there. `tiktoken` was exactly that gap (#14277): the two corpus cases red on `main` on
+    a warn-only workflow. So the arm below asserts the leg either installs the extra or
+    names the package — it is not satisfied by the pyproject declarations alone.
     """
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
     for where, declarations in (
@@ -607,3 +617,16 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
             f"needs it, and because the import is lazy the tokenizing cases fail with "
             f"`ModuleNotFoundError` instead of being skipped (#14277). Declarations: "
             f"{declarations}")
+
+    # Third path: the hand-enumerated post-merge leg (see the docstring). It is allowed to
+    # switch to the extra later; what it may NOT do is install neither.
+    pmv = (_REPO_ROOT / ".github" / "workflows" / "post-merge-validation.yml").read_text()
+    installs = [ln for ln in pmv.splitlines() if "pip install -e" in ln]
+    assert installs, "no `pip install -e` line found in post-merge-validation.yml"
+    for line in installs:
+        assert ".test" in line or "tiktoken" in line, (
+            "post-merge-validation.yml installs this leg WITHOUT the `test` extra and "
+            "without `tiktoken`, but it runs `python -m pytest tests/` over the whole tree "
+            "on the ambient interpreter and `tests/test_extractor_cost_measure.py` is not "
+            "in `slow_files` — so its two corpus cases die with `ModuleNotFoundError` "
+            f"(#14277). Install line: {line.strip()}")
