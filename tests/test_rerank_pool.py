@@ -2085,10 +2085,14 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
       ⛔ NOT GRADED — NAMED RESIDUALS, not claimed closed: the `AsyncFunctionDef`,
       `AsyncFor` and `AsyncWith` members of the same isinstance tuples, and the
       `posonlyargs`/`kwonlyargs`/`vararg`/`kwarg` annotation positions of
-      `FunctionDef`. Deleting any of those leaves every row green, and six of them
-      (an `async def` default, decorator or annotation; an `async for` target or
-      object target; an `async with` target or object target) turn a real shape
-      into the PROVEN-dead verdict — the fail-open this walk exists to forbid.
+      `FunctionDef`. Deleting any of those leaves every row green, and the async
+      members turn a real shape into the PROVEN-dead verdict: an `async def`
+      default, decorator or annotation; an `async for` target or object target;
+      an `async with` target or object target — the fail-open this walk exists to
+      forbid. ⛔ NOT COUNTED, on purpose: the parenthetical IS the claim, and a
+      numeral restating a list beside it is the drift this block exists to stop
+      (an earlier cut of this sentence said "six of them" beside seven named
+      shapes, which is why the count is gone rather than corrected).
       They are residuals because that is what they measured as; a pin that
       claimed them closed would be the defect this paragraph is fixing. A
       decorator row IS graded and is a REAL read, since Python CALLS a decorator
