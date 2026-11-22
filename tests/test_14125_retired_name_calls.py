@@ -673,9 +673,17 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     `try: … except Exception: raise finally: return ok` reads as propagating while the
     probe still converts the failure into "capability unavailable", and because
     `_probe_blocks_with_an_uncovered_import_seam` is conditioned on `swallows`, both gates
-    skip it. The seam gate's rationale — a HANDLER-LESS `try/finally` probe has no broad arm,
-    so its import error propagates — describes a different shape: this one carries a broad
-    arm that re-raises, and it is skipped only because that re-raise reads as propagating. It needs the owning `ast.Try`, not the handlers; the shape has
+    skip it. The seam gate's rationale is that a probe with NO BROAD ARM propagates the
+    `ImportError` from its own import, so there is nothing to fix — a DIFFERENT shape from
+    this one: this probe carries a broad arm that RE-RAISES, and it is skipped only because
+    that re-raise reads as propagating. ⛔ And NOT for the reason an earlier cut of this
+    paragraph gave ("a HANDLER-LESS `try/finally` probe has no broad arm"): a handler-less
+    `try` is never a row at all — `_probe_blocks_from_source` skips nested blocks with
+    `not block.handlers`, measured: a module-level `try/finally` importing own code yields
+    `()`, where the same block with an `except Exception: raise` arm yields one row — so no
+    row of that shape can reach this predicate. The two statements cannot both be true, and
+    the `_probe_blocks_with_an_uncovered_import_seam` docstring says the same.
+    It needs the owning `ast.Try`, not the handlers; the shape has
     0 instances in `tests/`+`tools/` (no probe there has `finally:` + `return`), so the
     machinery is deferred and this paragraph is the record. Re-read it before adding the
     first live instance.
