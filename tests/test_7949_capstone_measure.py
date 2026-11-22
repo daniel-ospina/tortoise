@@ -18000,14 +18000,32 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # at travels with it: the grep `-n 'subject_binding_available,'` prints `12175` and `46094` on
     # `tortoise/sdk.py` at `ae26adf963c` (2026-11-20), and `main` named the second at `:45867` at
     # that same commit, 227 lines off its then-value. ⛔ THIS HEAD'S pair is deliberately NOT typed
-    # here: the document sentence this row reads states both addresses and the arm grades them from
-    # THERE, so the figure needs one home, not two — a copy in a comment is a figure nothing reads,
-    # which is the class this file exists to close.
+    # here: the document sentence states both addresses and TWO rows grade them from THERE — this
+    # one for the `also hits` half, the import-address row below for the other — so the figure needs
+    # one home, not two; a copy in a comment is a figure nothing reads, which is the class this file
+    # exists to close.
     (
         "the `sdk.py` import's OTHER hit",
         r"the same grep also hits `:(?P<n>\d+)`",
         "sdk",
         "subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,",
+    ),
+    # ⛔ THE *OTHER* HALF OF THAT SAME PAIR, graded as its own claim (#14183 review, cycle 13 —
+    # MEASURED). The row above reads only the `also hits` address; the document sentence also
+    # states the IMPORT'S address in the same breath, and nothing read it — pointing it at a
+    # NEIGHBOURING import in the same file left the whole covering set GREEN. One row per spelling,
+    # never a second ungraded number: that is the rule this tuple exists to enforce, applied to the
+    # sentence that already broke it once.
+    # ⛔ RESIDUAL, NAMED RATHER THAN IMPLIED: the needle is a SUBSTRING, and the sibling address's
+    # line carries this same token as its PREFIX (it is the dual import), so an edit that pointed
+    # this claim at THAT line instead would satisfy the needle. Accepted, because the alternative —
+    # an exact-whole-line needle — reds on any reformat of a line this PR does not own, and the
+    # direction left open needs the address to become a DIFFERENT import LIST, not merely stale.
+    (
+        "the `subject_binding_available,` import address",
+        r"\(the import at `:(?P<n>\d+)`",
+        "sdk",
+        "subject_binding_available,",
     ),
     # ⛔ THE TWO `sed -n '<n>p'` QUOTES F1 CORRECTED, AND THE REASON THEY ARE HERE
     # (#13956 review, F1 — MEASURED). F1 re-pointed them from `'19560p'`/`'25346p'` to
@@ -18046,6 +18064,7 @@ _D5_CURRENT_CLAIM_LABELS = frozenset({
     "the file's ONLY `dedup_reviewed IS NULL`",
     "the quota guard `if count + est > max_points:`",
     "the `sdk.py` import's OTHER hit",
+    "the `subject_binding_available,` import address",
     'the `f"session entity-linking failed: …"` line',
     "the paragraph the cut quoted (`whose payload points ALL fold as PARAPHRASE noops`)",
     'the `if meta.get("route"):` gate (via `20289 + 176`)',
