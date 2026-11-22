@@ -1120,7 +1120,23 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#: ⛔ RE-CUT → (11861, "f0647020531c078c"). NOT this branch's rows, and not `main`'s either —
+#: the 11858 pair above is not reproducible from the tree that recorded it. Measured THREE ways,
+#: each a run rather than an argument:
+#:   * `--repin` on THIS (merged) tree prints the pair below;
+#:   * the tree of the commit that cut 11858 — `10e51693f1`, on this branch — re-measured in a
+#:     DETACHED worktree (`git worktree add --detach <tmp> 10e51693f1`) prints THE SAME pair and
+#:     `--check` exits 1 THERE, against its own 11858 pin. So the 11858 did not reproduce at its own
+#:     commit, and no tree since has ever derived it: this re-cut absorbs rows that predate every
+#:     commit this PR adds;
+#:   * this PR's ONLY tracked source change is `tests/test_14125_retired_name_calls.py`, and putting
+#:     `origin/main`'s version of that one file back leaves the pair byte-identical — 0 rows. So the
+#:     census's own contribution to this pin is ZERO, measured, not assumed from the file list.
+#: The row SET is unchanged in shape (856 rows, same digest) on every tree measured above, which is
+#: the reason a count-only attribution is unsafe here and the DIGEST is what makes this a re-cut
+#: rather than arithmetic on the last pin (`11858 + 3 = 11861` would be a coincidence, not a proof).
+#: `typed references still pointing at a public name` stays **0** on this tree.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
