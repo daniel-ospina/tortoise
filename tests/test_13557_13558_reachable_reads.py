@@ -1789,12 +1789,37 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
     # at the TOP of the bound while six to eight SINGLE-token adverbs (`<n> just`) would still be
     # inside it. The printed item count and the guarded token count are different measures; the rows
     # are what is pinned, and their token count is the one that touches the bound.
-    # ⛔ AND FROM ELEVEN TOKENS THE LIMIT IS THE SLOT BOUND, NOT THE WINDOW (turn-5 review, P2,
-    # measured — this paragraph previously blamed the 60-character window, which cannot be the cause):
+    # ⛔ AND FROM ELEVEN TOKENS THE LIMIT IS THE SLOT BOUND, WITHIN A WINDOW THAT IS NOT
+    # IRRELEVANT (turn-5 review, P2, measured — this paragraph previously blamed the 60-character
+    # window for a bound it does not set, and then over-corrected into saying it cannot matter):
     # `have any it has been <n x just> deprecated and been withdrawn` reports for n=1..10 and is
     # SILENT at n>=11 because the slot admits ten. The `[^?]{0,60}` window in this row sits BEFORE
-    # `been` and so cannot bound the adverb run at all, and widening the slot to `{0,12}` makes n=11
-    # and n=12 report — which a window limitation could not do. The edge is pinned below.
+    # `been`, so it does not set THIS bound — but it does cap the run's REACH: widening ONLY that
+    # window to `{0,300}` (slot left at `{0,10}`) makes n=11, 12 and 20 REPORT on this very row,
+    # because the wider reach lets the arm re-anchor on the trailing `been` of `and been
+    # withdrawn`. Widening the slot to `{0,12}` also makes n=11 and n=12 report, which is what
+    # makes the slot the bound at this window. The edge is pinned below.
+    # ⛔ AND THE WINDOWS THEMSELVES ARE PART OF THIS CONTRACT (round-38 review, P2, measured):
+    # the sentence above first said the window "cannot bound the adverb run at all", which is
+    # FALSE — widening ONLY the refusal arm's `[^?]{0,60}` to `{0,300}` (slot untouched) turns
+    # n=11, 12 and 20 from SILENT into `existence_unguarded`, and widening the ROUTING guard's
+    # `_EXISTENCE_WINDOW` the same way turns them into `ended` with `signal=None`, i.e. the #14033
+    # hijack. A "helpful" widening is therefore a behaviour change in the DANGEROUS direction, so
+    # the two literals are pinned here instead of only being described in prose.
+    from tortoise import state_intent as _si
+
+    assert "[^?]{0,60}?" in _si._EXISTENCE_WINDOW, (
+        f"the routing guard's window changed ({_si._EXISTENCE_WINDOW!r}) — widening it turns a "
+        f"silence into a ROUTE at n>=11 (measured: `ended` with `signal=None`), which is the "
+        f"#14033 hijack; re-measure before touching it")
+    _refusal = dict(_si._ENDING_SIGNALS)["existence_unguarded"]
+    assert "[^?]{0,60}?" in _refusal.pattern, (
+        f"the refusal arm's window changed — widening it makes the over-long adverb run REPORT "
+        f"instead of staying silent (measured: n=11/12/20 go silent -> `existence_unguarded`), so "
+        f"the note above is stale: {_refusal.pattern[:200]!r}")
+    assert "[^?]{0,300}" not in _refusal.pattern and "[^?]{0,300}" not in _si._EXISTENCE_WINDOW, (
+        "a wide window is in one of these two arms — measured: it routes or reports at n>=11, "
+        "which is exactly the trade this contract forbids")
     for query in (
         "have any it has been just only already no longer in fact very recently deprecated and "
         "been withdrawn",
