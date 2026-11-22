@@ -1114,7 +1114,10 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     gone = tmp_path / "gone-socket-dir"
     line = f"{binary} unixsocket:{gone}/redis.socket"
     child = subprocess.Popen(
-        [line], executable=str(binary), stdin=subprocess.PIPE, env=child_env,
+        [line],
+        executable=str(binary),
+        stdin=subprocess.PIPE,
+        env=child_env,
         stdout=subprocess.DEVNULL,
     )
     try:

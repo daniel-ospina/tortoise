@@ -1701,6 +1701,16 @@ def _builds_new_container(value: ast.AST, rebound: frozenset[str] = frozenset())
     passes `_rebound_callee_names(tree)` without `consts`, so a rebind laundered through a
     STRING KEY (`setattr(builtins, "list", …)`) is not seen here — the name-form rebind is
     what this arm closes, and widening it needs `consts` threaded through `_aliases_of`.
+
+    ⛔ ONLY THE TWO CALL SITES WHOSE PREDICATE CAN RESOLVE A COPY CALLEE PASS `rebound`
+    (`aliases`, `rows`), and each of those threads is pinned by a mutant that reds a test. The
+    other three (`shallow_copies`, `bound_mutator`, `page_container`) carried the argument for
+    review rounds without any row able to red its removal — measured: deleting all three left
+    **31 passed** (#14326 review at `a29f3cd8`, P2). They no longer pass it, because a thread
+    that cannot change a verdict is the same defect this file deletes unpinnable clauses for.
+    `shallow_copies` is the provable case: `copy_is_alias=True` short-circuits this predicate
+    in `_aliases_of`, so there is no exemption left on that path for a rebound callee to
+    disarm.
     """
     if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
         return True
@@ -2144,6 +2154,10 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     form of a static half is to say where it stops.
     """
     alias_rebinds = _rebound_callee_names(run_def if tree is None else tree)
+    #: ⛔ ONE OF THE TWO SITES THAT KEEP THE THREAD (#14326 review at `a29f3cd8`, P2): a
+    #: shadowed reader (`list = lambda _x: results`) must not make `list(results)` a "pure"
+    #: new container, which would drop the alias `_c = list(results)` from `watched`. Pinned
+    #: by a mutant that deletes `rebound=` here and reds a test.
     aliases = _aliases_of(run_def, _collection_alias_predicate(var), loops=True,
                           rebound=alias_rebinds)
     watched = {var} | aliases
@@ -2152,6 +2166,10 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # every `"per_query" in receiver` clause passing (measured). Resolve names bound to
     # ANY expression mentioning `per_query`.
     scalars = _scalar_bound_names(run_def)
+    #: ⛔ THE SECOND LOAD-BEARING SITE (#14326 review at `a29f3cd8`, P2 — this one was
+    #: UNPINNED until `8e4ffbc5a0`): without the thread, a module-level
+    #: `list = lambda _x: per_query` + `_r = list(1)` + `_r[-1]["order"].sort()` measured
+    #: `hits=[]` on a permuted page. Pinned by a mutant that deletes `rebound=` here.
     rows = ({"per_query"} | _aliases_of(
         run_def, lambda v: "per_query" in _names_in(v), loops=True,
         rebound=alias_rebinds)) - scalars
@@ -2194,11 +2212,14 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # spellings produced a given name, and the file's polarity is the false red (the
     # reviewer's own reading: "only a deep copy is [an exemption], and a deep copy cannot
     # be proven statically here").
+    #: ⛔ NO `rebound=` THREAD HERE (#14326 review at `a29f3cd8`, P2; MEASURED): this site
+    #: passes `copy_is_alias=True`, which makes `_aliases_of` COLLECT the copies rather than
+    #: exempt them, so `_builds_new_container` — and with it the rebound callee set — is never
+    #: consulted on this path. The argument was dead by construction.
     shallow_copies = _aliases_of(
         run_def,
         lambda v: _builds_new_container(v) and bool(_names_in(v) & watched),
-        loops=True, copy_is_alias=True,
-        rebound=alias_rebinds) - watched
+        loops=True, copy_is_alias=True) - watched
     # ⛔ A CONTAINER THAT HOLDS THE COLLECTION IS NOT THE COLLECTION — it is an INDEX into
     # the same object graph, so it joins a SECOND set (`holders`), never `muts` (#14281
     # review P1, measured). The distinction is load-bearing in both directions:
@@ -2420,8 +2441,11 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return any(_bound_mutator_expr(e) for e in v.elts)
         return False
 
-    bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True,
-                                rebound=alias_rebinds)
+    # ⛔ NO `rebound=` HERE (#14326 review at `a29f3cd8`, P2; MEASURED): `_bound_mutator_expr`
+    # resolves an `Attribute` mutator or a LITERAL container of one — never a copy CALLEE — so
+    # the `_builds_new_container` gate the thread feeds cannot drop a name this predicate
+    # matched, and deleting the argument left 31 passed.
+    bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True)
 
     def _mutator_slot_keys(tree: ast.AST) -> dict[str, frozenset[str] | None]:
         """CONTAINER name -> the SLOT KEYS that were ASSIGNED a bound mutator.
@@ -2550,8 +2574,10 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     #: `holders` tracks SLOTS; this tracks a container NAMED in an assignment, and
     #: `_element_only` needs both — `_box = [results]; random.shuffle(_box[0])` was GREEN
     #: with only `holders` (#14281 review P2, measured).
-    page_container = holders | _aliases_of(run_def, _container_of_page, loops=True,
-                                           rebound=alias_rebinds)
+    # ⛔ NO `rebound=` HERE EITHER (#14326 review at `a29f3cd8`, P2; MEASURED: deleting it
+    # left 31 passed): `_container_of_page` matches a container that MENTIONS the page, and a
+    # copy callee is already excluded by `_builds_new_container` before `rebound` can matter.
+    page_container = holders | _aliases_of(run_def, _container_of_page, loops=True)
     hits: list[int] = []
     for node in ast.walk(run_def):
         if node is artifact_append:
