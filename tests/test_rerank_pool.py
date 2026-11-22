@@ -1610,8 +1610,10 @@ def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
     reject, instead of a second copy of the arithmetic that can drift.
 
     ⛔ MENTIONS ARE NOT ASSERTED. A mention that reads nothing is not a read, so
-    a `len(live)` row would false-block a correct tree — a live mention bound and
-    left unused beside the two that are actually called.
+    a `len(mentions)` row would false-block a correct tree — a mention bound and
+    left unused beside the two that are actually called. `live` already excludes
+    a PROVEN-dead mention, which is why the row counts CALL SITES rather than
+    live mentions.
 
     ⛔ AND THE CALL-SITE ROW ALONE IS A FAIL-OPEN, which is why it does not stand
     alone. A mention that ESCAPED into a shape the walk cannot follow adds no call
