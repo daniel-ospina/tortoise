@@ -1629,7 +1629,7 @@ def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
 # prose arms. So the block is graded against `OWN_PINS`, an object-FREE map, and the map is
 # graded against each rev's committed pin by the premise arm that follows it.
 _OWN_PIN_CLAIM_RE = re.compile(
-    r"Its own pin[\s#:]+is[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+    r"(?:Its own pin[\s#:]+is|commits)[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
 _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 
 #: rev -> the `(rows, digest)` pair the block publishes AS that rev's own pin.
@@ -1640,6 +1640,16 @@ _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 #: re-derives every entry from the repository wherever the objects exist.
 OWN_PINS: dict[str, tuple[int, str]] = {
     "d523c9be8c": (11838, "de5664dc98549d56"),
+    # ⛔ THE `commits` SPELLING IS GRADED TOO (review of PR #14258, P3). The regex above used to key
+    # on `Its own pin is` alone, so the re-pin block's `10e51693f166` (#14160) `commits
+    # (11858, "a1552662bf07a10b")` — the same class of claim, written in a different honest form —
+    # was ungraded: a rev published with another tree's pair would have passed in that spelling.
+    # `c5e84ad180f2` is #14160's PRE-SQUASH tip and `10e51693f166` the squash that landed it; both
+    # commit the same pair, measured with `git show <rev>:tools/sdk_privatise.py | grep
+    # '^SWEEP_RESIDUE'`, and `--repin` at either tree prints it — which is what makes the squash
+    # tree's red `main`'s drift and not the branch's.
+    "10e51693f166": (11858, "a1552662bf07a10b"),
+    "c5e84ad180f2": (11858, "a1552662bf07a10b"),
 }
 
 
@@ -1648,7 +1658,9 @@ def _own_pin_claims(block: str) -> list[tuple[str, int, str]]:
 
     The rev is the NEAREST backticked hex token BEFORE the claim, because that is how the
     block writes it — the sentence it corrects reads "… `d523c9be8c`, the LAST of the eight,
-    inherits that deletion. … Its own pin is …". No claim returns an empty list; the caller
+    inherits that deletion. … Its own pin is …". Two SPELLINGS are graded, `Its own pin is` and
+    `commits` (PR #14258's review, P3: the second was ungraded, so the same defect written as
+    "`<rev>` commits `(N, "digest")`" passed). No claim returns an empty list; the caller
     asserts non-vacuity so deleting the sentence is not a way to pass.
     """
     claims = []
