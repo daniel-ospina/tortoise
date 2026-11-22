@@ -8561,6 +8561,16 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
 #: that at four clauses (#13802 review, finding 1 — the D5 row and the file-table section),
 #: so the pattern below is the armed detector for that defect class.
 _TYPED_INDEX_NUMSTAT = re.compile(
+    # ⛔ THE ALTERNATION IS GROUPED SO THE STAMP EXEMPTION GOVERNS ALL OF IT (#14269
+    # review, P2 — MEASURED). The exemption is stated ONCE, after the group, because a
+    # lookahead sitting beside ONE alternative only exempts that alternative: measured,
+    # "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `2 2` at
+    # `a577d0e25c`" was still REFUSED by the hard-coded literals above while the
+    # span-anchored one let the identical stamped form through — a false red on the
+    # archaeology, open in one spelling and closed in another, which is the split this
+    # exemption exists to end. Every branch here ends in a typed pair, so one trailing
+    # lookahead covers them all.
+    r"(?:"
     r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
     r"\s*(?:->|prints)\s*`\d+\s+\d+`"
     # ⛔ THE SHORT FORM TOO (#13802 review, P2). The document's own spelling of this
@@ -8592,14 +8602,6 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # match.
     r"|`[^`]*--numstat[^`]*`\s*(?:prints?|print|returns?|reports?|shows?|gives?|lists?|names?)"
     r"\s*`\d+\s+\d+`"
-    # ⛔ AND THE HEAD STAMP IT MUST NOT REFUSE (#14269 review, P2 — MEASURED). This document
-    # ALLOWS a head-STAMPED clause to type a figure (the archaeology, e.g. `numstat <sha> <sha>
-    # -- …` → `10 2`); the span-anchored alternative above would have refused the natural way of
-    # writing one ("`git diff --numstat` prints `10 2` at `a577d0e25c`"), i.e. a FALSE RED on a
-    # form the rule permits. A figure followed by a head stamp is therefore let through — the
-    # stamp is what makes it history rather than a claim about this head — and a figure followed
-    # by anything else (notably "at this head") is not.
-    r"(?!(?:\s*(?:at|@)\s*`?[0-9a-f]{7,40}`?))"
     # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
     # document's `both print NOTHING` clauses state the CURRENT reading without repeating
     # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
@@ -8631,7 +8633,8 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # the pair, so no alternative above sees it. The shape is specific on purpose — the
     # numstat pair is TWO NUMBERS and `docs/00_index.md` followed by such a pair is a typed
     # numstat reading by construction, not an English coincidence.
-    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`")
+    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`"
+    r")(?!(?:\s*(?:at|@)\s*`?[0-9a-f]{7,40}`?))")
 
 
 def test_the_document_types_no_numstat_figure_for_the_index_residual():
@@ -8727,6 +8730,12 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
         # stamp is what distinguishes them, so the stamp must be honoured, not the verb.
         "`git diff --numstat` prints `10 2` at `a577d0e25c`",
         "`git diff --numstat` -> `10 2` at `ef443ea968`",
+        # ⛔ AND THE SAME EXEMPTION FOR THE LITERAL ALTERNATIVES (#14269 review, P2 — MEASURED).
+        # The exemption was first written beside ONE branch, so the identical stamped form was
+        # allowed after the span-anchored spelling and REFUSED after the `docs/00_index.md`
+        # literals — one false red closed, its twin left open. These two pin the hoisted form.
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `2 2` at `a577d0e25c`",
+        "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints `1 1` at `a577d0e25c`",
         # a HISTORICAL quote of a past head's pair, sitting a few characters after the
         # command — must stay allowed without a present-tense verb to bind it
         # (#13802 merge-round review, P2: the unbounded cut of this alternative refused it).
