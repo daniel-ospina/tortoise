@@ -58,14 +58,15 @@ LIMITS — stated because an unstated limit reads as a result:
 3. **Cache arms are a ladder, not two points.** Both arms run the corpus in
    order, so from the second document onward the per-stage system prompt is
    already a cached prefix. ⛔ **NO TRULY COLD PREFIX WAS OBSERVED.** The
-   provider's prefix cache outlives a process and this measurement is
-   resumable (``measurements.jsonl`` accumulates across runs), so even the
-   cold arm's FIRST document was 83.3% cached (29,568 hit of 35,512 prompt
-   tokens) — its row is reported, labelled for what it is, rather than called
-   a cold reading. The cold arm's steady state (sys prompt warm, document body
-   cold) is the realistic production figure; the warm arm measures a perfect
-   replay — the upper bound of the cache lever, and the value content-hash
-   dedup would collect.
+   provider's prefix cache outlives a single call, and six workers run
+   concurrently against the same per-stage prompts, so even the cold arm's
+   FIRST document was 83.3% cached (29,568 hit of 35,512 prompt tokens) — the
+   prefix was already warm when it was measured, from a sibling call or an
+   earlier run, and the bundle cannot tell which. Its row is reported,
+   labelled for what it is, rather than called a cold reading. The cold arm's
+   steady state (sys prompt warm, document body cold) is the realistic
+   production figure; the warm arm measures a perfect replay — the upper bound
+   of the cache lever, and the value content-hash dedup would collect.
 """
 from __future__ import annotations
 

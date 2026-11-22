@@ -377,7 +377,7 @@ def test_the_documented_command_regenerates_the_committed_bundle(tmp_path):
         (_EVIDENCE / "report.json").read_text(encoding="utf-8")
 
 
-def test_the_first_measured_document_is_labelled_a_resume_not_a_cold_prefix():
+def test_the_first_measured_document_is_labelled_not_a_cold_prefix():
     """The section used to be titled "the true cold call (first document,
     before any prefix cached)" over a row that is 83% cache HITS.
 
