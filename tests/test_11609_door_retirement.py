@@ -1082,259 +1082,331 @@ class TestEveryReaderNamesTheLiveListingDoor:
         "docs/how-to/provision-a-graph-per-end-user.md",
     )
 
-    #: What ends a SENTENCE in this document. ⛔ A fixed ±N-character window is not one
-    #: (#14237 review F3): it spans sentence boundaries, so an instruction placed next to
-    #: an unrelated migration note passed. This is the assertion's stated property, so it
-    #: is what the assertion measures.
+    #: ⛔ WHAT THIS GUARD READS: MARKDOWN STRUCTURE, NOT ENGLISH (#14237, rounds 2-5).
     #:
-    #: A hard-wrapped PROSE line is deliberately NOT a boundary — the doc wraps at ~80
-    #: columns, so treating a bare newline as one would split a sentence mid-clause and
-    #: red a correct mention (the over-block direction). Blank lines and lines that OPEN a
-    #: new markdown block (table row, heading, list item) are boundaries, because that is
-    #: where prose actually stops.
+    #: The first version of this guard asked "is this mention labelled as a retirement?"
+    #: and answered it with a sentence splitter, a label word, and three widening patches.
+    #: Every round found a new way to defeat that question, because no punctuation table
+    #: answers a question about English:
     #:
-    #: A table CELL is a boundary too, and that is load-bearing rather than tidy: a
-    #: markdown row has no sentence terminator, so without this a MIGRATION NOTE in one
-    #: cell and an INSTRUCTION in the next shared one "sentence" and the instruction
-    #: passed on its neighbour's word (measured — the first form of this fix let exactly
-    #: that through). `|` is the cell separator, and it is not a character this doc uses
-    #: in prose.
+    #:   r2  `…retired forward into it.)`        `(?=\s)` missed terminator + `)`
+    #:   r3  `….**` / `.*` / `` ` `` / `>`       the closer set was hand-picked
+    #:   r4  `is not retired` / `(now retired)`  ANY "retired" in the segment counted
+    #:   r5  a fenced ``` call under a note      a fence was not a boundary at all
     #:
-    #: A `;` is a boundary too (#14237 N3): it joins two INDEPENDENT CLAUSES, so a note
-    #: and an instruction glued with one shared a "sentence" and the instruction again
-    #: passed on its neighbour's word. It is measured by its own case below, not asserted.
+    #: Measured at 27187627ea6f, every r4 form was still ACCEPTED (false green) and the
+    #: same correct sentence scored differently on `;` vs `—`. Each patch was correct and
+    #: the class still leaked, so the question is replaced by two a document answers about
+    #: itself:
     #:
-    #: A terminator followed by CLOSING/MARKUP characters is still a terminator (#14237
-    #: round-2 review P2, widened by round 3): `(?=\s)` alone missed the `.` in
-    #: `…retired forward into it.)`, so the sentence did not end there and the NEXT line
-    #: inherited the note's "retired" — measured, the guard passed an instruction written
-    #: directly under a parenthesised migration note. The round-3 review then defeated the
-    #: first fix with the other markdown closers (`.**`, `.*`, `._`, a closing code span,
-    #: a blockquote's `>`), so the class is the WHOLE run of closing characters, not a
-    #: hand-picked pair — and `…` is a terminator in its own right. Everything skipped is a
-    #: character that cannot start a sentence, and only up to whitespace, so this can only
-    #: ADD boundaries (never cut a sentence a plain terminator already cut in two).
+    #:   R1  a retired name written as a CALL — the name immediately followed by `(` — is
+    #:       a copyable command, so it may not appear at all. No prose talks it back in.
+    #:   R2  every other mention is a NOTE, and a note must name the recorded REPLACEMENT
+    #:       (`RETIRED_USE_INSTEAD[name]`) inside the same markdown BLOCK. A note that
+    #:       gives the reader only the old name is a dead end; an instruction does not
+    #:       name the successor, so it reds here without reading a word of English.
     #:
-    #: ⚠️ DECLARED RESIDUAL — the over-block side, stated not tuned (#14237 round-1 review,
-    #: finding 2's rung-2 note). `(?=\s)` means an ABBREVIATION whose dot is followed by a
-    #: space (`e.g.`, `i.e.`, `etc.`) still ends a "sentence", so a correct mention in the
-    #: same real sentence can be cut away from its label and the guard REDS on a doc that
-    #: is right. That direction is the one this guard is allowed to be wrong in: a spurious
-    #: boundary can only SHORTEN a segment, and a shorter segment can only MISS a label
-    #: (false red), never INHERIT one from the wrong clause (false green). The numeric forms
-    #: the review named alongside it do NOT split, and that is measured rather than assumed:
-    #: `3.5`, `§5.3` and `v3.5` carry no whitespace after the dot, so the `(?=\s)` lookahead
-    #: already excludes them — the residual is abbreviation-with-space, nothing wider.
-    #: `test_a_spurious_split_can_only_over_block_never_fail_open` pins both halves.
-    SENTENCE_BREAK = re.compile(
-        r"[.!?\u2026][\"'\u2019\u201d)\]_`*>]*(?=\s)"       # ends a sentence, maybe `.**`
-        r"|;[ \t]*"                                       # ends a CLAUSE
-        r"|\n[ \t]*\n"                                     # ends a block
-        r"|\n(?=\||#{1,6} |[ \t]*[-*+] |[ \t]*\d+\. )"     # a new block begins
-        r"|\|"                                            # a table CELL boundary
-    )
+    #: ⛔ R1 ALONE WOULD BE VACUOUS, AND THAT IS MEASURED, NOT FEARED. The defect this
+    #: guard exists for — commit b4da1f5c01: "or from the MCP tool
+    #: **`tortoise_list_graphs`**, which answers a metadata summary", and the table row
+    #: "the MCP tool `tortoise_list_graphs` lists graph **names**" — was written **BARE**,
+    #: with no `(`, so a call-form-only rule would have passed both. R2 catches the shape
+    #: that was actually shipped; R1 catches the copyable spelling R2 cannot see.
+    #:
+    #: A BLOCK is a markdown unit and it is deterministic: a fenced code block, a table
+    #: row, a heading, a list item, or a blank-line-delimited paragraph. Two consequences
+    #: are deliberate and pinned below — a fence is its OWN block (a code sample cannot
+    #: borrow the replacement named in the note above it), and a hard-wrapped prose line
+    #: is NOT a boundary (this doc wraps at ~80 columns, so a bare newline inside a
+    #: paragraph must not split it).
+    #:
+    #: ⚠️ SCOPE: the documents whose every `tortoise_*` mention is a call, and ONE of
+    #: them today. The rule is doc-agnostic, but applying it repo-wide would red on docs
+    #: that carry retired call forms right now (`docs/INGEST_CONTRACT.md:358` etc.), which
+    #: is a repair of its own — see the follow-up named in the PR body, not this guard.
+    REPLACEMENT_NAME = re.compile(r"tortoise_[a-z0-9_]+")
+
+    #: A retired name in call form: the name immediately followed by this.
+    CALL_FORM = "("
+
+    @staticmethod
+    def blocks(text: str) -> list[tuple[int, int, str]]:
+        """Split markdown into ``(start, end, block)`` units — structure, not punctuation.
+
+        A fence (``` or ~~~) is one block including its markers, so a code sample is
+        never joined to the prose around it. A table row, a heading and a list item are
+        each their own block. Everything else accumulates into a blank-line-delimited
+        paragraph, and a hard-wrapped line stays inside it.
+        """
+        blocks: list[tuple[int, int, str]] = []
+        offset = 0
+        lines = text.splitlines(keepends=True)
+
+        def flush(parts: list[str], begin: int, end: int) -> None:
+            if parts:
+                blocks.append((begin, end, "".join(parts)))
+
+        paragraph: list[str] = []
+        paragraph_start = 0
+        fence: list[str] = []
+        fence_start = 0
+        in_fence = False
+        for line in lines:
+            stripped = line.strip()
+            ends = offset + len(line)
+            opens_fence = stripped.startswith("```") or stripped.startswith("~~~")
+            if in_fence:
+                fence.append(line)
+                if opens_fence:
+                    blocks.append((fence_start, ends, "".join(fence)))
+                    fence, in_fence = [], False
+                offset = ends
+                continue
+            if opens_fence:
+                flush(paragraph, paragraph_start, offset)
+                paragraph = []
+                fence, fence_start, in_fence = [line], offset, True
+                offset = ends
+                continue
+            if not stripped:
+                flush(paragraph, paragraph_start, offset)
+                paragraph = []
+                offset = ends
+                continue
+            structural = (
+                stripped.startswith("|")
+                or stripped.startswith("#")
+                or re.match(r"[-*+] |\d+\. ", stripped) is not None
+            )
+            if structural:
+                flush(paragraph, paragraph_start, offset)
+                paragraph = []
+                blocks.append((offset, ends, line))
+                offset = ends
+                continue
+            if not paragraph:
+                paragraph_start = offset
+            paragraph.append(line)
+            offset = ends
+        flush(paragraph, paragraph_start, offset)
+        if in_fence:
+            blocks.append((fence_start, offset, "".join(fence)))
+        return blocks
 
     @classmethod
-    def sentence_around(cls, text: str, start: int, end: int) -> str:
-        """The sentence containing ``[start, end)`` — bounded by terminators, not width."""
-        left = 0
-        for match in cls.SENTENCE_BREAK.finditer(text, 0, start):
-            left = match.end()
-        following = cls.SENTENCE_BREAK.search(text, end)
-        right = following.end() if following else len(text)
-        return text[left:right]
+    def replacements(cls, name: str) -> set[str]:
+        """The live doors `RETIRED_USE_INSTEAD[name]` tells the reader to use instead.
 
-    #: What counts as a LABEL: the past/attributive form, not the stem (#14237 r3
-    #: review, P2). `retires` / `will retire` is a PROMISE that the name goes away, so a
-    #: sentence saying "Call `tortoise_list_graphs` for now — the door retires in the next
-    #: wave" still INSTRUCTS the reader to make the call; a stem match accepted it. The
-    #: narrower form can only over-block a hand-written synonym ("retirement", "gone") in
-    #: this one doc, which is the fail-closed direction and is visible in the failure text.
-    RETIRED_LABEL = re.compile(r"\bretired\b", re.IGNORECASE)
+        A pointer is prose: it can name one live door, two (`tortoise_mine_conversations`),
+        or the same one twice (`tortoise_delete` preview + confirm).
+        """
+        return set(cls.REPLACEMENT_NAME.findall(RETIRED_USE_INSTEAD[name]))
 
     @classmethod
-    def is_labelled(cls, sentence: str) -> bool:
-        """Is this sentence a statement that the door IS retired (not that it will be)?"""
-        return bool(cls.RETIRED_LABEL.search(sentence))
+    def retired_call_forms(cls, text: str) -> list[str]:
+        """R1 — every retired name written as a call, as ``name:line`` (empty is clean)."""
+        found: list[str] = []
+        for name in sorted(RETIRED_USE_INSTEAD):
+            for match in re.finditer(rf"\b{re.escape(name)}\b", text):
+                if text[match.end():match.end() + len(cls.CALL_FORM)] != cls.CALL_FORM:
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                found.append(f"{name}:{line}")
+        return found
 
-    def test_the_window_is_a_sentence_not_a_character_budget(self):
-        """The fail-open case, as a case (#14237 review F3).
+    @classmethod
+    def notes_missing_replacement(cls, text: str) -> list[str]:
+        """R2 — every non-call mention whose block never names the replacement."""
+        found: list[str] = []
+        blocks = cls.blocks(text)
+        for name in sorted(RETIRED_USE_INSTEAD):
+            for match in re.finditer(rf"\b{re.escape(name)}\b", text):
+                if text[match.end():match.end() + len(cls.CALL_FORM)] == cls.CALL_FORM:
+                    continue
+                block = next(
+                    (body for start, end, body in blocks if start <= match.start() < end),
+                    "")
+                if not (cls.replacements(name) & set(cls.REPLACEMENT_NAME.findall(block))):
+                    line = text.count("\n", 0, match.start()) + 1
+                    found.append(f"{name}:{line} -> {' '.join(block.split())[:120]}")
+        return found
 
-        A migration note on one line and an INSTRUCTION on the next: a ±140-character
-        window sees the neighbouring "retired" and passes the instruction; a sentence
-        window does not.
+    def test_the_guard_names_the_doc_it_guards(self):
+        """An empty parametrize source SKIPS, it does not fail (#14237 r5 review, P2).
+
+        `@pytest.mark.parametrize` over an empty tuple collects nothing, so deleting the
+        entry during a doc rename would leave every gate green while the guard measured
+        nothing. This row is the tripwire.
+        """
+        assert "docs/how-to/provision-a-graph-per-end-user.md" in self.CALL_INSTRUCTION_DOCS, (
+            "the guard's only parametrize source no longer names the doc — an empty "
+            "parametrize SKIPS instead of failing, so the guard would silently measure "
+            "nothing (measured: `parametrize` over `()` gives `1 skipped`)")
+
+    def test_the_block_splitter_is_structure_not_punctuation(self):
+        """A fence, a table row, a heading and a list item are blocks; a wrapped line is not."""
+        text = (
+            "Wrapped prose line one\n"
+            "and the same paragraph.\n"
+            "\n"
+            "| a | b |\n"
+            "# a heading\n"
+            "- a list item\n"
+            "```python\n"
+            "call()\n"
+            "```\n"
+        )
+        blocks = [body for _start, _end, body in self.blocks(text)]
+        assert len(blocks) == 5, blocks
+        assert blocks[0] == "Wrapped prose line one\nand the same paragraph.\n"
+        assert blocks[4] == "```python\ncall()\n```\n"
+
+    def test_the_PRE_FIX_text_is_a_violation(self):
+        """R2 catches the defect this guard exists for — measured from commit b4da1f5c01.
+
+        ⛔ Both lines were written BARE, so a call-form-only rule (R1) would pass them:
+        this is why R1 alone is not the guard.
+        """
+        pre_fix = (
+            "`keys:manage`) or from the MCP tool **`tortoise_list_graphs`**, which answers a\n"
+            "metadata summary you already have.\n"
+            "\n"
+            "| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | keep "
+            "`graph.id` from the 201; the MCP tool `tortoise_list_graphs` lists graph "
+            "**names**, not ids |\n"
+        )
+        assert not self.retired_call_forms(pre_fix), (
+            "the pre-fix text carried no `(`, so R1 alone cannot see it — that is the "
+            "premise of this row")
+        assert self.notes_missing_replacement(pre_fix), (
+            "the pre-fix text named a retired door as the tool to use and never named "
+            "`tortoise_graph_overview`, so R2 must reject it")
+        fixed = (
+            "(`keys:manage`) or the MCP tool **`tortoise_graph_overview(section=\"graphs\")`**\n"
+            "(the door `tortoise_list_graphs` retired forward into it).\n"
+            "\n"
+            "| `GRAPH_LISTING_VIA_SESSION` | keep `graph.id` from the 201 | "
+            "`tortoise_graph_overview(section=\"graphs\")` lists names "
+            "(`tortoise_list_graphs` retired forward into it) |\n"
+        )
+        assert not self.notes_missing_replacement(fixed), (
+            "the shipped repair names the live door in the same block as the note, so it "
+            "must pass — a guard that reds its own repair is an over-block")
+
+    @pytest.mark.parametrize("text", [
+        "Call `tortoise_list_graphs` for the names.\n",
+        "Call `tortoise_list_graphs` — it is not retired.\n",
+        "Call `tortoise_list_graphs` (now retired).\n",
+        "Call `tortoise_list_graphs` the way `tortoise_delete` did before it retired.\n",
+        "Call `tortoise_list_graphs` for names, even though OTHER doors retired.\n",
+        "Call `tortoise_list_graphs` for now — the door retires in the next SDK wave.\n",
+        "Do not call `tortoise_list_graphs`; it retired forward into it.\n",
+        "Do not call `tortoise_list_graphs` — it retired forward into it.\n",
+    ])
+    def test_an_instruction_cannot_be_talked_back_in(self, text):
+        """Every shape rounds 2-5 recorded as a fail-open, at once (#14237 r4/r5 reviews).
+
+        The label word is gone, so none of these has anything to hide behind: an
+        instruction does not name the replacement, and the negated/parenthetical/promise
+        forms ("not retired", "(now retired)", "retires in the next wave") are irrelevant
+        to a rule that reads structure.
+        """
+        assert self.notes_missing_replacement(text), (
+            f"an instruction was accepted as a note: {text!r}")
+
+    @pytest.mark.parametrize("text", [
+        "Call `tortoise_list_graphs(graph_id=x)` to read one graph.\n",
+        "Call `tortoise_list_graphs(section=...)` and then `tortoise_graph_overview`.\n",
+        "```python\ngraph = tortoise_list_graphs(graph_id='x')\n```\n",
+    ])
+    def test_a_copyable_call_is_rejected_even_beside_the_replacement(self, text):
+        """R1 — a call form is a spelling to type, so naming the successor does not save it."""
+        assert self.retired_call_forms(text), (
+            f"a copyable call of a retired door was accepted: {text!r}")
+
+    def test_a_fenced_mention_cannot_borrow_the_note_above_it(self):
+        """The r5 shape: a fence was not a boundary, so the note's "retired" cleared it.
+
+        ⛔ The fence DIRECTLY follows the note — no blank line — because that is the shape
+        a blank-line-only splitter gets wrong (measured: with the fence branch removed
+        from `blocks`, this fixture reds, which is what makes the row discriminating).
         """
         text = (
-            "The door `tortoise_list_graphs` retired forward into "
-            "`tortoise_graph_overview(section=\"graphs\")`.\n"
-            "Call `tortoise_list_graphs(graph_id=x)` to read one graph.\n"
+            "(the door `tortoise_list_graphs` retired forward into "
+            "`tortoise_graph_overview(section=\"graphs\")`.)\n"
+            "```python\n"
+            "graph = tortoise_list_graphs(graph_id='x')\n"
+            "```\n"
         )
-        instruction = text.index("Call `tortoise_list_graphs", text.index("Call"))
-        note = text.index("`tortoise_list_graphs`")
-        assert "retire" in self.sentence_around(text, note, note + 20).lower(), (
-            "the migration note is its own sentence and still says retired")
-        assert "retire" not in self.sentence_around(
-            text, instruction + 6, instruction + 26).lower(), (
-            "the INSTRUCTION shares a ±window with the note's 'retired' but not a "
-            "sentence — a window-based guard would call this labelled")
+        assert self.retired_call_forms(text), (
+            "a fenced call under a migration note was accepted — a fence is its own block")
+        bare = (
+            "(the door `tortoise_list_graphs` retired forward into "
+            "`tortoise_graph_overview(section=\"graphs\")`.)\n"
+            "```\n"
+            "tortoise_list_graphs\n"
+            "```\n"
+        )
+        assert self.notes_missing_replacement(bare), (
+            "a bare retired name inside its own fence borrowed the note's replacement — "
+            "without the fence branch in `blocks`, the note and the code share a paragraph")
 
-    def test_a_table_cell_is_its_own_sentence(self):
-        """A markdown row has no terminator, so cell scoping is what keeps a note
-        and an instruction apart inside one row (measured fail-open: without it, a
-        `retired` note in the next cell cleared the instruction)."""
-        row = ("|| `GRAPH_LISTING` | call `tortoise_list_graphs` for names "
-               "| (`tortoise_list_graphs` retired forward into it) |")
-        instruction = row.index("call `tortoise_list_graphs") + 6
-        assert "retire" not in self.sentence_around(
-            row, instruction, instruction + 20).lower(), (
-            "an instruction in one cell was cleared by a note in another")
-        note = row.rindex("`tortoise_list_graphs`")
-        assert "retire" in self.sentence_around(row, note, note + 20).lower(), (
-            "the migration note's own cell says retired")
+    def test_declared_residual_a_block_may_name_both_and_still_instruct(self):
+        """⚠️ DECLARED RESIDUAL — stated, not tuned (#14237 r5 review).
 
-    def test_a_semicolon_separates_clauses_not_a_label(self):
-        """A `;` joins independent clauses, so it is a boundary (#14237 N3).
-
-        The measured fail-open: a note and an instruction glued with `;` sat in one
-        "sentence", so the instruction inherited the note's "retired" and passed.
+        R2 asks that the mention's block names the replacement. A block that names BOTH
+        and still tells the reader to call the retired door therefore passes, e.g.
+        "Call `tortoise_list_graphs` for names; `tortoise_graph_overview` exists too".
+        That is the honest bound of a structural rule: it is strictly narrower than the
+        label word it replaces (which accepted a NEGATED label and any neighbouring
+        clause's "retired"), and R1 still rejects the copyable spelling. It is pinned
+        here so the next reader of the rule learns the bound from a test, not from a
+        regex.
         """
-        text = ("The door `tortoise_list_graphs` retired forward into it; call "
-                "`tortoise_list_graphs(graph_id=x)` to read one graph.")
-        instruction = text.index("call `tortoise_list_graphs") + 6
-        assert "retire" not in self.sentence_around(
-            text, instruction, instruction + 20).lower(), (
-            "an instruction joined to the note by ';' was cleared by the note's "
-            "'retired' — a clause boundary is not a sentence boundary")
-
-    @pytest.mark.parametrize("closer", [")", '"', "'", "\u201d", "\u2019", "]", "**", "*",
-                                      "_", "`", ">"])
-    def test_a_terminator_before_ANY_closing_closer_still_ends_the_sentence(self, closer):
-        """A terminator + ANY closing/markup run ends a sentence (#14237 r2/r3 reviews).
-
-        Measured fail-open, twice. First `.)`: a boundary that only looked for `[.!?]`
-        followed by whitespace missed it, so the instruction on the next line inherited
-        the note's "retired". Then the same hole with every OTHER markdown closer —
-        `.**`, `.*`, `._`, a closing code span, a blockquote's `>` — which is why the
-        rule skips the whole closing run instead of a hand-picked pair: each of these
-        is a form a how-to edit writes without thinking.
-        """
-        text = ("Intro about the wave.\n"
-                "(the door `tortoise_list_graphs` retired forward into "
-                f"`tortoise_graph_overview`.{closer}\n"
-                "Call `tortoise_list_graphs` for the names.\n")
-        instruction = text.rindex("Call `tortoise_list_graphs") + 6
-        assert "retire" not in self.sentence_around(
-            text, instruction, instruction + 20).lower(), (
-            f"an instruction under a `…retired….{closer}` note was cleared by it — a "
-            "terminator followed by a closing character is still a terminator")
-
-    def test_an_ELLIPSIS_terminator_ends_a_sentence(self):
-        """`…` is a terminator (#14237 r3 review, P1) — `[.!?]` alone missed it."""
-        text = ("The door `tortoise_list_graphs` retired forward into it\u2026\n"
-                "Call `tortoise_list_graphs` for the names.\n")
-        instruction = text.rindex("Call `tortoise_list_graphs") + 6
-        assert "retire" not in self.sentence_around(
-            text, instruction, instruction + 20).lower(), (
-            "an ellipsis ended the note and the next instruction still inherited its "
-            "'retired'")
-
-    def test_a_spurious_split_can_only_over_block_never_fail_open(self):
-        r"""The declared residual is BOUNDED, and it errs in the safe direction.
-
-        `(?=\s)` splits after an abbreviation (`e.g.`, `i.e.`), which can cut a correct
-        mention away from its own label and RED a right doc — the over-block direction the
-        guard is allowed to be wrong in. What it can never do is hand an instruction a
-        label from the clause beside it. The numeric forms the review grouped with these
-        do not split at all, because their dot is not followed by whitespace; that half is
-        the one that would silently WIDEN the over-block surface, so it is pinned too.
-        """
-        # OVER-BLOCK: the label sits before the abbreviation, the mention after it, so the
-        # mention loses its own sentence's label and the guard reds a correctly-labelled
-        # line. That is the wrong direction to be wrong in, and it is the bounded one.
-        labelled = ("The old door retired forward into `tortoise_graph_overview`, e.g. in "
-                    "wave seven, and `tortoise_list_graphs` is called only by legacy code.")
-        mention = labelled.index("`tortoise_list_graphs`")
-        segment = self.sentence_around(labelled, mention, mention + 20)
-        assert "retired" in labelled.lower(), "the fixture lost its label"
-        assert "retired" not in segment.lower(), (
-            "the abbreviation did not end a \"sentence\" — this residual no longer exists, "
-            "so the declaration above is stale rather than wrong")
-        # NOT fail-open: the same split can never hand an INSTRUCTION its neighbour's
-        # label, because the spurious boundary only ever SHORTENS the segment.
-        instruction_text = ("The old door retired in wave seven, e.g. the listing door, and "
-                            "call `tortoise_list_graphs` for names.")
-        call = instruction_text.index("call `tortoise_list_graphs") + 6
-        assert "retire" not in self.sentence_around(
-            instruction_text, call, call + 20).lower(), (
-            "a spurious boundary let an instruction inherit a label from the clause next "
-            "to it — that is the fail-open direction, and no abbreviation may buy it")
-
-        for numeric in ("3.5", "\u00a75.3", "v3.5"):
-            text = (f"A graph at {numeric} points still lists its graphs via "
-                    "`tortoise_list_graphs`.")
-            mention = text.index("`tortoise_list_graphs`")
-            assert "A graph at" in self.sentence_around(
-                text, mention, mention + 20), (
-                f"{numeric!r} was treated as a terminator: the dot is not followed by "
-                "whitespace, so nothing should have split there")
-
-    def test_a_promise_to_retire_is_not_a_label(self):
-        """`retires` / `will retire` is a PROMISE, not a label (#14237 r3 review, P2).
-
-        The scan used the bare stem `"retire"`, so an instruction carrying a promise —
-        "Call `tortoise_list_graphs` for now — the door retires in the next SDK wave" —
-        was accepted as labelled while still telling the reader to make the call.
-        """
-        assert not self.is_labelled(
-            "Call `tortoise_list_graphs` for now — the door retires in the next SDK "
-            "wave."), (
-            "a future-tense promise was accepted as a retirement label — the reader is "
-            "still being told to call the retired name")
-        assert not self.is_labelled(
-            "Call `tortoise_list_graphs(graph_id=x)` to read one graph."), (
-            "a plain instruction was accepted as a label")
-        assert self.is_labelled(
-            "The door `tortoise_list_graphs` retired forward into it."), (
-            "the past form IS the label — it must stay accepted")
+        text = (
+            "Call `tortoise_list_graphs` for names; "
+            "`tortoise_graph_overview(section=\"graphs\")` exists too.\n"
+        )
+        assert not self.notes_missing_replacement(text)
+        assert not self.retired_call_forms(text)
 
     @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
-    def test_every_mention_says_the_name_is_retired(self, relpath):
-        """A retired name may be MENTIONED here — it may not be RECOMMENDED.
+    def test_no_retired_name_is_offered_as_a_copyable_call(self, relpath):
+        """R1 on the real document: no retired name is written as a call (#14237 r5, P1)."""
+        from pathlib import Path
 
-        Asserting absence outright would be wrong, and this lane measured why: the
-        correct repair keeps a migration note (…"the door `tortoise_list_graphs`
-        retired forward into") so a reader who knows the old name learns where it
-        went. The property worth pinning is narrower and sharper — every mention is
-        labelled as a retirement in its own sentence. An INSTRUCTION ("call
-        `tortoise_list_graphs`, which answers …") has no such word, and that is
-        exactly the form the P7 review found twice in this file.
+        doc = Path(__file__).resolve().parent.parent / relpath
+        text = doc.read_text(encoding="utf-8")
+        assert not self.retired_call_forms(text), (
+            f"{relpath} writes a retired door as a call the reader can copy "
+            f"(name:line = {self.retired_call_forms(text)}). The name is shim-only on "
+            "`get_tool` and absent from `tools/list`, so a tool-grant client cannot "
+            "follow it — re-point the call at the live door")
 
-        ⛔ "In its own sentence" is measured as a sentence (#14237 review F3), not as a
-        character window: ±N characters spans sentence boundaries, so an instruction
-        placed within 140 characters of an unrelated "retired" note would pass — the
-        guard's own failure mode, one doc edit away.
+    @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
+    def test_every_mention_is_a_note_that_names_its_replacement(self, relpath):
+        """R2 on the real document: each retired mention names its successor (#14237 r5).
+
+        A DEAD-END mention is the defect class: the reader is given the old name and no
+        way forward. The doc's own two mentions are migration notes that name
+        `tortoise_graph_overview`, so they pass — and `mentions` is asserted non-empty,
+        because a scan with an empty discovery set proves nothing.
         """
         from pathlib import Path
 
         doc = Path(__file__).resolve().parent.parent / relpath
         text = doc.read_text(encoding="utf-8")
-        unlabelled = []
-        mentions = 0
-        for name in sorted(RETIRED_USE_INSTEAD):
-            for match in re.finditer(rf"\b{re.escape(name)}\b", text):
-                mentions += 1
-                sentence = self.sentence_around(text, match.start(), match.end())
-                if not self.is_labelled(sentence):
-                    unlabelled.append((name, " ".join(sentence.split())))
+        mentions = sum(
+            len(re.findall(rf"\b{re.escape(name)}\b", text)) for name in RETIRED_USE_INSTEAD
+        )
         assert mentions, (
             f"{relpath} names no retired door at all, so this guard measured nothing — "
             "a scan with an empty discovery set cannot pass")
-        assert not unlabelled, (
-            f"{relpath} names a retired door without saying it is retired, so the "
-            f"reader takes it as the call to make: {unlabelled}. The name is "
-            "shim-only on `get_tool` and absent from `tools/list`, so a tool-grant "
-            "client cannot follow it — name the live door and label the old one, or "
-            "drop the mention")
+        dead_ends = self.notes_missing_replacement(text)
+        assert not dead_ends, (
+            f"{relpath} mentions a retired door without naming its replacement in the "
+            f"same block, so the reader is told the old spelling and nothing else: "
+            f"{dead_ends}. Name the live door beside the note, or re-point the sentence")
         assert "tortoise_graph_overview" in text, (
             f"{relpath} no longer names the live listing door at all — the repair for "
             "this guard is a RE-POINT, never a deletion")
