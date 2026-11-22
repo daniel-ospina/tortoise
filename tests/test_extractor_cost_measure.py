@@ -549,6 +549,26 @@ def test_a_cold_only_render_invents_no_warm_arm():
                    if "Measured cache-hit share" in ln]
     assert len(share_lines) == 1, share_lines
     assert "(cold arm)" in share_lines[0]
+
+    # ⛔ The SECOND clause the fix guards is the cache-lever sentence, which says
+    # "The warm arm's measured X% hit share reaches $Y" — it spells the arm out
+    # in prose, so `"(warm arm)" not in text` above does NOT reach it. Measured:
+    # reverting only `:1238`'s `if has_warm else ""` back to an unconditional
+    # emit left every assertion in this test GREEN, so half the fabrication this
+    # test exists to prevent was unpinned (#14295 review, M2).
+    lever = [ln for ln in text.splitlines() if "How big the cache lever" in ln]
+    assert len(lever) == 1, lever
+    assert "warm arm" not in lever[0], (
+        "no warm arm was measured, so the lever paragraph cannot quote its hit "
+        f"share; got {lever[0]}")
+
     # the two-arm bundle is unaffected: guarded, not deleted
     both = m.report_from_rows(rows + [_row(arm="warm") for _ in range(3)])
-    assert "(warm arm)" in m.report_markdown(both)
+    both_text = m.report_markdown(both)
+    assert "(warm arm)" in both_text
+    both_lever = [ln for ln in both_text.splitlines()
+                  if "How big the cache lever" in ln]
+    assert len(both_lever) == 1, both_lever
+    assert "warm arm" in both_lever[0], (
+        "with a warm arm measured, the lever paragraph must still quote it; "
+        f"got {both_lever[0]}")
