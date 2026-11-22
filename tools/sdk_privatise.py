@@ -1118,9 +1118,35 @@ SWEEP_NAMES = 66
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
 #: branch's census file, and named by log rather than counted here, because a count restated in this
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
-#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
-#: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#: exited 0 on THAT PRE-MERGE branch tree on the SAME pair, so 11858 was re-measured there and not
+#: carried forward. ⛔ IT DID NOT HOLD OF THE TREE THE SQUASH LANDED ON — that reading was taken on
+#: a branch whose base predated `main`'s own drift, which is the re-cut immediately below.
+#:
+#: ⛔ RE-CUT → (11861, "f0647020531c078c"). The 11858 pair was true of the PRE-MERGE branch tree it
+#: was measured on and STALE ON ARRIVAL on `main`: between `e74cf1d13d` — whose own tree derives the
+#: 11857 pair `ed40203dbbf32b87`, re-derived here — and `13b6b49fe9`, the squash's parent, `main`
+#: took THREE rows of its own, so the tree `#14160`'s squash LANDED on sat at 11860 before its own
+#: single row was added to it. Both figures are `--repin` output on the named trees, and every row
+#: below is from a per-file row dump on each of them (`py_files()` → `edits_for()` → residue),
+#: sorted and diffed — the two-sum that follows is a CROSS-CHECK of those readings, never their
+#: derivation:
+#:   * +3 — `proj.g.query` 0 → 3 in `tools/read_wave_latency.py`, all three arriving with `main`'s
+#:     `94d75667dc` (`#14224`): the seed block's two `MATCH (n:Point) RETURN count(n)` reads and the
+#:     A/B id sweep. `proj` there is `sdk._get_proj()`, so `.g` is the FalkorDB `Graph` and `.query`
+#:     on it is the FalkorDB door, not the SDK's — the ordinary-word receiver this counter reports,
+#:     on no SDK-typed site. Neither this branch's nor `#14160`'s: that branch's base predates the
+#:     commit (`git merge-base --is-ancestor e74cf1d13d 94d75667dc` → yes).
+#:   * +1 — `out.update` 0 → 1 in `tests/test_14125_retired_name_calls.py`, `#14160`'s own row,
+#:     declared in the block above. So 11857 + 3 + 1 = 11861, and the pair `#14160` committed
+#:     (11858) sits one `main`-side drift below the tree that carries it.
+#: THIS BRANCH'S OWN CONTRIBUTION IS ZERO ROWS, measured rather than argued: `--repin` on the tree at
+#: `dcb1b81c09` — the merge of `origin/main` `70fbd1a27d` into `fix/14248-p7-pins` — prints THIS
+#: pair, and so does `--repin` on a detached worktree of `70fbd1a27d` itself, byte for byte (same
+#: digest, same count). What that diff touches is one doc and two test files, and `edits_for` walks
+#: the AST: a docstring is a `Constant` and a comment is invisible, so neither side can move a row.
+#: `typed references still pointing at a public name` stays **0** on that tree, so no SDK-typed site
+#: is legitimised by the re-cut.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
