@@ -15510,6 +15510,25 @@ durations:
   # shard-layout input re-stales against the run it came from, and the count moves
   # with every review round (`tools/ci_selection.py --integrity` is the authority).
   test_14185_projection_worker.py: 2.0
+  # #13998 (PR #14038) — the capacity-notice lane's suite. Its SURFACE rows land in
+  # `api:` and `core:` above, which is what puts it in `fast_pool()`, and it shipped
+  # WITHOUT a row here: `--integrity` is a 0.90 RATIO check and stayed green over the
+  # absence, so only this row records the weight (#14296 review finding 2 — the same
+  # #13854/#14086-F1/#14222-P3 shape, applied to a file a MERGE brought in rather
+  # than one a single PR added). `tools/ci_timing.py --refresh-durations` replaces
+  # this value from the first push-to-main junit sweep that includes the file; the
+  # file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because
+  # the ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody
+  # listed. What the weight covers, hermetically (the mailer, the store and the
+  # clock are injected recorders — no SMTP, no DB, no network, no model call): one
+  # send per threshold across repeated passes, an accepted send counting against
+  # `max_sends` even when its stamp write raises, the threshold ladder and the
+  # per-account suppression it implies, and the working-set capacity notices'
+  # payloads. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose —
+  # a figure beside a weight re-stales against the run it came from, and the count
+  # moves whenever a review round adds a pin (`tools/ci_selection.py --integrity`
+  # is the authority).
+  test_13998_capacity_notice.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2
   test_name_entropy_12294.py: 0.1

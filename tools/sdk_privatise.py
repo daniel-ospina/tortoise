@@ -1612,7 +1612,15 @@ SWEEP_NAMES = 66
 #: side), i.e. the branch brings +3 rows of its own and NEITHER figure is this tree's. `--repin`
 #: here prints the line below; `--check` exits 0 on it with `typed references still pointing at a
 #: public name: 0`.
-SWEEP_RESIDUE = (11888, "81587c6c776742a2")
+#: ⛔ #14296's FIX PASS — the reviewer found this PR's tree to be a dated snapshot, so the
+#: advanced tips of #14186 / #14185 / #14232 / #14033 / #13998 / #14249 / #14258 were merged
+#: INTO the integration (finding 1). That is a NINTH tree and neither parent's pair is this
+#: tree's: the integration pinned `(11888, "81587c6c776742a2")`, #14249's branch pinned
+#: `(11861, "f0647020531c078c")`. `--repin` on the merged tree prints the line below (+2 over
+#: the integration's, arriving from the branches' own code, which is why it is measured rather
+#: than added); `--check` exits 0 on it with
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11890, '77fe283f7c2e3c61')
 #: ⛔ MERGED `origin/main` `10e51693` INTO THIS BRANCH AND KEPT BOTH SIDES' BLOCKS ABOVE — each is a
 #: true measurement of the tree it NAMES, which is the ground rule of this run, so neither side is
 #: dropped to make the conflict go away. THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE, because
