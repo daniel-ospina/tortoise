@@ -2638,26 +2638,21 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
     # (c) ⛔ PRINTING THE READING MUST NEVER CHANGE THE READING (review cycle 1, P1, MEASURED).
     # `exit_code=` is the only severity signal the alert has and `exit "$rc"` is the round-18
     # gate. With the display block placed between them and the write, a verdict.json that is
-    # present but UNREADABLE (permissions, a directory, a damaged mount — `-s` cannot tell)
-    # makes `cat` fail under `-e` and aborts the step before either runs: measured
-    # `$GITHUB_OUTPUT` EMPTY and the step exiting **1** — the "cut a release" code — while its
-    # own logic had decided 2. The stub chmods the file it was just redirected into, so this
-    # is the real state, not a simulation of it.
-    # ⛔ PRINTING THE READING MUST NEVER CHANGE THE READING (review cycle 1, P1, MEASURED).
-    # `exit_code=` is the only severity signal the alert has and `exit "$rc"` is the round-18
-    # gate. With the display block placed between them and the write, a verdict.json that is
     # present but UNREADABLE makes `cat` fail under `-e` and aborts the step before either
     # runs: measured `$GITHUB_OUTPUT` EMPTY and the step exiting **1** — the "cut a release"
     # code — while its own logic had decided 2.
-    #
-    # ⛔ THE STATE IS A DIRECTORY, NOT A `chmod 000` FILE (review cycle 5, P3, MEASURED).
-    # `chmod 000` only denies a NON-root reader, so on a root host (dev containers, the
-    # `docker run` default) the case was INERT: a fresh reviewer applied the cycle-1
-    # regression and the test still passed as uid 0. A directory is unreadable to `cat(2)`
-    # for every uid (`EISDIR`), `[ -s ]` is still true for it, and `json.load` raises
-    # `IsADirectoryError`, so the step still reaches the detector-fault retag on any uid.
-    # The comment above already lists "a directory" among the real-world causes; this is
-    # that fixture, built mode-independently.
+    # The STUB builds the state the step then meets, and it builds it as a DIRECTORY at
+    # verdict.json — not as a `chmod 000` file. That distinction is load-bearing, not
+    # cosmetic:
+    #   * `chmod 000` only denies a NON-root reader. On a root host (dev containers, the
+    #     `docker run` default) the old fixture was INERT — a fresh reviewer applied the
+    #     cycle-1 regression and the test still passed as uid 0, so a green run there said
+    #     nothing about the property. A directory is unreadable to `cat(2)` for EVERY uid
+    #     (`EISDIR`), `[ -s ]` is still true for it, and `json.load` raises
+    #     `IsADirectoryError`, so the step reaches the detector-fault retag on any uid —
+    #     measured rc=2 / sink `exit_code=2` as uid 1000 AND uid 0.
+    #   * the earlier cause-list here ("permissions, a directory, a damaged mount") is why a
+    #     directory is a legitimate member of the class, not a contrived stand-in.
     rc, printed, published = execute(
         'printf \'{"verdict": "FAIL", "exit_code": 1}\\n\'; '
         'rm -f "$RUNNER_TEMP/canary/verdict.json"; '
@@ -2734,23 +2729,22 @@ def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
     # mangled-but-not-missing, exactly the class #12660 exists to end. This block only echoes
     # prose and needs no substitution, so the absence is the property — and it holds for
     # every spelling, which is what the docstring above now claims.
-    # ⛔ COMMENTS ARE EXEMPT (review cycle 5, P3, MEASURED): a backtick or `$(` on a `#` line
-    # cannot execute, and this file's steps document backticks in comments throughout. Only a
-    # line whose first non-space character is `#` is dropped, so a `See #12363` inside an
-    # echo is still scanned, and the legitimate `${EXIT_CODE:-…}` expansions pass (`$(`
-    # cannot match `${`).
-    prose = "\n".join(
-        line for line in run.splitlines() if not line.lstrip().startswith("#")
-    )
+    # ⛔ COMMENTS ARE EXEMPT — AND THE FILTER IS TEXTUAL, SO ITS BLIND SPOT IS NAMED HERE
+    # (review cycle 5+6, P3, MEASURED). A backtick or `$(` on a line whose first non-space
+    # character is `#` cannot execute, and this file's steps document backticks in comments
+    # throughout, so those lines are dropped: a `See #12363` inside an echo is still scanned
+    # and the legitimate `${EXIT_CODE:-…}` expansions still pass (`$(` cannot match `${`).
+    # ⛔ RESIDUAL, not a guarantee: the filter is textual, not quote-aware. A multi-line
+    # double-quoted `echo` whose CONTINUATION line starts with `#` is still inside the quote
+    # at execution time, so a substitution there would be dropped here and go unnoticed
+    # (measured: such a block passes this pin while still executing). This block's echoes are
+    # single-line and must stay that way; a quote-aware filter is the fix if that changes.
+    prose = "\n".join(line for line in run.splitlines() if not line.lstrip().startswith("#"))
     assert "`" not in prose and "$(" not in prose, (
         "the alarm block's ECHOED text now contains a backtick or a command substitution: "
         "inside its double-quoted echoes those EXECUTE and corrupt the summary silently, "
-        f"which is the #12660 defect. Prose names must be plain text. Offending line(s):\n"
-        + "\n".join(
-            line
-            for line in prose.splitlines()
-            if "`" in line or "$(" in line
-        )
+        "which is the #12660 defect. Prose names must be plain text. Offending line(s):\n"
+        + "\n".join(line for line in prose.splitlines() if "`" in line or "$(" in line)
     )
 
     # The property the corruption destroyed: the only branch that orders an irreversible
