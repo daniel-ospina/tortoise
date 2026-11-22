@@ -8009,19 +8009,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # ⛔ SO THE LINE IS DERIVED, NEVER TYPED. That is the whole rule this block exists to state,
     # and the block itself is the evidence for it: this cite has carried at least four values
     # (`:28067`, `:28178`, `:28395` and the one the tree holds now), each true at some head and
-    # each wrong at the next. Every value named above is HISTORY, stamped to no head on
+    # each stale at many of the heads it sat through — the first three each superseded. Every value named above is HISTORY, stamped to no head on
     # purpose — do not write the tree's current value here, and do not "fix" those four, because
     # a head-current number in this block is the exact rot the arm below prevents. The arm
     # prints the live value in its failure message; `grep -n 'dedup_reviewed IS NULL'
-    # tortoise/sdk.py` re-derives it. (`:28067` in particular was never this clause's own line
-    # at the head an earlier cut claimed — #13746 review, P2.)
+    # tortoise/sdk.py` re-derives it. (`:28067` was NOT the file's only
+    # `dedup_reviewed IS NULL` at the head an earlier cut was graded on — #13746 review, P2.)
     #
-    # ⛔ AND NOT `next(...)`: a bare `next` raises `StopIteration` with no message the moment the
-    # anchor is gone, which pre-empts the pin rows' own reporting and makes the mutant
-    # UNATTRIBUTABLE (agent-infra#3442 rule 2 — MEASURED: with the token removed the whole case
-    # died on `E StopIteration` and printed no row at all). The pin row's discrimination rests
-    # on this being the file's ONLY occurrence, so that is ASSERTED below rather than only
-    # claimed here.
+    # (the `next(...)` / `agent-infra#3442` reasoning is stated with the assert below)
     _dedup_filter_lines = [
         _n for _n, _ln in enumerate(sources["sdk"], 1)
         if "dedup_reviewed IS NULL" in _ln]
