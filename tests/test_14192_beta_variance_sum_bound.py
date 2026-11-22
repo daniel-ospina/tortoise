@@ -4,8 +4,12 @@
 persisted Beta width exceeds ``CONTESTED_VARIANCE_THRESHOLD``. That width is a
 division over ``α+β``, evaluated once per candidate row, and it was the cost this
 change targeted. #14192 put a NECESSARY precondition in front of it, so that the
-division, the coercion CASE and the band checks are skipped on the rows that were
-always going to be rejected:
+division and the band checks are skipped on the rows that were always going to be
+rejected. ⛔ **NOT the coercion ``CASE``** — the bound is built from the same
+``numeric_operand_cypher`` expressions the division uses, so the coercion runs on
+every candidate row INSIDE the guard itself (measured on the emitted predicate:
+8 ``CASE WHEN`` before ``$contested_sum_bound``). The coercion's cost is the
+price of the guard, not a saving:
 
     α+β < 1/(4·threshold) − 1        (`beta_variance_sum_bound`)
 
@@ -277,9 +281,13 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
       precede the guard, i.e. the division would run first and the guard would
       spare nothing, which is the entire point on the measured read.
 
-    OBSERVED at the reviewed head: one crit query, one occurrence, arm at
-    offset 579 / guard at 2163, depth 1 → 2, ``$contested_threshold`` after the
-    guard, and ``contested_sum_bound == 5.25`` — the same value the twin returns.
+    OBSERVED on ``origin/main`` (`70fbd1a27d`, re-measured, not carried): one
+    crit query, one occurrence, arm at offset 579 / guard at 2136, depth 1 → 3,
+    ``$contested_threshold`` at 13864, and ``contested_sum_bound == 5.25`` — the
+    same value the twin returns. (An earlier cut of this docstring quoted guard
+    offset 2163 at depth ``1 → 2``; the emitted predicate measures 2136 at
+    ``1 → 3``. The assertion reads the offsets rather than the prose, so nothing
+    depended on the stale pair — but nothing recomputed it either.)
     """
     graph, _ = _decorate_under_capture()
     crits = [(c, kw) for c, kw in graph.calls

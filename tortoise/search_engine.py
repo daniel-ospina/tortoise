@@ -5810,8 +5810,12 @@ def beta_variance_sum_bound(threshold: float) -> float:
     a sufficient one: it can only reject a pair whose variance is provably not
     above the threshold, so adding it in front of ``beta_variance_cypher(…) >
     $contested_threshold`` cannot change a result set — it only spares the
-    division, the coercion CASE and the band checks on the rows that were
-    always going to be rejected. ⛔ NO MILLISECOND FIGURE AND NO ROW COUNT IS
+    division and ``_beta_variance``'s band on the rows that were always going
+    to be rejected. ⛔ NOT the coercion ``CASE``: the bound is built from the
+    SAME ``numeric_operand_cypher`` expressions the division uses, so the
+    coercion is evaluated on every candidate row INSIDE the guard — measured on
+    the emitted predicate, 8 ``CASE WHEN`` before ``$contested_sum_bound``. That
+    is the guard's own price, not a saving. ⛔ NO MILLISECOND FIGURE AND NO ROW COUNT IS
     QUOTED HERE. The shipped artifacts measure the WHOLE function and its
     isolated A/B (``docs/evidence/14192-read-wave/``), never this query alone,
     and the rule that directory now carries is per-figure, not global: a figure
