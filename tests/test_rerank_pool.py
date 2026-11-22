@@ -26,6 +26,7 @@ never filters.** Everything below is a consequence or a failure mode of that:
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import sys
 import uuid
@@ -1274,6 +1275,120 @@ def test_search_sessions_re_owns_the_order_and_does_NOT_pay_for_a_rerank(sdk, mo
         f"PRE-rerank score and slices (loads={loads})")
 
 
+def _seam_read_calls(tree, mention) -> list:
+    """Every call `mention` can REACH in `tree`, following value flow to a fixpoint.
+
+    ⛔ DEADNESS MUST BE PROVEN, never inferred from a shape this resolver does not
+    model (#14278 F1). A mention reaches a call through more shapes than a direct
+    call or a one-hop `Name` binding: a container (`_reads = [SEAM]` then
+    `_reads[0](…)`), a subscript or attribute dispatch, a second alias hop
+    (`_n = _m`), or being handed to something as an argument. Measured at head
+    `59e701977a`: the one-hop form skipped the container and two-hop mutants, so
+    both stayed GREEN — an undocumented read inheriting a PERMANENT exemption,
+    which is the exact failure the arm this feeds exists to catch.
+
+    So the carriers are the mention plus every name bound to an expression that
+    CARRIES it (assignment RHS, container element, subscript or attribute
+    target), closed to a fixpoint; a call is a read when its CALLEE or one of its
+    ARGUMENTS carries a carrier. A call boundary stops the RHS walk — `results =
+    SEAM(…)` carries the call's RESULT, not the seam (that call is its own row) —
+    so ordinary result plumbing cannot make a name a carrier. `[]` therefore means
+    *no call in this file can reach the mention*, i.e. provably dead.
+    """
+    carriers: set = set()
+
+    def _carries(expr) -> bool:
+        stack = [expr]
+        while stack:
+            node = stack.pop()
+            if node is mention:
+                return True
+            if isinstance(node, ast.Name) and node.id in carriers:
+                return True
+            if isinstance(node, ast.Call):
+                continue        # a call is its own row; its VALUE is a result
+            stack.extend(ast.iter_child_nodes(node))
+        return False
+
+    grown = True
+    while grown:
+        grown = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            if not _carries(node.value):
+                continue
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target])
+            for target in targets:
+                for sub in ast.walk(target):
+                    # ⛔ `add`, never `update`: `.update(` is an ordinary-word
+                    # receiver the SDK residue sweep counts, and a test-only diff
+                    # must not move that pin (measured at `59e701977a`).
+                    if isinstance(sub, ast.Name) and sub.id not in carriers:
+                        carriers.add(sub.id)
+                        grown = True
+
+    reads: list = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _carries(node.func) or any(
+                _carries(arg) for arg in
+                (*node.args, *(k.value for k in node.keywords))):
+            reads.append(node)
+    return reads
+
+
+def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
+    """#14278 F1 — the resolver is not vacuous, and it does not free-ride either.
+
+    The census grant on `tools/read_wave_latency.py` is PERMANENT and its only
+    recorded reason is a comment, so this resolver is the one thing that grades
+    it. A one-hop `Name` resolver read the container and two-hop shapes as "reads
+    nothing" and skipped them (measured GREEN at `59e701977a`, RED at its
+    parent); the other direction matters just as much — a genuinely dead binding
+    must stay dead, or the count silently absorbs a read that went missing. So
+    each shape is pinned here by the query its fed call carries, and the synthetic
+    module is not in any census tree.
+    """
+    source = '''
+class SDK:
+    def _tortoise_fts_query(self, **kw):
+        return []
+
+def run(sdk):
+    sdk._tortoise_fts_query(query="warm", limit=10)
+    _reads = [sdk._tortoise_fts_query]
+    _reads[0](query="container", limit=10)
+    _opt = sdk._tortoise_fts_query
+    _opt(query="one-hop", limit=10)
+    _m = sdk._tortoise_fts_query
+    _n = _m
+    _n(query="two-hop", limit=10)
+
+def dead(sdk):
+    _dead = sdk._tortoise_fts_query
+'''
+    tree = ast.parse(source)
+    mentions = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute)
+                and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+    observed = []
+    for mention in mentions:
+        fed = _seam_read_calls(tree, mention)
+        observed.append((len(fed), sorted(
+            k.value.value for call in fed for k in call.keywords
+            if k.arg == "query" and isinstance(k.value, ast.Constant))))
+    assert sorted(observed) == [
+        (0, []),                    # the dead binding: provably no call
+        (1, ["container"]),         # `_reads = [SEAM]; _reads[0](…)`
+        (1, ["one-hop"]),           # `_opt = SEAM; _opt(…)`
+        (1, ["two-hop"]),           # `_n = _m; _n(…)`
+        (1, ["warm"]),              # the direct call
+    ], f"the resolver mis-graded a shape: {sorted(observed)}"
+
+
 def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     """The half of the guard that ``order_by``/recency cannot reach.
 
@@ -1752,65 +1867,22 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                      and n.attr in ("tortoise_fts_query",
                                     "_tortoise_fts_query")]
     # ⛔ RESOLVE THE ALIAS, and count only what is actually a READ. A mention can
-    # feed a call (`sdk._tortoise_fts_query(…)`), be bound to a name before use
-    # (`_m = sdk._tortoise_fts_query; _m(…)`), or read nothing at all (a dead
-    # binding). The three cases must NOT share a verdict: the census records a row
-    # for every mention, but what the grant's reason claims is READS — a dead
-    # binding is not one, and a read that opts out needs no grant at all. Measured
-    # before this resolution existed: deleting the warm-up and leaving
-    # `_dead = sdk._tortoise_fts_query` in its place kept the arm GREEN (the dead
-    # mention satisfied the count), and an ALIASED read that opts out reddened it
-    # (census-sanctioned, so a false block).
-    # ⛔ TO A FIXED POINT, and FAIL CLOSED — because `fed == []` was answering TWO
-    # questions. Resolving ONE hop made `_a = sdk._tortoise_fts_query; _b = _a;
-    # _b(…)` resolve to NO call, so the arm read a THIRD read inside `run` as
-    # "reads nothing" and stayed GREEN while the grant's "TWO" was false
-    # (measured at round 6's head). Comparable resolvers close alias chains to a
-    # fixed point rather than scanning single assignments, and treat a value whose
-    # sink they cannot follow as unresolved rather than dead — so a mention is
-    # skipped only when its bindings are PROVABLY never called (or it is a bare
-    # expression statement); anything else counts as a read.
-    def _bound_names(mention) -> set:
-        """Every name the mention flows into, transitively (`_b = _a` chains)."""
-        assignments = [(node.targets if isinstance(node, _ast.Assign)
-                        else [node.target], node.value)
-                       for node in _ast.walk(harness)
-                       if isinstance(node, (_ast.Assign, _ast.AnnAssign))]
-        names: set = set()
-        changed = True
-        while changed:
-            changed = False
-            for targets, value in assignments:
-                if not (value is mention or (isinstance(value, _ast.Name)
-                                            and value.id in names)):
-                    continue
-                for target in targets:
-                    # ⛔ `add`, never `update`: `.update(` is one of the ordinary-word
-                    # receiver shapes the SDK residue sweep counts, and a set built
-                    # with it moves `sweep_residue` by one on a test-only diff.
-                    if isinstance(target, _ast.Name) and target.id not in names:
-                        names.add(target.id)
-                        changed = True
-        return names
-
-    def _fed_calls(mention, names) -> list:
-        """Every call this mention reaches, directly or through a bound alias."""
-        return [c for c in _ast.walk(harness)
-                if isinstance(c, _ast.Call)
-                and (c.func is mention or mention in c.args
-                     or any(mention is k.value for k in c.keywords)
-                     or (isinstance(c.func, _ast.Name) and c.func.id in names))]
-
+    # feed a call (`sdk._tortoise_fts_query(…)`), reach one through a binding, a
+    # container or a second hop, or read nothing at all (a dead binding). Those
+    # cases must NOT share a verdict: the census records a row for every mention,
+    # but what the grant's reason claims is READS — a dead binding is not one, and
+    # a read that opts out needs no grant at all. `_seam_read_calls` follows the
+    # value flow to a fixpoint so that "no fed call" means PROVEN dead, never
+    # "a shape this resolver does not model" (#14278 F1: a one-hop resolver read
+    # the container and two-hop mutants as dead, so a third undocumented read was
+    # exempted with the arm GREEN).
     live: list = []
     seam_calls: list = []
     for mention in seam_mentions:
-        names = _bound_names(mention)
-        fed = _fed_calls(mention, names)
-        if not fed and (names
-                        or isinstance(harness_parent.get(id(mention)),
-                                      _ast.Expr)):
-            continue        # provably not a read: a dead binding, or a bare statement
-        if fed and all(_opted_out(c) for c in fed):
+        fed = _seam_read_calls(harness, mention)
+        if not fed:
+            continue        # provably dead: no call in this file can reach it
+        if all(_opted_out(c) for c in fed):
             continue        # the census's sanctioned alternative, no grant needed
         live.append(mention)
         seam_calls.extend(fed)
