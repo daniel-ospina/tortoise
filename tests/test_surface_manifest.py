@@ -7904,6 +7904,35 @@ def test_a_spliced_tool_row_with_no_record_is_red_and_names_the_symbol():
     assert any("DROPPED with no record" in p for p in problems), problems
 
 
+def test_shrink_problems_KEEPS_the_problem_KIND_the_CI_route_filter_reads():
+    """Round-24 review, F2: the `kind` the CI route filter reads must survive `shrink_problems`.
+
+    `shrink_problems` changed `out = [str(p) for p in problems]` to `list(problems)` so `check`
+    could filter by `RemovalProblem.kind` instead of re-deriving the class from message TEXT (two
+    `no-record` wordings printed no route at all under the substring filter). That half of the fix
+    had NO assertion: `RemovalProblem` IS a `str`, so every `in`/equality row in this file stays
+    green when the class is thrown away — a fix whose value cannot be made to vary. Measured: with
+    `[str(p) for p in problems]` restored, no other row in this file reds.
+
+    Mutation: `out = [str(p) for p in problems]` in `shrink_problems` -> RED here (`.kind` is
+    gone; the plain `str` has no such attribute).
+    """
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair(extra_rows=("tortoise_spliced_ghost",))
+
+    problems = sm.shrink_problems(base, now)
+
+    named = [p for p in problems if "tortoise_spliced_ghost" in p]
+    assert named, f"the spliced row must be graded: {problems}"
+    assert isinstance(named[0], sm.RemovalProblem), (
+        "`str()` throws the KIND away, and `check` filters the route block by it: "
+        f"{type(named[0])} carries no route class"
+    )
+    assert named[0].kind == "no-record", (
+        f"the route block keys on this kind; got {named[0].kind!r}: {named[0]}"
+    )
+
+
 def test_a_spliced_row_covered_by_an_archive_entry_is_green():
     """The legitimate case, on a REAL archive entry (an `mcp-tool` row in archive/MANIFEST.json).
 
@@ -8579,7 +8608,11 @@ def test_the_shrink_refusal_PRINTS_the_route(checker, tmp_path, monkeypatch):
     sm = checker
     with MANIFEST.open() as fh:
         doc = yaml.safe_load(fh)
-    problem = "tortoise_ghost (tool) was DROPPED with no record — it is gone from both"
+    # ⛔ A REAL `RemovalProblem`, because the block is now gated on `.kind` (round-19 P3): a plain
+    # string has no kind, and the row must exercise the class the filter keys on.
+    problem = sm.RemovalProblem(
+        "no-record", "tortoise_ghost (tool) was DROPPED with no record — it is gone from both"
+    )
     monkeypatch.setattr(
         sm, "shrink_report", lambda *a, **k: ([problem], "origin/main (merge base abc)", True)
     )
@@ -8625,3 +8658,57 @@ def test_the_ROUTE_BLOCK_is_absent_when_nothing_was_DROPPED(checker, tmp_path, m
         "a stale waiver is not a dropped row: its remedy is to drop the flag, and no archive "
         f"route can clear it: {out}"
     )
+
+
+def test_the_route_block_covers_EVERY_no_record_KIND(checker, tmp_path, monkeypatch):
+    """Round-19 review, P3: filtering by message TEXT missed two `no-record` rows.
+
+    `shrink_problems` used to `str()` its problems, throwing away `RemovalProblem.kind`, so `check`
+    re-derived the class from substrings that only cover two of the messages `removal_report`
+    produces. Measured: the rows `… has no departure record: --allow-surface-shrink states the
+    rename …` and `… is in REMOVED_SDK_METHODS … but its code is NOT archived` printed no route at
+    all, while `cut` (which filters by KIND) printed one for both.
+
+    Mutation: filter by the two substrings instead of `.kind` -> RED here.
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    problem = sm.RemovalProblem(
+        "no-record",
+        "tortoise_ghost (tool) has no departure record: `--allow-surface-shrink` states the "
+        "rename on the command line and nowhere a reader can find it",
+    )
+    monkeypatch.setattr(
+        sm, "shrink_report", lambda *a, **k: ([problem], "origin/main (merge base abc)", True)
+    )
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="origin/main")
+
+    assert rc == 1, out
+    assert "has no departure record" in out, out
+    assert "reported as dropped by exactly one of" in out, (
+        f"a `no-record` row needs the freeze route whatever its wording: {out}"
+    )
+
+
+def test_NEITHER_copy_of_the_stated_reason_predicate_takes_a_BLANK_rendering() -> None:
+    """P3 (round-20): the surface copy of the waiver-reason test lacked the blank-rendering set.
+
+    `_stated_reason` and `archive_surface._is_a_stated_reason` are two copies of ONE rule, and the
+    archive copy learned (round-19) that the Hangul fillers and `U+2800` pass every
+    `unicodedata` category test while rendering as nothing. The surface copy was left behind, so
+    `--allow-archive-shrink-reason $'\\u3164'` was refused by `check --base-ref` and accepted here —
+    the two-definitions-of-one-rule shape this file keeps removing, and a waiver minted with no
+    stated reason.
+
+    Mutation: drop `_BLANK_RENDERING` from either copy -> RED here.
+    """
+    from tools import archive_surface as arch
+    from tools import surface_manifest as sm
+
+    for blank in ("\u200b", "\u200e", "\ufeff", "\u3164", "\uffa0", "\u115f", "\u2800"):
+        assert not sm._stated_reason(blank), f"{blank!r} must not be a stated reason"
+        assert not arch._is_a_stated_reason(blank), f"{blank!r} must not be a stated reason"
+    assert sm._stated_reason("superseded by the v2 client")
+    assert arch._is_a_stated_reason("superseded by the v2 client")
