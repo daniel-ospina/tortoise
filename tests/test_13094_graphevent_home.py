@@ -115,10 +115,14 @@ CAPABILITY_CONTROLS = (
     # literal expectation here fixes arm PRECEDENCE, not just detection.
     ("re-spaced directed adjacency",
      "MATCH (e:GraphEvent) - [r:T]-> (p)", "cypher:-["),
-    # the live EP / belief walk CAPABILITY-PLACEMENT-AUDIT.md quotes (`:410`, sourced from
-    # `ep.py:1620-1632`), with its `{label}` placeholder FILLED BY `GraphEvent` — a label the walk
-    # is never swept over (`live.py:667`'s `EPISTEMIC_LABELS` is Point/Subject/Object/Event), so this
-    # row pins the SHAPE the capability arms must catch, not a placement claim.
+    # the live EP / belief walk CAPABILITY-PLACEMENT-AUDIT.md quotes in its §2.1 `:Point` table's
+    # EP-walk row (sourced from `ep.py:1620-1632`), with its `{label}` placeholder FILLED BY
+    # `GraphEvent` — a label the walk is never swept over (`live.py:667`'s `EPISTEMIC_LABELS` is
+    # Point/Subject/Object/Event), so this row pins the SHAPE the capability arms must catch, not a
+    # placement claim. ⛔ Named by SECTION and row, never as a `:NNNN` address into that document:
+    # the audit is a file this very PR grows, so a bare line number here went stale by this diff's
+    # own insertions (`:410` on `main` -> `:425` -> `:427` -> `:428`, each measured; #14183 review
+    # P3) and a lane re-deriving from it lands on a blank line. The document's own §2.1 anchors it.
     ("EP walk",
      "MATCH (a:GraphEvent) WHERE a.id IN $ids WITH * MATCH (a)-[r:IMPL|NAND]-(b)",
      "cypher:-["),

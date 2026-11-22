@@ -248,8 +248,8 @@ count in `_TOKEN_OCCURRENCES`, so re-pointing one of them here REDS the suite (m
 while the pin rows carry the same address in their single-token spelling, and each such token is satisfied by a
 sibling occurrence elsewhere in this file — so re-pointing **all six at once leaves the suite at 30
 passed** (measured, with a control above proving the mutation is live). Do not read this enumeration as
-guarded until those six have a site-level pin; the gap is the bare-`:NNNN`-code-span class recorded on
-#14089 (open: a wrong address in the "ten that are NOT comparable" enumeration above passed 24/24 — that
+guarded until those six have a site-level pin; the gap is the bare-`:NNNN`-code-span class recorded on issue #14089
+(open: a wrong address in the "ten that are NOT comparable" enumeration above passed 24/24 — that
 list is where the case was OBSERVED; the witness addresses the issue quotes (`:58265`, `:58272`, `:58274`,
 `:58923`) appear nowhere in this document, so do not follow this pointer expecting to read them here), not
 the census-row gap on #14204. ⛔ **The three `sdk.py`
