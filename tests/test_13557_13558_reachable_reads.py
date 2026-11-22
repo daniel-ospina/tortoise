@@ -4287,3 +4287,50 @@ def test_an_adverb_between_the_clitic_and_been_does_not_reopen_the_hijack():
                   "has the vendor's recently been deprecated"):
         assert detect_state_question(query).population is None, (
             f"{query!r} is now served — that direction re-opens the hijack above")
+
+
+def test_a_refused_clitic_subject_REPORTS_with_a_word_between_it_and_been():
+    """A refusal that reports nothing is invisible — the cue must survive one word.
+
+    ⛔ THE NOTICE ARM REQUIRED ADJACENCY (round-31 review, P1/P2, measured). It matched
+    `['’](?:s|ve|d)\\s+been`, so ONE word between them blinded it and the row was refused
+    with NOTHING reported — no population, no signal, no payload:
+      * the POSSESSIVE-SUBJECT class whose noun collides with the adverb table or ends in
+        `-ly` — `has the client's supply been archived` (2,400 of 5,600 rows silent);
+      * the HIJACK frame when its head is not `any`/`anything` — `has support confirmed
+        billing's just been retired` (240 of 400 silent).
+    ⛔ AND NOTHING PINNED IT: reverting the arm to the adjacent-only form left the suite
+    GREEN, because the neighbouring pin asserts only `population is None` on its statement
+    rows. This pin asserts the REPORT — which is what the arm exists for. A notice arm can
+    only add a report (a signal is computed only after every shape has declined), so
+    pinning it cannot hide a routing change.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    rows = (
+        # the possessive-collision class (noun looks like an adverb-table member)
+        "has the client's supply been archived",
+        "has the vendor's practice been archived",
+        "has the invoice's date been archived",
+        "has the board's last been archived",
+        "has the client's reply been retired",
+        # …and the non-`any` hijack frames
+        "has support confirmed billing's just been retired",
+        "have we heard billing's just been retired",
+        "has the board been told billing's just been retired",
+        "has support said the vendor's recently been retired",
+        # …and the statement spelling the neighbouring pin only checks for silence
+        "has billing's just been deprecated",
+        "has the vendor's recently been deprecated",
+    )
+    for query in rows:
+        got = detect_state_question(query)
+        assert got.population is None, (
+            f"{query!r} served {got.population!r} — a notice arm cannot route; a "
+            f"population here means a shape matched first")
+        assert got.signal, (
+            f"{query!r} is refused with NO notice (signal={got.signal!r}) — the caller "
+            f"cannot tell an empty answer from a cue that was seen and declined")
+        assert missed_route_payload(got) is not None, (
+            f"{query!r} reports a signal but no payload — a notice a caller cannot read "
+            f"is the same silence one layer down")

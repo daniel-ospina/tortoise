@@ -1627,13 +1627,25 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # shape, so it cannot route anything.
         + "|"
         + r"\b(?:has|have|had|is|are|was|were)\s+[^?]{0,40}?['\u2019](?:s|ve|d)"
+        # ⛔ THE CLITIC AND `been` NEED NOT BE ADJACENT (round-31 review, P1/P2, measured):
+        # this arm required `['’](?:s|ve|d)` then `\s+been`, so ONE word between them
+        # blinded it and the row was refused with NOTHING reported — `has billing's JUST
+        # been deprecated` (the hijack frame itself, when its head is not `any`/`anything`),
+        # `has support confirmed billing's just been retired`, and the
+        # possessive-subject class whose noun collides with the adverb table or ends in
+        # `-ly` (`has the client's SUPPLY been archived`, `has the vendor's PRACTICE been
+        # archived`, `has the invoice's DATE been archived`). Measured on the previous
+        # head: 2,400 of 5,600 possessive rows and 240 of 400 hijack rows silent.
+        # A SIGNAL arm can only ever ADD a report — a signal is computed only after every
+        # shape has declined — so widening the gap cannot route anything.
+        + r"\s+(?:[a-z0-9'’._/-]+\s+){0,3}been"
         # ⛔ THE WIDE REFUSAL SLOT, NOT THE NARROW WINDOW ONE (round-9 review, P2, measured): the
         # first cut of this arm used `_EXISTENCE_ADVERB_SLOT` (`already|ever|recently`), so the
         # adverb class the guard itself refuses on blinded it — `has the billing's been just
         # deprecated` and `… been only just deprecated` were still refused SILENTLY, one adverb
         # away from the frame this arm exists for. The row's first arm already uses the wide slot;
         # this arm now matches it.
-        + rf"\s+been\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        + rf"\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
         + ")"
         + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
