@@ -148,9 +148,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
-    # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
-    # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:58099`, `search_engine.py:7577`, `:7579`) = 122 of the 214. ⛔ The
+    # so the header counts it as drifted rather than compared, and it is one of the pairs the header
+    # enumerates as incomparable at the pin (`sdk.py:58099`, `search_engine.py:7577`, `:7579` among
+    # them). ⛔ NO SPLIT FIGURE IS TYPED HERE: the figures this sentence used to carry (`211`/`119`/
+    # `122`/`214`) were the retired `7697a6b762` edition's, so a reader who took them as this head's
+    # was reading a census no address on this line belongs to. The header's own split is recomputed
+    # by `_figure_problems` and by the comparability arm below, and the published sentence is graded
+    # there — read the split from that run, never from this comment (#14269 review, P1). ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
