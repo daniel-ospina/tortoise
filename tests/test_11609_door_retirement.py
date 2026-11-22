@@ -1156,17 +1156,41 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: follow-up is how a class gets declared closed while it is still open.
     REPLACEMENT_NAME = re.compile(r"tortoise_[a-z0-9_]+")
 
-    #: A retired name in call form: the name immediately followed by this.
-    CALL_FORM = "("
+    #: A retired name in call form: the name followed by an OPENING BRACKET, optionally
+    #: after HORIZONTAL space. `name(args)` and `name (args)` are the same spelling to a
+    #: reader and Python accepts both, so testing one character of adjacency made
+    #: `tortoise_list_graphs (graph_id=x)` — a copyable call — invisible to R1 while the
+    #: declared residual claimed R1 rejected the copyable spelling (#14237 r6 review P2).
+    #: Horizontal only: a newline is never a call.
+    CALL_FORM = re.compile(r"[ \t]*\(")
+
+    @classmethod
+    def is_call_form(cls, text: str, at: int) -> bool:
+        """True when the retired name ENDING at ``at`` is written as a CALL."""
+        return cls.CALL_FORM.match(text, at) is not None
 
     @staticmethod
     def blocks(text: str) -> list[tuple[int, int, str]]:
         """Split markdown into ``(start, end, block)`` units — structure, not punctuation.
 
         A fence (``` or ~~~) is one block including its markers, so a code sample is
-        never joined to the prose around it. A table row, a heading and a list item are
-        each their own block. Everything else accumulates into a blank-line-delimited
+        never joined to the prose around it. A table row is split into its CELLS (a row
+        has no sentence terminator, so a note in one cell would otherwise clear an
+        instruction in the next), and a row is recognised by the PIPE it must CONTAIN
+        rather than by a LEADING pipe — GFM does not require the leading pipe, and with
+        the leading form a pipe-less table collapsed into ONE paragraph, so the cells
+        were never separated and the whole table became a single block (#14237 r6
+        review P1, measured: pipe-less -> 1 block / ACCEPTED, leading pipes -> cells /
+        REJECTED, for identical content). A HEADING is its own block; a LIST ITEM is its
+        own block and KEEPS its indented continuation lines, which markdown puts inside
+        the same item. Everything else accumulates into a blank-line-delimited
         paragraph, and a hard-wrapped line stays inside it.
+
+        ⚠️ DECLARED RESIDUALS of this model, stated not tuned (#14237 r6 review): a PROSE
+        line containing a `|` is read as a table row and split into cells (over-block),
+        and a list item absorbs a nested sub-item, so a mention in the sub-item may be
+        cleared by the parent's replacement — the deliberate over-allow that stops the
+        model refusing correct, hard-wrapped notes (three of them in `docs/` today).
         """
         blocks: list[tuple[int, int, str]] = []
         offset = 0
@@ -1178,9 +1202,17 @@ class TestEveryReaderNamesTheLiveListingDoor:
 
         paragraph: list[str] = []
         paragraph_start = 0
+        item: list[str] = []
+        item_start = 0
         fence: list[str] = []
         fence_start = 0
         in_fence = False
+
+        def flush_item() -> None:
+            nonlocal item
+            flush(item, item_start, offset)
+            item = []
+
         for line in lines:
             stripped = line.strip()
             ends = offset + len(line)
@@ -1195,28 +1227,32 @@ class TestEveryReaderNamesTheLiveListingDoor:
             if opens_fence:
                 flush(paragraph, paragraph_start, offset)
                 paragraph = []
+                flush_item()
                 fence, fence_start, in_fence = [line], offset, True
                 offset = ends
                 continue
             if not stripped:
                 flush(paragraph, paragraph_start, offset)
                 paragraph = []
+                flush_item()
                 offset = ends
                 continue
-            structural = (
-                stripped.startswith("|")
-                or stripped.startswith("#")
-                or re.match(r"[-*+] |\d+\. ", stripped) is not None
-            )
-            if stripped.startswith("|"):
+            is_item = re.match(r"[-*+] |\d+\. ", stripped) is not None
+            has_pipe = "|" in stripped.replace("\\|", "")
+            if has_pipe:
                 # ⛔ A TABLE CELL IS ITS OWN BLOCK, not the row (#14237 round-2 review's
                 # property, kept when the rule moved off sentences). A markdown row has no
                 # sentence terminator, so with the ROW as the unit a migration note in one
                 # cell clears an instruction in the next — the exact fail-open the cell
                 # scoping was added for. `|` is the cell separator and not a character this
                 # doc uses in prose.
+                # ⛔ AND A ROW IS RECOGNISED BY THE PIPE IT CONTAINS, not by a LEADING one:
+                # GFM does not require the leading pipe, so keying on it collapsed a
+                # pipe-less table into ONE paragraph and the cells were never separated
+                # (#14237 r6 review P1).
                 flush(paragraph, paragraph_start, offset)
                 paragraph = []
+                flush_item()
                 cursor = offset
                 cells = line.split("|")
                 for index, cell in enumerate(cells):
@@ -1227,10 +1263,21 @@ class TestEveryReaderNamesTheLiveListingDoor:
                     blocks.append((cell_start, min(cursor, ends), cell))
                 offset = ends
                 continue
-            if structural:
+            # An INDENTED line after a list item is that item's CONTINUATION: markdown
+            # keeps it inside the item, so splitting it out refused correct, hard-wrapped
+            # migration notes (#14237 r6 review P2, three measured in `docs/`).
+            if item and line[:1] in (" ", "\t"):
+                item.append(line)
+                offset = ends
+                continue
+            if stripped.startswith("#") or is_item:
                 flush(paragraph, paragraph_start, offset)
                 paragraph = []
-                blocks.append((offset, ends, line))
+                flush_item()
+                if is_item:
+                    item, item_start = [line], offset
+                else:
+                    blocks.append((offset, ends, line))
                 offset = ends
                 continue
             if not paragraph:
@@ -1238,6 +1285,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
             paragraph.append(line)
             offset = ends
         flush(paragraph, paragraph_start, offset)
+        flush_item()
         if in_fence:
             blocks.append((fence_start, offset, "".join(fence)))
         return blocks
@@ -1257,7 +1305,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
         found: list[str] = []
         for name in sorted(RETIRED_USE_INSTEAD):
             for match in re.finditer(rf"\b{re.escape(name)}\b", text):
-                if text[match.end():match.end() + len(cls.CALL_FORM)] != cls.CALL_FORM:
+                if not cls.is_call_form(text, match.end()):
                     continue
                 line = text.count("\n", 0, match.start()) + 1
                 found.append(f"{name}:{line}")
@@ -1270,7 +1318,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
         blocks = cls.blocks(text)
         for name in sorted(RETIRED_USE_INSTEAD):
             for match in re.finditer(rf"\b{re.escape(name)}\b", text):
-                if text[match.end():match.end() + len(cls.CALL_FORM)] == cls.CALL_FORM:
+                if cls.is_call_form(text, match.end()):
                     continue
                 block = next(
                     (body for start, end, body in blocks if start <= match.start() < end),
@@ -1333,6 +1381,93 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "prose and the fence below it were merged into one block — a code sample then "
             "borrows the replacement a note in the prose names")
         assert blocks[9] == "~~~\ncode()\n~~~\n"
+
+    @pytest.mark.parametrize("kind,text", [
+        ("heading",
+         "# the MCP tool `tortoise_list_graphs` lists names\n"
+         "## `tortoise_graph_overview(section=\"graphs\")` lists them\n"),
+        ("list-item",
+         "- the MCP tool `tortoise_list_graphs` lists names\n"
+         "- `tortoise_graph_overview(section=\"graphs\")` lists them\n"),
+    ], ids=["heading", "list-item"])
+    def test_each_structural_block_kind_is_its_own_block(self, kind, text):
+        """The heading and list-item branches, pinned by a verdict that FLIPS.
+
+        ⛔ MEASURED, and this is the #14237 r6 review P2: the splitter row ABOVE counts blocks
+        in a fixture whose structural lines each sit on their own line, so dropping the
+        heading branch (or the list-item branch) from `blocks` leaves it GREEN — a count that
+        cannot fail is not coverage, and the structural model IS the rule's replacement
+        thesis. Each kind is pinned here where losing it changes the ANSWER: the mention in one
+        unit, the replacement in the NEXT unit of the same kind, no blank line between. Merge
+        the two units into one paragraph and the mention inherits its neighbour's replacement
+        — a false green.
+        """
+        assert self.notes_missing_replacement(text), (
+            f"a mention in one {kind} was cleared by the replacement in the next {kind} — "
+            "that block kind is not separated, so R2 reads the run as one block")
+
+    @pytest.mark.parametrize("label,text", [
+        ("pipe-less",
+         "GRAPH | the MCP tool `tortoise_list_graphs` lists names\n"
+         "--- | ---\n"
+         "GRAPH | `tortoise_graph_overview(section=\"graphs\")` lists them\n"),
+        ("leading-pipe",
+         "| GRAPH | the MCP tool `tortoise_list_graphs` lists names |\n"
+         "| --- | --- |\n"
+         "| GRAPH | `tortoise_graph_overview(section=\"graphs\")` lists them |\n"),
+    ], ids=["pipe-less", "leading-pipe"])
+    def test_a_table_row_is_a_row_with_or_without_leading_pipes(self, label, text):
+        """#14237 r6 review P1 — GFM does not require the leading pipe, and that mattered.
+
+        ⛔ MEASURED BEFORE THE FIX: the pipe-less table collapsed into ONE paragraph (1 block),
+        so its cells were never separated and the mention in row 1 was cleared by the
+        replacement in row 3 — ACCEPTED. The identical content written with leading pipes gave
+        3 rows / their cells and was REJECTED. Recognising a row only by a LEADING `|`
+        therefore re-opened, for pipe-less tables, the exact cell-scoping fail-open that
+        `test_a_table_cell_is_its_own_block` exists to close — reachable by deleting one
+        character per line. Both spellings are one table to markdown
+        (`MarkdownIt("commonmark").enable("table")` renders each as ONE <table> with
+        separate <tr>), so both must be rows here.
+        """
+        assert self.notes_missing_replacement(text), (
+            f"the {label} table was read as one block, so a mention in one cell was cleared "
+            "by the replacement in another row")
+
+    def test_a_list_item_keeps_its_indented_continuation(self):
+        """#14237 r6 review P2 — markdown puts an indented line INSIDE the item.
+
+        ⛔ MEASURED BEFORE THE FIX: the continuation was a separate block (2 blocks), so this
+        correct, hard-wrapped migration note was REFUSED and told its author to fix a document
+        that was already right. It is not hypothetical: three real notes in `docs/` had this
+        shape (`product/canonical-mcp-tools.md:505`,
+        `plans/2026-11-13-issue-12378-event-layer-read.md:50`,
+        `scoping/2026-09-17-3863-scope-output.md:874`). Markdown agrees with the note —
+        `MarkdownIt` renders both lines as ONE <li>.
+        """
+        text = (
+            "- The door `tortoise_list_graphs` retired forward into\n"
+            "  `tortoise_graph_overview(section=\"graphs\")`, use that.\n"
+        )
+        assert len(self.blocks(text)) == 1, self.blocks(text)
+        assert not self.notes_missing_replacement(text), (
+            "a correctly wrapped list-item note was refused because its continuation was "
+            "treated as a separate block")
+
+    def test_a_hard_wrapped_line_is_NOT_a_block_boundary(self):
+        """The negative control: making a bare newline a boundary must red this.
+
+        Without it, the cheapest way to pass every block-kind row is to split on EVERY line —
+        which refuses the notes the rule exists to accept, including this repo's own ~80-column
+        wrapped migration notes. A guard whose rows can all be satisfied by over-blocking is not
+        measuring the rule.
+        """
+        text = (
+            "The live door is `tortoise_graph_overview(section=\"graphs\")`; the MCP\n"
+            "tool `tortoise_list_graphs` retired forward into it.\n"
+        )
+        assert not self.notes_missing_replacement(text), (
+            "a hard-wrapped note was refused — a bare newline inside a paragraph is not a "
+            "block boundary")
 
     def test_a_table_cell_is_its_own_block(self):
         """A row has no terminator, so cell scoping keeps a note from clearing an instruction.
@@ -1418,10 +1553,17 @@ class TestEveryReaderNamesTheLiveListingDoor:
     @pytest.mark.parametrize("text", [
         "Call `tortoise_list_graphs(graph_id=x)` to read one graph.\n",
         "Call `tortoise_list_graphs(section=...)` and then `tortoise_graph_overview`.\n",
+        "Call `tortoise_list_graphs (graph_id=x)` to read one graph.\n",
+        "Call `tortoise_list_graphs  (graph_id=x)` to read one graph.\n",
         "```python\ngraph = tortoise_list_graphs(graph_id='x')\n```\n",
     ])
     def test_a_copyable_call_is_rejected_even_beside_the_replacement(self, text):
-        """R1 — a call form is a spelling to type, so naming the successor does not save it."""
+        """R1 — a call form is a spelling to type, so naming the successor does not save it.
+
+        The two SPACED rows are the #14237 r6 review P2: Python accepts `name (args)`, so a
+        rule testing ONE character of adjacency called the spaced spelling clean — while the
+        declared residual claimed R1 rejected the copyable spelling.
+        """
         assert self.retired_call_forms(text), (
             f"a copyable call of a retired door was accepted: {text!r}")
 
