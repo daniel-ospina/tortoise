@@ -1843,8 +1843,22 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # That is not new to this arm: the pre-existing `been` arm reports the same shape on
         # `main`'s head (`have any reports been archived in Q3 been published` -> `existence`).
         # The residual is a notice on a content query (the safe direction) and is pinned.
+        # ⛔ AND THE HEAD IS THE *NOTICE* HEAD, NOT THE ROUTING ONE (turn-5 review, P2, measured):
+        # the first cut took :data:`_EXISTENCE_HEAD`, which spells the auxiliary as a bare word with
+        # whitespace after it — so the CONTRACTED twin of every row this arm exists for stayed
+        # SILENT: `haven't any reports already archived`, `haven’t any reports ever archived`,
+        # `hasn’t anything already archived` and `hadn’t any claims already retracted` all returned
+        # `population=None, signal=None` while their uncontracted twins reported, and the whole
+        # suite stayed GREEN either way (0 moves over the 369-query pinned corpus), i.e. the gap was
+        # unobservable from inside the tests. That is the module's own round-32 lesson (a contracted
+        # head could not reach its own notice, the worst direction) one arm over: the arm is a
+        # SIGNAL arm, so :data:`_EXISTENCE_HEAD_NOTICE` — the same two classes with the contraction
+        # admitted, derived so the quantifier list keeps one home — is the head it should have taken
+        # from the start. Measured at this head: 0 population/shape moves over the pinned corpus,
+        # the contracted class silence -> `existence_unguarded`, and `haven't any reports been
+        # archived` still ROUTES (a `been` frame is not this class).
         + "|"
-        + _EXISTENCE_HEAD
+        + _EXISTENCE_HEAD_NOTICE
         + rf"[^?]{{0,60}}?\b{_ALREADY_EVER_AUX}\s+(?:{_ENDING_WORDS})\b"
         + ")"
         + _BLOCKED_TAIL)),

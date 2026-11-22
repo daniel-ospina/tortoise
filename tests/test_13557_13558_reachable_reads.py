@@ -1702,6 +1702,16 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
         "have any customers ever cancelled",
         "have any customers already cancelled",
         "have anything already archived",
+        # ⛔ THE CONTRACTED HEAD IS THE SAME CLASS (turn-5 review, P2, measured): ARM C took the
+        # ROUTING head (`_EXISTENCE_HEAD`), whose auxiliary is a bare word followed by whitespace,
+        # so every contracted spelling of the very class this test exists for stayed SILENT —
+        # `population=None, signal=None` — while its uncontracted twin reported, and the whole
+        # suite stayed green either way. It takes `_EXISTENCE_HEAD_NOTICE` now; these rows are what
+        # makes a revert to the routing head RED instead of invisible.
+        "haven't any reports already archived",
+        "haven\u2019t any reports ever archived",
+        "hasn\u2019t anything already archived",
+        "hadn\u2019t any claims already retracted",
     ]
     for query in refused:
         got = detect_state_question(query)
@@ -1765,15 +1775,18 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
     # claimed the slot WAS the helper's `{0,10}` while the code spelled eight, and the gap was
     # observable from the REPORT side — the two rows below were `population=None, signal=None` (a
     # refused cue with no notice, duty (b)). Both report now, and the widening is refusal-side:
-    # measured over 78 probes (runs 0-12 x six sentence shapes), 10 diffs, all silence ->
-    # `existence_unguarded`, 0 population/shape moves.
+    # 0 population/shape moves over the pinned corpus.
     # ⛔ AND THE TWO ROWS BELOW ARE NINE AND TEN TOKENS, NOT SIX AND SEVEN ADVERBIALS (peer round-34
     # review, P2, measured): the slot counts TOKENS, and `no longer` is two of them, so the rows sit
     # at the TOP of the bound while six to eight SINGLE-token adverbs (`<n> just`) would still be
     # inside it. The printed item count and the guarded token count are different measures; the rows
-    # are what is pinned, and their token count is the one that touches the bound. From eleven tokens
-    # on, the 60-character window dominates and both bounds answer identically — which is why the pin
-    # is here and not at the window's edge.
+    # are what is pinned, and their token count is the one that touches the bound.
+    # ⛔ AND FROM ELEVEN TOKENS THE LIMIT IS THE SLOT BOUND, NOT THE WINDOW (turn-5 review, P2,
+    # measured — this paragraph previously blamed the 60-character window, which cannot be the cause):
+    # `have any it has been <n x just> deprecated and been withdrawn` reports for n=1..10 and is
+    # SILENT at n>=11 because the slot admits ten. The `[^?]{0,60}` window in this row sits BEFORE
+    # `been` and so cannot bound the adverb run at all, and widening the slot to `{0,12}` makes n=11
+    # and n=12 report — which a window limitation could not do. The edge is pinned below.
     for query in (
         "have any it has been just only already no longer in fact very recently deprecated and "
         "been withdrawn",
@@ -1783,8 +1796,16 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
         got = detect_state_question(query)
         assert got.population is None and got.signal == "existence_unguarded", (
             f"{query!r} reports {got.signal!r} — these rows sit at the top of the refusal slot's "
-            f"bound and must REPORT; if this went silent, the slot is back inside the bound the "
-            f"prose claims")
+            f"bound (nine and ten TOKENS) and must REPORT; if this went silent, the slot is back "
+            f"inside the bound the prose claims")
+
+    # the bound's own edge: eleven tokens is past `{0,10}`, so BOTH bounds are silent there (a
+    # `{0,8}` copy answers identically) — pinning it is what keeps "eleven is the bound" from
+    # being mistaken for "the window dominates"
+    edge = "have any it has been " + " ".join(["just"] * 11) + " deprecated and been withdrawn"
+    assert detect_state_question(edge).signal is None, (
+        "an eleven-token run reports — the slot bound is not the `{0,10}` the prose and this test "
+        "both state, so the boundary above it is unpinned again")
 
     # ⛔ THE ARM IS NOT PURELY ADDITIVE, AND THE DIRECTION IT IS NOT IS A NAMING ONE (fresh
     # review, P2, measured). The signal rows are ordered and this one sits before
@@ -1800,6 +1821,14 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
         f"{compound!r} reports {got.signal!r} — a compound question with an `already|ever` frame "
         f"gets the existence notice, which is EARLIER in `_ENDING_SIGNALS` than "
         f"`which_modified_noun`; if this changed, the ordering note on ARM C is wrong")
+    # ⛔ AND THE CUE HALF OF THE DISCLOSED SWAP IS PINNED TOO (turn-5 review, P3, measured): the
+    # note says the notice's `cue` moved from the `which` clause to the `already|ever` clause, but
+    # nothing asserted `signal_cue`, so an edit could leave the notice naming the OTHER clause while
+    # every assertion above stayed green — a notice pointing at the wrong span is worse than none.
+    assert got.signal_cue == "have any reports already archived", (
+        f"{compound!r} reports cue {got.signal_cue!r}, not the `already|ever` clause — the note "
+        f"on ARM C states the cue was REPLACED by that clause, so a notice naming the `which` "
+        f"clause contradicts it")
 
     # ⛔ THE ATTRIBUTIVE RESIDUAL, STATED: silent only when the ending word is IMMEDIATELY
     # followed by `been`. A qualifier in between puts a `_BLOCKED_TAIL` member there and the
