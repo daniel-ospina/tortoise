@@ -129,6 +129,28 @@ def _drain_tails(timeout: float = 30.0) -> None:
         f"capture completions did not finish: {ha._CAPTURE_TAIL_TASKS}")
 
 
+def _await_phase_gone(session_id: str, deadline_s: float = 20.0) -> list:
+    """Poll until the in-flight phase pair is gone (the retire is an OFF-LOOP write).
+
+    ⛔ `_drain_tails()` is NOT enough to observe it, and a review round measured the
+    cost of assuming it was: the marker/phase writes are submitted to
+    `_CAPTURE_MARKER_EXECUTOR` from the tail task's done-callback, and
+    `_CAPTURE_TAIL_TASKS` drops the task BEFORE that submit — so a single read after
+    the drain races a thread-pool write. A 50 ms delay inside `_clear_capture_phase`
+    (a slow graph write, not a wrong handler) turned both rows RED with the handler
+    CORRECT: a host event manufacturing a product verdict, the `#5049` rule-1 class
+    this module cites elsewhere. Every pre-existing row that observes this retire
+    polls for it; these two now do the same.
+    """
+    deadline = time.monotonic() + deadline_s
+    row = _session_row(session_id)
+    while (time.monotonic() < deadline and row
+           and (row[0][3] is not None or row[0][4] is not None)):
+        time.sleep(0.02)
+        row = _session_row(session_id)
+    return row
+
+
 def _proj():
     return ha._make_sdk(namespace=TEST_ORG_ID)._get_proj()
 
@@ -324,6 +346,22 @@ def test_a_cancelled_completion_writes_the_abandoned_marker(
                 return True
 
         state = {"attempted": True, "finalized": False, "lane": "v2"}
+        # ⛔ THE CANCELLED ARM HAS ONE WRITER, and this records who it is
+        # (review, round 2 — measured: deleting the `not cancelled` guard from
+        # `_capture_tail_failed`'s retire arm left EVERY row green while a
+        # cancellation submitted `_clear_capture_phase` beside the marker, two
+        # graph writes where the two neighbouring docstrings say one). A pin on the
+        # SUBMISSIONS, not on the row: the row looks identical either way — the
+        # marker's own statement clears the phase pair, so only the submit
+        # distinguishes the contract from the accident.
+        cleared: list = []
+        _real_clear = ha._clear_capture_phase
+
+        def _recording_clear(proj, sid, *_a, **_k):
+            cleared.append(sid)
+            return _real_clear(proj, sid, *_a, **_k)
+
+        monkeypatch.setattr(ha, "_clear_capture_phase", _recording_clear)
         ha._capture_tail_failed(_Cancelled(), _proj(), session_id, state)
         # ⛔ ASSERT WHILE THE REAL EXTRACTION IS STILL PARKED. Releasing first
         # would let the genuine completion write `capture_ok=true` over the
@@ -352,6 +390,10 @@ def test_a_cancelled_completion_writes_the_abandoned_marker(
         assert set(block) == {"status", "extractor", "outcome_known"}, (
             f"a terminal row publishes no phase: {block}")
         assert block["outcome_known"] is True, block
+        assert cleared == [], (
+            "a CANCELLED tail must not submit the phase clear: the abandoned "
+            "marker is the terminal writer on that arm and clears the pair in its "
+            f"own statement (submitted: {cleared})")
         parked.release.set()
     _drain_tails()
 
@@ -1037,6 +1079,7 @@ def test_a_completion_that_dies_before_submitting_still_returns_capacity(
     # `phase: extracting` forever (measured: deleting the raise-arm submit reds
     # this assertion plus the hand-driven row, nothing else). The `extracting`
     # write lands before the dispatch, this dispatch raises, the tail dies.
+    row = _await_phase_gone("s-14232-no-dispatch")
     assert row[0][3] is None and row[0][4] is None, (
         "a tail that dies between its phase write and its terminal record must "
         f"still retire the phase through the real callback wiring: {row}")
@@ -1051,8 +1094,10 @@ def test_a_failed_terminal_write_still_retires_the_phase(client, monkeypatch):
     terminal write left `phase: extracting` beside a `capture_ok` that was never
     written — permanently, and reverting either half of the fix reds this row.
 
-    Drives the REAL handler: the terminal statement is recognised by its own text
-    (`s.capture_ok=$ok`), so this fails the outcome write and nothing else — the
+    Drives the REAL handler: the terminal statement is recognised by BOTH of its
+    own clauses (`s.capture_ok=$ok` AND the phase clear this PR adds, because the
+    first alone also matches the SDK's stamp), so this fails the outcome write and
+    nothing else — the
     record write, the phase writes, the extraction and the reads all still run.
     `capture_ok` must stay NULL (nothing was recorded, so the raise-shape/replay
     contract decides what the next POST does) and the phase must be gone.
@@ -1063,7 +1108,12 @@ def test_a_failed_terminal_write_still_retires_the_phase(client, monkeypatch):
     real_query = graph_cls.query
 
     def _query_failing_the_terminal_set(graph_self, statement, *a, **kw):
-        if "s.capture_ok=$ok" in statement:
+        # ⛔ BOTH tokens: `s.capture_ok=$ok` alone also matches the SDK's
+        # `_stamp_capture_attempt_state` (tortoise/sdk.py), so a future route through
+        # that door would fail TWO statements and this row would still pass while its
+        # docstring silently became false. The phase-clear clause is this PR's own.
+        if ("s.capture_ok=$ok" in statement
+                and "s.capture_extraction_phase=NULL" in statement):
             raise RuntimeError("terminal outcome write failed (simulated)")
         return real_query(graph_self, statement, *a, **kw)
 
@@ -1074,7 +1124,7 @@ def test_a_failed_terminal_write_still_retires_the_phase(client, monkeypatch):
     assert r.status_code == 200, r.text
     _drain_tails()
 
-    row = _session_row(session_id)
+    row = _await_phase_gone(session_id)
     assert row and row[0][1] is None, (
         "the terminal write FAILED, so no outcome was recorded — `capture_ok` "
         f"must stay NULL, got {row}")
