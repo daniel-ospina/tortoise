@@ -11,7 +11,9 @@ uses, so coercion ALSO runs on every candidate row INSIDE the guard itself. On
 the emitted predicate: 8 coercion ``CASE WHEN`` before ``$contested_sum_bound``
 against 73 between it and ``$contested_threshold`` (72 coercion + the division's
 own selector), so a rejected row pays 8 coercion cases to skip 72.
-BOTH halves are graded below. The guard's own 8 are its price, not a saving —
+BOTH halves are graded below — and so is the 72/1 split, because the share the
+caveat quotes (72 of 80 coercion, 90%, 64 net) is arithmetic over that split and
+over neither total alone. The guard's own 8 are its price, not a saving —
 which is a CAVEAT on the saving, never a claim that no coercion is spared:
 
     α+β < 1/(4·threshold) − 1        (`beta_variance_sum_bound`)
@@ -53,6 +55,7 @@ from tortoise.search_engine import (
     _beta_variance,
     beta_variance_sum_bound,
     get_relationships_bounded,
+    numeric_operand_cypher,
 )
 
 
@@ -383,6 +386,39 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     assert int(doc_spared.group(1)) == spared, (
         f"the docstring says {doc_spared.group(1)} `CASE WHEN` are spared, but "
         f"THIS predicate measures {spared} — the prose has rotted off the emission")
+    # ⛔ AND THE SPLIT THE DOCSTRING DERIVES THREE MORE NUMERALS FROM. The rows
+    # above grade the two TOTALS — the emission against literals, and the prose
+    # against the emission — and NEITHER grades their split. The caveat quotes
+    # "spares **72 of the predicate's 80 coercion `CASE WHEN`** … 90% of the
+    # coercion … net of the 8 it pays, a rejected row still skips 64" — and 72
+    # is NOT `73 - 8`: it is `73 - the division's own selector`, and a selector
+    # is not a coercion. So a coercion that became a selector leaves BOTH graded
+    # totals untouched and moves the quoted share, which is the same
+    # ungraded-figure class this file already closed for the `8` and the `73`.
+    # The count is measured from the emission's own structure rather than
+    # restated, so the row cannot drift with the coercion's shape: one
+    # `numeric_operand_cypher` emission is `emission_cases` `CASE WHEN`, and it
+    # spells the finite-range bound twice (a `<=` and a `>=`), so half the
+    # bound's occurrences is the number of emissions in the slice.
+    emission = numeric_operand_cypher("tortoise_probe_operand")
+    emission_cases = emission.count("CASE WHEN")
+    range_lit = emission.split("<= ")[1].split(" ")[0]
+    coercions = (crit[guard:division].count(range_lit) // 2) * emission_cases
+    assert spared - coercions == 1, (
+        f"{spared - coercions} `CASE WHEN` in the spared slice are not "
+        "`numeric_operand_cypher` coercions, but the docstring derives its "
+        "share as `72 coercion + the division's own selector` — exactly one. "
+        "With a different split the quoted 72 / 80 / 64 are all wrong while "
+        "the 8 and the 73 above stay green: re-derive the share")
+    assert coercions == 72, (
+        f"{coercions} coercion `CASE WHEN` sit in the spared slice, but the "
+        "docstring derives its share from 72 (\"72 of the predicate's 80 "
+        "coercion `CASE WHEN`\", \"90% of the coercion\", \"still skips 64\") "
+        "— re-derive all three against THIS predicate")
+    assert crit[:guard].count("CASE WHEN") + coercions == 80, (
+        "the docstring quotes the predicate's coercion total as 80 — the 8 the "
+        "guard pays plus the 72 it skips — but this predicate carries "
+        f"{crit[:guard].count('CASE WHEN') + coercions}; re-derive the share")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 
