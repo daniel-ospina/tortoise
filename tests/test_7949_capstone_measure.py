@@ -18611,3 +18611,62 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     assert not failures, (
         "the pair this row names does not open on the symbol the row is about:\n  - "
         + "\n  - ".join(failures))
+
+    # ⛔ ONE CITATION, TWO VALUES, ONE HEAD — the same shape one document over, and it had
+    # NO reader at all (14183 pre-merge review, P2 — MEASURED). `05-verify.md` D5 states
+    # `sdk.py:10326` is `_registry_cache = PackRegistry(packs_dir)` "at the MERGE head"
+    # AND `:10326` "at the branch head `2584a86ec1` too, so this re-cut did NOT move it":
+    # the SAME head named twice, so the two sides must agree — a self-agreement claim that
+    # needs no git to grade. A re-cut changed the FIRST side to `:10347` and left the second
+    # alone, and `:10347` is `if not results:` at that head, so the sentence asserted two
+    # values for one head and neither was read. Both arms run on purpose: the agreement arm
+    # reds on ANY edit that moves one side only (no object, no network); the head arm is the
+    # measurement that the agreement arm cannot make, because both sides could be edited
+    # together to a number that names nothing.
+    #
+    # ⛔ AND WHY THIS ARM LIVES **HERE**, at the end of the file, rather than beside the other
+    # D5 arms: `RECONCILE-A1-A2-A5.md` cites THIS file's own derivation line twice as
+    # `(`:N`)`, and `test_the_reconcile_cites_resolve_where_the_record_says_they_do` DERIVES
+    # `N` from this file's text — so any insertion ABOVE that line re-stales the record and
+    # reds an unrelated pin (MEASURED: a 57-line block placed above it moved the value and
+    # the record's two cites stopped matching). An arm about rot must not itself rot a
+    # citation, so it appends below the number it must not move.
+    _d5 = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+    _registry = re.search(
+        r"`sdk\.py:(?P<merge>\d+)` is `_registry_cache = PackRegistry\(packs_dir\)` "
+        r"at the MERGE head \(and `:(?P<branch>\d+)` at the branch head "
+        r"`(?P<head>[0-9a-f]{7,40})`", _d5)
+    assert _registry, (
+        "05-verify.md's `_registry_cache` clause no longer matches the form this arm "
+        "reads: `` `sdk.py:N` is `_registry_cache = PackRegistry(packs_dir)` at the "
+        "MERGE head (and `:N` at the branch head `<sha>` `` — if the wording moved, "
+        "re-derive the figure rather than dropping the arm, which is the only reader "
+        "this number has")
+    assert _registry.group("merge") == _registry.group("branch"), (
+        "05-verify.md names `:" + _registry.group("merge") + "` at the MERGE head and "
+        "`:" + _registry.group("branch") + "` at the branch head `"
+        + _registry.group("head") + "` — ONE head, stated twice, so the two sides must "
+        "agree. They do not: an edit moved one side only, the shape that let this pair "
+        "assert two values for one head (14183 review). Re-derive BOTH with `git show "
+        + _registry.group("head") + ":tortoise/sdk.py | grep -n "
+        "'_registry_cache = PackRegistry'` and correct the side that disagrees with the "
+        "head, never by copying the other side forward")
+    _r_head = _registry.group("head")
+    _r_show = subprocess.run(
+        ["git", "show", f"{_r_head}:tortoise/sdk.py"],
+        cwd=_REPO, capture_output=True, text=True)
+    if _r_show.returncode != 0:
+        pytest.skip(
+            f"{_r_head} (the branch head D5 quotes its `_registry_cache` figure for) is "
+            "not carried by this clone, so the figure is UNCHECKED here, not disproved — "
+            f"CI's `fetch-depth: 1` checkout lacks it by construction. git: "
+            f"{_r_show.stderr.strip()}")
+    _r_hits = [
+        _n for _n, _line in enumerate(_r_show.stdout.splitlines(), 1)
+        if "_registry_cache = PackRegistry(packs_dir)" in _line]
+    assert _r_hits == [int(_registry.group("merge"))], (
+        f"`_registry_cache = PackRegistry(packs_dir)` sits at {_r_hits} in "
+        f"`{_r_head}:tortoise/sdk.py`, while 05-verify.md D5 names "
+        f"`:{_registry.group('merge')}` for that head — re-derive the figure with "
+        f"`git show {_r_head}:tortoise/sdk.py | grep -n "
+        "'_registry_cache = PackRegistry'`, never carry it forward")
