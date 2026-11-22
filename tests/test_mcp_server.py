@@ -903,15 +903,30 @@ class TestEventsTools:
         # temporal field (`invalid_at=`), not a separate door. The pin follows the
         # CAPABILITY: the live row is the container, and the retired name must
         # still RESOLVE (via the #3883 shim) rather than read as "tool not found".
+        #
+        # ⛔ #11609 lane P7 made the SAME move on the events pair: `tortoise_events_poll`
+        # retires FORWARD into `tortoise_poll_events` (`tool_registry.py` — "its handler
+        # is the same body"), so the ADVERTISED row is `tortoise_poll_events` and the
+        # pre-P7 spelling is a `RETIRED_USE_INSTEAD` entry served only through the #3883
+        # shim. This arm therefore asserts BOTH directions, the shape the
+        # `tortoise_retract_point` rows above already use: the live name is advertised,
+        # and the retired one still RESOLVES (it is imported above and is callable) while
+        # staying off the advertised surface — a shim is not an advertisement.
         assert callable(tortoise_events_poll) and callable(tortoise_update_knowledge)
         names = {t.name for t in TOOL_REGISTRY}
-        assert "tortoise_events_poll" in names
+        assert "tortoise_poll_events" in names
+        assert "tortoise_events_poll" not in names, (
+            "the retired events spelling is back on the ADVERTISED surface — P7 "
+            "retired it forward into `tortoise_poll_events`, and a shim is not a door")
         assert "tortoise_update_knowledge" in names
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
         assert "tortoise_retract_point" in retired, (
             "the retired name has no shim row, so a caller gets no migration hint")
         assert "tortoise_retract_point" not in names
-        ev = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
+        assert "tortoise_events_poll" in retired, (
+            "the retired events spelling has no shim row, so a caller of the pre-P7 "
+            "name gets no migration hint")
+        ev = next(t for t in TOOL_REGISTRY if t.name == "tortoise_poll_events")
         rt = next(t for t in TOOL_REGISTRY
                   if t.name == "tortoise_update_knowledge")
         assert ev.http_policy is True and rt.http_policy is True
@@ -970,13 +985,17 @@ class TestEventsHttpSurface:
     def test_events_tools_in_http_allowed(self):
         from tortoise.mcp_auth import HTTP_ALLOWED
 
-        assert "tortoise_events_poll" in HTTP_ALLOWED
+        assert "tortoise_poll_events" in HTTP_ALLOWED
         # #4282 Phase 2: the retraction capability reaches HTTP through its
         # container, and the RETIRED name is off the allow-list (it is not
         # advertised there; the #3883 shim answers it on the transports that
         # serve retired names at all).
         assert "tortoise_update_knowledge" in HTTP_ALLOWED
         assert "tortoise_retract_point" not in HTTP_ALLOWED
+        # #11609 lane P7, same rule one row over: the events capability reaches HTTP
+        # through `tortoise_poll_events`, and the retired spelling it replaced is off
+        # the allow-list because `HTTP_ALLOWED` is derived from the ADVERTISED rows.
+        assert "tortoise_events_poll" not in HTTP_ALLOWED
 
 
 class TestIngestPromotionPolicy:
@@ -1249,12 +1268,19 @@ class TestStdioEntrypointToolRegistration:
             #   42 -  2 + 0 = 40   (#11609 P6's DELETE pair — `delete_point` /
             #                       `delete_entity` retire into the `tortoise_delete`
             #                       entry the #9660 ruling KEEPS)
+            #   40 -  1 + 0 = 39   (#11609 lane P7: FOUR targets registered and FIVE
+            #                       doors retired, so the listing moves by the NET of
+            #                       the two — the one door that left with no container
+            #                       row behind it is `tortoise_list_graphs`, retired
+            #                       forward into `tortoise_graph_overview(section=
+            #                       "graphs")`, whose section arm has dispatched to
+            #                       that body since #4282)
             # ⛔ Not the HTTP-filtered view: that one is 35 at this head
             # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 35
             # and 32 respectively), and
             # the two differ by the five `http_policy=False` rows. Writing one view's
             # base with the other's head lands on a number no population has.
-            assert len(names) >= 40, f"expected >=40 tools, got {len(names)}"
+            assert len(names) >= 39, f"expected >=39 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.
