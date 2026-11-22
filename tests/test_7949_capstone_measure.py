@@ -18356,17 +18356,38 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             pass  # unreadable diff is UNMEASURED, never a pass (see the guard below)
         else:
             _measured.append(f"the live `{_base}...HEAD` numstat")
+            _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
+            _base_has = (
+                _base_copy.returncode == 0 and _I7_TARGET in _base_copy.stdout)
             if not _numstat.stdout.strip():
-                failures.append(
-                    f"D5 says `04-plan.md` IS in this diff by its PAIR, but "
-                    f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY — so at "
-                    f"the head you are running, that file carries no re-point of this "
-                    f"diff. Either the re-point was dropped, or the sentence no longer "
-                    f"describes this head. Re-derive the membership (#14260 fix lane, "
-                    f"finding 3)")
+                # ⛔ THE LANDED STATE, MEASURED — NOT A SKIP AND NOT A FAILURE (#14290).
+                # An EMPTY membership here has TWO causes and the arm must tell them
+                # apart, because they are opposite verdicts:
+                #   (a) the re-point already LANDED on the base — every branch above the
+                #       merge has this shape, so #14290's own sentence ("IS in this diff
+                #       at the head this was read at") stays true as PROVENANCE while this
+                #       head carries none of it. Before this reading the arm was red on
+                #       EVERY such branch — a latent main-red that could not be satisfied
+                #       by any commit, because the only way to make the numstat non-empty
+                #       was to re-point a document the base already agrees with;
+                #   (b) the re-point was DROPPED — the base does not carry it either, and
+                #       nothing in this branch put it back. That stays RED.
+                # Reading the base's own copy is what distinguishes them, and it is the
+                # same read the non-empty half already does — so this ADDS a graded
+                # outcome, it does not relax one.
+                if _base_has:
+                    _measured.append(
+                        f"the landed state (`{_base}` already carries {_I7_TARGET})")
+                else:
+                    failures.append(
+                        f"D5 says `04-plan.md` IS in this diff by its PAIR, but "
+                        f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY AND "
+                        f"`{_base}`'s own copy does not carry {_I7_TARGET} either — so the "
+                        f"re-point is not in this diff and it did not land on the base. "
+                        f"It was dropped. Re-derive the membership (#14260 fix lane, "
+                        f"finding 3)")
             else:
-                _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
-                if _base_copy.returncode == 0 and _I7_TARGET in _base_copy.stdout:
+                if _base_has:
                     failures.append(
                         f"D5 calls the I7 range a re-point of THIS diff, but `{_base}`'s "
                         f"own `{_MEMBER_DOC}` already carries {_I7_TARGET} — so the range "
