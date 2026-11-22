@@ -1169,7 +1169,7 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
     """The header's bare-sibling clause is only true while each of the five is ALSO written one-token.
 
     The clause now says a `path.py:NNNN` re-spelling would add "five more **as-written spellings** —
-    345 → 350 — and so 114 → 119 collisions … while adding **no pair at all**: 231 either way, because
+    345 → 350 — and so 111 → 116 collisions … while adding **no pair at all**: 234 either way, because
     each of the five already carries its pair from §2.5". That last half is the load-bearing one, and it
     was FALSE for the sentence it replaced: the previous edition claimed a pair spelling "would add five
     more pairs to the populations the figures above are measured over" (`#13991` review, P2-1), while
