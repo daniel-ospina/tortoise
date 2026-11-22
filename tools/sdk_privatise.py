@@ -1123,6 +1123,10 @@ SWEEP_NAMES = 66
 #: `(11861, "f0647020531c078c")` — the SAME pair — and `--check` exits 0 on the integrated tree,
 #: so that integration added no untyped receiver either.
 #:
+#: ⛔ SUPERSEDED BY THE RE-CUT BELOW — the sentence above ends "`--check` exits 0 at this head on
+#: the SAME pair", and that reading did NOT survive the commits merged beside it: the census moved
+#: three rows before the pin commit itself landed. Read the re-cut, not that sentence.
+#:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
 #: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
 #: and the tree are both green at the moment it is taken. `10e51693f166` (#14160) commits
