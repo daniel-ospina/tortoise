@@ -116,6 +116,16 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
+#: ⛔ ONE DEFINITION of "what is a comment or a string literal inside a Cypher
+#: statement". The write gate needs exactly this normalisation for exactly the
+#: same reason — a comment or a literal must not be read as code — so it is
+#: IMPORTED rather than re-spelled here. ⚠️ It is the GATE variant, which KEEPS
+#: backtick-quoted identifiers: `_NO_WS` below strips those deliberately (so
+#: `` CALL `algo.pageRank` `` matches `call algo`), and a stripper that removed
+#: them first would delete the very text that arm reads. 0.16 s of import, which
+#: this tool already pays wherever it touches `tortoise/`.
+from tortoise.projection import _GATE_LITERAL_OR_COMMENT_RE as _LITERAL_OR_COMMENT
+
 #: ── THE READER CENSUS ─────────────────────────────────────────────────────
 #:
 #: Every SITE in `tortoise/` at which a statement READS or MAINTAINS the
@@ -782,6 +792,19 @@ def superset(graph_rows: list[dict[str, Any]],
 #: verdict would read "no reader needs a graph capability" beside a real one —
 #: the single failure this guard exists to prevent. Measured before the strip:
 #: `CALL `algo.pageRank`(null, null)` returned `None`.
+#:
+#: ⛔ THE COMMENT IS THE SAME FALSE-PASS DIRECTION, one spelling further out, and it
+#: was OPEN until round 12 (`#14183` review, P2). Cypher accepts a comment BETWEEN
+#: the `-` and the `[`, so `MATCH (e)-/* hop */[r:TOUCHED]-(p)` carries neither
+#: `-[` nor `]->` nor `--` contiguously: measured, `graph_capability` returned
+#: `None` for both `-/*hop*/[r:T]-` and the line-comment form `-//hop\n[r:T]-`,
+#: while the same pattern re-spaced (`- [r] -`, the round-8 row) was caught. The
+#: engine executes both comment spellings, and this repo already strips comments
+#: for exactly this reason elsewhere (the `_LITERAL_OR_COMMENT_RE` shape imported
+#: at the top of this module). So the snippet is COMMENT- and LITERAL-stripped
+#: BEFORE the whitespace/backtick strip. ⚠️ String literals go too: a `//` inside
+#: `'https://…'` would otherwise open a line comment and swallow every arm after
+#: it on that line.
 _NO_WS = re.compile(r"[\s`]+")
 GRAPH_CAPABILITY_CYPHER = (
     "-[*",                # a variable-length traversal
@@ -826,7 +849,11 @@ def graph_capability(row: Mapping[str, Any]) -> str | None:
         # like no capability at all (#14183 review, non-blocking 6, measured). Both
         # sides are whitespace-stripped before matching, so a re-spaced pattern is
         # the same pattern.
-        haystack = _NO_WS.sub("", snippet.lower())
+        # ⛔ A COMMENT IS NOT A BYPASS EITHER (round 12). `-/* hop */[r:T]-` and
+        # `-//hop\n[r:T]-` are engine-accepted and carry no contiguous arm, so the
+        # snippet is stripped of comments and string literals FIRST — see the
+        # `_NO_WS` block above for the measurement.
+        haystack = _NO_WS.sub("", _LITERAL_OR_COMMENT.sub("", snippet.lower()))
         for shape in GRAPH_CAPABILITY_CYPHER:
             if _NO_WS.sub("", shape) in haystack:
                 return f"cypher:{shape}"

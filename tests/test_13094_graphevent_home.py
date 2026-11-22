@@ -110,6 +110,17 @@ CAPABILITY_CONTROLS = (
     # carries no arm at all, so it reds on the same mutant from the other side.
     ("re-spaced undirected adjacency",
      "MATCH (a) - [r:IMPL|NAND]- (b)", "cypher:-["),
+    # ⛔ THE SAME SHAPE WITH A COMMENT INSIDE THE HOP — the pin for
+    # `_LITERAL_OR_COMMENT`. Cypher accepts a comment between the `-` and the `[`,
+    # so this spelling carries no contiguous arm: measured before the fix,
+    # `graph_capability` returned `None` for BOTH rows below while the re-spaced
+    # rows above were caught (round-12 review, P2 — the same false-PASS direction
+    # as the backtick and the space, one spelling further out). Strip comments
+    # before matching and these two rows are what reds.
+    ("adjacency with a BLOCK comment inside the hop",
+     "MATCH (e:GraphEvent)-/* hop */[r:TOUCHED]-(p:Point) RETURN p", "cypher:-["),
+    ("adjacency with a LINE comment inside the hop",
+     "MATCH (e:GraphEvent)-//hop\n[r:TOUCHED]-(p:Point) RETURN p", "cypher:-["),
     # The DIRECTED re-spaced spelling pins the SECOND half: raw it is caught by
     # `]->` alone, and on the stripped form by the earlier `-[` arm — so the
     # literal expectation here fixes arm PRECEDENCE, not just detection.
@@ -213,12 +224,16 @@ ARMS_NO_SNIPPET_CAN_DECIDE = {
     # Every realistic spelling of these is a `CALL`: the operator spells the
     # procedure with its `call ` prefix (backticked or not — the strip makes
     # `` `db.idx… `` the same text as `db.idx…`), and the `call db.idx.*` arm is
-    # ordered before the bare name. ⛔ Measured limit of this claim (`#14183`
-    # round-9 review, P3): an engine-accepted COMMENT between the two —
-    # `CALL /*idx*/ db.idx.fulltext.queryNodes(…)` — makes the BARE arm decide
-    # instead. That is not a hole (the row is still REFUSED, which is the safe
-    # direction, and no reader in the tree spells it that way), so the two bare
-    # arms stay declared rather than gaining rows for a form nothing carries.
+    # ordered before the bare name. ⚠️ The round-9 note that used to sit here —
+    # that an engine-accepted COMMENT between the two (`CALL /*idx*/
+    # db.idx.fulltext.queryNodes(…)`) left the BARE arm to decide and was therefore
+    # "not a hole" — is RETRACTED at round 12, because that reasoning did not hold
+    # where it mattered: for the ADJACENCY arms a comment inside the hop defeated
+    # EVERY arm and the row was misfiled, not refused (measured `None`). Comments
+    # are stripped before matching now (see the tool's `_NO_WS` block), so the
+    # `call db.idx.*` arm decides that spelling too. The two bare arms stay
+    # declared because their `call ` prefix is ordered before them, which is what
+    # their own control rows pin.
     "db.idx.fulltext",
     "db.idx.vector",
 }
