@@ -952,6 +952,48 @@ class TestTheInProcessBackingIsUnchangedWork:
         assert calls == [("alpha", "beta")], (
             f"the backing did not make the historical call: {calls}")
 
+    def test_an_EMPTY_text_list_answers_empty_without_touching_a_backing(self):
+        """Zero texts is not a batch: `[]` in, `[]` out, NO backing consulted.
+
+        ⛔ A CONTRACT row, not a fix for a wasteful live path. The only in-repo
+        caller (`compute_embeddings`) already returns early on an empty fold, so
+        nothing currently reaches `encode_texts([])` — checked, not assumed
+        (`tortoise/embeddings.py:2135` is its first statement). What makes the
+        guard worth pinning is that `encode_texts` is a PUBLIC seam entry point,
+        and an empty input used to get a DIFFERENT answer per backing: `None`
+        from an unloaded in-process backing, `RuntimeError` from an `external` one
+        with no url, `[]` from a live one. `[]` is the only answer that matches
+        `len(rows) == len(texts)`, which every caller indexes.
+
+        `install_backing` makes a consulted backing VISIBLE rather than merely
+        slow, so "the guard holds" is observable rather than a claim about
+        timing.
+        """
+        class _CountingBacking:
+            name = "counting"
+
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def encode(self, texts, *, timeout_s=None):
+                self.calls.append(list(texts))
+                return [[1.0, 2.0] for _ in texts]
+
+            def close(self) -> None:
+                return None
+
+            def describe(self) -> dict:
+                return {"backing": self.name}
+
+        counting = _CountingBacking()
+        embed_seam.install_backing(counting)
+        try:
+            assert embed_seam.encode_texts([]) == []
+            assert counting.calls == [], (
+                f"an EMPTY batch reached the backing: {counting.calls!r}")
+        finally:
+            embed_seam.install_backing(None)
+
     def test_a_short_row_set_raises_instead_of_returning_a_ragged_batch(
             self, monkeypatch):
         """A short answer is REFUSED, because the callers index per input.

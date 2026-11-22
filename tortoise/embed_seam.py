@@ -2047,7 +2047,20 @@ def encode_texts(texts: Sequence[str], *,
     bypasses the queue entirely and the backing is called on the caller's
     thread. Returns ``None`` when the encoder is unavailable; raises on a
     backing failure, so the caller keeps its own decline bookkeeping.
+
+    ⛔ ZERO TEXTS IS NOT A BATCH: ``[]`` answers ``[]`` WITHOUT consulting a
+    backing. This is a CONTRACT statement, not a fix for a wasteful live path —
+    the only in-repo caller, ``compute_embeddings``, already returns early on an
+    empty fold (``tortoise/embeddings.py:2135``) and never reaches here with
+    ``[]``. It matters because ``encode_texts`` is a PUBLIC seam entry point, and
+    without the guard the same empty input got a DIFFERENT answer per backing:
+    ``None`` from an unloaded in-process backing, ``RuntimeError`` from an
+    ``external`` one with no url, ``[]`` from a live one — three answers to a
+    question with no rows in it. ``[]`` is the only one that matches
+    ``len(rows) == len(texts)``, which every caller then indexes.
     """
+    if not texts:
+        return []
     backing = active_backing()
     budget = resolve_timeout_s() if timeout_s is None else timeout_s
     try:
