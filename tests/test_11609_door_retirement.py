@@ -1120,6 +1120,18 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: reader holding a sentence-segmentation library's documentation finds the ruling instead
     #: of an accident.
     #:
+    #: ⛔ AND A SECOND, NARROWER DEPARTURE: A TABLE **CELL** IS TREATED AS A BLOCK. The GFM
+    #: tables extension makes the table a leaf block and states that block-level elements
+    #: cannot occur inside a cell (read from the GFM spec's block model), so a spec-faithful
+    #: unit would be the ROW — and a ROW is what `blocks()` emitted first. Measured: with the
+    #: row as the unit, a migration note in one cell cleared a BARE instruction in the next
+    #: (the round-2 fail-open, re-entered through the new rule). Splitting on `|` can only
+    #: SHORTEN a unit, so it errs exclusively toward a false red on a correct row — the
+    #: fail-closed direction this guard has declared since round 1 — and it is pinned by
+    #: `test_a_table_cell_is_its_own_block` (both halves: the instruction cell reds, the note
+    #: cell passes). A pipe inside an inline code span is a known limitation of any pipe split
+    #: and would only ever SPLIT further, i.e. still the same direction.
+    #:
     #: ⛔ R1 ALONE WOULD BE VACUOUS, AND THAT IS MEASURED, NOT FEARED. The defect this
     #: guard exists for — commit b4da1f5c01: "or from the MCP tool
     #: **`tortoise_list_graphs`**, which answers a metadata summary", and the table row
