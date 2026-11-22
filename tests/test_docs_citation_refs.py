@@ -3289,8 +3289,9 @@ def _d5_grep_verdict(ran: subprocess.CompletedProcess, name: str, grep: str = "g
     `False` is the refusal arm of its own assertion. A second copy of the rule would let the two
     disagree about what a given exit code means, which is the drift this file bans by name (#14138
     review round 8, P2 — MEASURED: with a grep that answers a third code for a PREFIX spelling only,
-    a two-way `if rc in (0, 1) … else` read it as a refusal and asserted "(measured: exit 2)" over a
-    run that exited 3).
+    a two-way `if rc in (0, 1) … else` read it as a refusal — and the assertion it then reached
+    interpolates the code it actually SAW, so it printed "(measured: exit 3)" over a run that exited
+    3: a refusal claimed about a measurement that was never taken).
     """
     if ran.returncode in (0, 1):
         return True
@@ -5188,10 +5189,7 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     `test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a_silent_grep`.
     """
     completed = subprocess.run(["grep", "--help"], capture_output=True, text=True, timeout=60)
-    try:
-        documented = _d5_documented_long_options(completed)
-    except _D5NoDocumentedUniverse as no_universe:
-        pytest.skip(str(no_universe))
+    documented = _d5_pinned_universe(completed)
     universe = _d5_all_long_options()
     allowance = _d5_undocumented_long_options()
     # ⛔ THE UNDOCUMENTED ALLOWANCE IS A MEASUREMENT, AND ITS CANDIDATES ARE PINNED AS GENUINELY
@@ -5228,6 +5226,28 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
         f"{sorted(_ARG_TAKING_LONG_FLAGS - universe)} — `_resolved_long_option` "
         "resolves every arity entry through `_d5_long_option_candidates`, which can only answer "
         "about documented names (#14027 review round 7, P3 — MEASURED)")
+
+
+def _d5_pinned_universe(completed: subprocess.CompletedProcess) -> set[str]:
+    """Read the documented universe from a `grep --help` run, or SKIP where it published none.
+
+    ⛔ THE SKIP IS THE PORTABILITY FIX, AND IT NEEDED ITS OWN WITNESS (#14303 review round 14, P2 —
+    MEASURED). BSD grep 2.6.0-FreeBSD answers `--help` with a `usage:` line on STDERR and exit 2, so
+    there is no option list to pin and this cell must SKIP rather than ERROR — which is what made it
+    runnable on macOS at all (#14306's handover). Pinning `_d5_documented_long_options` on its own
+    did not pin THIS conversion: replacing the `pytest.skip` below with a bare `raise` left this
+    file at `37 passed` on every platform CI runs, because no shipped GNU grep fails `--help`, so
+    the cell would error on a BSD box with a green rail — the regression this fix exists to close,
+    reintroduced with nothing to red it.
+
+    `test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a_silent_grep` now
+    drives this helper with both a universe and a silent grep, so the skip is a witnessed behaviour
+    rather than an unreachable branch.
+    """
+    try:
+        return _d5_documented_long_options(completed)
+    except _D5NoDocumentedUniverse as no_universe:
+        pytest.skip(str(no_universe))
 
 
 def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a_silent_grep():
@@ -5292,6 +5312,19 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     with pytest.raises(_D5NoDocumentedUniverse, match="exited 2"):
         not_a_skip(_d5_documented_long_options, reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    # ⛔ AND THE CELL'S OWN TURNING OF THAT RAISE INTO A SKIP IS WITNESSED HERE (#14303 review round
+    # 14, P2 — MEASURED). Every arm above pins the DERIVATION; none of them ran the call site that
+    # converts "no universe published" into `pytest.skip`, so replacing that skip with a bare `raise`
+    # left this file at `37 passed` and only a BSD-grep box would ever have noticed. That is the same
+    # P2-whose-fix-has-no-call-site-witness shape this PR catalogues, so it is pinned in both
+    # directions: a silent grep SKIPS, a real universe is RETURNED.
+    with pytest.raises(pytest.skip.Exception):
+        _d5_pinned_universe(reported(
+            2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    full_help = reported(0, usage(_D5_LONG_OPTION_FLOOR))
+    assert _d5_pinned_universe(full_help) == _d5_documented_long_options(full_help), (
+        "a `grep --help` that PUBLISHED a universe must be RETURNED, not skipped — the skip excuses "
+        "only the platform that published nothing (#14303)")
 
 
 def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypatch):
@@ -5627,8 +5660,9 @@ def test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal(tmp_path: Path)
     """The alias cell's THREE-WAY rule, witnessed where it is actually used (#14303 round 3, P3).
 
     ⛔ THE GAP THIS CLOSES, MEASURED. `_d5_grep_verdict`'s own docstring records the round-8 P2: a
-    two-way `if rc in (0, 1) … else` read a THIRD exit code as a REFUSAL and asserted
-    "(measured: exit 2)" over a run that never exited 2. Pinning the helper did not pin the alias
+    two-way `if rc in (0, 1) … else` read a THIRD exit code as a REFUSAL and printed
+    "(measured: exit 3)" — the code it interpolated — over a run that was not a refusal at all.
+    Pinning the helper did not pin the alias
     cell's use of it — replacing the loop's verdict with that two-way branch left the whole file
     GREEN on GNU grep 3.11 AND under the 3.12 shim, because no shipped grep answers a third code for
     a PREFIX spelling. So the fix for a P2 was itself unwitnessed.
