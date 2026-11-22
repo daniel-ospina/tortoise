@@ -54,8 +54,8 @@ instead of merging green.
 Static: file reads plus the §7 payload construction through a stub transport. No network,
 no DB, no graph, no model — and that is a claim the suite can hold this file to, which is
 why the §7 `tok` cells are a RECORDED proxy (`_S7_TOKEN_CELLS`) rather than a re-count
-(PR #10302 review round 6: `tiktoken` is a `dev`-group package and its BPE fetch leaves the
-box, invisible to the httpx-shaped hermetic guard — details on the constant).
+(PR #10302 review round 6: `tiktoken`'s BPE fetch leaves the box, invisible to the
+httpx-shaped hermetic guard — not its availability, since `#14277`; details on the constant).
 """
 
 from __future__ import annotations
@@ -552,11 +552,12 @@ def _s7_cost_cells(text: str) -> dict[str, dict[str, int | float]]:
 #: one it compares against.
 #:
 #: ⚠️ Why a constant rather than a measurement (PR #10302 review round 6, P1 + P2): the
-#: `tok` column needs `tiktoken`, which is declared ONLY in the `dev` dependency group — no CI
-#: leg installs it (`pyproject.toml`'s `test` extra is what `pip install -e '.[test]'` resolves,
-#: and the sharded job runs the ambient interpreter, not the `uv sync` venv), so a test that
-#: imports it reds the fast leg with `ModuleNotFoundError`. Worse, `tiktoken.get_encoding(
-#: "cl100k_base")` DOWNLOADS its ~1.1 MB BPE ranks from
+#: `tok` column needs `tiktoken`. Availability used to be the whole reason — declared ONLY in
+#: the `dev` dependency group, since the sharded job runs the ambient interpreter and not the
+#: `uv sync` venv, a test importing it reddened with `ModuleNotFoundError`. Since `#14277` the
+#: `test` extra declares it and `pip install -e '.[test]'` is what a sharded CI leg runs, so
+#: that reason is GONE — do not restate it. The reason that SURVIVES is the FETCH:
+#: `tiktoken.get_encoding("cl100k_base")` DOWNLOADS its ~1.1 MB BPE ranks from
 #: `https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken` at construction
 #: whenever `$TMPDIR/data-gym-cache` is cold — and every ephemeral runner's cache is cold. That
 #: fetch goes over `requests`/`urllib`, not `httpx`, so the hermetic egress guard in
@@ -830,9 +831,10 @@ def test_the_pre_framing_baseline_is_a_measurement_and_a_superseded_row_is_marke
     byte_cells = _s7_payloads(framed=False)
     # The `B` cells are MEASURED (exact and hermetic — see `_s7_payloads`): that equality is
     # the tripwire a payload change hits. The `tok` cells are the RECORDED `cl100k_base`
-    # proxy (`_S7_TOKEN_CELLS_UNFRAMED`) — re-deriving them needs `tiktoken`, which no CI leg
-    # installs and which downloads its BPE ranks at construction, so it cannot run in a
-    # deterministic test (PR #10302 review round 6, P1 + P2: the reason is on the constant).
+    # proxy (`_S7_TOKEN_CELLS_UNFRAMED`) — re-deriving them needs `tiktoken`, whose BPE ranks
+    # are downloaded at construction, so it cannot run in a deterministic test even though a
+    # CI leg now installs it since `#14277` (PR #10302 review round 6, P1 + P2: the reason is
+    # on the constant).
     # Both cells are still GUARDED below: a published `B ≈ tok` pair that is neither the pair
     # asserted here nor labelled superseded reds `_unmarked_legacy_figures`.
     assert byte_cells == {"vet-v2": 39_544, "classify-v2": 23_332}, (

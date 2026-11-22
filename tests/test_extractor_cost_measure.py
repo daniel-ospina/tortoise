@@ -12,6 +12,7 @@ re-run without spending money to check itself.
 from __future__ import annotations
 
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -572,3 +573,37 @@ def test_a_cold_only_render_invents_no_warm_arm():
     assert "warm arm" in both_lever[0], (
         "with a warm arm measured, the lever paragraph must still quote it; "
         f"got {both_lever[0]}")
+
+
+def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
+    """`#14277` — `_encoding()` imports `tiktoken` lazily, so only DECLARATIONS make it reachable.
+
+    `tools/extractor_cost_measure.py::_encoding` imports `tiktoken` inside the function body,
+    so the module imports fine on an install that lacks it and the failure lands on the
+    tokenizing cases alone — which is exactly how this file was RED on `main` before the
+    declaration existed (measured at `#14277`: 2 of 35 cases, `ModuleNotFoundError` at
+    `tools/extractor_cost_measure.py:120`). A lazy import is what makes this a declaration
+    problem rather than an import-time crash, so it is pinned as one.
+
+    Both install paths are pinned because BOTH are installed in practice (`#2985`): CI's
+    `pip install -e '.[test]'` and the canonical dev install `uv sync --extra embeddings
+    --extra parity`, which does NOT include the `test` extra. A `dev`-only entry leaves the
+    required CI legs red; a `test`-only entry strands the re-measure recipe the recorded
+    `_S7_TOKEN_CELLS` cells point at. This mirrors
+    `test_closes_landing.py::test_the_commonmark_oracle_cannot_be_skipped_out_of_the_install`.
+
+    Non-vacuous: at the pre-fix head `project.optional-dependencies.test` carries no
+    `tiktoken` entry at all, so the first path reds before the second is ever reached.
+    """
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
+    for where, declarations in (
+        ("`project.optional-dependencies.test` (CI: pip install -e '.[test]')",
+         pyproject["project"]["optional-dependencies"]["test"]),
+        ("`dependency-groups.dev` (uv sync --extra embeddings --extra parity)",
+         pyproject["dependency-groups"]["dev"]),
+    ):
+        assert any(d.startswith("tiktoken") for d in declarations), (
+            f"tiktoken is missing from {where} — `tools/extractor_cost_measure.py::_encoding` "
+            f"needs it, and because the import is lazy the tokenizing cases fail with "
+            f"`ModuleNotFoundError` instead of being skipped (#14277). Declarations: "
+            f"{declarations}")
