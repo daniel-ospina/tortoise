@@ -407,11 +407,24 @@ SELECTED = [
     ("has the reports both been archived", "ended", "is_copula"),
     ("have the claims each been withdrawn", "ended", "is_copula"),
     # ── a PREPOSITIONAL `to` IS NOT AN INFINITIVE (review P1 at `42e0c1a662`) ───────
-    # The infinitive exclusion added to `_COPULA_SUBJECT` names `to be` — a PHRASE, not
+    # The infinitive exclusion (`_COPULA_INFINITIVE_REFUSAL`) names `to be` — a PHRASE, not
     # the word `to` — so a `to` that introduces a noun keeps routing. Pinned because the
     # cheap wrong fix is `to`, which would have killed every `is the export to Europe
     # archived` question on this shape.
     ("is the export to Europe archived", "ended", "is_copula"),
+    # ── the INFINITIVE exclusion belongs to the COPULA BRANCH ONLY (review P1, measured) ──
+    # It sits in `_COPULA_INFINITIVE_REFUSAL`, applied to the `is|are|was|were` alternative
+    # and NOT to `_COPULA_SUBJECT`, because that guard is shared with the perfect branch.
+    # In `has … been <participle>` the predicate is already anchored, so a `to be <participle>`
+    # inside the subject is a POST-NOMINAL MODIFIER and the question is legitimate. When the
+    # exclusion lived in the shared guard all four rows below went `None / None` — routed at
+    # the previous head, then SILENT, with `missed_route_payload` None because
+    # `_COPULA_LONG_SUBJECT` is anchored `^(?:is|are|was|were)`. That is the routed->silent
+    # regression this PR exists to remove, so each spelling is pinned as a ROUTE.
+    ("has the contract to be signed been archived", "ended", "is_copula"),
+    ("has the report to be reviewed been archived", "ended", "is_copula"),
+    ("has the decision to be taken been archived", "ended", "is_copula"),
+    ("has the report being reviewed been archived", "ended", "is_copula"),
 ]
 
 
@@ -1568,6 +1581,35 @@ def test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound():
             f"and the behaviour never disagree")
 
 
+
+
+def test_the_repetition_bound_is_not_NARROWER_than_the_bound_it_replaced():
+    """The count bound must not re-open the hole it says it closes (review P3, measured).
+
+    The helper this bound replaced was TWO `{0,5}` runs, i.e. effectively ten adverbial
+    tokens. Shipping `{0,8}` while the comment called it a widening from five was a
+    NARROWING of the guard by two tokens, and the direction that matters is the one that
+    matters everywhere in this module: a question the guard no longer matches is ROUTED
+    to the whole ended population with the caller's predicate dropped and `signal=None`.
+
+    Asserted at the GUARD-REGEX level on purpose: the full detector's 60-character window
+    dominates for a ten-adverb sentence, so a `detect_state_question` row would be vacuous
+    here — the shape would decline for the window's reason, not the bound's.
+    """
+    import re
+
+    from tortoise import state_intent
+
+    guard = re.compile(state_intent._EXISTENCE_GUARD)
+    for n in (8, 9, 10):
+        probe = "the vendor has " + "very " * n + "been deprecated"
+        assert guard.match(probe) is None, (
+            f"{n} adverbials did NOT match the refusal guard ({probe!r}) — the bound is "
+            f"narrower than the ten-token bound it replaced, so this spelling ROUTES and "
+            f"drops the caller's predicate silently")
+    assert guard.match("the vendor has " + "very " * 12 + "been deprecated") is not None, (
+        "the bound is unbounded — a count bound still has to keep the window from "
+        "swallowing a whole clause")
 
 
 def test_the_two_silences_the_comments_name_are_measured_not_hoped():
@@ -3600,7 +3642,11 @@ def test_the_asyndetic_gap_is_blind_to_neither_a_contraction_nor_a_measured_adve
     this guard fails, so every row here is a question whose answer would silently be the
     whole ended population.
     """
-    from tortoise.state_intent import detect_state_question, missed_route_payload
+    from tortoise.state_intent import (
+        _APOSTROPHES,
+        detect_state_question,
+        missed_route_payload,
+    )
 
     for member in _CONTRACTED_AUXILIARIES:
         query = f"have any users reported the vendor {member} been deprecated"
@@ -3618,18 +3664,22 @@ def test_the_asyndetic_gap_is_blind_to_neither_a_contraction_nor_a_measured_adve
     # population routed on U+2019 while the ASCII twin was refused. `tortoise/
     # extractor_v2.py` normalises the same inventory before tokenising, for the same
     # reason; this module is the consumer that sees raw caller text.
-    # ⛔ ALL SEVEN CODEPOINTS THE NORMALISATION TRANSLATES, not the four that read
-    # nicely: a pin that exercises four of seven leaves three silently droppable, and a
-    # regression on `hasn\u02bet` is the same hijack as one on `hasn't`.
-    for member in ("hasn\u2019t", "hadn\u2019t", "wasn\u2019t", "couldn\u2019t",
-                   "hasn\u02bct", "hasn\u2018t", "hasn\uff07t",
-                   "hasn\u055at", "hasn\u02bet", "hasn\u02bft"):
+    # ⛔ EVERY CODEPOINT THE NORMALISER TRANSLATES, asserted against the module's OWN
+    # inventory rather than a hand-typed list: the round-27 fix shipped exercising four of
+    # seven, so three could have been deleted from `_APOSTROPHES` with the suite green. A
+    # pin derived from the constant cannot drift off it.
+    for _ap in _APOSTROPHES:
+        member = f"hasn{_ap}t"
         query = f"have any users reported the vendor {member} been deprecated"
         got = detect_state_question(query)
         assert got.population is None and got.signal, (
             f"{query!r} ROUTED (population={got.population!r}, signal={got.signal!r}) — "
-            f"the apostrophe here is not U+0027, and a class closed over one codepoint is "
-            f"not closed over the family the caller sends")
+            f"the apostrophe {_ap!r} is not U+0027, and a class closed over one codepoint "
+            f"is not closed over the family the caller sends")
+    assert len(_APOSTROPHES) >= 7, (
+        f"the normaliser's inventory shrank to {len(_APOSTROPHES)} codepoints "
+        f"({_APOSTROPHES!r}) — `\u2019` alone is what the product sends, and the six "
+        f"beside it were measured as the same hijack")
     # ⛔ AND THE CLITIC SPELLINGS (`'s`, `'ve`, `'d`) — the commonest English form of
     # exactly these auxiliaries, and all of them routed before the clitic pattern.
     for query in (
