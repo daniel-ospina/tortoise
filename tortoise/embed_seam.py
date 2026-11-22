@@ -109,6 +109,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -358,7 +359,6 @@ def encodes_in_process() -> bool:
     ``True`` for ``inprocess`` (the default) and ``False`` for ``worker`` /
     ``external``. It resolves the LEVER only — it constructs no backing and
     retires no collector — so a boot path can ask it without side effects.
-
     ⛔ THE ONE QUESTION THE EAGER LOADS ASK. ``hosted_api``'s lifespan pre-warm and
     ``sdk``'s engine-init kick both exist to make the IN-PROCESS forward pass warm.
     With the encoder elsewhere they buy nothing and cost exactly what the migration
@@ -366,12 +366,25 @@ def encodes_in_process() -> bool:
     overlapping loads, #13674), on top of the worker's own copy.
 
     ⛔ DELIBERATELY NOT APPLIED INSIDE ``EmbeddingModel.start_warm_up``. The write
-    and read readiness paths (``await_write_ready_reason``, the read decline
-    ladder) read that call's return value as "is a load in flight"; answering
-    ``None`` there would convert a healthy LOCAL load into a decline on a
-    deployment that still uses the in-process encoder for some path (the
-    documented ``fallback_snapshot`` residual). Gate the eager KICKS, not the
+    and read readiness paths read that call's return value as "is a load in
+    flight"; answering ``None`` there would convert a healthy LOCAL load into a
+    decline on a deployment that still uses the in-process encoder for some path
+    (the documented ``fallback_snapshot`` residual). Gate the eager KICKS, not the
     primitive.
+
+    ⛔ AND IT IS APPLIED ONE LAYER EARLIER TOO (review P1):
+    ``EmbeddingModel.await_write_ready_reason`` / ``await_read_ready_reason``
+    answer ``None`` (ready) here as well. Those methods exist to bound a LOCAL
+    load, and with the encoder elsewhere their only effect was to start that load
+    and then decline the write/read that triggered it — a vectorless row or a
+    keyword-only read on a deployment whose encoder was healthy.
+
+    ⛔ WHAT IT DOES NOT COVER (review P2): the residual paths that still encode
+    in-process and call ``EmbeddingModel.get()`` synchronously —
+    ``entity_resolver`` / ``cross_lens`` arrive through ``_encode``, not through
+    the seam — so with a worker backing those pay the cold load on the request
+    thread instead of at boot. Documented in ``docs/infra-runbook.md`` §4.1.1e;
+    routing them through the seam is a behaviour change, not a gate.
     """
     return resolve_backing() == BACKING_INPROCESS
 
@@ -867,8 +880,14 @@ class WorkerBacking:
             pid = int(pid_text)
             if pid == os.getpid() or _pid_alive(pid):
                 continue
-            with _swallow_oserror():
-                os.rmdir(os.path.join(root, name))
+            # ⛔ ``rmtree``, NOT ``rmdir`` (review P2). A worker that was SIGKILLed
+            # leaves its socket INSIDE this directory — and since the readiness
+            # fix, possibly a staging sibling too — so ``rmdir`` refused every
+            # directory this function exists to reap and the ``$TMPDIR``
+            # accumulation it claims to bound kept happening. The ``rmdir`` row
+            # that pinned it built an EMPTY directory, a shape the code never
+            # produces: a guard that could not be reddened.
+            shutil.rmtree(os.path.join(root, name), ignore_errors=True)
 
     def startup_pending(self) -> bool:
         """Whether the next encode will pay a boot (review F1).
@@ -1032,9 +1051,10 @@ class WorkerBacking:
                     os.unlink(address)
         # The private directory is ours: remove it with the socket, so a backing
         # that is retired leaves nothing behind in the temp dir (review F2).
+        # ⛔ ``rmtree`` for the same reason as the prune above: ``rmdir`` refuses
+        # the directory a killed worker actually leaves (its socket inside it).
         if directory is not None:
-            with _swallow_oserror():
-                os.rmdir(directory)
+            shutil.rmtree(directory, ignore_errors=True)
 
     def describe(self) -> dict:
         alive = self._proc is not None and self._proc.poll() is None
@@ -1804,8 +1824,15 @@ def active_backing() -> EmbeddingBacking:
         retired = _Retired(_backing, _collector)
         _record_snapshot(_backing_name, _collector)
         _backing = _construct(name)
-        _backing_name = name
+        # ⛔ THE COLLECTOR IS CLEARED BEFORE THE NAME MOVES (review P3).
+        # ``seam_status`` reads these under no lock by design (a health read must
+        # not block on a boot), so a reader landing between the two stores would
+        # see the NEW name beside the OLD collector and publish the retired
+        # backing's reservoir as the new one's FRESH measurement — the F3
+        # mis-attribution, in the reset window. Clearing first makes that window
+        # answer "no collector" (null/stale), which is honest.
         _collector = None
+        _backing_name = name
         fresh = _backing
     _retire(retired)
     _logger.info(

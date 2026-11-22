@@ -1471,6 +1471,17 @@ class EmbeddingModel:
             # contract (#13224: the bound must never change dev/test behaviour,
             # and `tests/conftest.py` pins this flag off for the whole suite).
             return None
+        # ⛔ #14186 (review P1) — WITH THE ENCODER ELSEWHERE, THE LOCAL MODEL IS
+        # NOT THIS PATH'S ENCODER. The caller (``encode_for_row(bounded=True)``)
+        # waits here and then encodes through the SEAM, so on a `worker` or
+        # `external` deployment the only thing this method can do is kick a 432 MB
+        # in-process load that nothing consults — and while that load runs, the
+        # write DECLINES and stores a vectorless row on a deployment whose encoder
+        # was healthy the whole time (measured: the load starts, the row loses its
+        # vector, ``derived_embed_declines`` names "the local embedder is cold").
+        # "The local model is not this path's encoder" is READY, not a decline.
+        if not embed_seam.encodes_in_process():
+            return None
         # ⛔ A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
         # `embeddings` extra absent the model can never load, so neither waiting
         # nor retrying can help. This is the DOCUMENTED DEFAULT install (a plain
@@ -1593,6 +1604,13 @@ class EmbeddingModel:
         # pre-#13528 synchronous contract would silently not apply in the
         # others.
         if not _embedder_warmup_enabled():
+            return None
+        # ⛔ #14186 (review P1), the READ twin of the write path's gate: with a
+        # `worker`/`external` backing the read's vector comes from the seam, so
+        # "the local model is not warm" is not a reason to skip the dense leg —
+        # declining here would degrade a read to keyword-only for the duration of
+        # a local load nothing on this path would have used. ``None`` is READY.
+        if not embed_seam.encodes_in_process():
             return None
         # A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
         # `embeddings` extra absent the model can never load, so neither waiting

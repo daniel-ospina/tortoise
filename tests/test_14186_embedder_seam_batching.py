@@ -1590,6 +1590,15 @@ class TestWorkerReadinessIsTheSocketExisting:
         stale.close()  # the FILE remains — exactly a SIGKILLed worker's residue
         assert os.path.exists(path), "the stale socket file did not survive close"
 
+        # ⛔ THE GRACE IS WIDENED FOR THIS ROW ONLY. The shipped grace is 250 ms
+        # and the fake listener appears after a 100 ms sleep, so on a loaded box
+        # overshooting 150 ms turned this row into an error rather than a signal
+        # (review P3) — the load-sensitivity class this PR already hardened in
+        # ``TestStopIsAStop``. The companion row below keeps the SHIPPED bound
+        # under test, so widening here does not unpin it.
+        monkeypatch.setattr(
+            embed_seam._LineJSONClient, "_CONNECT_REFUSED_GRACE_S", 2.0)
+
         serving = threading.Event()
         stop = threading.Event()
 
@@ -2740,10 +2749,22 @@ class TestThePrivateSocketDirectoryLifecycle:
             "describe() minted the private socket directory")
 
     def test_a_directory_named_for_a_dead_pid_is_pruned(self, monkeypatch):
-        """A SIGKILLed process cannot clean up after itself; nothing else did."""
+        """A SIGKILLed process cannot clean up after itself; nothing else did.
+
+        ⛔ THE RESIDUE SHAPE MATTERS (review P2). The row used to build an EMPTY
+        directory — a shape the code never produces — while a killed worker always
+        leaves its SOCKET inside, and ``os.rmdir`` refuses a non-empty directory.
+        So the prune was inert and the row that pinned it was green by
+        construction. This builds the real shape: the socket file inside.
+        """
         root = tempfile.gettempdir()
         stale = os.path.join(root, "tortoise-embed-worker-999999-stale")
         os.makedirs(stale, exist_ok=True)
+        socket_file = os.path.join(stale, "embed.sock")
+        holder = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        holder.bind(socket_file)
+        holder.close()  # the FILE survives, exactly as after SIGKILL
+        assert os.path.exists(socket_file)
         monkeypatch.setattr(embed_seam, "_pid_alive",
                             lambda pid: pid != 999999)
         worker = embed_seam.WorkerBacking()
@@ -2752,7 +2773,29 @@ class TestThePrivateSocketDirectoryLifecycle:
         finally:
             worker.close()
         assert not os.path.exists(stale), (
-            "a socket directory left by a dead worker was never pruned")
+            "a socket directory left by a dead worker was never pruned — "
+            "`os.rmdir` cannot remove the socket file inside it")
+
+    def test_a_close_removes_its_own_directory_with_the_socket_inside(
+            self, monkeypatch):
+        """``close()`` reaps its private directory, residue and all (review P2).
+
+        The sibling residue a crash can leave beside the socket made ``rmdir``
+        fail here too, so a retired backing left its ``0700`` directory behind.
+        """
+        worker = embed_seam.WorkerBacking()
+        address = worker.socket_path()
+        directory = os.path.dirname(address)
+        assert os.path.isdir(directory)
+        # A socket file of the kind a killed predecessor leaves.
+        socket_file = os.path.join(directory, "embed.sock")
+        residue = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        residue.bind(socket_file)
+        residue.close()
+        worker.close()
+        assert not os.path.exists(directory), (
+            "close() left the private socket directory behind because it was "
+            "not empty — `rmdir` refuses exactly the shape a crash leaves")
 
     def test_a_close_does_not_remove_a_directory_it_did_not_mint(self):
         """The close/describe interleave must not re-mint.
@@ -2769,3 +2812,77 @@ class TestThePrivateSocketDirectoryLifecycle:
         # A second close is a no-op and mints nothing.
         worker.close()
         assert worker._socket_dir is None
+
+
+class TestTheReadinessBoundsKnowWhereTheEncoderLives:
+    """#14186 review P1 — the write/read bounds must not kick a load that is not theirs.
+
+    ``await_write_ready_reason`` / ``await_read_ready_reason`` exist to bound a
+    LOCAL load. With a ``worker`` / ``external`` backing the encode goes through
+    the SEAM (``compute_embeddings`` → ``embed_seam.encode_texts``), so the only
+    effects those bounds could have were (a) starting a 432 MB in-process load
+    nothing consults and (b) DECLINING the write/read while it ran — a vectorless
+    row, or a keyword-only read, on a deployment whose encoder was healthy.
+    """
+
+    @pytest.fixture
+    def cold_model(self, monkeypatch):
+        """A genuinely cold singleton, so "already warm" cannot mask the gate."""
+        from tortoise.embeddings import EmbeddingModel
+
+        monkeypatch.setattr(EmbeddingModel, "_instance", None, raising=False)
+        monkeypatch.setattr(EmbeddingModel, "_warm_up_started", False,
+                            raising=False)
+        kicked: list[tuple] = []
+        monkeypatch.setattr(
+            EmbeddingModel, "start_warm_up",
+            classmethod(lambda cls: kicked.append((cls.__name__,)) or None))
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+        return kicked
+
+    def test_a_worker_backing_does_not_kick_a_local_load(
+            self, cold_model, monkeypatch):
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        from tortoise.embeddings import EmbeddingModel
+
+        assert EmbeddingModel.await_write_ready_reason(0.05) is None, (
+            "a bounded write declined on a deployment whose encoder is a worker")
+        assert EmbeddingModel.await_read_ready_reason(0.05) is None, (
+            "a read declined on a deployment whose encoder is a worker")
+        assert cold_model == [], (
+            "the readiness bounds kicked a LOCAL 432 MB load with the encoder "
+            f"served elsewhere: {cold_model}")
+
+    def test_the_in_process_backing_still_kicks_the_load(self, cold_model,
+                                                        monkeypatch):
+        """The control: the gate is a gate, not a blanket skip."""
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        from tortoise.embeddings import EmbeddingModel
+
+        EmbeddingModel.await_write_ready_reason(0.0)
+        assert cold_model, (
+            "the IN-PROCESS backing stopped kicking its own warm-up — the cold "
+            "window would now be paid synchronously by the first write")
+
+    def test_the_sdk_engine_kick_follows_the_backing(self, monkeypatch):
+        """``_embedder_engine_kick_allowed`` — the engine-init kick's decision.
+
+        ⛔ FAIL-SAFE DIRECTION: an unreadable seam answers TRUE (warm), because a
+        silent skip is a load that never happens on the configuration that needs
+        it — the mirror of ``hosted_api._embed_prewarm_target``.
+        """
+        from tortoise import sdk as sdk_module
+
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        assert sdk_module._embedder_engine_kick_allowed() is False
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+        assert sdk_module._embedder_engine_kick_allowed() is False
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        assert sdk_module._embedder_engine_kick_allowed() is True
+
+        def _unreadable() -> bool:
+            raise RuntimeError("the seam cannot be read")
+
+        monkeypatch.setattr(embed_seam, "encodes_in_process", _unreadable)
+        assert sdk_module._embedder_engine_kick_allowed() is True, (
+            "an unreadable seam silently skipped the engine-init warm-up")

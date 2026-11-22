@@ -890,6 +890,29 @@ def _kind_invisible_char(kind: str) -> str | None:
     return None
 
 
+def _embedder_engine_kick_allowed() -> bool:
+    """Whether ENGINE INIT should kick the in-process encoder warm-up (#14186 F5).
+
+    ``False`` when the seam's backing is ``worker`` / ``external``: this process
+    runs no forward pass on those, so an eager load is a 432 MB copy nothing
+    consults — the RSS the ``worker`` backing exists to remove (#13674).
+
+    ⛔ FAILS SAFE, in the opposite direction from a skip: a seam that cannot be
+    imported answers ``True`` (warm), mirroring
+    ``hosted_api._embed_prewarm_target``'s fallback. A silent skip on an import
+    error is a load that never happens on the configuration that NEEDS it.
+
+    A function rather than an inline ``try`` so the three answers (worker ⇒ no,
+    inprocess ⇒ yes, unreadable seam ⇒ yes) are pinnable without building a graph.
+    """
+    try:
+        from .embed_seam import encodes_in_process
+
+        return encodes_in_process()
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable seam warms
+        return True
+
+
 def _kind_suggestion(kind: str) -> str:
     """``kind`` with its non-identifier characters removed, for the message.
 
@@ -15545,10 +15568,17 @@ class TortoiseSDK:
             # flight", so a skip there would turn a healthy LOCAL load into a
             # decline on a deployment that still uses the in-process encoder for a
             # residual path.
+            #
+            # ⛔ AND THE DECISION IS A FUNCTION, NOT AN INLINE IMPORT (review
+            # P3): folded into the blanket ``except`` below, a seam that could not
+            # be imported silently SKIPPED the warm-up — the mirror image of
+            # ``hosted_api._embed_prewarm_target``, which keeps the pre-warm ON
+            # when the lever cannot be read. :func:`_embedder_engine_kick_allowed`
+            # fails SAFE (unreadable lever ⇒ warm) and is pinnable without
+            # building a graph.
             try:
-                from .embed_seam import encodes_in_process
                 from .embeddings import EmbeddingModel
-                if encodes_in_process():
+                if _embedder_engine_kick_allowed():
                     EmbeddingModel.start_warm_up()
             except Exception:  # noqa: BLE001, RUF100 — warm-up is never fatal
                 pass
