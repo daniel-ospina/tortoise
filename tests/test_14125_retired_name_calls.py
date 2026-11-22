@@ -849,18 +849,28 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
         # first cut of this fix and is TOO STRICT: it charges `raise RuntimeError(...) from
         # exc`, a handler that fails LOUDLY. Such handlers exist in `tests/`+`tools/`, and the
         # count is quoted ONLY together with its CLASS, because the class is what makes it
-        # re-derivable: a review of #14287 reported this figure unreproducible under three
-        # variants (339 / 384 / 397), and EVERY one of those was a different class. Start from
-        # "the LAST statement raises an object that is not the caught name" and add the
-        # exclusions; each one moves the population, so the three figures are NESTED SUBSETS:
+        # re-derivable: the review of #14287 at `0517b517` counted **409** over this population
+        # and recorded its three attempted variants as 365 / 408 / 381, "none is 345" — its 409
+        # IS the first class below, so the class here agrees with the review's own count, and
+        # none of the three readings behind those variants is what this derivation returns.
+        # ⛔ THIS SENTENCE ONCE QUOTED "339 / 384 / 397" AS A REVIEW'S VARIANT SET: no
+        # review reported those numbers (they appear only in a fixer report on this PR), so a
+        # reader checking the attribution found nothing to check against. Start from "the LAST
+        # statement raises an object that is not the caught name" and add the exclusions; each
+        # one moves the population, so the three figures are NESTED SUBSETS:
         #   409  ... any chain
         #   396    ... and carries a cause clause at all
         #   345    ... and the chain is not suppressed by `from None` (ast.Constant(None))
-        # The figure this comment stands behind is the LAST of the three — **345** handlers, the
-        # population the first-cut rule would have charged. ⛔ `from None` parses to
+        # The figure this comment stands behind is the LAST of the three — **345** handlers.
+        # ⛔ AND 345 IS NOT "the population the first-cut rule would have charged", which this
+        # sentence said: the rule "the raised object must be the caught one" charges ALL 409,
+        # because the population is DEFINED as the raises that are not the caught name (0 of
+        # them re-raises it). 345 is what the cause-consulting cut REPLACED by #14287's P1
+        # CREDITED — it charged the other 64 — and it is the same 345 as the third class here.
+        # ⛔ `from None` parses to
         # `ast.Constant(value=None)`, NOT `ast.Name(id="None")`: reading it as a Name is how a
         # re-derivation lands on 396 and reports the number wrong. None of the 345 is graded
-        # today — so it would not red now, but it WOULD red the first widened probe and
+        # today — so it would not red now, but it WOULD red the first widened probe, and
         # it false-reds the CORRECT shape this file's own docstring promises never to charge.
         # Only a conversion into a SKIP hides the failure.
         if _last.exc is None:
