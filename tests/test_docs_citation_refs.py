@@ -5247,8 +5247,8 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # because declining a spelling grep will not run cannot hide anything, so the exclusion stays
     # fail-closed there. That is the #13995 false RED this cell exists to end, one alias over.
     # Reproduced with a stub that refuses `--fixed-regexp` alone (rc 2, everything else delegated):
-    # `1 failed, 32 passed`. The exit-code rule is READ FROM `_d5_grep_verdict` rather than restated,
-    # so a third code still RAISES here instead of deciding.
+    # one cell red. The exit-code rule is READ FROM `_d5_grep_verdict` rather than restated, so a
+    # third code still RAISES here instead of deciding.
     fixed_regexp, fixed_accepted = _d5_grade_alias_spelling("--fixed-regexp")
     if fixed_accepted:
         assert fixed_regexp.stdout.strip() == "0", (
@@ -5361,8 +5361,8 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
         _d5_grep_runs_long_option("--unix-byte-offsets", silent)
     # ⛔ AND THE CONTROL'S EXIT-CODE HALF HAS ITS OWN WITNESS (#14138 mutation review, P3 — MEASURED).
     # Without this stub the `returncode not in (0, 1)` clause of the control is INERT: every other
-    # stub that gets past the stdout check answers rc 0/1, so deleting the rc clause left all 33
-    # cells green. This one prints the count and still exits 2, which only the rc clause catches —
+    # stub that gets past the stdout check answers rc 0/1, so deleting the rc clause left the suite
+    # green. This one prints the count and still exits 2, which only the rc clause catches —
     # a grep that reports a count and then fails is not a grep that refused the spelling.
     with pytest.raises(AssertionError, match="control probe"):
         _d5_grep_runs_long_option("--unix-byte-offsets", counts_then_fails)
@@ -5413,9 +5413,13 @@ def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
     probe made this WHOLE file uncollectable on a box with no `grep`, taking every citation guard in
     it down with the cells that need grep, and a `grep` that blocked on PATH hung COLLECTION instead
     of failing one cell (the consequence is recorded on that function). No cell asserted it, so it
-    could be silently undone: prepending a module-level `_D5_ALL = _d5_all_long_options()` leaves
-    **all 35 cells green** on any box that HAS grep, and only a grep-less box ever notices — which
-    is exactly the platform this file is least often run on.
+    could be silently undone: before this cell and the collect-only cell below existed, prepending a
+    module-level `_D5_ALL = _d5_all_long_options()` left every cell green on a box that HAS grep, and
+    only a grep-less box ever noticed — which is exactly the platform this file is least often run
+    on. At THIS head the hoist is visible, and the two child-process cells are what made it so
+    (MEASURED, and stated WITHOUT a count because a cell added to this file falsifies one: the raising
+    hoist reds this cell and the collect-only one; the hoist that swallows its error reds arm (a)
+    alone).
 
     ⛔ MEASURED IN CHILD INTERPRETERS, not in-process: this module's own import has already happened
     by the time any cell runs, so an in-process check could never observe it. TWO children, because
@@ -5432,6 +5436,12 @@ def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
           must import successfully AND leave the allowance underived (`currsize == 0`).
 
     (a) fails a spawn, (b) fails a raise or a derivation; neither alone is sufficient.
+
+    ⛔ (b) IS KEPT FOR ITS INPUT, NOT AS A SECOND WITNESS. No mutant reaches it alone: the raising
+    hoist reds (a) first, so (b) has no independently attributable row (#14303 review, P2 — MEASURED).
+    It stays because its INPUT is different — no `grep` on PATH at all, against a `grep` that answers
+    wrongly — and that is the box the historical failure happened on. Saying so here is cheaper than
+    letting a later reader count two witnesses where there is one.
     """
     source = str(Path(__file__).resolve())
     import_probe = (
@@ -5446,11 +5456,16 @@ def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
 
     # (a) A `grep` that RECORDS its own invocation. The ordinary PATH stays behind it so the stub's
     # own `sh` and `touch` still resolve, and nothing else can shadow the recording grep.
+    # ⛔ THE MARKER PATH IS QUOTED. Unquoted, a `tmp_path` containing a space makes `touch` fail, the
+    # marker is never created, and this guard then passes VACUOUSLY while grep really was spawned
+    # (#14303 review, P2 — reproduced by hand with a spaced path). pytest's basetemp is pinned under
+    # `/tmp/tt_<hex>` today, so it is unreachable in this suite; that makes the quoting hardening,
+    # not a live fix, which is why it is stated rather than silently tightened.
     spy_dir = tmp_path / "spy-bin"
     spy_dir.mkdir()
     marker = tmp_path / "grep-was-spawned"
     spy = spy_dir / "grep"
-    spy.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+    spy.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 0\n', encoding="utf-8")
     spy.chmod(0o755)
     spy_run = subprocess.run(
         [sys.executable, "-c", import_probe],
@@ -5493,11 +5508,13 @@ def test_the_d5_alias_cells_still_COLLECT_when_grep_cannot_answer(tmp_path):
     aborts collection where grep is PRESENT but broken. Different hosts, and the second is the shape
     that made this file uncollectable once already.
 
-    ⛔ WHY IT CANNOT BE AN IN-PROCESS ASSERTION. An eager
+    ⛔ WHY IT CANNOT BE AN IN-PROCESS ASSERTION. Before the two child-process cells existed, an eager
     `_D5_ALL_LONG_OPTIONS_EAGER = _D5_DOCUMENTED_LONG_OPTIONS | _d5_undocumented_long_options()`
-    leaves the whole suite green on a working grep, so no cell in this file notices it; only a
-    collection of the file on a hostile host does (MEASURED: `no tests collected, 1 error` for the
-    eager form, against a full collection for the deferred one).
+    left the whole suite green on a working grep — nothing in-process could observe it — and only a
+    collection of the file on a hostile host did (MEASURED: `no tests collected, 1 error` for the
+    eager form, against a full collection for the deferred one). At this head the hoist reds this
+    cell and the import-time one by name; the point of the paragraph is why the observation has to
+    leave the process, not that the guard is still missing.
 
     ⛔ MEASURED BY COMPARING, NOT BY ASSERTING A COUNT. The cell count is not written down here: a
     later test added to this file would silently falsify it. The same `--collect-only` run is made
