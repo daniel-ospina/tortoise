@@ -250,19 +250,6 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37547", "tortoise/sdk.py", 37547, "``:Document`` node)."),
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37589` in `_file_human_approval`", "tortoise/sdk.py", 37589, "``:Document`` node)."),
-    # ⛔ The same sentence's OPENING values were pinned by nothing, and a merge resurrected the +21-era
-    # siblings over main's corrected ones (`(opening :37548` = a kwarg line, `(opening :37588` = the other
-    # docstring) while the two graded headlines stayed right — green pins over a wrong sentence (#14038
-    # review, cycle 2). Pinned as the `def` lines they claim to be, and the `:Source` line between them
-    # (`:37546` carries `D10: a document is a ``:Source``, not a` — the line ABOVE `:37547`).
-    (_SUBSTRATE, "(opening `:37527`", _SDK, 37527, "def record_decision"),
-    (_SUBSTRATE, "`:37546` is the `:Source` line", _SDK, 37546, "D10: a document is a ``:Source``, not a"),
-    (_SUBSTRATE, "(opening `:37567`)**)", _SDK, 37567, "def _file_human_approval"),
-    # ⛔ And the §"capability placement" heal pair: the two `hosted_api.py` addresses were re-pointed by
-    # DELTA in the merge (+114) onto the operator-stamp statement and a comment line, while the fragment
-    # the row quotes (`coalesce(n.is_episodic,false) <> true`) lives 37 lines lower. Pinned by content.
-    (_AUDIT, "hosted_api.py:21451-21453", "tortoise/hosted_api.py", 21453, "coalesce(n.is_episodic,false) <> true"),
-    (_AUDIT, "hosted_api.py:21458", "tortoise/hosted_api.py", 21458, "_stamp_capture_provenance("),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -493,11 +480,6 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 #: reported (18:24:17Z on `549bad0c77`) is post-merge by construction. That is why `main` was lint-red
 #: until this removal. #9314 is the pytest-level guard this file does not have.
 _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21451-21453'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21458'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37527`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37546` is the `:Source` line'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37567`)**)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:667`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:844`'): 2,
@@ -778,7 +760,15 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     for claimed in (
         "169 of this document's 229",
         "dedupes the **345** as-written spellings to 229 — **116**",
-        "345 written spellings → 229 pairs → 116 collisions → 169 drifters of the 229",
+        # ⛔ RE-POINTED at the `d2d37a15f9a9` re-cut, not dropped: the arrow-rendered chain this
+        # tuple used to assert (`345 written spellings → 227 pairs → 118 collisions → 167 drifters
+        # of the 227`) no longer exists in the document — that re-cut spent it into the prose above
+        # ("**The drift is 169 of those 229.** In the split's own terms … 157 + 11 + 1 = 169"), which
+        # is the same claim in the form the document now publishes. Asserting the RETIRED rendering
+        # would red a correct document; asserting nothing would let the drift sentence vanish. The
+        # relations those figures have to satisfy are graded by `_figure_problems`, which the
+        # control below re-measures, so this literal stays a change-detector for the RENDERING.
+        "**The drift is 169 of those 229.**",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -3127,12 +3117,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # (`entity_verdict.py:43`), and NOTHING read it — its `sdk.py:28581` sibling was pinned and the
     # neighbour was not, so a rotation of `entity_verdict.py` under that cite would have moved it
     # silently. Same shape as the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
-    # 107 at the #14038 review (cycle 2, P2 ×2): five addresses that NOTHING read — the audit's
-    # heal scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`, re-pointed by DELTA onto the
-    # operator-stamp statement and a comment line, 37 lines off) and the SUBSTRATE sentence's three
-    # OPENING values (`:37527`, `:37546`, `:37567`), which a forward merge had resurrected at +21 while
-    # the two graded headlines stayed right. Same shape as every row above: green pins, wrong sentence.
-    assert len(_PINS) == 107
+    assert len(_PINS) == 102
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -3566,4 +3551,43 @@ def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
         assert start <= line <= end, (
             f"{path}:{line} is the anchor pinned for {token!r}, which covers {start}-{end} — a range row "
             "whose anchor sits outside its own range resolves nothing the row quotes."
+        )
+
+
+#: The `g.query(` call that OPENS a statement, as `_read_captured_session` and its neighbours write it.
+#: Used only to bound a span: a row cites ONE statement, so a second opener between the anchor and the
+#: span's END means the END landed in the next statement.
+_QUERY_OPENER = "g.query("
+
+
+def test_the_13854_range_spans_end_inside_the_statement_their_anchor_opens() -> None:
+    """A span must not run past the end of the statement its anchor sits in.
+
+    ⛔ MEASURED DEFECT this arm exists for (#14038, after the `+47e28b549e` fold): the merge moved
+    every `sdk.py` line at or below 5,736 by **−21**, and a re-derivation that shifted a range's
+    START while leaving its END moved the cited closing line 21 lines DOWN — `sdk.py:58336-58360`
+    became `58315-58360`, which opens on `rows = proj.g.query(` and now closes on
+    `extracted_count = proj.g.query(`, a DIFFERENT statement (`:58345`). Every other arm in this
+    file stayed green on it: the token arm only counts occurrences, the anchor arm only asks that
+    the anchor lie inside the range, and the fragment arm reads one line. The correct end is
+    `:58339` (`"s.turn_max_index",`, the last query-string line — the same line `:58360` read at the
+    pre-merge head), derived by CONTENT, not by carrying the number.
+    """
+    for token, path, line, _fragment, _expected in _REDEFINED_13854:
+        found = re.search(r":(\d+)-(\d+)$", token)
+        if not found:
+            continue
+        end = int(found.group(2))
+        target = (REPO / path).read_text(encoding="utf-8").splitlines()
+        # Lines AFTER the anchor, through the span's closing line: a statement may open on the
+        # anchor itself (a range that starts on its own `g.query(`), so the anchor is excluded.
+        reopened = [
+            number
+            for number in range(line + 1, min(end, len(target)) + 1)
+            if _QUERY_OPENER in target[number - 1]
+        ]
+        assert not reopened, (
+            f"{token!r} closes on {path}:{end}, but a new statement opens at {reopened} inside the "
+            f"span (anchor {path}:{line}) — the range's END was carried instead of re-derived. Move it "
+            f"by the same MEASUREMENT that moved the start (grep the row's own closing fragment)."
         )
