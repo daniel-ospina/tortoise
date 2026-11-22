@@ -1428,6 +1428,25 @@ _SHALLOW_COPY_CALLEES = frozenset({"list", "tuple", "sorted", "set", "frozenset"
                                    "dict", "copy", "deepcopy"})
 
 
+#: The allow-listed pure reads that build NO CONTAINER AT ALL — a string, a number, a
+#: bool, a class, or `None`.
+#:
+#: ⛔ STILL EXEMPT (#14326 review P0): `payload = json.dumps(results)` / `_s = str(row)`
+#: cannot be written through to the recorded page, and the round-9 blanket exemption kept
+#: them green. NARROWING the copy set must not re-red them, so they are their own class
+#: rather than left to fall through to the alias arm.
+#: ⛔ AND `min`/`max` ARE DELIBERATELY **NOT** IN IT: they return an ELEMENT of the page,
+#: which is exactly why the blanket `callee in _PURE_READS` exemption was the P0.
+_SCALAR_CALLEES = frozenset(_PURE_READS - _SHALLOW_COPY_CALLEES - {"min", "max"})
+
+
+def _is_scalar_producer(value: ast.AST) -> bool:
+    """The value is a pure read that returns a scalar/text, never the page or its rows."""
+    return (isinstance(value, ast.Call)
+            and (getattr(value.func, "id", None) or getattr(value.func, "attr", None))
+            in _SCALAR_CALLEES)
+
+
 def _builds_new_container(value: ast.AST) -> bool:
     """The value is a COPY — a call to a container BUILDER, or a comprehension.
 
@@ -1524,15 +1543,18 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
             # `_row = per_query[-1]` are aliases of the collection inside them, and the
             # bare-Name form left `_box[0].sort()` / `_row["order"] = …` green (measured).
             # …but a COPY (`list(results)`, a comprehension) is NOT an alias — see
-            # `_builds_new_container` above. `copy_is_alias=True` collects the copies.
-            resolves = (copy_is_alias or not _builds_new_container(value)) and (
-                predicate(value)
-                or bool(_names_in(value) & out)
-                or any(predicate(operand)
-                       or (isinstance(operand, ast.Name) and operand.id in out)
-                       or bool(_names_in(operand) & out)
-                       for operand in _collection_operands(value))
-            )
+            # `_builds_new_container` above. `copy_is_alias=True` collects the copies. A
+            # SCALAR read (`json.dumps(results)`, `str(row)`) is not an alias EITHER
+            # (`_is_scalar_producer`), and that gate stays on in both modes.
+            resolves = (not _is_scalar_producer(value)
+                        and (copy_is_alias or not _builds_new_container(value)) and (
+                            predicate(value)
+                            or bool(_names_in(value) & out)
+                            or any(predicate(operand)
+                                   or (isinstance(operand, ast.Name) and operand.id in out)
+                                   or bool(_names_in(operand) & out)
+                                   for operand in _collection_operands(value))
+                        ))
             if resolves:
                 out.add(target.id)
                 return True
@@ -3542,6 +3564,13 @@ def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
          '    _c = dict(results[0])\n    print(_c["id"])\n'),
         ("copy handed to a pure read",
          '    _c = list(results)\n    print(len(_c))\n'),
+        # ⛔ AND A SCALAR READ IS NOT AN ALIAS EITHER — the class the narrowed copy set must
+        # not swallow (#14326 review P0): `json.dumps(results)` builds a STRING, and
+        # `encode` is not in `_PURE_METHODS`, so `_is_scalar_producer` is the only thing
+        # keeping this innocent pair green. Without it the scalar falls through to the alias
+        # arm and the pin reports "an in-place sort/clear reaches the artifact".
+        ("serialiser bound, then a str method off the allow-list",
+         '    _s = json.dumps(results)\n    _s.encode("utf-8")\n'),
     ):
         assert not _mutations_of(body), (
             f"[{label}] FALSE RED (hits={_mutations_of(body)}) — the copy is a NEW container "
