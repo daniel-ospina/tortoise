@@ -705,11 +705,15 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: and copy identical for n=1..8 and n>=11, different at n=9,10. The `_EXISTENCE_HELPER` note
 #: ~60 lines above already states nine/ten for the same class, so this file carried two boundaries
 #: for one measurement until now.
-#: Measured over 78 probes (adverb runs 0-12 across six sentence shapes, incl. the relative-clause
-#: and `we have been tracking` twins): 10 diffs, ALL silence -> `existence_unguarded`,
-#: **0 population/shape moves** — the widening is refusal-side and cannot route. Beyond ten
-#: adverbials the 60-character window dominates and both bounds answer identically, which is the
-#: same end-to-end caveat the helper's own note states.
+#: ⛔ AND THE "10 diffs over 78 probes" THAT STOOD HERE DOES NOT RE-DERIVE (round-35 review, P3,
+#: measured): the two shapes it names — the relative-clause and `we have been tracking` twins —
+#: cannot differ at ANY run length, because their fixed prefix already fills the `[^?]{0,60}`
+#: window, so the count is at most 8 on the grid as described. What DOES re-derive, and is what the
+#: two load-bearing claims need, is the shape of the difference: every diff is a silence ->
+#: `existence_unguarded` transition at **n=9,10 only**, and **0 population/shape moves** — the
+#: widening is refusal-side and cannot route. Beyond ten adverbials the 60-character window
+#: dominates and both bounds answer identically, which is the same end-to-end caveat the helper's
+#: own note states.
 #: ⛔ AND THE WIDENING IT PAID FOR OVER-REFUSED THE SAME SPELLING INSIDE A RELATIVE CLAUSE
 #: (round-6 review, P2, measured — this lane's own regression, caught by a fresh reviewer): with
 #: `{0,8}` a RELATIVE clause whose own participle is an ENDING word was refused instead of routed,
