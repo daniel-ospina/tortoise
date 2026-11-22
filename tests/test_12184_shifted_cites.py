@@ -351,6 +351,19 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_INDEX, '`entity_verdict.py:43`', _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
     (_EVIDENCE, '(`sdk.py:28581`), so any non-NULL', _SDK, 28581, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, 'called at `sdk.py:28945`', _SDK, 28945, 'result = apply_entity_merge('),
+    # --- row 2d's `:Meta` pair was the last `+21`-class cite in this document, and NOTHING pinned it.
+    # The `#14038` re-cut wrote `sdk.py:62020`/`:62040` at `c5ca268aa96`, where `:62020` WAS the
+    # `MATCH (m:Meta {key:$key}) RETURN m.recordedAt` statement and `:62040` WAS
+    # `def _config_reset_state(`. A later fold took 21 lines out of `sdk.py` above both, so at this
+    # head `:62020` is a DOCSTRING line and `:62040` is the `# #4282 Phase 2` banner — two cites that
+    # read as re-derived and open on prose. Measured, not inferred:
+    # `sed -n '61999p;62019p' tortoise/sdk.py` prints the read and the `def`. Both rows pin the CONTENT
+    # the row's prose claims, because the population arms (`_PIN_EOF_PAIRS`, the census triple) are
+    # INVARIANT under a re-point — they hold every number this pair can be moved to — and the drift
+    # numerator cannot see them either (both sit past the pin's `sdk.py`, so they are non-comparable).
+    # That is the whole uncovered-claim class: only opening the line catches it, so the line is pinned.
+    (_AUDIT, '`sdk.py:61999` (reads)', _SDK, 61999, '"MATCH (m:Meta {key:$key}) RETURN m.recordedAt"'),
+    (_AUDIT, '`sdk.py:62019` (`_config_reset_state`)', _SDK, 62019, 'def _config_reset_state(self) -> dict | None:'),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
     # ⛔ The branch's `+147` to `hosted_backup.py` moved `def _index_has_is_operator()` from
     # `origin/main`'s `:2519` to `:2666` (`:2684` is that def's DOCSTRING line, so the `+4` that
@@ -657,6 +670,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:15873`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:16077-16082`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3801`'): 1,
+    # row 2d's `:Meta` pair — one SITE each, written once as a one-token spelling (the two-span forms
+    # at `:135`/`:149` are different spellings and cannot satisfy these counts).
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:61999` (reads)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:62019` (`_config_reset_state`)'): 1,
 }
 
 
@@ -1733,8 +1750,8 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58315): 56415,
     ("tortoise/sdk.py", 58317): 56415,
     ("tortoise/sdk.py", 58966): 56415,
-    ("tortoise/sdk.py", 62020): 56415,
-    ("tortoise/sdk.py", 62040): 56415,
+    ("tortoise/sdk.py", 61999): 56415,
+    ("tortoise/sdk.py", 62019): 56415,
     ("tortoise/search_engine.py", 7170): 7071,
     ("tortoise/search_engine.py", 7201): 7071,
     ("tortoise/search_engine.py", 7577): 7071,
@@ -3139,7 +3156,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`) and the SUBSTRATE sentence's three
     # OPENING values (`:37527`, `:37546`, `:37567`), which a forward merge had resurrected at +21 while
     # the two graded headlines stayed right.
-    assert len(_PINS) == 107
+    # 107 -> 109 at the `#14038` fix lane's row-2d pass: the `:Meta` pair (`sdk.py:62020`/`:62040`) was
+    # the LAST `+21`-class cite in this document, and it was unobservable to EVERY population arm —
+    # `_figure_problems` is invariant under a re-point (345/229/116/169 hold at any address this pair
+    # takes), and the drift numerator cannot see it because both addresses sit past the pin's `sdk.py`
+    # and are therefore non-comparable. Only opening the line catches this class, so the line is pinned.
+    assert len(_PINS) == 109
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
