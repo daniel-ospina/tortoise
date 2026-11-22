@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1049 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1050 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair), AND THE ARMS GRADE
     ALL OF IT
@@ -351,9 +351,11 @@ _ARM_REFSPECS: dict[str, str] = {
     # ⛔ THE RECUT BLOCK'S OWN ADDRESSES (#14282 review, P3). Three revs the block publishes an
     # OWN PIN for, so `_requires(...)` can name them — and an unmapped rev RAISES instead of
     # printing an inert command, which is the round-12/13 defect this map exists to prevent.
-    # GitHub serves an ancestor commit by FULL SHA and a DESTINATION is required (round 13), so
-    # each maps to `+<sha>:refs/remotes/origin/<abbrev>`. Measured on this repo: the fetch created
-    # the destination ref at the named sha.
+    # GitHub serves a commit reachable from ANY ADVERTISED REF, by FULL SHA — `main`'s ancestry, or
+    # `refs/pull/<n>/head` (`efe5605e976a` is served via `refs/pull/14270/head`: the rebase left it
+    # no longer an ancestor of `main`, so an ancestry-only rule does NOT explain that entry) — and a
+    # DESTINATION is required (round 13), so each maps to `+<sha>:refs/remotes/origin/<abbrev>`.
+    # Measured on this repo: each fetch created its destination ref at the named sha.
     "5e83c2a2f6": "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/remotes/origin/5e83c2a2f6",
     "10e51693f1": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/remotes/origin/10e51693f1",
     "efe5605e976a": "+efe5605e976af24ea45cc66d2015861d30d3a39c:refs/remotes/origin/efe5605e976a",
