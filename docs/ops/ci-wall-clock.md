@@ -309,7 +309,17 @@ over 11 shards is what was measured to cross the minute boundary at the earlier 
 `durations:` row), and the tree merged with `origin/main` `588cf7ae` (this land's merge, re-emitted here) emits
 **all eleven** shards at **721.6 s**
 (a-k, two runs byte-identical) — `ceil(721.6/60 x 2)` is still **25 m**, the emitted term,
-not a hand count. The three
+not a hand count. ⛔ **The EARLIER tree this sentence used to name — the merge with `main`
+`10e51693f1`, `c0b929403aa9` — does NOT read 721.6, and its split is RESTORED here rather than left
+deleted**: re-measured at that sha with the same verb, two runs byte-identical, it emits **four**
+shards at **721.3 s** (a, b, c, i) and **seven** at **721.2 s**, and `ceil(721.3/60 x 2)` is also
+**25 m**. An earlier cut of this paragraph overwrote that split with THIS head's 721.6 while the
+sentence still carried the `10e51693f1` sha — one tree's emission carried under another tree's sha
+is the exact defect class this section exists to record for the minute boundary — and the follow-up
+that claimed to restore the split carried no edit to this file at all (`git show --stat <that commit>
+-- docs/ops/ci-wall-clock.md` is empty), which is why the figure is restored here by measurement
+instead. Nothing grades this number (`grep -rn '721\.' tests/ tools/` finds no pin), so re-derive it
+with `--emit-push-matrix` at the sha the sentence names. The three
 hand-added figures are re-added from the
 emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, plus `config/ci-surfaces.yml`'s S=11
 header block, which reads **arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
