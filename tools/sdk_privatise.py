@@ -1133,9 +1133,9 @@ SWEEP_NAMES = 66
 #:   * +3 — `proj.g.query` 0 → 3 in `tools/read_wave_latency.py`, all three arriving with `main`'s
 #:     `94d75667dc` (`#14224`): the seed block's two `MATCH (n:Point) RETURN count(n)` reads and the
 #:     A/B id sweep. `proj` there is `sdk._get_proj()`, so `.g` is the FalkorDB `Graph` and `.query`
-#:     on it is the FalkorDB door, not the SDK's — the ordinary-word receiver this counter reports,
-#:     on no SDK-typed site. Neither this branch's nor `#14160`'s: that branch's base predates the
-#:     commit (`git merge-base --is-ancestor e74cf1d13d 94d75667dc` → yes).
+#:     on it is the FalkorDB door, not the SDK's — the ordinary-word receiver this counter
+#:     reports, and no SDK-typed site is involved. Neither this branch's nor `#14160`'s: that
+#:     base predates the commit (`git merge-base --is-ancestor e74cf1d13d 94d75667dc` → yes).
 #:   * +1 — `out.update` 0 → 1 in `tests/test_14125_retired_name_calls.py`, `#14160`'s own row,
 #:     declared in the block above. So 11857 + 3 + 1 = 11861, and the pair `#14160` committed
 #:     (11858) sits one `main`-side drift below the tree that carries it.
