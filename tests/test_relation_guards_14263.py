@@ -41,6 +41,9 @@ What this file pins, and why each test is here rather than in a docstring:
    registry and the public SDK method set are untouched (repo `AGENTS.md`:
    an MCP/SDK surface change needs Daniel's approval; changing what an existing
    door VALIDATES does not).
+6. **The published contract** — `docs/INGEST_CONTRACT.md` §3.3's example IS an
+   emitted payload, so the block a client branches on cannot drift from the code
+   that fills it (review F2).
 
 Runnable embedded (no Docker)::
 
@@ -49,8 +52,10 @@ Runnable embedded (no Docker)::
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -386,10 +391,20 @@ class TestShippedDeclarations:
 
     def test_the_label_set_is_the_ontology_labels(self):
         """The mirror is pinned against its authority (`pack_state`), so a label
-        added there is a red test here rather than a silent non-match."""
+        added there is a red test here rather than a silent non-match.
+
+        ⛔ NO bilateral subtraction (#14284 review F3). The previous draft read
+        `set(_ONTOLOGY_LABELS) - {"Document"} == set(LABEL_ENDPOINTS) - {"Document"}`,
+        which subtracted the SAME element from both sides — so `Document`, the one
+        slot the module's own comment calls out, was unpinned in BOTH directions:
+        deleting it from `LABEL_ENDPOINTS` left this green. The two sets are the
+        same six today, so plain equality pins every slot, that one included; the
+        explicit membership line states the intent rather than relying on it.
+        """
         from tortoise.pack_state import _ONTOLOGY_LABELS
 
-        assert set(_ONTOLOGY_LABELS) - {"Document"} == set(LABEL_ENDPOINTS) - {"Document"}
+        assert set(_ONTOLOGY_LABELS) == set(LABEL_ENDPOINTS)
+        assert "Document" in LABEL_ENDPOINTS
 
     def test_the_relationship_answer_does_not_depend_on_which_packs_are_loaded(
             self, monkeypatch):
@@ -700,6 +715,53 @@ class TestIngestCarriesTheReport:
         assert "relation_declarations" in out, (
             "the field is part of the STABLE key set — always present")
         assert out["relation_declarations"] == []
+
+
+class TestTheContractExampleIsTheEmittedPayload:
+    """Review F2 — the documented `rule` named a field the payload does not carry.
+
+    `INGEST_CONTRACT.md` §3.3 is a CLIENT's only source for this block, and its
+    example said `"rule": "undeclared_relation_pair"` — that is the
+    `warnings[].code` (`RG.warning_shape`), a different field on a different
+    object — while the shipped payload carries `relation-pair-not-declared`
+    (`RULE_UNDECLARED`). The same example also listed the JUDGED pair under
+    `declaredFor` beside `outcome: undeclared_pair`, so it contradicted itself
+    about the one thing it was illustrating. Nothing compared the two, so the
+    contract could not go red; this does — the doc example is now parsed and
+    compared, field by field, to a payload the code emits for those kinds.
+    """
+
+    #: Everything in the block that is a FACT about the verdict. The id fields
+    #: (`target`/`connection`/`fromId`/`toId`) are per-write and are shown in the
+    #: doc as placeholders on purpose, so they are not compared.
+    STABLE = ("outcome", "predicate", "from", "to", "rule", "declaredFor",
+              "declaredBetweenTheseKinds", "override", "undo")
+
+    @staticmethod
+    def _documented_example() -> dict:
+        doc = (Path(__file__).resolve().parent.parent
+               / "docs" / "INGEST_CONTRACT.md").read_text(encoding="utf-8")
+        section = doc.split("### 3.3", 1)[1]
+        block = section.split("```json", 1)[1].split("```", 1)[0]
+        return json.loads(block)
+
+    def test_the_example_is_a_payload_the_code_emits(self, sdk):
+        documented = self._documented_example()
+        out = sdk._ingest(_pair_bundle(reify=False, label="assignedTo"))
+        emitted = out["relation_declarations"][0]
+        assert {k: documented[k] for k in self.STABLE} == {
+            k: emitted[k] for k in self.STABLE}, (
+            "INGEST_CONTRACT.md §3.3 drifted from the payload it documents")
+
+    def test_the_example_publishes_the_RULE_id_and_not_the_warning_CODE(self):
+        documented = self._documented_example()
+        assert documented["rule"] == rg.RULE_UNDECLARED
+        assert documented["rule"] != "undeclared_relation_pair", (
+            "that spelling is warnings[].code, not this field's value")
+        # and the message's factual core is the pair it actually judged
+        assert documented["message"].startswith(
+            f"relation '{documented['predicate']}' is not declared between "
+            f"{documented['from']} and {documented['to']}")
 
 
 class TestAResubmissionOfAReSpellingDedupes:

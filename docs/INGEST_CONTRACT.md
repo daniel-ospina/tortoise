@@ -354,22 +354,36 @@ That judgement is `out["relation_declarations"]`.
 {
   "outcome": "undeclared_pair",
   "predicate": "assignedTo",
-  "from": "pm:card",
-  "to": "Object",
+  "from": "dev:api",
+  "to": "dev:database",
   "target": "01J8…",
   "connection": "c1",
   "fromId": "01J8…",
   "toId": "01J8…",
   "rule": "relation-pair-not-declared",
-  "declaredFor": [{"fromKind": "pm:card", "toKind": "Subject"},
-                  {"fromKind": "venture:actionItem", "toKind": "Subject"}],
-  "declaredBetweenTheseKinds": [],
+  "declaredFor": [
+    {"fromKind": "pm:card", "toKind": "Subject"},
+    {"fromKind": "venture:actionItem", "toKind": "Subject"}
+  ],
+  "declaredBetweenTheseKinds": ["dependsOn"],
   "override": null,
   "undo": "none — the write was stored exactly as asked",
-  "message": "relation 'assignedTo' is not declared between …"
+  "message": "relation 'assignedTo' is not declared between dev:api and dev:database …"
 }
 ```
 
+- ⛔ **`rule` is `relation-pair-not-declared`** (or `relation-pair-reversed` for the
+  reverse pair) — `relation_guards.py`'s `RULE_UNDECLARED` / `RULE_REVERSED`. The
+  `undeclared_relation_pair` spelling is the `warnings[]` entry's `code` **for this
+  outcome** (§3.2; a reversed pair carries `reversed_relation_pair` — see the
+  bullet below), a **different field on a different object**; a client that
+  branches on `rule` will never match it against `code` (#14284 review F2).
+  `tests/test_relation_guards_14263.py::TestTheContractExampleIsTheEmittedPayload`
+  compares this block to a real emitted payload, so the two cannot drift.
+- ⛔ **`declaredFor` is what the predicate IS declared for — never the pair being
+  judged.** If it listed this example's own `dev:api -> dev:database` together with
+  `outcome: undeclared_pair`, the block would contradict itself (that was the
+  pre-#14284 draft).
 - **One entry per REPORTED target.** A `to` list with several targets produces
   one entry per target that was reported, each carrying its own `target` id —
   the same shape the connect doors return individually. `connection` is the
