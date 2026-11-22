@@ -302,7 +302,8 @@ here MUST name the head it was measured at and re-derive BOTH arms with the verb
 LOWER A WEIGHT: the three enter at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
 their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
-all three `durations:` rows still emits **721.1** on THIS resolution — so lowering or dropping
+all three `durations:` rows still emits **721.3** on THIS resolution (re-derived at head
+`f56aac204ca6`; see the `0467ba32` re-cut below) — so lowering or dropping
 those rows moves NOTHING, which is the point of the sentence) — what moves the term is three more
 files in the pack, +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is
 applied at the earlier heads. ⛔ **EACH RE-CUT MERGES A DIFFERENT PAIR, SO THE TERM IS READ OFF THE
@@ -314,9 +315,21 @@ it), and the pool it packed held BOTH parents' added suites — `#14012`'s three
 `test_miss_rate_m5.py` (shard `d`, beside `resident_cli`) — so no arithmetic on the two parents'
 figures would have predicted the merged reading. ⛔ **THE MERGE WITH `origin/main` `10e51693` IS A
 FURTHER TREE AND MOVES IT AGAIN, so the figure quoted above is HISTORY and not this tree's term:**
-`--emit-push-matrix` here emits **25 m on all eleven shards** at a worst `est_seconds` of **721.1**
-(and dropping the three `durations:` rows still reads 721.1 — measured by doing exactly that, then
-restoring the manifest), which is `#14192`'s added suites packing into the same pool. The three
+`--emit-push-matrix` on THAT tree emits **25 m on all eleven shards** at a worst `est_seconds` of
+**721.1** (and dropping the three `durations:` rows still reads 721.1 — measured by doing exactly
+that, then restoring the manifest), which is `#14192`'s added suites packing into the same pool.
+⛔ **THE MERGE WITH `origin/main` `0467ba32` IS YET ANOTHER TREE, AND THE FIGURE MOVES AGAIN — so
+`721.1` is HISTORY too, and this document's own lesson now has a third data point:**
+`--emit-push-matrix` at head `f56aac204ca6` (the tree that merged `0467ba32`) emits **25 m on all
+eleven shards** at a worst `est_seconds` of **721.3** (shards `a`, `b`, `c`, `i`; the other seven
+read 721.2), and dropping the same three `durations:` rows still reads **721.3** — re-derived by
+doing exactly that and restoring the manifest. The `+0.2 s` is ONE file: `git log --diff-filter=A
+--name-status 10e51693..0467ba32 -- 'tests/test_*.py'` names exactly one addition,
+`tests/test_extractor_cost_measure.py` (`config/ci-surfaces.yml:2955`), and removing THAT row —
+nothing else — drops the worst back to **721.1** (measured, then restored). So the reading is the
+same shape as every earlier one: NO ARITHMETIC ON THE TWO PARENTS' FIGURES WOULD HAVE PREDICTED IT
+(`721.1` on the parent that merged `10e51693`, `721.3` here). The minute is
+unchanged — `ceil(721.3/60 x 2)` = 25 — so the hand-added 56.6 m / 85.0 m / 5.0 m terms stand. The three
 hand-added figures are re-added from the emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row
 above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 56.64 m,
 x 1.5 = 85.0 m, 5.0 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
