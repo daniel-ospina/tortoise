@@ -3025,12 +3025,17 @@ def test_the_repeat_grader_counts_a_COMPREHENSION_and_not_its_outer_iterable():
     * the OUTERMOST ``generators[0].iter`` is NOT a repeat: it is evaluated once,
       so ``[x for x in SEAM(query="once")]`` is a single read. Counting it would
       false-block a perfectly good rewrite, which is the over-block direction of
-      the same bug. ⛔ ONLY that one: the language reference is explicit that
-      "the leftmost ``for`` iterable is evaluated ... once, while targets,
-      SUBSEQUENT ``for`` clauses, ``if`` filters, and the result expression are
-      evaluated as the comprehension iterates" (Python 3.12 reference, §6.2.9
-      comprehensions), so a SECOND generator's iterable IS a repeat — row
-      `subseq` grades exactly that sentence.
+      the same bug. ⛔ ONLY that one. The Python 3.12 reference, §6.2.9
+      (Comprehensions), says *"the iterable expression in the leftmost ``for``
+      clause is evaluated directly in the enclosing scope and then passed as an
+      argument to the implicitly nested scope"*, and adds that *"subsequent
+      ``for`` clauses and any filter condition in the leftmost ``for`` clause
+      cannot be evaluated in the enclosing scope"* — so everything BUT that one
+      iterable runs in the nested scope, once per iteration. A SECOND generator's
+      iterable is therefore a repeat, and row `subseq` grades it. ⛔ QUOTED FROM
+      THE DOCUMENT, not paraphrased inside quotation marks: an earlier cut of
+      this bullet attributed a synthesised sentence to §6.2.9, which a reader who
+      opened the page could not find.
 
     The returned NODE is graded, not a bare truthiness, so "it is a repeat" and
     "it is a repeat FOR THE RIGHT REASON" are different assertions.
