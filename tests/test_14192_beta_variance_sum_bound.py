@@ -14,7 +14,9 @@ it, or matched by the NAND/terminal alternatives, never evaluates it. On
 the emitted predicate: 8 coercion ``CASE WHEN`` before ``$contested_sum_bound``
 against 73 between it and ``$contested_threshold`` (72 coercion + the division's
 own selector), so a rejected row pays 8 coercion cases to skip 72.
-BOTH halves are graded below — and so is the 72/1 split, because the share the
+BOTH halves are graded below — and so is the 72/1 split, and the conjunct
+ordinal that last sentence turns on (``third`` is read back out of BOTH copies
+and compared to the emission), because the share the
 caveat quotes (72 of 80 coercion, 90%, 64 net) is arithmetic over that split and
 over neither total alone. The guard's own 8 are its price, not a saving —
 which is a CAVEAT on the saving, never a claim that no coercion is spared:
@@ -536,6 +538,50 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
             "that drifts off them re-inverts the claim this PR exists to keep "
             "true. Restore the wording or re-point this test; do not leave a "
             "copy ungraded")
+    # ⛔ AND THE ORDINAL THE NARROWING SENTENCE TURNS ON, which is a numeral too.
+    # Both copies now say coercion runs on every row that REACHES the guard
+    # "not on every candidate row: the guard is the third ``AND``ed conjunct
+    # inside the contested ``OR`` arm, so a row failing the presence checks
+    # ahead of it … never evaluates it" — and NOTHING recomputed that ordinal:
+    # measured at `07fd752374`, rewriting `third` to `fourth` in either copy
+    # left this whole file green (79 passed). It is the same ungraded-figure
+    # class the offsets and the ``CASE WHEN`` numerals above were closed for,
+    # and it rots in the direction that matters — INSERTING a conjunct ahead of
+    # the guard is exactly the edit that changes how many rows pay the 8 while
+    # every graded total above stays put.
+    #
+    # The ordinal is DERIVED from the emission, not restated: the arm's own
+    # conjunct separators are the `` AND ``s sitting at the arm's nesting + 1.
+    # Deeper ones are NOT separators — conjunct 1 carries an ``AND`` inside its
+    # span, and the guard's own operands two more — which is why the depth
+    # filter is load-bearing rather than `crit[arm:guard].count(" AND ")`.
+    guard_conjunct = 1 + sum(
+        1 for hit in re.finditer(r" AND ", crit[arm:guard])
+        if _paren_depth(crit, arm + hit.start()) == _paren_depth(crit, arm) + 1)
+    ordinals = {1: "first", 2: "second", 3: "third", 4: "fourth",
+                5: "fifth", 6: "sixth"}
+    assert guard_conjunct in ordinals, (
+        f"the contested arm ANDs {guard_conjunct} conjuncts ahead of the guard "
+        "— extend `ordinals` here and re-derive the narrowing sentence in both "
+        "docstrings")
+    for where, text in (("`beta_variance_sum_bound`'s docstring",
+                        " ".join(doc.split())),
+                        ("this module's docstring", module_doc)):
+        stated_ordinal = re.search(
+            r"the (\w+) ``AND``ed conjunct inside the contested ``OR`` arm",
+            text)
+        assert stated_ordinal, (
+            f"{where} no longer states the guard's conjunct ordinal as "
+            "'the <ordinal> ``AND``ed conjunct inside the contested ``OR`` "
+            "arm' — restore the wording or re-point this row, but do not leave "
+            "the ordinal ungraded")
+        assert stated_ordinal.group(1) == ordinals[guard_conjunct], (
+            f"{where} calls the guard the {stated_ordinal.group(1)} ``AND``ed "
+            f"conjunct of the contested arm, but THIS predicate measures it as "
+            f"the {ordinals[guard_conjunct]} ({guard_conjunct - 1} conjunct "
+            "separator(s) precede it) — so the sentence's 'a row failing the "
+            "presence checks ahead of it … never evaluates it' no longer "
+            "describes this emission")
     # ⛔ EVERY FIGURE IN THIS MESSAGE IS DERIVED FROM THE ENFORCED BOUND AND THE
     # LIVE SPAN, because RESTATING a derived figure is how this message twice
     # acquired a claim its band did not implement (rounds 21 and 22): one cut
