@@ -6821,8 +6821,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # assignment. No leg could see it: `_BUNDLE_CITE` needs a cite to NAME its
         # file (this is a bare continuation), and the only row reaching this
         # docstring above scopes on "with the flag ON", whose number sits one
-        # markdown line ABOVE the gate sentence. Measured pre-fix: `git grep -F
-        # '17967'` over `docs/ tests/ tools/` returned this line and nothing else.
+        # markdown line ABOVE the gate sentence. Measured pre-fix, `git grep -n -F
+        # '17967'` here also hits 2 JSON substrings — no other CITE carried it.
         # Non-vacuity: on the pre-fix line `:17970` is ABSENT (it carried `:17967`),
         # so this row reds on exactly the number it was added for, and the `_locate_hint`
         # leg names the live line (`if vet_enabled and embed_list:` at `:17970`).

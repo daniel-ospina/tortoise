@@ -1450,7 +1450,7 @@ def test_the_split_membership_is_derived_from_the_pins_own_line_counts() -> None
 
     BOTH DIRECTIONS, because each catches a different edit: a pair CROSSING the boundary with the table
     untouched is caught by `crossed`; a table entry whose pin-side figure was typed rather than measured
-    (or left behind by a re-point that moved a pair back inside the file) is caught by `wrong`.
+    is `wrong`'s. A pair left behind by a re-point back inside the file is the sibling test's `orphan`.
 
     ⛔ IT GRADES WHERE `git show` CANNOT RUN. The pin-side figure per file is `_pin_line_count` when this
     clone has the object, and `_PIN_LENGTHS` when it does not — and the second is the case that matters:
