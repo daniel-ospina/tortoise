@@ -174,7 +174,7 @@ def _git_sha() -> str:
             ["git", "rev-parse", "--short=12", "HEAD"],
             cwd=_REPO_ROOT, capture_output=True, text=True, check=False,
         ).stdout.strip()
-    except Exception:  # noqa: BLE001 — provenance only
+    except Exception:  # provenance only — a missing sha must not fail the run
         return "unknown"
 
 
@@ -232,7 +232,9 @@ def _load_pre_change_search_engine(rev: str):
 def seed(proj, points_n: int, corpus_seed: int) -> int:
     """Seed the deterministic corpus ONCE; a re-run reuses what is there."""
     from benchmarks.synthetic_corpus import (
-        generate_points, seed_corpus, seed_operator_edges,
+        generate_points,
+        seed_corpus,
+        seed_operator_edges,
     )
 
     existing = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
@@ -380,7 +382,8 @@ def compare(new: dict, base: dict) -> dict:
             continue
         if other["order"] != pq["order"]:
             first = next(
-                (i for i, (a, b) in enumerate(zip(pq["order"], other["order"]))
+                (i for i, (a, b) in enumerate(
+                    zip(pq["order"], other["order"], strict=False))
                  if a != b), None)
             rank_diff.append({
                 "qid": pq["qid"],
