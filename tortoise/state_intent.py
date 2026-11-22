@@ -588,15 +588,21 @@ _EXISTENCE_HELPER = (
 # wider slot here would swallow a second clause). `have any reports already archived` — where
 # `already` is the AUXILIARY and `archived` stays ATTRIBUTIVE — is `main`'s behaviour traded
 # away deliberately and is pinned in NOT_SELECTED.
-#: ⛔ ONE SLOT, THREE CONSUMERS (review of this fix, P1, measured): the adverb slot is declared
-#: ONCE and used by the window AND by the two lookaheads that decide whether a `been` belongs to a
-#: SECOND CLAUSE. Widening only the window is what re-opened the asyndetic hijack: with the slot on
-#: the window and `been` still adjacent in the lookaheads,
-#: `have any users reported it has been already deprecated` went from `None` (refused) to
-#: `ended / signal=None` — the whole ended population served with the caller's own predicate
-#: (`reported`) DROPPED and no notice, which is the direction the module rates worst. The same
-#: spelling with an adverb is now refused exactly like the spelling without one.
+#: ⛔ TWO SLOTS, AND THE ASYMMETRY IS THE POINT (two rounds of review, both measured).
+#: The WINDOW is RECALL: its slot is the narrow set a customer actually writes between the auxiliary
+#: and the participle (`already|ever|recently`), because a wider slot there would let the window
+#: swallow a second clause.
+#: The two LOOKAHEADS are REFUSAL: they only ever ADD a refusal, so their slot is the WHOLE
+#: :data:`_EXISTENCE_ADVERB` class. Giving them the narrow slot was a measured hole — `just` and
+#: `only` are members of that class (so `{_EXISTENCE_HELPER}` already accepts them BEFORE `been`)
+#: but were not in the narrow slot, so they blinded both lookaheads and
+#: `have any users reported it has been just deprecated and been withdrawn` ROUTED the whole ended
+#: population with the caller's predicate dropped and `signal=None`, while the `already` spelling of
+#: the same string was refused. Refusal-side widening cannot create a route: it can only over-refuse,
+#: which the canonical relative-clause rows below measure.
 _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
+#: The refusal-side slot: ANY adverbial the guard's own class knows, one of them.
+_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+)?"
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -638,7 +644,7 @@ _EXISTENCE_GUARD = (
     # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
     # after. The anchor is the same one the pronoun branch below already uses: the
     # lookahead fires only when the second clause's passive ends an ENDING participle.
-    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -671,7 +677,7 @@ _EXISTENCE_GUARD = (
     # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
     # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
     r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
-    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
 )
 
 _EXISTENCE_WINDOW = (

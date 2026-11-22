@@ -429,6 +429,13 @@ def test_a_state_question_selects_its_population(query, population, shape):
 #: commitment with "due this week" dropped. Each one is pinned here so that
 #: regression cannot come back quietly.
 NOT_SELECTED = [
+    # ⛔ THE REFUSAL-SIDE SLOT'S TWO ROWS (round-3 review, P1, measured): `just` and `only` are
+    # members of the guard's own adverb class but were not in the narrow window slot, so they
+    # blinded both clause lookaheads and these ROUTED the whole ended population with the caller's
+    # predicate dropped and `signal=None`. They live here because this list is what the
+    # parametrization READS; `NOTICE_ONLY` re-states the ones that carry a notice.
+    "have any users reported it has been just deprecated and been withdrawn",
+    "have any users reported it has been only deprecated and been withdrawn",
     # …added by the `NOTICE_ONLY ⊆ NOT_SELECTED` invariant: these three report the
     # notice, so they belong in BOTH lists — a `NOTICE_ONLY` row that no
     # parametrization reads asserts nothing at all.
@@ -911,6 +918,19 @@ NOTICE_ONLY = [
     "have any users reported it has been already deprecated",
     "have any customers noticed they have been already cancelled",
     "has anyone complained billing has been recently deprecated",
+    # ⛔ …AND THE TWO THAT EXPOSED THE ASYMMETRY (round-2 review, P1, measured): the WINDOW's slot
+    # is the narrow `already|ever|recently`, but the two clause LOOKAHEADS are refusal-only and so
+    # carry the WHOLE `_EXISTENCE_ADVERB` class. Giving them the narrow slot was a hole: `just` and
+    # `only` are class members (the helper already accepts them BEFORE `been`) but were not in the
+    # slot, so they blinded both lookaheads and these ROUTED the whole ended population with the
+    # caller's predicate dropped and `signal=None`, while the `already` spelling of the same string
+    # was refused. Pinned so a one-sided narrowing reds instead of shipping.
+    # ⛔ …AND THE ROUND-3 TWIN (review of this fix, P1, measured): `just`/`only` are
+    # `_EXISTENCE_ADVERB` members, so the clause lookaheads carry the WHOLE class while the
+    # WINDOW keeps its narrow slot — recall and refusal want opposite slots, and giving the
+    # lookaheads the narrow one ROUTED this pair with the caller's predicate dropped.
+    "have any users reported it has been just deprecated and been withdrawn",
+    "have any users reported it has been only deprecated and been withdrawn",
     "have any users said it will have been deprecated",
     "is the SOC2 audit and its evidence package archived",
     "is the onboarding flow and its partner variants retired",
@@ -3329,7 +3349,6 @@ def _existence_adverb_tokens():
     rows, so ten of the twelve could have been deleted silently. This returns the table
     itself so the assertion below is about the CLASS.
     """
-    import re
 
     from tortoise import state_intent
 
