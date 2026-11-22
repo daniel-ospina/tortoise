@@ -395,6 +395,55 @@ def _artifact_entries(run_def: ast.AST) -> tuple[dict[str, ast.AST], ast.Call]:
 _NON_MUTATING = {"list", "tuple", "len", "sorted", "id", "str", "bool", "any", "all",
                  "isinstance"}
 
+#: Callees that only READ their argument, so a name handed to one is not handed to a
+#: mutation. `print(f"nhits={len(results)}")` is the natural next edit to `run()`'s
+#: existing per-query print line, and it mutates nothing.
+_PURE_READS = _NON_MUTATING | {"repr", "int", "float", "type", "min", "max", "sum",
+                               "format", "round", "abs", "set", "dict", "frozenset"}
+
+
+def _names_handed(node: ast.AST) -> set[str]:
+    """Names in `node` at a position that could HAND the collection to a mutation.
+
+    ⛔ DOES NOT DESCEND INTO A PURE READ (#14281 review P2, measured). The plain
+    `_names_in(arg)` walk red-flagged `print(f"nhits={len(results)}")` — 1 failed,
+    10 passed at 66880dace8 — because `results` appears inside a `len(...)`. Nothing is
+    handed and nothing is mutated there, and the failure message misdiagnosed it as an
+    in-place sort. Stopping at a known-pure callee keeps the shapes this branch exists
+    for: `random.shuffle(results)` and `_helper(results + other)` still red (the name is
+    not under a pure call), while `len(results)` / `str(results)` do not.
+    """
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Call):
+        callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if callee in _PURE_READS:
+            return set()
+    out: set[str] = set()
+    for child in ast.iter_child_nodes(node):
+        out |= _names_handed(child)
+    return out
+
+
+def _collection_operands(value: ast.AST) -> list[ast.AST]:
+    """The sub-expressions that may BE the collection in a fallback expression.
+
+    ⛔ `a1 = results or []` and `a1 = results if flag else []` bind the SAME collection
+    when the left arm wins, and BOTH read GREEN on the name-only bind (#14281 review P1,
+    measured: `aliases=[]`, then `a1.sort()` permuted the recorded page). Over-collecting
+    here can only RED, which is the cheap direction; a `Subscript` (`results[0]`) is an
+    ELEMENT and is deliberately not included.
+
+    Returns the operand NODES, not their name-sets: the caller tests them with the same
+    predicate it uses for a direct bind, so a BoolOp whose left arm IS the measured page
+    resolves exactly like `a1 = results` does.
+    """
+    if isinstance(value, ast.BoolOp):
+        return list(value.values)
+    if isinstance(value, ast.IfExp):
+        return [value.body, value.orelse]
+    return []
+
 
 def _aliases_of(tree: ast.AST, predicate) -> set[str]:
     """Names bound to a matching expression, TRANSITIVELY — `a = results`, `b = a`,
@@ -415,6 +464,11 @@ def _aliases_of(tree: ast.AST, predicate) -> set[str]:
     ⛔ UNPACK TARGETS TOO (`(page,) = (results,)`), which a `len(targets) == 1 and
     isinstance(target, ast.Name)` bind never sees — measured GREEN on the form above
     while `page.sort()` permuted the recorded page.
+
+    ⛔ AND A FALLBACK EXPRESSION (`a1 = results or []`, `a1 = results if c else []`):
+    the name-only test read GREEN on both (`aliases=[]`) while `a1.sort()` permuted the
+    recorded page, because the collection was never resolved as the alias at all.
+    `_collection_operands` closes it, and over-collecting there can only RED.
     """
     binds: list[tuple[ast.AST, ast.AST]] = []
     for node in ast.walk(tree):
@@ -434,7 +488,14 @@ def _aliases_of(tree: ast.AST, predicate) -> set[str]:
         if isinstance(target, ast.Name):
             if target.id in out:
                 return False
-            if predicate(value) or (isinstance(value, ast.Name) and value.id in out):
+            resolves = (
+                predicate(value)
+                or (isinstance(value, ast.Name) and value.id in out)
+                or any(predicate(operand)
+                       or (isinstance(operand, ast.Name) and operand.id in out)
+                       for operand in _collection_operands(value))
+            )
+            if resolves:
                 out.add(target.id)
                 return True
             return False
@@ -502,7 +563,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None) \
             if isinstance(node, ast.Call) else None
         handed = isinstance(node, ast.Call) and callee not in _NON_MUTATING and any(
-            _names_in(arg) & watched
+            _names_handed(arg) & watched
             for arg in list(node.args) + [k.value for k in node.keywords])
         if receiver & watched or "per_query" in receiver or handed:
             hits.append(node.lineno)
@@ -694,6 +755,85 @@ def test_an_UNPACKED_alias_still_reaches_the_sort() -> None:
         "page is permuted in place before it is recorded")
 
 
+def test_a_FALLBACK_expression_alias_still_reaches_the_sort() -> None:
+    """A fallback expression binds the SAME collection — `results or []`, `results if c else []`.
+
+    ⛔ MEASURED GREEN on the name-only bind (#14281 review P1): `aliases=[]` for both
+    shapes, so `a1.sort()` permuted the recorded page while the receiver half and the
+    "handed" half both saw nothing. `results or []` returns `results` whenever it is
+    non-empty, which is every measured arm. `results[0]` is an ELEMENT and is
+    deliberately NOT an alias, so it must stay green.
+    """
+    for label, value_expr in (("or", "results or []"),
+                              ("ifexp", "results if flag else []")):
+        src = ("def run(sdk):\n"
+               "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+               f"    a1 = {value_expr}\n"
+               "    a1.sort()\n")
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        sort = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "sort")
+        aliases = _aliases_of(run_def, lambda v: isinstance(v, ast.Name) and v.id == "results")
+        assert "a1" in aliases, (
+            f"[{label}] `a1 = {value_expr}` is not resolved as an alias "
+            f"(aliases={sorted(aliases)}) — the fallback returns the measured page "
+            "whenever the left arm wins, so `a1.sort()` permutes the recorded page "
+            "invisibly")
+        hits = _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+        assert sort.lineno in hits, (
+            f"[{label}] a FALLBACK alias is GREEN (aliases={sorted(aliases)}, "
+            f"hits={hits}) — a sorted page reaches the artifact while the pin reads "
+            "the measured page")
+
+    # A SUBSCRIPT is an element, not the collection: it must NOT be treated as an alias.
+    src = ("def run(sdk):\n"
+           "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+           "    first = results[0]\n"
+           "    first.sort()\n")
+    run_def = ast.parse(src).body[0]
+    assert "first" not in _aliases_of(
+        run_def, lambda v: isinstance(v, ast.Name) and v.id == "results"), (
+        "`first = results[0]` is an ELEMENT of the page, not the page — treating it as "
+        "an alias would red an innocent lookup")
+
+
+def test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation() -> None:
+    """`print(f"nhits={len(results)}")` mutates nothing and must stay GREEN.
+
+    ⛔ MEASURED FALSE RED at 66880dace8 (#14281 review P2): `_mutated_after` walked the
+    argument for NAMES, so `len(results)` inside the per-query print — the natural next
+    edit to the print line `run()` already has — reported "line(s) [323] mutate a
+    collection AFTER the measured read", which is neither true nor the shape the branch
+    exists for. `_names_handed` stops at a known-pure callee.
+
+    The catches the branch EXISTS for must survive, so both are asserted here too.
+    """
+    def _hits(body: str) -> list[int]:
+        src = ("def run(sdk):\n"
+               "    results = sdk._tortoise_fts_query(query='q', limit=10)\n" + body)
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        return _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+
+    for innocent in ('    print(f"nhits={len(results)}")\n',
+                     "    log(str(len(results)))\n"):
+        assert not _hits(innocent), (
+            f"{innocent.strip()!r} is a FALSE RED (hits={_hits(innocent)}) — a pure read "
+            "inside a log line hands the page to nothing, and the message misdiagnoses "
+            "it as an in-place mutation")
+
+    for caught in ("    random.shuffle(results)\n",
+                   "    helper(results + other)\n"):
+        assert _hits(caught), (
+            f"{caught.strip()!r} must stay RED — the page IS handed to a call that may "
+            "mutate it, and stopping at pure reads must not disable that")
+
+
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     """The harness must time the read the PRODUCT runs — with the door's own arguments.
 
@@ -706,10 +846,11 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     check exists to catch.
 
     ⛔ `/v1/search` ONLY, and deliberately so: the MCP ``tortoise_search`` tool calls
-    the SAME read with a SUPERSET of arguments (``kind``, ``threshold``,
-    ``entity_type``, ``min_confidence``, ``order_by``, ``relationship_filter``,
-    ``traversal_path`` — ``tortoise/mcp_server.py``), several of which select a
-    materially different read. The allow-list below is derived from the
+    the SAME read with a DIFFERENT argument set — seven levers the door does not name
+    (``kind``, ``threshold``, ``entity_type``, ``min_confidence``, ``order_by``,
+    ``relationship_filter``, ``traversal_path`` — ``tortoise/mcp_server.py``), and
+    NEITHER of the door's two out-sinks (``read_status_out``, ``_truncation_out``) — so
+    the two are INCOMPARABLE, not ordered. The allow-list below is derived from the
     ``/v1/search`` door alone, so it does NOT describe the MCP arm; a harness that
     mirrors THAT arm needs its own contract, not a widened one here.
 
