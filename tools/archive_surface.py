@@ -1251,9 +1251,12 @@ def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
     to the file's own link text and a two-cycle to the other link's, both of which parse as inert
     expressions: the module simply does not enter the carrier set, exactly as it did before this
     function existed. That is the SAFE direction — the set answers "did this carrier hold a body",
-    and a link loop holds no code. A chain longer than `_LINK_HOPS` links, or one that dangles,
-    answers `None` (unreadable): no depth bound is reached by any shape this repo has, and a bound
-    that IS reached must not invent a reading by returning the last link's text.
+    and a link loop holds no code. A chain longer than `_LINK_HOPS` links answers `_UNREADABLE`,
+    and a link that DANGLES answers `_DANGLING` — a KNOWN reading ("holds no code"), not the
+    unknown one. The sentence that stood here said BOTH answered `None`, which contradicted the
+    fix (round-25 review, P3 — measured: a dangling link reads `''`, `is _DANGLING` True). No depth
+    bound is reached by any shape this repo has, and a bound that IS reached must not invent a
+    reading by returning the last link's text.
     """
     text = _git_blob(root, sha, path)
     if text is None:
@@ -2703,14 +2706,28 @@ def block_holds(
     "does not hold", so an unreadable candidate is unaffected.
     """
 
-    def holds(candidate: str) -> bool:
+    def holds(candidate: str) -> bool | None:
+        """True / False / **None for "could not be evaluated"**.
+
+        ⛔ THREE ANSWERS, NOT TWO (round-25 review, P3 — measured). A link chain past `_LINK_HOPS`
+        answers `_UNREADABLE`, and calling that "this commit does not hold the code" made the
+        writer refuse with two false facts — "no commit on main holds this code … the working tree
+        differs from every commit there" — on a CLEAN tree whose commit holds the code through the
+        chain, printing a remedy that cannot clear the red. The caller now names the bound.
+        """
+        unreadable = False
         for path, segment, node_key in blocks:
             blob = _blob_following_links(root, candidate, path)
-            if blob is None:
-                return False
+            if blob is _UNREADABLE:
+                unreadable = True
+                continue
+            if blob is _DANGLING:
+                return False  # dangles: this commit provably holds no code here
             expected = expected_block(kind, symbol, path, blob, node_key)
             if expected is None or expected.rstrip() != segment.strip("\n"):
                 return False
+        if unreadable:
+            return None
         return True
 
     return holds
@@ -2742,12 +2759,23 @@ def anchor_sha(root: Path, paths: list[str], holds=None) -> tuple[str, str]:
     code, out = _git(root, "rev-list", ref, "--", *paths)
     candidates = [c for c in (out.split() if code == 0 else []) if _SHA_RE.match(c)]
     held_a_path = False
+    unreadable_here = False
     for candidate in candidates:
         if not all(_git_blob(root, candidate, path) is not None for path in paths):
             continue
         held_a_path = True
-        if holds is None or holds(candidate):
+        verdict = True if holds is None else holds(candidate)
+        if verdict:
             return candidate, ref
+        if verdict is None:
+            unreadable_here = True
+    if held_a_path and unreadable_here:
+        raise ArchiveRefused(
+            f"the carrier's link chain at {', '.join(paths)} exceeds `_LINK_HOPS` "
+            f"({_LINK_HOPS}) hops, so the committed body cannot be read: shorten the chain (or "
+            "point the carrier straight at the file) and archive again. ⛔ This is NOT a "
+            "working-tree difference, and committing the source will not change it."
+        )
     if held_a_path:
         # The paths exist on the default branch but no commit holds THIS code: the working tree
         # carries an edit (or a newer body) that never landed there. ⛔ Not a "never landed"

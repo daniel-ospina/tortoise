@@ -4521,3 +4521,72 @@ def test_an_archived_module_from_a_SYMLINKED_carrier_is_CLEAN(tree: Path) -> Non
     frozen = (tree / entry["file"]).read_text(encoding="utf-8")
     assert "def real()" in frozen, "the frozen body must be the TARGET's code"
     assert arch.file_violations([entry], tree / "archive", tree) == []
+
+
+def _chain(tree: Path, links: int) -> None:
+    """`tortoise/x/__init__.py -> lc0 -> ... -> real.py`, *links* links in total."""
+    for i in range(links - 1):
+        (tree / "tortoise" / f"lc{i}.py").symlink_to(
+            "real.py" if i == links - 2 else f"lc{i + 1}.py"
+        )
+    (tree / "tortoise" / "real.py").write_text("def real(x):\n    return x * 2\n", encoding="utf-8")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../lc0.py")
+    _commit(
+        tree,
+        *(f"tortoise/lc{i}.py" for i in range(links - 1)),
+        "tortoise/real.py",
+        "tortoise/x/__init__.py",
+    )
+
+
+def test_a_link_CHAIN_BEYOND_the_HOP_BOUND_fails_CLOSED(tree: Path) -> None:
+    """P2 (round-25): the fail-closed polarity was load-bearing and pinned by NOTHING.
+
+    Measured pre-fix: returning `_DANGLING` instead of `_UNREADABLE` at the bound turned a
+    beyond-bound chain's deletion from RED to GREEN — code in no file under `archive/` — while ALL
+    101 targeted `tests/test_archive.py` rows stayed green. The reviewer's mutation was the only
+    thing that could see it: a bound that cannot tell "unknown" from "empty" is fail-OPEN.
+
+    Both readings are asserted, so the polarity cannot drift again: the read says UNKNOWN, the
+    cancelling asker treats UNKNOWN as content, and deleting the whole chain is a removal.
+
+    Mutation: `return _UNREADABLE` -> `return _DANGLING` at the bound -> RED here.
+    """
+    _chain(tree, arch._LINK_HOPS + 1)
+    datum = arch._blob_following_links(tree, "HEAD", "tortoise/x/__init__.py")
+    assert datum is arch._UNREADABLE, f"beyond the bound is UNKNOWN, not empty: {datum!r}"
+    assert arch._content_or_link(tree, "HEAD", "tortoise/x/__init__.py", datum) is True, (
+        "an unknown carrier must not cancel a removal"
+    )
+
+    for extra in ("tortoise/x", "tortoise/real.py"):
+        subprocess.run(["git", "rm", "-r", "-q", extra], cwd=tree, check=True)
+    for i in range(arch._LINK_HOPS):
+        subprocess.run(["git", "rm", "-q", f"tortoise/lc{i}.py"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.x:") and "REMOVED" in p for p in problems), (
+        f"a chain past the bound is UNREADABLE, never 'nothing was here': {problems}"
+    )
+
+
+def test_a_chain_BEYOND_the_HOP_BOUND_names_the_BOUND_not_a_working_tree_diff(tree: Path) -> None:
+    """P3 (round-25): the writer refused an over-bound chain by asserting two false facts.
+
+    Measured pre-fix on a CLEAN tree whose commit holds the code through the chain:
+    "no commit on main holds this code at tortoise/x/__init__.py — the working tree differs from
+    every commit there" — both halves false, and the remedy (commit the source) cannot clear it.
+    `holds` now answers None for "could not be evaluated", and the refusal names the bound.
+
+    Mutation: make `holds` return False for `_UNREADABLE` -> RED here.
+    """
+    _chain(tree, arch._LINK_HOPS + 1)
+    with pytest.raises(arch.ArchiveRefused) as refused:
+        arch.archive_symbol(arch.MODULE, "tortoise.x", "batch-a", "r", root=tree)
+    message = str(refused.value)
+    assert "_LINK_HOPS" in message, f"the refusal must name the bound it hit: {message}"
+    assert "the working tree differs from every commit" not in message, (
+        f"a clean tree must not be told it differs from every commit: {message}"
+    )
