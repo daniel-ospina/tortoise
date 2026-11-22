@@ -14741,6 +14741,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                       "deadline_aborts": 0,  # #1787 P2-L: deadline-kill
                       # #3359: the cost driver (calibration data only)
                       "prompt_tokens": 0, "completion_tokens": 0,
+                      # #14277: the cached portion of prompt_tokens, so a
+                      # cost reader can price a warm call instead of billing
+                      # every cached token at the miss rate.
+                      "prompt_cache_hit_tokens": 0,
+                      "prompt_cache_miss_tokens": 0,
                       "cost_usd": 0.0, "calls_without_cost": 0,
                       "calls_without_usage": 0,
                       "by_stage": {}}
@@ -16314,6 +16319,12 @@ def _empty_cost_bucket() -> dict:
     ANY usage-less call is never silently priced.
     """
     return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            # #14277: the CACHED portion of ``prompt_tokens``, under the key
+            # names ``tools/longmem_eval/costing.py`` already prices on
+            # (``_CACHE_KEY``/``_MISS_KEY``). Without a producer those read 0
+            # on every real row, so cached input was billed at the full rate —
+            # the cache discount the reader implements was inert.
+            "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0,
             "cost_usd": 0.0, "calls_without_cost": 0,
             "calls_without_usage": 0, "calls_without_tokens": 0,
             "usage_present": True}
@@ -16358,6 +16369,16 @@ def _merge_cost_bucket(tgt: dict, src: dict) -> bool:
     tgt["calls"] += int(src.get("calls", 0) or 0)
     tgt["prompt_tokens"] += int(src.get("prompt_tokens", 0) or 0)
     tgt["completion_tokens"] += int(src.get("completion_tokens", 0) or 0)
+    # #14277: the cache split sums beside the counts it divides. A source
+    # bucket written before this key existed contributes 0, which reads as
+    # "no cached tokens" — the same thing the pricing reader would have
+    # concluded on its own, so an old row is unchanged, never re-read wrong.
+    tgt["prompt_cache_hit_tokens"] = (
+        int(tgt.get("prompt_cache_hit_tokens", 0) or 0)
+        + int(src.get("prompt_cache_hit_tokens", 0) or 0))
+    tgt["prompt_cache_miss_tokens"] = (
+        int(tgt.get("prompt_cache_miss_tokens", 0) or 0)
+        + int(src.get("prompt_cache_miss_tokens", 0) or 0))
     tgt["cost_usd"], _cost_landed = _bounded_cost_sum(
         tgt["cost_usd"], src.get("cost_usd"))
     tgt["calls_without_cost"] += int(src.get("calls_without_cost", 0) or 0)
@@ -16390,6 +16411,13 @@ def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
     acc["completion_tokens"] = (
         int(acc.get("completion_tokens", 0))
         + int(src.get("completion_tokens", 0) or 0))
+    # #14277: the cache split rides the same merge (see ``_merge_cost_bucket``).
+    acc["prompt_cache_hit_tokens"] = (
+        int(acc.get("prompt_cache_hit_tokens", 0))
+        + int(src.get("prompt_cache_hit_tokens", 0) or 0))
+    acc["prompt_cache_miss_tokens"] = (
+        int(acc.get("prompt_cache_miss_tokens", 0))
+        + int(src.get("prompt_cache_miss_tokens", 0) or 0))
     acc["cost_usd"], _cost_landed = _bounded_cost_sum(
         acc.get("cost_usd", 0.0), src.get("cost_usd"))
     acc["calls_without_cost"] = (
@@ -16480,7 +16508,8 @@ def _normalise_token_count(value) -> int | None:
 
 
 def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
-                          cost_usd, provider, model) -> None:
+                          cost_usd, provider, model,
+                          cache_hit_tokens=None) -> None:
     """#3359: accumulate ONE successful provider call into ``stats["cost"]``.
 
     Called from ``_complete``'s success path — the single point where the
@@ -16525,6 +16554,13 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     so ITS per-route branch is unreachable. Across calls the accumulator can
     hold both — an earlier route overflow beside a later session-total
     overflow — so never read the two as exclusive at the ROW level.
+
+    #14277: ``cache_hit_tokens`` is the CACHED portion of ``prompt_tokens``
+    (the provider's own report). It is written onto the pricing reader's
+    already-pinned keys — ``prompt_cache_hit_tokens`` and its complement
+    ``prompt_cache_miss_tokens`` — because a row that carries only the SUM
+    cannot be repriced at the hit rate, and ``costing.price_usage_envelope``
+    has implemented that discount since before there was a producer for it.
     """
     acc = stats.setdefault("cost", {})
     # #5854: normalise BOTH provider token fields before the first mutation
@@ -16572,6 +16608,21 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     acc["calls"] = int(acc.get("calls", 0)) + 1
     acc["prompt_tokens"] = int(acc.get("prompt_tokens", 0)) + ptoks
     acc["completion_tokens"] = int(acc.get("completion_tokens", 0)) + ctoks
+    # #14277: the cache split, normalised ONCE and accumulated at BOTH levels
+    # the roll-up reads — this stage accumulator (which ``_rollup_llm`` sums
+    # into the session row) and the per-route bucket below (which the pricing
+    # reader prices). Writing only the bucket would leave the session row at 0.
+    _hit = _normalise_token_count(cache_hit_tokens) or 0
+    if _hit > ptoks:
+        # A provider reporting more hits than total prompt tokens contradicts
+        # itself. Keep the split CONSISTENT with the count it divides (miss
+        # would go negative, and a negative feeds the dollar total), and fall
+        # back to "no cache information" — an absence beats a shaped number.
+        _hit = 0
+    acc["prompt_cache_hit_tokens"] = (
+        int(acc.get("prompt_cache_hit_tokens", 0)) + _hit)
+    acc["prompt_cache_miss_tokens"] = (
+        int(acc.get("prompt_cache_miss_tokens", 0)) + max(0, ptoks - _hit))
     if cost_val is None:
         acc["calls_without_cost"] = int(acc.get("calls_without_cost", 0)) + 1
     else:
@@ -16595,6 +16646,11 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     lane["calls"] += 1
     lane["prompt_tokens"] += ptoks
     lane["completion_tokens"] += ctoks
+    # #14277: the same split onto the pricing reader's already-pinned keys
+    # (``costing._CACHE_KEY``/``_MISS_KEY``), so the cache dimension it has
+    # always implemented stops reading 0 on every real row.
+    lane["prompt_cache_hit_tokens"] += _hit
+    lane["prompt_cache_miss_tokens"] += max(0, ptoks - _hit)
     if cost_val is None:
         lane["calls_without_cost"] += 1
     else:
@@ -16672,6 +16728,14 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     llm_stats["completion_tokens"] = (
         llm_stats.get("completion_tokens", 0)
         + int(cost.get("completion_tokens", 0) or 0))
+    # #14277: the session-level cache split, rolled beside the counts it
+    # divides so a reader never has to sum ``by_stage`` to get it.
+    llm_stats["prompt_cache_hit_tokens"] = (
+        llm_stats.get("prompt_cache_hit_tokens", 0)
+        + int(cost.get("prompt_cache_hit_tokens", 0) or 0))
+    llm_stats["prompt_cache_miss_tokens"] = (
+        llm_stats.get("prompt_cache_miss_tokens", 0)
+        + int(cost.get("prompt_cache_miss_tokens", 0) or 0))
     llm_stats["cost_usd"], _cost_landed = _bounded_cost_sum(
         llm_stats.get("cost_usd", 0.0), cost.get("cost_usd"))
     llm_stats["calls_without_cost"] = (
@@ -16729,15 +16793,18 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
                max_tokens: int | None,
                stats: dict | None
                ) -> tuple[str | None, object | None, int, int,
-                          float | None, str | None, str | None]:
+                          float | None, str | None, str | None, int]:
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
 
     Returns ``(resp, finish_reason, prompt_tokens, completion_tokens,
-    cost_usd, provider, model)`` — the finish reason AND per-call token
-    counts captured in the calling thread
+    cost_usd, provider, model, cache_hit_tokens)`` — the finish reason AND
+    per-call token counts captured in the calling thread
     right after ``complete()`` returns (F4 #1780; token capture #2134
     Task 0 — never read the shared adapter attrs from the caller thread).
+    The eighth element is the provider's cache-hit split, which the cost row
+    prices on (#14277) — arity is part of this contract, so it is declared
+    here and not only at the return.
 
     #3359: the same in-thread capture also snapshots the provider's OWN
     reported charge (``last_cost_usd`` — ``None`` when the route reports
@@ -16792,6 +16859,13 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         _ct = getattr(model, "last_completion_tokens", None)
         box["prompt_tokens"] = 0 if _pt is None else _pt
         box["completion_tokens"] = 0 if _ct is None else _ct
+        # #14277: the CACHED portion of ``prompt_tokens``, captured in the
+        # SAME thread as the counts (same cross-thread-race reason). It rides
+        # the return tuple rather than ``stats`` for the #3359 reason above.
+        # ``None`` (a mock, or an adapter that predates this field) becomes 0,
+        # which is the pre-#14277 reading — never a TypeError in a mock path.
+        _ch = getattr(model, "last_cache_hit_tokens", None)
+        box["cache_hit_tokens"] = 0 if _ch is None else _ch
         # #3359: the provider's own charge + the route that served it,
         # captured in the SAME thread as the call (same cross-thread-race
         # reason as the tokens above; ``is None`` — 0.0 is authoritative).
@@ -16887,7 +16961,7 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
     return (box.get("resp"), box.get("finish_reason"),
             box.get("prompt_tokens", 0), box.get("completion_tokens", 0),
             box.get("cost_usd"), box.get("cost_provider"),
-            box.get("cost_model"))
+            box.get("cost_model"), box.get("cache_hit_tokens", 0))
 
 
 def _scaled_deadline(base: int, max_tokens: int | None) -> int:
@@ -16953,7 +17027,8 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
         try:
             (resp, finish_reason,
              prompt_tokens_raw, completion_tokens_raw,
-             call_cost_usd, call_provider, call_model) = _call_once(
+             call_cost_usd, call_provider, call_model,
+             call_cache_hit_tokens) = _call_once(
                  model, system, user, deadline_s=deadline_s,
                  max_tokens=max_tokens, stats=stats)
             # #5854: the per-call SNAPSHOT fields are the NORMALISED counts
@@ -16986,7 +17061,8 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                     completion_tokens=completion_tokens_raw,
                     cost_usd=call_cost_usd,
                     provider=call_provider,
-                    model=call_model)
+                    model=call_model,
+                    cache_hit_tokens=call_cache_hit_tokens)
                 # #2134 Task 0 (P1-22): the truncation-token read surface —
                 # a length-truncated call's emitted tokens are the lower
                 # bound on the true list size (the model filled its budget
