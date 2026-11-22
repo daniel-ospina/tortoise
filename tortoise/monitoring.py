@@ -8364,8 +8364,9 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # load (p95 20,414 ms → 268 ms) — a trade that LEAVES ROWS the dense leg
         # cannot find. §17.2 requires that divergence be checkable, and #13156
         # rules out inferring it from the read side (a budget-cancelled leg reads
-        # like a slow store). Keyed by the decline's CAUSE, because the four
-        # causes need opposite responses. Like every key above: additive, never
+        # like a slow store). Keyed by the decline's CAUSE, because the FIVE
+        # causes (#14186 added `backing_cold`) need opposite responses. Like every
+        # key above: additive, never
         # a term in `status`.
         "derived_embed_declines": derived_embed_decline_counts(),
         # ...and WHERE the live writes actually landed (#12943 reopening). The

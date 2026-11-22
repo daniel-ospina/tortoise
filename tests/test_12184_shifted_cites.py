@@ -427,8 +427,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    # 1, not 2 (#14220): the SITE moved to `:2950` (below) and the header's HISTORY cite kept
-    # `:2921`, which the header arm guards verbatim.
+    # 2, both THIS-TREE (#14220): the header's parenthetical paren and §2.5's term. The HISTORY
+    # address before the paren (`:2876` at `main ae54df166d`) is unchanged and the header arm
+    # pins that string verbatim — so the count here is of the TREE value, never of history.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2950`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37957`'): 1,
     # 3, not 2: the whole-node walk's address is written BARE at three sites — the header's pair

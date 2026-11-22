@@ -7804,6 +7804,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15209` (inside the span),
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
         # the blank line immediately before `return OrgInfoResponse(` at `:15258`.
+        # ⛔ RE-DERIVED at the #14220 head: `_embed_seam_health`'s comment gained four
+        # lines above this anchor, so the pair is `:15561-15638` and the anchor is `:15561`
+        # (the range START); `:15638` is the blank line before `return OrgInfoResponse(` at
+        # `:15639`. Both numbers were read off the tree, never nudged by `+4`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("15561", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
@@ -8078,11 +8082,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         f"`hosted_api.py:{_i7_return}`, but `:{_i7_end}` is not blank — re-derive the range "
         "structurally before trusting this arm")
     _i7_pair = f"`hosted_api.py:{_i7_start}-{_i7_end}`"
-    assert _i7.count(_i7_pair) == 1, (
-        f"04-plan.md I7's range cite is not the pair the tree carries ({_i7_pair}): the document "
-        "states it "
-        f"{_i7.count(_i7_pair)} time(s). Re-derive BOTH endpoints from `hosted_api.py` and keep "
-        "the `:START-END` form, which is what this guard parses")
+    # ⛔ INTO THE SAME FAILURE LIST, NOT AN INLINE `assert` (review P3, cycle 11). Asserting
+    # here aborted the function before the aggregate `assert not (row_failures or
+    # block_failures)` at the end, so a stale I7 pair reported ONE problem and hid every
+    # `_pin_row_failures` row collected above it (measured: 10 collected, 1 printed). This is
+    # the mask class `8c93952f45` fixed in `test_12184_shifted_cites.py`; the same fix has to
+    # reach the arm that collects.
+    if _i7.count(_i7_pair) != 1:
+        row_failures.append(
+            f"04-plan.md I7's range cite is not the pair the tree carries ({_i7_pair}): the "
+            f"document states it {_i7.count(_i7_pair)} time(s). Re-derive BOTH endpoints from "
+            "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
     _span = _org_info[_i7_start - 1:_i7_end]
     for _needle, _what in (("nodes_used = await asyncio.to_thread(", "the nodes_used read"),
                           ('max_nodes = org.get("max_points")', "the max_nodes derivation")):
