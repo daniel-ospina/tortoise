@@ -62,9 +62,11 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    bound or by a stopping worker (``queue_full`` / ``worker_stopping``), which is
    what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls — with the bound at ``1``, or
    once the default saturates. (b) The STRUCTURAL arms, which fold inline on EVERY
-   write at ANY depth, including an idle queue — ALL FOUR of the conditions
+   write at ANY depth, including an idle queue — ALL FOUR of the SIX conditions
    :func:`tortoise.live_write._submitted_to_worker` tests before it touches the
-   queue: ``journal_skipped`` (a record-only write, whose durable copy IS the
+   queue (the four that are CORRECTNESS, not configuration — the other two are the
+   unarmed loop and an unarmed record, which move no counter either):
+   ``journal_skipped`` (a record-only write, whose durable copy IS the
    record), a ``record_sink`` door (it reads the outcome), a NON-DURABLE log (a
    scratch buffer, which the seam itself declines), and ``tenant is None`` (the
    ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
