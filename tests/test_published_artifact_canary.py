@@ -2601,6 +2601,16 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         "no more about the artifact than a crashed run does, which is the state in which "
         "a broken published artifact gets diagnosed as a detector fault (#12660)"
     )
+    # ⛔ AND THE LINE'S OWN PROVENANCE FIELDS ARE THE PINNED PART, not just the payload
+    # (agent-infra#3442 mutation pass, MEASURED): deleting the header `echo` left the suite
+    # green, so `published_fail=` could have regressed silently — and `published_fail` is
+    # what separates "the tool said FAIL" from "the tool exited 1 for another reason",
+    # i.e. the distinction the round-18 retag is built on.
+    assert "exit_code=1" in printed and "published_fail=1" in printed, (
+        "the line carrying the reading lost its provenance fields (`exit_code=`, "
+        "`published_fail=`) — the log then states a verdict without saying what it was "
+        f"derived from, which is the misread #12660 started with: {printed!r}"
+    )
     assert published.strip() == "exit_code=1", published
 
     # (b) the interpreter dies before the tool can report: the log must SAY so, and must

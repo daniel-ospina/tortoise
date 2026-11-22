@@ -166,8 +166,18 @@ jobs:
           # present-but-unreadable verdict.json — permissions, a directory, a damaged
           # mount) aborted the step BEFORE either ran: measured the output sink EMPTY and
           # the step exiting 1 — the "cut a release" code — while its own logic had decided
-          # 2. `-s` cannot catch it (`-s` is true for an unreadable file); only `-e` + the
-          # ordering can, so the write moves first and the read is guarded.
+          # 2. `-s` cannot catch it (`-s` is true for an unreadable file).
+          #
+          # ⛔ WHAT ACTUALLY PREVENTS THE ABORT, stated precisely because a MUTATION PASS
+          # (agent-infra#3442) showed the first version of this comment overclaimed: the
+          # `|| true` on the `cat` is the LOAD-BEARING guard — with it in place, moving the
+          # display above this write changes nothing, and the suite correctly stays green
+          # under that mutant (`1 passed`). The ORDERING is defence in depth: it means a
+          # future display line that fails for a reason `|| true` does not cover (a failing
+          # `echo` on a closed or EPIPE'd stdout) still cannot cost the severity signal,
+          # which is the only thing the alert and the round-18 gate read. So: the guard is
+          # pinned by a mutant (remove `|| true` -> case (c) reds); the ordering is a stated
+          # invariant, not something the test can falsify today.
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           if [ -s "$RUNNER_TEMP/canary/verdict.json" ]; then
             echo "published-artifact-canary exit_code=$rc published_fail=$published_fail — the verdict.json the exit code was derived from:"
