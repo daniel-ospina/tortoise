@@ -2073,8 +2073,18 @@ def write_spool_entry(
     # meta — so the stored turns are read anyway and the decision below is made
     # on what is actually on disk.
     unusable = prior_state == PRIOR_META_UNUSABLE
+    # ⛔ `prior is not None` IS NOT "THE ENTRY IS ON DISK" (#14347 review F2).
+    # In the UNUSABLE arm `prior` is None BY DEFINITION while the entry — meta
+    # AND turn log — is still occupying bytes. Every question that is really
+    # about disk occupancy (is this write a REPLACEMENT? does the stored content
+    # sit over `max_entry_bytes`?) must ask THIS, not the readability of the
+    # meta. Asking the wrong one counted a growth of an unreadable entry TWICE
+    # (once through `unreadable_bytes`, once through the un-replaced projection),
+    # so the writer refused at ~half the byte ceiling while the health line —
+    # which does not project — reported the same spool healthy.
+    entry_on_disk = prior_state != PRIOR_META_ABSENT
     stored, stored_state = (_read_turns_state(root, snapshot.session_id)
-                            if (prior or unusable) else ([], TURNS_ABSENT))
+                            if entry_on_disk else ([], TURNS_ABSENT))
     new_digest = content_digest(snapshot.turns)
 
     # Dedup: an identical snapshot is a no-op (no rewrite, no re-upload) —
@@ -2126,6 +2136,10 @@ def write_spool_entry(
         )
     )
 
+    # The stored turn count this write would QUARANTINE if it is admitted —
+    # resolved here so the disposition can be decided BEFORE the guards and
+    # APPLIED after them (#14347 review F3).
+    divergent_turns = 0
     if unusable:
         # ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
         # (#12487). Measured on this head, with an unreadable meta beside a
@@ -2181,30 +2195,27 @@ def write_spool_entry(
                     " turn(s) and overwrote nothing; the entry's retry/filing"
                     " state could not be carried forward (it lived in the"
                     " unreadable meta), so the entry may re-POST once")
+            discards.append(_record_refusal(root, {
+                "session_id": snapshot.session_id,
+                "capture_key": capture_key(snapshot.session_id, snapshot.turns),
+                "reason": DISCARD_META_UNREADABLE,
+                "retained": True,
+                "detail": f"the stored meta ({meta_path.name}) could not be read or"
+                          f" used; {note}",
+            }, stamp=f"unusable-meta:{snapshot.session_id}"))
         else:
-            quarantined = _quarantine_log(log_path)
-            note = (
-                f"this snapshot diverges from the stored log, so the stored"
-                f" {len(stored)} turn(s) were QUARANTINED to"
-                f" {quarantined.name if quarantined is not None else '(none)'}"
-                " — preserved on disk for forensics and still counted against"
-                " the byte ceiling — and the entry was rewritten from this"
-                " snapshot; the retry/filing state could not be carried forward")
+            # ⛔ NOTHING IS MOVED YET (#14347 review F3). The guards BELOW can
+            # still REFUSE this write, and a refusal has to leave the entry
+            # byte-identical — that is the module's own stated contract ("A
+            # refused write therefore repairs nothing itself"). Quarantining
+            # here renamed the stored log to `.orphan` BEFORE the decision, so a
+            # REFUSED write had already moved the only addressable copy of the
+            # transcript the refusal text promised was "kept". The disarm and the
+            # record are deferred to the admitted path; refusing here is not a
+            # no-op, it is a mutation.
+            divergent_turns = len(stored)
             stored = []
             extends = False
-        discards.append(_record_refusal(root, {
-            "session_id": snapshot.session_id,
-            "capture_key": capture_key(snapshot.session_id, snapshot.turns),
-            "reason": DISCARD_META_UNREADABLE,
-            "retained": True,
-            "detail": f"the stored meta ({meta_path.name}) could not be read or"
-                      f" used; {note}",
-        }, stamp=f"unusable-meta:{snapshot.session_id}"))
-
-    if extends:
-        log_text = "".join(_serialise_turn(t) for t in snapshot.turns[len(stored):])
-    else:
-        log_text = "".join(_serialise_turn(t) for t in snapshot.turns)
 
     if extends:
         log_text = "".join(_serialise_turn(t) for t in snapshot.turns[len(stored):])
@@ -2361,9 +2372,33 @@ def write_spool_entry(
         # bound — the reviewer's 1032-byte conversation, destroyed by one
         # oversized turn — the entry is legal and fileable, and all this write
         # needs is to be refused.
-        if prior is not None:
+        if entry_on_disk:
             on_disk = _entry_bytes(root, snapshot.session_id)
             if on_disk > bounds.max_entry_bytes:
+                if prior is None:
+                    # The entry is on disk and over the bound, but its META cannot
+                    # be read — so it cannot be marked terminal either (#14347
+                    # review F2, consequence 4). This used to fall into the
+                    # FRESH arm below, which recorded `retained: False` /
+                    # `bytes: 0` about an entry that is demonstrably on disk.
+                    # Refuse it: retained, counted, and reversible once the bytes
+                    # are readable again (`--retry-terminal` needs a meta).
+                    discards.append(_record_refusal(root, {
+                        "session_id": snapshot.session_id,
+                        "capture_key": meta["capture_key"],
+                        "reason": DISCARD_ENTRY_TOO_LARGE,
+                        "retained": True,
+                        "detail": (
+                            f"{detail}, and the content already on disk"
+                            f" ({on_disk} bytes) is also over that bound, so this"
+                            " entry can never be filed — but its meta cannot be"
+                            " read, so it cannot be marked terminal either. The"
+                            " write is REFUSED and the entry left byte-identical"
+                            " (a retained refusal, never a reported loss)"
+                        ),
+                    }))
+                    return {"written": False, "bytes": on_disk,
+                            "discards": discards}
                 # The stored entry can never be filed: RETAINED and marked
                 # terminal, exactly like a permanent HTTP refusal
                 # (`_quarantine_entry`, #7708). This branch used to be the one
@@ -2432,11 +2467,18 @@ def write_spool_entry(
     # in both directions: a new entry could cross the byte ceiling on its own, and
     # an EXISTING entry could grow past it with no eviction path at all (measured
     # 3.07x the byte ceiling with an empty ledger — capture-loss residual 6).
+    replaces_session_id = snapshot.session_id if entry_on_disk else None
     if _admission_saturated(
         root, bounds,
         session_id=snapshot.session_id,
         projected_bytes=entry_bytes,
-        replaces_session_id=(snapshot.session_id if prior else None),
+        # #14347 review F2: an entry that occupies disk is a REPLACEMENT, whether
+        # or not its meta was readable. Passing `None` for the unusable arm made
+        # the byte total count the entry twice (its retained bytes, then the full
+        # projected entry instead of the delta), which refused growths the health
+        # line called healthy AND inflated the count term by one for a write that
+        # adds no entry.
+        replaces_session_id=replaces_session_id,
     ):
         discards.append(_record_refusal(root, {
             "session_id": snapshot.session_id,
@@ -2446,7 +2488,7 @@ def write_spool_entry(
             "detail": (
                 f"spool is at its ceiling (max_entries={bounds.max_entries},"
                 f" max_total_bytes={bounds.max_total_bytes}) with NOTHING"
-                f" evictable — this {'session GROWTH' if prior else 'NEW session'}"
+                f" evictable — this {'session GROWTH' if entry_on_disk else 'NEW session'}"
                 " was REFUSED rather than evicting an UNDELIVERED entry; the"
                 " turns the spool already holds are kept, and any newer turn is"
                 " still in the harness session log"
@@ -2455,10 +2497,55 @@ def write_spool_entry(
             # answered from this stamp instead of re-parsing every meta
             # (`_refused_at_current_state`).
         }, bounds=bounds, projected_bytes=entry_bytes,
-            replaces_session_id=(snapshot.session_id if prior else None)))
+            replaces_session_id=replaces_session_id))
         return {"written": False,
-                "bytes": (_entry_bytes(root, snapshot.session_id) if prior else 0),
+                "bytes": (_entry_bytes(root, snapshot.session_id)
+                          if entry_on_disk else 0),
                 "discards": discards}
+
+    if divergent_turns:
+        # ⛔ THE QUARANTINE HAPPENS HERE, ON THE ADMITTED PATH ONLY (#14347 review
+        # F3/F4). Above the guards it mutated the spool before the decision, so a
+        # refusal had already moved the only addressable copy of the transcript.
+        # And `_quarantine_log` returns None for TWO outcomes — "nothing to keep"
+        # and "the rename FAILED" — so accepting None blindly fell through to
+        # `_atomic_write` over the still-present log: a DESTRUCTION disclosed as a
+        # retention (`retained: True`). A log that still has bytes after a failed
+        # quarantine is the third disposition — REFUSE, entry byte-identical.
+        quarantined = _quarantine_log(log_path)
+        if quarantined is None and _file_size(log_path) > 0:
+            discards.append(_record_refusal(root, {
+                "session_id": snapshot.session_id,
+                "capture_key": meta["capture_key"],
+                "reason": DISCARD_META_UNREADABLE,
+                "retained": True,
+                "detail": (
+                    f"the stored meta ({meta_path.name}) could not be read or"
+                    " used, and its stored turn log could not be moved aside"
+                    f" ({divergent_turns} turn(s) still at"
+                    f" {log_path.name}) — so this snapshot was REFUSED and the"
+                    " entry left byte-identical: writing it would overwrite the"
+                    " very turns this path exists to preserve"
+                ),
+            }, stamp=f"unusable-meta-unquarantinable:{snapshot.session_id}"))
+            return {"written": False,
+                    "bytes": _entry_bytes(root, snapshot.session_id),
+                    "discards": discards}
+        note = (
+            f"this snapshot diverges from the stored log, so the stored"
+            f" {divergent_turns} turn(s) were QUARANTINED to"
+            f" {quarantined.name if quarantined is not None else '(none)'}"
+            " — preserved on disk for forensics and still counted against"
+            " the byte ceiling — and the entry was rewritten from this"
+            " snapshot; the retry/filing state could not be carried forward")
+        discards.append(_record_refusal(root, {
+            "session_id": snapshot.session_id,
+            "capture_key": meta["capture_key"],
+            "reason": DISCARD_META_UNREADABLE,
+            "retained": True,
+            "detail": f"the stored meta ({meta_path.name}) could not be read or"
+                      f" used; {note}",
+        }, stamp=f"unusable-meta:{snapshot.session_id}"))
 
     try:
         if extends:

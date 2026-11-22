@@ -2416,7 +2416,16 @@ surfaces:
   # registered under `core` because `tortoise/capture_spool.py` and
   # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
   - test_capture_spool.py
-  # #6388: the session-events DRAIN's CLI consumer (`tortoise session drain`) and
+  # #14342 D2 (#12483/#12484/#12487): the spool-integrity guard belongs beside
+  # `test_capture_spool.py` for the SAME two reasons — its CLI surface
+  # (`tortoise session spool` / `session drain`) lives in `tortoise/__main__.py`,
+  # an EXACT `api` SOURCE_PATTERNS match, so an api-only diff would otherwise run
+  # no guard for the arithmetic this file pins. The `core` row below is the
+  # mechanism half (`tortoise/capture_spool.py` matches no named surface).
+  # ⛔ Both rows are required: an unregistered test file also reds the
+  # `manifest-integrity` leg (`tools/ci_selection.py --integrity`), and the tests
+  # themselves would then run on NO surface at all.
+  - test_12483_12487_spool_integrity.py
   # its SessionStart hook live in `tortoise/__main__.py`, an EXACT `api`
   # SOURCE_PATTERNS match. A match REPLACES the `core` fallback in `select()`, so
   # a `__main__.py`-only diff selected `api` and NOT this guard — the #1349/#2938
@@ -6756,6 +6765,12 @@ surfaces:
   # tortoise/__main__.py); this `core` entry is what runs the guard when the
   # spool module itself — an unmatched `tortoise/` path — changes.
   - test_capture_spool.py
+  # #14342 D2 (#12483/#12484/#12487): the spool-integrity guard's MECHANISM half.
+  # `tortoise/capture_spool.py` matches no named `SOURCE_PATTERNS` entry, so it
+  # falls through to `core`; without this row a change to the spool module itself
+  # would run no guard for the retained-unreadable accounting it pins. Dual
+  # registration mirrors `test_capture_spool.py` one block up.
+  - test_12483_12487_spool_integrity.py
   # #6388: the session-events SEAL policy (`tools/seal_session_events.py` —
   # compress, never discard, per the #3870 ruling). `tools/` is a flat
   # NON_PYTHON_PREFIXES entry, so a change to that tool selects NO surface on
@@ -14380,6 +14395,12 @@ durations:
   test_session_attribution.py: 0.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.3
   test_session_import_codex.py: 23.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 23.6
   test_capture_spool.py: 4.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 5.1
+  # #14342 D2: registering `test_12483_12487_spool_integrity.py` puts one more file
+  # in `fast_pool()`, and `--integrity`'s duration-coverage floor (0.90) is
+  # measured against that pool's own size — so the row must EXIST, not merely
+  # default. Measured locally: 17 tests, DB-free / graph-free / network-free /
+  # model-free, every case under `tmp_path`.
+  test_12483_12487_spool_integrity.py: 1.5
   test_6388_session_events_drain.py: 0.3  # The row has to EXIST, not merely default: the `core` + `api` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: DB-free, graph-free, network-free and model-free — every case writes day files under `tmp_path` (`TORTOISE_SESSION_EVENTS_DIR`/`store=`) and drives `drain_session_events` with a recording `PostOutcome` transport; the only subprocess-free cost is gzip encode/decode on the sealed-day cases. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
   # #3516 §B: the capture-lane marker. Measured as the CALL sum of an
   # embedded-lane run (23 tests, four of them HTTP round-trips); the docker

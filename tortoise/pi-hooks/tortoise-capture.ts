@@ -2308,7 +2308,16 @@ export function writeSpoolEntry(
   const priorRead = readSpoolEntryState(dir, snapshot.sessionId);
   const prior = priorRead.meta;
   const unusablePrior = priorRead.state === PRIOR_META_UNUSABLE;
-  const storedRead = prior !== undefined || unusablePrior
+  // ⛔ `prior === undefined` IS NOT "THE ENTRY IS ON DISK" (#14347 review F2).
+  // In the UNUSABLE arm `prior` is undefined BY DEFINITION while the entry —
+  // meta AND turn log — still occupies bytes. Every question that is really
+  // about disk occupancy (is this write a REPLACEMENT? is the stored content
+  // over `maxEntryBytes`?) must ask THIS. Asking the wrong one counted a growth
+  // of an unreadable entry TWICE, so the writer refused at ~half the byte
+  // ceiling while the health line reported the same spool healthy. Mirrors
+  // `capture_spool.write_spool_entry`.
+  const entryOnDisk = priorRead.state !== PRIOR_META_ABSENT;
+  const storedRead = entryOnDisk
     ? readSpoolTurnsState(dir, snapshot.sessionId)
     : { turns: [] as Turn[], state: TURNS_ABSENT };
   let stored = storedRead.turns;
@@ -2380,6 +2389,9 @@ export function writeSpoolEntry(
     );
 
   let extendsLog = extendsStored;
+  // The stored turn count this write would QUARANTINE if it is admitted —
+  // resolved before the guards and APPLIED after them (#14347 review F3).
+  let divergentTurns = 0;
   if (unusablePrior) {
     // ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
     // (#12487). Measured on the Python twin (the same code): `written: true` with
@@ -2429,39 +2441,38 @@ export function writeSpoolEntry(
       );
       return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
     }
-    let note: string;
     if (extendsLog) {
-      note =
+      const note =
         `the write APPENDED ${snapshot.turns.length - stored.length} new turn(s)` +
         " and overwrote nothing; the entry's retry/filing state could not be" +
         " carried forward (it lived in the unreadable meta), so the entry may" +
         " re-POST once";
+      discards.push(
+        recordRefusal(
+          dir,
+          {
+            session_id: snapshot.sessionId,
+            capture_key: captureKey(snapshot.sessionId, snapshot.turns),
+            reason: DISCARD_META_UNREADABLE,
+            retained: true,
+            detail:
+              `the stored meta (${basename(metaPath)}) could not be read or used; ` + note,
+          },
+          { stamp: `unusable-meta:${snapshot.sessionId}` },
+        ),
+      );
     } else {
-      const moved = quarantineLog(logPath);
-      note =
-        `this snapshot diverges from the stored log, so the stored` +
-        ` ${stored.length} turn(s) were QUARANTINED to` +
-        ` ${moved === undefined ? "(none)" : basename(moved)}` +
-        " — preserved on disk for forensics and still counted against the byte" +
-        " ceiling — and the entry was rewritten from this snapshot; the" +
-        " retry/filing state could not be carried forward";
+      // ⛔ NOTHING IS MOVED YET (#14347 review F3). The guards BELOW can still
+      // REFUSE this write, and a refusal must leave the entry byte-identical.
+      // Quarantining here renamed the stored log BEFORE the decision, so a
+      // REFUSED write had already moved the only addressable copy of the
+      // transcript its own refusal text promised was "kept". The disarm and the
+      // record are deferred to the admitted path; refusing is not a no-op, it
+      // is a mutation. Mirrors `capture_spool.write_spool_entry`.
+      divergentTurns = stored.length;
       stored = [];
       extendsLog = false;
     }
-    discards.push(
-      recordRefusal(
-        dir,
-        {
-          session_id: snapshot.sessionId,
-          capture_key: captureKey(snapshot.sessionId, snapshot.turns),
-          reason: DISCARD_META_UNREADABLE,
-          retained: true,
-          detail:
-            `the stored meta (${basename(metaPath)}) could not be read or used; ` + note,
-        },
-        { stamp: `unusable-meta:${snapshot.sessionId}` },
-      ),
-    );
   }
 
   const logText = extendsLog
@@ -2565,9 +2576,30 @@ export function writeSpoolEntry(
     // reviewer's 1032-byte conversation, destroyed by one oversized turn — the
     // entry is legal and fileable, and all this write needs is to be REFUSED.
     // Mirrors the Python writer's `capture_spool.write_spool_entry`.
-    if (prior) {
+    if (entryOnDisk) {
       const onDisk = spoolEntryBytes(dir, snapshot.sessionId);
       if (onDisk > bounds.maxEntryBytes) {
+        if (prior === undefined) {
+          // On disk and over the bound, but the META cannot be read — so it
+          // cannot be marked terminal either (#14347 review F2, consequence 4).
+          // This used to fall into the FRESH arm below, recording
+          // `retained: false` / `bytes: 0` about an entry that is on disk.
+          discards.push(
+            recordRefusal(dir, {
+              session_id: snapshot.sessionId,
+              capture_key: meta.capture_key,
+              reason: DISCARD_ENTRY_TOO_LARGE,
+              retained: true,
+              detail:
+                `${detail}, and the content already on disk (${onDisk} bytes) is` +
+                " also over that bound, so this entry can never be filed — but its" +
+                " meta cannot be read, so it cannot be marked terminal either. The" +
+                " write is REFUSED and the entry left byte-identical (a retained" +
+                " refusal, never a reported loss)",
+            }),
+          );
+          return { written: false, bytes: onDisk, discards };
+        }
         // The stored entry can never be filed: RETAINED and marked terminal,
         // exactly like a permanent HTTP refusal (`quarantineEntry`, #7708). This
         // branch used to be the one place that deleted a PREVIOUSLY SPOOLED
@@ -2636,10 +2668,16 @@ export function writeSpoolEntry(
   // directions: a new entry could cross the byte ceiling on its own, and an
   // EXISTING entry could grow past it with no eviction path at all (measured
   // 3.07x the byte ceiling with an empty ledger — capture-loss residual 6).
+  const replacesSessionId: string | undefined = entryOnDisk
+    ? snapshot.sessionId
+    : undefined;
   if (
     admissionSaturated(dir, bounds, {
       projectedBytes: entryBytes,
-      replacesSessionId: prior ? snapshot.sessionId : undefined,
+      // #14347 review F2: an entry that occupies disk is a REPLACEMENT, whether
+      // or not its meta was readable. `undefined` here counted the entry twice
+      // and inflated the count term by one for a write that adds no entry.
+      replacesSessionId,
       sessionId: snapshot.sessionId,
     })
   ) {
@@ -2654,7 +2692,7 @@ export function writeSpoolEntry(
           detail:
             `spool is at its ceiling (maxEntries=${bounds.maxEntries},` +
             ` maxTotalBytes=${bounds.maxTotalBytes}) with NOTHING evictable —` +
-            ` this ${prior ? "session GROWTH" : "NEW session"} was REFUSED rather` +
+            ` this ${entryOnDisk ? "session GROWTH" : "NEW session"} was REFUSED rather` +
             " than evicting an UNDELIVERED entry; the turns the spool already" +
             " holds are kept, and any newer turn is still in the harness session log",
         },
@@ -2663,15 +2701,67 @@ export function writeSpoolEntry(
         {
           bounds,
           projectedBytes: entryBytes,
-          replacesSessionId: prior ? snapshot.sessionId : undefined,
+          replacesSessionId,
         },
       ),
     );
     return {
       written: false,
-      bytes: prior ? spoolEntryBytes(dir, snapshot.sessionId) : 0,
+      bytes: entryOnDisk ? spoolEntryBytes(dir, snapshot.sessionId) : 0,
       discards,
     };
+  }
+
+  if (divergentTurns > 0) {
+    // ⛔ THE QUARANTINE HAPPENS HERE, ON THE ADMITTED PATH ONLY (#14347 review
+    // F3/F4). Above the guards it mutated the spool before the decision. And
+    // `quarantineLog` returns `undefined` for TWO outcomes — "nothing to keep"
+    // and "the rename FAILED" — so accepting it blindly fell through to
+    // `atomicWrite` over the still-present log: a DESTRUCTION disclosed as a
+    // retention (`retained: true`). A log that still has bytes after a failed
+    // quarantine is the third disposition — REFUSE, entry byte-identical.
+    const quarantined = quarantineLog(logPath);
+    if (quarantined === undefined && fileSize(logPath) > 0) {
+      discards.push(
+        recordRefusal(
+          dir,
+          {
+            session_id: snapshot.sessionId,
+            capture_key: meta.capture_key,
+            reason: DISCARD_META_UNREADABLE,
+            retained: true,
+            detail:
+              `the stored meta (${basename(metaPath)}) could not be read or used,` +
+              ` and its stored turn log could not be moved aside (${divergentTurns}` +
+              ` turn(s) still at ${basename(logPath)}) — so this snapshot was` +
+              " REFUSED and the entry left byte-identical: writing it would" +
+              " overwrite the very turns this path exists to preserve",
+          },
+          { stamp: `unusable-meta-unquarantinable:${snapshot.sessionId}` },
+        ),
+      );
+      return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
+    }
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: meta.capture_key,
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail:
+            `the stored meta (${basename(metaPath)}) could not be read or used; ` +
+            `this snapshot diverges from the stored log, so the stored` +
+            ` ${divergentTurns} turn(s) were QUARANTINED to` +
+            ` ${quarantined === undefined ? "(none)" : basename(quarantined)}` +
+            " — preserved on disk for forensics and still counted against the byte" +
+            " ceiling — and the entry was rewritten from this snapshot; the" +
+            " retry/filing state could not be carried forward",
+        },
+        { stamp: `unusable-meta:${snapshot.sessionId}` },
+      ),
+    );
   }
 
   try {

@@ -35,6 +35,7 @@ from pathlib import Path
 from tortoise.capture_spool import (
     Bounds,
     Snapshot,
+    _entry_bytes,
     _entry_is_filed,
     _log_path,
     _meta_path,
@@ -363,3 +364,136 @@ def test_the_two_legs_no_longer_disagree_DESTRUCTIVELY_on_non_utf8(tmp_path):
     assert meta.exists() and log.exists()
     assert not list(_entries(tmp_path).glob("*.orphan*"))
     assert [d["reason"] for d in read_discards(tmp_path)] == ["meta_unreadable"]
+
+
+# ── #14347 review — the seams the new third state opens ────────────────────
+#
+# The three-state split (`_read_prior_meta`) is right; these pin the places where
+# the NEW state met arithmetic and control flow that still assumed the old two.
+# Each test names the mutation that reopens its defect.
+
+
+def test_a_growth_of_an_unreadable_entry_is_counted_ONCE(tmp_path):
+    """#14347 review F2 — ``prior is None`` is not "nothing is on disk".
+
+    In the UNUSABLE arm the meta cannot be read, but the entry still occupies
+    bytes. Asking the admission guard with ``replaces_session_id=None`` made the
+    byte total count it TWICE — once through the retained-unreadable term, once
+    through a full-entry projection that was never subtracted — so a growth whose
+    true post-write size is under the ceiling was REFUSED, at roughly half the
+    ceiling, forever (the refusal replays from its stamp). It also made the
+    health line disagree with the writer: the health line does not project, so it
+    reported the same spool healthy.
+
+    MUTATION THAT REDS THIS: ``replaces_session_id=(snapshot.session_id if prior
+    else None)`` — the pre-fix line. `written` becomes False and the health line
+    calls the same spool fine.
+    """
+    locked = _write_meta(tmp_path, "sess-g", filed_key="OLDKEY")
+    stored = [{"role": "user", "content": f"turn-{i}"} for i in range(6)]
+    _write_turns(tmp_path, "sess-g", stored)
+    grown = [*stored, {"role": "assistant", "content": "turn-6"}]
+
+    # The size the write will really put on disk, measured on a twin spool so the
+    # bound is derived from the code's own definition rather than hardcoded.
+    probe = tmp_path / "probe"
+    write_spool_entry(probe, _snapshot("sess-g", turns=grown), ROOMY)
+    projected = _entry_bytes(probe, "sess-g")
+    # Room for the post-write entry and nothing else. Double-counting the entry
+    # it replaces overflows this by its own size.
+    bounds = Bounds(max_entries=1000, max_total_bytes=projected + 8,
+                    max_entry_bytes=1 << 20)
+
+    _lock(locked)
+    try:
+        res = write_spool_entry(tmp_path, _snapshot("sess-g", turns=grown), bounds)
+    finally:
+        _unlock(locked)
+
+    assert res["written"] is True, (
+        "the entry this write REPLACES must be subtracted from the projection — "
+        f"counted twice it overflows a ceiling the write cannot cross: {res['discards']}")
+    assert not [d for d in res["discards"] if d["reason"] == "spool_saturated"]
+    assert spool_saturated(tmp_path, bounds) is False, (
+        "the writer admitted the write, so the same spool must not read SATURATED")
+    assert capture_health_line(tmp_path, bounds=bounds).state != "saturated", (
+        "a healthy health line over a refused write is the false PASS (#2100) "
+        "this accounting exists to remove")
+
+
+def test_a_REFUSED_write_does_not_quarantine_the_log_it_refuses_to_replace(tmp_path):
+    """#14347 review F3 — a refusal must not mutate the spool.
+
+    On the diverging disposition the writer quarantined the stored log (a rename
+    to ``.orphan``) BEFORE the guards decided, so a REFUSED write had already
+    moved the only addressable copy of the transcript its own refusal text
+    promised was "kept", on exactly the saturated box that makes the refusal
+    likely. Nothing may move until the write is admitted.
+
+    MUTATION THAT REDS THIS: call ``_quarantine_log(log_path)`` inside the
+    ``unusable`` block, above the guards — the log leaves its live name and an
+    ``.orphan`` appears for a write that was never written.
+    """
+    locked = _write_meta(tmp_path, "sess-r")
+    stored = [{"role": "user", "content": f"turn-{i}"} for i in range(6)]
+    log = _write_turns(tmp_path, "sess-r", stored)
+    _lock(locked)
+    try:
+        bounds = Bounds(max_entries=1000, max_total_bytes=1,
+                        max_entry_bytes=1 << 20)
+        res = write_spool_entry(tmp_path, _snapshot("sess-r", turns=stored[:1]), bounds)
+    finally:
+        _unlock(locked)
+
+    assert res["written"] is False
+    assert res["discards"][-1]["reason"] == "spool_saturated"
+    assert not list(_entries(tmp_path).glob("*.orphan*")), (
+        "a refused write must leave the entry byte-identical: the transcript was "
+        "moved aside for a write that never happened")
+    assert log.exists(), "the stored log must still be at its live, addressable name"
+    assert len(log.read_text(encoding="utf-8").splitlines()) == len(stored)
+
+
+def test_a_FAILED_quarantine_refuses_instead_of_overwriting_the_log(tmp_path, monkeypatch):
+    """#14347 review F4 — `_quarantine_log` returns ``None`` for TWO outcomes.
+
+    "Nothing to keep" and "the rename FAILED" were indistinguishable to the
+    caller, so a failed quarantine fell through to ``_atomic_write`` over the
+    still-present stored log: the turns were DESTROYED while the record said
+    ``retained: True`` (a destruction disclosed as a retention — fail-open). A
+    log that still has bytes after a failed quarantine is the third disposition:
+    REFUSE, entry byte-identical.
+
+    MUTATION THAT REDS THIS: accept ``None`` from ``_quarantine_log`` without
+    checking that the log is gone — `written` becomes True and the six stored
+    turns are replaced by one.
+    """
+    import tortoise.capture_spool as spool_mod
+
+    locked = _write_meta(tmp_path, "sess-q")
+    stored = [{"role": "user", "content": f"turn-{i}"} for i in range(6)]
+    log = _write_turns(tmp_path, "sess-q", stored)
+    real_replace = spool_mod.os.replace
+
+    def refuse_orphan(src, dst, *a, **kw):
+        # Only the quarantine move fails; the tmp -> live-log replace still works,
+        # which is the exact shape that turned the failure into an overwrite.
+        if str(dst).find(".orphan") >= 0:
+            raise OSError(13, "Permission denied", str(dst))
+        return real_replace(src, dst, *a, **kw)
+
+    monkeypatch.setattr(spool_mod.os, "replace", refuse_orphan)
+    _lock(locked)
+    try:
+        res = write_spool_entry(tmp_path, _snapshot("sess-q", turns=stored[:1]), ROOMY)
+    finally:
+        _unlock(locked)
+        monkeypatch.setattr(spool_mod.os, "replace", real_replace)
+
+    assert res["written"] is False
+    assert res["discards"][-1]["retained"] is True
+    assert "could not be moved aside" in res["discards"][-1]["detail"]
+    assert not list(_entries(tmp_path).glob("*.orphan*"))
+    assert len(log.read_text(encoding="utf-8").splitlines()) == len(stored), (
+        "a quarantine that failed must never be followed by an overwrite of the "
+        "very log it could not move")

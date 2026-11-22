@@ -1031,18 +1031,23 @@ def test_the_ONE_health_scan_answers_both_questions_the_same_way(tmp_path):
 
     This pin is the equivalence proof: for a spool holding one of EVERY shape the
     two walks treat differently — a plain undelivered entry, a FILED entry, a
-    TERMINAL entry, and a corrupt meta (which counts as PENDING but is excluded
-    from the saturation metas) — the combined scan must reproduce
-    `count_pending_captures` and `spool_saturated(repair=False)` exactly.
+    TERMINAL entry, a corrupt meta (which counts as PENDING but is excluded from
+    the saturation metas), a meta with no usable session id, and a READ-REFUSED
+    meta whose bytes are counted by the third element — the combined scan must
+    reproduce `count_pending_captures` and `spool_saturated(repair=False)`
+    exactly.
 
     MUTATION THAT REDS THIS: drop the `on_disk - len(metas)` term -> the corrupt
-    meta stops counting as pending (2 -> 1) and the box reads healthier than it
+    meta stops counting as pending (3 -> 2) and the box reads healthier than it
     is; or call `spool_saturated` again instead of reusing the metas -> the count
-    term below still matches, so the red is the corrupt-meta one.
+    term below still matches, so the red is the corrupt-meta one; or return a
+    constant `0` as `_health_scan`'s third element -> the read-refused entry's
+    bytes leave the byte-ceiling verdict the health line reaches.
     """
     from tortoise.capture_spool import (
         Bounds,
         _health_scan,
+        _log_path,
         _meta_path,
         _saturated_for_metas,
         _write_meta,
@@ -1063,28 +1068,47 @@ def test_the_ONE_health_scan_answers_both_questions_the_same_way(tmp_path):
     _meta_path(tmp_path, "corrupt").write_text("{not json", encoding="utf-8")
     (tmp_path / "entries" / "nometa.meta.json").write_text(
         json.dumps({"version": 1}), encoding="utf-8")
+    # ⛔ AND a READ-REFUSED entry (#14347 review F6). Without it the third element
+    # of `_health_scan` is structurally 0 here (`_unreadable_entry_bytes(root, [])`
+    # = the parameter default), so forwarding it proves nothing: the mutant
+    # `_health_scan` -> `return pending, metas, 0` left this test GREEN. An
+    # unreadable meta is now one of the shapes the two walks treat differently, so
+    # it belongs in this fixture and the operand must be able to VARY.
+    unreadable_meta = _meta_path(tmp_path, "locked")
+    unreadable_meta.write_text(
+        json.dumps({"version": 1, "session_id": "locked"}), encoding="utf-8")
+    _log_path(tmp_path, "locked").write_text(
+        "".join(json.dumps(t) + "\n" for t in ({"role": "user", "content": "z" * 64},)),
+        encoding="utf-8")
+    unreadable_meta.chmod(0o000)
+    try:
+        scanned = _health_scan(tmp_path)
+        assert scanned is not None
+        pending, metas, unreadable_bytes = scanned
 
-    scanned = _health_scan(tmp_path)
-    assert scanned is not None
-    pending, metas, unreadable_bytes = scanned
+        assert unreadable_bytes > 0, (
+            "the forwarded operand must be able to VARY, or the equivalence below "
+            "is a tautology and a mutant returning a constant 0 stays green")
 
-    assert pending == count_pending_captures(tmp_path) == 3, (
-        "pending must mean the same thing on both walks: `undelivered`, plus the "
-        "two metas neither walk can read (they may be waiting, so folding them "
-        "into 'nothing to do' is the false pass this health state exists to "
-        "remove) — and NOT `delivered` or `terminal`, which a drain skips")
+        assert pending == count_pending_captures(tmp_path) == 4, (
+            "pending must mean the same thing on both walks: `undelivered`, plus "
+            "the three metas neither walk can read (they may be waiting, so folding "
+            "them into 'nothing to do' is the false pass this health state exists "
+            "to remove) — and NOT `delivered` or `terminal`, which a drain skips")
 
-    for bounds in (roomy,
-                   # The count ceiling binds (two live metas, nothing filed).
-                   Bounds(max_entries=1, max_total_bytes=1 << 30,
-                          max_entry_bytes=1 << 20),
-                   # The byte ceiling binds.
-                   Bounds(max_entries=1000, max_total_bytes=1,
-                          max_entry_bytes=1 << 20)):
-        assert _saturated_for_metas(tmp_path, metas, bounds,
-                                    unreadable_bytes=unreadable_bytes) is \
-            spool_saturated(tmp_path, bounds, repair=False), (
-                f"the reused metas must reach the SAME verdict: {bounds}")
+        for bounds in (roomy,
+                       # The count ceiling binds (two live metas, nothing filed).
+                       Bounds(max_entries=1, max_total_bytes=1 << 30,
+                              max_entry_bytes=1 << 20),
+                       # The byte ceiling binds.
+                       Bounds(max_entries=1000, max_total_bytes=1,
+                              max_entry_bytes=1 << 20)):
+            assert _saturated_for_metas(tmp_path, metas, bounds,
+                                        unreadable_bytes=unreadable_bytes) is \
+                spool_saturated(tmp_path, bounds, repair=False), (
+                    f"the reused metas must reach the SAME verdict: {bounds}")
+    finally:
+        unreadable_meta.chmod(0o600)
 
 
 def test_a_HEALTH_read_never_repairs_the_spool_it_describes(tmp_path):
