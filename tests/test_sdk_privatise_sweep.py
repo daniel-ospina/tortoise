@@ -264,9 +264,14 @@ def _residue_block() -> str:
     the block) moved it to 1147, correcting that note's own mis-quoted ending — it called a
     PREFIX of the sentence its close — moved it to 1152, and correcting that note's FALSE account
     of how the second address rotted, plus an unreproducible "18 of the last 20" count in the
-    same block, moved it to 1163, and the correction that follows — naming THIS sentence rather
-    than "a sibling sentence" — took it the rest of the way, to the figure this docstring opens
-    with. ⛔ "THIS sentence", NOT "a sibling sentence" (cycle 2, P3): at `04afeb811d` the only
+    same block, moved it to 1163, and the correction naming THIS sentence rather than "a sibling
+    sentence" took it to 1165. ⛔ THE CHAIN STOPS THERE ON PURPOSE (#14282 review cycle 4, P3): it
+    used to end "to the figure this docstring opens with", which is a RELATIVE reference — so the
+    next edit that changed the figure silently re-pointed the history's last link at a value the
+    history never measured (measured: this note's own edit took 1165 → 1172 and the sentence went
+    on naming it as if a listed edit had). Hops that only re-derive the figure for a docstring
+    edit are this sentence's git history, not the pin's, and are not logged past the instructive
+    ones. ⛔ "THIS sentence", NOT "a sibling sentence" (cycle 2, P3): at `04afeb811d` the only
     occurrence of the 985 reading in the tree was THIS sentence (`git grep -n "985 lines"
     04afeb811d` returns exactly one hit), so a sibling never published it. Every one of those
     readings was an honest
@@ -1908,7 +1913,30 @@ def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
 # prose arms. So the block is graded against `OWN_PINS`, an object-FREE map, and the map is
 # graded against each rev's committed pin by the premise arm that follows it.
 _OWN_PIN_CLAIM_RE = re.compile(
-    r"(?:Its own pin[\s#:]+is|commits)[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+    r"(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits)[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+#: How many clauses the pattern must match is NOT typed: it is counted off the block below.
+#: ⛔ THE WRAP IS GRADED HERE BECAUSE A RE-WRAP SILENTLY DISARMS THIS ARM (#14282 review cycle 4,
+#: P1, measured). The pattern was `Its own pin[\s#:]+is` — it tolerated a wrap between `pin` and
+#: `is` but NOT between `Its` and `own`, so re-wrapping one sentence put `Its` at the end of a line
+#: and the clause stopped matching. `10e51693f1`'s published pair then passed a mutant that set it
+#: to `(99999, "aaaaaaaaaaaaaaaa")`: the whole suite stayed green, which is a FALSE PASS — the
+#: exact failure this file exists to catch, introduced by a prose edit. The pattern now breaks at
+#: ANY of those word boundaries, AND the parity assertion below makes a silent drop impossible
+#: however the sentence is wrapped next.
+_OWN_PIN_CLAUSE_TEXT_RE = re.compile(
+    r"(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits)[\s#:]*`\(")
+#: ⛔ THE PARITY PARTNER IS DELIBERATELY LOOSER THAN `_OWN_PIN_CLAIM_RE` IN EXACTLY ONE DIMENSION: it
+#: stops after the OPENING BACKTICKED PAREN, so it does not grade the pair's CONTENTS. It therefore
+#: catches a failure the matcher's own tolerances cannot — a PAIR that was wrapped or malformed (the
+#: digest split across lines, or `[\"']` lost) still reads as a clause to the loose form and not to
+#: the strict one. A bare `commits` in prose does NOT count, because the loose form requires the
+#: opening paren: measured on this block `commits` appears as an ordinary word many times and
+#: exactly twice before a pair, and an earlier cut of this assertion counted every one of them and
+#: reded an honest block with `6 == 18` — the arm grading the WRONG POPULATION, which is the same
+#: defect class as the wrap it was written to catch, one level up. ⛔ AND IT USES `[\s#:]+` BETWEEN
+#: THE PHRASE'S OWN WORDS, not `\s+`: this block's line breaks are `\n#: `, so the `#:` is INSIDE the
+#: gap and `\s+` alone matched one claim fewer than the matcher did — measured, and that asymmetry
+#: is why the word-level separator must match the matcher's while only the pair body is relaxed.
 _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 
 #: rev -> the `(rows, digest)` pair the block publishes AS that rev's own pin.
@@ -1986,6 +2014,16 @@ def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
     assert claims, (
         "non-vacuity: the block still publishes at least one rev's OWN pin — deleting the "
         "sentence is not the fix for a wrong pair")
+    #: ⛔ COUNT PARITY, so a RE-WRAP cannot silently disarm this arm (#14282 review cycle 4, P1).
+    #: Every textual `Its own pin is` / `commits` clause in the block must yield a claim; a wrap
+    #: that broke the match already caused one false pass once, and this makes the next such edit
+    #: RED instead of green without anybody having to notice the regex.
+    published_clauses = len(_OWN_PIN_CLAUSE_TEXT_RE.findall(block))
+    assert len(claims) == published_clauses, (
+        f"the block publishes {published_clauses} \"Its own pin is\"/\"commits\" clause(s) but "
+        f"only {len(claims)} parsed as a graded claim — a WRAP (or a spelling) has disarmed this "
+        "arm, and every pair in the unparsed clause(s) is passing ungraded. Re-wrap so the "
+        "phrase is contiguous, or widen `_OWN_PIN_CLAIM_RE`")
     # ⛔ THE `commits` SPELLING MUST BE FOUND, not merely tolerated (#14258 review, P3 and the
     # mutation-attribution rule). Widening `_OWN_PIN_CLAIM_RE` ADDED an assertion surface — two
     # block clauses that were ungraded became graded — and without this arm REVERTING the
