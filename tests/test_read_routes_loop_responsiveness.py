@@ -1749,6 +1749,24 @@ _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
     # was inline-on-the-loop before the extraction and still is — same residual,
     # now named.
     "_key_created_analytics",
+    # #14232: the capture ACK's reportable TAIL, extracted out of
+    # `_capture_session_impl` (declared above) so the ACK can be produced before
+    # the tail is awaited. The extraction moved the SAME TWO inline SDK
+    # constructions into a body the scan now sees by its own name —
+    # `completion_sdk = _org_sdk(org["org_id"])` and
+    # `_org_sdk_from_name(org["org_id"], default_ns)` — so the residual is the
+    # one `_capture_session_impl` already carried, and it is named rather than
+    # widened: the pre-split body is still declared, and this body is a strict
+    # subset of it (construction only — it adds no graph-seam hit, which is what
+    # keeps the off-loaded sets' assertion meaningful).
+    #
+    # ⛔ NOT off-loaded, and that is a #7500 decision, not effort: the READ rides
+    # the capture pool (`_run_off_loop(_CAPTURE_EXECUTOR, _org_default_namespace,
+    # …)` three lines above the second construction), while `_make_sdk` may NOT
+    # leave the loop — the same split the indexing lane uses, stated in the code
+    # at the site. Converting it is a unit with its own thread-dependence
+    # measurement (#2446's class), not a one-line swap.
+    "_report_capture",
 })
 
 

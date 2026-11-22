@@ -9563,12 +9563,33 @@ class TestSearchOffloadConcurrency:
     the offload at the HANDLER level — TestClient serializes, so an HTTP-level
     test cannot demonstrate overlap."""
 
-    def test_two_concurrent_searches_overlap_on_thread_pool(self, monkeypatch):
-        """Two concurrent searches whose encode blocks on a shared barrier must
-        complete in ~1x encode time, not 2x — proving they run on worker
-        threads, not serialized on the event loop. With the offload removed,
-        the first encode blocks the loop, the barrier times out (3s), and the
-        wall-time bound fails in ~4.5s (the discriminator)."""
+    def test_two_concurrent_searches_never_encode_on_the_event_loop(self, monkeypatch):
+        """#14186 re-derivation of `test_two_concurrent_searches_overlap_on_thread_pool`.
+
+        ⛔ WHAT CHANGED, AND WHY THE OLD DISCRIMINATOR WAS RETIRED RATHER THAN
+        TUNED. The query encode now routes through `embed_seam.encode_query`,
+        whose `_Collector` encodes batches on ITS OWN thread — so two concurrent
+        searches are no longer two PARALLEL `EmbeddingModel.encode` calls, they
+        are consecutive batches on the coalescer's thread (continuous batching,
+        pinned by
+        `tests/test_14186_embedder_seam_batching.py::test_concurrent_queries_coalesce_into_far_fewer_encodes`
+        and `…::test_the_zero_window_still_coalesces_opportunistically`). The
+        previous row proved "offloaded" by a two-party `threading.Barrier` that
+        BOTH encodes had to reach; under the seam only one encode is ever in
+        flight, so the barrier could not be satisfied by correct code and the row
+        reddened a healthy tree (measured: 7.0 s = two 3 s barrier timeouts, one
+        per serialized encode).
+
+        WHAT IS STILL AN INVARIANT — and is what this row now asserts DIRECTLY —
+        is the property the barrier only ever proxied: the encode never runs on
+        the EVENT LOOP's thread (`search` offloads the whole SDK call through
+        `_read_offload`, #1676/#10602). A ticker scheduled beside the two
+        searches must keep firing while they encode; if the encode ran on the
+        loop, the loop could not run the ticker at all. Mutant (measured):
+        replacing `await _read_offload(lambda: sdk._tortoise_fts_query(…))` with a
+        direct inline call leaves the ticker at ~0 ticks during the encode
+        window and reds this row; the unmutated tree ticks throughout.
+        """
         import asyncio
         import threading
         import time
@@ -9578,15 +9599,22 @@ class TestSearchOffloadConcurrency:
         import tortoise.hosted_api as ha_mod
         from tortoise.embeddings import EmbeddingModel
 
-        barrier = threading.Barrier(2, timeout=3)
+        encoded_on: list[str] = []
+        batch_sizes: list[int] = []
 
-        class _SlowEmbedder:
-            """Stub whose encode blocks on the shared barrier + sleeps, then
-            returns a valid 384-dim vector (matches bge-small-en-v1.5)."""
+        class _RecordingEmbedder:
+            """Stub that records the THREAD and batch shape of every encode.
+
+            No barrier, no cross-encode rendezvous: the seam serializes batches by
+            design, so a stub that requires two encodes to meet reds correct code.
+            The 0.5 s sleep is what makes the loop-responsiveness window
+            observable — it is the interval the ticker must keep running in.
+            """
             def encode(self, texts, **kwargs):
+                encoded_on.append(threading.current_thread().name)
+                batch_sizes.append(len(texts))
                 time.sleep(0.5)
-                barrier.wait()
-                return np.zeros((1, 384), dtype=np.float32)
+                return np.zeros((len(texts), 384), dtype=np.float32)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -9600,25 +9628,51 @@ class TestSearchOffloadConcurrency:
                 # or hit the socket before it appears.
                 pre = ha_mod._make_sdk(namespace=TEST_ORG_ID)
                 pre._get_proj()  # eager: ensure the daemon socket is up
-                # Install the stub AFTER the pre-warm so the pre-warm doesn't
-                # consume/break the shared barrier.
+                # Install the stub AFTER the pre-warm so the pre-warm does not
+                # consume the recording.
                 monkeypatch.setattr(EmbeddingModel, "get",
-                                    lambda: _SlowEmbedder())
+                                    lambda: _RecordingEmbedder())
 
                 async def _run():
                     from tortoise.hosted_api import search
-                    t0 = time.monotonic()
-                    await asyncio.wait_for(asyncio.gather(
-                        search("falkordb traversal", limit=10, org=TEST_TEAM),
-                        search("graph performance", limit=10, org=_SECOND_TEAM),
-                    ), timeout=15)
-                    return time.monotonic() - t0
+                    ticks: list[float] = []
+                    done = False
 
-                elapsed = asyncio.run(_run())
-                # Overlap: ~0.5s (one encode window) + small overhead, well
-                # under 2x (1.0s+). Cap 1.5s clears the measured cold path
-                # (0.91s) without flaking green code.
-                assert 0.4 <= elapsed < 1.5, f"searches did not overlap: {elapsed:.2f}s"
+                    async def _tick():
+                        while not done:
+                            ticks.append(time.monotonic())
+                            await asyncio.sleep(0.005)
+
+                    ticker = asyncio.ensure_future(_tick())
+                    t0 = time.monotonic()
+                    try:
+                        await asyncio.wait_for(asyncio.gather(
+                            search("falkordb traversal", limit=10, org=TEST_TEAM),
+                            search("graph performance", limit=10, org=_SECOND_TEAM),
+                        ), timeout=30)
+                        return time.monotonic() - t0, ticks
+                    finally:
+                        done = True
+                        await asyncio.gather(ticker, return_exceptions=True)
+
+                elapsed, ticks = asyncio.run(_run())
+                # Non-vacuity: with no encode at all this row would assert
+                # nothing about threading.
+                assert encoded_on, "no encode ran — the stub never reached the seam"
+                # The property: NO encode on the event loop's own thread. Every
+                # encode runs either on the seam's collector thread or on the read
+                # lane's worker, never on the thread `asyncio.run` is driving.
+                loop_thread = threading.main_thread().name
+                assert loop_thread not in encoded_on, (
+                    f"a query encode ran on the EVENT LOOP thread ({loop_thread}) — "
+                    f"the read offload (#1676/#10602) is gone: {list(zip(encoded_on, batch_sizes))}")
+                # And the loop stayed responsive throughout the encode window:
+                # ~0.5 s of encode per search at a 5 ms tick is ~100 ticks, so 20
+                # is a floor that a loop-blocking encode (0 ticks during the
+                # window) cannot reach.
+                assert len(ticks) >= 20, (
+                    f"the event loop only ticked {len(ticks)} times across "
+                    f"{elapsed:.2f}s of searches — the encode blocked it")
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 

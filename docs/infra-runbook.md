@@ -4676,7 +4676,7 @@ operator who read the line above as "CI defends this" would never run it.
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
 >    `:1625` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
->    `:3302-3306` (the reader that runs on the deployed box — the `elif` that CALLS the flag and
+>    `:3667-3671` (the reader that runs on the deployed box — the `elif` that CALLS the flag and
 >    the thread it starts; the import and the comment above it are not the reader);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
 >    read at `:432`.

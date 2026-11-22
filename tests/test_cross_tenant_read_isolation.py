@@ -71,6 +71,7 @@ import contextlib
 import contextvars
 import json
 import os
+import time
 import uuid
 
 import pytest
@@ -268,8 +269,46 @@ def xtenant(tmp_path_factory):
 
 # ── Capture (the "capture" half of capture -> read) ──────────────────────────
 
+def _await_extraction(client: TestClient, ack: dict, *, timeout_s: float = 120.0) -> dict:
+    """Poll the ACK's own ``status_url`` until the deferred tail reports done (#14232).
+
+    ⛔ THE ACK IS A DURABLE-ACCEPT RECEIPT SINCE #14232, NOT THE EXTRACTION'S
+    RESULT. `POST /v1/sessions` returns as soon as the session is stored: the
+    body carries ``extraction.outcome_known: false`` with a phase, an
+    ``extracted`` count that is SO FAR (0 while the tail runs), and the
+    ``status_url`` that answers when the outcome IS known. A caller that read
+    ``extracted`` straight off the ACK was reading a race — this fixture did,
+    and it turned every cross-tenant row into ``capture as A extracted
+    nothing`` the moment the tail moved off the request.
+
+    The poll address is the contract: read the phase from `status_url`, never
+    sleep-and-hope. `outcome_known` becoming true is the server's own word that
+    the count is final (``capture_ok IS NOT NULL`` and no phase left).
+    """
+    url = ack.get("status_url")
+    assert url, f"the ACK advertised no status_url to poll: {ack}"
+    deadline = time.monotonic() + timeout_s
+    while True:
+        detail = client.get(url)
+        assert detail.status_code == 200, (
+            f"the ACK's status_url {url} answered {detail.status_code}: {detail.text}")
+        served = detail.json()
+        if (served.get("extraction") or {}).get("outcome_known"):
+            return served
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"capture {ack['session_id']} still extracting after {timeout_s}s: "
+                f"{served.get('extraction')}")
+        time.sleep(0.05)
+
+
 def _capture(h: _TenantHarness, tenant: str) -> None:
-    """Capture a session as `tenant` whose transcript carries its marker."""
+    """Capture a session as `tenant` whose transcript carries its marker.
+
+    Waits out the #14232 ACK split: the POST is a receipt, so the extraction's
+    OUTCOME is read from the status surface the receipt names (see
+    :func:`_await_extraction`), not off the ACK body.
+    """
     client = h.as_tenant(tenant)
     marker = h.markers[tenant]
     session_id = h.sessions[tenant]
@@ -286,7 +325,10 @@ def _capture(h: _TenantHarness, tenant: str) -> None:
     assert r.status_code == 200, f"capture as {tenant} failed: {r.status_code} {r.text}"
     body = r.json()
     assert body["session_id"] == session_id, body
-    assert body["extracted"] >= 1, f"capture as {tenant} extracted nothing: {body}"
+    detail = _await_extraction(client, body)
+    assert detail["extracted"] >= 1, (
+        f"capture as {tenant} extracted nothing once the tail reported done: "
+        f"{detail}")
 
 
 def _seed_both_tenants(h: _TenantHarness) -> None:

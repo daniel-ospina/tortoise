@@ -3327,7 +3327,12 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("sdk.py", 55972, 55974): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 56124, 56133): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22987, 23162): (
+    # #14296: re-derived at the merge head by CONTENT, not by an offset —
+    # `grep -n 'def update_knowledge(' tortoise/sdk.py` -> 23061, and the pair's
+    # second address is the `update_knowledge` body's own relay (the same
+    # `return self._update_entity_any(id, **props)` spelling also occurs at
+    # 22698, in `create_edge`'s sibling door, so the ADDRESS is what binds it).
+    ("sdk.py", 23061, 23236): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
     ("sdk.py", 56630, 56630): (
         "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
