@@ -563,20 +563,6 @@ def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
             not in _PURE_READS)
 
 
-def _splat_operands(call: ast.Call) -> list[ast.AST]:
-    """The operands a positional list can deliver, a LITERAL splat expanded one level.
-
-    `getattr(*[sdk, _N])` passes ONE `Starred` node and delivers two arguments, so an
-    arity test (`len(n.args) >= 2`) could not see it at all (#14279 review F2/F3).
-    """
-    operands: list[ast.AST] = []
-    for arg in call.args:
-        operands.append(arg)
-        if isinstance(arg, ast.Starred) and isinstance(arg.value, (ast.Tuple, ast.List)):
-            operands.extend(arg.value.elts)
-    return operands
-
-
 def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
     """The operands of `call` that are NOT the object being read.
 
@@ -584,7 +570,13 @@ def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
     position are not statically knowable here, so it is fail-closed — `getattr(*_pair)`, a
     one-element positional list, still inspects `_pair` (#14279 review F3).
     """
-    operands = _splat_operands(call)[1:]
+    # ⛔ THE LITERAL-SPLAT EXPANSION IS GONE (#14326 review P3): `_splat_operands`
+    # expanded a `Starred` over a literal one level, and NO mutant could red those two
+    # lines — the Starred itself is in this list, and `_possible_strings` already resolves
+    # THROUGH a `Starred` into its literal container (measured: deleting the expansion
+    # leaves `getattr(*[sdk, "…"])` red). A clause no mutant can red reads to the next lane
+    # as an independent check; this file deletes them instead.
+    operands = list(call.args)[1:]
     operands.extend(arg for arg in call.args if isinstance(arg, ast.Starred))
     return operands
 
@@ -1034,6 +1026,13 @@ _PURE_METHODS = frozenset({
     "replace", "format", "join", "title", "capitalize", "zfill", "center",
 })
 
+#: The callees a tainted ELEMENT may be handed to without that being a mutation of the
+#: collection: a pure read, a pure METHOD, or the blessed id mapper. Anything else is
+#: fail-closed, because a helper is free to write the element it was given (#14326 review
+#: P2, measured: an element write through a helper left the recorded page permuted with
+#: `rank_identical: True`, in every wrapper spelling).
+_PURE_CALLEES = _PURE_READS | _PURE_METHODS | _ID_MAPPERS
+
 
 def _is_mutator_method(name: str | None) -> bool:
     """True when ``<receiver>.<name>(…)`` may MUTATE the receiver.
@@ -1308,6 +1307,17 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # three times, and its contract is to state its false reds rather than add them.
     # `_tainted()` below lets a holder through only where the expression REACHES THROUGH
     # the slot (`_d["k"]`, `_o.a`, `self._page`).
+    #: A LOCAL CALLABLE the scan can name: `_key = lambda _e: …` and a nested `def`. Used
+    #: below to taint a CALLBACK's parameters — the callback is handed the collection's
+    #: ELEMENTS, and until this map existed nothing tied its parameter to the page.
+    callable_params: dict[str, ast.AST] = {}
+    for _n in ast.walk(run_def):
+        if isinstance(_n, (ast.Assign, ast.AnnAssign)) and isinstance(_n.value, ast.Lambda):
+            for _t in (list(_n.targets) if isinstance(_n, ast.Assign) else [_n.target]):
+                if isinstance(_t, ast.Name):
+                    callable_params[_t.id] = _n.value
+        elif isinstance(_n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            callable_params.setdefault(_n.name, _n)
     holders: set[str] = set()
     changed = True
     while changed:
@@ -1420,6 +1430,29 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                                           + list(_args.kwonlyargs) + [a for a in
                                           (_args.vararg, _args.kwarg) if a is not None]],
                                     ctx=ast.Load())
+            elif isinstance(_node, ast.Call) and any(
+                    _names_in(_a) & (muts | holders)
+                    for _a in list(_node.args) + [_k.value for _k in _node.keywords]):
+                # ⛔ A CALLBACK RECEIVES THE COLLECTION'S ELEMENTS (#14326 review P2,
+                # measured GREEN): `sorted(results, key=<lambda that writes an element>)`
+                # hands the page to a PURE callee, so the element-hand-off arm cannot speak
+                # for the CALL — and the write happens inside a callback whose parameter
+                # nothing tainted. The callable is in the SAME call's argument list, so its
+                # parameters ARE the tainted elements. Both spellings: the inline lambda, and
+                # a local name bound to one (`_key = lambda …`) or to a nested `def`.
+                for _a in list(_node.args) + [_k.value for _k in _node.keywords]:
+                    _callables = [w for w in ast.walk(_a) if isinstance(w, ast.Lambda)]
+                    if isinstance(_a, ast.Name) and _a.id in callable_params:
+                        _callables.append(callable_params[_a.id])
+                    for _cb in _callables:
+                        _cargs = _cb.args
+                        fresh = {a.arg for a in
+                                 list(_cargs.posonlyargs) + list(_cargs.args)
+                                 + list(_cargs.kwonlyargs)} - muts
+                        if fresh:
+                            muts |= fresh
+                            changed = True
+                continue  # this branch taints directly; there is no `_target` to add
             else:
                 continue
             fresh = _names_in(_target) - muts
@@ -1596,45 +1629,65 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return False
 
         def _derived(arg: ast.AST) -> bool:
-            """A comprehension BUILDS A NEW collection, so ITERATING a source mutates nothing.
+            """A comprehension BUILDS A NEW collection, so it cannot mutate its source.
 
             ⛔ Measured RED without this (#14281 review P2): `", ".join(e.get("leg") or ""
             for e in trace)` and `statistics.fmean(len(r) for r in results)` were reported
             as "an in-place sort/clear" by the `handed` arm, decided by the CALLEE's name
-            rather than by any mutation. `_row_ref` already documented the same shape over
-            `per_query` as a measured false red.
+            rather than by any mutation.
 
-            ⛔ BUT THE EXEMPTION IS THE COMPREHENSION, NOT ITS BODY (#14326 review P2,
-            measured GREEN here with the recorded page permuted and `rank_identical: True`):
-
-                def _scrub(_e): _e["id"] = "REDACTED"
-                _j = ", ".join(_scrub(r) for r in results)
-
-            The collection the OUTER callee receives is fresh, so that callee cannot mutate
-            the page — but the comprehension's BODY runs on the page's elements, and `handed`
-            was the only arm looking at them. `<results.sort() for …>` and `<results.clear()
-            for …>` were caught by the mutator arm; an ELEMENT write through a helper was
-            not. So the body is graded by the rule the argument is: every call inside the
-            comprehension must be a known non-mutator, or NOTHING is exempted. Every
-            comprehension in the real tool passes (`e.get(…)`, `len(r)`, `_result_id(r)`).
+            ⛔ THE BODY IS GRADED **ELSEWHERE**, AND THAT IS DELIBERATE (#14326 review P2).
+            A body-grading loop lived here for one round and could only ever run for a
+            NON-pure callee: `handed` short-circuits on `callee not in _PURE_READS` BEFORE
+            consulting this helper, so `any(...)`/`sorted(...)`/`min(...)` wrappers and a
+            comprehension with no callee at all were untouched by it. The class is closed at
+            the SITE instead — `_element_handed` below — so a tainted ELEMENT handed to a
+            callee that is not `_PURE_CALLEES` reds whatever the wrapper is. Keeping both
+            would leave a loop no mutant could red.
             """
-            if not isinstance(arg, (ast.ListComp, ast.GeneratorExp, ast.SetComp,
-                                    ast.DictComp)):
-                return False
-            for inner in ast.walk(arg):
-                if not isinstance(inner, ast.Call):
-                    continue
-                inner_callee = (getattr(inner.func, "id", None)
-                                or getattr(inner.func, "attr", None))
-                if (inner_callee not in _PURE_READS
-                        and inner_callee not in _PURE_METHODS
-                        and inner_callee not in _ID_MAPPERS):
-                    return False
-            return True
+            return isinstance(arg, (ast.ListComp, ast.GeneratorExp, ast.SetComp,
+                                    ast.DictComp))
 
         handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
             _names_handed(arg) & watched and not _element_only(arg) and not _derived(arg)
             for arg in list(node.args) + [k.value for k in node.keywords])
+
+        def _element_handed(call: ast.AST, call_callee: str | None) -> bool:
+            """A TAINTED ELEMENT handed to a call that is not a known non-mutator.
+
+            ⛔ THE COLLECTION'S ELEMENTS ARE THE COLLECTION'S ROWS (#14326 review P2,
+            measured GREEN with `compare()` then reporting `rank_identical: True` over a
+            genuinely permuted pair):
+
+                def _scrub(_e): _e["id"] = "REDACTED"
+                _flag = any(_scrub(r) for r in results)
+                _j    = ", ".join(_scrub(r) for r in results)
+                _x    = [r for r in results if _scrub(r)]
+                _sorted = sorted(results, key=<lambda that writes an element>)
+
+            `handed` above cannot see these: it tests `watched` (the collection ITSELF), and
+            an element is deliberately NOT that (the artifact hands `_result_id(r)` the
+            elements it is supposed to record). `muts` holds them — the comprehension/`for`
+            target taint — but a tainted name is only a MUTATION when something writes it.
+            So this arm asks the question `handed` asks, one level down: is a tainted ELEMENT
+            handed to a callee that is not `_PURE_CALLEES`? A pure read, a pure method and the
+            blessed id mapper are exempt (`len(r)`, `e.get(…)`, `_result_id(r)` — the real
+            tool's own artifact), everything else is fail-closed, because an unknown helper is
+            free to write the row it was given.
+
+            ⛔ THE CLASS NEEDS NO WRAPPER-SHAPED CLAUSE. An earlier attempt graded the
+            comprehension's BODY inside `_derived`, which could only ever fire for a NON-pure
+            callee (`handed` short-circuits before `_derived` is consulted — see `_derived`)
+            and left `any(...)`, `sorted(...)`, `min(...)` and a comprehension with NO callee
+            at all uncovered. Grading the SITE covers every wrapper at once, and `_derived` is
+            left as what it always was: the exemption for a comprehension that hands a NEW
+            collection.
+            """
+            if not isinstance(call, ast.Call) or call_callee in _PURE_CALLEES:
+                return False
+            return any(
+                _names_handed(arg) & muts and not _element_only(arg) and not _derived(arg)
+                for arg in list(call.args) + [k.value for k in call.keywords])
         def _slot_ref(arg: ast.AST) -> bool:
             """A slot's VALUE handed to a call is the object stored there (#14281 P1).
 
@@ -1659,7 +1712,8 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         # (`muts`, or `muts | holders` for a container slot), so this is a truthiness
         # test — re-intersecting with `muts` here is what kept a slot mutation GREEN after
         # its arm existed, because a holder is never a tainted name (#14281 review P1).
-        if receiver or handed or row_handed or slot_handed:
+        if (receiver or handed or row_handed or slot_handed
+                or _element_handed(node, callee)):
             hits.append(node.lineno)
     return hits
 
@@ -3105,6 +3159,20 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '        getattr(sdk, _N)(query=queries[0]["query"], limit=10, '
             'kind="statement")\n'
             '    _f()\n'),
+        # ⛔ A TRUE LITERAL splat (#14326 review P3): the row above is labelled "literal"
+        # while binding a NAME, so nothing red the literal carrier itself.
+        "LITERAL carried into a splat": ('    getattr(*[sdk, "_tortoise_fts_query"])'
+                                         '(query=queries[0]["query"], limit=10, '
+                                         'kind="statement")\n'),
+        # ⛔ BOTH ROWS BELOW BIND **BEFORE** THEIR SOURCE (#14326 review P3, measured):
+        # `ast.walk` is breadth-first, not source order, so a single pass resolves only the
+        # FAVOURABLE order. The fixpoint is load-bearing and had no row that red it — with
+        # the loop replaced by one pass both of these stayed GREEN.
+        "chain bound BEFORE its source": ('    _A = _N\n    _N = "_tortoise_fts_query"\n'
+                                          f'    {reach.format(name="_A")}\n'),
+        "unpack bound BEFORE its source": ('    _pair, = (_N,)\n'
+                                           '    _N = "_tortoise_fts_query"\n'
+                                           f'    {reach.format(name="_pair")}\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -3209,6 +3277,27 @@ def test_a_COMPREHENSION_argument_is_NOT_the_collection() -> None:
             f"{body.strip()!r} hands a NEW collection to the callee, not the page "
             f"(`hits={_mutations_of(body)}`) — a comprehension over the page is not a "
             "mutation of it")
+    # ⛔ AND THE BODY IS GRADED AT THE SITE, whatever the wrapper (#14326 review P2,
+    # measured GREEN at `df5f67017c`/`b0cea320` with `compare()` then reporting
+    # `rank_identical: True` over a permuted pair): a helper that WRITES an element ran
+    # inside the comprehension, and the exemption covered the comprehension. `any(...)`,
+    # `sorted(key=…)` and `min(key=…)` take a PURE callee, so `handed` never looked at them
+    # at all, and a comprehension with no callee has no call to look at.
+    for body in (
+            '    def _scrub(_e):\n        _e["id"] = "REDACTED"\n'
+            '    _flag = any(_scrub(r) for r in results)\n',
+            '    _scrub = lambda _e: _e.__setitem__("id", "REDACTED")\n'
+            '    _x = [r for r in results if _scrub(r)]\n',
+            '    _key = lambda _e: (_e.__setitem__("id", "X"), 0)[1]\n'
+            '    _sorted = sorted(results, key=_key)\n',
+            '    _min = min(results, key=lambda _e: (_e.__setitem__("id", "X"), 0)[1])\n',
+            '    def _scrub(_e):\n        _e["id"] = "REDACTED"\n'
+            '    _j = ", ".join(_scrub(r) for r in results)\n'):
+        assert _mutations_of(body), (
+            f"{body.strip()!r} hands the page's ELEMENTS to a callee that is not a known "
+            "non-mutator, and `compare()` then reads `rank_identical: True` over a genuinely "
+            "permuted pair — a pure wrapper (`any`, `sorted`, `min`) does not make the BODY "
+            "safe")
     for body in ('    _x = [results.clear() for r in results]\n',
                  '    _y = [results.sort() or r for r in results]\n'):
         assert _mutations_of(body), (
