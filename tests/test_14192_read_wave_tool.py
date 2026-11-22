@@ -626,13 +626,18 @@ def _collection_alias_predicate(var: str):
       passed only because it ran a DIFFERENT lambda from the one production runs — no
       mutant of the guard could red it (rule 3).
 
-    A bare `Subscript` value is that element. ⛔ `first = results[0]; first.sort()` is RED,
-    not green: the mention-based predicate makes `first` an alias of `results`, and the
-    receiver arm then sees `first` — so the ELEMENT path is conservative in the same
-    direction as everything else here (a false red, against a page permutation that would
-    otherwise be invisible). This docstring claimed the opposite and was wrong (#14281
-    review P2, measured). The LITERAL `results[0].sort()` is RED through the receiver arm
-    too — a subscript expression is not a bind.
+    A bare `Subscript` value is that element, so `_aliases_of` does NOT resolve it, and
+    `first = results[0]; first.sort()` is GREEN on the PAGE pass — the guard's own unit test
+    asserts exactly that (`test_…: assert not _mutated_after(run_def, "results", …)`), because
+    `first.sort()` re-orders the element's own inner list, which the artifact's
+    `_result_id(r)` does not read. ⛔ IT IS STILL RED ON THE FULL PIN, through the TRACE pass:
+    the page assignment's value mentions `trace` (`leg_trace=trace`), so `results` is an
+    alias of the trace there and `first` inherits it. Two reviewers measured the two halves
+    separately and reached opposite conclusions from this sentence — so both facts are
+    stated here, and the file no longer argues with itself. The LITERAL
+    `results[0].sort()` is RED through the receiver arm — a subscript expression is not a
+    bind — and `_box[0]`, whose base is a LITERAL CONTAINER of the page, is not an element
+    either.
     """
     def _predicate(value: ast.AST) -> bool:
         if isinstance(value, ast.Subscript):
@@ -979,11 +984,37 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return names & (muts | holders)
         return names & muts
 
-    bound_mutator = _aliases_of(
-        run_def,
-        lambda v: (isinstance(v, ast.Attribute) and v.attr in _MUTATORS
-                   and bool(_tainted(v.value))),
-        loops=True)
+    def _bound_mutator_expr(v: ast.AST) -> bool:
+        """A bound mutator, or a LITERAL CONTAINER of one (`_d = {"s": results.sort}`).
+
+        ⛔ The COMPOSITION was uncaught (#14281 review P2, measured GREEN with the page
+        permuted): the seed matched only a bare `Attribute`, so `_d["s"]()` reached the
+        page through a slot nothing resolved. Same seed-vs-check asymmetry `_environ_
+        mutations` closed for `{"p": os.environ.pop}`.
+        """
+        if isinstance(v, ast.Attribute):
+            return v.attr in _MUTATORS and bool(_tainted(v.value))
+        if isinstance(v, ast.Dict):
+            return any(e is not None and _bound_mutator_expr(e) for e in v.values)
+        if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
+            return any(_bound_mutator_expr(e) for e in v.elts)
+        return False
+
+    bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True)
+
+    def _container_of_page(v: ast.AST) -> bool:
+        """A LITERAL container assigned the page: `_box = [results]`, `_d = {"p": results}`."""
+        if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
+            return any(bool(_names_in(e) & muts) for e in v.elts)
+        if isinstance(v, ast.Dict):
+            return any(e is not None and bool(_names_in(e) & muts)
+                       for e in list(v.values) + list(v.keys))
+        return False
+
+    #: `holders` tracks SLOTS; this tracks a container NAMED in an assignment, and
+    #: `_element_only` needs both — `_box = [results]; random.shuffle(_box[0])` was GREEN
+    #: with only `holders` (#14281 review P2, measured).
+    page_container = holders | _aliases_of(run_def, _container_of_page, loops=True)
     hits: list[int] = []
     for node in ast.walk(run_def):
         if node is artifact_append:
@@ -1006,9 +1037,16 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             # `results[0] = …` writes INTO the page → a mutation. `_box[0] = results[0]`
             # REPLACES a slot of a container that only holds the page → a bind.
             receiver = _tainted(node.value)
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
-                and node.func.id in bound_mutator:
-            receiver = {node.func.id}  # a bound mutator CALL is the mutation
+        elif isinstance(node, ast.Call) and (
+                (isinstance(node.func, ast.Name) and node.func.id in bound_mutator)
+                or (isinstance(node.func, ast.Subscript)
+                    and bool(_names_in(node.func.value) & bound_mutator))):
+            # ⛔ AND THROUGH A CONTAINER SLOT (#14281 review P2, measured GREEN):
+            # `_d = {"s": results.sort}; _d["s"](key=…, reverse=True)` and
+            # `_es = [results.sort]; _es[0](…)` permute the PAGE before the artifact reads
+            # it. The bound mutator is the SAME pointer in a slot, so the seed resolves a
+            # literal container of one and this arm accepts a `Subscript` function.
+            receiver = _names_in(node.func)  # a bound mutator CALL is the mutation
         # ⛔ THE AUGMENTED SPELLING IS THE SAME MECHANISM (#14281 review P1, measured).
         # `dict |= other` is PEP 584's in-place merge — the exact semantics of `update`,
         # which `_MUTATORS` already carries — but an `AugAssign` whose target is a BARE
@@ -1034,9 +1072,20 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None) \
             if isinstance(node, ast.Call) else None
         def _element_only(arg: ast.AST) -> bool:
-            """`results[0]` is an ELEMENT, not the collection (this file says so twice)."""
+            """`results[0]` is an ELEMENT, not the collection (this file says so twice).
+
+            ⛔ UNLESS THE BASE IS A CONTAINER OF THE PAGE (#14281 review P2, measured):
+            `_box = [results]; random.shuffle(_box[0])` shuffles the WHOLE page through a
+            slot, and the blanket `return True` exempted it. `_box[0]` is the page; only a
+            subscript over the collection itself is that collection's element.
+            """
             if isinstance(arg, ast.Subscript):
-                return True
+                # ⛔ UNLESS THE BASE IS A CONTAINER OF THE PAGE (#14281 review P2,
+                # measured): `_box = [results]; random.shuffle(_box[0])` shuffles the WHOLE
+                # page through a slot, and the blanket `return True` exempted it. `holders`
+                # is exactly the set of containers that hold the page, so a subscript over
+                # one of them is NOT an element of the page.
+                return not bool(_names_in(arg.value) & page_container)
             if isinstance(arg, ast.Call):
                 callee_id = getattr(arg.func, "id", None) or getattr(arg.func, "attr", None)
                 return callee_id in _PURE_READS or any(
@@ -1056,8 +1105,10 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 def _scrub3(rows): rows.sort(key=str)
                 _scrub3(per_query)
 
-            `_element_only()` cannot decide this one: it exempts ANY subscript (right for
-            `results[0]`), and `per_query[-1]` is a dict carrying the order.
+            `_element_only()` cannot decide this one: it exempts a subscript over the
+            collection ITSELF (right for `results[0]` — and no longer ANY subscript, since a
+            container slot like `_box[0]` is the page), while `per_query[-1]` is a dict
+            carrying the order.
             """
             if isinstance(arg, ast.Name):
                 return arg.id in rows
@@ -1316,7 +1367,12 @@ def _rebound_after(run_def: ast.AST, var: str, lineno: int) -> list[int]:
             targets = [i.optional_vars for i in node.items if i.optional_vars is not None]
         else:
             continue
-        if any(var in _names_in(t) for t in targets):
+        # ⛔ A SUBSCRIPT-ROOTED TARGET IS NOT A REBINDING (#14281 review P3, measured):
+        # `results[0]["id"] = "X"` reported "`results` is rebound at line(s) [307] — a
+        # sorted/emptied copy would reach the artifact", which names the wrong mechanism
+        # for a mutation that `_mutated_after`'s Store arm reports correctly. A `Store`
+        # into the collection cannot replace the name, so it is skipped here.
+        if any(var in _names_in(t) and not isinstance(t, ast.Subscript) for t in targets):
             if (isinstance(node, ast.Assign) and len(node.targets) == 1
                     and isinstance(node.targets[0], ast.Name)
                     and node.targets[0].id == var and _is_exactly(node.value, var)):
@@ -2364,9 +2420,15 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         #     "read": "_tortoise_fts_query",
         #     "measured_by": f"{'_tortoise_fts_query'}",
         # which the message called "an alias, a string reference or a getattr" — for a
-        # string that could not reach the read. A `Constant` inside a call is kept.
+        # string that could not reach the read.
+        # ⛔ …AND IT IS KEPT UNDER A `Subscript` TOO (#14281 review P2, measured): the first
+        # form kept only `Call` parents, so a THIRD reach added beside the two real ones —
+        #     _lever = vars(type(sdk))["_tortoise_fts_query"](query=q["query"], limit=10)
+        # — left the census at 2 mentions and `_read_calls` at 2 calls, and the pin passed
+        # while a lever reached a read the door does not name. The literal's parent there is
+        # the SUBSCRIPT, not the call, so the executed spelling spans both.
         return (isinstance(node, ast.Constant) and node.value in _READ_NAMES
-                and isinstance(parents.get(id(node)), ast.Call))
+                and isinstance(parents.get(id(node)), (ast.Call, ast.Subscript)))
 
     # ⛔ ⛔ `indirect` IS EVALUATED *BEFORE* THE MENTIONS CENSUS (#14281 review F3). It used
     # to sit after it, where it was DEAD: every node satisfying `indirect` is also
