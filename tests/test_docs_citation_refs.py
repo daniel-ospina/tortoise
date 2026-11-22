@@ -5004,6 +5004,53 @@ def _d5_measured_or_declined_conflict(
         f"some other option (#14306 review F2, P1)")
 
 
+def _d5_measure_the_spellings(
+        ran_by_spelling: dict[str, subprocess.CompletedProcess],
+        ) -> tuple[dict[str, str], dict[str, str]]:
+    """(measured, declined) for the three spellings — REDDING on a failed measurement.
+
+    ⛔ MEASURE PER SPELLING, AND ONLY WHAT THIS GREP CAN ANSWER — BUT "WHICH GREP IS THIS" IS NOT
+    THE SAME QUESTION AS "rc NOT IN (0, 1)" (#14306 review F2, P1 — MEASURED ON GNU grep 3.11).
+    The first cut of this fix read `if ran.returncode not in (0, 1): continue`, and that predicate
+    cannot tell a PORTABILITY GAP from a BROKEN MEASUREMENT — the two cases it must separate:
+        grep -c --definitely-not-an-option '^[+-]$'  ->  rc 2, `grep: unrecognized option …`
+        grep -c --fixed-regexp '^[+-]$' /tmp         ->  rc 2, `grep: /tmp: Is a directory`
+    Both took the same silent `continue`, so a genuine measurement failure was reported as "not
+    portable" and stayed GREEN — the false PASS this file's rulings refuse (#14027 reddened on
+    exactly that diagnostic before this fix). The tolerance is scoped to the ONE cause that is a
+    platform fact — grep's own stderr naming THIS spelling as one it does not know
+    (`_d5_grep_declined_the_spelling`) — and every other non-0/1 code REDS with its diagnostic.
+
+    ⛔ IT IS A HELPER SO THE FAIL-CLOSED ARM IS REACHABLE BY A TEST (#14306 pins lane, P2). Inline
+    in the cell, the only way to exercise it was to find a grep that really fails a measurement —
+    which nothing on a green box produces — so reverting the `_d5_grep_declined_the_spelling`
+    test to tolerate every non-0/1 code left the whole suite GREEN (measured by the reviewer).
+    Taking the mapping as its argument is what lets a fixture hand it an `Is a directory`-shaped
+    result and a genuinely named refusal side by side.
+    """
+    measured: dict[str, str] = {}
+    declined: dict[str, str] = {}
+    for accepted, expected in (("--unix-byte-offsets", "2"), ("--u", "2"), ("--fixed-regexp", "0")):
+        ran = ran_by_spelling[accepted]
+        if ran.returncode not in (0, 1):
+            if not _d5_grep_declined_the_spelling(ran, accepted):
+                raise AssertionError(
+                    f"`grep -c {accepted} '^[+-]$'` exited {ran.returncode} on the declared probe "
+                    f"with a message that does not name `{accepted}` as an option this grep does "
+                    f"not know ({ran.stderr.strip()!r}) — that is a MEASUREMENT FAILURE, not a "
+                    "platform that lacks the spelling, so it fails closed with its diagnostic "
+                    "rather than being reported as `not portable` (#14306 review F2, P1)")
+            declined[accepted] = ran.stderr.strip()
+            continue
+        assert ran.stdout.strip() == expected, (
+            f"`grep -c {accepted} '^[+-]$'` printed {ran.stdout.strip()!r} on the probe "
+            f"({expected!r} expected) — `--unix-byte-offsets`/`--u` must count THIS class for the "
+            "false-PASS argument to hold, and `--fixed-regexp` must count NOTHING for its exclusion "
+            f"to be safe (#14027, MEASURED on {ran.args[2]})")
+        measured[accepted] = ran.stdout.strip()
+    return measured, declined
+
+
 def test_the_d5_universe_floor_reds_a_broken_derivation_and_skips_only_a_silent_grep():
     """The `>= 40` floor is REACHABLE: a `--help` that succeeded and parsed too little REDS.
 
@@ -5085,6 +5132,16 @@ def test_the_d5_grep_portability_tolerance_covers_a_REFUSAL_and_nothing_else():
     assert not _d5_grep_declined_the_spelling(
         ran(2, "grep: unrecognized option '--fixed-regexp'\n"), "--unix-byte-offsets"), (
         "a refusal of ONE spelling must not license another: the tolerance is per spelling")
+    # ⛔ THE MARKER REQUIREMENT IS ITSELF PINNED, NOT JUST EACH WORDING (#14306 pins lane, P3).
+    # Every declared wording above has a fixture, but none of them can witness the CONJUNCT: delete
+    # the whole `any(marker in stderr …)` requirement and every row still holds, because no fixture
+    # fed rc != 0 + spelling present + NO marker and expected False. This row does — a diagnostic
+    # that names the option for some other reason (`Is a directory`) is a MEASUREMENT failure.
+    assert not _d5_grep_declined_the_spelling(
+        ran(2, "grep: --unix-byte-offsets: Is a directory\n"), "--unix-byte-offsets"), (
+        "rc 2 with the spelling NAMED but NO refusal wording is still a MEASUREMENT failure — a "
+        "message that merely mentions the spelling is not grep saying it does not know it, and "
+        "without the marker conjunct that distinction is unobserved (#14306 pins lane, P3)")
     assert not _d5_grep_declined_the_spelling(
         ran(0, "grep: unrecognized option '--u'\n"), "--u"), (
         "a grep that RAN the spelling (rc 0) has not declined it, whatever an unrelated warning "
@@ -5296,6 +5353,128 @@ def test_the_alias_cell_reds_a_broken_reader_claim_even_when_grep_declines_every
         what="a corrupted reader declaration under a grep that declines every spelling")
 
 
+def test_the_d5_spelling_measurement_FAILS_CLOSED_and_tolerates_a_NAMED_refusal():
+    """The measurement loop REDS on an unnamed failure, and only tolerates a NAMED refusal.
+
+    ⛔ #14306 PINS LANE, P2 — REVERTING THE FAIL-CLOSED ARM WAS GREEN BEFORE THESE ARMS EXISTED. The
+    reviewer measured it: restoring the original F2 defect (tolerate every non-0/1 exit code) left
+    the suite at 34 passed, because no green box produces a grep that really fails a measurement.
+    The loop was lifted into `_d5_measure_the_spellings` so a fixture can feed the two cases the
+    predicate must separate:
+      * `grep: /tmp: Is a directory` — rc 2, a message that names NO spelling → must RAISE with
+        its diagnostic (a measurement failure, not a platform fact);
+      * `grep: unrecognized option '--u'` — rc 2, naming THAT spelling plus a refusal marker →
+        must be RECORDED as declined and must NOT raise.
+    ⛔ TWO ARMS, TWO LEVELS, AND BOTH NOW RED — NEITHER MAY CLAIM THE OTHER'S KILL (#14306 pins
+    lane, P2 — MEASURED on the merged tree). Reverting the arm to
+    `if ran.returncode not in (0, 1): continue` reds this test AND the cell-level
+    `test_the_alias_cell_reds_a_MEASUREMENT_FAILURE_it_must_not_call_portability` (4 failed, 37
+    passed); the narrower `if False:` mutant reds these same two. That is not redundancy: this one
+    pins the MAPPING's contract directly, that one pins the CELL's wiring to it. Widening the
+    tolerance past a named refusal reds the second `pytest.raises` here. Both directions are the
+    assertion, not the prose.
+    """
+    def ran(returncode: int, stdout: str, stderr: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(args=["grep"], returncode=returncode,
+                                           stdout=stdout, stderr=stderr)
+
+    with pytest.raises(AssertionError, match="MEASUREMENT FAILURE"):
+        _d5_measure_the_spellings({
+            "--unix-byte-offsets": ran(2, "", "grep: /tmp: Is a directory\n"),
+            "--u": ran(0, "2\n", ""),
+            "--fixed-regexp": ran(0, "0\n", ""),
+        })
+    measured, declined = _d5_measure_the_spellings({
+        "--unix-byte-offsets": ran(2, "", "grep: unrecognized option '--unix-byte-offsets'\n"),
+        "--u": ran(2, "", "grep: unrecognized option '--u'\n"),
+        "--fixed-regexp": ran(0, "0\n", ""),
+    })
+    assert measured == {"--fixed-regexp": "0"}, (
+        f"a genuinely NAMED refusal must be recorded rather than redding the cell, and the "
+        f"spelling grep RAN must still be measured — got measured={measured!r} (#14306 F2, P1)")
+    assert set(declined) == {"--unix-byte-offsets", "--u"}, (
+        f"a declined spelling is RECORDED with its reason, not dropped by a bare `continue` — "
+        f"got declined={sorted(declined)} (#14306 F2, P1)")
+
+
+def test_the_d5_alias_cell_SKIPS_LAST_so_a_broken_reader_row_still_REDS(monkeypatch):
+    """The alias cell's skip is POSITIONED below every reader row, and that position is the fix.
+
+    ⛔ #14306 PINS LANE, P2 — A SKIP MOVED UP IS GREEN UNLESS AN ARM BREAKS A ROW BENEATH IT. The
+    reviewer measured it: lifting `if not measured: pytest.skip(…)` above the six reader rows
+    (exactly the defect this PR fixed) also left the suite green at the time. `pytest.skip` RAISES,
+    so a skip placed above those rows makes them unreachable on a grep that runs none of the three
+    spellings: the cell reports a GREEN skip while certifying nothing, on a `core`+`tier1` surface
+    selected on every PR. `test_the_alias_cell_reds_a_broken_reader_claim_even_when_grep_declines_
+    everything` (#14306 review F5) breaks the FIRST reader row; the arms here break the first `-u`
+    row and the LAST row, and the third is what closes the window between them — see below.
+
+    Both arms feed the cell an all-declined grep and call it directly:
+      * with the real reader, the cell must reach the END of its body and SKIP;
+      * with one reader row deliberately broken (`_d5_count_prescriptions` returns nothing, so a
+        real `-u` prescription goes unread), the cell must RED. A skip winning here means the row
+        was unreachable — which is precisely the `skip`-moved-up mutant this pin exists to catch.
+      * and with ONLY THE LAST ROW broken, the cell must RED as well — THIS ARM IS NOT
+        REDUNDANT (#14306 pins lane, P3, found in review): the two above constrain only rows that
+        sit above the first broken row, so a MID-position skip (moved below the six `-u` rows but
+        above the `hidden` two-prescription row and the three `--fixed-regexp` rows) was measured
+        GREEN (36 passed, before this arm existed) — the same false-PASS class in a narrower
+        window. Pinning the first and
+        the last reader row is what makes "deferred to the very end of the cell" true, not just
+        plausible.
+    """
+    def refused(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=2, stdout="",
+            stderr=f"grep: unrecognized option '{argv[2]}'\n")
+
+    # The real reader, captured BEFORE any patch below, so the third arm can delegate to it.
+    _real_count_prescriptions = _d5_count_prescriptions
+
+    def assert_cell_reds(expected: str) -> None:
+        """The cell must RED with `expected` in its diagnostic — and a SKIP here is a RED.
+
+        ⛔ A SKIP MUST NOT BE ALLOWED TO READ AS GREEN (#14306 pins lane, P2). A bare
+        `pytest.raises(AssertionError, …)` would let the mutant's `pytest.skip` propagate as a
+        SKIPPED outcome — which the rail reads as green, the exact false PASS this cell exists to
+        refuse — so the skip is caught BY NAME and turned into the failure it is. The `else` arm
+        closes the third hole: a cell that neither reds nor skips on a deliberately broken reader
+        row has stopped asserting anything at all.
+        """
+        try:
+            test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS()
+        except AssertionError as _red:
+            assert expected in str(_red), (
+                f"the cell redded, but not at the row this arm breaks ({expected!r} absent from "
+                f"{_red!r}) — a different row failing would not witness this one")
+        except pytest.skip.Exception as _skipped:
+            raise AssertionError(
+                f"the cell SKIPPED instead of reaching the deliberately broken row ({expected!r}): "
+                "the skip is positioned ABOVE it, which is the mutant this pin exists to catch "
+                f"(#14306 pins lane, P2) — {_skipped}") from None
+        else:
+            raise AssertionError(
+                f"the cell PASSED while the row this arm breaks ({expected!r}) should have redded "
+                "— the reader rows are no longer asserting (#14306 pins lane)")
+
+    monkeypatch.setattr(subprocess, "run", refused)
+    with pytest.raises(pytest.skip.Exception, match="runs NONE of the three spellings"):
+        test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS()
+
+    monkeypatch.setitem(globals(), "_d5_count_prescriptions", lambda bundle: [])
+    assert_cell_reds("declining it left a real blank-class prescription")
+
+    # ⛔ THE **LAST** ROW, AND ONLY IT, IS BROKEN HERE (#14306 pins lane, P3). Every other row is
+    # served the real reader's answer, so a cell that reds at the `--fixed-regexp` prescription row
+    # got there — and a skip positioned anywhere above that row is caught rather than staying green.
+    def reds_only_at_the_END(bundle: str) -> list[str]:
+        return (["^[+-]$"] if "--fixed-regexp '^[+-]$'" in bundle
+                else _real_count_prescriptions(bundle))
+
+    monkeypatch.setitem(globals(), "_d5_count_prescriptions", reds_only_at_the_END)
+    assert_cell_reds("is `-F`: a LITERAL pattern")
+
+
 def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     r"""`_D5_ALL_LONG_OPTIONS` matches `grep --help`, and not through the argument-taking oracle.
 
@@ -5440,22 +5619,19 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
     }
     # ⛔ MEASURE PER SPELLING, AND ONLY WHAT THIS GREP CAN ANSWER — BUT "WHICH GREP IS THIS" IS NOT
     # THE SAME QUESTION AS "rc NOT IN (0, 1)" (#14306 review F2, P1 — MEASURED ON GNU grep 3.11).
-    # The first cut of this fix read `if ran.returncode not in (0, 1): continue`, and that predicate
-    # cannot tell a PORTABILITY GAP from a BROKEN MEASUREMENT — the two cases it must separate:
-    #     grep -c --definitely-not-an-option '^[+-]$'  ->  rc 2, `grep: unrecognized option …`
-    #     grep -c --fixed-regexp '^[+-]$' /tmp         ->  rc 2, `grep: /tmp: Is a directory`
-    # Both took the same silent `continue`, so a genuine measurement failure was reported as "not
-    # portable" and stayed GREEN — the false PASS this file's rulings refuse (#14027 reddened on
-    # exactly that diagnostic before this fix). The tolerance is now scoped to the ONE cause that is
-    # a platform fact — grep's own stderr naming THIS spelling as one it does not know
-    # (`_d5_grep_declined_the_spelling`) — and every other non-0/1 code REDS with its diagnostic.
+    # The loop and its rationale now live in `_d5_measure_the_spellings`, which takes this mapping —
+    # so the fail-closed arm is driven from a fixture instead of needing a grep that really fails a
+    # measurement (nothing on a green box produces one).
     # ⛔ AND THAT WIRING IS WITNESSED AT THE CELL, NOT ONLY AT THE HELPER (#14306 review F6, P2 —
-    # MEASURED BY MUTATION): reverting the loop below to the pre-fix `continue` left the whole file
-    # GREEN, and driving the mutant cell with `grep: /tmp: Is a directory` proved the consequence —
-    # a real measurement failure reported as "not portable" and staying GREEN.
+    # MEASURED BY MUTATION). BEFORE that arm existed, reverting the fail-closed test to the pre-fix
+    # `continue` left the whole file GREEN, and driving the mutant cell with `grep: /tmp: Is a
+    # directory` proved the consequence — a real measurement failure reported as "not portable" and
+    # staying GREEN. That revert now reds, at the cell and at the helper both.
     # `test_the_alias_cell_reds_a_MEASUREMENT_FAILURE_it_must_not_call_portability` reds on that
     # mutant; `test_the_alias_cell_reds_one_spelling_measured_and_its_mate_declined` holds the
-    # `_conflict` assertion below, which deleting also left the file green.
+    # `_conflict` assertion below, which deleting also left the file green; and
+    # `test_the_d5_spelling_measurement_FAILS_CLOSED_and_tolerates_a_NAMED_refusal` drives the
+    # helper's two arms directly.
     # ⛔ A DECLINED SPELLING IS RECORDED, NOT DROPPED (#14306 review F2, P1). `declined` keeps the
     # per-spelling reason, so the omission is STATED rather than inferred from a `continue`, and
     # `_d5_measured_or_declined_conflict` asserts the two `-u` spellings are answered CONSISTENTLY:
@@ -5464,26 +5640,7 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
     # platform that declines `-u` those two verdicts cannot be measured at all — there is nothing to
     # check — and the arms that still discriminate there are the reader's, asserted unconditionally
     # above and below. This test's SUBJECT is the reader; grep's verdict is the justification.
-    measured: dict[str, str] = {}
-    declined: dict[str, str] = {}
-    for accepted, expected in (("--unix-byte-offsets", "2"), ("--u", "2"), ("--fixed-regexp", "0")):
-        ran = ran_by_spelling[accepted]
-        if ran.returncode not in (0, 1):
-            if not _d5_grep_declined_the_spelling(ran, accepted):
-                raise AssertionError(
-                    f"`grep -c {accepted} '^[+-]$'` exited {ran.returncode} on the declared probe "
-                    f"with a message that does not name `{accepted}` as an option this grep does "
-                    f"not know ({ran.stderr.strip()!r}) — that is a MEASUREMENT FAILURE, not a "
-                    "platform that lacks the spelling, so it fails closed with its diagnostic "
-                    "rather than being reported as `not portable` (#14306 review F2, P1)")
-            declined[accepted] = ran.stderr.strip()
-            continue
-        assert ran.stdout.strip() == expected, (
-            f"`grep -c {accepted} '^[+-]$'` printed {ran.stdout.strip()!r} on the probe "
-            f"({expected!r} expected) — `--unix-byte-offsets`/`--u` must count THIS class for the "
-            "false-PASS argument to hold, and `--fixed-regexp` must count NOTHING for its exclusion "
-            f"to be safe (#14027, MEASURED on {ran.args[2]})")
-        measured[accepted] = ran.stdout.strip()
+    measured, declined = _d5_measure_the_spellings(ran_by_spelling)
     _conflict = _d5_measured_or_declined_conflict(measured, declined)
     assert _conflict is None, (
         f"{_conflict} — the verdicts collected here must describe ONE grep; a verdict for only one "
