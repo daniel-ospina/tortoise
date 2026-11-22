@@ -49,8 +49,9 @@ import time
 import pytest
 
 import tortoise.hosted_api as ha
-from tests.test_hosted_api import TEST_ORG_ID  # noqa: F401 — fixture side effects
-from tests.test_hosted_api import client as client  # noqa: F401 — the fixture
+from tests.test_hosted_api import TEST_ORG_ID
+from tests.test_hosted_api import client as client
+
 
 @pytest.fixture(autouse=True)
 def _offline_extractor(monkeypatch):
@@ -804,15 +805,24 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     # with `{'stage': 'capture_gates', 'stages_ms': {'pre_handler': 24.1}}`.
     # Stubbing the quota read to a constant leaves ONE thing able to cross the
     # bound: the deliberately slow write.
+    #
+    # ⛔ AND IT WAS STILL NOT ENOUGH (measured at the round-4 head, with the stubs
+    # above in place): the row reddened `stage=capture_gates` with
+    # `stages_ms={'pre_handler': 70.5}` — the pre-handler work finished in 70 ms
+    # and the request then sat for the rest of the 0.35 s BEFORE the endpoint
+    # marked `capture_gates`, so a 0.35 s bound is simply shorter than this box's
+    # cold start on a freshly-created graph. A wider margin makes the row
+    # attributable WITHOUT weakening it: the breach still lands inside the write,
+    # because the write is the only leg made to outlast the bound.
     monkeypatch.setattr(ha, "_session_extraction_estimate", lambda *_a, **_kw: 0)
     import tortoise.quota as _quota
     monkeypatch.setattr(_quota, "count_org_usage",
                         lambda *_a, **_kw: 0)
-    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.35)
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 3.0)
     real_write = ha._write_session_and_turns
 
     def _slow_write(*args, **kwargs):
-        time.sleep(0.8)
+        time.sleep(5.0)
         return real_write(*args, **kwargs)
 
     monkeypatch.setattr(ha, "_write_session_and_turns", _slow_write)
@@ -856,7 +866,7 @@ def test_capacity_returns_after_ack_and_completion(client, monkeypatch):
     assert r.status_code == 200, r.text
     _drain_tails()
 
-    assert ha._CAPTURE_IN_FLIGHT == before, (
+    assert before == ha._CAPTURE_IN_FLIGHT, (
         f"capture capacity leaked: was {before}, now {ha._CAPTURE_IN_FLIGHT}")
     assert not ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
 
@@ -889,7 +899,7 @@ def test_a_completion_that_dies_before_submitting_still_returns_capacity(
     assert r.status_code == 200, r.text
     _drain_tails()
 
-    assert ha._CAPTURE_IN_FLIGHT == before, (
+    assert before == ha._CAPTURE_IN_FLIGHT, (
         f"capacity leaked on the no-dispatch arm: {before} -> {ha._CAPTURE_IN_FLIGHT}")
     assert not ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
     row = _session_row("s-14232-no-dispatch")
@@ -919,13 +929,13 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
     """
     import asyncio
 
-    from tortoise.hosted_api import app
     # The shared async seam (#8582/#5049): a wait-bound refusal reaching THIS
     # client is a non-answer (INCONCLUSIVE), never an assertion about the code.
-    from tests.test_capture_loop_responsiveness import (  # noqa: PLC0415
+    from tests.test_capture_loop_responsiveness import (
         _verdict_async_client,
     )
-    from tests.test_hosted_api import TEST_TEAM  # noqa: PLC0415
+    from tests.test_hosted_api import TEST_TEAM
+    from tortoise.hosted_api import app
 
     before = ha._CAPTURE_IN_FLIGHT
     parked = threading.Event()          # the phase write is IN FLIGHT
@@ -969,10 +979,10 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
                 await task
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001 — the request may surface it
+            except Exception:
                 pass
             for _ in range(400):  # the abandoned task's callback settles
-                if ha._CAPTURE_IN_FLIGHT == before and not ha._CAPTURE_SESSIONS:
+                if before == ha._CAPTURE_IN_FLIGHT and not ha._CAPTURE_SESSIONS:
                     break
                 await asyncio.sleep(0.02)
             return ha._CAPTURE_IN_FLIGHT, dict(ha._CAPTURE_SESSIONS)
