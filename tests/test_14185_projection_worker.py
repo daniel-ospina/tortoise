@@ -153,6 +153,14 @@ def _fast_projector(applied: bool = True):
     return project
 
 
+def _pending_item(seq: int, project=None) -> projection_worker.PendingProjection:
+    """One queued item, built the way the chokepoint builds it."""
+    return projection_worker.PendingProjection(
+        record={"type": "PointAdded"}, seq=seq, tenant=_TENANT,
+        journal_skipped=False, project=project or _fast_projector(),
+        enqueued_at=time.monotonic())
+
+
 # ── 1. the ack does not include the projection ─────────────────────────────
 
 
@@ -210,13 +218,8 @@ def test_the_ack_never_WALKS_the_queue_it_is_acked_behind(armed, monkeypatch):
 
     project = _fast_projector()
 
-    def item(seq):
-        return projection_worker.PendingProjection(
-            record={"type": "PointAdded"}, seq=seq, tenant=_TENANT,
-            journal_skipped=False, project=project,
-            enqueued_at=time.monotonic())
-
-    counting = _IterationCountingDeque([item(seq) for seq in range(1, bound)])
+    counting = _IterationCountingDeque(
+        [_pending_item(seq, project) for seq in range(1, bound)])
     instance._pending = counting
     instance._pending_positioned = len(counting)
     # ⛔ The consumer must not run: a live loop pops items and moves every value
@@ -224,16 +227,27 @@ def test_the_ack_never_WALKS_the_queue_it_is_acked_behind(armed, monkeypatch):
     # `submit` is called exactly as the chokepoint calls it.
     monkeypatch.setattr(instance, "_ensure_started", lambda: None)
 
-    assert instance.submit(item(bound)) is True, "the queue was full at bound-1"
+    try:
+        assert instance.submit(_pending_item(bound, project)) is True, (
+            "the queue was full at bound-1")
 
-    assert counting.iteration_count == 0, (
-        "the ACK iterated the queue while holding `_cond` — the ack is O(queue "
-        "depth), and it is the consumer's own lock (property 2 says otherwise)")
-    assert instance._pending_positions_locked() == bound, (
-        "the maintained position count disagrees with what was enqueued")
-    assert len(counting) == bound
-    stats = instance.stats()
-    assert (stats.pending_positions, stats.queue_depth) == (bound, bound)
+        assert counting.iteration_count == 0, (
+            "the ACK iterated the queue while holding `_cond` — the ack is O(queue "
+            "depth), and it is the consumer's own lock (property 2 says otherwise)")
+        assert instance._pending_positions_locked() == bound, (
+            "the maintained position count disagrees with what was enqueued")
+        assert len(counting) == bound
+        stats = instance.stats()
+        assert (stats.pending_positions, stats.queue_depth) == (bound, bound)
+    finally:
+        # ⛔ PUT THE SINGLETON BACK, or the fixture's `shutdown(drain=True)`
+        # spends its whole 5 s timeout folding a synthetic backlog this leg
+        # built and no production path would ever queue (#14222 review round 9,
+        # the category-B observation: wall-clock paid by every later run).
+        # The queue is a process singleton, so a leg that leaves 9 999 items in
+        # it is a cost every test after it inherits.
+        instance._pending = collections.deque()
+        instance._pending_positioned = 0
 
 
 def test_the_settled_projection_is_reported_as_armed_not_as_an_unarmed_write(armed):
@@ -405,30 +419,43 @@ def test_an_OLDER_snapshot_never_overwrites_a_newer_one(armed):
         worker._pending.clear()
 
 
-def test_a_snapshot_from_BEFORE_a_fork_reset_cannot_undo_it(armed):
+def test_a_snapshot_from_BEFORE_a_fork_reset_cannot_undo_it(armed, monkeypatch):
     """⛔ #14222 review cycle 5, P2-1: the snapshot numbers are PROCESS-LOCAL.
 
-    The reset zeroes the sequence and stamps its own snapshot, which makes the
-    reset's number the SMALLEST — so a snapshot captured before the reset compared
+    The reset zeroes the sequence, so a snapshot captured before the reset compared
     as NEWER and undid the reset, restoring the other process's gauges and freezing
     them until the sequence climbed past the stale number. The epoch makes every
     pre-reset number unmatchable.
+
+    ⛔ AND THE RESET NO LONGER PUBLISHES (round 9's P2). Reading
+    ``projection_worker_gauges()`` after the reset can no longer prove anything —
+    a read path does not reach the metrics backend at all — so this leg watches the
+    PUBLISH CALLS instead: after a reset, the stale snapshot must produce **none**.
+    That is sharper than the old value assertion, which would now pass for the
+    wrong reason (the gauge simply keeps the parent's value).
     """
     slow = _SlowProjector()
     live_write.write({"type": "A"}, log=_Log(), project=slow, tenant=_TENANT)
     assert slow.in_flight.wait(5)
 
+    calls = []
+    monkeypatch.setattr(monitoring, "record_projection_queue_state",
+                        lambda **kw: calls.append(kw))
+
     worker = projection_worker.worker()
     with worker._cond:
         stale = worker._stamp_locked()          # captured BEFORE the reset
     worker._cond_pid = os.getpid() + 1_000_000  # a fork is observed…
+    calls.clear()
     worker.stats()                              # …and the reset runs
-    assert monitoring.projection_worker_gauges()["queue_depth"] == 0
+    assert calls == [], (
+        "the reset PUBLISHED from a read path — that is a foreign call on a lock "
+        "no hook of ours replaces (round 9's P2)")
 
     worker._publish(stale)                      # arrives late, from the old epoch
-    assert monitoring.projection_worker_gauges()["queue_depth"] == 0, (
-        "a pre-reset snapshot undid the reset and restored the other "
-        "process's backlog")
+    assert calls == [], (
+        "a pre-reset snapshot reached the metrics backend and restored the other "
+        f"process's backlog: {calls}")
 
     slow.gate.set()
     assert projection_worker.wait_for_drain(10) is True
@@ -1099,14 +1126,29 @@ def test_a_drain_predicate_is_exact_even_after_a_fork(armed):
         "the child's counters are its own — the parent's are not its work")
 
 
-def test_a_forked_worker_republishes_its_gauges(armed):
-    """⛔ #14222 review cycle 3, P2-2: a child must not inherit the parent's lag.
+def test_a_forked_childs_READ_never_publishes_and_its_FIRST_WRITE_republishes(
+        armed, monkeypatch):
+    """⛔ #14222 review cycle 3, P2-2 AND round 9's P2, held apart on purpose.
 
-    The fork reset empties the queue and zeroes the counters — and the three
-    GAUGES are per-process readings too. Leaving them at the parent's last
-    published value made a preforked child advertise a PERMANENT backlog it does
-    not have, while `stats()` reported 0: the gauges and `stats()` disagreeing is
-    exactly the invariant cycle 1's P1-1 was about.
+    Two recorded findings pull in opposite directions here, and the resolution is
+    worth reading before changing either half:
+
+    * cycle 3 (P2-2) — a forked child must not inherit the parent's lag. Leaving
+      the three GAUGES at the parent's last published value made a preforked child
+      advertise a PERMANENT backlog it does not have, while `stats()` reported 0.
+    * round 9 (P2) — the fix for the above published FROM THE RESET, and the reset
+      runs on every entry point including the read paths. The publish reaches
+      ``Gauge.set`` → ``prometheus_client``'s ``MutexValue.set``, which takes a
+      third lock (an inherited ``threading.Lock`` whose owner did not survive the
+      ``fork()``) that no hook of ours replaces — so a read in a forked child could
+      hang FOREVER and silently. A blocked lock is not an exception, so `_emit`'s
+      suppression cannot help.
+
+    The resolution: **a read never publishes; the child's first WRITE does.** The
+    epoch bump still makes every pre-reset snapshot unmatchable, so the write's
+    publish lands and a parent's snapshot cannot override it. The declared cost is
+    a child that only reads — its gauges stay at the parent's values until its
+    first write, and ``stats()`` is the authoritative reading there.
     """
     slow = _SlowProjector()
     log = _Log()
@@ -1115,6 +1157,10 @@ def test_a_forked_worker_republishes_its_gauges(armed):
                          tenant=_TENANT)
     assert slow.in_flight.wait(5)
     assert monitoring.projection_worker_gauges()["pending_positions"] == 3
+
+    calls = []
+    monkeypatch.setattr(monitoring, "record_projection_queue_state",
+                        lambda **kw: calls.append(kw))
 
     worker = projection_worker.worker()
     worker._cond_pid = os.getpid() + 1_000_000     # pretend this was inherited
@@ -1125,14 +1171,24 @@ def test_a_forked_worker_republishes_its_gauges(armed):
     worker._inline_fallbacks = 7
 
     stats = projection_worker.stats()               # triggers the fork reset
-    gauges = monitoring.projection_worker_gauges()
     assert stats.pending_positions == 0
     assert stats.inline_fallbacks == 0, (
         "a child reports its OWN inline fallbacks — an inherited count is another "
         f"process's work claimed as its own: {stats.inline_fallbacks}")
-    assert gauges["pending_positions"] == 0, (
-        "a child must not export the parent's phantom backlog")
-    assert gauges["queue_depth"] == stats.queue_depth
+    assert calls == [], (
+        "the fork reset published from a READ path — the metrics backend's own "
+        "lock is inherited and cannot be replaced, so a scrape callback in a "
+        f"child can hang forever: {calls}")
+    assert monitoring.projection_worker_gauges()["pending_positions"] == 3, (
+        "this is the DECLARED residual, pinned so it stays declared: a child that "
+        "has not written yet still exports the parent's last values, and `stats()` "
+        "is the authoritative reading there")
+
+    # …and the child's FIRST deferred write republishes, from its own state.
+    assert worker.submit(_pending_item(1)) is True
+    assert any(c["pending_positions"] == 1 and c["depth"] == 1 for c in calls), (
+        "the child's own first write must publish the CHILD's queue, not leave the "
+        f"parent's reading in place: {calls}")
 
     slow.gate.set()
     assert projection_worker.wait_for_drain(10) is True

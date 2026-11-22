@@ -386,21 +386,19 @@ class LiveWrite:
     an operator sees for it.
 
     ``record`` is ``None`` on FOUR arms, and they are NOT the same fact
-    (#13345 review P3-1/P3-3; the fourth is #14222 review, finding 2): the
-    UNARMED deployment (no DSN) — the one case `write_live_record` returns
-    ``None`` for, and the arm :attr:`armed` answers ``False`` on; the
+    (#13345 review P3-1/P3-3; the fourth arrived with #14185 and this list said
+    THREE until #14222's round-9 review found it): the UNARMED deployment (no
+    DSN) — the one case `write_live_record` returns ``None`` for; the
     ``projection_raised`` arm, where the seam never ANSWERED at all (it raised,
-    or could not be imported), so whether this deployment is armed is UNMEASURED
-    there and :attr:`LiveWrite.armed` answers ``None``; a door that supplies its
-    own ``project=`` whose callable returns ``None`` (the SDK's
+    or could not be imported), so whether this deployment is armed is
+    UNMEASURED there and :attr:`LiveWrite.armed` answers ``None``; a door that
+    supplies its own ``project=`` whose callable returns ``None`` (the SDK's
     ``seam_unimportable`` arm is the live one), where :attr:`armed` answers
     ``False`` — because from this module's position the record was never asked,
-    which is a different fact from "nothing was armed"; and the DEFERRED arm
-    (``deferred=True``, #14185), where the fold is QUEUED and nothing has
-    ANSWERED **yet** — no ``RecordWrite`` exists because the worker has not run,
-    but the record IS armed (route 2 of :attr:`armed`, established by
-    ``_record_armed()`` before the item was queued) and ``applied`` stays
-    ``False`` until the queue reaches it. ⛔ Never infer
+    which is a different fact from "nothing was armed"; and the ``deferred`` arm,
+    where the record has not ANSWERED **YET** — the line is committed and the fold
+    is queued, so ``armed`` is ``True`` (deferral requires an armed record) and
+    :attr:`LiveWrite.deferred` is ``True``. ⛔ Never infer
     "unarmed" from ``record is None``: read :attr:`armed`, which is the
     three-state answer for this module's own path and is ``False`` — never
     ``None`` — on a door's ``None``-returning project. A DECLINE is a
@@ -442,9 +440,12 @@ class LiveWrite:
     #: ⛔ The record's fold was HANDED TO THE PROJECTION WORKER instead of run
     #: here (#14185). ``True`` means: the journal line is committed, the fold is
     #: QUEUED, and ``record`` is ``None`` because nothing has ANSWERED yet — not
-    #: because nothing is armed. It is a separate field rather than a third
+    #: because nothing is armed. It is a separate field rather than a FOURTH
     #: meaning of ``record is None`` precisely so that "deferred" and "unarmed"
-    #: cannot be confused by a caller or by :attr:`armed`.
+    #: cannot be confused by a caller or by :attr:`armed`. (The class docstring's
+    #: list of arms was still saying THREE when this field made it four; #14222's
+    #: round-9 review found the two sentences contradicting each other, and both
+    #: now count four.)
     #:
     #: A deferred write is a LANDED write (the line exists, and
     #: ``derived = replay(journal)`` guarantees the record can be rebuilt to
