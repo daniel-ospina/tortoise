@@ -659,6 +659,18 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
+        # ⛔ The drift NUMERATOR (`128`) was the one figure in this header that no arm
+        # could catch, and it was measured rather than assumed: mutating it to `129`
+        # left all 31 arms of `tests/test_12184_shifted_cites.py` GREEN (the split arm
+        # grades both DENOMINATORS — `221` against `_PIN_EOF_PAIRS`, the ratio's own
+        # `of the 221` — and the `8`/`5` partition, but never the count of the 221 that
+        # drift). It is a coverage gap and not a wrong number: `128` is correct by the
+        # header's own rule. Graded as a literal because deriving it needs two
+        # historical blobs per pair (`git show <head>:<path> | sed -n '<N>p'` at each,
+        # text for text), which this suite refuses to do 221 times — the docstring
+        # above already states that this file's job is change-detection, not
+        # re-measurement.
+        "128 of the 221 comparable",
         "136 of this document's 234",
         "dedupes the **345** as-written spellings to 234 — **111**",
         "345 written spellings → 234 pairs → 111 collisions → 136 drifters of the 234",
