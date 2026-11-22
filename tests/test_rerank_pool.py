@@ -1980,6 +1980,44 @@ def c(sdk):
         "gained a scope model, and the `_seam_opaque_values` paragraph that says "
         "it has none (so the annotation mention is an accepted over-block) has "
         "to be rewritten together with this row")
+    # ⛔ AND THIS ROW'S OWN PROSE, which restated the same measurement TWICE and
+    # graded neither copy (review P2, measured at the head that added the row:
+    # rewriting the tuple below to ``(live=99, resolved=98, unresolved=97,
+    # calls=96)``, or the ``calls=7 live=8 unresolved=9`` inside the first
+    # paragraph, left this row GREEN). A copy nothing reads is the same
+    # ungraded-figure class this row closes one level out — so the row that
+    # grades it for ``_seam_opaque_values`` must not carry two of them itself.
+    # Both copies are read back out of this function's own ``__doc__`` and
+    # compared to the SAME ``counts`` computed above, so a wrong numeral in
+    # either one reds here rather than sitting in the file looking checked.
+    own = " ".join(
+        (test_the_pep563_over_block_is_graded_and_the_walk_has_no_scope_model
+         .__doc__ or "").split())
+    own_tuple = re.search(
+        r"exactly ``\(live=(\d+), resolved=(\d+), unresolved=(\d+), "
+        r"calls=(\d+)\)``", own)
+    assert own_tuple, (
+        "this row's docstring no longer states the walk's report as "
+        "'exactly ``(live=N, resolved=N, unresolved=N, calls=N)``' — restore "
+        "the wording or re-point this check, but do not leave the copy ungraded")
+    asserted = tuple(int(group) for group in own_tuple.groups())
+    assert asserted == counts["pep563"], (
+        "this row's docstring claims the walk reports"
+        f" {asserted} (live, resolved, unresolved, calls), THIS walk reports"
+        f" {counts['pep563']} — the sentence a reader takes the over-block's size"
+        " from no longer matches the emission")
+    own_para = re.search(r"QUOTED ``calls=(\d+) live=(\d+) unresolved=(\d+)``", own)
+    assert own_para, (
+        "this row's docstring no longer quotes `_seam_opaque_values`'s paragraph "
+        "as 'QUOTED ``calls=N live=N unresolved=N``' — restore the wording or "
+        "re-point this check, but do not leave the copy ungraded")
+    para_calls, para_live, para_unresolved = (
+        int(group) for group in own_para.groups())
+    assert (para_live, para_unresolved, para_calls) == measured, (
+        "this row's paraphrase of `_seam_opaque_values`'s paragraph no longer "
+        f"matches it: paraphrase says live={para_live}"
+        f" unresolved={para_unresolved} calls={para_calls}, the graded paragraph"
+        f" measures {measured} (live, unresolved, calls)")
 
 
 def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
