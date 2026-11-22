@@ -1648,8 +1648,10 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # squash that landed it; both commit the same pair, measured with `git show
     # <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`. ⛔ `--repin` at the SQUASH tree prints
     # `(11861, "f0647020531c078c")` — that is the drift this re-pin repairs, so it is `--repin` at
-    # `0351fe856942` alone that reproduces the pair, and an earlier cut of this comment said
-    # "either tree" (review round 2, P2). ⛔ AND NOT `c5e84ad180f2`, where
+    # `0351fe856942`, NOT at the squash, that reproduces the pair; an earlier cut of this comment
+    # said "either tree" (review round 2, P2) and the cut that replaced it said "alone", which the
+    # NEXT sentence falsifies — `c5e84ad180f2` reads the same pair too, which is the whole point of
+    # excluding it by PROVENANCE rather than by a measurement difference (review round 3, P2). ⛔ AND NOT `c5e84ad180f2`, where
     # `origin/fix/14125-census-p1s` stands today: it is a DESCENDANT of `0351fe856942`, pushed
     # after the squash, and its content never landed.
     "10e51693f166": (11858, "a1552662bf07a10b"),
