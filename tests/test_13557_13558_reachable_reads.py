@@ -862,6 +862,22 @@ NOT_SELECTED = [
     # asking for ONE record.
     "list our commitments",
     "show me all the commitments",
+    # …and the INFINITIVE / PROGRESSIVE copula subjects (review P1 at `42e0c1a662`):
+    # refused by the subject's second-verb lookahead, never routed. They also carry the
+    # missed-cue notice, so they stand in `NOTICE_ONLY` as well — a reporting row pinned
+    # in only one of the two lists is asserted by nothing (see the collection-time
+    # assertion under `NOTICE_ONLY`). `is the export yet to be archived` is the row that
+    # makes the defect obvious: it asks for the OPPOSITE of archived.
+    "is the export to be archived",
+    "is the data being archived",
+    "is the export yet to be archived",
+    "is the export supposed to be archived",
+    "is the export going to be archived",
+    "is the export due to be archived",
+    "is the report to be retired",
+    "is the claim being withdrawn",
+    "is the export to be archived by the vendor",
+    "is the export to be archived in Q3",
 ]
 
 
