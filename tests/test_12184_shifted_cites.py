@@ -3481,8 +3481,8 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     ("sdk.py:58966", "tortoise/sdk.py", 58966, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
     ("sdk.py:20141-20144", "tortoise/sdk.py", 20144, "\"AND coalesce(n.is_episodic, false) <> true \")", 2),
     ("sdk.py:20149", "tortoise/sdk.py", 20149, "_stamp_capture_provenance(", 2),
-    ("sdk.py:58315-58360", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
-    ("sdk.py:58317-58360", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
+    ("sdk.py:58315-58339", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
+    ("sdk.py:58317-58339", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
     ("sdk.py:58317", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 3),
     ("sdk.py:4265-4268", "tortoise/sdk.py", 4265, "\"s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL \"", 3),
     ("sdk.py:4399-4406", "tortoise/sdk.py", 4404, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 2),
@@ -3543,4 +3543,43 @@ def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
         assert start <= line <= end, (
             f"{path}:{line} is the anchor pinned for {token!r}, which covers {start}-{end} — a range row "
             "whose anchor sits outside its own range resolves nothing the row quotes."
+        )
+
+
+#: The `g.query(` call that OPENS a statement, as `_read_captured_session` and its neighbours write it.
+#: Used only to bound a span: a row cites ONE statement, so a second opener between the anchor and the
+#: span's END means the END landed in the next statement.
+_QUERY_OPENER = "g.query("
+
+
+def test_the_13854_range_spans_end_inside_the_statement_their_anchor_opens() -> None:
+    """A span must not run past the end of the statement its anchor sits in.
+
+    ⛔ MEASURED DEFECT this arm exists for (#14038, after the `+47e28b549e` fold): the merge moved
+    every `sdk.py` line at or below 5,736 by **−21**, and a re-derivation that shifted a range's
+    START while leaving its END moved the cited closing line 21 lines DOWN — `sdk.py:58336-58360`
+    became `58315-58360`, which opens on `rows = proj.g.query(` and now closes on
+    `extracted_count = proj.g.query(`, a DIFFERENT statement (`:58345`). Every other arm in this
+    file stayed green on it: the token arm only counts occurrences, the anchor arm only asks that
+    the anchor lie inside the range, and the fragment arm reads one line. The correct end is
+    `:58339` (`"s.turn_max_index",`, the last query-string line — the same line `:58360` read at the
+    pre-merge head), derived by CONTENT, not by carrying the number.
+    """
+    for token, path, line, _fragment, _expected in _REDEFINED_13854:
+        found = re.search(r":(\d+)-(\d+)$", token)
+        if not found:
+            continue
+        end = int(found.group(2))
+        target = (REPO / path).read_text(encoding="utf-8").splitlines()
+        # Lines AFTER the anchor, through the span's closing line: a statement may open on the
+        # anchor itself (a range that starts on its own `g.query(`), so the anchor is excluded.
+        reopened = [
+            number
+            for number in range(line + 1, min(end, len(target)) + 1)
+            if _QUERY_OPENER in target[number - 1]
+        ]
+        assert not reopened, (
+            f"{token!r} closes on {path}:{end}, but a new statement opens at {reopened} inside the "
+            f"span (anchor {path}:{line}) — the range's END was carried instead of re-derived. Move it "
+            f"by the same MEASUREMENT that moved the start (grep the row's own closing fragment)."
         )
