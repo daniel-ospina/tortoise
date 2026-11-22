@@ -82,11 +82,10 @@ _CONV = [
 #: The window the DEPLOYED handler uses, READ FROM THE MODULE at import time.
 #: It has to be read here rather than in the row: the suite's autouse fixture opens
 #: `ha._CAPTURE_ACK_DEADLINE_S` to `_CAPTURE_ACK_WINDOW_S` for the whole session (so
-#: no pre-existing
-#: assertion races a deadline), so by the time a test body runs the module attribute
-#: is no longer the deployed value. Reading it at import — before any fixture runs —
-#: is what makes the row's claim ("a value too tight would keep every suite green")
-#: about the REAL constant: a literal here would keep passing while
+#: no pre-existing assertion races a deadline), so by the time a test body runs the
+#: module attribute is no longer the deployed value. Reading it at import — before
+#: any fixture runs — is what makes the row's claim ("a value too tight would keep
+#: every suite green") about the REAL constant: a literal here would keep passing while
 #: `hosted_api._CAPTURE_ACK_DEADLINE_S` was changed to anything at all (measured by
 #: review round 5: `0.5 → 0.05` in `hosted_api.py` left this module green).
 _PRODUCTION_ACK_DEADLINE_S = ha._CAPTURE_ACK_DEADLINE_S
@@ -599,10 +598,10 @@ def test_completion_inside_the_window_still_returns_todays_receipt(client):
     With the suite's OPENED window (see the autouse
     `_capture_ack_window_is_deterministic` fixture: `_CAPTURE_ACK_DEADLINE_S` is
     `_CAPTURE_ACK_WINDOW_S` for the whole suite, because whether a local mock
-    capture beats a 0.5 s
-    deadline is a question about HOST LOAD and `#5049` rule 1 forbids a deadline
-    expiry from producing a verdict) and the offline mock extractor, completion
-    lands inside it and the caller gets the SAME body shape as before this
+    capture beats a 0.5 s deadline is a question about HOST LOAD and `#5049` rule 1
+    forbids a deadline expiry from producing a verdict) and the offline mock
+    extractor, completion lands inside it and the caller gets the SAME body shape
+    as before this
     change: `status ok/partial`, a real `extracted` count, the extraction mode,
     and NO in-flight phase. That is what keeps 34 test files and every capture
     client reading what they read yesterday — and it is asserted here by cause
@@ -1389,7 +1388,8 @@ def test_the_suite_window_is_the_opened_window_not_the_half_bound():
     `_CAPTURE_ACK_DEADLINE_S` to `_CAPTURE_ACK_WINDOW_S` so that no pre-existing
     "the POST body reports what was extracted" assertion races a deadline
     (`#5049` rule 1). That claim was FALSE: `_capture_ack_grace_s` clamps to
-    `min(window, _TRANSPORT_WAIT_BOUND_S / 2)` = `min(30, 5)` = **5 s**, and a cold
+    `min(window, _TRANSPORT_WAIT_BOUND_S / 2)` — `min(300.0, 5.0)` at this suite's
+    window, `min(30.0, 5.0)` at the earlier 30 s cut — = **5 s** either way, and a cold
     `build_master_list` is ~12 s, so the rows the fixture exists to protect still
     red on a cold shard — measured, and the reason two rows in this suite carry
     per-row warm-ups (review round 5).
