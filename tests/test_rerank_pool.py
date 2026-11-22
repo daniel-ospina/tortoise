@@ -1327,9 +1327,21 @@ def _seam_opaque_values(node):
     value escaping its function (``return``/``yield``), a parameter default or a
     decorator, a class base/keyword, a ``match`` subject or pattern expression, an
     ``except`` clause's exception TYPE (Python EVALUATES it and matches by class —
-    it is not a call), and a ``type`` statement's value. When the mention reaches
-    one of these the walk cannot say what happens to it — so "no call found" is
-    NOT deadness and the caller must fail closed.
+    it is not a call), a ``type`` statement's value, and every ANNOTATION — the
+    target of an ``AnnAssign`` and a function's parameter/return annotations.
+    When the mention reaches one of these the walk cannot say what happens to it —
+    so "no call found" is NOT deadness and the caller must fail closed.
+
+    ⛔ WHY ANNOTATIONS ARE AN ESCAPE RATHER THAN A MODELLED BINDING, though the
+    MENTION there really is read: an annotation is an ordinary expression Python
+    EVALUATES, and nothing in it is a call, so a mention that appears ONLY in one
+    reaches no call — which is the negative this walk reports. But its value then
+    travels into ``__annotations__``/a ``__annotate__`` thunk the walk does not
+    follow, so "reaches no call" there is not deadness either; admitting it costs
+    one row and keeps the enumeration's claim TRUE. Measured before this fix:
+    ``_x: SEAM`` (no value), ``def f() -> SEAM`` and ``def f(_x: SEAM)`` each
+    returned ``calls=0, opaque=False`` — read as PROVABLY DEAD, which is the exact
+    direction this function exists to forbid (round-18 review).
 
     ⛔ This is an enumeration, not a proof about future syntax: it is every binder
     kind in the Language Reference's list ("Naming and binding", §4.2.1) that this
@@ -1347,11 +1359,17 @@ def _seam_opaque_values(node):
         return [node.value]
     if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)):
         return [node.value]
+    if isinstance(node, ast.AnnAssign):
+        return [node.annotation]
     if isinstance(node, ast.Lambda):
         return [*node.args.defaults, *node.args.kw_defaults]
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return [*node.decorator_list, *node.args.defaults,
-                *node.args.kw_defaults,
+        args = node.args
+        annotated = [a.annotation for a in (
+            *getattr(args, "posonlyargs", ()), *args.args, *args.kwonlyargs,
+            args.vararg, args.kwarg) if a is not None]
+        return [*node.decorator_list, *args.defaults,
+                *args.kw_defaults, node.returns, *annotated,
                 *(getattr(node, "type_params", None) or [])]
     if isinstance(node, ast.ClassDef):
         return [*node.decorator_list, *node.bases,
@@ -1518,8 +1536,14 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
     reads: list = []
     opaque = False
     for node in ast.walk(tree):
-        if _seam_modelled_binding(node) is None and any(
-                _carries(value) for value in _seam_opaque_values(node)):
+        # ⛔ NO ``_seam_modelled_binding(node) is None`` GUARD HERE. It used to
+        # stand in front of this test, and it is why an ``AnnAssign``'s annotation
+        # was never examined: every MODELLED binder returns ``[]`` from this
+        # function (checked — Assign/For/With/comprehension/NamedExpr are all
+        # absent from the branches above), so the guard excluded exactly one node
+        # kind that DOES have an escape value, and exempted it instead of
+        # admitting it (round-18 review).
+        if any(_carries(value) for value in _seam_opaque_values(node)):
             opaque = True
         if not isinstance(node, ast.Call):
             continue
@@ -1788,7 +1812,10 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     admission ADDED for round 10; `helper-arg` is the one row that exercises the
     argument-carrier branch (a seam handed to ANOTHER call rather than called),
     which nothing else reached — deleting that branch left every row GREEN
-    (measured at `62fb081200`).
+    (measured at `62fb081200`); `ann-only`/`ann-param`/`ret-ann` grade the three
+    ANNOTATION escapes added for round 18 — a mention there is EVALUATED but
+    reaches no call, so reading it as provably dead is the fail-open the
+    enumeration forbids (all three measured `calls=0, opaque=False` before it).
 
     ⛔ AND EVERY BRANCH OF THE TWO ENUMERATIONS HAS A ROW, because a pin cannot be
     a tripwire for a binding kind it never exercises: measured at `93178a6495`,
@@ -1908,6 +1935,16 @@ def matchvalue(sdk):
 
 def helperarg(sdk):
     _helper(sdk._tortoise_fts_query, query="helper-arg")
+
+def annotonly(sdk):
+    _bare: sdk._tortoise_fts_query
+
+def annotparam(sdk):
+    def _g(_x: sdk._tortoise_fts_query):
+        pass
+
+def retann(sdk) -> sdk._tortoise_fts_query:
+    pass
 '''
     tree = ast.parse(source)
     mentions = [n for n in ast.walk(tree)
@@ -1938,6 +1975,9 @@ def helperarg(sdk):
         (0, True, []),                  # `@SEAM` on a class
         (0, True, []),                  # `class _K2(metaclass=SEAM)`
         (0, True, []),                  # `case SEAM.attr:` VALUE pattern
+        (0, True, []),                  # `_bare: SEAM` annotation, no value
+        (0, True, []),                  # `def _g(_x: SEAM)` parameter annotation
+        (0, True, []),                  # `def f() -> SEAM` return annotation
         (1, False, ["ann"]),            # `_ann: object = SEAM; _ann(…)`
         (1, False, ["comprehension"]),  # `for _c in [SEAM]: _c(…)`
         (1, False, ["container"]),      # `_reads = [SEAM]; _reads[0](…)`
