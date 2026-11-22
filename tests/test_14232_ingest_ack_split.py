@@ -2336,6 +2336,7 @@ def test_a_REFUSAL_fails_the_run(monkeypatch, capsys, tmp_path):
     assert "[FAIL] terminal on its own" not in out, (
         "the mixed population must leave the OTHER criteria TRUE, or this row "
         f"cannot witness `ok_refusal` as the decision input: {out}")
+    assert "[FAIL] extraction demonstrably ran" not in out, out
 
 
 class _Resp504:
@@ -2371,6 +2372,12 @@ def test_a_STUCK_session_fails_the_run(monkeypatch, capsys, tmp_path):
     assert rc == 1, f"a stuck session is a criterion FAIL (exit 1): rc={rc}\n{out}"
     assert "[FAIL] terminal on its own" in out, out
     assert "VERDICT: FAIL" in out, out
+    # ⛔ THE OTHER CRITERIA ARE ASSERTED, not assumed (review round Q, P3): this
+    # row's witness for `ok_terminal` rests on `ok_refusal`/`ok_extract` being
+    # TRUE, and without these two lines a drifting evidence stub hid the mutant
+    # entirely (measured: `_verdict(ok_terminal=True)` + `points: 0` stayed GREEN).
+    assert "[FAIL] zero refusals" not in out, out
+    assert "[FAIL] extraction demonstrably ran" not in out, out
 
 
 class _Resp200:
@@ -2521,3 +2528,93 @@ def test_the_json_report_is_PARSEABLE_when_the_spool_has_junk(monkeypatch, capsy
     assert report["n"] == 1, report["n"]
     assert "spooled" in report["corpus"] or "spool" in report["corpus"], report["corpus"]
     assert "skipped 1 unreadable/empty spool entries" in captured.err, captured.err
+
+
+def test_ENTITIES_REQUIRED_and_absent_fails_the_run(monkeypatch, capsys, tmp_path):
+    """`ok_extract`'s `ok_entities` arm is a graded input, and it had no witness.
+
+    Round Q (P2): `--require-entities` + `{points: 1, entities: 0, edges: 0}` is
+    the defect criterion 4 exists to catch ("points exist but nothing was WIRED to
+    them"), and no row in the file ever passed the flag — enabling
+    `ok_entities = True` left 52/52 green. Mutant: `ok_entities = True` → this row
+    reds with `VERDICT: PASS` at rc 0.
+    """
+    drain = _criterion_drain(
+        monkeypatch, tmp_path,
+        evidence=lambda sid: {"measured": True, "points": 1, "entities": 0,
+                              "edges": 0, "session_id": sid})
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600", "--require-entities"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"a required-but-absent entity is a FAIL (exit 1): rc={rc}\n{out}"
+    assert "[FAIL] extraction demonstrably ran" in out, out
+    assert "VERDICT: FAIL" in out, out
+
+
+def test_UNMEASURED_extraction_evidence_fails_the_run(monkeypatch, capsys,
+                                                      tmp_path):
+    """`evidence["measured"]` is the other half of `ok_extract`, also unwitnessed.
+
+    Round Q (P2): no row passed `measured: False`, so an unmeasured claim counted as
+    extraction with the file green. ⛔ The guard exists in TWO redundant places (the
+    `and` in the expression and the `if not measured` arm below it), so reverting
+    either ALONE is a no-op — measured. The mutant this row pins is the behaviour:
+    drop `measured` from the expression AND delete the arm → PASS at rc 0, this row
+    reds. A row can only pin a behaviour, not a redundancy.
+    """
+    drain = _criterion_drain(
+        monkeypatch, tmp_path,
+        evidence=lambda sid: {"measured": False, "points": 1, "session_id": sid})
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"unmeasured evidence is a FAIL (exit 1): rc={rc}\n{out}"
+    assert "[FAIL] extraction demonstrably ran" in out, out
+
+
+def test_the_DEFERRAL_share_does_not_count_refused_acks(monkeypatch, capsys,
+                                                        tmp_path):
+    """The deferral numerator filters on `status_code == 200`; nothing pinned it.
+
+    Round Q (P3): dropping that filter left 52/52 green. A refused ack is not an
+    ack that DEFERRED, and without the filter a 504 body carrying
+    `status: accepted` would inflate `n` past `of` — the share would report work
+    the server never accepted. Mutant: drop `o["status_code"] == 200` from the
+    `deferred` sum → this row reds (`n == 1` over `of == 0`).
+    """
+    class _RefusedButChatty:
+        status_code = 504
+        text = '{"status": "accepted", "extraction": {"phase": "extracting"}}'
+
+        def json(self):
+            # A 504 whose body still claims the ack was accepted — the shape the
+            # numerator must NOT count.
+            return {"status": "accepted", "extraction": {"phase": "extracting"},
+                    "stage": "capture_gates"}
+
+    drain = _criterion_drain(monkeypatch, tmp_path,
+                             ack=lambda _cap: _RefusedButChatty())
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 1, rc
+    report = json.loads(captured.out)
+    assert report["deferred_at_ack"]["n"] == 0, report["deferred_at_ack"]
+    assert report["deferred_at_ack"]["of"] == 0, report["deferred_at_ack"]
+    assert report["deferred_at_ack"]["measurable"] is False
+
+
+def test_ENTITIES_present_but_EDGES_absent_fails_the_run(monkeypatch, capsys,
+                                                         tmp_path):
+    """`ok_entities` is a conjunction (`entities >= 1` AND `edges >= 1`), pinned.
+
+    Round Q (P2) territory: with the entities arm unwitnessed, the *edges* conjunct
+    had no row either — a point extracted with nothing WIRED to it is the defect
+    criterion 4 names, and `edges: 0` alone must FAIL under `--require-entities`.
+    Mutant: drop the `edges` conjunct from `ok_entities` → this row reds.
+    """
+    drain = _criterion_drain(
+        monkeypatch, tmp_path,
+        evidence=lambda sid: {"measured": True, "points": 1, "entities": 3,
+                              "edges": 0, "session_id": sid})
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600", "--require-entities"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"entities without edges is a FAIL (exit 1): rc={rc}\n{out}"
+    assert "[FAIL] extraction demonstrably ran" in out, out
