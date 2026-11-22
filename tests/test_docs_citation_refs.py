@@ -3377,8 +3377,16 @@ def _d5_grade_alias_spelling(
     with a two-way `ran.returncode in (0, 1)` branch left this whole file GREEN on GNU grep 3.11 AND
     under a 3.12 shim — the round-8 fail-open read, reinstated with nothing to red it, because no
     shipped grep answers a third code for a PREFIX spelling. Routing the loop through this function
-    lets a stub grep drive it, which is what
-    `test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal` does.
+    means the cell and `test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal` share ONE
+    grading path, so the rule is pinned where it is APPLIED.
+
+    ⛔ THE STUB DRIVES THIS FUNCTION, SO THE LOOP'S USE OF IT HAS ITS OWN WITNESS (#14303 review
+    round 4, P3 — MEASURED). A stub can only reach the helper, so pinning it here does NOT pin what
+    the CELL calls: replacing the loop body with a local `subprocess.run` plus a two-way
+    `rc in (0, 1)` left this file green on GNU grep 3.11 AND under a 3.12 shim. The alias cell
+    therefore installs a RECORDER over this name and asserts it was called once per spelling — a
+    loop-local two-way records NOTHING and reds, which is what makes "witness at its call site" true
+    of the loop and not only of the rule.
 
     ⛔ AND IT IS NOT TRUE THAT "EVERY SPELLING GOES THROUGH THE UNIVERSE" (#14303 review round 10,
     P3 — MEASURED: the candidate tuple has ONE member and the alias cell probes six spellings). Only
@@ -5305,6 +5313,11 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # in `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`; what this pair of
     # assertions refuses is the other failure — a CONSTANT that no longer matches the live binary.
     runs = _d5_grep_runs_long_option("--unix-byte-offsets")
+    # ⛔ THIS `rc in (0, 1)` IS A DELIBERATE SECOND, INDEPENDENT READ, not a third copy of the rule
+    # (#14303 review round 10, P3 — MEASURED). The point of the pair is two reads of the SAME binary
+    # disagreeing, so this one must NOT go through `_d5_grep_verdict`: a row that asked the helper to
+    # confirm itself would be a helper against itself. `_d5_grade_alias_spelling` raises above on a
+    # third code, so the restated test cannot misfire on one.
     assert runs == (
         _d5_grade_alias_spelling("--unix-byte-offsets")[0].returncode in (0, 1)), (
         "`_d5_grep_runs_long_option` disagrees with a raw probe of the SAME binary — one of the "
