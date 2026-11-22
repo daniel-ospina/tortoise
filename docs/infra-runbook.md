@@ -1377,7 +1377,10 @@ carrying on into the seam — would charge the worker's BOOT to the create (#405
 exactly that), so it is refused by design. ⛔ The predicate is the BACKING's phase, not the lever:
 a WARM `worker` (or `external`, which is a round trip with no boot) answers ready and the encode goes
 through the seam in milliseconds — declining on the lever alone would have stored no derived vector
-for the LIFE of the process.
+for the LIFE of the process. "Booting" is readiness's own conjunction, so it also covers a worker
+that DIED or lost its socket (the next encode respawns it), and the decline is decided before the
+local fast paths — a process that happens to hold a loaded local model (entity resolution loads one
+even under `worker`) must not answer for an encoder it does not serve with.
 
 ⚠️ **THE BUDGET COVERS `bounded=True` ONLY — the RECORD-TRUTH writes still pay the boot.**
 `compute_embeddings` (`bounded` default `false`) has no such bound, and it must not: a Point's vector
@@ -4672,9 +4675,9 @@ operator who read the line above as "CI defends this" would never run it.
 >
 > 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1364`;
 > 2. the SDK **write-path** bound — `tortoise/embeddings.py::await_write_ready_reason`,
->    `:1471` (#13224);
+>    `:1488` (#13224);
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
->    `:1625` (#13528);
+>    `:1631` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
 >    `:3302-3306` (the reader that runs on the deployed box — the `elif` that CALLS the flag and
 >    the thread it starts; the import and the comment above it are not the reader);
@@ -4704,7 +4707,7 @@ operator who read the line above as "CI defends this" would never run it.
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
 > Number 2 and 3 are the second most likely to be missed, and they change behaviour: with the flag
-> `0` each returns `None` immediately (`:1471-1475`, `:1625-1626`), so the write and read paths fall
+> `0` each returns `None` immediately (`:1488-1492`, `:1631-1632`), so the write and read paths fall
 > back to the **synchronous in-request load** — that fallback is part of what flipping the switch
 > chooses.
 

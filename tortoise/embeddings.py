@@ -1453,6 +1453,23 @@ class EmbeddingModel:
         unaffected, and the bounded path can only run where a background load is
         the declared behaviour.
         """
+        # ⛔ THIS DECISION IS MADE ABOVE BOTH LOCAL FAST PATHS (review P1, cycle
+        # 4). It used to sit below them, so in any process holding a LOADED local
+        # model it never ran: that process answered READY while the worker was
+        # booting, `encode_for_row` went on into the seam, and the create paid the
+        # worker's 600 s start-up — the very charge this gate exists to refuse.
+        # Both fast paths below are statements about a LOCAL encoder
+        # (`_model is not None` = it is warm here; `TORTOISE_EMBEDDER_WARMUP=0` =
+        # nobody hands a load to a background lane), so neither is an answer to
+        # "does the encoder this write will use live in this process". And the
+        # state is reachable, not theoretical: the lever is re-read per call
+        # (documented retargeting without a restart), and
+        # `entity_resolver`/`cross_lens` reach `EmbeddingModel.get()` directly,
+        # which loads the local model even under `worker`.
+        if not embed_seam.encodes_in_process():
+            if embed_seam.backing_booting():
+                return _WRITE_DECLINE_BACKING_COLD
+            return None
         inst = cls._instance
         if inst is not None and inst._model is not None:
             return None
@@ -1472,34 +1489,6 @@ class EmbeddingModel:
             # No background lane to hand the load to — preserve the synchronous
             # contract (#13224: the bound must never change dev/test behaviour,
             # and `tests/conftest.py` pins this flag off for the whole suite).
-            return None
-        # ⛔ #14186 — WITH THE ENCODER ELSEWHERE, THE LOCAL MODEL IS NOT THIS
-        # PATH'S ENCODER, and this bound must neither START it nor CHARGE its
-        # remote twin to the create.
-        #
-        # Two rounds of review named opposite halves of this and both are right:
-        # (a) answering READY unconditionally made the create go on into the seam,
-        # where `WorkerBacking.encode` waits out the WORKER'S BOOT (up to
-        # `resolve_worker_startup_s()`, 600 s) on the request's own thread —
-        # charging process initialization to a request, which #4055/#13224
-        # forbid; (b) leaving the pre-fix arm alone STARTED a 432 MB LOCAL load
-        # nothing consults and then blamed "the local embedder is cold" for a
-        # deployment whose encoder was healthy.
-        #
-        # And a third review caught the first version of this gate declining on
-        # the LEVER rather than on the BACKING: with `worker` configured, a WARM
-        # worker was treated as cold, so every derived fold would have stored no
-        # vector for the LIFE of the process instead of for one boot. So the
-        # question is asked of the backing (`embed_seam.backing_booting()`):
-        #
-        #   * a worker boot in flight ⇒ DECLINE, having waited and loaded nothing;
-        #     the derived row is re-encoded by
-        #     `graph-scripts/backfill_embeddings.py` once the backing answers;
-        #   * warm worker, or `external` (a round trip has no boot) ⇒ READY, and
-        #     the encode happens through the seam in milliseconds.
-        if not embed_seam.encodes_in_process():
-            if embed_seam.backing_booting():
-                return _WRITE_DECLINE_BACKING_COLD
             return None
         # ⛔ A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
         # `embeddings` extra absent the model can never load, so neither waiting
@@ -1613,6 +1602,23 @@ class EmbeddingModel:
         still can create one. Declining setup is the same principle applied one
         step earlier: neither charged, and now not waited for either.
         """
+        # ⛔ ORDERED LIKE THE WRITE BOUND (review P1, cycle 4): the seam question
+        # is about WHERE the encoder lives, so it precedes both local fast paths
+        # — the write side was measurably wrong below them, and keeping the two
+        # ladders in the same order is what stops the next edit from reproducing
+        # that on this side. Both arms here answer READY, so this is ordering for
+        # the reader's sake rather than a behaviour change: a read that declined
+        # on a booting backing would have to change BOTH of these together.
+        # ⛔ AND THIS METHOD IS NOT THE BOUND THAT ACTUALLY RUNS (review P3). The
+        # live read path asks the seam FIRST: `sdk` computes
+        # ``_seam_remote = backing != inprocess`` and takes the seam branch
+        # (``encode_query``) BEFORE this ladder, so on `worker`/`external` no
+        # caller reaches this method at all. The guard is therefore DEFENCE IN
+        # DEPTH for a future caller — do not delete the `_seam_remote` branch
+        # believing this method covers it: that branch is what keeps a read from
+        # calling ``EmbeddingModel.get()`` unconditionally.
+        if not embed_seam.encodes_in_process():
+            return None
         inst = cls._instance
         if inst is not None and inst._model is not None:
             return None
@@ -1623,18 +1629,6 @@ class EmbeddingModel:
         # pre-#13528 synchronous contract would silently not apply in the
         # others.
         if not _embedder_warmup_enabled():
-            return None
-        # ⛔ #14186 — WITH THE ENCODER ELSEWHERE, THE LOCAL MODEL IS NOT THIS
-        # PATH'S ENCODER, AND THIS METHOD IS NOT THE BOUND THAT RUNS (review P3).
-        # The live read path asks the seam FIRST: `sdk` computes
-        # ``_seam_remote = backing != inprocess`` and takes the seam branch
-        # (``encode_query``) BEFORE this ladder, so on `worker`/`external` no
-        # caller reaches this method at all. The guard below is therefore
-        # DEFENCE IN DEPTH for a future caller — do not delete the `_seam_remote`
-        # branch believing this method covers it: that branch is what keeps a
-        # read from calling ``EmbeddingModel.get()`` unconditionally, and the
-        # answer here (READY) is the same one that branch encodes.
-        if not embed_seam.encodes_in_process():
             return None
         # A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
         # `embeddings` extra absent the model can never load, so neither waiting

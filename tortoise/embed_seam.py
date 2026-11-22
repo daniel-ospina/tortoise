@@ -911,16 +911,27 @@ class WorkerBacking:
             shutil.rmtree(os.path.join(root, name), ignore_errors=True)
 
     def startup_pending(self) -> bool:
-        """Whether the next encode will pay a boot (review F1).
+        """Whether the next encode will pay a boot (review F1, cycle 4).
 
         Read WITHOUT the state lock on purpose: the boot holds that lock for its
-        whole duration, and a ticket's bound must not block on it. ``_proc`` is
-        set only once the worker is READY (``embed_worker.serve`` binds after
-        ``_preload_encoder``), so ``None`` is exactly "a boot is in flight" —
-        including the race where it has just finished, which errs on the
-        generous side and costs a slower backstop, never a wrong decline.
+        whole duration, and a ticket's bound must not block on it.
+
+        ⛔ ``_proc is None`` IS NOT THE QUESTION (review P1). ``_ensure_started``
+        RESPAWNS a ``_proc`` that is dead (``poll()`` returns) or alive with its
+        socket gone — so both of those are boots the NEXT encode pays, and
+        answering ``False`` for them sized the bound for steady state: the bounded
+        write answered READY, walked into the seam, and charged the worker's 600 s
+        start-up to the request (the #4055/#13224 defect this gate exists to
+        remove), while the read valve declined a worker that was merely
+        restarting. Readiness is the conjunction it actually is: a live child AND
+        a bound socket.
         """
-        return not self._closed and self._proc is None
+        if self._closed:
+            return False
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return True
+        return not os.path.exists(self._address or "")
 
     def _ensure_started(self, timeout_s: float) -> str:
         """Spawn the worker if needed and wait until it is READY.

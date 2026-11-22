@@ -3020,6 +3020,126 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
             embed_seam.install_backing(None)
             embed_seam.reset_seam()
 
+    def test_the_boot_predicate_reads_the_REAL_backing_phase(self, tmp_path):
+        """⛔ Every row above stubs `startup_pending`, and the production one was
+        WRONG in a state no stub could represent (review P1, cycle 4): `_proc`
+        set but DEAD — or alive with its socket gone — is a boot the NEXT encode
+        pays, because `_ensure_started` respawns in both cases. Answering "not
+        booting" then sized the bound for steady state, so a bounded write took
+        the seam and charged 600 s of worker start-up to the create.
+
+        So this row asks the REAL class, in the four shapes readiness actually
+        takes. The `False` row is not decoration: it is what stops a future fix
+        from over-declining a healthy worker — cycle 3's finding.
+        """
+        class _Live:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+        class _Dead:
+            pid = 4243
+
+            def poll(self):
+                return 137
+
+        backing = embed_seam.WorkerBacking()
+        try:
+            path = str(tmp_path / "phase.sock")
+            # 1. Nothing spawned yet: the first encode pays the whole boot.
+            assert backing.startup_pending() is True
+            # 2. Spawned, then the child DIED: `_ensure_started` respawns.
+            backing._proc = _Dead()
+            backing._address = path
+            assert backing.startup_pending() is True, (
+                "a DEAD worker read as ready — the next encode respawns it, so "
+                "a bounded write would have paid the boot on the request thread")
+            # 3. Alive, but the socket it bound is gone (a retired instance, or
+            #    anything that removed the path): also a respawn.
+            backing._proc = _Live()
+            assert backing.startup_pending() is True
+            # 4. Alive AND bound: warm, so this must NOT decline.
+            open(path, "w").close()
+            backing._address = path
+            assert backing.startup_pending() is False, (
+                "a WARM worker read as booting — every derived fold would store "
+                "no vector for the life of the process")
+        finally:
+            backing._proc = None
+            backing._address = None
+            backing.close()
+
+    def test_a_bounded_write_on_a_WARM_worker_still_uses_the_seam(
+            self, monkeypatch):
+        """A loaded LOCAL model must not answer for a seam this process does not run.
+
+        ⛔ The seam gate sat BELOW `inst._model is not None` (review P1, cycle 4),
+        so in any process holding a loaded local model it never ran: that process
+        answered READY during the worker's boot and the create paid it. Reachable
+        two documented ways — the lever is re-read per call, and
+        `entity_resolver`/`cross_lens` load the local model even under `worker`.
+        """
+        from tortoise.embeddings import _WRITE_DECLINE_BACKING_COLD, EmbeddingModel
+
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+
+        class _WarmLoadedLocalModel:
+            """The state that used to short-circuit the gate: model loaded HERE."""
+
+            _model = object()
+
+        monkeypatch.setattr(EmbeddingModel, "_instance",
+                            _WarmLoadedLocalModel(), raising=False)
+        assert EmbeddingModel.await_write_ready_reason(0.05) == \
+            _WRITE_DECLINE_BACKING_COLD, (
+                "a loaded LOCAL model answered READY for a worker that is "
+                "booting — the write then charges the boot to the create")
+
+    def test_a_bounded_write_hands_the_cause_TO_the_log_arm(self, monkeypatch,
+                                                            caplog):
+        """⛔ The HAND-OFF, not the arm (review P3, cycle 4).
+
+        The row below calls ``_note_cold_write`` by hand, so hardcoding a
+        different ``reason=`` at the decline site left it green while the log
+        line and the counter named the wrong cause. This drives the real
+        ``encode_for_row`` decline path instead and asks the three channels an
+        operator actually reads: no vector returned, the backing_cold line
+        emitted, and the counter labelled ``backing_cold`` — not merely a line
+        someone hand-wrote.
+        """
+        import logging as _logging
+
+        from tortoise import embeddings as embeddings_module
+        from tortoise import monitoring
+        from tortoise.embeddings import _note_cold_write
+
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+        monkeypatch.setattr(embed_seam, "encodes_in_process", lambda *a, **k: False)
+        embeddings_module._COLD_WRITE_REPORTED.clear()
+        before = dict(monitoring.derived_embed_decline_counts())
+        with caplog.at_level(_logging.DEBUG, logger="tortoise.embeddings"):
+            assert embeddings_module.encode_for_row("hello", None,
+                                                    bounded=True) is None, (
+                "a bounded write on a booting worker returned a vector — it "
+                "went on into the seam and paid the boot")
+        after = dict(monitoring.derived_embed_decline_counts())
+        key = f"{embeddings_module.BOUNDED_SCOPE_GRAPH_FOLD}:backing_cold"
+        assert after.get(key, 0) - before.get(key, 0) == 1, (
+            f"the decline was not counted under {key!r}: "
+            f"{ {k: v - before.get(k, 0) for k, v in after.items() if v != before.get(k, 0)} }")
+        lines = [r for r in caplog.records
+                 if r.name == "tortoise.embeddings" and "vector" in r.getMessage()]
+        assert lines, "the decline produced no line at all"
+        assert "after waiting" not in lines[0].getMessage(), (
+            f"the hand-off lost the cause and fell through to the wait text: "
+            f"{lines[0].getMessage()!r}")
+        # And the arm itself still works when called by the site's own contract.
+        _note_cold_write(embeddings_module.WRITE_EMBED_BUDGET_S,
+                         reason=embeddings_module._WRITE_DECLINE_BACKING_COLD)
+
     def test_the_backing_cold_line_names_the_backing_and_claims_no_wait(
             self, cold_model, monkeypatch, caplog):
         """⛔ The arm that reports `backing_cold` had no row (review P3).
@@ -3141,6 +3261,10 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
             if line.strip() and _indent_at(source, cursor) <= gate_indent:
                 block_end = cursor
                 break
+        assert source.count("EmbeddingModel.start_warm_up()") == 1, (
+            "the engine-init site calls start_warm_up() more than once — the "
+            "pin only inspects the first call after the gate, so an UNGATED kick "
+            "beside the gated one stays green (review P3)")
         assert gate < warm < block_end, (
             "the engine-init warm-up call is not INSIDE the "
             "_embedder_engine_kick_allowed() block (an `else:`/`elif:` inversion "

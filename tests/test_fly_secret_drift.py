@@ -2225,6 +2225,11 @@ _READER_CITE_RE = re.compile(r"`(?::|(?:tortoise/)?[a-z_]+\.(?:py|sh):)(\d+)(?:-
 #: What a cited line has to contain to be the thing the citation says it is. The
 #: SHELL reads its own copy of the variable, so it is spelled out there.
 _READER_NEEDLE = {
+    #: ⛔ The bare NAME is the needle; ``_span_calls_the_reader`` below is what
+    #: rejects a span that merely SPELLS it (an import, a comment). Both are
+    #: needed: this dict answers "which symbol is this cite about", the call
+    #: requirement answers "does the span actually read it" — and the second is
+    #: the one a bare-name needle alone could not see.
     "embeddings.py": "_embedder_warmup_enabled",
     "hosted_api.py": "_embedder_warmup_enabled",
     "entrypoint.sh": "TORTOISE_EMBEDDER_WARMUP",
