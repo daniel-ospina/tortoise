@@ -526,12 +526,23 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     #: (unreachable) `except ModuleNotFoundError: FLAG = False` propagates everything, and
     #: the order-blind `any()` charged it — a FALSE RED the delta introduced, on the exact
     #: ordering a lane gets by following this gate's own repair message above an existing
-    #: precise skip. ⛔ ONE EXCEPTION, measured and deliberate (review of PR #14287 cycle 8):
-    #: this short-circuit fires BEFORE `caught_earlier` is consulted, so a bare or `_BROAD`
-    #: arm is charged even when an earlier arm made it unreachable — 4,292 over-charges over
-    #: 245,410 enumerated sequences, 0 of them gate-level (coverage is full in that shape, so
-    #: both gates stay green). The charge rule is therefore "an unreachable NARROW arm does
-    #: not drop", not "an unreachable arm never drops".
+    #: precise skip. ⛔ ONE EXCEPTION, deliberate and gate-level NEUTRAL (review of PR #14287
+    #: cycle 8): this short-circuit fires BEFORE `caught_earlier` is consulted, so a bare or
+    #: `_BROAD` arm is charged even when earlier arms have already RE-RAISED every graded
+    #: family. The arm is not unreachable — Python still reaches it — but its remaining
+    #: GRADED-drop set is empty, so charging it is an over-charge. It cannot reach a gate, and
+    #: that is a consequence of the two rules rather than a coincidence: only arms that do NOT
+    #: return can sit above the short-circuit, every graded dropper returns at itself, so the
+    #: arms that empty the remaining set are precisely the re-raising arms `_covered` credits —
+    #: coverage is therefore full and both gates stay GREEN (witnessed on synthetic source in
+    #: `test_the_import_seam_census_sees_the_shapes_it_grades`). ⛔ NO COUNT IS QUOTED HERE: this
+    #: note carried "4,292 over-charges over 245,410 enumerated sequences", and the figure is
+    #: reviewer-LOCAL — the enumeration's arm alphabet and length bound were never stated, so
+    #: it cannot be re-derived from this tree (an independent re-derivation over the same
+    #: 245,410-sequence domain lands on a different count). Two figures of exactly this shape
+    #: were deleted from this file in review cycle 8 for the same reason; the class is checkable
+    #: from the rule in this paragraph, the integer was not. The charge rule is therefore "an
+    #: unreachable NARROW arm does not drop", not "an unreachable arm never drops".
     caught_earlier: set[str] = set()
     for handler in handlers:
         names = _handler_names(handler)
@@ -2772,6 +2783,40 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     assert _seam_from_rows(tuple((_witness, *row) for row in no_broad)) == (), (
         "the seam gate must stay GREEN on a probe with no broad arm — it is already loud, and "
         f"`swallows` is the term that says so: {no_broad}"
+    )
+
+    # ⛔ THE DELIBERATE OVER-CHARGE AT `_swallows_everything`'s short-circuit (its "ONE
+    #     EXCEPTION" note): a broad arm BELOW arms that already re-raised every graded family
+    #     is still charged, because the short-circuit returns before `caught_earlier` is
+    #     consulted. What this pins is the GATE-LEVEL invariance, which is the part a reader
+    #     relies on — and it is stable whether the over-charge stands or is one day made
+    #     reachability-aware: the arms that emptied the remaining set are the re-raising arms
+    #     `_covered` credits, so coverage is full and BOTH gates stay green either way.
+    over_charged = rows(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK as _ProbeSDK
+            _ProbeSDK()
+            FALKORDB_AVAILABLE = True
+        except (AttributeError, NameError, TypeError, ImportError,
+                ModuleNotFoundError, ZipImportError, UnboundLocalError):
+            raise
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert over_charged[0][1] == (
+        "AttributeError", "ImportError", "ModuleNotFoundError", "NameError", "TypeError",
+        "UnboundLocalError", "ZipImportError",
+    ), f"the arm above the broad one re-raises every graded family: {over_charged}"
+    assert _unarmed_from_rows(tuple((_witness, *row) for row in over_charged)) == (), (
+        "every graded family is covered above the broad arm, so the over-charge cannot reach "
+        f"the UNARMED gate: {over_charged}"
+    )
+    assert _seam_from_rows(tuple((_witness, *row) for row in over_charged)) == (), (
+        "`ImportError` is covered above the broad arm, so the over-charge cannot reach the "
+        f"SEAM gate: {over_charged}"
     )
 
     # A bare `except:` covers NOTHING and swallows everything — the worst shape.
