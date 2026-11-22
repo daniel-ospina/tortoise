@@ -17938,6 +17938,26 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "sdk",
         "n.dedup_reviewed IS NULL",
     ),
+    # ⛔ THE `+21` CUT'S OWN RE-POINTED PAIR, BOUND TO THE SENTENCES THAT CARRY IT (#14183
+    # review, cycle 5, P3 — MEASURED). That cut re-pointed the paragraph's address and inserted
+    # the `f"session entity-linking failed: …"` address, and NO entry named either: reverting
+    # them to the pre-delta addresses left this file's whole D5 selection GREEN. That is the
+    # class #13879 / #13956 named one layer up — a row whose own thesis is that a typed line
+    # number rots cannot ship its newest corrections unread. Each regex binds the number to the
+    # sentence that gives it its meaning, and the needle is that line's own text, so the number
+    # and the content it describes are graded by the same arm.
+    (
+        'the `f"session entity-linking failed: …"` line',
+        r'`f"session entity-linking failed[^`]*` line sits at `:(?P<n>\d+)`',
+        "sdk",
+        'f"session entity-linking failed:',
+    ),
+    (
+        "the paragraph the cut quoted (`whose payload points ALL fold as PARAPHRASE noops`)",
+        r"`whose payload points ALL fold as PARAPHRASE noops`\) is at `:(?P<n>\d+)`",
+        "sdk",
+        "# whose payload points ALL fold as PARAPHRASE noops",
+    ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
     # carries 279 cite-shaped `:N` tokens at this head (re-derived from the row this branch
@@ -18008,6 +18028,8 @@ _D5_CURRENT_CLAIM_LABELS = frozenset({
     "the file's ONLY `dedup_reviewed IS NULL`",
     "the quota guard `if count + est > max_points:`",
     "the `sdk.py` import's OTHER hit",
+    'the `f"session entity-linking failed: …"` line',
+    "the paragraph the cut quoted (`whose payload points ALL fold as PARAPHRASE noops`)",
     "the replay-skips-capture `sed -n` quote",
     "the `# then resolved to the row it replaced.` `sed -n` quote",
 })
