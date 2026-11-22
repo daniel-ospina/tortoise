@@ -11,6 +11,7 @@ re-run without spending money to check itself.
 """
 from __future__ import annotations
 
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -597,13 +598,14 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
 
     ⛔ THERE IS A THIRD PATH, and pinning the two declarations is not enough without it.
     `post-merge-validation.yml` hand-enumerates its install as
-    `pip install -e '.[embeddings]' <packages…>` — it deliberately does not take the whole
-    `test` extra, because playwright ships no browsers on that runner — and then runs the
-    WHOLE tree on the ambient interpreter. This file is not in `slow_files`, so that leg
-    collects it, and a package reachable only through `dev` or the `test` extra is missing
-    there. `tiktoken` was exactly that gap (#14277): the two corpus cases red on `main` on
-    a warn-only workflow. So the arm below asserts the leg either installs the extra or
-    names the package — it is not satisfied by the pyproject declarations alone.
+    `pip install -e '.[embeddings]' <packages…>` — it has never taken the `test` extra
+    (#493) — and then runs the fast tree on the AMBIENT interpreter
+    (`tests/` minus `tests/e2e`, minus `slow_files`, minus `-m 'not track_b'`). This file is
+    not in `slow_files`, so that leg collects it, and a package reachable only through
+    `dev` or the `test` extra is missing there. `tiktoken` was exactly that gap (#14277):
+    the two corpus cases red on `main` on a warn-only workflow. So the arm below asserts
+    the leg either installs the extra or names the package — it is not satisfied by the
+    pyproject declarations alone.
     """
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
     for where, declarations in (
@@ -619,14 +621,20 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
             f"{declarations}")
 
     # Third path: the hand-enumerated post-merge leg (see the docstring). It is allowed to
-    # switch to the extra later; what it may NOT do is install neither.
+    # switch to the extra later; what it may NOT do is install neither. Comment lines are
+    # skipped (`:307` and the block below it both quote this command), and the extras test
+    # is a real parse rather than a substring: `".[test]"` does NOT contain `".test"` —
+    # the dot is followed by `[` — so a substring arm would be dead code and would red the
+    # very remediation the docstring blesses.
     pmv = (_REPO_ROOT / ".github" / "workflows" / "post-merge-validation.yml").read_text()
-    installs = [ln for ln in pmv.splitlines() if "pip install -e" in ln]
-    assert installs, "no `pip install -e` line found in post-merge-validation.yml"
+    installs = [ln for ln in pmv.splitlines()
+                if "pip install -e" in ln and not ln.lstrip().startswith("#")]
+    assert installs, "no live `pip install -e` line found in post-merge-validation.yml"
+    test_extra = re.compile(r"\.\[[^\]]*\btest\b[^\]]*\]")
     for line in installs:
-        assert ".test" in line or "tiktoken" in line, (
+        assert test_extra.search(line) or "tiktoken" in line, (
             "post-merge-validation.yml installs this leg WITHOUT the `test` extra and "
-            "without `tiktoken`, but it runs `python -m pytest tests/` over the whole tree "
+            "without `tiktoken`, but it runs `python -m pytest tests/` over the fast tree "
             "on the ambient interpreter and `tests/test_extractor_cost_measure.py` is not "
             "in `slow_files` — so its two corpus cases die with `ModuleNotFoundError` "
             f"(#14277). Install line: {line.strip()}")

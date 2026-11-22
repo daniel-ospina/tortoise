@@ -302,19 +302,27 @@ jobs:
         run: |
           set -o pipefail  # don't let `tail` mask a pip failure
           # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
-          # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
           #
-          # ⛔ HAND-ENUMERATED ON PURPOSE, AND THAT IS A STANDING HAZARD. This leg
-          # deliberately does NOT install the whole `test` extra (playwright ships no
-          # browsers here), so every package that a test this leg COLLECTS imports has to
-          # be named on the line below. It runs `python -m pytest tests/` (step "Run tests")
-          # on the AMBIENT interpreter — `uv sync --frozen` fills `.venv`, and nothing in
-          # this workflow activates or exports it — so a package that is declared only in
-          # the `dev` group is NOT importable here. `tiktoken` is the case that proved it
-          # (#14277): `tools/extractor_cost_measure.py::_encoding` imports it lazily, so the
-          # two corpus cases in `tests/test_extractor_cost_measure.py` (NOT in `slow_files`,
-          # so this leg collects them) reddened with `ModuleNotFoundError` — and the same
-          # absence is why the `test` extra now declares it for the python-ci shards.
+          # ⛔ HAND-ENUMERATED, AND THAT IS A STANDING HAZARD. This leg has never installed
+          # the `test` extra; it names a minimal subset (#493). The rule that follows from
+          # that is not optional: every package that a test this leg COLLECTS imports has to
+          # be named on the install line below. It runs `python -m pytest tests/` on the
+          # AMBIENT interpreter — `uv sync --frozen` fills `.venv`, and nothing in this
+          # workflow activates or exports it — so a package declared only in the `dev` group
+          # is NOT importable here, however complete that group looks.
+          #
+          # `tiktoken` is the case that proved it (#14277):
+          # `tools/extractor_cost_measure.py::_encoding` imports it lazily, so the two corpus
+          # cases in `tests/test_extractor_cost_measure.py` — NOT in `slow_files`, so this leg
+          # collects them — reddened with `ModuleNotFoundError`. That absence is also why the
+          # `test` extra now declares it for the python-ci shards.
+          #
+          # Switching this leg to `'.[test,embeddings]'` would end the drift class, and is
+          # NOT done here: that is a separate decision, because it also installs
+          # `playwright` + `pytest-playwright` (a plugin surface this leg never arms — it
+          # runs no `python -m playwright install`). The guard in
+          # `tests/test_extractor_cost_measure.py` accepts EITHER shape, so whoever makes
+          # that call is not blocked by it.
           pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 'tiktoken>=0.14.0' uv 2>&1 | tail -2
           # uv (#2216): test_battery_corpus.py::test_builder_determinism_cross_process
           # and tests/eval/retrieval/test_gate_1349.py::test_cli_python_dash_m_entrypoint
