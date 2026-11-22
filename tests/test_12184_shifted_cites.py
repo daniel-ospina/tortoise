@@ -2423,13 +2423,20 @@ def _published_table_length() -> int:
     this cannot find is a figure nothing grades, which is the defect class the arm exists to close.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
-    match = re.search(r"\*\*(\d+) rows, which is the TABLE's own length", text)
-    assert match is not None, (
+    found = re.findall(r"\*\*(\d+) rows, which is the TABLE's own length", text)
+    assert found, (
         f"`{_AUDIT}` no longer publishes the table's length in the graded form "
         "(\"**N rows, which is the TABLE's own length\") — re-point this reader at the sentence "
         "that states it rather than dropping the arm"
     )
-    return int(match.group(1))
+    # ⛔ EVERY match, not the first (#14269 review, cycle 14): `re.search` grades whichever copy
+    # comes first, so a second sentence stating a DIFFERENT figure would sit unread while this
+    # arm reported green — the same one-reader-one-figure gap the arm exists to close.
+    assert len(set(found)) == 1, (
+        f"`{_AUDIT}` publishes the table's length more than once with different figures: {found} "
+        "— there must be exactly one graded sentence, so re-point the duplicates at a single figure"
+    )
+    return int(found[0])
 
 
 def test_the_redefined_13854_table_length_is_the_figure_the_document_publishes() -> None:
@@ -2883,6 +2890,49 @@ def test_the_13854_cite_families_open_on_the_line_they_quote() -> None:
             f"{path}:{line} no longer carries {fragment!r} — it reads {target[line - 1].strip()[:96]!r}. "
             "The cite is bound to a line, so re-derive it from the row's own quoted fragment instead of "
             "moving it by a delta."
+        )
+
+
+#: §2.4's `list_sessions` row — the FIFTH row this branch re-points at this head, declared at
+#: `#14269` review cycle 14 because a declaration that nothing grades is a promise, not a pin.
+#: Shape is `_REDEFINED_13854`'s (`token in the document`, `file`, `line the fragment must be on`,
+#: `verbatim fragment`, `how many times the document carries the token`) and is graded by the arm
+#: below. ⛔ NOT folded into `_REDEFINED_13854`: its length IS a published figure (35 rows), armed
+#: in the same commit, so adding rows here must not move a number the document quotes.
+_LIST_SESSIONS_ROW_BINDS: tuple[tuple[str, str, int, str, int], ...] = (
+    (":25136", "tortoise/hosted_api.py", 25136, "async def list_sessions(request: Request", 1),
+    (":25233-25266", "tortoise/hosted_api.py", 25233, "query = (", 4),
+    (":25235", "tortoise/hosted_api.py", 25235, "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point)", 1),
+    (":25252-25253", "tortoise/hosted_api.py", 25252,
+     "\"RETURN s.id, s.created_at, s.turn_count, count(p), \"", 1),
+    (":25254", "tortoise/hosted_api.py", 25254, "s.machine_id, s.model,", 3),
+    (":25260", "tortoise/hosted_api.py", 25260, "s.capture_ok, s.capture_extractor,", 3),
+    (":25264", "tortoise/hosted_api.py", 25264,
+     "s.client_captured_at, s.client_captured_at_source, s.capture_lane", 4),
+)
+
+def test_the_list_sessions_row_binds_every_address_it_names() -> None:
+    """§2.4's `list_sessions` row is content-bound, not just declared (#14269 review, cycle 14).
+
+    The declaration said five rows were re-pointed at this head; the fifth had no reader, so
+    measured on a throwaway copy a rotation of `tortoise/hosted_api.py` above the handler
+    re-points all seven addresses onto comment lines while the whole gate stays green — the false
+    PASS this PR exists to refuse, left open on the one row the declaration itself had just
+    admitted. Each row pins the token's occurrence count in the document AND the verbatim
+    fragment at the line the token names, so a re-point either way reds.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    for token, path, line, fragment, expected in _LIST_SESSIONS_ROW_BINDS:
+        assert text.count(token) == expected, (
+            f"`{_AUDIT}` carries {token!r} {text.count(token)}x, not {expected}x — a SITE was "
+            "re-pointed while a sibling kept the string. Re-derive by CONTENT, not by a delta."
+        )
+        target = (REPO / path).read_text(encoding="utf-8").splitlines()
+        assert 0 < line <= len(target), f"{path} has no line {line}"
+        assert fragment in target[line - 1], (
+            f"{path}:{line} no longer carries {fragment!r} — it reads "
+            f"{target[line - 1].strip()[:96]!r}. The row names a statement, so bind it to the "
+            "line that statement is on instead of moving the cite by a delta."
         )
 
 
