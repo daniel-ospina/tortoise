@@ -899,7 +899,28 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                     # GREEN.
                     _slots = [t for t in _targets
                               if isinstance(t, (ast.Subscript, ast.Attribute))]
-                    if not _slots or _cannot_carry(_iter, scalars):
+                    if not _slots:
+                        # ⛔ A CONTAINER ASSIGNED FROM A HOLDER IS THE SAME CONTAINER
+                        # (#14281 review P1's family, measured GREEN at `6fe2a1f5c83`):
+                        #
+                        #     _d = {}; _d["k"] = results[0]
+                        #     _t = _d; _t["k"] |= {"id": "REDACTED"}   -> hits=[]
+                        #     _t["k"].update({"id": "REDACTED"})       -> hits=[]
+                        #
+                        # The slot store put the element in `_d`; `_t` is a second NAME
+                        # for that same index, exactly as `a1 = results` is a second
+                        # name for the page — and the hop was missing, so the carrier
+                        # arm covered only the name the store happened to mention.
+                        # Measured through `compare()`: a genuinely permuted pair reads
+                        # `rank_identical: True`.
+                        if isinstance(_iter, ast.Name) and _iter.id in holders:
+                            _fresh = {b.id for t in _targets for b in ast.walk(t)
+                                      if isinstance(b, ast.Name)} - holders
+                            if _fresh:
+                                holders |= _fresh
+                                changed = True
+                        continue
+                    if _cannot_carry(_iter, scalars):
                         continue
                     _fresh = set().union(
                         *(_names_in(s.value) for s in _slots)) - holders
@@ -1839,6 +1860,18 @@ def test_a_CONTAINER_that_only_HOLDS_the_page_is_NOT_the_page() -> None:
         ("write through the slot",
          "    _d = {}\n    _d['k'] = results[0]\n    _d['k']['id'] = 'REDACTED'\n",
          "_d['k']['id'] = "),
+        # ⛔ THE SAME SLOT, REACHED THROUGH A SECOND NAME FOR THE CONTAINER (#14281 review
+        # P1's family, measured GREEN at `6fe2a1f5c83`): the slot store put the element in
+        # `_d`, and `_t` IS `_d` — exactly as `a1 = results` is a second name for the page.
+        # Without the hop the carrier arm covered only the name the store mentioned.
+        ("held element, container ALIASED first",
+         "    _d = {}\n    _d['k'] = results[0]\n    _t = _d\n"
+         "    _t['k'] |= {'id': 'REDACTED'}\n",
+         "_t['k'] |= "),
+        ("held element, container ALIASED then updated",
+         "    _d = {}\n    _d['k'] = results[0]\n    _t = _d\n"
+         "    _t['k'].update({'id': 'REDACTED'})\n",
+         "_t['k'].update("),
         ("three-deep chained unpack, last target",
          "    (_a,) = (_b,) = (_c,) = results\n    _c |= {'id': 'REDACTED'}\n",
          "_c |= "),
