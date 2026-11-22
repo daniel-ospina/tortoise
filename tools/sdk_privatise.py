@@ -1302,6 +1302,27 @@ SWEEP_NAMES = 66
 #: ⛔ EVERY BLOCK ABOVE IS KEPT, both sides', because each is a true measurement of the tree it
 #: NAMES — including both sides' final lines, which are two different trees and neither of which
 #: is this one.
+#: ⛔ RE-PINNED → (11861, "f0647020531c078c") BY MEASUREMENT, and the 11858 pair FALSIFIED AT ITS
+#: OWN COMMIT. `surface-guard` was RED on PR #14220 at `b7ce9f086c` with `observed: (11861,
+#: f0647020531c078c)` / `pinned: (11858, a1552662bf07a10b)`, and the pin's own base commit
+#: `10e51693f1` — the ONLY commit that ever set 11858 — measures `(11861, "f0647020531c078c")`
+#: by this same code when its tree is extracted and graded (`git archive 10e51693f1 | tar -x -C
+#: <dir>`; run `sdk_privatise.rename_map(rev=SWEEP_BASE)` + `edits_for` over `py_files()`), so the
+#: delta is not attributable to any tree reachable from it and the paragraph above's claim that
+#: 11858 was re-measured cannot be reproduced. ⛔ THE BRANCH'S OWN CONTRIBUTION IS MEASURED ZERO:
+#: the residue SET at `b7ce9f086c`'s ancestor `d2b5f83a0a` and at PR #14220's head digest
+#: IDENTICALLY (`f0647020531c078c`, 11861 rows, row-for-row diff empty) — `git diff`
+#: `d2b5f83a0a..HEAD` adds no `.query`/`.update`/`.delete` receiver — so this re-pin carries the pin to
+#: a value measured on the tree that ships, and neither introduces nor hides a row here. The pin is
+#: a WHOLE-TREE census and moves with unrelated merges; re-derive it, never inherit it.
+#:
+#: ⛔ AND `#14220` IS NOW MERGED INTO THE SAME INTEGRATION TREE (`integration/14183-14220`, the
+#: second and last half of the reconciliation), so this pin is taken on THAT tree — a THIRD one, not
+#: either parent's. Its own branch pins `(11861, "f0647020531c078c")`; the tree this branch resolved
+#: pins `(11864, "2a6400518a87775c")` — UNCHANGED from the first merge, so `#14220` contributes ZERO
+#: untyped receivers of its own, which is a measurement and not an inheritance. `--check` exits 0 on it with
+#: `typed references still pointing at a public name: 0`. ⛔ BOTH sides' blocks above are KEPT again,
+#: for the reason the note above already states.
 SWEEP_RESIDUE = (11864, "2a6400518a87775c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

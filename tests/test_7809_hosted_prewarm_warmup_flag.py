@@ -103,3 +103,35 @@ def test_default_warms_the_embedder(monkeypatch, embedder_get_spy):
         f"({overrides}) — #13674 left ONE declared bound, so it must take "
         f"EmbeddingModel._LOAD_TIMEOUT_S: calls={calls}"
     )
+
+
+def test_a_worker_backing_skips_the_in_process_prewarm(
+        monkeypatch, embedder_get_spy):
+    """#14186 review F5 — a ``worker``/``external`` backing must not load it HERE.
+
+    The pre-warm exists to make the IN-PROCESS forward pass warm. Once the seam's
+    backing is ``worker`` or ``external`` nothing in this process encodes, so the
+    load buys nothing and costs exactly what the migration exists to remove: 432 MB
+    resident in the serving process (3.66 GB with two overlapping loads, #13674) —
+    on top of the worker's own copy. Pre-fix the gate was
+    ``_embedder_warmup_enabled()`` alone, so the documented migration in
+    ``docs/infra-runbook.md`` §4.1.1e left two copies resident, and the runbook's
+    lever table never said the pre-warm had to be disabled by hand too.
+
+    ⛔ The boot PAGE-CACHE warm (``entrypoint.sh``, a throwaway process before
+    ``exec``) is deliberately NOT gated: it is not resident, and under ``worker``
+    the worker loads the same model and reads those pages warm.
+    """
+    calls, called = embedder_get_spy
+    monkeypatch.setenv("TORTOISE_EMBED_BACKING", "worker")
+    monkeypatch.delenv("TORTOISE_EMBEDDER_WARMUP", raising=False)
+
+    with TestClient(ha.app):
+        # A buggy spawn reaches the stubbed get within ms; wait so a leak cannot
+        # hide behind thread scheduling.
+        called.wait(timeout=0.5)
+
+    assert calls == [], (
+        "the hosted lifespan loaded the encoder in-process while the embed "
+        f"seam's backing was `worker`: calls={calls}"
+    )

@@ -2464,7 +2464,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     `_TOKEN_OCCURRENCES[':6989']` in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
     deletes the only protection on the entry that actually suffered the false correction. The document's
     own shape puts the DECLARED head's figure FIRST with this tree's after it in parens (`:33583`
-    there, `:33637` at this head), not the reverse.
+    there, `:34388` at this head), not the reverse.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     # ⛔ THE WHOLE ENUMERATION, not one entry (review cycle 3, F1). `#13466` re-pointed FOUR of its
@@ -2484,7 +2484,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "subject probe `:7025-7028`",
         "`subject_binding_available()` at `:7031-7044`",
         "index note `:3070`;",
-        "`capture_redactions` writer `:2876` (on this tree `:2921`)",
+        "`capture_redactions` writer `:2876` (on this tree `:2950`)",
         "walk `:4780-4784`",
         "operator leg `:6667`",
         "label scan `:4708-4710`",
@@ -2632,18 +2632,30 @@ def test_the_13854_cite_families_open_on_the_line_they_quote() -> None:
     under it moves.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    #: ⛔ COLLECT, DO NOT ABORT AT THE FIRST ROW (review P2, cycle 10). Asserting
+    #: inside the loop meant one row that was ALREADY red at the base (here
+    #: `sdk.py:18035`) masked every later row: three cites this PR's own +29
+    #: insertions moved went unreported, and the suite still read "the same five
+    #: base failures", so the masking was invisible. A gate that reports only the
+    #: first defect of a class is how the rest of that class ships.
+    failures: list[str] = []
     for token, path, line, fragment, expected in _REDEFINED_13854:
-        assert text.count(token) == expected, (
-            f"{_AUDIT} carries {token!r} {text.count(token)}x, not {expected}x — a SITE was re-pointed "
-            "while a sibling kept the string. Re-derive by CONTENT and update the count."
-        )
+        if text.count(token) != expected:
+            failures.append(
+                f"{_AUDIT} carries {token!r} {text.count(token)}x, not {expected}x — a SITE was "
+                "re-pointed while a sibling kept the string. Re-derive by CONTENT and update the count.")
+            continue
         target = (REPO / path).read_text(encoding="utf-8").splitlines()
-        assert 0 < line <= len(target), f"{path} has no line {line}"
-        assert fragment in target[line - 1], (
-            f"{path}:{line} no longer carries {fragment!r} — it reads {target[line - 1].strip()[:96]!r}. "
-            "The cite is bound to a line, so re-derive it from the row's own quoted fragment instead of "
-            "moving it by a delta."
-        )
+        if not 0 < line <= len(target):
+            failures.append(f"{path} has no line {line}")
+            continue
+        if fragment not in target[line - 1]:
+            failures.append(
+                f"{path}:{line} no longer carries {fragment!r} — it reads "
+                f"{target[line - 1].strip()[:96]!r}. The cite is bound to a line, so re-derive it from "
+                "the row's own quoted fragment instead of moving it by a delta.")
+    assert not failures, (
+        f"{len(failures)} row(s) failed:\n" + "\n".join(failures))
 
 
 def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:

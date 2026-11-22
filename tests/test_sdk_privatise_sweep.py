@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1192 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1213 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; and PR #14258's own
     two prose commits grew it to 1066 while this sentence still said 985, which was true at
@@ -261,8 +261,8 @@ def _residue_block() -> str:
     dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
     rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
     blocks and added the re-measure note — to 1122; and the `#14183` + `#14220` reconciliation
-    (`integration/14183-14220`), which keeps BOTH sides' blocks again and adds the integration
-    tree's own note, to 1192), AND THE ARMS GRADE
+    (`integration/14183-14220`), which keeps BOTH sides' blocks at each of its two merges and adds
+    the integration tree's own note at each, to 1192 and then 1213), AND THE ARMS GRADE
     ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,

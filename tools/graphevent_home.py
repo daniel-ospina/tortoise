@@ -453,7 +453,18 @@ class RecordUnavailable(RuntimeError):
 def _graph_connection(uri: str):
     from falkordb import FalkorDB
 
-    return FalkorDB.from_url(uri.replace("docker://", "redis://"))
+    # ⛔ THE READ IS BOUNDED (#14286, the #3065/#8118 class). ``falkordb`` defaults
+    # ``socket_timeout`` to ``None`` and hands that to redis-py explicitly, so an
+    # unbounded client against a STALLED engine (the #2969 defrag loop, #2838's
+    # MERGE lock) parks this process in ``recv()`` forever at 0% CPU — printing
+    # nothing and exiting nothing, on a verb whose whole contract is to READ a
+    # live graph and produce a verdict. The bound comes from the product's ONE
+    # resolution point so the ``TORTOISE_DB_SOCKET_*`` knobs reach it too, and a
+    # stalled server now surfaces as a bounded read error this tool can REPORT.
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    return FalkorDB.from_url(uri.replace("docker://", "redis://"),
+                             **_bounded_server_socket_kwargs())
 
 
 def _known_graphs(db) -> list[str]:
