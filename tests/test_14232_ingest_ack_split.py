@@ -1704,3 +1704,116 @@ def test_run_emits_THE_DECISION_POINTS_verdict_and_exit(monkeypatch, capsys,
         "the exit code must be derived from that same verdict: "
         f"{exits}")
 
+
+def test_the_transport_error_classifier_is_ISINSTANCE_not_a_name_match():
+    """`_is_transport_error` — the classification arm of note 1 (7074468018).
+
+    The pre-fix predicate was
+    `type(exc).__name__ == "HTTPError" or "httpx" in type(exc).__module__`. The
+    NAME arm is false for every CONCRETE httpx error (`ConnectError`,
+    `ReadTimeout`, …), and the module arm only matches when the exception's own
+    module string happens to contain `httpx` — so a transport error raised from a
+    vendored/wrapped module was classified as a criterion FAILURE and re-raised as
+    a verdict about the change.
+
+    The row pins a real `httpx.HTTPError` subclass whose `__module__` is not
+    `httpx`, which the module substring cannot rescue, plus the negative that
+    keeps the guard from swallowing genuine failures.
+
+    Mutant: restore the name/substring predicate → `_Vendored` classifies False
+    and this row reds.
+    """
+    import httpx
+
+    drain = _drain_tool()
+
+    class _Vendored(httpx.HTTPError):
+        """A concrete httpx error re-exported from a vendor module."""
+
+    _Vendored.__module__ = "vendor.transport"
+
+    assert drain._is_transport_error(_Vendored("connection refused")) is True, (
+        "a subclass of httpx.HTTPError IS a transport error whatever module it "
+        "is raised from")
+    assert drain._is_transport_error(httpx.ConnectError("refused")) is True
+    assert drain._is_transport_error(ValueError("a criterion bug")) is False, (
+        "the guard must not swallow a genuine failure — it would turn a broken "
+        "criterion into exit 2")
+
+
+@pytest.mark.parametrize("boom", ["get_session", "extraction_evidence"])
+def test_a_transport_failure_on_a_DETAIL_READ_is_UNREACHABLE_not_a_verdict(
+        boom, monkeypatch, capsys, tmp_path):
+    """The guard must cover ALL THREE network calls, not one (note 1, 7074468018).
+
+    Only `post_capture` was wrapped, so a `ConnectError` on a detail read — the
+    criterion-3 terminal poll, or the one inside `extraction_evidence` for
+    criterion 4 — surfaced as a traceback and exited 1. This tool's own contract
+    reads exit 1 as "a criterion RAN and FAILED", so one API blip on a deployment
+    run was reported as a FAIL of the CHANGE, which is the exact class the
+    `post_capture` guard exists to stop.
+
+    Both arms now report `<label> unreachable — ConnectError: …` and exit 2, the
+    code the `post_capture` guard already used. Mutants, one per arm: delete the
+    `try/except` around the terminal poll → arm `get_session` reds with the
+    propagating `ConnectError` instead of rc 2; delete it around
+    `extraction_evidence` → arm `extraction_evidence` does the same.
+    """
+    drain = _drain_tool()
+
+    class _Resp:
+        def __init__(self, code, body):
+            self.status_code = code
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    def _boom(_sid):
+        import httpx
+
+        raise httpx.ConnectError("connection refused")
+
+    class _Stub:
+        """Every criterion would be met; the NETWORK is what fails here."""
+
+        label = "stub"
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            pass
+
+        def post_capture(self, _cap):
+            return _Resp(200, {"status": "ok", "extracted": 1,
+                               "extraction": None})
+
+        def get_session(self, sid):
+            if boom == "get_session":
+                _boom(sid)
+            # TERMINAL on the first poll, so the other arm reaches criterion 4.
+            return _Resp(200, {"extracted": 1,
+                               "extraction": {"status": "ok",
+                                              "outcome_known": True}})
+
+        def extraction_evidence(self, sid):
+            _boom(sid)
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    rc = drain.main(["--n", "1"])
+    err = capsys.readouterr().err
+    assert rc == 2, (
+        "a network failure is a USAGE error (exit 2), not a FAIL of the change "
+        f"(exit 1): rc={rc} stderr={err!r}")
+    assert "unreachable" in err and "ConnectError" in err, (
+        f"the failure must name the deployment as unreachable: {err!r}")
+    assert "Traceback" not in err, f"a usage error must not print a traceback: {err!r}"
+

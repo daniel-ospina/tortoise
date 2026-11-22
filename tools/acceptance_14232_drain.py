@@ -384,6 +384,39 @@ def _verdict(*, ok_refusal: bool, ok_terminal: bool, ok_extract: bool,
     return "PASS" if ok_ack else "FAIL"
 
 
+def _is_transport_error(exc: BaseException) -> bool:
+    """Is `exc` the NETWORK failing, rather than a criterion failing?
+
+    ⛔ `isinstance` against httpx's own base class — not a name/substring test
+    (review note 1 on `2285bebc1e`, comment 7074468018). The first cut tested
+    `type(exc).__name__ == "HTTPError" or "httpx" in type(exc).__module__`: the
+    name arm is false for EVERY concrete httpx error (`ConnectError`,
+    `ReadTimeout`, `RemoteProtocolError`), so the guard matched only by accident
+    of the module substring, and it would refuse a subclass raised from a
+    differently-named module. httpx is imported lazily and the rehearsal never
+    needs it, so the duck-typed arm stays as the fallback rather than this tool
+    hard-depending on httpx for an offline run.
+    """
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover — httpx ships with the app
+        return (type(exc).__name__ == "HTTPError"
+                or "httpx" in type(exc).__module__)
+    return isinstance(exc, httpx.HTTPError)
+
+
+def _close(transport) -> None:
+    """Release the rehearsal's graph handle on EVERY exit path.
+
+    The tail of `run()` used to close the transport itself, which the early
+    `return 2` from the unreachable guard — and now the two detail-read guards —
+    would skip. Same behaviour as before on the normal path; no leaked handle on
+    the failure paths.
+    """
+    if isinstance(transport, _InProcessTransport):
+        transport.close()
+
+
 def _exit_code(verdict: str) -> int:
     """The shell contract: `PASS` and `INCONCLUSIVE` exit 0, `FAIL` exits 1.
 
@@ -443,6 +476,22 @@ def run(args) -> int:
     def _say(*a, **kw):
         print(*a, file=_out, **kw)
 
+    def _unreachable(exc: BaseException) -> int:
+        """A transport failure is a USAGE error (exit 2), never a verdict.
+
+        ⛔ ALL THREE network calls report through here (review note 1, comment
+        7074468018). Only `post_capture` used to be wrapped, so a `ConnectError`
+        on a detail read — the terminal poll, or the one inside
+        `extraction_evidence` — surfaced as a traceback and exited 1, which this
+        tool's contract reads as "a criterion RAN and FAILED": a FAIL of the
+        CHANGE rather than of the deployment, and a red wall of one API blip's
+        making. The class the guard was added for was half-closed.
+        """
+        print(f"error: {transport.label} unreachable — "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        _close(transport)
+        return 2
+
     _say(f"#14232 acceptance drain — {transport.label}")
     _say(f"  corpus: {corpus_label}, n={len(corpus)}")
     if not args.base_url:
@@ -460,10 +509,8 @@ def run(args) -> int:
         try:
             r = transport.post_capture(cap)
         except Exception as exc:  # a transport failure is a USAGE error, not a verdict
-            if type(exc).__name__ == "HTTPError" or "httpx" in type(exc).__module__:
-                print(f"error: {transport.label} unreachable — "
-                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
-                return 2
+            if _is_transport_error(exc):
+                return _unreachable(exc)
             raise
         elapsed = time.monotonic() - started
         acks.append(elapsed)
@@ -507,7 +554,12 @@ def run(args) -> int:
         deadline = time.monotonic() + args.terminal_timeout
         last = "not read"
         while time.monotonic() < deadline:
-            r = transport.get_session(cap["session_id"])
+            try:
+                r = transport.get_session(cap["session_id"])
+            except Exception as exc:  # network down ≠ "every session got stuck"
+                if _is_transport_error(exc):
+                    return _unreachable(exc)
+                raise
             if r.status_code == 200:
                 detail = r.json()
                 done, last = _is_terminal(detail)
@@ -524,7 +576,12 @@ def run(args) -> int:
     # ── criterion 4: extraction demonstrably ran, on ONE drained session ──
     evidence = {"measured": False, "why": "no session drained"}
     if terminals:
-        evidence = transport.extraction_evidence(terminals[0]["session_id"])
+        try:
+            evidence = transport.extraction_evidence(terminals[0]["session_id"])
+        except Exception as exc:  # a blip here reads as "extraction did not run"
+            if _is_transport_error(exc):
+                return _unreachable(exc)
+            raise
         evidence["session_id"] = terminals[0]["session_id"]
 
     p95 = _percentile(acks, 95)
@@ -646,8 +703,7 @@ def run(args) -> int:
         print()
         print(f"VERDICT: {report['verdict']}")
 
-    if isinstance(transport, _InProcessTransport):
-        transport.close()
+    _close(transport)
     # ⛔ THREE-WAY, and the middle one is not a pass: an INCONCLUSIVE run graded
     # every host-INDEPENDENT criterion and could not grade the absolute one, so it
     # exits 0 (the change is not what failed) while the printed and JSON verdict
