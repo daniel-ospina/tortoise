@@ -1342,6 +1342,26 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False) -> set[str]:
 
     out: set[str] = set()
 
+    def _builds_new_object(value: ast.AST) -> bool:
+        """The value is a COPY — a call to an allow-listed pure reader, or a comprehension.
+
+        ⛔ A COPY CANNOT MUTATE WHAT IT COPIED (#14326 round 9, MEASURED at `88859180`):
+        `_copy = list(results); _copy.sort()` measured `hits=[5]` and
+        `_ids = [_result_id(r) for r in results]; _ids.sort()` measured `hits=[5]` — the pin
+        RED-ed two edits that mutate nothing the artifact records, while this file's own
+        docstring declares exactly those shapes "correctly exempt". The mention rule below
+        counts any page name inside the value, and both spellings CONTAIN one, so the copy
+        became an alias of its source. The exemption is `_PURE_READS` (already carrying
+        `list`/`dict`/`set`/`sorted` and the serialisers) plus the four comprehension nodes.
+        A LITERAL container is deliberately NOT exempt — `_box = [results]` really does hold
+        the page, and its own mutations stay the stated accepted false red.
+        """
+        if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return True
+        return (isinstance(value, ast.Call)
+                and (getattr(value.func, "id", None) or getattr(value.func, "attr", None))
+                in _PURE_READS)
+
     def _bind(target: ast.AST, value: ast.AST) -> bool:
         """Resolve one (target, value) pair; True when it named something new."""
         if isinstance(target, ast.Name):
@@ -1350,7 +1370,9 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False) -> set[str]:
             # ⛔ A MENTION, not only a bare `Name`: `_box = [results]` and
             # `_row = per_query[-1]` are aliases of the collection inside them, and the
             # bare-Name form left `_box[0].sort()` / `_row["order"] = …` green (measured).
-            resolves = (
+            # …but a COPY (`list(results)`, a comprehension) is NOT an alias — see
+            # `_builds_new_object` immediately above.
+            resolves = not _builds_new_object(value) and (
                 predicate(value)
                 or bool(_names_in(value) & out)
                 or any(predicate(operand)
@@ -1599,8 +1621,15 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     itself, a transitive alias, a walrus bind, EVERY target of an unpack, a `for` target,
     a `lambda`/`def` default, an augmented assignment, a container or object SLOT store
     (`_c[k] = results[0]`, `self._page = results[0]`) — and the same set one level down,
-    for the RECORDED ROWS — plus a bound mutator (`_s = results.sort`) reached directly or
-    through a container slot.
+    for the RECORDED ROWS — plus a bound mutator (`_s = results.sort`) reached directly, or
+    through a LITERAL container, an OBJECT slot, a slot STORE (`_sl["s"] = results.sort`) or a
+    second hop out of a container holding one (`_b.s = _d["s"]`).
+
+    ⛔ STATED RESIDUAL, not implied coverage (#14326 round 9): a bound mutator reached through
+    a DYNAMIC attribute (`getattr(_b, "s")(key=…)`, `_b.__dict__["s"]()`) is NOT resolved —
+    the attribute name is computed at runtime, which is the same boundary the read-name census
+    declares. Everything above is a statically visible attribute/slot spelling; this one is
+    not, and a future edit that relies on it must be graded by hand.
     ⛔ A METHOD NAME IS NOT ENUMERATED, IT IS DEFAULTED (#14281 review round 14, four
     shapes measured GREEN at `3e6e5e61de1b`): the mutator test is `_is_mutator_method`,
     which is FAIL-CLOSED — `_PURE_METHODS` names the read side of the collection protocol
@@ -1907,6 +1936,35 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
 
     bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True)
 
+    def _mutator_holders(tree: ast.AST) -> frozenset[str]:
+        """NAMES of containers/objects whose SLOT was ASSIGNED a bound mutator.
+
+        ⛔ THE SLOT-STORE SPELLING WAS GREEN (#14326 round 9, MEASURED at `88859180`):
+        `_sl = {}; _sl["s"] = results.sort; _sl["s"](key=…)` measured `hits=[]` while the
+        LITERAL spelling of the same thing (`_d = {"s": results.sort}; _d["s"](…)`) reds.
+        The literal is resolved by `_bound_mutator_expr`'s `Dict` arm, but a STORE into a
+        slot reaches neither `_aliases_of` (name targets only) nor the `Attribute`/`Name`
+        targets `_rebound_mutator_slots` collects — so nothing knew `_sl` held a mutator.
+        The same gap made the second hop (`_b.s = _d["s"]; _b.s(…)`) green. Collected as
+        container NAMES because over-collecting here can only RED.
+        """
+        found: set[str] = set()
+        for sub in ast.walk(tree):
+            targets: list[ast.AST] = []
+            value: ast.AST | None = None
+            if isinstance(sub, ast.Assign):
+                targets, value = list(sub.targets), sub.value
+            elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
+                targets, value = [sub.target], sub.value
+            if value is None or not _bound_mutator_expr(value):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Subscript):
+                    found |= _names_in(target.value)
+        return frozenset(found)
+
+    mutator_holders = _mutator_holders(run_def)
+
     def _rebound_mutator_slots(tree: ast.AST) -> frozenset[str]:
         """CALLEE names bound to a BOUND MUTATOR — `_b.s = results.sort`, `_x.count = results.sort`.
 
@@ -1927,7 +1985,16 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 targets, value = list(sub.targets), sub.value
             elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
                 targets, value = [sub.target], sub.value
-            if value is None or not _bound_mutator_expr(value):
+            if value is None:
+                continue
+            # ⛔ A VALUE READ OUT OF A CONTAINER THAT HOLDS A MUTATOR IS THAT MUTATOR (#14326
+            # round 9, MEASURED at `88859180`: `_d = {"s": results.sort}; _b.s = _d["s"];`
+            # `_b.s(key=str)` was GREEN). `_d` is in `bound_mutator` (the literal-dict arm), so
+            # the slot is handed the same pointer one hop out; accepting the `Subscript` value
+            # here is what lets the `Attribute` target below record it.
+            if not (_bound_mutator_expr(value)
+                    or (isinstance(value, ast.Subscript)
+                        and bool(_names_in(value.value) & bound_mutator))):
                 continue
             for target in targets:
                 # ⛔ `Name` TARGETS ARE DELETED, NOT KEPT (#14326 round 9, measured: removing
@@ -1990,7 +2057,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         elif isinstance(node, ast.Call) and (
                 (isinstance(node.func, ast.Name) and node.func.id in bound_mutator)
                 or (isinstance(node.func, ast.Subscript)
-                    and bool(_names_in(node.func.value) & bound_mutator))):
+                    and bool(_names_in(node.func.value) & (bound_mutator | mutator_holders)))):
             # ⛔ AND THROUGH A CONTAINER SLOT (#14281 review P2, measured GREEN):
             # `_d = {"s": results.sort}; _d["s"](key=…, reverse=True)` and
             # `_es = [results.sort]; _es[0](…)` permute the PAGE before the artifact reads
@@ -3120,6 +3187,13 @@ def test_a_BOUND_MUTATOR_in_an_OBJECT_SLOT_is_red() -> None:
         ("object slot, ANNOTATED", "    _b.s: object = results.sort\n    _b.s()\n"),
         ("rebound pure method name", "    _x.count = results.sort\n    _x.count()\n"),
         ("object slot, keyword call", '    _b.s = results.sort\n    _b.s(key=_r.get("id"))\n'),
+        # ⛔ A STORE INTO A SLOT (#14326 round 9, MEASURED at `88859180`: `hits=[]` while the
+        # LITERAL spelling of the same thing reds). `_sl["s"] = results.sort` reaches neither
+        # the name-target seed nor the `Attribute` targets above, so the container never became
+        # a mutator holder; the second hop through a literal dict was green for the same reason.
+        ("slot STORE then call", '    _sl = {}\n    _sl["s"] = results.sort\n    _sl["s"](key=str)\n'),
+        ("second hop through a literal dict",
+         '    _d = {"s": results.sort}\n    _b.s = _d["s"]\n    _b.s(key=str)\n'),
     ):
         assert _mutations_of(body), (
             f"[{label}] a bound mutator stored in an OBJECT SLOT is GREEN (hits=[]) — the "
@@ -3135,6 +3209,36 @@ def test_a_BOUND_MUTATOR_in_an_OBJECT_SLOT_is_red() -> None:
             f"[{label}] an OBJECT SLOT holding a NON-mutator must stay green — over-collecting "
             "the slot would red an inert edit")
 
+
+def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
+    """`_copy = list(results); _copy.sort()` mutates a NEW object, so it must stay GREEN.
+
+    ⛔ MEASURED RED at `88859180` (#14326 round 9): the alias mention rule counts any page
+    name inside the bound value, so `list(results)` made `_copy` an alias of `results` and
+    sorting it red the pin — while this file's own docstring declares exactly these shapes
+    "correctly exempt, and a copy cannot mutate what it copied". A false red on the natural
+    "collect the rows" edit is the direction that makes the next author edit the PIN instead
+    of the tool. `_builds_new_object` exempts `_PURE_READS` calls and comprehensions.
+    """
+    for label, body in (
+        ("list() copy", "    _copy = list(results)\n    _copy.sort()\n"),
+        ("sorted()", "    _copy = sorted(results, key=str)\n    _copy.sort()\n"),
+        ("dict() copy of a row", "    _copy = dict(results[0])\n    _copy.update({'x': 1})\n"),
+        ("comprehension over the page",
+         "    _ids = [_result_id(r) for r in results]\n    _ids.sort()\n"),
+    ):
+        assert not _mutations_of(body), (
+            f"[{label}] a COPY of the page is being graded as a mutation of the page — the "
+            "value BUILDS A NEW OBJECT, so nothing the artifact records can have changed")
+    # ⛔ AND THE OTHER POLARITY, so the exemption cannot swallow a real alias: a LITERAL
+    # container HOLDS the page (`_box = [results]`), and a direct alias IS the page.
+    for label, body in (
+        ("literal container holding the page", "    _box = [results]\n    _box.sort()\n"),
+        ("direct alias", "    _a = results\n    _a.sort()\n"),
+    ):
+        assert _mutations_of(body), (
+            f"[{label}] must stay RED — the copy exemption must not widen into 'nothing is an "
+            "alias'")
 
 def test_a_FALLBACK_expression_alias_still_reaches_the_sort() -> None:
     """A fallback expression binds the SAME collection — `results or []`, `results if c else []`.
