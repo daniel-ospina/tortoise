@@ -892,10 +892,15 @@ GRAPH_CAPABILITY_CYPHER = (
     # and pinned like every arm here.
     # ⛔ `exists {` WAS AN ARM AND IS GONE (#14183 round-16 review, P3) — the SAME
     # argument as `size((` below, one arm over. First-match ordering puts `-[`,
-    # `]->`, `)<-`, `)--(`, `)-->`, `->(` and the pattern arm BEFORE it, so every
-    # EDGE-bearing existence predicate over a BRACKETED or UNBRACKETED hop is
-    # decided earlier (`EXISTS { (e)-[:TOUCHED]->(:Point) }` → `-[`,
-    # `EXISTS { (e)-r->(p) }` → `->(`, `EXISTS { (e)-r-(p) }` → the pattern), and the
+    # `]->`, `)<-`, `)--(`, `)-->`, `->(` BEFORE it in the substring list, so every
+    # EDGE-bearing existence predicate over a BRACKETED hop is decided earlier
+    # (`EXISTS { (e)-[:TOUCHED]->(:Point) }` → `-[`, `EXISTS { (e)-r->(p) }` → `->(`).
+    # ⛔ AND NOT THE PATTERN ARM — the pattern arms are a SECOND loop that runs AFTER
+    # every substring arm, so an `exists {` substring arm would have SHADOWED the
+    # undirected unbracketed hop, not been decided before it: `EXISTS { (e)-r-(p) }`
+    # returns `cypher:)-r-(` today only because `exists {` is gone, and with it
+    # restored that same snippet returns `cypher:exists {` (measured, round-16 review
+    # cycle 3). With it gone, the
     # only shape left that reaches an `exists {` arm is a NODE-existence test
     # (`EXISTS { (n:Point) }`), which needs no graph capability at all — while the
     # comment here claimed "a pattern-existence predicate over an EDGE". The two
