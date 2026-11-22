@@ -606,7 +606,8 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     lo_delta, hi_delta = magnitude_lo - spared_span, magnitude_hi - spared_span
     lo_pct, hi_pct = (100 * lo_delta / spared_span, 100 * hi_delta / spared_span)
     assert magnitude_lo < spared_span < magnitude_hi, (
-        "the docstring calls the spared span a ~11.7k-char coercion `CASE` and "
+        f"the docstring quotes the spared span as a ~{spared_span / 1000:.1f}k-char "
+        "coercion `CASE` and "
         f"THIS predicate measures {spared_span} chars. This is a MAGNITUDE "
         "tripwire for a figure the prose quotes as a '~N.Nk' magnitude, NOT "
         "a byte pin, and its real tolerance is what it actually implements: the "
