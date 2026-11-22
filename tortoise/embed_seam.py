@@ -1430,11 +1430,19 @@ class _Collector:
     ``asyncio`` task would run the forward pass on whichever loop thread
     happened to be scheduled, so the pin would become a guess.
 
-    ⛔ ONE FORWARD PASS AT A TIME. The collector is a single thread and the
-    backing is called from it, so encodes are serialised. That is deliberate: N
-    concurrent encodes on shared cores are what produced the 2-4 s measurement,
-    and serialising them behind a batching queue is the scheduling change the
-    issue asks for. It also gives the pin one place to be asserted.
+    ⛔ THE COLLECTOR'S OWN FORWARD PASSES ARE ONE AT A TIME — that is the whole
+    claim, and it is a claim about THIS QUEUE, not about the process. The collector
+    is a single thread and it calls the backing itself, so its batches are
+    serialised: N coalesced requests become one forward pass, never several. It is
+    NOT a process-wide mutex, and the previous wording ("the backing is called from
+    it, so encodes are serialised") over-claimed: :func:`encode_texts` — the
+    entry point for work that is ALREADY batched — calls ``backing.encode`` on the
+    CALLER's thread by design, so an ``encode_texts`` call and a collector batch
+    can overlap. Two forward passes can therefore be resident at once, and the
+    2-4 s contention this class removes is removed for the QUEUED path (queries),
+    not for a caller that hands over a whole batch. Making those serialise would
+    put a queue in front of a call that has nothing left to coalesce, and would
+    make ``encode_texts``'s documented "no added wait" false (review P3).
     """
 
     def __init__(self, backing_factory) -> None:
@@ -1627,6 +1635,24 @@ class _Collector:
 
     def _fire(self, batch: list[_Ticket]) -> None:
         """Encode ``batch`` in ONE call and hand each ticket its row."""
+        # ⛔ THE STOP FLAG IS RE-CHECKED HERE, UNDER THE LOCK THAT ``stop()`` SETS IT
+        # UNDER (review P3). ``_run`` checks it once, and ``_fire`` then spends its
+        # whole prologue before it resolves a backing — a ``stop()`` landing in that
+        # gap still fired a batch, and (after ``reset_seam``) constructed a FRESH
+        # worker through ``active_backing`` that nothing would close. Claiming the
+        # batch here shrinks the window from "the prologue" to one critical section,
+        # and the ordering is now defined rather than lucky: a ``stop()`` that lands
+        # BEFORE this acquisition declines the batch; one that lands AFTER it is the
+        # in-flight case ``stop()``'s join covers (and ``_retire`` must not close a
+        # backing while :meth:`alive`). The window is not zero and cannot be — a
+        # forward pass cannot be un-fired — so the guarantee is "no NEW batch fires",
+        # which is what :meth:`stop` documents.
+        with self._lock:
+            if self._stop:
+                self._window_opened_at = None
+                for ticket in batch:
+                    self._decline(ticket, _STOPPED_BEFORE_ENCODE)
+                return
         fired_at = time.monotonic()
         # ⛔ TWO DIFFERENT QUANTITIES, published separately because conflating
         # them is a claim that cannot be true on the DEFAULT backing:
@@ -1700,11 +1726,18 @@ class _Collector:
         breaking the one-forward-pass-at-a-time ceiling this module states.
 
         Now: queued tickets are declined with a named reason (their callers do
-        not wait out their whole bound), a batch dequeued but not yet fired is
-        declined by :meth:`_run`, and nothing fires afterwards. ``timeout_s``
-        bounds only the JOIN — a caller that still sees a live collector knows an
-        encode was in flight and must not close its backing yet (see
-        :func:`_retire`).
+        not wait out their whole bound), and a batch dequeued but not yet fired is
+        declined by :meth:`_run` — or, if ``stop()`` landed later still, by
+        :meth:`_fire`'s own re-check under this same lock before it resolves a
+        backing. ``timeout_s`` bounds only the JOIN — a caller that still sees a live
+        collector knows an encode was in flight and must not close its backing yet
+        (see :func:`_retire`).
+
+        ⛔ SO THE GUARANTEE IS "NOTHING **NEW** FIRES", NOT "NOTHING FIRES" (review
+        P3). A batch already past :meth:`_fire`'s claim is IN FLIGHT: it cannot be
+        un-fired, it is what the join above waits for, and the pre-fix defect was
+        that such a batch could also CONSTRUCT a backing nothing owns. The claim
+        closes the construction half; the in-flight half is the join's.
         """
         bound_s = _STOP_JOIN_S if timeout_s is None else timeout_s
         with self._wakeup:

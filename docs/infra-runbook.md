@@ -1398,11 +1398,11 @@ those calls block on the seam, which waits out the boot under
 `backing_booting()` answers `False` for it. So the first create/update/capture after a deploy can be
 slow rather than wrong. That is the deliberate trade, not an oversight.
 
-⚠️ **NOTHING WARMS THE WORKER AT BOOT TODAY.** The lifespan pre-warm is skipped on `worker` /
-`external` (it would load a local copy), and no equivalent kick boots the *worker* — so the first
-encode after a deploy or a lever change is the one that pays the boot: bounded writes decline until
-it lands, and record-truth writes block on it. A boot-time worker warm is a known follow-up, not
-something this section promises.
+⚠️ **NOTHING WARMS THE WORKER AT BOOT — SO A BOUNDED-ONLY PROCESS NEVER LANDS THE BOOT.** The first
+encode after a deploy or a lever change pays it: record-truth writes block, bounded writes decline.
+⛔ "Declines UNTIL IT LANDS" presumes something lands it — a read or a record-truth write does; a
+process issuing ONLY bounded writes has neither, so its derived folds stay VECTORLESS for its whole
+lifetime (`backing_cold` on each). A boot-time worker warm is the known follow-up, not promised here.
 
 ⚠️ **WHAT THE GATE DOES NOT REMOVE — read this before promising an RSS drop.** A few residual paths
 still encode IN-PROCESS and call `EmbeddingModel.get()` synchronously rather than going through the

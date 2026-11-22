@@ -2841,6 +2841,45 @@ class TestASubmitToAStoppedCollectorIsRefused:
             "a submit to a stopped collector ENCODED — the stop was not terminal")
         assert not collector.alive()
 
+    def test_a_batch_dequeued_when_stop_lands_is_not_fired_or_re_resolved(
+            self, backing):
+        """Review P3 at ``7640dc5de00``: ``stop()``'s "nothing fires afterwards" had a window.
+
+        ``_run`` checked ``_stop`` ONCE, and ``_fire`` then spent its whole prologue
+        (window/percentile bookkeeping) before resolving a backing — so a ``stop()``
+        landing in that gap still fired the batch, and after ``reset_seam`` cleared
+        the module globals it CONSTRUCTED a fresh backing through
+        ``active_backing`` that nothing would ever close (432 MB, for ``worker``).
+        ``_fire`` now claims the batch under the lock ``stop()`` sets the flag
+        under, so the ordering is defined instead of lucky.
+
+        Driven directly rather than raced: ``_fire`` is the unit that has to
+        re-check, and a thread race would decide which arm of the window was hit.
+        """
+        recorder = backing()
+        collector = embed_seam._Collector(lambda: recorder)
+        ticket = embed_seam._Ticket("a")
+        # What ``stop()`` leaves behind, without the join: the flag AND the
+        # terminal ``_closed``. Nothing here may reach a backing.
+        collector._stop = True
+        collector._closed = True
+        collector._window_opened_at = time.monotonic()
+
+        collector._fire([ticket])
+
+        assert recorder.batches == [], (
+            "a batch already dequeued was still ENCODED after stop() had set the "
+            "flag — the collector fired a forward pass teardown had already "
+            "accounted for")
+        assert ticket.done.is_set(), (
+            "the batch's ticket was neither answered nor declined — its caller "
+            "waits out its whole bound for a batch that will never fire")
+        assert isinstance(ticket.error, RuntimeError) and \
+            "stopped before" in str(ticket.error), ticket.error
+        assert collector._window_opened_at is None, (
+            "the re-check returned without clearing the window marker, so a "
+            "later snapshot would date the next batch from THIS one's dequeue")
+
 
 # ── the worker's reap arms ──────────────────────────────────────────────────
 
