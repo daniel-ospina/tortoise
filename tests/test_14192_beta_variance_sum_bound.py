@@ -2,11 +2,21 @@
 
 ``get_relationships_bounded``'s critical-class read admits a peer when its
 persisted Beta width exceeds ``CONTESTED_VARIANCE_THRESHOLD``. That width is a
-division over ``α+β``, and it was the most expensive expression on the search
-read (measured 160 ms of a 231 ms search on the #14192 corpus). #14192 put a
-NECESSARY precondition in front of it:
+division over ``α+β``, evaluated once per candidate row, and it was the cost this
+change targeted. #14192 put a NECESSARY precondition in front of it, so that the
+division, the coercion CASE and the band checks are skipped on the rows that were
+always going to be rejected:
 
     α+β < 1/(4·threshold) − 1        (`beta_variance_sum_bound`)
+
+⛔ **NO MILLISECOND FIGURE IS CLAIMED HERE.** The committed artifacts
+(`docs/evidence/14192-read-wave/`) measure the WHOLE function and its isolated
+A/B, never this expression alone. An earlier cut of this docstring claimed "160 ms
+of a 231 ms search" — both numbers appear HERE only because this note withdraws
+them: neither is a cell of either JSON, and `160 ms` could not have been right
+anyway, because it exceeded the `159 ms` wave that was supposed to contain it.
+Both are WITHDRAWN rather than restated, which is the same rule
+`beta_variance_sum_bound`'s own docstring applies to its own earlier figures.
 
 The guard is only sound if it can NEVER reject a pair whose width clears the
 threshold — otherwise it silently drops critical peers, which are cap-exempt
