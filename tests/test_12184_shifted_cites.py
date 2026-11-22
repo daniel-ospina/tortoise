@@ -1931,6 +1931,18 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             f"the header says the statement at `main`'s line {_prov_main_line} is the SAME statement as "
             f"the one at this head's {_prov_head_line}, which is what makes it a move and not an "
             f"insertion. Re-derive both addresses.")
+    # ⛔ The head ADDRESS is pinned, not merely same-statement: this branch's 114 inserted lines sit
+    # ABOVE `main`'s 51493, so every pair `(n, n+114)` inside that block is a same-statement pair with
+    # the right arithmetic — a header could state `main`'s 51,494 (`params["uid"] = actor_filter`) and
+    # this head's 51,608 and stay GREEN (#14038 cycle 15, P2 — MEASURED: that doc passed this file while
+    # the same-statement and arithmetic arms both held). The split counts ONE pair for this file, so the
+    # provenance sentence must name THAT one.
+    _pin_hosted_lines = [_ln for (_p, _ln) in _PIN_EOF_PAIRS if _p.endswith("hosted_api.py")]
+    assert _prov_head_line in _pin_hosted_lines, (
+        f"the provenance sentence names this head's line {_prov_head_line}, but the split counts "
+        f"hosted_api.py's non-comparable pair at {_pin_hosted_lines} — the sentence must move THAT "
+        "statement. An unpinned address is the one thing the same-statement and arithmetic arms above "
+        "cannot catch, because a whole block of them moves together.")
     assert _as_int(drift.group(4)) == len(_PIN_EOF_PAIRS), (
         f"the drift sentence names `of those {drift.group(4)} pairs` while the split counts "
         f"{len(_PIN_EOF_PAIRS)} non-comparable pairs"
