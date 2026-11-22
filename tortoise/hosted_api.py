@@ -706,7 +706,7 @@ async def _mark_capture_extraction_phase(proj, session_id: str, phase: str,
             return
         await _run_off_loop(_CAPTURE_EXECUTOR, _write_capture_phase,
                             proj, session_id, phase, now)
-    except Exception:
+    except Exception:  # bookkeeping on a committed record
         _logger.debug("capture phase write failed (session %s)", session_id,
                       exc_info=True)
 
@@ -21368,7 +21368,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # observe would be pure cost.
     _capture_phase_view = {"phase": "queued", "armed": False}
 
-    async def _extract_capture() -> dict:
+    async def _extract_capture() -> dict:  # the extraction lane
         """The post-record half of a capture: extract, then report what happened.
 
         Runs INLINE on the lanes that do not extract (today's behaviour, today's
@@ -21606,7 +21606,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         return {"extracted": extracted, "meta": meta,
                 "tenant_vocab_warning": tenant_vocab_warning}
 
-    async def _report_capture(_lane_result: dict) -> dict:
+    async def _report_capture(_lane_result: dict) -> dict:  # the report half
         """Everything the extraction makes reportable, and the receipt (#14232).
 
         Split from `_extract_capture` so the ACK's join window covers ONLY the
