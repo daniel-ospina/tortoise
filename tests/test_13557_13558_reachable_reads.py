@@ -412,6 +412,16 @@ SELECTED = [
     # cheap wrong fix is `to`, which would have killed every `is the export to Europe
     # archived` question on this shape.
     ("is the export to Europe archived", "ended", "is_copula"),
+    # ── …and a CONTRACTED head auxiliary (round-4 review, P2, measured) ─────────────
+    # `isn't the export archived` / `hasn't the export been archived` matched NO shape and NO
+    # signal — the head was spelled `is|are|was|were` with nothing between the verb and the
+    # space, and `\b` cannot match after `is` inside `isn't` — while their uncontracted twins
+    # `is the export not archived` / `is the export archived` route. A negative question is
+    # still a question about a state, so the two spellings must not differ.
+    ("isn't the export archived", "ended", "is_copula"),
+    ("hasn't the export been archived", "ended", "is_copula"),
+    ("isn’t the export archived", "ended", "is_copula"),
+    ("aren't the exports archived", "ended", "is_copula"),
 ]
 
 
@@ -920,6 +930,11 @@ NOT_SELECTED = [
     # twin was refused. Refused now, and reported through `existence_unguarded`.
     "has anyone reported v3 hasn't been deprecated",
     "has anyone complained billing hasn't been deprecated",
+    # …and the ADVERB-inside-the-non-finite-phrase rows: refused AND reported, so they stand in
+    # `NOTICE_ONLY` as well (see the collection-time assertion there).
+    "is the export being quietly archived",
+    "is the data being constantly archived",
+    "is the export getting officially retired",
 ]
 
 
@@ -1074,6 +1089,13 @@ NOTICE_ONLY = [
     "is the export to become archived",
     "has anyone reported v3 hasn't been deprecated",
     "has anyone complained billing hasn't been deprecated",
+    # …and the ADVERB between the non-finite verb and the participle (round-4 review, P2,
+    # measured): `is the export being quietly archived` and its twins were SILENT while the
+    # no-adverb spelling reports — the round-22 class one slot over. A signal cannot route, so
+    # the widened slot can only add a report.
+    "is the export being quietly archived",
+    "is the data being constantly archived",
+    "is the export getting officially retired",
     # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
     # that is now stated and machine-checked (review at `5b82bcdf03`, P2, measured) ──
     # The PREPOSITIONS `_BLOCKED_TAIL` names are REPORTED on this shape (see the

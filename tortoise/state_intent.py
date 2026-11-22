@@ -1141,10 +1141,21 @@ _COPULA_SUBJECT = (
 #: Adding it here would be dead code that reads as coverage — measured:
 #: `is the export now archived` is REFUSED by the subordinator guard, not routed, and
 #: `is it now retired` likewise. Recorded rather than duplicated.
+#: ⛔ THE HEAD AUXILIARY MAY CARRY ITS CLITIC (round-4 review, P2, measured): the head was
+#: spelled `is|are|was|were` / `has|have|had` with nothing between the verb and the space, and
+#: `\b` cannot match after `is` inside `isn't` — so a refused-and-reporting pair became a silent
+#: one. `isn't the export archived` and `hasn't the export been archived` came back
+#: `population=None, signal=None` while their UN-contracted twins `is the export not archived`
+#: and `is the export archived` ROUTE (measured: over `8 subjects x 7 endings`, 384 of 384
+#: contracted probes silent and 384 of 384 uncontracted twins routed). A negative question is
+#: still a question about a state, and the ended population answers it the same way it answers
+#: the uncontracted spelling, so the two must not differ — routing, not a notice, is the parity.
+#: The typographic apostrophe is accepted for the same reason as `:data:`_CONTRACTED_AUX``: it is
+#: the same word on a phone keyboard.
 _COPULA_PREFIX = (
-    rf"^(?:(?:is|are|was|were)\s+{_COPULA_SUBJECT}"
+    rf"^(?:(?:is|are|was|were)(?:n['’]t)?\s+{_COPULA_SUBJECT}"
     rf"\s+(?:(?:already|ever|really|still|actually|just)\s+)?(?:{_ENDING_WORDS})\b"
-    rf"|(?:has|have|had)\s+{_COPULA_SUBJECT}"
+    rf"|(?:has|have|had)(?:n['’]t)?\s+{_COPULA_SUBJECT}"
     rf"\s+been\s+(?:{_ENDING_WORDS})\b)"
 )
 
@@ -1268,8 +1279,15 @@ _COPULA_LONG_SUBJECT = re.compile(
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     rf"(?!.*\b(?:because|that|given|since|when|while|if|unless|which|who|whom|"
     rf"whose|where)\b)"
-    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{1,5}}{_NONFINITE_COPULA}\s+"
-    rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
+    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{1,5}}{_NONFINITE_COPULA}"
+    # ⛔ AN ADVERB BETWEEN THE VERB AND THE PARTICIPLE IS NOT A SILENCE (round-4 review, P2,
+    # measured): arm B's slot was `(?:already|ever)?`, so `is the export being quietly
+    # archived`, `is the data being constantly archived` and `is the export getting officially
+    # retired` came back `population=None, signal=None` while their no-adverb twins REPORT —
+    # the round-22 class one slot over (silent on the adverb spelling, reporting on the plain
+    # one). This is a SIGNAL, so widening it can only add a report, never a route.
+    rf"\s+(?:(?:[a-z]+ly|already|ever|just|only|still|never|not)\s+){{0,2}}"
+    rf"(?:{_ENDING_WORDS})\b"
     rf")"
     rf"{_BLOCKED_TAIL}"
 )
