@@ -1371,13 +1371,19 @@ _COPULA_LONG_SUBJECT = re.compile(
     # lookahead (`_COPULA_INFINITIVE_REFUSAL`) allows `{0,6}` words before the non-finite
     # verb, so with `{1,5}` here the ZERO-word endpoint — a SUBJECT-LESS non-finite question —
     # was refused with NO report, which is the silence this module's contract forbids and the
-    # exact reason arm B exists. Measured at the delta's base these ROUTED (`ended / is_copula`)
-    # and at the head they were `population=None, signal=None, payload=None`:
+    # exact reason arm B exists. ⛔ THE MEASURED HISTORY, WITH THE COMMITS NAMED, because an
+    # earlier cut of this note said "at the delta's base these ROUTED" and that is FALSE —
+    # the base of the commit that fixed it was ALREADY silent (re-measured, all four rows):
+    #   at `0e52593c91` (before `_COPULA_INFINITIVE_REFUSAL` landed)      -> ended / is_copula
+    #   at `d8295ea8b2` (the refusal landed, arm B still `{1,5}`)          -> None / None / no payload
+    #   at this commit (the refusal + arm B `{0,5}`)                       -> None / is_copula_long_subject
     #   `is being archived` / `is to be archived` / `is getting archived` / `was being retired`
-    # Enumerated class 4 auxiliaries x 6 non-finite forms x 5 endings = 120 rows, all silent.
+    # Enumerated class 4 auxiliaries x 6 non-finite forms x 5 endings = 120 rows. ⛔ ALL 120
+    # gain `is_copula_long_subject` — an earlier cut of this note said "56 rows gain" one line
+    # below the "= 120 rows" it was describing, which reads as 64 still unreported. Measured.
     # The verdict (refuse) is right — a scheduled or progressive state must not be served —
     # but the report must survive it. Measured after widening: 0 population changes across
-    # 34,560 probes, 56 rows gain `is_copula_long_subject` (exactly the zero-word class).
+    # 34,560 probes.
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     rf"(?!.*\b(?:because|that|given|since|when|while|if|unless|which|who|whom|"
     rf"whose|where)\b)"
