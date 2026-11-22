@@ -364,19 +364,25 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
         # 19, P3). The falsy arm below already excludes `no_durable_journal`, but
         # this arm returned `record_no_outcome` BEFORE looking — so an outcome
         # carrying the seam's healthy token with no readable `applied` was counted
-        # as a LOSS, the one divergence `live_write` does not have: its
-        # `_is_durable_decline(outcome)` reads the token independently of
-        # `applied` (live_write.py:745-746). Latent today (both doors answer
-        # `RecordWrite | None`), and fail-closed in the wrong direction — a false
-        # loss count, never a lost row. Checked in BOTH arms rather than hoisted
-        # above them, and what that costs is stated rather than glossed: the FALSY
-        # arm below already read `refusal`, so its behaviour is unchanged; THIS arm
-        # did not, so a `refusal` property that RAISES is newly reachable here — and
-        # it lands on the same fail-safe verdict (the caller's `except` maps the
-        # raise to `record_no_outcome`, which is exactly what this arm returns
-        # itself), with a different warning line. A hoist above both arms would
-        # instead have newly read `refusal` for a HEALTHY outcome too, turning a
-        # raise there into a loss where it previously returned a written row.
+        # as a LOSS. `live_write` has no such divergence, and the reason is NOT
+        # that it reads the token independently of `applied`: its gate at
+        # live_write.py:745 is `not getattr(outcome, "applied", False) and not
+        # _is_durable_decline(outcome)`, so a `False` DEFAULT makes an ABSENT
+        # attribute FALSY, that write enters the falsy branch, and the decline is
+        # consulted there (`:746`). With `applied=True` the decline is never read at
+        # all — which is exactly why this arm had to look before it answered.
+        # Latent today (both doors answer `RecordWrite | None`), and fail-closed in
+        # the wrong direction — a false loss count, never a lost row.
+        #
+        # The check is in BOTH arms rather than hoisted above them, and what that
+        # costs is stated rather than glossed: the FALSY arm already read `refusal`,
+        # so its behaviour is unchanged; THIS arm did not, so a `refusal` property
+        # that RAISES is newly reachable here — and it lands on the same fail-safe
+        # verdict (the caller's `except` maps the raise to `record_no_outcome`, which
+        # is exactly what this arm returns itself), with a different warning line. A
+        # hoist above both arms would instead have newly read `refusal` for a
+        # HEALTHY outcome too, turning a raise there into a loss where it previously
+        # returned a written row.
         refusal = getattr(result, "refusal", None)
         if refusal is not None and refusal == _non_durable_journal_refusal():
             return None          # the seam's healthy decline, not a loss (#9231)
