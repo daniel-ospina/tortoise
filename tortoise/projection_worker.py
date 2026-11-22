@@ -360,6 +360,22 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
     _absent = object()
     applied = getattr(result, "applied", _absent)
     if applied is _absent:
+        # ⛔ THE HEALTHY DECLINE IS CHECKED IN THIS ARM TOO (#14222 review round
+        # 19, P3). The falsy arm below already excludes `no_durable_journal`, but
+        # this arm returned `record_no_outcome` BEFORE looking — so an outcome
+        # carrying the seam's healthy token with no readable `applied` was counted
+        # as a LOSS, the one divergence `live_write` does not have: its
+        # `_is_durable_decline(outcome)` reads the token independently of
+        # `applied` (live_write.py:745-746). Latent today (both doors answer
+        # `RecordWrite | None`), and fail-closed in the wrong direction — a false
+        # loss count, never a lost row. Checked in BOTH arms rather than hoisted
+        # above them so that a raising `refusal` PROPERTY keeps exactly the
+        # semantics it had: a raise there reaches the caller's `try`, which is
+        # already the fail-safe path, and a hoist would have made a healthy
+        # outcome with a raising `refusal` newly read as a loss.
+        refusal = getattr(result, "refusal", None)
+        if refusal is not None and refusal == _non_durable_journal_refusal():
+            return None          # the seam's healthy decline, not a loss (#9231)
         # ⛔ AN OUTCOME WHOSE `applied` CANNOT BE READ IS "NOTHING WAS OBSERVED", not
         # a written row (#14222 review round 17, P3). The default used to be `True`,
         # so an object with no readable `applied` fell through as a PROJECTION —
