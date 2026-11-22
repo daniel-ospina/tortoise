@@ -337,10 +337,12 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
       now" would then state a fact nothing checked.
 
     So the reason names WHAT WAS OBSERVED:
-    ``record_no_outcome`` (the callable answered nothing — or answered a value
-    whose outcome could not be READ, which is the same fact: nothing was
-    observed), ``projection_refused`` (an armed refusal — nothing was written),
-    and the raise arm's ``projection_raised`` is minted by the caller.
+    ``record_no_outcome`` (the callable answered nothing — or answered an object
+    with no readable ``applied`` attribute, which is the same fact: nothing was
+    observed), ``projection_refused`` (an outcome that does not attest a written
+    row — an armed refusal, or any falsy ``applied``, since a value that cannot
+    attest a row is not one), and the raise arm's ``projection_raised`` is minted
+    by the caller.
     `no_durable_journal` is NOT a failure: it is the seam's healthy decline for a
     lane with no journal by design (#9231), and the gate here already refuses to
     queue a non-durable log.
@@ -361,9 +363,9 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
         # ⛔ AN OUTCOME WHOSE `applied` CANNOT BE READ IS "NOTHING WAS OBSERVED", not
         # a written row (#14222 review round 17, P3). The default used to be `True`,
         # so an object with no readable `applied` fell through as a PROJECTION —
-        # the opposite of what this docstring says ("answered a value whose outcome
-        # could not be READ … nothing was observed") and of what `live_write` does
-        # on the same input (`getattr(outcome, "applied", False)`, fail-closed).
+        # the opposite of what this docstring says (`applied` ABSENT is "nothing was
+        # observed") and of what `live_write` does on the same input
+        # (`getattr(outcome, "applied", False)`, fail-closed).
         # The raising-property shape was already covered by the caller's `try`;
         # this is the ABSENT-attribute shape, and it is latent today (both
         # production doors answer `RecordWrite | None`) — which is exactly why it
@@ -376,7 +378,17 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
             "`tools/record_runner.py apply` folds it idempotently (#14185)",
             seq)
         return "record_no_outcome"
-    if applied is False:
+    # ⛔ FALSY, NOT `is False` (#14222 review round 18, P3). Identity left every
+    # non-`bool` falsy value — `None`, `0`, a JSON-decoded shape — matching neither
+    # this arm nor the `_absent` arm above, so it fell through to the `return None`
+    # below, i.e. COUNTED AS A WRITTEN ROW. `live_write` reads the same input the
+    # other way on BOTH of its surfaces: `not getattr(outcome, "applied", False)`
+    # (:745) and `LiveWrite.applied`'s `bool(getattr(self.record, "applied", False))`
+    # (:466-468) — truthiness, fail-closed. A value that cannot attest a row must
+    # never be read as one. Latent today (both production doors answer
+    # `RecordWrite | None`, whose `applied` is a real `bool`), which is why the
+    # shape is pinned now rather than after a door changes.
+    if not applied:
         refusal = getattr(result, "refusal", None)
         if refusal is not None and refusal == _non_durable_journal_refusal():
             return None          # the seam's healthy decline, not a loss (#9231)

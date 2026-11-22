@@ -651,6 +651,50 @@ def test_a_fold_outcome_with_NO_READABLE_applied_is_NOT_counted_as_a_projection(
     assert projection_worker._classify_fold_outcome(None, 1) == "record_no_outcome"
 
 
+def test_an_INDETERMINATE_applied_is_REFUSED_not_counted_as_a_projection():
+    """⛔ Round-18 P3: the sentinel covered `applied` ABSENT; `applied`
+    INDETERMINATE (`None`, `0`, any falsy non-`bool`) matched NEITHER arm — not the
+    `_absent` sentinel, not `applied is False` — and fell through to
+    `return None`, i.e. COUNTED AS A WRITTEN ROW.
+
+    `live_write` reads the SAME input fail-closed on both of its surfaces
+    (`not getattr(outcome, "applied", False)` at :745, and `LiveWrite.applied` =
+    `bool(getattr(self.record, "applied", False))`), so identity here was the last
+    divergence from the polarity the round-17 finding was filed about: its own
+    summary says the absent case must answer what `live_write` answers "on the
+    same input".
+
+    Reachability today is none — both production doors answer `RecordWrite |
+    None`, whose `applied` is a real `bool` — so no existing row reds if the arm
+    reverts to identity. That is precisely why the shape is pinned rather than
+    assumed: a `projected` count is what makes an operator read "caught up", and
+    "caught up" is the false green this module grades P1 elsewhere.
+    """
+    for falsy in (None, 0, 0.0, ""):
+        assert projection_worker._classify_fold_outcome(
+            types.SimpleNamespace(applied=falsy, refusal="circuit_open"),
+            1) == "projection_refused", (
+                f"an outcome whose `applied` is the falsy non-bool {falsy!r} was "
+                "counted as a written row; `live_write` reads the same value as "
+                "NOT applied, so identity-vs-truthiness is still divergent")
+
+    # …and a TRUTHY non-bool is still a written row: the rule is truthiness, not
+    # `is True`, matching `live_write`, which asks only `not getattr(..., False)`.
+    assert projection_worker._classify_fold_outcome(
+        types.SimpleNamespace(applied=1, refusal=None), 1) is None
+
+    # The ONE refusal that is not a loss survives the widened arm (#9231): a
+    # broader refuser must not swallow the seam's healthy decline.
+    decline = projection_worker._non_durable_journal_refusal()
+    assert decline, (
+        "the seam's healthy-decline token could not be read, so this leg cannot "
+        "distinguish a widened arm from a correct one")
+    assert projection_worker._classify_fold_outcome(
+        types.SimpleNamespace(applied=None, refusal=decline), 1) is None
+    assert projection_worker._classify_fold_outcome(
+        types.SimpleNamespace(applied=False, refusal=decline), 1) is None
+
+
 def test_a_RENAMED_prometheus_lock_REDS_the_guard_instead_of_passing_vacuously():
     """The guard on the legs above must fire, and on a REAL object.
 

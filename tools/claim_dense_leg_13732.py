@@ -1524,11 +1524,13 @@ class SeedReport:
     def _fold_note(self) -> str:
         """WHY a fold is named — one sentence per cause.
 
-        The NOTE's order is its own, and deliberately not `_fold_needed()`'s: the
-        "ran and lost the row" cause leads here because it is the one an operator
-        can do nothing about by re-reading the queue (#14222 review round 17, P3 —
-        an earlier revision of this docstring claimed it matched `_fold_needed`'s
-        order, which the round that added that cause had already broken).
+        ⛔ THE EMISSION ORDER IS NOT RESTATED HERE. It is documented where it is
+        enforced — the comment at the `record_deferred_failures` block below —
+        because a second copy of an ordering claim is what round 17 of #14222's
+        review had to repair: the docstring here asserted an order the code did
+        not have, and handed the next editor an instruction that would have
+        reinstated the defect. One statement of the order, at the site that
+        makes it true.
 
         ⛔ THE NOTE USED TO BE WRITTEN FOR TWO OF THE THREE TRIGGERS (#14222
         review, P2 of the round that read the undrained arm). It opened
