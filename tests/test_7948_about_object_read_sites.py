@@ -3462,7 +3462,15 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: collision hop of the chain the note above records. Nothing else moved: no row,
 #: no door, no exception. Both the scope rule and the seam change tighten, so the
 #: pin reads the same either way — and the uniform-3 sweep stays at 34.
-_ACCEPTED_PAIRS_AT_THIS_HEAD = 36
+#: ⛔ 36 -> 27 at `#14249`'s head, and the FALL is the TABLE, not the predicate. The table
+#: was re-cut twice after that derivation (19 rows x 22 doors = 418 pairs -> 18 rows x 15
+#: doors = 270), so the SAME relation now runs over a smaller population and accepts 27
+#: of 270 instead of 36. The arm's own rule above is that a FALL means the new figure is
+#: RE-DERIVED and the reason recorded — this is that re-derivation, replicated against
+#: `_rows()` / `_doors()` / `_door_reaches()` rather than assumed. ⚠️ The worst-row
+#: ceiling is deliberately NOT moved with it: its note below says it is a BOUND, and the
+#: measured worst row is 3 against that ceiling of 4.
+_ACCEPTED_PAIRS_AT_THIS_HEAD = 27
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches
 #: more of a larger set. It is the same relation over a larger population, not a
@@ -3701,8 +3709,11 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # ⛔ EVERY EXCEPTION BUDGET IS EXACT, not a ceiling (`#14249` review P2-2).
     # `distance <= hops` above is satisfiable by a budget that GROWS: measured on this
     # head, raising `ranking.py::fetch_entity_signals`'s budget 4 -> 5 left every arm in
-    # this file green — including the 36-pair pin and the falsifiability arm — while one
-    # more hop of attribution silently widened row 24's reach. The budget's own text says
+    # this file green — including the 27-pair pin and the falsifiability arm — and it
+    # moved NO row's accepted set (re-measured: total 27 -> 27, and rows 17 and 24 both
+    # stay at 3 doors). So the loosening is invisible to the reach arms rather than
+    # visible through a widened row: there is no widened row to see. What it breaks is
+    # the budget's own claim. The budget's own text says
     # it is "the measured distance", so assert THAT: the deepest door of each exception
     # reader must need exactly its budget. (MAX over the reader's doors, not per door:
     # `_preview_delete_edges` is a door at distance 2 for two live tools and 4 for the

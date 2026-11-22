@@ -2408,6 +2408,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # and NOTHING read it — its `sdk.py:28581` sibling was pinned and the neighbour was not, so a
     # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
     # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
+    # 83 -> 87 at the `#14249` review cycle 2 (P1): the four rows at `:265`-`:268` were RE-POINTED by
+    # this branch and left with no content pin, so a one-line regression shipped green — MEASURED by
+    # mutating each destination by one line and watching the whole suite stay at `31 passed`. Same rule
+    # as every line above: a re-point nobody grades moves the defect rather than closing it.
     assert len(_PINS) == 87, (
         f"_PINS carries {len(_PINS)} rows, not 87 — a re-pointed cite was added or dropped without "
         "this count. Every re-point this branch writes must carry a content pin (review cycle 2)."
