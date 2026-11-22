@@ -98,7 +98,7 @@ door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
 1,642 occurrences of the door predicate across 111 files
-2,378 occurrences of the verb predicate across 149 files   (upper-bound shape, see below)
+2,379 occurrences of the verb predicate across 149 files   (upper-bound shape, see below)
 
 1,642  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
@@ -119,8 +119,8 @@ the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reprodu
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 306 files>` → **2,365** across **148** files, while the tool
-reports 2,378 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 306 files>` → **2,366** across **148** files, while the tool
+reports 2,379 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
 example — **ten** are wrapped English sentences / docstring prose (e.g. `oauth.py`'s “limits match” /
@@ -142,11 +142,11 @@ the 182, so the count does not ride on that file — and none of the 13 is an ex
 split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
-(A bare case-sensitive `rg` gives 2,096, and `-i` without the exclusion 2,437 — ⛔ both over
+(A bare case-sensitive `rg` gives 2,096, and `-i` without the exclusion 2,438 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
 number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 306
-`.py` files the same two predicates read **2,093** and **2,365**; with `-t py` and the test-module
-exclusion dropped they read **2,095** and **2,368**. The 69-occurrence 2,366→2,435 gap is entirely
+`.py` files the same two predicates read **2,093** and **2,366**; with `-t py` and the test-module
+exclusion dropped they read **2,095** and **2,369**. The 69-occurrence 2,366→2,435 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
 `tortoise/pi-hooks/tortoise-capture.test.ts` 14, `tortoise/pi-hooks/store-sync.test.mjs` 3,
 `tortoise/pi-hooks/tortoise-capture.ts` 1, `tortoise/openclaw-plugin/index.test.mjs` 1,
@@ -453,8 +453,8 @@ so the migration metric §0 is about does not move. ⚠️ **§0's `plain`/write
 this document before this cut** — it read `872` / `284` while the pins and every other table read
 `873` / `285` — so those two figures are RE-DERIVED from this run rather than incremented. §1's `rg`
 reconciliation moves with exactly the one new door call and the one new `MATCH (`: door **1,642 /
-111** whole-text, bare **1,648 / 112**, on call lines **1,588**, verb **2,378 / 149** (the line-based
-forms are re-measured there and read 2,093 / 2,095 / 2,365 / 2,368). Appendix A is regenerated with
+111** whole-text, bare **1,648 / 112**, on call lines **1,588**, verb **2,379 / 149** (the line-based
+forms are re-measured there and read 2,093 / 2,095 / 2,366 / 2,369). Appendix A is regenerated with
 `--markdown` at this tree: it gains this one row, and the `tortoise/hosted_api.py` rows after it move
 with the insertion, which is why the table is regenerated rather than carried.
 
