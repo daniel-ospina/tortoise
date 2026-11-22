@@ -2058,13 +2058,21 @@ def encode_texts(texts: Sequence[str], *,
     ``external`` one with no url, ``[]`` from a live one — three answers to a
     question with no rows in it. ``[]`` is the only one that matches
     ``len(rows) == len(texts)``, which every caller then indexes.
+
+    ⛔ MATERIALISED ONCE, THEN TESTED. ``if not texts`` reads the TRUTHINESS of
+    whatever was passed, and an array-like batch (``np.array([...])``) has no
+    single truth value — it raises ``ValueError: The truth value of an array with
+    more than one element is ambiguous``, where the ``list(texts)`` below accepted
+    it. On a PUBLIC entry point that traded one contract hole for a smaller one,
+    so the batch is materialised first and the emptiness test reads the LIST.
     """
-    if not texts:
+    incoming = list(texts)
+    if not incoming:
         return []
     backing = active_backing()
     budget = resolve_timeout_s() if timeout_s is None else timeout_s
     try:
-        return backing.encode(list(texts), timeout_s=budget)
+        return backing.encode(incoming, timeout_s=budget)
     except BaseException as exc:
         _note_decline(exc)
         raise

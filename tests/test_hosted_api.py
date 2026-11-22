@@ -9582,9 +9582,11 @@ class TestSearchOffloadConcurrency:
         never runs ON the event loop: a ticker coroutine must keep getting turns
         while the encodes are in flight. Remove the offload (call the SDK inline
         instead of awaiting ``_read_offload``) and ``encode`` blocks the loop for
-        its whole 0.5 s, twice — the ticker gets no turn at all and this row
-        reddens. That is the pre-fix failure the row exists for, and unlike the
-        wall-time bound it does not depend on how many encodes run at once.
+        its whole 0.5 s, twice, so the ticker's turns COLLAPSE — measured 6-10 of
+        the 20 required, never 0, because the loop still turns between the two
+        blocking reads — and this row reddens. That is the pre-fix failure the row
+        exists for, and unlike the wall-time bound it does not depend on how many
+        encodes run at once.
 
         The stub is deliberately NOT a barrier any more: a cross-encode
         rendezvous now DEADLOCKS the design it is supposed to test rather than
