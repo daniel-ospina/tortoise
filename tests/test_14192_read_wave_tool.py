@@ -235,13 +235,6 @@ def test_a_door_diff_selects_this_pin():
 
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
 _HOSTED = _REPO_ROOT / "tortoise" / "hosted_api.py"
-#: Callees whose STRING argument can become a call target, so a literal naming the read
-#: inside one is a reach: `getattr`/`setattr`/`delattr`/`__getattribute__` resolve an
-#: attribute by name, and `operator`'s two-by-name factories do the same. `print` is
-#: deliberately absent (#14281 review P2, measured: a blanket `Call` parent red it).
-_EXECUTES_STRING_ARG = {"getattr", "setattr", "delattr", "__getattribute__", "__setattr__",
-                        "__delattr__", "methodcaller", "attrgetter"}
-
 _READ_NAMES = ("tortoise_fts_query", "_tortoise_fts_query")
 
 
@@ -2662,10 +2655,22 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         if not isinstance(node, ast.Constant) or node.value not in _READ_NAMES:
             return False
         if isinstance(_parent, ast.Subscript):
-            return True  # `vars(type(sdk))["…"]`, `_ops["…"]` — a slot that may be called
+            # ⛔ A STORE CANNOT BE CALLED (#14281 review P2, measured): counting every
+            # subscript red `_counts["_tortoise_fts_query"] = 0` and
+            # `_counts2["_tortoise_fts_query"] += 1` — the recording direction #14289 wants,
+            # and the same "can this be EXECUTED?" rule the `Call` arm follows.
+            return isinstance(_parent.ctx, ast.Load)
+        # ⛔ FAIL-CLOSED ON AN UNKNOWN CALLEE (#14281 review P1, three spellings measured
+        # GREEN against the allow-list this replaced): `_g = getattr;
+        # _g(sdk, "_tortoise_fts_query")(…)`, `getattr.__call__(…)` and
+        # `dict.__getitem__(vars(type(sdk)), "_tortoise_fts_query")(…)` each carry a lever.
+        # The allow-list answered the `print("…")` false red by OPENING the hole — the wrong
+        # direction. `_PURE_READS` is the set this file already trusts not to reach a callee
+        # by name (it contains `print`, `len`, `dict`, …), so `print("…")` stays green and a
+        # name alias of `getattr` does not become a way through.
         return (isinstance(_parent, ast.Call)
                 and (getattr(_parent.func, "id", None) or getattr(_parent.func, "attr", None))
-                in _EXECUTES_STRING_ARG)
+                not in _PURE_READS)
 
     # ⛔ ⛔ `indirect` IS EVALUATED *BEFORE* THE MENTIONS CENSUS (#14281 review F3). It used
     # to sit after it, where it was DEAD: every node satisfying `indirect` is also
