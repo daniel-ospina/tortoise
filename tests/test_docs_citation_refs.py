@@ -8787,7 +8787,7 @@ _TYPED_RETAKEN_NUMSTAT = re.compile(
     r"(?:\brange\b|\bnumstat\b).{0,160}?"
     r"(?:reads?|read|prints?|print|printed|returns?|returned|reports?|reported"
     r"|shows?|shown|gives?|given|lists?|named?|names?|->|\u2192|=>)"
-    r"\s*\*{0,2}`\d+\s+\d+`"
+    r"\s*[:=]?\s*\*{0,2}`\d+\s+\d+`"
 )
 
 #: A pair that is the PRINTED RESULT OF A FENCED COMMAND is a claim about a diff, not a carried
@@ -8808,7 +8808,7 @@ _TYPED_RETAKEN_NUMSTAT = re.compile(
 _TYPED_NUMSTAT_AS_COMMAND_RESULT = re.compile(
     r"`[^`]*\b(?:numstat\b|--stat\b|git diff\b)[^`]*`\s*"
     r"(?:(?:->|\u2192|=>)|(?:prints?|print|printed|reads?|read|returns?|returned"
-    r"|reports?|reported|shows?|shown|gives?|given|lists?|named?|names?))?\s*\*{0,2}$"
+    r"|reports?|reported|shows?|shown|gives?|given|lists?|named?|names?))?\s*[:=]?\s*\*{0,2}$"
 )
 
 
@@ -8877,6 +8877,10 @@ def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
         "the same range `origin/main...HEAD` re-taken here reads `403 401`",
         "the same range `70fbd1a27d...HEAD` re-taken here printed **`403 401`**",
         "the numstat printed `403 401`",
+        # ⛔ A COLON or `=` between the verb and the pair is the same claim (#14249 review, round
+        # 4): the noun, the verb and the pair are all graded ones, and only `\s*` sat between them.
+        "the same range re-taken here reads: `403 401`",
+        "the same range re-taken here reads = `403 401`",
     ):
         assert _typed_retaken_numstat_pairs(_typed), (
             f"the re-taken-numstat detector does not see {_typed!r} — that spelling of a "
@@ -8907,6 +8911,10 @@ def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
         "shows `3 1`)",
         "`git diff --numstat 70fbd1a27d 689d21b7e4c1 -- docs/architecture/CYPHER-INVENTORY.md` "
         "reported `381 379`",
+        # …and the colon form of a FENCED command stays exempt too: the widening above must not
+        # turn a legitimate command-result sentence into a red.
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "shows: `3 1`)",
     ):
         assert not _typed_retaken_numstat_pairs(_allowed), (
             f"the re-taken-numstat detector REFUSES {_allowed!r}, which types no current "
