@@ -539,6 +539,10 @@ NOT_SELECTED = [
     # these two rows pin the class in both directions (population None AND a notice).
     "has the billing's been deprecated",
     "has v3's been deprecated",
+    # …and the ADVERB twins, which the narrow slot blinded (round-9 review, P2, measured): the
+    # first cut of that arm used the WINDOW's narrow set, so these were still refused SILENTLY.
+    "has the billing's been just deprecated",
+    "has the billing's been only just deprecated",
     # ⛔ …AND THE AGENT-PHRASE HIJACK, WHICH THE `by` TOLERANCE RE-OPENED (round-7 review, P2,
     # measured — this lane's regression, found by a fresh reviewer within the hour): with `by`
     # tolerated, both lookaheads went blind whenever the reported clause's participle took an
@@ -1077,6 +1081,8 @@ NOTICE_ONLY = [
     "has anyone complained billing has been only deprecated",
     "has the billing's been deprecated",
     "has v3's been deprecated",
+    "has the billing's been just deprecated",
+    "has the billing's been only just deprecated",
     "have any users reported it has been deprecated by legal been withdrawn",
     "have any users reported the vendor has been deprecated by legal been withdrawn",
     "have any users reported the vendor has been deprecated by legal and been withdrawn",

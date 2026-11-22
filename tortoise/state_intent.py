@@ -1468,7 +1468,13 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # shape, so it cannot route anything.
         + "|"
         + r"\b(?:has|have|had|is|are|was|were)\s+[^?]{0,40}?['\u2019](?:s|ve|d)"
-        + rf"\s+been\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        # ⛔ THE WIDE REFUSAL SLOT, NOT THE NARROW WINDOW ONE (round-9 review, P2, measured): the
+        # first cut of this arm used `_EXISTENCE_ADVERB_SLOT` (`already|ever|recently`), so the
+        # adverb class the guard itself refuses on blinded it — `has the billing's been just
+        # deprecated` and `… been only just deprecated` were still refused SILENTLY, one adverb
+        # away from the frame this arm exists for. The row's first arm already uses the wide slot;
+        # this arm now matches it.
+        + rf"\s+been\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
         + ")"
         + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
