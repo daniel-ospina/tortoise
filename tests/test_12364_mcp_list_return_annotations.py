@@ -60,7 +60,7 @@ def _registry_pairs() -> list[tuple[str, str]]:
         sdk_method = getattr(row, "sdk_method", None)
         if sdk_method:
             pairs.append((row.name, sdk_method))
-    # 29 on the merged surface at this head — MEASURED from a run (40 live rows, 11 of which
+    # 28 on the merged surface at this head — MEASURED from a run (39 live rows, 11 of which
     # name no `sdk_method`), and the population is what moves the floor. The edition history,
     # MEASURED at each head rather than subtracted from the previous number:
     #   48 rows / 37 pairs   (before #13556)
@@ -76,6 +76,17 @@ def _registry_pairs() -> list[tuple[str, str]]:
     #                        only TWO of them were pass-throughs, which is why the
     #                        pass-through floor below moves by two (12 -> 10) — the
     #                        two columns are different populations.
+    #   39 / 28              #14169's P7 batch — FIVE doors that named an `sdk_method`
+    #                        retired FORWARD (`create_edge`, `create_operator`,
+    #                        `events_poll`, `delete`, `list_graphs`) and FOUR targets
+    #                        that name one registered (`poll_events`,
+    #                        `delete_knowledge`, `get_historical_knowledge`,
+    #                        `link_entities`), so BOTH columns move by the net of one:
+    #                        40 − 5 + 4 = 39 and 29 − 5 + 4 = 28. The pass-through
+    #                        column moves the OTHER way (10 -> 11) because exactly one
+    #                        of the four new targets is a pass-through wrapper
+    #                        (`tortoise_get_historical_knowledge`), which is why the
+    #                        floor below is re-pinned UP in the same wave.
     # Every one of those waves retired doors that DID name an `sdk_method`; before them, the
     # READ/QUERY, WRITE/MUTATE and SOURCES/MINE/SESSION container waves and #11609's
     # seven-door wave did the same (`get_session`, `list_batch`,
@@ -85,7 +96,7 @@ def _registry_pairs() -> list[tuple[str, str]]:
     # while #13626 had ALREADY taken the population to 29, so the floor landed exactly ON the
     # population and `29 > 29` reds every shard that runs this file — main-red since, #13678,
     # and the required `python-ci-gate` with it. The RULE beside the pin is the margin, never
-    # a free threshold: `> 40` sat 4 under 44, `> 33` sat 4 under 37, so `> 25` sits 4 under 29.
+    # a free threshold: `> 40` sat 4 under 44, `> 33` sat 4 under 37, so `> 24` sits 4 under 28.
     # ⛔ And it must stay a MEASURED CONSTANT, not a value derived from the registry in code
     # (#13678 proposes `len(TOOL_REGISTRY) - 4`): this scan reads `tool_registry.TOOL_REGISTRY`
     # ITSELF, so a scan that reached an empty or truncated registry would shrink a derived
@@ -96,7 +107,7 @@ def _registry_pairs() -> list[tuple[str, str]]:
     # left at the pre-consolidation number REDS on a CORRECT retirement, which is what the
     # previous `> 40` did when the seventh door left. A floor that drifts down by as much as
     # the surface does stops noticing a scan that has lost an arm of its own.
-    assert len(pairs) > 25, f"registry scan found only {len(pairs)} rows — the scan is broken"
+    assert len(pairs) > 24, f"registry scan found only {len(pairs)} rows — the scan is broken"
     return pairs
 
 
@@ -262,7 +273,7 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # guard actually needs is that the scan is EXHAUSTIVE: every row that names
     # an SDK method is classified into exactly one of pass-through / reshaping,
     # and no row is dropped for an unreadable source or a missing SDK method.
-    # The ONE literal below (`checked >= 10`) is not this instrument — it is the
+    # The ONE literal below (`checked >= 11`) is not this instrument — it is the
     # population floor, argued where it sits, including why it keeps 0 slack while
     # the `pairs` floor above keeps 4 rows of margin.
     assert not unresolved, (
@@ -313,7 +324,7 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # .compute_confidence, …)`), while `tortoise_recall` RESHAPED (`return {"mode": mode,
     # "results": results}`), so it left the `reshaped` term above instead.
     # 12 -> 10 with #13626's `rest_spec` wave, MEASURED at `2c1065a52e` (44 rows / 33
-    # pairs / 12 pass-through) against this head (40 / 29 / 10): TWO of its four retired
+    # pairs / 12 pass-through) against this head (39 / 28 / 11): TWO of its four retired
     # doors were pass-throughs — `tortoise_session_context` (`return
     # _safe(_get_org_sdk().session_context)`) and `tortoise_issue_insight` (same shape A,
     # with the door's own args) — while the two DELETE doors (`tortoise_delete_point`,
@@ -326,7 +337,7 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # produces, which is slack on the one guard whose job is to notice a collapse.)
     # The floor moves DOWN with the surface, exactly ON the measurement (0 slack, as
     # at 16); it is not lowered to whatever a green run last produced. Measured at
-    # this head: 10 pass-through + 19 reshaping = the 29 rows the scan above found.
+    # this head: 11 pass-through + 17 reshaping = the 28 rows the scan above found.
     # ⛔ WHAT NO GUARD IN THIS TEST CATCHES — written down because the sentence that used
     # to stand here ("the two guards ABOVE … are what still make a vacuous scan
     # impossible") was FALSE, and a false non-vacuity claim is the class-A hazard this
@@ -337,8 +348,8 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     #   • `checked > 0` sees only the pass-through term collapsing to ZERO.
     #   ⇒ a LOSS OF RESHAPING ROWS is covered by NOTHING here. Measured at this head:
     #     three reshaping rows disappear (a scan that lost them, not a real retirement)
-    #     → pairs 29 → 26 (`26 > 25` GREEN), checked 10 → 10 (`>= 10` GREEN), 10 + 16 ==
-    #     26 (tautology, GREEN), `checked > 0` GREEN. Every guard passes over a registry
+    #     → pairs 28 → 25 (`25 > 24` GREEN), checked 11 → 11 (`>= 11` GREEN), 11 + 14 ==
+    #     25 (tautology, GREEN), `checked > 0` GREEN. Every guard passes over a registry
     #     three rows short. The mirror case IS caught: three pass-throughs going
     #     unrecognised answer checked=7 and red this floor.
     #     So the `pairs` floor's 4-row margin is bought by THIS floor's 0 slack for the
@@ -347,7 +358,7 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     #     0-slack floor on the term whose job is to SWALLOW unrecognised shapes is a
     #     standing false-red on every reshaping-door retirement, so it owes its own
     #     change and its own mutant attribution (#13704 owns that decision).
-    # ⛔ WHY 0 SLACK HERE, and 4 rows of margin 200 lines above (`> 25` for pairs) —
+    # ⛔ WHY 0 SLACK HERE, and 4 rows of margin 200 lines above (`> 24` for pairs) —
     # the #13676 review named this as the file's one unexplained convention clash,
     # so the rule is stated: the `pairs` floor answers a REACH question ("did the scan
     # reach the registry at all?"), where a floor left at a pre-consolidation number
@@ -358,11 +369,11 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # PASS is class A, an over-block is class B (AGENTS.md A/B), so the margin that is
     # right for `pairs` is a blind spot here. The price is named, not hidden: a wave
     # that retires a pass-through door reds this line and re-pins it in the same wave —
-    # 19 -> 16 -> 13 -> 12 -> 10 above IS that procedure — which is the same FALSE-RED
+    # 19 -> 16 -> 13 -> 12 -> 10 -> 11 above IS that procedure — which is the same FALSE-RED
     # direction `checked > 0` accepts deliberately a few lines up.
-    assert checked >= 10, (
+    assert checked >= 11, (
         f"only {checked} pass-through wrappers were found ({reshaped} read as "
-        "reshaping) against a floor of 10, the population measured at this head. "
+        "reshaping) against a floor of 11, the population measured at this head. "
         "The count cannot tell its two causes apart: a CORRECT retirement of a "
         "pass-through door, or the classifier going blind (a pass-through rewritten "
         "in an idiom `_passthrough_of` does not know is counted as reshaping). "

@@ -5622,10 +5622,11 @@ def test_the_module_filter_admits_a_split_traversal():
     # `tortoise/resident_pin.py` arrived carrying TWO untyped closure walks —
     # `read` and `_closure_for`, one site each, both `OPTIONAL MATCH (n)--(m:{label})`
     # — so the corpus gains exactly two keys and two rows. Each is registered
-    # (`EMPTY_PATTERN`) rather than given a §13 row, because neither can return an
-    # `aboutObject` edge: both endpoints are pinned to the SAME label while an
-    # `aboutObject` triple runs Point/Session/Event -> Object, and the pattern
-    # returns only neighbour identity, never `type(r)` or an edge property.
+    # (`EMPTY_PATTERN`) rather than given a §13 row, because neither reads a
+    # REFERENT: the pattern returns only neighbour identity, never `type(r)` or an
+    # edge property. ⛔ NOT because the walk cannot SEE the edge — it does (a
+    # multi-labelled `:Point:Object` target puts both ends on `Point`), and the
+    # entries say so rather than resting on a false endpoint argument.
     # ⚠️ NOT `#14169`'s P7 batch — this was attributed to it when the move was
     # found, and the measurement refutes that: the pre-P7 tree `605d9ebffbe1`
     # already derives 29/43, `e74cf1d13da7`'s parent `dea00903b50f` derives 27/41,
