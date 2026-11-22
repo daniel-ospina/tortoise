@@ -438,8 +438,9 @@ def _collection_operands(value: ast.AST) -> list[ast.AST]:
     ⛔ `a1 = results or []` and `a1 = results if flag else []` bind the SAME collection
     when the left arm wins, and BOTH read GREEN on the name-only bind (#14281 review P1,
     measured: `aliases=[]`, then `a1.sort()` permuted the recorded page). Over-collecting
-    here can only RED, which is the cheap direction; a `Subscript` (`results[0]`) is an
-    ELEMENT and is deliberately not included.
+    here can only RED, which is the cheap direction. A `Subscript` (`results[0]`) is an
+    ELEMENT, so it is not a FALLBACK OPERAND — but it is still watched, as an element
+    whose write reaches the page: that is `_is_whole_collection`'s job, not this one's.
 
     Returns the operand NODES, not their name-sets: the caller tests them with the same
     predicate it uses for a direct bind, so a BoolOp whose left arm IS the measured page
@@ -450,6 +451,71 @@ def _collection_operands(value: ast.AST) -> list[ast.AST]:
     if isinstance(value, ast.IfExp):
         return [value.body, value.orelse]
     return []
+
+
+def _reemits_a_target(expr: ast.AST, targets: set[str]) -> bool:
+    """`expr` re-emits an object it did not CONSTRUCT: `r`, `r["order"]`, `r.legs`.
+
+    A CALL is the boundary — `_result_id(r)` and `r.get("leg")` build NEW objects, so a
+    comprehension whose element is a call holds derived values, not the collection's own
+    entries. `r` and `r["order"]` hand back the very object the collection holds.
+    """
+    if isinstance(expr, ast.Name):
+        return expr.id in targets
+    if isinstance(expr, (ast.Subscript, ast.Attribute, ast.Starred)):
+        return _reemits_a_target(expr.value, targets)
+    return False
+
+
+def _is_whole_collection(value: ast.AST, var: str) -> bool:
+    """True when `value` IS `var`, an ELEMENT of it, or something HOLDING one of those.
+
+    ⛔ A DERIVED COLLECTION IS NOT THE PAGE (#14281 review F1, measured). The predicate
+    this replaced was a bare mention — `bool(_names_in(value) & {var})` — so a name bound
+    to a NEW collection BUILT from the page resolved as the page:
+
+        _ids = [_result_id(r) for r in results]
+        print(_ids)
+
+    read RED as "line(s) [N] mutate a collection AFTER the measured read". Nothing is
+    mutated there and `_ids` is not the page — the same FALSE RED class `_rebound_after`
+    already carries for `results = list(results)`, in a file whose contract is to state
+    its false reds.
+
+    ⛔ AND THE OTHER DIRECTION IS WHY IT IS STRUCTURAL, NOT "DROP COMPREHENSIONS"
+    (measured): `_rows = [r for r in results]` DOES hold the page's own entries, so
+    `_rows[0]["id"] = "x"` mutates the page and `helper(_rows)` may sort one in place.
+    Dropping every comprehension name would turn both of those GREEN — a false PASS,
+    which is the expensive direction. So the test is what the expression HOLDS:
+
+        Name                       the page itself                        RED
+        Subscript                  an element of the page                 RED
+        BoolOp / IfExp arm         the page on one arm                    RED
+        [ … ] / ( … ) / { … }      a literal holding a page object        RED
+        [r for r in results]       the page's OWN entries                 RED
+        [_f(r) for r in results]   NEW objects built from them            green (derived)
+
+    Residual, stated rather than implied: `b = [_f(a)]` where `a` is ALREADY resolved as
+    an alias still resolves through `_bind`'s transitive clause — over-collection, which
+    can only RED, never a false pass.
+    """
+    if isinstance(value, ast.Name):
+        return value.id == var
+    if isinstance(value, ast.Subscript):
+        return bool(_names_in(value) & {var})
+    if isinstance(value, (ast.BoolOp, ast.IfExp)):
+        return any(_is_whole_collection(op, var) for op in _collection_operands(value))
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        return any(_is_whole_collection(e, var) for e in value.elts)
+    if isinstance(value, ast.Dict):
+        return any(_is_whole_collection(v, var) for v in value.values if v is not None)
+    if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+        if not any(_names_in(gen.iter) & {var} for gen in value.generators):
+            return False
+        targets = {name for gen in value.generators for name in _names_in(gen.target)}
+        elts = [value.key, value.value] if isinstance(value, ast.DictComp) else [value.elt]
+        return any(_reemits_a_target(e, targets) for e in elts)
+    return False
 
 
 def _aliases_of(tree: ast.AST, predicate) -> set[str]:
@@ -566,14 +632,24 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     the scan is not line-filtered, so `def _tidy(): results.sort()` above the read and
     `_tidy()` after it reds at `results.sort()`). Interprocedural reach is out of scope
     for an AST pin, and `tools/read_wave_latency.py` carries no such helper today.
+
+    ⛔ AND THE ALIAS SET IS STRUCTURAL, NOT "ANY MENTION" (#14281 review F1, measured).
+    The mention form resolved names bound to a NEW collection BUILT from the page and
+    reddened `print(_ids)` on `_ids = [_result_id(r) for r in results]` — nothing is
+    mutated there. `_is_whole_collection` keeps every shape whose write reaches the page
+    (`_rows = [r for r in results]` included) and drops the derived ones. The RECEIVER
+    half and the "handed" half share the set on purpose: a derived collection handed to a
+    helper cannot be mutated into the page, and the shapes that CAN be are all in it.
     """
-    aliases = _aliases_of(run_def, lambda v: bool(_names_in(v) & {var}))
+    aliases = _aliases_of(run_def, lambda v: _is_whole_collection(v, var))
     watched = {var} | aliases
     # ⛔ THE RECORDED ROWS ARE A COLLECTION TOO: `_row = per_query[-1]` then
     # `_row["order"] = _row["order"][:5]` truncated the page the verdict reads, with
     # every `"per_query" in receiver` clause passing (measured). Resolve names bound to
-    # ANY expression mentioning `per_query`.
-    rows = {"per_query"} | _aliases_of(run_def, lambda v: "per_query" in _names_in(v))
+    # the recorded list, an ELEMENT of it, or a literal/comprehension HOLDING one — the
+    # same structural rule as above, so `_table = [pq["qid"] for pq in per_query]` is a
+    # derived collection and printing it is not a mutation.
+    rows = {"per_query"} | _aliases_of(run_def, lambda v: _is_whole_collection(v, "per_query"))
     # ⛔ ITERATION TARGETS ARE THE SAME COLLECTION, TO A FIXPOINT — for the MEASURED
     # collections as well as the recorded rows (#14281 review P1, measured). A `for`
     # target binds nothing that `_aliases_of` resolves, so an element rewrite through one
@@ -786,6 +862,24 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     The only exemption is the module-level setup pops of the two API variables — the
     harness removes them BEFORE building the SDK so it measures the embedded graph. The
     exemption is scoped: the same `pop` inside `run()` is a mutation like any other.
+
+    ⛔ A NAME BINDING IS NEVER A REBINDING OF THE MAPPING (#14281 review F2, measured).
+    The `os.environ = {…}` clause used to accept ANY target `_is_environ` recognised, and
+    `env_alias` is seeded by "mentions the mapping" — so it fired on the ALIAS ITSELF and
+    on every value derived from it:
+
+        env = os.environ                                 -> RED ("the harness mutates
+        _uri = os.environ.get("TORTOISE_DB_URI", "")    ->  os.environ at line(s) [N]")
+        _e = getattr(os, "environ")                       ->
+
+    None of the three mutates anything: `env = os.environ` is the CANONICAL alias the
+    docstring above presents as the thing to resolve, and `_uri = os.environ.get(…)`
+    already sits inside `run()`'s returned dict, so hoisting it into a local — the
+    ordinary refactor — turned the pin RED with a wrong diagnosis. Only the module
+    ATTRIBUTE replaces the object (`os.environ = {…}`, `del os.environ`); a NAME target
+    rebinds a local, which changes nothing the harness can measure. The write-through-
+    alias shapes are untouched: `env = os.environ; env["X"] = "1"` still reds on the
+    SUBSCRIPT branch, which is what the alias set is for.
     """
     mutators = {"clear", "pop", "popitem", "setdefault", "__delitem__", "__setitem__",
                 "update"}
@@ -845,9 +939,18 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
 
     # ⛔ A BOUND METHOD IS THE SAME POINTER: `_set = os.environ.__setitem__` then
     # `_set(...)`, and `_pop = os.environ.pop` then `_pop(...)`, were both measured green.
+    # ⛔ THE RECEIVER RESOLVES THROUGH THE ALIAS SET, NOT ONLY THROUGH A LITERAL SPELLING:
+    # `_e = getattr(os, "environ"); _p = _e.pop; _p("X")` was COVERED ONLY ACCIDENTALLY —
+    # the replacement clause used to red the `_p = _e.pop` BINDING (because `_p` was in
+    # `env_alias`) while `bound` never resolved `_e`. Narrowing that clause to the module
+    # attribute alone (the F2 fix) turned this test's "getattr, aliased bound mutator"
+    # case GREEN — measured — so the alias traversal moves here, where the mutation
+    # actually is: `_p(...)`.
     bound = _aliases_of(
         tree, lambda v: (isinstance(v, ast.Attribute) and v.attr in mutators
-                         and _mentions_mapping(v.value)))
+                         and (_mentions_mapping(v.value)
+                              or (isinstance(v.value, ast.Name)
+                                  and v.value.id in env_alias))))
 
     hits: list[int] = []
     for node in ast.walk(tree):
@@ -860,10 +963,13 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
         aug = isinstance(node, ast.AugAssign) and _is_environ(node.target)
         bound_call = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                       and node.func.id in bound)
-        # ⛔ `os.environ = {…}` REPLACES the mapping: a rebinding, not a write.
+        # ⛔ ONLY THE MODULE ATTRIBUTE ITSELF REPLACES THE MAPPING (#14281 review F2).
+        # `env = os.environ` / `_uri = os.environ.get(…)` / `_e = getattr(os, "environ")`
+        # rebind a LOCAL name; none of them touches `os.environ`.
         rebound = (isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete))
-                   and any(_is_environ(t) for t in (
-                       getattr(node, "targets", None) or [getattr(node, "target", None)])))
+                   and any(isinstance(t, ast.Attribute) and t.attr == "environ"
+                           for t in (getattr(node, "targets", None)
+                                     or [getattr(node, "target", None)])))
         handed = isinstance(node, ast.Call) and any(
             _is_environ(a) for a in list(node.args) + [k.value for k in node.keywords])
         if not (subscript or method or aug or bound_call or rebound or handed):
@@ -1019,16 +1125,29 @@ def test_a_FALLBACK_expression_alias_still_reaches_the_sort() -> None:
             f"hits={hits}) — a sorted page reaches the artifact while the pin reads "
             "the measured page")
 
-    # A SUBSCRIPT is an element, not the collection: it must NOT be treated as an alias.
+    # A SUBSCRIPT is an ELEMENT of the page — and at the PRODUCTION predicate it IS
+    # resolved, because a write through the element reaches the artifact (#14281 review
+    # F1). The control that sat here asserted the opposite at a STAND-IN predicate
+    # (`isinstance(v, ast.Name) and v.id == "results"`), which `_mutated_after` never
+    # used: `_bind` cannot resolve a `Subscript` value under it, so no edit to the alias
+    # machinery could ever vary the assertion — a rule-3 dead assertion whose message
+    # ("treating it as an alias would red an innocent lookup") described a behaviour the
+    # pin does not have.
     src = ("def run(sdk):\n"
            "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
            "    first = results[0]\n"
-           "    first.sort()\n")
+           '    first["id"] = "REDACTED"\n')
     run_def = ast.parse(src).body[0]
-    assert "first" not in _aliases_of(
-        run_def, lambda v: isinstance(v, ast.Name) and v.id == "results"), (
-        "`first = results[0]` is an ELEMENT of the page, not the page — treating it as "
-        "an alias would red an innocent lookup")
+    read = next(n for n in ast.walk(run_def)
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+    assert "first" in _aliases_of(run_def, lambda v: _is_whole_collection(v, "results")), (
+        "`first = results[0]` is an ELEMENT of the page and is not resolved as watched — "
+        "an element write then reaches every `order` the verdict compares while the pin "
+        "reads the measured page")
+    assert _mutated_after(run_def, "results", read.lineno, artifact_append=None), (
+        '`first = results[0]; first["id"] = "REDACTED"` is GREEN — a write through an '
+        "ELEMENT of the page is a page mutation, and it is statically visible")
 
 
 def test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation() -> None:
@@ -1063,6 +1182,59 @@ def test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation() -> None:
         assert _hits(caught), (
             f"{caught.strip()!r} must stay RED — the page IS handed to a call that may "
             "mutate it, and stopping at pure reads must not disable that")
+
+
+def test_a_DERIVED_collection_is_not_the_page_and_a_HOLDING_one_is() -> None:
+    """A collection BUILT from the page is not the page; one HOLDING its entries is.
+
+    ⛔ MEASURED FALSE RED on the mention-based alias set `_mutated_after` used before
+    `_is_whole_collection` (#14281 review F1):
+
+        _ids = [_result_id(r) for r in results]
+        print(_ids)
+
+    read RED as "line(s) [N] mutate a collection AFTER the measured read". `_result_id(r)`
+    builds a NEW value per element, so `_ids` holds nothing the page holds and printing it
+    mutates nothing — the same class `_rebound_after` already carries for
+    `results = list(results)`, in a file whose contract is to state its false reds.
+
+    ⛔ THE OTHER DIRECTION IS THE EXPENSIVE ONE and is asserted too: `_rows = [r for r in
+    results]` re-emits the page's OWN entries, so an element write through it — and a call
+    handed it — can reach the artifact. A rule that simply dropped every comprehension
+    name would turn those GREEN, which is a false PASS, not a relaxation.
+    """
+    def _hits(body: str) -> list[int]:
+        src = ("def run(sdk):\n"
+               "    results = sdk._tortoise_fts_query(query='q', limit=10)\n" + body)
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        return _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+
+    for label, derived in (
+            ("comprehension over a helper",
+             '    _ids = [_result_id(r) for r in results]\n    print(_ids)\n'),
+            ("sorted() copy",
+             '    _ids = sorted({r["id"] for r in results})\n    print(_ids)\n')):
+        assert not _hits(derived), (
+            f"[{label}] is a FALSE RED (hits={_hits(derived)}) — the name holds NEW objects "
+            "built from the page, so nothing it is handed can mutate the measured one")
+
+    for label, holding in (
+            ("comprehension re-emitting the entries",
+             '    _rows = [r for r in results]\n    _rows[0]["id"] = "REDACTED"\n'),
+            ("comprehension handed to a call",
+             "    _rows = [r for r in results]\n    helper(_rows)\n"),
+            ("dict comprehension over the entries",
+             '    _by_id = {r["id"]: r for r in results}\n'
+             '    _by_id["a"]["id"] = "x"\n'),
+            ("literal container",
+             "    _box = [results]\n    helper(_box[0])\n")):
+        assert _hits(holding), (
+            f"[{label}] is GREEN (hits={_hits(holding)}) — the name HOLDS the page's own "
+            "objects, so a write or a call through it reaches the artifact the verdict "
+            "compares")
 def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
     """The mapping is recognised through the STATIC spellings this repo can carry.
 
@@ -1135,6 +1307,60 @@ def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
             f"[{label}] GREEN — the env guard does not resolve this spelling of "
             "`os.environ`, so the fused-rerank gate can be flipped inside `run()` and "
             "the artifact would not record which arm was in force")
+
+
+def test_an_env_ALIAS_BINDING_is_not_a_mutation() -> None:
+    """Binding a NAME to the mapping mutates nothing — only the attribute replaces it.
+
+    ⛔ MEASURED FALSE RED (#14281 review F2). The `os.environ = {…}` clause accepted ANY
+    target `_is_environ` recognised, and `env_alias` is seeded by "any name bound to an
+    expression MENTIONING the mapping" — so it fired on the alias BINDING itself. Each of
+    these reds with the message "the harness mutates `os.environ` at line(s) [N] (only the
+    module-level `TORTOISE_API_URL`/`TORTOISE_API_KEY` pops are allowed)", which is a
+    wrong diagnosis of an innocent line:
+
+        env = os.environ
+        _uri = os.environ.get("TORTOISE_DB_URI", "")
+        _e = getattr(os, "environ")
+
+    `env = os.environ` is the canonical alias the guard's own docstring presents as the
+    thing to resolve, and `tools/read_wave_latency.py:345` already reads
+    `os.environ.get("TORTOISE_DB_URI", "")` inside the returned dict — hoisting it into a
+    local (the ordinary refactor, and the shape the #14289 repair will want) turned the
+    pin RED with a wrong message.
+
+    ⛔ The WRITE shapes are untouched and are asserted here: `os.environ = {…}` /
+    `del os.environ` REPLACE the object, and a write through an alias or an imported name
+    still reds on the SUBSCRIPT branch — which is what the alias set is for.
+    """
+    def _hits(src: str) -> list[int]:
+        tree = ast.parse(src)
+        parents: dict[int, ast.AST] = {
+            id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        return _environ_mutations(tree, parents)
+
+    for label, innocent in (
+            ("alias binding", "import os\nenv = os.environ\n"),
+            ("value derived from the mapping",
+             'import os\n_uri = os.environ.get("TORTOISE_DB_URI", "")\n'),
+            ("getattr binding", 'import os\n_e = getattr(os, "environ")\n'),
+            ("imported, then aliased",
+             "from os import environ as _e\n_alias = _e\n")):
+        assert not _hits(innocent), (
+            f"[{label}] is a FALSE RED (hits={_hits(innocent)}) — binding a local name "
+            "mutates nothing; only the module attribute replaces the mapping")
+
+    for label, caught in (
+            ("attribute replaced", "import os\nos.environ = {}\n"),
+            ("attribute augmented", 'import os\nos.environ |= {"A": "1"}\n'),
+            ("attribute deleted", "import os\ndel os.environ\n"),
+            ("write through an alias",
+             'import os\nenv = os.environ\nenv["TORTOISE_FUSED_RERANK"] = "1"\n'),
+            ("write through an imported name",
+             'from os import environ\nenviron["TORTOISE_FUSED_RERANK"] = "1"\n')):
+        assert _hits(caught), (
+            f"[{label}] is GREEN — narrowing the replacement clause must not disable the "
+            "shapes that really change the mapping")
 
 
 def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
