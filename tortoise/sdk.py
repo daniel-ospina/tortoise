@@ -62448,12 +62448,33 @@ class TortoiseSDK:
         # One resolution, shared with `_create_direct_edge` and `_create_operator`
         # (`_canonical_relation_spelling`), so these three doors cannot disagree
         # about whether a re-spelling is applied.
+        _asked_relation = relation
         _canonical = self._canonical_relation_spelling(relation)
         if _canonical:
             relation = _canonical
         _declaration_notes = self._relation_pair_notes(
             predicate=relation, source_id=from_id, target_ids=[to_id])
-        created = proj.create_edge(from_id, to_id, relation)  # validates relation
+        try:
+            created = proj.create_edge(from_id, to_id, relation)  # validates relation
+        except ValueError as _exc:
+            # ⛔ The closed-set refusal must name what the CALLER wrote, not our
+            # spelling of it (round-3 review, P3). ``_VALID_EDGE_PREDICATES``
+            # validates the token it is HANDED, and this door now hands it the
+            # resolved spelling — so ``link_entities("CONTAINS", …)`` raised
+            # ``Unknown predicate: contains``, a token the caller never sent,
+            # on the one refusal whose AX Rule 2 job is to say exactly what
+            # failed. Only that exact refusal is rewritten; every other
+            # ``ValueError`` keeps its own text.
+            if _asked_relation and _asked_relation != relation:
+                _prefix = f"Unknown predicate: {relation}"
+                _text = str(_exc)
+                if _text.startswith(_prefix):
+                    # keep the corrective TAIL (the structural-verb list and the
+                    # "use create_operator" advice) — only the token changes.
+                    raise ValueError(
+                        f"Unknown predicate: {_asked_relation}"
+                        + _text[len(_prefix):]) from None
+            raise
         result = {
             "edge": {"relation": relation, "from": from_id, "to": to_id},
             "created": created,

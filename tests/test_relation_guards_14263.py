@@ -62,6 +62,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise import relation_guards as rg
+from tortoise.pack_registry import CORE_ALIASED_KINDS
 from tortoise.relation_guards import (
     ABSTAIN,
     ACCEPT,
@@ -281,6 +282,37 @@ class TestAbstention:
         v = relation_pair_verdict("contains", "product-strategy:product",
                                  "statement")
         assert v.outcome == UNDECLARED_PAIR
+
+    def test_a_BASE_kind_sharing_a_declared_LOCAL_name_still_abstains(self):
+        """Round-3 review, P1 — the local half is not the caller's token.
+
+        `addresses` declares `core:goal` as a target, so `_local("core:goal")`
+        is `goal`. The scope gate used to compare LOCAL halves, so a write
+        between two BASE kinds — `goal` (a bare core Point kind) and
+        `statement` — matched an in-scope name and was REPORTED as
+        `undeclared_pair`, i.e. "the pack declares no relation for this pair"
+        about a pair no declaration ever addressed. MEASURED before the fix at
+        this head: `relation_pair_verdict("addresses", "goal", "statement")`
+        → `undeclared_pair`; the same for `("deploysTo", "statement",
+        "deployment")`. Both must abstain — the noise class the scope gate is
+        for. The FULL spelling is a different matter and keeps its verdict:
+        `core:goal` IS a declared endpoint, so it is judged.
+        """
+        for predicate, from_kind, to_kind in (
+                ("addresses", "goal", "statement"),
+                ("deploysTo", "statement", "deployment")):
+            assert from_kind in CORE_ALIASED_KINDS, (
+                f"precondition: {from_kind!r} must be a bare CORE kind for "
+                "this row to exercise the local-name collision")
+            v = relation_pair_verdict(predicate, from_kind, to_kind)
+            assert v.outcome == ABSTAIN, (
+                f"{predicate}: a bare core kind is NOT a re-spelling of a "
+                f"namespaced declaration's local half; got {v.outcome} "
+                f"({getattr(v, 'reason', None)})")
+            assert v.reason == rg.ABSTAIN_OUTSIDE_SCOPE
+        # the control: the NAMESPACED spelling is a declared endpoint
+        assert relation_pair_verdict(
+            "addresses", "dev:epic", "core:goal").outcome == ACCEPT
 
     def test_unreadable_declarations_abstain(self, monkeypatch):
         monkeypatch.setattr(rg, "declared_relation_pairs", lambda: None)
@@ -533,6 +565,29 @@ class TestDoors:
         assert "create_operator" in message
         assert "create_direct_edge" in message
         assert "label=" in message
+
+    def test_the_REFUSAL_names_the_token_the_CALLER_wrote(self, sdk):
+        """Round-3 review, P3 — a refusal must quote the caller, not our spelling.
+
+        `_create_edge` resolves a declared verb's spelling before it hands the
+        token to the projection's closed allow-list, so the refusal used to echo
+        the RESOLVED spelling back at a caller who never wrote it: MEASURED
+        before this fix, `link_entities("CONTAINS", …)` raised
+        ``Unknown predicate: contains``. The row reads the CALLER's token for
+        both a declared-but-not-allow-listed verb and an undeclared one, and
+        checks the corrective tail still survives.
+        """
+        epic = _obj(sdk, "E", "dev:epic")
+        issue = _obj(sdk, "I", "dev:issue")
+        for asked in ("CONTAINS", "BLOCKS"):
+            with pytest.raises(ValueError) as exc:
+                sdk.link_entities(asked, epic, issue)
+            message = str(exc.value)
+            assert message.startswith(f"Unknown predicate: {asked}"), (
+                f"the refusal must name what the caller wrote, not our "
+                f"spelling of it; got {message.splitlines()[0][:80]!r}")
+            assert "create_operator" in message, (
+                "the corrective tail must survive the token rewrite")
 
     def test_the_direct_edge_door_reads_the_LABEL_not_the_mechanism(self, sdk):
         """`op_type` is Layer 1 (a mechanism), never a declared relation."""

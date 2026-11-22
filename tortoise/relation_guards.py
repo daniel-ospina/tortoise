@@ -477,7 +477,7 @@ def _predicates_between(declared: dict[str, tuple[tuple[str, str], ...]],
 
 def _declared_endpoint_locals(
         declared: dict[str, tuple[tuple[str, str], ...]]) -> frozenset[str]:
-    """The LOCAL names of every kind/label any pack uses as a relation endpoint.
+    """Every kind/label any pack uses as a relation endpoint, as an IN-SCOPE set.
 
     The scope test below asks a narrower question than "is this pair declared?"
     — it asks *is the caller speaking the packs' domain language at all?* A
@@ -488,13 +488,55 @@ def _declared_endpoint_locals(
     report). Reporting there would put a warning on the ordinary
     ``create_operator(label=\'addresses\')`` write, which is the noise class
     that makes a warning stop carrying information.
+
+    ⛔ **A NAMESPACED declaration's local half is admitted ONLY when that name is
+    not itself a CORE kind (round-3 review, P1).** ``core:goal`` declares
+    ``goal`` as its local half, and ``goal`` is ALSO a bare core Point kind
+    (``pack_registry.CORE_KINDS``); admitting the local half made a write
+    between two BASE kinds — ``goal`` -> ``statement`` — read as in-scope and be
+    REPORTED as ``undeclared_pair`` ("the pack declares no relation for this
+    pair"), which is false about a pair no declaration ever addressed and is
+    the exact noise this abstention exists to prevent. The bare spelling of a
+    CORE kind is its own vocabulary, not a re-spelling of a domain kind, so it
+    is compared as a FULL spelling only (``core:goal`` stays in scope; ``goal``
+    on its own does not).
     """
+    core = _core_kind_names()
     out: set[str] = set()
     for pairs in declared.values():
         for one, two in pairs:
-            out.add(_local(one))
-            out.add(_local(two))
-    return frozenset(name for name in out if name)
+            for kind in (one, two):
+                if not isinstance(kind, str) or not kind.strip():
+                    continue
+                kind = kind.strip()
+                if ":" not in kind:
+                    # a BARE declaration (`Subject`) admits its own spelling
+                    out.add(kind)
+                    continue
+                # a namespaced declaration: its FULL spelling is in scope, and
+                # its local half only if a bare kind of that name is not a
+                # CORE kind of its own (see above)
+                out.add(kind)
+                local = _local(kind)
+                if local and local not in core:
+                    out.add(local)
+    return frozenset(out)
+
+
+def _core_kind_names() -> frozenset[str]:
+    """The bare CORE kind names, or an empty set if the registry is unreadable.
+
+    Read lazily and defensively, like every other pack read in this module: this
+    is a scope guard, so an unreadable registry must widen nothing — the empty
+    answer keeps the FORMER behaviour (every local half admitted) rather than
+    abstaining on writes the packs do speak about.
+    """
+    try:
+        from tortoise.pack_registry import CORE_ALIASED_KINDS
+
+        return frozenset(CORE_ALIASED_KINDS)
+    except Exception:  # noqa: BLE001, RUF100 — a scope guard must not raise
+        return frozenset()
 
 
 def _human_block(*, outcome: str, predicate: str, from_kind: str, to_kind: str,
@@ -612,8 +654,25 @@ def relation_pair_verdict(
         # for.
         return _abstain(ABSTAIN_NO_DECLARED_PAIR, canonical, from_kind, to_kind)
     in_scope = _declared_endpoint_locals(declared)
-    if (_local(from_kind) not in in_scope and _local(to_kind) not in in_scope
-            and from_label not in in_scope and to_label not in in_scope):
+
+    def _speaks(kind: object, label: object) -> bool:
+        """Does this endpoint use an in-scope spelling? (see the helper above)
+
+        The FULL spelling always counts; the LOCAL half counts only when the
+        given kind is itself BARE, because a namespaced kind's local half is not
+        the caller's token and comparing it would equate ``dev:issue`` with a
+        bare ``issue`` that a different namespace may declare (the
+        ``_kind_equivalent`` rule this module already states).
+        """
+        if isinstance(kind, str):
+            asked = kind.strip()
+            if asked in in_scope:
+                return True
+            if asked and ":" not in asked and _local(asked) in in_scope:
+                return True
+        return isinstance(label, str) and label in in_scope
+
+    if not (_speaks(from_kind, from_label) or _speaks(to_kind, to_label)):
         return _abstain(ABSTAIN_OUTSIDE_SCOPE, canonical, from_kind, to_kind)
     matched = _pair_matches(pairs, from_kind, to_kind, from_label, to_label)
     if matched is not None:
