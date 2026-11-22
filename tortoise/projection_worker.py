@@ -65,10 +65,10 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    write at ANY depth, including an idle queue: ``tenant is None`` (the
    ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
    pass no tenant) and every ``record_sink`` door. (c) An inline fold the bound
-   cannot reach at all: an UNCOPYABLE record (the deep snapshot above fails, so a
-   write that would otherwise already be queued folds inline instead) and a
-   ``submit`` FAULT (the ``queue_fault`` arm below, published before it
-   propagates). So raising the bound does NOT remove this residual — it only
+   cannot reach at all: an UNCOPYABLE record (the deep snapshot in :func:`submit`
+   fails, so a write that would otherwise already be queued folds inline instead)
+   and a ``submit`` FAULT (the ``queue_fault`` arm in :func:`submit`, published
+   before it propagates). So raising the bound does NOT remove this residual — it only
    removes arm (a); a same-tenant queued write can be overtaken by a structural-arm
    fold at zero depth, or by a (c) fold at any depth. Nothing detects it: both
    positions are present, so ``journal_coverage`` / ``record-reconcile`` read
