@@ -507,8 +507,13 @@ def _require_prometheus_lock(holder) -> threading.Lock:
 def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed, monkeypatch):
     """⛔ ROUND 10'S P2 + two P3s: the wedge is prometheus_client's OWN lock.
 
-    `prometheus_client` (0.26.0) gives every metric family a `_lock` and every
-    `MutexValue` its own plain `threading.Lock`. A child that forks while a PEER
+    `prometheus_client` (0.26.0) gives every `MutexValue` its own plain
+    `threading.Lock`, and a metric FAMILY one only when it is LABELLED —
+    `_is_parent()` (`self._labelnames and not self._labelvalues`) gates
+    `self._lock = Lock()` in `MetricWrapperBase.__init__`, so an unlabelled
+    `Gauge`/`Counter`/`Histogram`/`Summary` family carries NONE (the three
+    unlabelled gauges this module repairs are exactly that case; `Info`/`Enum` are
+    the exception and this module defines neither). A child that forks while a PEER
     THREAD holds one inherits a lock with no owner, so its next
     `set`/`get`/`labels`/`collect` blocks FOREVER — and `contextlib.suppress`
     cannot help, because a blocked lock is not an exception.
