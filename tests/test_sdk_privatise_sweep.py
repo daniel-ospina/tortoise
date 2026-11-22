@@ -518,17 +518,16 @@ def test_the_extent_figure_is_the_walks_own_count():
     a prose edit that changes the extent REDS, naming both numbers, instead of quietly publishing
     a stale one.
 
-    ⛔ NO COUNT AND NO HISTORY IS RESTATED HERE (#14282 review, P3). An earlier cut of this
-    docstring said the figure had been carried wrong "three times" while `_residue_block`'s own
-    docstring — the `ITS EXTENT IS THE ENTIRE RUN` paragraph above, named by its TEXT because a
-    positional address rots under the next insertion — said five, then six, in successive cuts of
-    this same branch: three numbers for one population, every one of them authored by this PR, so
-    a reader auditing the count had to re-derive it instead of trusting either. Those two totals are
-    cited HERE ONLY as the history of that disagreement: neither paragraph publishes a total for
-    the readings now, and the readings themselves live in ONE place (`_residue_block`'s docstring,
-    beside the figures they name). Repeating the enumeration here is the same stale-restatement
-    defect this gate exists to close, one level up. That is why this arm asserts the FIGURE and
-    not the history.
+    ⛔ NO COUNT OF THE READINGS IS RESTATED HERE, OR ANYWHERE (#14282 review, P3). An earlier
+    cut of this docstring carried its OWN count of how often the extent figure had been re-derived,
+    and it disagreed with the count `_residue_block`'s docstring carried — two numbers for one
+    population, both authored by this PR, so a reader auditing the count had to re-derive it
+    instead of trusting either. Those numbers survive only as the history of that disagreement,
+    which is why this header says a count is not restated rather than that none is mentioned:
+    neither docstring publishes a total now. The readings are listed in one place
+    (`_residue_block`'s docstring, beside the figures they name) and their count is deliberately
+    left unasserted — publishing it here would be the same stale-restatement defect this gate
+    exists to close, one level up. That is why this arm asserts the FIGURE and not the history.
 
     Scoped to THIS sentence's figure: the docstring legitimately quotes other counts (`shrank to
     22`, `round 17`), and a looser match would grade those against the walk and red an honest edit.
