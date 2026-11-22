@@ -1641,10 +1641,15 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # and with the gate armed the re-picked page is exactly what the
         # rank-identity check exists to catch — the same ground
         # `window_quality_m2.py` and `tools/miss_rate_m5.py` hold.
-        # ⛔ AND THE MIRROR IS ASSERTED, not declared: the shipped door passes NO
-        # lever flags at all, and `tests/test_14192_read_wave_tool.py::
-        # test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags` reds if a
-        # lever (or an opt-out) is added to either of its two reads.
+        # ⛔ AND THE MIRROR IS ASSERTED, not declared: the shipped door names NO LEVER
+        # (a flag that changes WHICH rows survive ``limit`` — ``_rerank_candidates``,
+        # ``_record_reads``, ``_valid_time_rerank``, ``include_terminal``…); out-sinks
+        # such as ``_truncation_out`` are instruments, not levers, and the door does
+        # pass those. `tests/test_14192_read_wave_tool.py::
+        # test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags` derives
+        # that split from the read's own signature and reds if a lever (or an opt-out)
+        # is added to either of the tool's two reads, or if a third mention of the read
+        # appears anywhere in the file.
         "tools/read_wave_latency.py": frozenset({"run"}),
     }
     seen_external: set[str] = set()

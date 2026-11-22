@@ -170,24 +170,65 @@ def test_a_tool_only_diff_selects_this_pin():
     )
 
 
+_SDK = _REPO_ROOT / "tortoise" / "sdk.py"
+_READ_NAMES = ("tortoise_fts_query", "_tortoise_fts_query")
+
+
+def _read_call_contract() -> tuple[set[str], set[str]]:
+    """`(levers, instruments)` — DERIVED from the read's own signature, not remembered.
+
+    A *lever* changes what the read returns (so a mirror must not name it); an
+    *instrument* is a caller-owned out-sink that leaves the result alone (so a
+    faithful mirror may name it). The split is read off `_tortoise_fts_query`'s
+    signature: a boolean-defaulted parameter is a lever, a `None`-defaulted one is an
+    out-sink. ⛔ The earlier shape used "any `_`-prefixed keyword" as the lever test,
+    which forbade `_truncation_out` — an instrument the `/v1/search` door this file
+    mirrors actually passes (`hosted_api.py`) — and would have false-red a faithful
+    mirror while its message claimed the door names no lever.
+    """
+    tree = ast.parse(_SDK.read_text())
+    defs = [n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "_tortoise_fts_query"]
+    assert len(defs) == 1, f"sdk.py holds {len(defs)} `_tortoise_fts_query` definitions"
+    spec = defs[0].args
+    pairs = [(a, d) for a, d in zip(spec.args[len(spec.args) - len(spec.defaults):],
+                                    spec.defaults, strict=True)]
+    pairs += list(zip(spec.kwonlyargs, spec.kw_defaults, strict=True))
+    levers, instruments = set(), set()
+    for arg, default in pairs:
+        if default is None:
+            continue
+        if isinstance(default, ast.Constant) and isinstance(default.value, bool):
+            levers.add(arg.arg)
+        elif isinstance(default, ast.Constant) and default.value is None:
+            instruments.add(arg.arg)
+    assert {"_rerank_candidates", "_record_reads", "_valid_time_rerank"} <= levers, levers
+    assert {"leg_trace", "_truncation_out"} <= instruments, instruments
+    return levers, instruments
+
+
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
-    """The harness must time the read the PRODUCT runs — and name no lever at all.
+    """The harness must time the read the PRODUCT runs — and name no LEVER.
 
     `tests/test_rerank_pool.py`'s census refuses an un-opted-out site in `tools/`
     unless it is on its `intentional_keep` list, and this file is granted on the
     ground that it is a MIRROR of the shipped door: it measures
     ``TortoiseSDK._tortoise_fts_query`` — what ``/v1/search`` and the MCP
     ``tortoise_search`` call — and its verdict is the ORDERED id list, so a
-    rerank-free reader would time a door the product never opens and would hide
-    the very page permutation the rank-identity check exists to catch.
+    rerank-free reader would time a door the product never opens and would hide the
+    very page permutation the rank-identity check exists to catch.
 
-    A grant can only say "this file MAY run the lever", so the mirror is asserted
-    here instead of assumed: the shipped door passes NO read lever (they are the
-    private keyword-only switches, or the terminal-inclusion selector), so neither
-    may these calls — an opt-out added to "stabilise" the measurement would red
-    this pin rather than quietly change what was measured. Parsed from the source
-    so an alias or a wrapper is not invisible: every call site in the file must be
-    one of the two inside ``run()``.
+    A grant can only say "this file MAY run the lever", so the mirror is asserted here
+    instead of assumed. Lever vs instrument is DERIVED from the read's signature
+    (``_read_call_contract``), so this pin cannot rot into a remembered deny-list and
+    cannot forbid an out-sink the mirrored door itself passes.
+
+    ⛔ EVERY MENTION OF THE READ IN THIS FILE IS CENSUSED, not just the two calls: a
+    bound-method alias (``_read = sdk._tortoise_fts_query`` then ``_read(…)``) and a
+    ``getattr(sdk, "_tortoise_fts_query")`` both left a lexer that only read
+    ``Call.func`` green with a lever-carrying third read (measured), and a bare
+    attribute mention with no call at all would be invisible to the census as well.
     """
     tree = ast.parse(_TOOL.read_text())
     parents: dict[int, ast.AST] = {}
@@ -203,24 +244,45 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             parent = parents.get(id(parent))
         return "<module>"
 
+    mentions = [n for n in ast.walk(tree)
+                if (isinstance(n, ast.Attribute) and n.attr in _READ_NAMES)
+                or (isinstance(n, ast.Name) and n.id in _READ_NAMES)]
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None))
-             in ("tortoise_fts_query", "_tortoise_fts_query")]
-    # Anti-vacuity: the two reads this pin is about (the warm-up and the per-query
-    # measurement), and they must both live in `run()`.
+             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in _READ_NAMES]
+    # Anti-vacuity: TWO mentions, both calls, both the reads this pin is about (the
+    # warm-up and the per-query measurement), and both inside `run()`.
     assert len(calls) == 2, (
-        f"tools/read_wave_latency.py holds {len(calls)} read calls — this pin knows "
-        "the warm-up and the per-query one")
-    assert sorted(_owner(c) for c in calls) == ["run", "run"], (
-        f"a read call sits outside `run()`: {[(_owner(c), c.lineno) for c in calls]}")
+        f"tools/read_wave_latency.py holds {len(calls)} read calls — this pin knows the "
+        "warm-up and the per-query one")
+    assert len(mentions) == 2, (
+        f"the tool MENTIONS the read {len(mentions)} times but calls it {len(calls)} — an "
+        f"alias or a `getattr` reference is unaccounted for: "
+        f"{[(ast.unparse(m), m.lineno) for m in mentions]}")
+    assert all(_owner(m) == "run" for m in mentions), (
+        f"the read is mentioned outside `run()`: {[(_owner(m), m.lineno) for m in mentions]}")
+    indirect = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+                in ("getattr", "setattr")
+                and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
+                and n.args[1].value in _READ_NAMES]
+    assert not indirect, (
+        f"the tool reaches the read through {indirect[0].func.id}() by name — that bypasses "
+        "every check in this pin")
+    levers, instruments = _read_call_contract()
     traced = 0
     for call in calls:
         named = {k.arg: k.value for k in call.keywords if k.arg is not None}
-        levers = sorted(n for n in named if n.startswith("_") or n == "include_terminal")
-        assert not levers, (
-            f"line {call.lineno} hands {levers} to the read — the shipped door names no "
-            "lever, so this harness must not either: an opt-out here measures a reader "
-            "`/v1/search` does not run, and hides the page permutation the verdict checks")
+        handed = sorted(set(named) & levers)
+        assert not handed, (
+            f"line {call.lineno} hands {handed} to the read — a lever changes WHICH rows "
+            "survive `limit`, so a mirror that names one times a reader `/v1/search` does "
+            "not run (and hides the page permutation the verdict exists to catch)")
+        unknown = sorted(n for n in named
+                         if n.startswith("_") and n not in levers and n not in instruments)
+        assert not unknown, (
+            f"line {call.lineno} hands {unknown}, which `_tortoise_fts_query`'s signature "
+            "does not classify as a lever or an out-sink — decide which it is in "
+            "`_read_call_contract` before trusting this pin")
         assert not any(k.arg is None for k in call.keywords), (
             f"line {call.lineno} splats a mapping into the read, so which levers it "
             "carries is invisible to this pin")
