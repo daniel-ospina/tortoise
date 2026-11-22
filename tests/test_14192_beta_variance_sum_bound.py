@@ -454,16 +454,18 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     # while the graded headline stayed true (round-21 and round-22 reviews).
     #
     # So the rows below are built FROM the emission and demanded as literal
-    # substrings of each docstring that quotes them. That is stronger than a
-    # per-numeral regex and it is the only form that cannot be narrowed by
-    # accident: a copy that is not demanded here is either absent from both
-    # docstrings or a new copy this tuple must learn about. ⛔ The claim is
-    # deliberately no wider than that: these are the copies THIS list enumerates,
-    # not "every sentence either docstring contains".
+    # substrings of each docstring that quotes them. ⛔ NO COMPLETENESS CLAIM IS
+    # MADE HERE, on purpose: two earlier cuts of this comment asserted that a
+    # copy outside the tuple "is either absent from both docstrings or a new copy
+    # this tuple must learn about", and both times several copies were present
+    # and ungraded — including the headline `(72 of 80)` restatement — so the
+    # sentence was the same ungraded-claim defect one level up (rounds 22 and
+    # 23). The list is what it is; a copy not in it is simply not graded by it.
     coercions_total = guard_cases + coercions
     pct_coercion = round(100 * coercions / coercions_total)
     pct_slice = round(100 * coercions / spared)
     net_cases = coercions - guard_cases
+    selectors = spared - coercions
     function_doc_copies = (
         f"{coercions} of the predicate's {coercions_total} coercion",
         f"{pct_coercion}% of the coercion",
@@ -473,12 +475,18 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
         f"({coercions} coercion + the division's own selector)",
         f"pays {guard_cases} coercion ``CASE``s to skip {coercions}",
         f"(the {guard_cases} above + the {coercions} below)",
+        f"({coercions} of {coercions_total})",
+        f"That {guard_cases} is the guard's own",
+        f"net of the {guard_cases} it pays",
+        f"({coercions} of {spared} — {pct_slice}%",
     )
     module_doc_copies = (
         f"({coercions} of {coercions_total} coercion, {pct_coercion}%, "
         f"{net_cases} net)",
         f"({coercions} coercion + the division's own selector)",
         f"pays {guard_cases} coercion cases to skip {coercions}",
+        f"the {coercions}/{selectors} split",
+        f"The guard's own {guard_cases} are its price",
     )
     for where, text, rows in (
             ("`beta_variance_sum_bound`'s docstring", doc, function_doc_copies),
@@ -496,8 +504,10 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
         f"THIS predicate measures {len(crit[guard:division])} chars. This is a "
         "MAGNITUDE tripwire for a figure the prose quotes to one significant "
         "figure, NOT a byte pin, and its real tolerance is what it actually "
-        "implements: the band reds below 11,000 (−728, −6.2%) or above 12,500 "
-        "(+772, +6.6%). ⛔ A semantics-preserving rename inside the slice REDS "
+        "implements: the band reds AT OR BELOW 11,000 (−728, −6.2%) and AT OR "
+        "ABOVE 12,500 (+772, +6.6%) — the edges themselves red, because both "
+        "comparisons are strict."
+        " ⛔ A semantics-preserving rename inside the slice REDS "
         "IT — measured, `other` -> `other_peer` (216 occurrences) moves the span "
         "by +1,080 to 12,808 — and that false block is the ACCEPTED cost of "
         "grading an approximate figure at all, not a bug to be explained away. "
