@@ -562,7 +562,7 @@ capability cannot turn on a walk that is not there, which is why `turn_max_index
 COMPOSED site (`hosted_api.py:45028-45040`) and not on this one. ⛔ Applied consistently below: the four sibling
 members of verdict row 7 move into row 7b, and **no label's verdict changes** — four *properties* change row,
 which is the whole point of a census that classifies properties rather than statements. ⚠️ The rule cuts inside a
-`graph` row too: `harness` is a sibling projection in BOTH session reads (`sdk.py:58338`, `hosted_api.py:24790`) and
+`graph` row too: `harness` is a sibling projection in BOTH session reads (`sdk.py:58338`, `hosted_api.py:25253`) and
 is `none`-capability — row 6 is `graph` for its `CONTAINS` structure and `turn_count`'s composition, never for
 `harness`.
 
@@ -599,9 +599,9 @@ MIXED set, and precision here is the point — it is not one claim:
   columns** of two walks — the retrofit audit's short-turns query (`session_schema.py:855-861`, whose own
   comment at `:852-853` says they are *"reported beside it"*) and `list_sessions`
   (`hosted_api.py:24770-24802`) — and of the session-detail **point lookup** (`sdk.py:58338-58360`, no walk in
-  the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:24790`) and in the
+  the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:25253`) and in the
   session-detail endpoint's OWN point lookup, which has no `CONTAINS` walk either
-  (`hosted_api.py:25148-25167`, `s.turn_count, s.actor_user_id, s.harness,` at `:25151`), a filter
+  (`hosted_api.py:25611-25630`, `s.turn_count, s.actor_user_id, s.harness,` at `:25614`), a filter
   in the **LIST** endpoint's own conditions (`hosted_api.py:51493`, `s.actor_user_id = $uid`) and carries its own `:Session` index
   (`projection/__init__.py:21185`) — sibling, filter, index, and no walk, so `none` like its neighbours;
   `entity_links_attempted` is a sibling column of the entity-link walk
@@ -1118,11 +1118,11 @@ contrast.)
   reads and by the retrofit audit's `RETURN`; and
   `draft_count`/`commit_count` are read inside that same commit-statement `SET`
   (`hosted_api.py:22982-22985`). The four siblings are named across three reads — `entity_links_attempted` by the retrofit audit alone:
-  the session LIST (`hosted_api.py:24790`, `:24791`, `:24797`, `:24801`), the retrofit audit
+  the session LIST (`hosted_api.py:25253`, `:25254`, `:25260`, `:25264`), the retrofit audit
   (`session_schema.py:860-861`, `:916-917`) and the session-DETAIL point lookup (`sdk.py:58338-58360`);
   `harness`'s NAMED readers are the filter-and-counts at `hosted_api.py:26535`/`:26540` **plus four id-keyed
   point lookups** (`:10693`, `:13322`, `:25151`, `:26654`) — plus the three sibling projections named just
-  above (`hosted_api.py:24790`, `sdk.py:58338`, `session_schema.py:861`).
+  above (`hosted_api.py:25253`, `sdk.py:58338`, `session_schema.py:861`).
   Every one is a point lookup, a property guard or a sibling column — capability **`none`** — which is why
   the verdict is `record_only` on the CAPABILITY rule, never on the false premise "unread". Moving them is a
   **property-level** placement, which the row-level tier cannot express.
