@@ -18381,12 +18381,12 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         _shallow = _git("rev-parse", "--is-shallow-repository").stdout.strip() == "true"
         if not _shallow:
             failures.append(
-                f"D5's `04-plan.md` membership could not be MEASURED at all: the named head's "
-                f"object is absent, no `origin/main`/`main` ref resolves, and this is not a "
-                f"shallow clone — so the named head is unverifiable here (a fabricated sha is "
-                f"indistinguishable from a pruned one). Name a head that exists and is "
-                f"readable, or run the check on a clone that carries the base ref "
-                f"(#14260 fix lane, finding 3)")
+                "D5's `04-plan.md` membership could not be MEASURED at all: the named head's "
+                "object is absent, no `origin/main`/`main` ref resolves, and this is not a "
+                "shallow clone — so the named head is unverifiable here (a fabricated sha is "
+                "indistinguishable from a pruned one). Name a head that exists and is "
+                "readable, or run the check on a clone that carries the base ref "
+                "(#14260 fix lane, finding 3)")
     assert "IS in this diff at this head, by its PAIR" not in text, (
         "D5 has gone back to stating `04-plan.md`'s membership WITHOUT the head it was read "
         "at ('at this head, by its PAIR'). That spelling is true only until this branch "
