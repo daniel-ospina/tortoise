@@ -1648,10 +1648,11 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # `capstone_12186_recall.py` and `miss_rate_m5.py` hold above.
         # ⛔ THIS COMMENT IS THE ONLY RECORDED REASON FOR A PERMANENT EXEMPTION,
         # and the `read_wave_latency` arm at the end of this test grades its
-        # COUNTABLE parts — how many seam mentions the tool carries, that all of
-        # them sit in the granted owner `run`, that exactly ONE is the traced
-        # per-query loop, and that the traced one is inside a `for` (the `1 + N`
-        # above). It does NOT grade a line number, which is why the shapes above
+        # COUNTABLE parts — how many seam mentions the tool carries that the grant
+        # is what exempts (an OPTED-OUT read counts for neither), that all of them
+        # sit in the granted owner `run`, that exactly ONE is the traced per-query
+        # loop, and that the traced one is inside a `for` (the `1 + N` above). It
+        # does NOT grade a line number, which is why the shapes above
         # are named by ROLE rather than by offset: an insertion higher in the
         # file rots an offset silently, and an ungraded numeral is the same rotted
         # claim this block exists to stop. Re-derive the text; never delete that
@@ -1718,32 +1719,59 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # by the owner-granular grant and would be invisible to a ``Call``-only
     # predicate (measured: both mutants stayed GREEN against the Call form, which
     # is the gap this line closes).
+    # ⛔ AND ONLY THE MENTIONS THE GRANT IS WHAT EXEMPTS. `_sites` records a row for
+    # every mention, but it asserts only on the ones that did NOT opt out —
+    # opting out is the census's own sanctioned alternative ("name it or opt it
+    # out"), so counting an opted-out read here would FALSE-BLOCK the correct fix
+    # (measured: a `_rerank_candidates=False` read in `main()` passes the census
+    # and reddened this arm — round 4's defect, mirrored).
+    def _opted_out(call) -> bool:
+        """`_sites`' own rule, so this arm counts exactly what the grant exempts."""
+        if call is None:
+            return False
+        for k in call.keywords:
+            if (k.arg == "_rerank_candidates"
+                    and isinstance(k.value, _ast.Constant)
+                    and k.value.value is False):
+                return True
+            if k.arg != "_search_kwargs":
+                continue
+            try:
+                opts = _ast.literal_eval(k.value)
+            except (ValueError, SyntaxError):
+                continue
+            if (isinstance(opts, dict)
+                    and opts.get("_rerank_candidates") is False):
+                return True
+        return False
+
     seam_mentions = [n for n in _ast.walk(harness)
                      if isinstance(n, _ast.Attribute)
                      and n.attr in ("tortoise_fts_query",
                                     "_tortoise_fts_query")]
-    assert len(seam_mentions) == 2, (
-        f"{len(seam_mentions)} seam mention(s) of `tortoise_fts_query` in "
-        "tools/read_wave_latency.py, but the exemption's recorded reason says "
-        "TWO (a discarded warm-up, and the measured loop) and the grant is "
-        "owner-granular — a further read inside `run` is exempted with no "
-        "recorded reason. Re-derive the comment in `intentional_keep`.")
-    owners = {(_enclosing(m).name if _enclosing(m) else None)
-              for m in seam_mentions}
-    assert owners == {"run"}, (
-        "the exempted reads are not all inside `run`, the only owner the grant "
-        f"names: {sorted(owners, key=str)}")
-    seam_calls = []
+    live: list = []
+    seam_calls: list = []
     for mention in seam_mentions:
         call = next((c for c in _ast.walk(harness)
                      if isinstance(c, _ast.Call)
                      and (c.func is mention or mention in c.args
                           or any(mention is k.value for k in c.keywords))), None)
-        assert call is not None, (
-            f"the seam mention at line {mention.lineno} feeds no call — the "
-            "exemption is claimed for READS, and a mention that reaches none "
-            "proves nothing")
-        seam_calls.append(call)
+        if _opted_out(call):
+            continue        # the census's sanctioned alternative, not an exemption
+        live.append(mention)
+        if call is not None:
+            seam_calls.append(call)
+    assert len(live) == 2, (
+        f"{len(live)} un-opted-out seam mention(s) of `tortoise_fts_query` in "
+        "tools/read_wave_latency.py, but the exemption's recorded reason says "
+        "TWO (a discarded warm-up, and the measured loop) and the grant is "
+        "owner-granular — a further read inside the granted owner is exempted "
+        "with no recorded reason. Re-derive the comment in `intentional_keep`, "
+        "or opt the new read out, which needs no grant.")
+    owners = {(_enclosing(m).name if _enclosing(m) else None) for m in live}
+    assert owners == {"run"}, (
+        "the exempted reads are not all inside `run`, the only owner the grant "
+        f"names: {sorted(owners, key=str)}")
     traced = [c for c in seam_calls
               if any(k.arg == "leg_trace" for k in c.keywords)]
     assert len(traced) == 1, (
