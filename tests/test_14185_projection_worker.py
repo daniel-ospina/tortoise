@@ -1983,12 +1983,15 @@ def test_an_UNIMPORTABLE_loop_folds_inline_instead_of_breaking_the_write(
     # `None` in `sys.modules` raises while a previously imported module, its
     # worker thread and its queue are still alive — nor for a RE-import that fails
     # after an earlier load succeeded; in both an inline fold CAN overtake an
-    # earlier queued position. ⛔ Note it is the PAIR that raises, and this test
-    # performs both acts: `from . import projection_worker` does not consult
+    # earlier queued position. ⛔ Note it is a PAIR that raises, and this test
+    # performs both halves: `from . import projection_worker` does not consult
     # `sys.modules` once a load has succeeded, so the cache entry alone still
     # QUEUES — the package attribute must also be removed (`delattr` at the top of
-    # this test). Nothing in `tortoise/` assigns `None` there, drops the entry or
-    # removes the attribute, which is why the arm is classified structural; the
+    # this test). And the two entry states are not interchangeable: a `None` entry
+    # fails by itself (which is what this test sets), while a merely dropped entry
+    # would re-import and SUCCEED. Nothing in `tortoise/` assigns `None` there,
+    # drops the entry or removes the attribute, which is why the arm is classified
+    # structural; the
     # classification rests on that, not on the raise alone. What is mechanically
     # checkable here is the counter half — moving
     # `tortoise_record_projection_inline_fallbacks_total` would make an operator

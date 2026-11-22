@@ -114,10 +114,13 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    ``_handle_fromlist`` attempts an import only when
    ``hasattr(package, "projection_worker")`` is False (and this package also has a
    module ``__getattr__``). So an unusable entry by itself still yields a QUEUED
-   write — the arm never runs. The precondition is BOTH acts: the entry made
-   unusable (``None``, or dropped) AND the package attribute removed (``del
-   tortoise.projection_worker`` / ``delattr``), which is exactly the pair this PR's
-   own test performs. There the arm folds inline with an earlier position still queued,
+   write — the arm never runs. The precondition is TWO things at once: the package
+   attribute removed (``del tortoise.projection_worker`` / ``delattr``) AND an entry
+   that makes the resulting import FAIL. ⛔ Those entries are NOT interchangeable,
+   which is the part a one-word gloss loses: a ``None`` entry fails by itself, and
+   that is the pair this PR's own test performs and raises on; a merely DROPPED
+   entry RE-IMPORTS AND SUCCEEDS — the write stays QUEUED and the arm never runs —
+   and reaches the arm only when that re-import raises for its own reason. There the arm folds inline with an earlier position still queued,
    the later write's row lands first, and its predecessor overwrites it — the
    residual itself. That state is reachable (this PR's own test builds it, and
    names both acts) but is not PRODUCED by this tree: nothing in ``tortoise/``
@@ -211,9 +214,10 @@ STRUCTURAL and the other TWO are the SWITCHES. Of the five structural, FOUR are
 CORRECTNESS rather than configuration, and the fifth is the UNIMPORTABLE loop —
 the ``except`` around ``from . import projection_worker`` — which folds inline on
 every write at any depth and moves **no counter**, so it is invisible in
-``inline_fallbacks{}``. The four correctness arms follow; the unimportable loop
-is stated at the end of this section rather than numbered with them, and the two
-switches are stated after that.
+``inline_fallbacks{}``. ⛔ It gets NO bullet below, and that is not an omission: its
+full statement is property 1 above, where its exclusion from the ordering residual
+is scoped, and this preamble is where it is COUNTED. The four correctness arms
+follow, and the two switches after them.
 
 * ⛔ **A record-only write is never deferred** (``journal_skipped``, #14002).
   On a cut-over graph there is no journal line — the record's own commit IS the
