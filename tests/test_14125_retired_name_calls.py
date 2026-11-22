@@ -563,7 +563,11 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     substitution `_swallows_everything` charges, and the shape is one the gate's own repair
     message produces — "Insert the re-raise arm immediately before the broad handler" — on a
     block that already carries an `except ImportError:` skip: the charged ImportError drop
-    stayed green in BOTH gates. Measured, and the population is unchanged (70/58/0).
+    stayed green in BOTH gates. Measured, and the population is unchanged — 70 rows over 58
+    graded files, 0 unarmed and 0 seam (`len(_probe_report())`, the distinct first field, and
+    the two gate verdicts; named rather than written as a bare `70/58/0` triple, because
+    review of PR #14287 cycle 3 read the middle figure as unsupported: it is the FILE count,
+    not a root or coverage count, and a bare triple cannot say so).
 
     ⛔ THE HIERARCHY IS COMPARED, THE SPELLING IS CREDITED — and the two are NOT the same
     set (review of #14160, cycle 11, both P1s). Accounting is done on the CANONICAL name, so
