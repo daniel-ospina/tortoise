@@ -589,7 +589,21 @@ def evaluate(org_id: str, *, limits: dict | None = None,
     both from the gate's own instruments.
     """
     if limits is None:
-        limits = quota.resolve_org_limits(org_id)
+        try:
+            limits = quota.resolve_org_limits(org_id)
+        except Exception as exc:  # a gauge fault is NOT a decision
+            # ⛔ THE INSTRUMENT THIS MODULE PUBLISHES A REASON FOR. `notify_account`
+            # documents a CLOSED list of statuses a caller aggregates on, and names
+            # `unreadable-allowance` for "the gauge pair could not be read". Left
+            # unguarded, a raise here reached the caller as `sweep_pass`'s generic
+            # `error` — a different name for the same state, with the cause reduced
+            # to a log line nothing aggregates, so the documented status was
+            # unreachable for the very failure it names. Nothing is sent and the
+            # mark is untouched, exactly as for every non-`sent` exit.
+            logger.warning(
+                "capacity notice: the allowance for %s could not be read (%s) "
+                "— no email", org_id, _logged_reason(exc))
+            return None, "unreadable-allowance"
     allowance = limits.get(ALLOWANCE_KEY)
     if allowance is None:
         # An UNARMED tier: no hot window, so the email's sentence ("…included in
@@ -602,7 +616,17 @@ def evaluate(org_id: str, *, limits: dict | None = None,
     if not math.isfinite(allowance_mb) or allowance_mb <= 0:
         return None, "no-allowance"
     if reading is None:
-        reading = allowance_gate.read_dimension(DIMENSION, org_id)
+        try:
+            reading = allowance_gate.read_dimension(DIMENSION, org_id)
+        except Exception as exc:  # the meter half of the same name
+            # The sibling of the guard above, at the OTHER instrument: the two are
+            # separate seams, so one try/except cannot cover both, and this is the
+            # path a production caller takes (`reading=None` means "read it
+            # yourself"). Same outcome — no email, mark untouched.
+            logger.warning(
+                "capacity notice: the meter for %s could not be read (%s) "
+                "— no email", org_id, _logged_reason(exc))
+            return None, "unreadable-reading"
     if reading is None:
         # ABSENT (never measured) or a METER FAULT — indistinguishable to a caller
         # that must not guess, and both mean "no percentage". The pass logs this.
@@ -995,8 +1019,9 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     decides on — not the type alone, because `supabase_control` raises
     `RuntimeError` for BOTH a rejected column and a transport failure),
     ``unreadable-allowance`` and ``unreadable-reading`` (the gauge pair could not
-    be read — returned verbatim, and listed here because the closed list below is
-    what a caller aggregates on), ``below-threshold``/
+    be read — the instrument RAISED, or the figure it answered cannot be turned
+    into a percentage; returned verbatim, and listed here because the closed list
+    below is what a caller aggregates on), ``below-threshold``/
     ``no-reading``/``no-allowance`` (the
     evaluate reasons are passed through verbatim so the caller can aggregate
     them), ``skipped`` (send budget), ``failed`` (provider), ``unknown-account``.
