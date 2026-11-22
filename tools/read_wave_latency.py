@@ -294,6 +294,8 @@ def run(args) -> dict:
     # Warm-up: the embedder load and the projection's index caches are setup,
     # not this issue's chain (#10893's ``embed_get``).
     sdk._tortoise_fts_query(query=queries[0]["query"], limit=10)
+    _m = sdk._tortoise_fts_query
+    _m(query="m", limit=10)
 
     per_query = []
     for q in queries:
