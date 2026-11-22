@@ -1375,6 +1375,22 @@ def test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE(tmp_path, monkeyp
     out = capsys.readouterr().out
     assert "::error::" in out and "duplicate key" in out, out
 
+    # ⛔ THE SECOND DRIVER GRADES THE SAME ARTIFACT (#14033 review P2). tools/surface-guard.py
+    # reads the frozen baseline itself — it is PINNED TO THE BASE REF and therefore keeps its
+    # OWN copy of the refusal rather than importing tools/surface_manifest.py (a module it
+    # imported would be PR-authored; see test_the_pinned_gate_imports_only_its_allow_listed_
+    # modules). That duplication is what let the first fix land on one copy only: the guard
+    # still read with `yaml.safe_load` and printed "The manifest CLAIMS an approval" off
+    # whichever `approval_status:` line came LAST in a file that carries the key twice. The
+    # net that keeps the copies in step is this arm — drive BOTH drivers at the same artifact.
+    guard = _run("tools/surface-guard.py", "--manifest", str(path))
+    assert guard.returncode == 1, (
+        "tools/surface-guard.py read a baseline carrying a duplicate top-level key and "
+        "reported on one of them — it then grades a value the artifact contradicts "
+        f"(rc={guard.returncode}, out={guard.stdout!r}, err={guard.stderr!r})")
+    assert "duplicate key" in guard.stdout, (
+        f"the guard refused, but not for the duplicate key: {guard.stdout!r}")
+
     # the repair path still opens it, or nobody can fix it
     doc = sm._read_manifest(check_provenance=False)
     assert doc.get("cut_at_commit"), doc.get("cut_at_commit")
