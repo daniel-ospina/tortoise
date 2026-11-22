@@ -35,6 +35,9 @@ already paid for once.
 """
 from __future__ import annotations
 
+import inspect
+import re
+
 import pytest
 
 from tortoise.graph_ops import (
@@ -356,6 +359,30 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
         "`$contested_threshold`, but the docstring promises 73 (72 coercion + "
         "the division's own selector) — re-derive BOTH "
         "numerals against THIS predicate")
+    # ⛔ AND THE DOCSTRING ITSELF IS GRADED, not just the emission. The two
+    # numerals above are compared against LITERALS, so on their own they pin the
+    # predicate but NOT the prose: a docstring could be inverted to "73 before
+    # the guard / 8 spared" — the exact false claim this PR exists to correct —
+    # and both assertions above would stay green. That is the very
+    # ungraded-numeral class the module docstring apologises for, so the
+    # docstring's own numerals are read OUT OF THE DOCSTRING and compared to the
+    # same measurements. Precedent for reading a prose figure in a test:
+    # `test_sdk_privatise_sweep.py::test_the_abbreviation_length_claim_reproduces`.
+    doc = inspect.getdoc(beta_variance_sum_bound) or ""
+    doc_before = re.search(r"\*\*(\d+)\*\* coercion ``CASE WHEN`` before", doc)
+    doc_spared = re.search(r"against \*\*(\d+)\*\* between it and", doc)
+    assert doc_before and doc_spared, (
+        "`beta_variance_sum_bound`'s docstring no longer states both CASE WHEN "
+        "numerals in the graded form ('**N** coercion ``CASE WHEN`` before' / "
+        "'against **N** between it and') — restore the wording or re-point this "
+        "test, but do not drop the coupling")
+    assert int(doc_before.group(1)) == crit[:guard].count("CASE WHEN"), (
+        f"the docstring says {doc_before.group(1)} coercion `CASE WHEN` precede "
+        f"the guard, but THIS predicate measures "
+        f"{crit[:guard].count('CASE WHEN')} — the prose has rotted off the emission")
+    assert int(doc_spared.group(1)) == spared, (
+        f"the docstring says {doc_spared.group(1)} `CASE WHEN` are spared, but "
+        f"THIS predicate measures {spared} — the prose has rotted off the emission")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 
