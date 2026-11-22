@@ -1103,9 +1103,14 @@ SWEEP_NAMES = 66
 #: that pair is `e74cf1d13d` itself (⛔ scoped to `main`, NOT "the only commit" — the pair is set
 #: by AT LEAST ONE OTHER commit, the side branch's `3f289474f9` (`feat/14012-pin-and-outside-view`,
 #: parent 11856) as well as by `e74cf1d13d` (parent 11843), so the unscoped sentence fails the very
-#: `git log` it cites. ⛔ AND `-S` IS NOT A SETTER COUNT: it also matches a commit whose own pin
-#: REPLACED the pair, so `917ae19efd` and `10e51693f1` (both own 11858, both parent 11857) appear in
-#: a `-S` list without ever setting it. ⛔ AND NO TOTAL FROM `--all` BELONGS IN THIS BLOCK, on two
+#: `git log` it cites. ⛔ AND `-S` IS NOT A SETTER COUNT — IT IS A COUNT-CHANGE LIST, in which a
+#: commit whose own pin REPLACED the pair sits beside one that SET it. Measured on
+#: `-S'SWEEP_RESIDUE = (11858, "a1552662bf07a10b")'` (`--all`): the SETTERS `10e51693f1` and
+#: `917ae19efd` (parent 11857 → own 11858) are in it BECAUSE they set it, next to `0a07fb713c` and
+#: `70a3ae85d3` (parent 11858 → own 11861), which only REPLACED it — so read each commit's own and
+#: parent pin (`git show <sha>:tools/sdk_privatise.py`, then the same on `<sha>^`) before calling it
+#: a setter or a replacer — the `-S` list itself answers neither. ⛔ AND NO TOTAL FROM `--all` BELONGS
+#: IN THIS BLOCK, on two
 #: measured grounds: the search STRING changes the population (`-S` on the bare pair is a different
 #: set from `-S` on the assignment line), and `--all` walks `refs/wip/*` lane snapshots, which are
 #: created and pruned continuously, so a total over them is a fact about the instrument at one
