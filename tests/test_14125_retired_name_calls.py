@@ -4912,6 +4912,42 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "an arm below a re-raising arm that already catches its whole family can never run, "
         "so it drops nothing"
     )
+    #: ⛔ THE BROAD-ARM HALF of that same early return — no row pinned it (review of PR #14287
+    #: @ `a6443ec3a2`, F1). `_dead_drop` above pins only the NARROW term; the other branch,
+    #: `names & _BROAD`, is load-bearing in the FALSE-RED direction: with its return deleted, a
+    #: block that propagates everything — `except Exception: raise` followed by an (unreachable)
+    #: `except ImportError:` drop — reads as a swallow. Measured on this head: as-is `False`,
+    #: mutant `True`, and NO other row varies, so the guard could be deleted silently. The pair
+    #: below pins both halves: the broad arm that RE-RAISES charges nothing below it, and the
+    #: broad arm that DROPS charges (the control — this is not "broad arms never charge").
+    _broad_dead_drop = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                "try:\n    _probe = _make()\nexcept Exception:\n    raise\n"
+                "except ImportError:\n    _probe = None\n"
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _swallows_everything(_broad_dead_drop) is False, (
+        "a narrow drop below a re-raising BROAD arm can never run, so it drops nothing — "
+        "charging it is a false red on a block that propagates everything"
+    )
+    _broad_drop_charges = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                "try:\n    _probe = _make()\nexcept Exception:\n    _probe = None\n"
+                "except ImportError:\n    _probe = None\n"
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _swallows_everything(_broad_drop_charges) is True, (
+        "a BROAD arm that DROPS is a swallow — the row above must not be read as "
+        "'a broad arm never charges'"
+    )
     #: ⛔ THE EXACT-SPELLING HALF OF `_masked_by`, on the CHARGE side — no row pinned it
     #: (review of PR #14287, F3). `_dead_drop` above only pins the FAMILY term: with the
     #: exact term deleted, `_RAISED_ALIAS.get("ModuleNotFoundError") == "ImportError"` is
