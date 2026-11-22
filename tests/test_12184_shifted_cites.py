@@ -1683,6 +1683,170 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
     )
 
 
+#: The census pairs the header's comparability split calls NON-comparable, with the pin-side line count that
+#: makes each one so: the pair's line is past `ccb49741b2ec`'s copy of its file. MEASURED, one command per
+#: file — `git show ccb49741b2ec:<path> | wc -l` — and the header publishes the same four counts in its
+#: `wc -l` parenthetical, so the two are one measurement and this table is its per-pair form.
+#:
+#: ⛔ `mcp_server.py`'s `11590` is in this set because `main`'s `#14169` moved the address past the pin's
+#: 11,466-line copy; it is NOT this branch's own write, which is why the header's split has to qualify
+#: "this branch's own" rather than assert it for all of them. The `#14246` review's finding 1 is the exact
+#: failure this table exists to make unreachable: the split shipped `224`/`ten`/`131`/`seven` — internally
+#: consistent, and wrong — because nothing DERIVED it, and a self-consistent stale split cannot be caught
+#: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
+_PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
+    ("tortoise/hosted_api.py", 51607): 49851,
+    ("tortoise/mcp_server.py", 11590): 11466,
+    ("tortoise/sdk.py", 58099): 56415,
+    ("tortoise/sdk.py", 58315): 56415,
+    ("tortoise/sdk.py", 58317): 56415,
+    ("tortoise/sdk.py", 58966): 56415,
+    ("tortoise/sdk.py", 61999): 56415,
+    ("tortoise/sdk.py", 62019): 56415,
+    ("tortoise/search_engine.py", 7153): 7071,
+    ("tortoise/search_engine.py", 7184): 7071,
+    ("tortoise/search_engine.py", 7560): 7071,
+    ("tortoise/search_engine.py", 7562): 7071,
+}
+#: The split's three published sentences. Each is matched on the header's emphasis-stripped body, like every
+#: other figure pattern in this file, and each group is graded as a NUMBER (`_as_int`), so an edition may
+#: state a count in digits or in words without the comparator reporting a false absence.
+_SPLIT_COMPARABLE = re.compile(r"all (\d+) comparable ones resolve at BOTH heads")
+_SPLIT_NONCOMPARABLE = re.compile(r"the (\w+) that are NOT comparable")
+_SPLIT_DRIFT = re.compile(r"the drift is (\d+) of the (\d+) comparable, plus (\w+) of those (\w+) pairs")
+_SPLIT_ABSENT_AT_MAIN = re.compile(r"the\s+(\w+) that do not exist at `main` either")
+
+
+def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
+    """The `N comparable / M not` split is derived from the pin's own file lengths, not trusted as prose.
+
+    WHY THIS EXISTS. `#14246` re-pointed §2.5's `:Tag` traversal from `11281` to `11590`, which moved that
+    `(path, line)` pair past `ccb49741b2ec`'s 11,466-line copy of `tortoise/mcp_server.py` — so the pair
+    left the COMPARABLE population and joined the enumerated non-comparable ones. Every published figure
+    moved with it (`224`/`ten`/`131 of the 224, plus seven of those ten` read `223`/`eleven`/`130 of the
+    223, plus eight of those eleven`) and the headline total did not (`138` either way, because the pair's
+    drifter status does not change — it exists at `main`). Nothing reddened: the split is a literal in the
+    document and `_figure_problems` recomputes only the DENOMINATOR (spellings/pairs/collisions, which are
+    invariant under a re-point). That is a published claim whose value could not vary under ANY mutation of
+    the diff — the rule-3 uncovered-claim shape. The four figures happened to be internally consistent
+    while wrong, so no arithmetic-only arm can catch this class; the pin's file lengths are what decides
+    membership, and they are pinned here.
+
+    WHAT IT GRADES. (1) Every pair in `_PIN_EOF_PAIRS` is still a census pair — a dropped or re-pointed cite
+    must re-derive this table rather than leave it describing a population the document no longer has.
+    (2) The header NAMES each of them at the address it writes, inside the non-comparable enumeration ("each
+    named at the address this document writes for it" is the clause that promised it). (3) The published
+    counts agree with the table: comparable + non-comparable == the pairs the file measures, and the four
+    pinned `wc -l` values are the ones the header states for those files.
+
+    NON-VACUOUS, measured on the pre-fix document (`git show 3cb2090c61:docs/architecture/…`): it reds on
+    all three arms — the split publishes `224`/`ten` against this table's `223`/`11`, `mcp_server.py`'s
+    `11590` is named nowhere in the enumeration, and the pin-side `wc -l` list has no entry for
+    `mcp_server.py`.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    body = _unbolded(text)
+    _spellings, pairs = _resolved_pairs(text)
+
+    # (1) the table describes THIS document's population.
+    orphan = sorted(pair for pair in _PIN_EOF_PAIRS if pair not in pairs)
+    assert not orphan, (
+        f"the comparability split counts {orphan} as non-comparable census pairs, but this document no "
+        "longer writes a one-token spelling that resolves to them. Re-derive `_PIN_EOF_PAIRS` against the "
+        "cites the document carries now — do not drop the entry to make the split agree with itself."
+    )
+
+    # (2) every one of them is NAMED where the header promises to name them: the non-comparable enumeration,
+    # the sentence between "that are NOT comparable" and "past the pin's copy of its file". Either spelling
+    # form the document uses for a pair counts — `SDK/FILE:NNNN` (`sdk.py:57951`) or the bare `:NNNN`
+    # sibling behind an adjacent path (`search_engine.py`'s `:7196`).
+    start = body.find("that are NOT comparable")
+    end = body.find("past the pin's copy of its file")
+    assert start != -1 and end > start, (
+        "the header no longer publishes the non-comparable enumeration this split's figures describe "
+        f"(`that are NOT comparable` at {start}, `past the pin's copy of its file` at {end}) — re-point "
+        "this arm against how the split is published now, do not delete it"
+    )
+    region = body[start:end]
+    unnamed = sorted(
+        pair
+        for pair in _PIN_EOF_PAIRS
+        if not any(
+            form in region
+            for form in (
+                f"`{pair[0]}:{pair[1]}`",
+                f"`{pair[0].rsplit('/', 1)[-1]}:{pair[1]}`",
+                f"`:{pair[1]}`",
+            )
+        )
+    )
+    assert not unnamed, (
+        f"the comparability split counts {len(_PIN_EOF_PAIRS)} pairs as non-comparable but does not name "
+        f"{unnamed} at the address the document writes for it. A pair that left the comparable set is a "
+        "published figure moving: name it in that enumeration, and re-derive the counts the split states."
+    )
+
+    # (3) the published figures agree with the table and with each other.
+    comparable = _SPLIT_COMPARABLE.search(body)
+    noncomparable = _SPLIT_NONCOMPARABLE.search(body)
+    drift = _SPLIT_DRIFT.search(body)
+    absent = _SPLIT_ABSENT_AT_MAIN.search(body)
+    for found, what in (
+        (comparable, "`all N comparable ones resolve at BOTH heads`"),
+        (noncomparable, "`the N that are NOT comparable`"),
+        (drift, "`the drift is N of the M comparable, plus S of those T pairs`"),
+        (absent, "`the N that do not exist at `main` either`"),
+    ):
+        assert found is not None, (
+            f"the header no longer publishes {what} — the comparability split is a published claim, and "
+            "this arm cannot grade a sentence it cannot read. Re-point the pattern against how it is "
+            "written now, do not delete the arm"
+        )
+    expected_comparable = len(pairs) - len(_PIN_EOF_PAIRS)
+    assert int(comparable.group(1)) == expected_comparable, (
+        f"the header says `{comparable.group(1)}` comparable pairs, but this document measures {len(pairs)} "
+        f"pairs and `_PIN_EOF_PAIRS` holds {len(_PIN_EOF_PAIRS)} past the pin's EOF — so {expected_comparable} "
+        "are comparable. Re-measure the split, do not adjust the table to it."
+    )
+    assert _as_int(noncomparable.group(1)) == len(_PIN_EOF_PAIRS), (
+        f"the header says `{noncomparable.group(1)}` pairs are NOT comparable, but `_PIN_EOF_PAIRS` — the "
+        f"pin-side facts, `git show ccb49741b2ec:<path> | wc -l` against each pair's line — measures "
+        f"{len(_PIN_EOF_PAIRS)}. A pair that crossed the pin's EOF is the whole delta here."
+    )
+    comparable_denominator = int(drift.group(2))
+    assert comparable_denominator == expected_comparable, (
+        f"the drift sentence names `of the {comparable_denominator}` comparable pairs while the split's own "
+        f"denominator measures {expected_comparable} — the ratio has to name the population it was taken over"
+    )
+    # The incomparable half splits in two: the pairs that DO exist at the named `main` (and so drift) and the
+    # ones that exist at neither head (and so cannot be compared at all). Both counts are published, and they
+    # must add up to the population `_PIN_EOF_PAIRS` measures — which is what makes "eight of those eleven"
+    # checkable rather than asserted.
+    drifters_incomparable = _as_int(drift.group(3))
+    absent_at_main = _as_int(absent.group(1))
+    assert drifters_incomparable + absent_at_main == len(_PIN_EOF_PAIRS), (
+        f"the split says {drifters_incomparable} of its non-comparable pairs drift and {absent_at_main} "
+        f"exist at neither head — {drifters_incomparable + absent_at_main} in all, but the pin-side facts "
+        f"measure {len(_PIN_EOF_PAIRS)} non-comparable pairs. Every one of them is in exactly one half."
+    )
+    assert _as_int(drift.group(4)) == len(_PIN_EOF_PAIRS), (
+        f"the drift sentence names `of those {drift.group(4)} pairs` while the split counts "
+        f"{len(_PIN_EOF_PAIRS)} non-comparable pairs"
+    )
+    # The pinned `wc -l` values ARE the membership rule, so the header has to state the one for every file a
+    # non-comparable pair lives in — the pin-side fact a reader checks, and the entry `#14246` was missing.
+    for (path, _line), pin_lines in _PIN_EOF_PAIRS.items():
+        stated = (
+            f"{path} | wc -l` -> `{pin_lines}`" in body
+            or f"…/{path.rsplit('/', 1)[-1]}` -> `{pin_lines}`" in body
+        )
+        assert stated, (
+            f"the split's non-comparable membership rests on `{path}` being {pin_lines} lines at the pin, "
+            "but the header's pin-side `wc -l` parenthetical does not state it. Without that figure the "
+            "five numerals above are unverifiable prose, which is how they shipped wrong."
+        )
+
+
 def test_a_carried_forward_figure_is_reported() -> None:
     """The comparator's negative case, reachable: a stale triple and a broken arithmetic relation red.
 
