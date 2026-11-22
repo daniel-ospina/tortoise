@@ -594,6 +594,19 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     if isinstance(node, ast.JoinedStr):
         return frozenset().union(*(_possible_strings(part, consts)
                                    for part in node.values))
+    # ⛔ A LITERAL-ONLY `+` IS A LITERAL (#14326 round 9, MEASURED GREEN at `d6ed6799`):
+    # `getattr(sdk, "_tortoise_" + "fts_query")(…, kind="statement")` passed the pin at
+    # `m=2 c=2 i=0`, while the IMPLICIT-CONCAT spelling of the same string (which `compile()`
+    # folds to ONE `LOAD_CONST`) was refused. Nothing is computed at runtime — the operands
+    # are `Constant`s — so this is the same argument that admitted `IfExp`/`BoolOp`: a
+    # SELECTION between literals is statically the set of its literals. Only a `+` whose
+    # operands are BOTH statically resolvable is joined; `_N + "_x"` (a NAME operand) stays
+    # the declared residual.
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        _left, _right = _possible_strings(node.left, consts), _possible_strings(node.right, consts)
+        if len(_left) == 1 and len(_right) == 1:
+            return frozenset({next(iter(_left)) + next(iter(_right))})
+        return frozenset().union(_left, _right)
     return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
 
 
@@ -1906,10 +1919,14 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             if value is None or not _bound_mutator_expr(value):
                 continue
             for target in targets:
+                # ⛔ `Name` TARGETS ARE DELETED, NOT KEPT (#14326 round 9, measured: removing
+                # this arm leaves the suite green and changes no `_mutations_of` verdict,
+                # because `_aliases_of(…, loops=True)`'s `bound_mutator` seed already
+                # supplies every `Name` target). This arm was the SLOT case's own addition —
+                # an `Assign`/`AnnAssign` into an OBJECT slot — and a clause no mutant can
+                # red reads as coverage and is not.
                 if isinstance(target, ast.Attribute):
                     found.add(target.attr)
-                elif isinstance(target, ast.Name):
-                    found.add(target.id)
         return frozenset(found)
 
     rebound_mutators = _rebound_mutator_slots(run_def)
@@ -3085,6 +3102,11 @@ def test_a_BOUND_MUTATOR_in_an_OBJECT_SLOT_is_red() -> None:
     """
     for label, body in (
         ("object slot", "    _b.s = results.sort\n    _b.s()\n"),
+        # ⛔ THE ANNOTATED SPELLING (#14326 round 9, MEASURED: deleting the `AnnAssign` arm
+        # leaves the suite green while this shape goes `hits=[5]` -> `[]`, i.e. an in-place
+        # page sort through an annotated slot reads as a pass). The rows above all spell
+        # `Assign`, so the arm was load-bearing and unpinned.
+        ("object slot, ANNOTATED", "    _b.s: object = results.sort\n    _b.s()\n"),
         ("rebound pure method name", "    _x.count = results.sort\n    _x.count()\n"),
         ("object slot, keyword call", '    _b.s = results.sort\n    _b.s(key=_r.get("id"))\n'),
     ):
@@ -3582,6 +3604,29 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             f'    {reach.format(name="_N")}\n'),
         "walrus INLINE in the getattr": (
             '    getattr(sdk, (_M := "_tortoise_fts_query"))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE `_possible_strings` `NamedExpr` ARM NEEDS ITS OWN ROWS (#14326 round 9,
+        # MEASURED: deleting the arm leaves the suite green). The row above does NOT pin it —
+        # that reach also reds at the mentions census (`m=3`), so it refuses either way. These
+        # four go through `getattr(*…)`/a keyword, where the operand path is the ONLY thing
+        # that can see the walrus.
+        "walrus INLINE, splatted": (
+            '    getattr(*{sdk, (_M := "_tortoise_fts_query")})'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "walrus INLINE, tuple-splatted": (
+            '    getattr(*((_M := "_tortoise_fts_query"),))(sdk)'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "walrus INLINE, in a SELECTION": (
+            '    getattr(sdk, ((_M := "_tortoise_fts_query") if queries else "x"))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "walrus INLINE, as a KEYWORD": (
+            '    _PageFetcher(name=(_M := "_tortoise_fts_query"))(sdk)'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ AND A LITERAL-ONLY `+` (#14326 round 9, MEASURED GREEN at `d6ed6799` while the
+        # implicit-concat spelling was refused — the same string, folded by `compile()` to one
+        # `LOAD_CONST`): nothing is computed, so it is the `IfExp`/`BoolOp` case exactly.
+        "literal-only `+` (a compile-time fold)": (
+            '    getattr(sdk, "_tortoise_" + "fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "for target": ('    for _N in ("_tortoise_fts_query",):\n        '
                        f'{reach.format(name="_N")}\n'),
