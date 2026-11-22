@@ -369,10 +369,14 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
         # `applied` (live_write.py:745-746). Latent today (both doors answer
         # `RecordWrite | None`), and fail-closed in the wrong direction — a false
         # loss count, never a lost row. Checked in BOTH arms rather than hoisted
-        # above them so that a raising `refusal` PROPERTY keeps exactly the
-        # semantics it had: a raise there reaches the caller's `try`, which is
-        # already the fail-safe path, and a hoist would have made a healthy
-        # outcome with a raising `refusal` newly read as a loss.
+        # above them, and what that costs is stated rather than glossed: the FALSY
+        # arm below already read `refusal`, so its behaviour is unchanged; THIS arm
+        # did not, so a `refusal` property that RAISES is newly reachable here — and
+        # it lands on the same fail-safe verdict (the caller's `except` maps the
+        # raise to `record_no_outcome`, which is exactly what this arm returns
+        # itself), with a different warning line. A hoist above both arms would
+        # instead have newly read `refusal` for a HEALTHY outcome too, turning a
+        # raise there into a loss where it previously returned a written row.
         refusal = getattr(result, "refusal", None)
         if refusal is not None and refusal == _non_durable_journal_refusal():
             return None          # the seam's healthy decline, not a loss (#9231)
