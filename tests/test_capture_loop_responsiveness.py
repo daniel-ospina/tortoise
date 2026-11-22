@@ -524,6 +524,21 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             # must still be OPEN. No clocks compared.
             health_served_in_stall = not exited_evt.is_set()
             cap = await capture
+            # ⛔ #14232 — `await capture` IS THE ACK, NOT THE EXTRACTION. The
+            # receipt is served inside a bounded join, so on this lane the POST
+            # returns WHILE the fake is still sleeping in its stall; the row's
+            # own window (`entered < t < exited`) then reads `state["exited"]`
+            # before it exists — measured as a hard `KeyError: 'exited'` on a
+            # COLD solo run, green only when another capture suite warmed the
+            # seam first. So the stall is waited out explicitly and on its own
+            # clock (`to_thread`, never on the loop), bounded well above
+            # `STALL_S`; the tick collection keeps running for exactly the window
+            # the assertions below are about.
+            await asyncio.to_thread(exited_evt.wait, STALL_S * 3 + 10)
+            assert exited_evt.is_set(), (
+                "the stalling extraction never finished after the ACK — the tail "
+                "did not run, so the tick window below measures nothing "
+                f"(#14232): {capture.exception() if capture.done() else 'pending'}")
             stop["done"] = True
             await tick
         return ticks, health, health_served_in_stall, cap
