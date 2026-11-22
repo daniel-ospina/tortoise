@@ -5,9 +5,18 @@
 # PR. On FAIL it also flags the linked issue (parsed from "Closes #N" in the
 # PR body) so an issue can never be silently 'done' while its change is red.
 #
-# Warn-only by design (mirrors post-deploy-verify): it detects problems and
-# makes them visible; it does not roll back. The issue stays open until the
-# failure is resolved and re-validated.
+# Non-blocking by design (mirrors post-deploy-verify): it runs AFTER the merge, so
+# it cannot gate one, and it does not roll back. That is a statement about the
+# MERGE, not about the colour of this run — a red suite really does red it, because
+# the `Run tests` step ends with `exit $rc`. This header said "warn-only" until
+# #14277, which read as "red is not red"; it is. On FAIL the linked issue is also
+# commented on, so a red tree cannot look 'done' silently.
+#
+# ⚠️ The `Fail the check` step further down is a no-op in practice: its `if:` carries
+# no status-check function, so GitHub applies the implicit `success()` and SKIPS it
+# whenever `tests` has failed — the one case it exists for. The red comes from
+# `Run tests` instead, so nothing is unguarded today; the step is dead weight that
+# would matter the day `Run tests` gained `continue-on-error`.
 #
 # Note: epic #1647 (Task 10 Step 1a, P4) — this job now runs the suite on
 # the docker lane: job-level TORTOISE_DB_URI (the same test-prefixed path as
@@ -32,7 +41,8 @@
 # #1430: the tests step carries an in-step watchdog (mirrors python-ci.yml's
 # test job, the #798 mode) — a runner-level kill can never lose the summary
 # silently: the step always re-prints the tail + pass/fail counts + real exit
-# code, with a WATCHDOG banner on timeout kills. Warn-only, no gate impact.
+# code, with a WATCHDOG banner on timeout kills. Non-blocking for merges (see the
+# header), but never silent: a red suite reds this run.
 #
 # #1474: sound-dedup vs python-ci's push-to-main full run. This workflow used
 # to trigger on pull_request:closed and re-run the FULL suite on every merged
@@ -301,7 +311,11 @@ jobs:
         if: needs.dedup-check.outputs.skip != 'true'
         run: |
           set -o pipefail  # don't let `tail` mask a pip failure
-          # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
+          # pytest-asyncio is required by the async API/middleware suites, which carry
+          # `@pytest.mark.asyncio` (e.g. tests/test_client_ip_middleware.py) — NOT by
+          # tests/test_github_indexer.py, which this line named until #14277: that file's
+          # markers went in a56380b5e4a6 and it drives its own loop now, so the name was
+          # stale.
           #
           # ⛔ HAND-ENUMERATED, AND THAT IS A STANDING HAZARD. This leg has never installed
           # the `test` extra; it names a minimal subset (#493). The rule that follows from
@@ -457,7 +471,8 @@ jobs:
           # death mode again). The suite is over budget today (#1439) — #1439
           # excludes the slow files below, so the WATCHDOG banner firing is
           # the honest-red exception (HF outage, loaded runner), never silent.
-          # Warn-only workflow — no gate impact.
+          # Post-merge, so it cannot block a merge (see the header) — but it is NOT
+          # "warn-only": `Run tests` ends with `exit $rc`, so a red suite reds the run.
           # NB: `set +e` is load-bearing — GitHub runs steps under
           # bash -eo pipefail; without it, timeout's 124 aborts the step
           # BEFORE the tail/banner/exit-code print (silent #798, again).

@@ -222,9 +222,10 @@ fi
 # change — and naming a leg that HAS migrated is a red too, because an over-wide residual
 # sends the next lane to migrate work that is already done.
 #
-# `validate` is the LAST one: it is the warn-only job, so for it the consequence is a
-# misleading artifact rather than a false red on a required check — named anyway, so the
-# residual reads as one scope instead of a list that stops where the gate impact does.
+# `validate` is the LAST one: it runs post-merge, so it cannot block a merge, and for it
+# the consequence is a misleading artifact rather than a false red on a required check —
+# named anyway, so the residual reads as one scope instead of a list that stops where
+# the gate impact does.
 #
 # ⚠️ THE FOUR `python-ci.yml` LEGS THIS LIST USED TO NAME — `test-concurrency-falkor`,
 # `test-track-b`, `test-carve-out` and `test-d14-hosted-api` — are MIGRATED (#7815, PR

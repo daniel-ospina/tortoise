@@ -14,7 +14,7 @@ updated: 2026-11-06
 
 **Status:** adopted 2026-10-31 by owner ruling — decision record: issue **#10399**.
 **Supersedes:** the post-merge full suite as the *gate*. `python-ci.yml`'s `push: branches: [main]`
-leg (and `post-merge-validation.yml`, which is warn-only by its own header) still runs, but it is now a
+leg (and `post-merge-validation.yml`, which runs after the merge and so cannot gate one) still runs, but it is now a
 **detector**, not the gate: a red main is a process failure, not an expected state.
 
 **OVERRIDES:** ci-main.yml's post-merge full suite — the suite now gates the batch BEFORE main, because

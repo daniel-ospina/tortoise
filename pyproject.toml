@@ -104,7 +104,9 @@ test = ["pytest>=8", "pytest-timeout>=2.4.0", "pytest-asyncio>=0.23", "pytest-xd
 dev = [
     # pytest + pytest-timeout pins merged with #746's dev group; the extra
     # deps are required by the suite (verified while wiring #493):
-    #   pytest-asyncio  — tests/test_github_indexer.py (@pytest.mark.asyncio)
+    #   pytest-asyncio  — the async API/middleware suites (e.g. tests/test_client_ip_middleware.py).
+    #                     This named tests/test_github_indexer.py until #14277; its markers went
+    #                     in a56380b5e4a6 and it now drives its own loop, so the name was stale.
     #   scikit-learn    — tests/test_gmm_proofs.py (module-level sklearn import)
     #   requests        — integrations/crm/twenty/bridge.py (repo-local tooling)
     #   jax             — tortoise/svbp.py (lazily imported by the ingest EP path)

@@ -167,7 +167,7 @@ def _triggers(doc: dict) -> dict:
 # converse too: an excused workflow must have NO `paths`/`paths-ignore` key.
 UNFILTERED_PUSH_OK = {
     "python-ci.yml": "the push-to-main leg IS the merged-tree test run the merge rail baselines against",
-    "post-merge-validation.yml": "validates every merged tree (warn-only) — the whole point is one run per push",
+    "post-merge-validation.yml": "validates every merged tree (post-merge, so it cannot block a merge) — the whole point is one run per push",
     "main-lint.yml": (
         "ruff reads the WHOLE tree, so any merged tree can redden main — a path "
         "filter would skip exactly the trees that need it. Cheap enough (~2 min, "

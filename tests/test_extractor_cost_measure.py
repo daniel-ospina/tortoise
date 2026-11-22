@@ -603,7 +603,7 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
     (`tests/` minus `tests/e2e`, minus `slow_files`, minus `-m 'not track_b'`). This file is
     not in `slow_files`, so that leg collects it, and a package reachable only through
     `dev` or the `test` extra is missing there. `tiktoken` was exactly that gap (#14277):
-    the two corpus cases red on `main` on a warn-only workflow. So the arm below asserts
+    the two corpus cases red on `main`'s post-merge leg. So the arm below asserts
     the leg either installs the extra or names the package — it is not satisfied by the
     pyproject declarations alone.
     """
