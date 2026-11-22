@@ -636,10 +636,20 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #:                          `… in fact only just superseded by legal been withdrawn`
 #:   asyndetic (must REFUSE): `have any reported it has been in fact only just deprecated and been
 #:                            withdrawn`
-#: Both consumers therefore carry `(?!\s*(?:been|by)\b)` after the ending word: the ending is the
-#: RELATIVE clause's when the clause continues (`… been withdrawn`) or when it takes an agent
-#: (`… superseded by legal`), and only then is it the question's own predicate. Both directions are
-#: pinned in `SELECTED` / `NOT_SELECTED`;
+#: Both consumers therefore carry `(?!\s*been\b)` after the ending word: the ending is the RELATIVE
+#: clause's when that clause CONTINUES into the question's own `been …`, and then it is not the
+#: question's predicate. Both directions are pinned in `SELECTED` / `NOT_SELECTED`.
+#: ⛔ AND THE AGENT ARM WAS A MISTAKE (round-7 review, P2, measured — this lane's own regression,
+#: caught within the same hour): tolerating `by` as well made both lookaheads blind whenever the
+#: reported clause's participle took an agent, so the asyndetic hijack this guard exists for ROUTED
+#: again — `have any users reported it has been deprecated by legal been withdrawn`, and its bare-
+#: noun and clitic twins, all returned `ended` with `signal=None` (the silent, predicate-dropping
+#: direction). A `by` phrase cannot separate the two readings by tokens alone: the RELATIVE row
+#: `… that has been … superseded by legal been withdrawn` and the ASYNDETIC row
+#: `… it has been deprecated by legal been withdrawn` differ only by a relativizer, which lives
+#: OUTSIDE this slot. So the `by` tolerance is WITHDRAWN and its cost is stated rather than hidden:
+#: a relative clause whose own participle takes an agent is refused AND REPORTED (a recall loss in
+#: the module's preferred direction), pinned in `NOT_SELECTED` + `NOTICE_ONLY`;
 _EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,8}}"
 #: ⛔ A CONTRACTED AUXILIARY CARRIES ITS NEGATION INSIDE THE WORD (round-26 review, P1; round-28
 #: at `feb2c740bb`, P1, measured — the SAME class, one guard over). One home, THREE consumers:
@@ -733,7 +743,7 @@ _EXISTENCE_GUARD = (
     # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
     # after. The anchor is the same one the pronoun branch below already uses: the
     # lookahead fires only when the second clause's passive ends an ENDING participle.
-    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b(?!\s*(?:been|by)\b))"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b(?!\s*been\b))"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -774,7 +784,7 @@ _EXISTENCE_GUARD = (
     # so `’` is already `'` by the time any of this runs.
     r"[a-z0-9][a-z0-9'’._/-]*['’](?:s|ve|d)|"
     r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
-    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b(?!\s*(?:been|by)\b))"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b(?!\s*been\b))"
 )
 
 _EXISTENCE_WINDOW = (

@@ -236,8 +236,12 @@ SELECTED = [
     ("has anything that has been only just very recently deprecated been withdrawn",
      "ended", "existence"),
     ("has anything that has been in fact only just superseded been withdrawn", "ended", "existence"),
-    ("has anything that has been in fact only just superseded by legal been withdrawn",
-     "ended", "existence"),
+    # ⛔ …AND THE AGENT ARM IS WITHDRAWN, WITH ITS COST PINNED (round-7 review, P2, measured): the
+    # negative below tolerates ONLY `been`, because tolerating `by` made the guard blind to the
+    # asyndetic hijack it exists for — `have any users reported it has been deprecated by legal been
+    # withdrawn` returned `ended` with `signal=None`. So a relative clause whose own participle takes
+    # an agent is REFUSED AND REPORTED (see NOT_SELECTED / NOTICE_ONLY) rather than routed: a stated
+    # recall loss in the module's preferred direction, not a silent drop.
     ("what ended", "ended", "wh_whole_question"),
     ("what ended?", "ended", "wh_whole_question"),
     ("what has been withdrawn", "ended", "wh_whole_question"),
@@ -510,6 +514,19 @@ NOT_SELECTED = [
     # supplied their notice; these are the bare frames, and they red without this pin.
     "has anyone complained billing has been just deprecated",
     "has anyone complained billing has been only deprecated",
+    # ⛔ …AND THE AGENT-PHRASE HIJACK, WHICH THE `by` TOLERANCE RE-OPENED (round-7 review, P2,
+    # measured — this lane's regression, found by a fresh reviewer within the hour): with `by`
+    # tolerated, both lookaheads went blind whenever the reported clause's participle took an
+    # agent, and these ROUTED the whole ended population with the caller's predicate dropped and
+    # `signal=None`. Refused and reported now; both subject classes and the clitic twin are pinned.
+    "have any users reported it has been deprecated by legal been withdrawn",
+    "have any users reported the vendor has been deprecated by legal been withdrawn",
+    "have any users reported the vendor has been deprecated by legal and been withdrawn",
+    "has anyone complained billing has been deprecated by legal been withdrawn",
+    # …and the RELATIVE row the withdrawn `by` arm used to route — refused AND REPORTED (a stated
+    # recall loss: a token-level slot cannot see the relativizer that separates it from the
+    # asyndetic twin above).
+    "has anything that has been in fact only just superseded by legal been withdrawn",
     # ⛔ THE `<preposition> the <noun>` QUALIFIER class on `is_copula`, GIVEN UP by the re-cut
     # review's P1 fix (measured): `as`/`than`/`during`/`until` also head a CLAUSE, so exempting
     # them from the second-NP refusal routed `is the report as the board archived` to the WHOLE
@@ -1015,6 +1032,11 @@ NOTICE_ONLY = [
     "have any reported it has been in fact just about deprecated and been withdrawn",
     "has anyone complained billing has been just deprecated",
     "has anyone complained billing has been only deprecated",
+    "have any users reported it has been deprecated by legal been withdrawn",
+    "have any users reported the vendor has been deprecated by legal been withdrawn",
+    "have any users reported the vendor has been deprecated by legal and been withdrawn",
+    "has anyone complained billing has been deprecated by legal been withdrawn",
+    "has anything that has been in fact only just superseded by legal been withdrawn",
     # ⛔ …AND THEIR ADVERB TWINS (review of this fix, P1, measured): the adverb slot this lane adds
     # to the `been`-anchored window is matched by the SAME slot in the two lookaheads that decide
     # whether a `been` belongs to a second CLAUSE. Without that symmetry these three ROUTED the whole
