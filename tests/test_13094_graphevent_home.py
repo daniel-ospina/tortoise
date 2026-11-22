@@ -156,8 +156,13 @@ CAPABILITY_CONTROLS = (
     ("node existence", "MATCH (n:Point) WHERE EXISTS { (n:Point) } RETURN n",
      "cypher:exists {"),
     ("adjacency aggregate", "MATCH (e:GraphEvent) RETURN size((e)-->())",
-     "cypher:--"),
-    ("undirected hop", "MATCH (n:Point) WHERE NOT (n)--() RETURN n", "cypher:--"),
+     "cypher:)-->" ),
+    ("undirected hop", "MATCH (n:Point) WHERE NOT (n)--() RETURN n", "cypher:)--("),
+    # ⛔ THE INBOUND HOP. `<--(` is what `(a)<--(b)` carries once the node paren is
+    # part of the arm, but `<-` sits EARLIER in the arm order and takes it — so this
+    # row's literal expectation is `cypher:<-`, and it is the row that pins `<-`
+    # (which is why `<-` is not in `ARMS_NO_SNIPPET_CAN_DECIDE`).
+    ("inbound hop", "MATCH (a:Point)<--(b) RETURN a", "cypher:<-"),
     # procedures and algorithms. `apoc.` is the shape the census's own
     # before/after table advertises, so it is the one that must not ship untested.
     ("path procedure",
@@ -208,12 +213,17 @@ CAPABILITY_CONTROLS = (
 
 #: Arms that can never be the DECIDING token, because every real spelling of them
 #: also carries an EARLIER arm in `GRAPH_CAPABILITY_CYPHER` and the tool takes the
-#: first match: `-[r]->` also carries `-[`, `<-[:T]-` also carries `-[`, and a
-#: `size((…))` adjacency aggregate needs a relationship inside it, so `-[` or `--`
-#: decides first. They are real arms — a snippet carrying only that substring is
-#: still refused — they simply cannot be pinned by a snippet a real reader would
-#: carry. Declared here so the completeness pin can tell "not pinned yet" (a
-#: defect) from "cannot be pinned" (a property of first-match ordering).
+#: first match: `-[r]->` also carries `-[`, and `<-[:T]-` also carries `-[`. They
+#: are real arms — a snippet carrying only that substring is still refused — they
+#: simply cannot be pinned by a snippet a real reader would carry. Declared here so
+#: the completeness pin can tell "not pinned yet" (a defect) from "cannot be
+#: pinned" (a property of first-match ordering).
+#: ⛔ `size((` USED TO BE DECLARED HERE AND IS NO LONGER AN ARM AT ALL (#14183
+#: round-13 review, P3). The note was right that no snippet could decide it, and
+#: the conclusion drawn from that was wrong: a token NO snippet can decide is
+#: contributing nothing, while `RETURN size((collect(n)))` — a grouping paren with
+#: no relationship in it — made `readers_report()` publish the opposite verdict.
+#: A permanently-undecidable arm is a false-positive surface, not a spare.
 #:
 #: ⛔ THIS SET IS A CLAIM ABOUT ORDERING, SO IT IS SMALL ON PURPOSE, and every
 #: member was checked by construction rather than by intuition: `*1..`, `*..` and
@@ -228,7 +238,6 @@ ARMS_NO_SNIPPET_CAN_DECIDE = {
     # It is pinned above. What is left here must be undecidable by FIRST-MATCH
     # ORDERING — the completeness pin asserts this set and the control rows are a
     # PARTITION, so a token that a row decides cannot stay declared.
-    "size((",        # a pattern aggregate needs a relationship → `-[` or `--`
     # Every realistic spelling of these is a `CALL`: the operator spells the
     # procedure with its `call ` prefix (backticked or not — the strip makes
     # `` `db.idx… `` the same text as `db.idx…`), and the `call db.idx.*` arm is
