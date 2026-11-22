@@ -375,6 +375,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # and grades it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16098-16103", "tortoise/sdk.py", 16098, "**JSONL event log (#548):** written when *point* is provided"),
     (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    # --- #14183 FINAL pre-merge review (P2): §2.6's `poll_events` row was re-pointed by a CONSTANT
+    # (-21) instead of by content — `:15878` is docstring prose in `poll_events` and `:15754` is inside
+    # `_encode_cursor`, so the row named neither the `read_after` call nor the `def`, and NOTHING read
+    # it: no `_PINS` row named either token. The real pair is the `def` at `:15775` and the call at
+    # `:15899`, both opened at this head. One one-token spelling replaces another, so the header's
+    # as-written count does not move; the PAIR set does, which is why the figures were re-measured.
+    (_AUDIT, 'tortoise/sdk.py:15899', _SDK, 15899, 'evs = read_after(proj, after_seq, types=types, limit=limit)'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -573,6 +580,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # #14043 review (finding 1): one site each in §6.3. Measured on this document:
     # `grep -o -F 'sdk.py:16098-16103' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16098-16103'): 1,
+    # #14183 FINAL review (P2): the §2.6 `poll_events` row's re-derived call address. One occurrence,
+    # measured with `grep -o -F 'tortoise/sdk.py:15899' <doc> | wc -l`.
+    (_AUDIT, 'tortoise/sdk.py:15899'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3801'): 1,
 }
 
@@ -2207,7 +2217,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # only what IS re-derivable: the count, and the guarantee the arm enforces — `_PINS` pins
     # `(doc, token, path, line, fragment)` and the content arm opens every one of them, so a row
     # whose address rots reds instead of being carried.
-    assert len(_PINS) == 90
+    # 90 -> 91 at the `#14183` FINAL pre-merge review (P2): §2.6's `poll_events` row carried an address
+    # produced by a CONSTANT (-21) rather than by content, and no pin named either token — the row had
+    # been rewritten from `main`'s `:15810`/`:15631` to `:15878`/`:15754`, where the first is docstring
+    # prose and the second is inside `_encode_cursor`. The real pair is `:15899` (the `read_after` call)
+    # and `:15775` (the `def`); the row now cites both, and this pin grades the call.
+    assert len(_PINS) == 91
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
