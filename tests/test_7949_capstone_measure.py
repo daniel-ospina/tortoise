@@ -18279,7 +18279,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # edit on `22052−19077` or `29142−25461`) left the WHOLE covering set GREEN (554 passed).
     # The row's live subtraction triples are built FROM the anchors its `at THIS head` clause
     # states — the new-column triple and the old-column one share their a-side — so the
-    # a-side must BE those anchors, which are graded separately by `_D5_CURRENT_CLAIMS`.
+    # a-side must BE those anchors, which are graded separately by the anchor-slot loop below (`_D5_TRIPLE_RE`).
     _triple_match = _D5_TRIPLE_RE.search(text)
     if _triple_match is not None:
         _anchors = [int(_triple_match.group(s)) for s in ("a", "b", "c")]
