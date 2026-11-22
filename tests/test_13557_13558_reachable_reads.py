@@ -3618,8 +3618,12 @@ def test_the_asyndetic_gap_is_blind_to_neither_a_contraction_nor_a_measured_adve
     # population routed on U+2019 while the ASCII twin was refused. `tortoise/
     # extractor_v2.py` normalises the same inventory before tokenising, for the same
     # reason; this module is the consumer that sees raw caller text.
+    # ⛔ ALL SEVEN CODEPOINTS THE NORMALISATION TRANSLATES, not the four that read
+    # nicely: a pin that exercises four of seven leaves three silently droppable, and a
+    # regression on `hasn\u02bet` is the same hijack as one on `hasn't`.
     for member in ("hasn\u2019t", "hadn\u2019t", "wasn\u2019t", "couldn\u2019t",
-                   "hasn\u02bct", "hasn\u2018t", "hasn\uff07t"):
+                   "hasn\u02bct", "hasn\u2018t", "hasn\uff07t",
+                   "hasn\u055at", "hasn\u02bet", "hasn\u02bft"):
         query = f"have any users reported the vendor {member} been deprecated"
         got = detect_state_question(query)
         assert got.population is None and got.signal, (
