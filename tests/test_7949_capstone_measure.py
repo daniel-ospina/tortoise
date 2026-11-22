@@ -18200,6 +18200,26 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                 f"{needle!r} is at {hits}. Re-derive by CONTENT "
                 "(`grep -n`), never by carrying the number forward")
 
+    # ⛔ EVERY ARITHMETIC IDENTITY THE ROW STATES IS EVALUATED (#14183 review, cycle 7, P3 —
+    # MEASURED). D5 states its addresses as `a + b = c` expressions, and the `+21`-shifted
+    # spellings were read by NOTHING: mutating `20257 + 155 = 20412` to `= 20391`, changing
+    # `20288 + 155 = 20443` to start from `20267`, or mutating `20267 + 176 = 20443` to
+    # `= 20422` EACH left the whole D5 selection GREEN, so the row could state one fact twice
+    # with two values — the class a sibling commit fixed one paragraph away in this same file.
+    # The census grades the IDENTITY rather than any single address, so a new expression is
+    # covered the moment it is written and a figure that drifts from its own derivation reds
+    # here. NO COUNT of the expressions is typed here: that would be the head-bound figure D5
+    # forbids, and this row's own history is of counts that rotted.
+    _bad_arithmetic = [
+        f"{a} + {b} = {c}"
+        for a, b, c in re.findall(r"`(\d+) \+ (\d+) = (\d+)`", text)
+        if int(a) + int(b) != int(c)]
+    assert not _bad_arithmetic, (
+        f"D5 states arithmetic that does not evaluate: {_bad_arithmetic} — the row derives "
+        "each address from the cut's own anchor plus a measured shift, so a sum that does not "
+        "land means the figure and its derivation have come apart; re-derive both ends by "
+        "content instead of editing one of them (#14183 review, cycle 7, P3)")
+
     triple = _D5_TRIPLE_RE.search(text)
     if triple is None:
         failures.append(
