@@ -1223,11 +1223,28 @@ _PR_REF_AS_TREE = re.compile(
 #: ⛔ PRESENT TENSE ON PURPOSE: `this branch's tree printed at `72c104bcbb`` is a MEASUREMENT with
 #: its rev named and must not red, while the unqualified present tense is the binding that the
 #: next re-pin falsifies — the same measurement-vs-binding line clause 1 already draws.
+#: ⛔ A MOVING REF'S TREE AS THE SUBJECT OF A PRINT/PIN VERB (PR #14283 review F2). The paragraph
+#: said "it is the SAME pair `origin/main`'s tree prints": `origin/main` is a ref that TRACKS a
+#: head, so the sentence is true only until `main` moves again with a residue change, and it
+#: carried no quoted pair for `_PAIR_BELOW_CLAIM` and no relative `head` for clauses 1-2 — it sat
+#: GREEN and ungraded, the #14174 class the block itself records. Clauses 1-4 all key on a
+#: RELATIVE head, so the same defect spelled with a branch ref was invisible. The honest form
+#: names the rev the reading was taken at (`origin/main` at `70fbd1a2` prints the same), which has
+#: no possessive-tree subject. Clause 5 is a SEPARATE pattern (`_MOVING_REF_TREE_CLAIM`) rather
+#: than a fifth alternative here, because it needs a different refutation policy — see
+#: `_relative_pin_addresses`.
 _RELATIVE_PIN_ADDRESS = re.compile(
     r"(?i)\b(?:pair|pin)\b[^.\"]{0,40}\b(?:THIS|this)\s+head\b"
     r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|tree|revision|rev)\s+pins?\b"
     r"|\b(?:THIS|this)\s+(?:branch|commit|PR|pr)'?s\s+(?:tree|tip)\s+(?:pins?|prints?)\b"
     r"|\bthis\s+commit'?s\s+`?origin/main`?")
+
+#: Clause 5: a BRANCH REF's tree used as the SUBJECT of a present-tense print/pin verb —
+#: "the SAME pair `origin/main`'s tree prints". The ref tracks a head, so the sentence is a
+#: BINDING (falsified by the next move of `main`) and not a measurement, exactly the line
+#: `_RELATIVE_PIN_ADDRESS`'s docstring draws for relative heads.
+_MOVING_REF_TREE_CLAIM = re.compile(
+    r"(?i)\b(?:origin/)?(?:main|master)`?['’]?s?\s+(?:tree|tip)\s+(?:pins?|prints?)\b")
 
 #: The rewrite's PARENT claim: `83e94826a8a` is the pre-rebase DRAFT of the commit that landed as
 #: `1b82cc7063`; the rewrite's PARENT — the tree every row above is measured against — is
@@ -1265,9 +1282,22 @@ def _pr_ref_as_tree_violations(flow: str) -> list[str]:
 
 
 def _relative_pin_addresses(flow: str) -> list[str]:
-    """A pin pair or an `origin/main` bound to a RELATIVE head (review, round 13, P2)."""
-    return [flow[m.start():m.end()] for m in _RELATIVE_PIN_ADDRESS.finditer(flow)
-            if not _refuted(flow, m.start())]
+    """A pin pair or an `origin/main` bound to a RELATIVE head (review, round 13, P2).
+
+    ⛔ CLAUSE 5 IS REFUTED BY A QUOTED DRAFT ONLY, not by the inline-negation heuristic
+    `_refuted` applies to the rest (PR #14283 review F2). Measured on the pre-fix block: the
+    sentence bound the pin to `origin/main`'s tree and then added the honest parenthetical
+    "(cross-checked, never the derivation)" — `never` fell inside `_refuted`'s 70-character
+    window and SWALLOWED the charge, so the shape this clause exists to refuse would have stayed
+    GREEN in the very sentence that motivated it. Here a negation in the next clause usually
+    qualifies that clause (the arithmetic), not the binding, so only the block's explicit
+    quoted-and-called-wrong form refutes it.
+    """
+    found = [flow[m.start():m.end()] for m in _RELATIVE_PIN_ADDRESS.finditer(flow)
+             if not _refuted(flow, m.start())]
+    found += [flow[m.start():m.end()] for m in _MOVING_REF_TREE_CLAIM.finditer(flow)
+              if not _quoted(flow, m.start())]
+    return found
 
 
 def _parent_claims(flow: str) -> list[str]:
@@ -1461,6 +1491,24 @@ def test_the_recut_pair_is_bound_to_its_rev_never_to_a_relative_head():
         f"{flow} and the pair THIS COMMIT pins, `{RESIDUE_ABBREV}` over"), (
         "a relative pin spelled `THIS COMMIT pins` is the same defect as `THIS head pins` — the "
         "arm must refuse the SHAPE, not one spelling of it")
+    # ⛔ AND THE SPELLING KEYED ON A MOVING REF RATHER THAN A RELATIVE HEAD (PR #14283 review F2).
+    # Measured on the PRE-FIX block: this sentence shipped GREEN on every arm, because the pair it
+    # binds carries no quoted pair for `_PAIR_BELOW_CLAIM` and `origin/main`'s tree is not a
+    # `this head` for clauses 1-2 — so `_relative_pin_addresses(pre_fix)` was EMPTY. The sentence
+    # is installed VERBATIM, parenthetical included: `never the derivation` is what would have
+    # swallowed the charge under `_refuted`, which is why clause 5 keeps its own policy.
+    pre_fix = ("it is the SAME pair `origin/main`'s tree prints "
+               "(cross-checked, never the derivation)")
+    assert _relative_pin_addresses(f"{flow} {pre_fix}"), (
+        "`the SAME pair `origin/main`'s tree prints` binds the pin to a BRANCH REF, which tracks a "
+        "head — name the rev the reading was taken at, or the sentence goes false the moment "
+        "`main` moves with a residue change")
+    # ⛔ …AND THE HONEST FORM STAYS GREEN, so the fix is a scoping and not a deletion: the same
+    # sentence with the rev named is a MEASUREMENT, exactly as clause 3's docstring requires.
+    assert not _relative_pin_addresses(
+        f"{flow} it is the SAME pair `origin/main` at `70fbd1a2` prints"), (
+        "`origin/main` at `<rev>` prints the same` is the scoped form this arm exists to allow"
+    )
 
 
 def test_a_pair_bound_to_the_pair_below_is_the_pins_own_pair():
