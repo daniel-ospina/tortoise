@@ -1500,13 +1500,23 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     `_rearm_command` indexes `_ARM_REFSPECS` directly, so an unmapped rev raises instead of
     printing an inert `git fetch origin <abbreviation>`. This arm keeps the map honest for
     the revs a skip can name today.
+
+    ⛔ EVERY ENTRY IS GRADED, NOT A HARDCODED SIX (#14282 review, P3 residual). This arm used
+    to iterate a literal tuple of the revs then in the map, so the three addresses the re-cut
+    paragraph publishes (`5e83c2a2f6`, `10e51693f1`, `efe5605e976a`) were added to the map and
+    graded by NOTHING: an ABBREVIATION or a SOURCE-ONLY refspec on any of them passed silently,
+    which is exactly the round-12/round-13 inert remedy one level down. The first loop keeps the
+    literal tuple so deleting an entry is still caught; the second grades the SHAPE of every
+    entry the map holds, so folding a new rev in cannot buy an ungraded line.
     """
     for rev in (RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
                 RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"):
         assert rev in _ARM_REFSPECS, f"{rev} has no fetchable address — a skip naming it is inert"
-        assert not re.fullmatch(r"[0-9a-f]{7,39}", _ARM_REFSPECS[rev]), (
+    assert _ARM_REFSPECS, "non-vacuity: the map still addresses at least one rev"
+    for rev, refspec in _ARM_REFSPECS.items():
+        assert not re.fullmatch(r"[0-9a-f]{7,39}", refspec), (
             f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
-        _, _, destination = _ARM_REFSPECS[rev].lstrip("+").partition(":")
+        _, _, destination = refspec.lstrip("+").partition(":")
         assert destination, (
             f"{rev} is mapped to a SOURCE-ONLY refspec: git records it in `FETCH_HEAD` and "
             "creates no local ref, so a skip printing it re-arms the object DB and leaves the "
