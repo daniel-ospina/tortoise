@@ -359,6 +359,41 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
         ),
         2,
     ),
+    # ⛔ #14012's bounded pin (added with `tortoise/resident_pin.py` by `#14161`) brought
+    # TWO untyped closure walks into the class at once, and neither is a referent read.
+    # Both endpoints are pinned to the SAME label — `(n:{label})--(m:{label})`, where the
+    # label's key comes from the record's own contract (`cache_projection.KEY_PROPERTY`,
+    # reached through `tools/resident.py --label`) — while an `aboutObject` triple runs
+    # Point/Session/Event -> Object. No such edge therefore has BOTH ends on one label, so
+    # the hop cannot return it whatever label is configured. The pattern's USE bounds it
+    # as well: it RETURNS `id(m)` and `m.{key_prop}` — a neighbour IDENTITY, for the
+    # footprint and degree the budget is enforced on — and never `type(r)` nor any edge
+    # property, so it asks *is there a neighbour*, not *what does the referent say*.
+    (
+        "tortoise/resident_pin.py",
+        "read",
+        "the bounded pin's 1-hop CLOSURE read: both endpoints are pinned to the "
+        "SAME label (`(n:{label})--(m:{label})`) while an `aboutObject` triple "
+        "runs Point/Session/Event -> Object, so no such edge has both ends on one "
+        "label and the hop cannot return it; the pattern also RETURNS only "
+        "neighbour identity (`id(m)`, `m.{key_prop}`) for the footprint/degree "
+        "the budget is enforced on — never `type(r)` or an edge property — so it "
+        "asks whether a neighbour exists, never what the referent says",
+        ("OPTIONAL MATCH (n)--(m:{label})",),
+        1,
+    ),
+    (
+        "tortoise/resident_pin.py",
+        "_closure_for",
+        "the SAME closure read one entry over — `resolve()`'s per-key arm carries "
+        "its own copy of the query, so each walk is stated separately: both "
+        "endpoints are pinned to the SAME label while an `aboutObject` triple runs "
+        "Point/Session/Event -> Object, so the hop cannot return it; it RETURNS "
+        "neighbour identity only (`id(m)`, `m.{key_prop}`), never `type(r)` or an "
+        "edge property",
+        ("OPTIONAL MATCH (n)--(m:{label})",),
+        1,
+    ),
 )
 
 #: The readers of the THIRD shape: a relationship type that is an EXPRESSION, not
