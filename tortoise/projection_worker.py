@@ -934,8 +934,9 @@ class ProjectionWorker:
                     "(%s: %s) for journal position %s — the journal holds the "
                     "line and the record does not. This is the named "
                     "disagreement `record_projection.journal_coverage` counts; "
-                    "`tools/record_runner.py apply` heals it idempotently "
-                    "(#14185)",
+                    "`tools/record_runner.py apply` re-creates the row idempotently "
+                    "(the row only — a fold passed no `derived` leaves `embedding` "
+                    "NULL) (#14185)",
                     type(exc).__name__, exc, item.seq)
             else:
                 # ⛔ THE CLASSIFIER IS INSIDE ITS OWN GUARD (round-13 review, P3):
