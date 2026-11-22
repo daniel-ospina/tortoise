@@ -600,6 +600,13 @@ def run(args) -> int:
             "ack_ms": round(elapsed * 1000.0, 1),
             "ack_status": ack_status,
             "phase_at_ack": phase_at_ack,
+            # ⛔ AN UNREADABLE ACK BODY IS NOT A MEASUREMENT OF "0 DEFERRED"
+            # (review round N, P3). The tolerant decode above is deliberate — a
+            # garbled ack must not fail the run — but without this flag the
+            # report said "extraction finished inside the budget on every
+            # session" about a body it never read: a claim with nothing behind
+            # it, in the one line that describes the split itself.
+            "ack_body_readable": isinstance(body, dict),
             # "the ack came back before extraction finished" — the property this
             # tool MEASURES. It is deliberately NOT a criterion: a run where
             # extraction happens to finish inside the budget is a legitimate run,
@@ -675,6 +682,10 @@ def run(args) -> int:
     accepted = sum(1 for o in outcomes if o["status_code"] == 200)
     deferred = sum(1 for o in outcomes
                    if o["status_code"] == 200 and o["deferred_at_ack"])
+    #: Acks whose body would not decode. The COUNT of deferrals means nothing for
+    #: those, so the reporting line says so instead of reading their `False` as
+    #: "extraction finished inside the budget" (review round N, P3).
+    unreadable_acks = sum(1 for o in outcomes if not o["ack_body_readable"])
     ok_terminal = (not stuck) and accepted > 0 and len(terminals) == accepted
     # ⛔ DEFERRAL IS A MEASUREMENT, NOT A CRITERION (review round 5). An earlier
     # cut made `deferred > 0` a hard failure and called it "host-independent",
@@ -768,10 +779,15 @@ def run(args) -> int:
         # A MEASUREMENT, not a criterion — printed with `·` so it can never be
         # read as a PASS/FAIL. It answers "did the split actually defer?" on
         # this run; grading it would red a run that was merely fast enough.
-        print(f"  · deferred at ack: {deferred}/{accepted} "
-              f"({'the ack returned before extraction finished' if deferred
-                 else 'extraction finished inside the budget on every session'}; "
-              f"measured, not graded)")
+        if unreadable_acks:
+            print(f"  · deferred at ack: NOT MEASURABLE — {unreadable_acks} ack "
+                  f"body/bodies would not decode, so this run cannot say whether "
+                  f"the split deferred")
+        else:
+            print(f"  · deferred at ack: {deferred}/{accepted} "
+                  f"({'the ack returned before extraction finished' if deferred
+                     else 'extraction finished inside the budget on every session'}; "
+                  f"measured, not graded)")
         print()
         print(f"VERDICT: {report['verdict']}")
 

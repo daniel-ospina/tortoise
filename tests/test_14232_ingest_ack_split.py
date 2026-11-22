@@ -1831,10 +1831,19 @@ def test_a_transport_failure_on_ANY_NETWORK_CALL_is_UNREACHABLE_not_a_verdict(
 
 
 def test_the_normal_path_releases_the_transport_too(monkeypatch, capsys, tmp_path):
-    """The tail's close is load-bearing: dropping it must red this row.
+    """The tail's close is load-bearing, and a full run must reach PASS/exit 0.
 
     Round M (P3) measured that dropping the tail `_close` reddened nothing at all —
     a leaked graph handle was unpinned in both directions.
+
+    ⛔ AND THE EXIT CODE IS PINNED, not waved through (review round N, P2). This
+    row used to accept `rc in (0, 1)`, which cannot tell the normal path from a
+    FAIL — and at the head it was written on its own scenario exited 1, because the
+    stub returned the SERVED key (`extracted`) where the tool grades its internal
+    one (`points`). `--max-ack-p95 3600` keeps the absolute p95 criterion out of it:
+    the point of the row is the exit path, not this box's scheduler. Mutant: make
+    `ok_points` unconditionally False (the round-8 "a deployment can never PASS"
+    regression) → this row reds, and before it NOTHING pinned an end-to-end PASS.
     """
     drain = _drain_tool()
 
@@ -1868,18 +1877,208 @@ def test_the_normal_path_releases_the_transport_too(monkeypatch, capsys, tmp_pat
                           "extraction": {"status": "ok", "outcome_known": True}})
 
         def extraction_evidence(self, sid):
-            return {"measured": True, "extracted": 1, "session_id": sid}
+            # `points` is the TOOL's key and the one `ok_points` grades; the
+            # served HTTP surface publishes `extracted`/`extracted_points`, and
+            # `_HttpTransport.extraction_evidence` maps them onto `points`.
+            return {"measured": True, "points": 1, "session_id": sid}
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # A LOAD THAT GRADES THE ABSOLUTE CRITERION. Without this the row's verdict is
+    # `INCONCLUSIVE` on any box whose load exceeds its cpu count — i.e. this row
+    # would assert PASS on an idle host and fail on a loaded one, which is the
+    # #5049 rule-1 class the tool itself refuses to grade.
+    monkeypatch.setattr(drain.os, "getloadavg", lambda: (0.1, 0.1, 0.1))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    out = capsys.readouterr().out
+    assert rc == 0, (
+        f"a run whose four criteria all pass must exit 0 (PASS), not {rc}:\n{out}")
+    assert "VERDICT: PASS" in out, out
+    assert _Stub.closes == 1, f"the tail must close the transport: closes={_Stub.closes}"
+
+
+def test_a_raising_CLOSE_cannot_replace_the_exit_code(monkeypatch, capsys, tmp_path):
+    """A `close()` that throws must not turn a finished run into a traceback.
+
+    Round N (P3): the `contextlib.suppress` in `_close` was asserted in prose and
+    covered by NO row — deleting it left every row green. Measured with it removed:
+    this scenario propagates `RuntimeError` and the run's PASS/exit-0 is replaced by
+    a traceback at 1 (and on the early `unreachable` path, a clean exit 2 by the
+    same traceback).
+    """
+    drain = _drain_tool()
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class _Stub:
+        label = "stub"
+        closes = 0
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            type(self).closes += 1
+            raise RuntimeError("close blew up")
+
+        def post_capture(self, _cap):
+            return _Resp({"status": "ok", "extracted": 1, "extraction": None})
+
+        def get_session(self, _sid):
+            return _Resp({"extracted": 1,
+                          "extraction": {"status": "ok", "outcome_known": True}})
+
+        def extraction_evidence(self, sid):
+            return {"measured": True, "points": 1, "session_id": sid}
 
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
 
-    rc = drain.main(["--n", "1"])
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    captured = capsys.readouterr()
+    assert _Stub.closes == 1, _Stub.closes
+    assert rc == 0, (
+        "a raising close must not change the verdict it was called to preserve: "
+        f"rc={rc} out={captured.out!r} err={captured.err!r}")
+    assert "close blew up" not in captured.err, captured.err
+
+
+def test_an_UNREADABLE_response_is_routed_by_the_RUN(monkeypatch, capsys, tmp_path):
+    """`_wire_failure`'s unreadable branch is load-bearing in `run()`.
+
+    Round N (P2): deleting the two lines that route `_is_unreadable_body` to exit 2
+    left every row green, because the type and the two decode sites are pinned but
+    the GLUE between them is not. With it gone, the deployment path regresses to
+    exactly the defect the branch closes: `_HttpTransport.extraction_evidence`
+    raises `_UnreadableResponse`, `_wire_failure` returns None, and the exception
+    propagates — a shell exit 1, which this tool's contract reads as "a criterion
+    ran and failed".
+    """
+    drain = _drain_tool()
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class _Stub:
+        label = "stub"
+        closes = 0
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            type(self).closes += 1
+
+        def post_capture(self, _cap):
+            return _Resp({"status": "ok", "extracted": 1, "extraction": None})
+
+        def get_session(self, _sid):
+            return _Resp({"extracted": 1,
+                          "extraction": {"status": "ok", "outcome_known": True}})
+
+        def extraction_evidence(self, sid):
+            # The shape `_HttpTransport.extraction_evidence` raises when the detail
+            # body will not decode — raised HERE so the routing, not the decode, is
+            # what this row exercises.
+            raise drain._UnreadableResponse("ValueError: garbled")
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    err = capsys.readouterr().err
+    assert rc == 2, (
+        "an undecodable response is a broken wire (exit 2), never a verdict: "
+        f"rc={rc} err={err!r}")
+    assert "unreadable response" in err, err
+    assert _Stub.closes == 1, _Stub.closes
+
+
+def test_a_GARBLED_ack_body_is_reported_as_NOT_MEASURABLE(
+        monkeypatch, capsys, tmp_path):
+    """A garbled ACK body must not be reported as "nothing deferred".
+
+    Round N (P3): the tolerant decode is deliberate (a garbled ack must not fail
+    the run), but the report then said "extraction finished inside the budget on
+    every session" about a body it never read — a measurement claim with nothing
+    behind it, in the one line that describes the split itself.
+    """
+    drain = _drain_tool()
+
+    class _Garbled:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class _Stub:
+        label = "stub"
+        closes = 0
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            type(self).closes += 1
+
+        def post_capture(self, _cap):
+            return _Garbled()
+
+        def get_session(self, _sid):
+            return _Resp({"extracted": 1,
+                          "extraction": {"status": "ok", "outcome_known": True}})
+
+        def extraction_evidence(self, sid):
+            return {"measured": True, "points": 1, "session_id": sid}
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    drain.main(["--n", "1", "--max-ack-p95", "3600"])
     out = capsys.readouterr().out
-    assert rc in (0, 1), rc
-    assert "VERDICT:" in out, out
-    assert _Stub.closes == 1, f"the tail must close the transport: closes={_Stub.closes}"
+    assert "NOT MEASURABLE" in out, out
+    assert "extraction finished inside the budget" not in out, (
+        f"the run must not claim a deferral measurement it could not make: {out}")
 
 
 def test_a_NON_transport_exception_is_not_laundered(monkeypatch, capsys, tmp_path):
