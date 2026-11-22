@@ -1183,14 +1183,18 @@ NOTICE_ONLY = [
     # cannot distinguish that from "nothing has ended", which is duty (b). `_ALREADY_EVER_AUX`'s
     # arm in `existence_unguarded` reports the cue instead, and the arm is a SIGNAL, so the
     # routing table is untouched — 0 population/shape moves over the pinned corpus.
-    # ⛔ NO CORPUS SIZE IS STATED, AND THAT IS THE FIX (fresh review, P2, measured): this comment
-    # used to give the corpus as "321 distinct / 624 naive / 204 tokens", all three measured at
-    # `34b339c75d`; a peer lane then added 111 rows and the same measurement at the head gave 369 /
-    # 724 / 216, so the numbers were stale on arrival in a file whose own cost test exists to stop
-    # exactly this. The corpus size is DERIVED, never quoted: import the three lists and count —
-    # and note that a recursive walk of `SELECTED` counts its `(query, population, shape)` tuples'
-    # population/shape TOKENS as rows while `NOTICE_ONLY` duplicates `NOT_SELECTED`, so the naive
-    # walk and the distinct count are different questions and neither is a constant.
+    # ⛔ NO CORPUS SIZE IS STATED, AND THAT IS THE FIX (fresh review P2, then P3 — measured): this
+    # comment used to pin the corpus as a triple of numbers taken at one head. Every round after
+    # that added rows (the lists grow with each review round on this branch, and the earlier triple's
+    # own dedup width was ambiguous by one), so the numbers were stale on arrival, in a file whose own
+    # cost test exists to stop exactly that. ⛔ AND THE REPLACEMENT'S FIRST CUT MADE THE SAME MISTAKE
+    # ONE LEVEL DOWN — it quoted the delta BETWEEN two heads, which is just another count that moves
+    # and that a reader cannot re-derive without being given both heads.
+    # So the corpus size is DERIVED and never quoted, and this comment now carries no number at all:
+    # import the three lists and count. Note WHAT you are counting, because the three measures differ:
+    # a recursive walk of `SELECTED` counts its `(query, population, shape)` tuples' population/shape
+    # TOKENS as rows, `NOTICE_ONLY` duplicates `NOT_SELECTED`, and distinct-query dedup is not the
+    # same question as the leaf count. Only the derivation travels; the answer does not.
     # ⛔ AND THE ACTIVE-VOICE SIBLING IS STILL SILENT ON PURPOSE — `has the partner already
     # cancelled` / `has legal already retracted` (no existential quantifier, so no ending CUE is
     # recognised, and they were silent on `main` too). Pinned in `NOT_SELECTED` only, so an arm
@@ -1759,13 +1763,17 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
 
     # ⛔ THE REFUSAL SLOT'S BOUND IS `{0,10}`, NOT `{0,8}` (fresh review, P2, measured): the prose
     # claimed the slot WAS the helper's `{0,10}` while the code spelled eight, and the gap was
-    # observable from the REPORT side — six and seven adverbials before the ending word were
-    # `population=None, signal=None` (a refused cue with no notice, duty (b)). Both report now, and
-    # the widening is refusal-side: measured over 78 probes (runs 0-12 x six sentence shapes),
-    # 10 diffs, all silence -> `existence_unguarded`, 0 population/shape moves. At eight and beyond
-    # the 60-character window dominates and both bounds answer identically — pinned below, because
-    # "the window dominates" is the reason the bound cannot be measured there and a reader should
-    # not infer coverage from it.
+    # observable from the REPORT side — the two rows below were `population=None, signal=None` (a
+    # refused cue with no notice, duty (b)). Both report now, and the widening is refusal-side:
+    # measured over 78 probes (runs 0-12 x six sentence shapes), 10 diffs, all silence ->
+    # `existence_unguarded`, 0 population/shape moves.
+    # ⛔ AND THE TWO ROWS BELOW ARE NINE AND TEN TOKENS, NOT SIX AND SEVEN ADVERBIALS (peer round-34
+    # review, P2, measured): the slot counts TOKENS, and `no longer` is two of them, so the rows sit
+    # at the TOP of the bound while six to eight SINGLE-token adverbs (`<n> just`) would still be
+    # inside it. The printed item count and the guarded token count are different measures; the rows
+    # are what is pinned, and their token count is the one that touches the bound. From eleven tokens
+    # on, the 60-character window dominates and both bounds answer identically — which is why the pin
+    # is here and not at the window's edge.
     for query in (
         "have any it has been just only already no longer in fact very recently deprecated and "
         "been withdrawn",
@@ -1774,8 +1782,9 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
     ):
         got = detect_state_question(query)
         assert got.population is None and got.signal == "existence_unguarded", (
-            f"{query!r} reports {got.signal!r} — a six- or seven-adverbial refusal must REPORT; if "
-            f"this went silent, the refusal-side slot is back inside the bound the prose claims")
+            f"{query!r} reports {got.signal!r} — these rows sit at the top of the refusal slot's "
+            f"bound and must REPORT; if this went silent, the slot is back inside the bound the "
+            f"prose claims")
 
     # ⛔ THE ARM IS NOT PURELY ADDITIVE, AND THE DIRECTION IT IS NOT IS A NAMING ONE (fresh
     # review, P2, measured). The signal rows are ordered and this one sits before
