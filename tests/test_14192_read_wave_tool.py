@@ -366,7 +366,12 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             for case in node.cases:
                 for capture in ast.walk(case.pattern):
                     name = getattr(capture, "name", None) or getattr(capture, "rest", None)
-                    if not isinstance(name, str):
+                    # ⛔ NO `isinstance(name, str)` GUARD (#14326 round 6): `MatchAs.name` is
+                    # `identifier?` and `MatchMapping.rest` an identifier, so a non-str name
+                    # cannot reach here, and `ast.Name(id=None)` is never read back by
+                    # `_possible_strings` anyway — the guard was a clause no mutant could
+                    # red, and this file deletes those.
+                    if name is None:
                         continue  # `case 1:` / `case _:` bind nothing
                     binds.append((ast.Name(id=name, ctx=ast.Store()), node.subject))
     out: dict[str, set[str]] = {}
@@ -552,13 +557,65 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
 
 
+def _rebound_pure_names(tree: ast.AST) -> frozenset[str]:
+    """`_PURE_READS` names the source REBINDS — they are not pure any more.
+
+    ⛔ THE PURITY TESTS ARE BY NAME, SO THE NAME CAN BE REBOUND (#14326 round 6, MEASURED
+    GREEN at `81973329`): `print = getattr` then `print(sdk, _N)(query=…, kind="statement")`
+    passed the pin (`m=2 c=2 i=0`) — and the same for `dict = getattr` and `type = getattr`
+    with the literal inline — while the file's own comment claimed "a name alias of
+    `getattr` does not become a way through". It did, through every name this file trusts.
+    A shadowed/assigned pure name is therefore dropped from the allow-list: fail-closed.
+    """
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                for sub in ast.walk(target):
+                    if isinstance(sub, ast.Name):
+                        out.add(sub.id)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            for sub in ast.walk(node.target):
+                if isinstance(sub, ast.Name):
+                    out.add(sub.id)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension,
+                               ast.With, ast.AsyncWith)):
+            for sub in ast.walk(node.target if hasattr(node, "target") else node):
+                if isinstance(sub, ast.Name):
+                    out.add(sub.id)
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                out.add(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.arg):
+            out.add(node.arg)
+    return frozenset(out & _PURE_READS)
+
+
+#: Callees that RECORD a string and cannot execute it. Kept separate from `_PURE_READS`
+#: because that set also grades MUTATION (`_PURE_CALLEES`), where a logger method must stay
+#: a mutator-adjacent unknown; this set is used by the CENSUS arms only.
+#: ⛔ WITHOUT IT THE CENSUS FALSE-REDS THE RECORDING DIRECTION (#14326 round 6, measured at
+#: `81973329`: `_LOG.info("_tortoise_fts_query")`, `sys.stderr.write(…)` and
+#: `_COUNTS.setdefault("_tortoise_fts_query", 0)` were all REFUSED at mentions=3, while the
+#: sixth control requires the identical act written as a subscript STORE to stay green —
+#: the same act graded two ways depending on syntax).
+_RECORDING_CALLEES = frozenset({
+    "info", "debug", "warning", "warn", "error", "exception", "critical", "log",
+    "write", "writelines", "setdefault", "append", "add", "update", "extend",
+    "format", "format_map",
+})
+
+
 def _carries_read_name(node: ast.AST, consts: dict[str, frozenset[str]]) -> bool:
     """True when `node` may statically BE one of the product read names."""
     return not _possible_strings(node, consts).isdisjoint(_READ_NAMES)
 
 
 def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
-                 consts: dict[str, frozenset[str]]) -> bool:
+                 consts: dict[str, frozenset[str]],
+                 rebound: frozenset[str] = frozenset()) -> bool:
     """True when `node` is a REACH on the read — a mention the census must account for."""
     if isinstance(node, ast.Attribute) and node.attr in _READ_NAMES:
         return True
@@ -585,10 +642,16 @@ def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
         # rather than executable-decided: `_READ["name"]` and `_READ.get("name")` are the
         # same non-read. Both directions are pinned in
         # `test_EVERY_static_binding_form_is_a_READ_reach`.
-        return (isinstance(_np, ast.Call)
-                and (getattr(_np.func, "id", None)
-                     or getattr(_np.func, "attr", None)) not in _PURE_READS) \
-            or (isinstance(_np, ast.Subscript) and _np.slice is node
+        # ⛔ A REBOUND PURE NAME IS NOT PURE (#14326 round 6, measured): `print = getattr`
+        # then `print(sdk, _N)(…)` passed the pin. `rebound` drops every `_PURE_READS`
+        # name the source assigns, so the allow-list cannot be laundered by shadowing.
+        if isinstance(_np, ast.Call):
+            _callee = (getattr(_np.func, "id", None)
+                       or getattr(_np.func, "attr", None))
+            if ((_callee not in _PURE_READS and _callee not in _RECORDING_CALLEES)
+                    or _callee in rebound):
+                return True
+        return (isinstance(_np, ast.Subscript) and _np.slice is node
                 and isinstance(_np.ctx, ast.Load))
     # ⛔ A STRING LITERAL MATTERS ONLY WHERE IT CAN BE EXECUTED. The census counts mentions
     # because a bare name can be handed to `getattr`; a `Constant` in dict-value position is
@@ -634,9 +697,16 @@ def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
     # direction. `_PURE_READS` is the set this file already trusts not to reach a callee by
     # name (it contains `print`, `len`, `dict`, …), so `print("…")` stays green and a name
     # alias of `getattr` does not become a way through.
-    return (isinstance(_parent, ast.Call)
-            and (getattr(_parent.func, "id", None) or getattr(_parent.func, "attr", None))
-            not in _PURE_READS)
+    # ⛔ A REBOUND PURE NAME IS NOT PURE, AND A RECORDING CALLEE IS NOT AN EXECUTOR
+    # (#14326 round 6, both measured at `81973329`): `print = getattr` then
+    # `print(sdk, _N)(…)` passed the pin, while `_LOG.info("_tortoise_fts_query")` and
+    # `_COUNTS.setdefault("_tortoise_fts_query", 0)` were FALSE REDS although the same
+    # recording act written as a subscript STORE must stay green.
+    if not isinstance(_parent, ast.Call):
+        return False
+    _callee = getattr(_parent.func, "id", None) or getattr(_parent.func, "attr", None)
+    return ((_callee not in _PURE_READS and _callee not in _RECORDING_CALLEES)
+            or _callee in rebound)
 
 
 def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
@@ -654,10 +724,29 @@ def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
     # as an independent check; this file deletes them instead.
     operands = list(call.args)[1:]
     operands.extend(arg for arg in call.args if isinstance(arg, ast.Starred))
+    # ⛔ A KEYWORD IS A DELIVERY TOO (#14326 round 6, MEASURED GREEN at `81973329`):
+    # `_name_reaching_operands` scanned `call.args` only, and CPython's grammar puts a
+    # keyword in a SEPARATE `keyword` node (`Call(expr func, expr* args, keyword*
+    # keywords)`), so a literal handed over by name never reached the census or
+    # `_indirect_reads`:
+    #     _PageFetcher(name="_tortoise_fts_query")          -> mentions=2 calls=2 indirect=0
+    #     _PageFetcher(**{"name": "_tortoise_fts_query"})   -> same
+    # — identical to the positional-splat row that WAS pinned, so the delivery class looked
+    # closed. `keyword.arg` is `None` for a `**` mapping, so the value is inspected either
+    # way.
+    for kw in call.keywords:
+        if kw.arg is None and isinstance(kw.value, ast.Dict):
+            # `**{"name": "_tortoise_fts_query"}`: the VALUES are the argument values.
+            # `_possible_strings` unions a dict literal's KEYS (iteration semantics, the
+            # polarity `for` targets need), so the spread position is walked here.
+            operands.extend(v for v in kw.value.values if v is not None)
+        else:
+            operands.append(kw.value)
     return operands
 
 
-def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]]) -> list[ast.Call]:
+def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]],
+                     rebound: frozenset[str] = frozenset()) -> list[ast.Call]:
     """Calls that reach the read BY NAME through an argument — the census's own diagnosis.
 
     ⛔ MEASURED BYPASS (#14279 review F3/P2), each GREEN before this arm resolved a name
@@ -684,8 +773,11 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]]) -> list[as
         if not isinstance(n, ast.Call):
             continue
         _callee = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
-        if _callee in _PURE_READS:
-            continue  # a pure callee cannot fetch by name — the `print("…")` control
+        # A pure or RECORDING callee cannot fetch by name — the `print("…")` control —
+        # unless the source REBOUND that name (#14326 round 6).
+        if (_callee in _PURE_READS or _callee in _RECORDING_CALLEES) \
+                and _callee not in rebound:
+            continue
         if not any(_carries_read_name(arg, consts)
                    for arg in _name_reaching_operands(n)):
             continue
@@ -705,7 +797,12 @@ def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]]) -> list[as
         # through this branch, and emptying the set now reds
         # `test_EVERY_static_binding_form_is_a_READ_reach` — which is what makes it
         # load-bearing rather than decorative.
+        # ⛔ A SPLAT OR A KEYWORD IS THE CONTAINER DELIVERY (#14326 round 5, round 6). A
+        # SPLAT's arity and position are not statically knowable, so the fetcher behind it
+        # cannot be excluded by name. A KEYWORD delivers by name too (`_PageFetcher(name="…")`,
+        # `**{"name": "…"}`), which is why `_name_reaching_operands` carries keywords.
         if (_callee in _NAMEFETCH_CALLEES
+                or n.keywords
                 or any(isinstance(arg, ast.Starred) for arg in n.args)):
             out.append(n)
     return out
@@ -742,8 +839,9 @@ def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
     """
     consts = _str_constants(tree) if consts is None else consts
     parents = _parents_of(tree) if parents is None else parents
-    mentions = [n for n in ast.walk(tree) if _is_read_ref(n, parents, consts)]
-    return mentions, _read_calls(tree), _indirect_reads(tree, consts)
+    rebound = _rebound_pure_names(tree)
+    mentions = [n for n in ast.walk(tree) if _is_read_ref(n, parents, consts, rebound)]
+    return mentions, _read_calls(tree), _indirect_reads(tree, consts, rebound)
 
 
 #: The kwargs `tortoise/hosted_api.py::search` hands the read, as of this pin. A LITERAL
@@ -3283,8 +3381,6 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    match _m:\n'
             '        case {"read": _N}:\n'
             f'            {reach.format(name="_N")}\n'),
-        "for target over a SET literal": ('    for _N in {"_tortoise_fts_query"}:\n'
-                                          f'        {reach.format(name="_N")}\n'),
         "STARRED target against a literal": (
             '    (*_r, _b) = ("_tortoise_fts_query", "x")\n'
             f'    {reach.format(name="_r")}\n'),
@@ -3414,6 +3510,46 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _fetcher = _PageFetcher()\n'
             '    _lever = _fetcher(*("_tortoise_fts_query",))\n'
             '    _lever(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ A KEYWORD IS A DELIVERY (#14326 round 6, BOTH MEASURED GREEN at `81973329`:
+        # mentions=2, calls=2, indirect=0): `_name_reaching_operands` scanned `call.args`
+        # only, and CPython puts a keyword in its own `keyword` node, so a literal handed to
+        # a non-pure callee BY NAME escaped both the census and `_indirect_reads`. The second
+        # row is a `**` mapping (`keyword.arg` is None there), so the value is inspected.
+        "literal as a KEYWORD argument": (
+            '    _fetcher = _PageFetcher()\n'
+            '    _lever = _fetcher(name="_tortoise_fts_query")\n'
+            '    _lever(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "literal inside a **MAPPING": (
+            '    _fetcher = _PageFetcher()\n'
+            '    _lever = _fetcher(**{"name": "_tortoise_fts_query"})\n'
+            '    _lever(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE LEVER THE `Name` ARM EXISTS FOR (#14326 round 6, measured): NO row
+        # exercised it — every other row was refused by `indirect`, so deleting the whole
+        # `Name` arm left 25 green while `vars(type(sdk))[_N]` (its own comment's example)
+        # went from REFUSED to `refuses=False`. This row is that arm's attribution.
+        "NAME as the fetch subscript's INDEX": (
+            '    _N = "_tortoise_fts_query"\n'
+            '    vars(type(sdk))[_N]'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ A REBOUND PURE NAME IS NOT PURE (#14326 round 6, measured GREEN): the purity
+        # tests decide by NAME, so `print = getattr` launder the alias through an allow-
+        # listed name — `_g = getattr` was already refused, this spelling was not. A
+        # shadowed `_PURE_READS` name is graded as an unknown (fail-closed) instead.
+        "REBOUND pure name as the fetcher": (
+            '    print = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE PAIRING ARM NEEDS EQUAL LENGTHS (#14326 round 6, measured): without the
+        # guard a SHORTER target silently pairs against a LONGER value, so the second
+        # element is never bound and the lever goes uncensused.
+        "SHORTER target against a longer literal tuple": (
+            '    (_N,) = ("a", "_tortoise_fts_query")\n'
+            f'    {reach.format(name="_N")}\n'),
+        # ⛔ `setattr` HAS NO POSITIONAL ROW ANYWHERE ELSE (#14326 round 6, measured):
+        # removing it from the named pair left 25 green, because every other row reaches
+        # the pair through a SPLAT. A fetcher that WRITES by name reaches the read's name too.
+        "`setattr` over an f-string name": (
+            '    setattr(sdk, f"_tortoise_fts_query", 1)\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -3484,6 +3620,22 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a subscript STORE whose key is the read literal is a FALSE RED — it records under "
         "the name and executes nothing; the Constant arm's Load guard is what keeps the "
         "census counting CALLABLE spellings")
+
+    # ⛔ THE RECORDING DIRECTION, IN THE CALL SPELLINGS (#14326 round 6, all four MEASURED
+    # REFUSED at `81973329`): the Constant arm treated every callee outside `_PURE_READS` as
+    # an executor, so the identical recording act was graded two ways depending on syntax —
+    # green as a subscript store (above), red as a call. `_RECORDING_CALLEES` carries the
+    # spellings that take a string and cannot execute it, and `print` (already allow-listed)
+    # gets its own row so the purity test itself cannot silently invert.
+    for label, body in (
+            ("logger method", '    _LOG.info("_tortoise_fts_query")\n'),
+            ("stderr write", '    sys.stderr.write("_tortoise_fts_query")\n'),
+            ("dict setdefault", '    _COUNTS.setdefault("_tortoise_fts_query", 0)\n'),
+            ("print, inline", '    print("_tortoise_fts_query")\n')):
+        assert not _pin_refuses(_pin_source(body)), (
+            f"[{label}] recording the read's NAME is a FALSE RED — nothing is executed, and "
+            "the recording direction #14289 asks for must not depend on whether the act is "
+            "spelled as a call or as a subscript store")
     # ⛔ …AND THE `mentions == 2` ASSERTION THAT USED TO SIT HERE IS DELETED, NOT KEPT
     # (#14326 round 5): `_pin_refuses` is `bool(indirect) or len(calls) != 2 or len(mentions)
     # != 2` over the same `_read_reach` on an identically re-parsed source, so the control
