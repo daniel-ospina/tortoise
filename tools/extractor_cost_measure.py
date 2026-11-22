@@ -857,21 +857,26 @@ _BLOCKQUOTE = re.compile(r"^[ \t]*> ?")
 _FENCE_OPEN = re.compile(r"^ {0,3}(?P<delim>`{3,}|~{3,})(?P<info>.*)$")
 
 
-def _marker_columns(line: str) -> list[int]:
-    """The COLUMN of each leading blockquote marker on this line.
+def _marker_count(line: str) -> int:
+    """How many leading blockquote markers this line carries, at ANY indentation.
 
-    Columns, not just a count: inside a list item a quote's markers are offset
-    by the item's content indent, so the same quote can carry `  > ``` ` on the
-    opener and `    > code` on a content line. Comparing counts alone therefore
-    cannot tell a content line from a line that left the container.
+    The indentation is deliberately not capped: inside a list item a quote's
+    markers are offset by the item's content indent, so the same quote carries
+    `  > ``` ` on the opener and `    > code` on a content line, and a {0,3}
+    cap read the second as "no marker at all".
+
+    Only the COUNT is used, never the offsets. That is measured, not assumed: a
+    line whose marker sits at a SHALLOWER offset than the opener's is still
+    fence CONTENT under CommonMark (`markdown-it@14`, commonmark preset), so
+    comparing offsets escaped a code line and left the real prose bare.
     """
-    columns: list[int] = []
+    count = 0
     pos = 0
     while True:
         marker = _BLOCKQUOTE.match(line[pos:])
         if not marker:
-            return columns
-        columns.append(pos + len(marker.group(0)) - len(marker.group(0).lstrip(" \t")))
+            return count
+        count += 1
         pos += marker.end()
 
 
@@ -885,46 +890,42 @@ def _strip_markers(line: str, count: int) -> str:
     return line
 
 
-def _opens_fence(line: str) -> tuple[str, list[int]]:
-    """(the opener's FULL delimiter run, its marker columns) or ("", [])."""
-    columns = _marker_columns(line)
-    match = _FENCE_OPEN.match(_strip_markers(line, len(columns)))
+def _opens_fence(line: str) -> tuple[str, int]:
+    """(the opener's FULL delimiter run, its marker count) or ("", 0)."""
+    count = _marker_count(line)
+    match = _FENCE_OPEN.match(_strip_markers(line, count))
     if not match:
-        return "", []
+        return "", 0
     delim = match.group("delim")
     if delim[0] == "`" and "`" in match.group("info"):
         # CommonMark: a backtick fence's info string may not contain a backtick.
-        return "", []
-    return delim, columns
+        return "", 0
+    return delim, count
 
 
-def _left_container(line: str, columns: list[int]) -> bool:
+def _left_container(line: str, count: int) -> bool:
     """Did this line end the container the fence was opened in?
 
-    ONE way: FEWER markers than the opener. A line with NO marker ends the
+    ONE way: fewer markers than the opener. A line with NO marker ends the
     container; a line whose markers are merely offset differently does not.
     """
-    if not columns:
+    if not count:
         # An unquoted fence is not held by a container: only a closer ends it.
         return False
-    # COUNT only — measured against a CommonMark renderer, a line with a marker
-    # at a SHALLOWER column than the opener's is still fence CONTENT (the quote
-    # that opened it ended, but the fence's content carries on). Comparing
-    # columns here would escape that code line and leave the real prose bare.
-    return len(_marker_columns(line)) < len(columns)
+    return _marker_count(line) < count
 
 
-def _closes_fence(line: str, delim: str, columns: list[int]) -> bool:
+def _closes_fence(line: str, delim: str, count: int) -> bool:
     """A closer is AT LEAST as long as its opener, and only spaces follow.
 
-    The opener's marker columns are stripped, never more and never fewer: a
+    The opener's marker count is stripped, never more and never fewer: a
     ``>``-prefixed line INSIDE a fence is fence CONTENT, so stripping markers
     the opener did not have would let a quoted example close the block it is
     quoted inside.
     """
     return re.fullmatch(
         r" {0,3}" + re.escape(delim[0]) + "{" + str(len(delim)) + r",}[ \t]*",
-        _strip_markers(line, len(columns))) is not None
+        _strip_markers(line, count)) is not None
 
 
 def escape_dollars_outside_code(markdown: str) -> str:
@@ -971,11 +972,14 @@ def escape_dollars_outside_code(markdown: str) -> str:
       opens a fence itself.
     * An INDENTED code block (4+ spaces, which CommonMark makes code) is not
       tracked as code, so a ``$`` inside one IS escaped — the fence rules above
-      are applied, indentation-based code blocks are not. This module emits
-      neither shape.
+      are applied, indentation-based code blocks are not. The one exception is a
+      line that reads as a 4+-column-indented QUOTED fence (`    > ``` `), which
+      this scan treats as a fence and then keeps its ``$`` bare — there a
+      renderer calls it an indented code block. This module emits neither shape.
     * CONTAINER tracking (a fence opened inside a blockquote, so the quote
       ending closes it) approximates CommonMark's list/quote interaction rather
-      than modelling it: a marker at any column is recognised, and the fence ends
+      than modelling it: a marker at any indentation is recognised, markers are
+      counted as characters rather than expanded to tab stops, and the fence ends
       when a line carries FEWER markers than the opener. Degenerate documents —
       a fence inside a list-item quote whose content lines' marker offsets vary
       wildly — can still be classified differently from a full CommonMark
@@ -991,25 +995,25 @@ def escape_dollars_outside_code(markdown: str) -> str:
     """
     out: list[str] = []
     fence: str = ""
-    fence_columns: list[int] = []
+    fence_markers: int = 0
     for line in markdown.split("\n"):
-        if fence and _left_container(line, fence_columns):
+        if fence and _left_container(line, fence_markers):
             # The container that held the fence ENDED on this line, so the fence
             # ended with it and this line is prose (or a new opener) again —
             # CommonMark closes the container, it does not carry it on.
             fence = ""
-            fence_columns = []
+            fence_markers = 0
         if fence:
             out.append(line)
             out.append("\n")
-            if _closes_fence(line, fence, fence_columns):
+            if _closes_fence(line, fence, fence_markers):
                 fence = ""
-                fence_columns = []
+                fence_markers = 0
             continue
-        opened, columns = _opens_fence(line)
+        opened, markers = _opens_fence(line)
         if opened:
             fence = opened
-            fence_columns = columns
+            fence_markers = markers
             out.append(line)
             out.append("\n")
             continue
