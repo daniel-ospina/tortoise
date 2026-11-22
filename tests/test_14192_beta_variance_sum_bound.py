@@ -500,21 +500,35 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
             "that drifts off them re-inverts the claim this PR exists to keep "
             "true. Restore the wording or re-point this test; do not leave a "
             "copy ungraded")
-    assert 11_000 < len(crit[guard:division]) < 12_500, (
+    # ⛔ EVERY FIGURE IN THIS MESSAGE IS DERIVED FROM THE ENFORCED BOUND AND THE
+    # LIVE SPAN, because RESTATING a derived figure is how this message twice
+    # acquired a claim its band did not implement (rounds 21 and 22): one cut
+    # promised "an order of magnitude" over a ±7% band, and the next restated the
+    # tolerance against the measured 11,728 — correct at that tree and false the
+    # moment an edit inside the slice moves the span, which is precisely the
+    # event this row exists to red. Deriving both leaves nothing to drift, so
+    # the message cannot state a tolerance the comparison does not enforce.
+    magnitude_lo, magnitude_hi = 11_000, 12_500
+    spared_span = len(crit[guard:division])
+    lo_delta, hi_delta = magnitude_lo - spared_span, magnitude_hi - spared_span
+    lo_pct, hi_pct = (100 * lo_delta / spared_span, 100 * hi_delta / spared_span)
+    assert magnitude_lo < spared_span < magnitude_hi, (
         "the docstring calls the spared span a ~11.7k-char coercion `CASE` and "
-        f"THIS predicate measures {len(crit[guard:division])} chars. This is a "
-        "MAGNITUDE tripwire for a figure the prose quotes to one significant "
-        "figure, NOT a byte pin, and its real tolerance is what it actually "
-        "implements: the band reds AT OR BELOW 11,000 (−728, −6.2%) and AT OR "
-        "ABOVE 12,500 (+772, +6.6%) — the edges themselves red, because both "
-        "comparisons are strict."
+        f"THIS predicate measures {spared_span} chars. This is a MAGNITUDE "
+        "tripwire for a figure the prose quotes to one significant figure, NOT "
+        "a byte pin, and its real tolerance is what it actually implements: the "
+        f"band reds AT OR BELOW {magnitude_lo:,} ({lo_delta:+,} / "
+        f"{lo_pct:+.1f}%) and AT OR ABOVE {magnitude_hi:,} ({hi_delta:+,} / "
+        f"{hi_pct:+.1f}%) — the edges themselves red, because both comparisons "
+        "are strict."
         " ⛔ A semantics-preserving rename inside the slice REDS "
         "IT — measured, `other` -> `other_peer` (216 occurrences) moves the span "
         "by +1,080 to 12,808 — and that false block is the ACCEPTED cost of "
         "grading an approximate figure at all, not a bug to be explained away. "
         "Earlier cuts of this message claimed an order-of-magnitude tolerance "
-        "over a ±7% band, i.e. told the first reader who hit the red something "
-        "false about the row (rounds 21 and 22).")
+        "over a ±7% band, and then restated the tolerance instead of deriving "
+        "it, i.e. told the first reader who hit the red something false about "
+        "the row (rounds 21, 22 and 23).")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 
