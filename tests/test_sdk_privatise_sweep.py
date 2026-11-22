@@ -380,6 +380,9 @@ _ARM_REFSPECS: dict[str, str] = {
     # checks it where it does — on the SOURCE.
     "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
     "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
+    # `fa4d1c8065` is the same shape — a `main` commit three back from the tip when it was added,
+    # so no depth-1 ref can arm it either. Full-SHA source, same reason as the entry above.
+    "fa4d1c8065": "+fa4d1c8065f052f1a90579f14e62a5b131321aeb:refs/pi/fa4d1c8065",
 }
 
 
@@ -1706,6 +1709,16 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # after the squash, and its content never landed.
     "10e51693f166": (11858, "a1552662bf07a10b"),
     "0351fe856942": (11858, "a1552662bf07a10b"),
+    # ⛔ THE RE-PIN THAT MADE THIS PR'S PIN A NO-OP, NOW GRADED (review of PR #14288, P1/P2). The
+    # forward merge that resolved this block's conflict against `main` records that #14258's
+    # `fa4d1c8065` landed `(11861, "f0647020531c078c")` — the SAME pair as the constant — which is
+    # why `main` is green without this branch. That sentence is written in the graded `commits
+    # (N, "digest")` spelling, so it is a claim this file has to hold: without the row,
+    # `test_a_revs_published_own_pin_is_the_pin_that_rev_commits` reds and names it (measured —
+    # that is how it was found). It is a `main` commit, so its fetchable address is a FULL-SHA want
+    # (the `10e51693f166` convention above); the pair is `git show
+    # fa4d1c8065:tools/sdk_privatise.py | grep -m1 '^SWEEP_RESIDUE'`.
+    "fa4d1c8065": (11861, "f0647020531c078c"),
 }
 
 

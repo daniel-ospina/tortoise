@@ -1084,8 +1084,16 @@ SWEEP_NAMES = 66
 #: here prints `(11857, "ed40203dbbf32b87")`, the SAME pair `main` pins at `e74cf1d13d`. ⛔ THE
 #: COINCIDENCE IS NOT THE EVIDENCE — the evidence is that `--repin` run. What makes it expected
 #: rather than lucky is MEASURED too, not assumed: `git diff origin/main` on the resolved tree
-#: touches exactly TWO files, and every line it adds is either `#:`-prefixed prose or the single
-#: docstring figure in `tests/test_sdk_privatise_sweep.py` — not one executable line. `edits_for`
+#: touched TWO files, and every line it added was either `#:`-prefixed prose or the single docstring
+#: figure in `tests/test_sdk_privatise_sweep.py` — not one executable line. ⛔ THAT IS A READING OF
+#: THE TREE IT NAMES, NOT A STANDING PROPERTY OF THIS BRANCH: an earlier cut of this block shipped
+#: from a head where that file did not differ at all (`git diff origin/main --
+#: tests/test_sdk_privatise_sweep.py | wc -l` → 0), so a reader re-running the command THERE saw ONE
+#: file and a correct exclusion read as a false one — the "the FILE changed, the ROW did not" trap
+#: this block warns about below, in its mirror form. It differs again NOW, by the `OWN_PINS` row and
+#: its refspec that GRADE the `fa4d1c8065` pin below: test DATA, not one executable line of the tool
+#: either way. The conclusion is unaffected: a docstring is a `Constant`, never an `Attribute`.
+#: `edits_for`
 #: walks the AST and cannot see a comment, and a docstring is a `Constant`, not an `Attribute`, so
 #: this branch can move no row in either direction, which is why the two readings agree.
 #: ⛔ NEITHER SIDE'S FIGURE IS INHERITED BY ARITHMETIC: this branch's own tree `1b0db04894` measured
@@ -1109,7 +1117,13 @@ SWEEP_NAMES = 66
 #: `917ae19efd` (parent 11857 → own 11858) are in it BECAUSE they set it, next to `0a07fb713c` and
 #: `70a3ae85d3` (parent 11858 → own 11861), which only REPLACED it — so read each commit's own and
 #: parent pin (`git show <sha>:tools/sdk_privatise.py`, then the same on `<sha>^`) before calling it
-#: a setter or a replacer — the `-S` list itself answers neither. ⛔ AND NO TOTAL FROM `--all` BELONGS
+#: a setter or a replacer — the `-S` list itself answers neither. ⛔ AND THERE IS A THIRD CASE IN THAT
+#: LIST: a commit that only MENTIONS the literal in PROSE is counted too, so `-S` is not even a
+#: count of transitions — `bfd38e3b50` is that case (measured: own and parent pin are BOTH
+#: `(11861, "f0647020531c078c")`, so it neither set nor replaced the pair, and it is in the list
+#: only because its own prose added the literal). `-G'^SWEEP_RESIDUE = \(11858'` — anchored to the
+#: ASSIGNMENT LINE rather than to the substring — is the instrument that separates a prose mention
+#: from a change of the pair: it does not contain that commit. ⛔ AND NO TOTAL FROM `--all` BELONGS
 #: IN THIS BLOCK, on two
 #: measured grounds: the search STRING changes the population (`-S` on the bare pair is a different
 #: set from `-S` on the assignment line), and `--all` walks `refs/wip/*` lane snapshots, which are
@@ -1267,9 +1281,12 @@ SWEEP_NAMES = 66
 #: ⛔ AND `main` HAS SINCE RE-PINNED TO THAT SAME PAIR: `fa4d1c8065` (#14258) commits
 #: `(11861, "f0647020531c078c")`, byte-identical to the constant below (measured: `git show
 #: origin/main:tools/sdk_privatise.py | grep -m1 '^SWEEP_RESIDUE'`), so this PR's PIN component is
-#: a NO-OP against the base and what still differs is prose alone (`git diff origin/main
-#: --name-only` lists this file and nothing else). The red this PR was opened for is repaired on
-#: both sides; what this block still carries that a bare re-pin does not is the ATTRIBUTION.
+#: a NO-OP against the base and EVERY non-blank line this PR still adds or removes in this file is
+#: `#:`-prefixed prose (one command: `git diff origin/main -- tools/sdk_privatise.py`, then drop the
+#: `+++`/`---` headers and count the lines that are NOT `#:` — the count is 0), so what is left on
+#: this branch is the
+#: ATTRIBUTION plus the test rows that grade it. The red this PR was opened for is repaired on both
+#: sides.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
