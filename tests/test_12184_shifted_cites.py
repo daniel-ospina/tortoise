@@ -160,57 +160,39 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`mcp_server.py:5250`", _MCP, 5250, "entity_type=entity_type"),
-    # ⛔ §2.5's `:Tag` traversal row cites `mcp_server.py:11590` and, until this row, NOTHING read
-    # it (`grep -rn 11590 tests/` -> nothing): the audit document's header promises a reader for
-    # every entry it re-derives, and this one had none. The `g.query(` call is `:11589` here; the
-    # document cites the query LITERAL's first line, which is `:11590` (`#14169` moved it from `:11281`, which
-    # in turn had moved from `:11280`; the call is `:11589` at this head); its siblings in the same
-    # paragraph follow the same convention — `sdk.py:31533` is the literal while `:31532` is the call).
+    # ⛔ §2.5's `:Tag` traversal row cites this address and, until this row, NOTHING read it —
+    # at that head `grep -rn 11281 tests/` returned nothing (it returns this file's own comments
+    # now, which is not a read): the audit document's header promises a reader for every entry it
+    # re-derives, and this one had none. The document cites the query LITERAL's
+    # first line, not the `g.query(` call above it — at THIS head the call is `:11589` and the
+    # literal `:11590`; at the head that row was written for they were `:11280` / `:11281`, and
+    # `#14169` moved both together (its siblings in the same paragraph follow the same
+    # convention — `sdk.py:31533` is the literal while `:31532` is the `rows = proj.g.query(` call).
     (_AUDIT, "`mcp_server.py:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
-    # (`` `mcp_server.py:5250`/`:8515`/`:11590` `` on this head; `:5184`/`:8206`/`:11281` before
-    # `#14169` moved them), and the §2.5 token above cannot see a bare
-    # `:NNNN`. Review at `b9e7822362c6`, P2: reverting ONLY the header half (`:11590` -> `:11589`)
-    # left every arm green — `_PINS` counts were unchanged (63/63), `_TOKEN_OCCURRENCES`' key count
+    # (`` `mcp_server.py:5250`/`:8515`/`:11590` ``), and the §2.5 token above cannot see a bare
+    # `:NNNN`. Review at `b9e7822362c6`, P2: reverting ONLY the header half (`:11281` -> `:11280`,
+    # the address's spelling at that head) left every arm green — `_PINS` counts were unchanged
+    # (63/63), `_TOKEN_OCCURRENCES`' key count
     # stayed 1 (the §2.5 spelling is a different key), `_REDEFINED_13854` was untouched and the
     # `_resolved_pairs` census was identical (223 pairs) — so the document could name two addresses
     # for one reader with nothing red. That is the false pass this file exists to stop, and it is the
-    # `#13466` shape (four header entries re-pointed, nothing red). Its siblings on the same header
-    # line are pinned per SITE for exactly this reason: `` `:8515` `` and `` `:5720` `` each carry a
-    # bare-token row with count 2 (header + §2.5) — measured on this head. This row and its count are the site the re-derived
-    # §2.5 row left behind.
+    # `#13466` shape (four header entries re-pointed, nothing red). Its neighbours are pinned per
+    # SITE for exactly this reason, and each carries a bare-token row with count 2 (header + §2.5):
+    # `` `:8515` `` sits on the same five-address header trio as this row; `` `:5720` `` sits on the
+    # `:5529` passthrough parenthetical and on §2.5's table row instead (⛔ NOT on that header line —
+    # measured), which its own row covers.
+    # ⛔ THE BARE-TOKEN COUNT BELOW IS RE-MEASURED ON THIS MERGED DOCUMENT, never carried: the two
+    # parents each counted it for their OWN doc and disagreed (3 against 4). Measured here with
+    # `grep -o '`':11590`'' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4, at the
+    # MEASURED line numbers `:112` (the header's eleven-non-comparable-pair list), `:181` (the header
+    # enumeration `mcp_server.py:5250`/`:8515`/`:11590`), `:227` (§2.5's five-address enumeration) and
+    # `:240` (§2.5's head-declaration sentence, which states where the address sits at the pin).
+    # Re-derive with `grep -n '`':11590`'' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
+    # trusting those four numbers on a later head: a line number in prose is exactly the claim this
+    # file pins for the document, and it drifts the same way. The sibling `:11281` spelling is NOT
+    # counted — it is the record of the correction, not a cite of this head.
     (_AUDIT, "`:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
-    # 1 -> 3 at the #13991 merge of `origin/main` `0656b056d7`: the branch's OWN prose adds two more
-    # BARE sites of this same address, so the bare-token row DIRECTLY ABOVE (`` `:11590` ``, count
-    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11590` row above it (count 1,
-    # unchanged — the row whose token carries the path, not a bare `:NNNN`) covers only the §2.5
-    # one-token spelling. Deliberately no "N lines above": that distance moved twice on this branch
-    # already, and a stated count is the defect class this file exists to catch. Measured on the merged document
-    # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
-    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11590`"))'` -> 3), with the site
-    # lines RE-MEASURED on this document rather than carried — `grep -n '`:11590`' on the MERGED
-    # document gives `:179` / `:225` / `:652`. ⛔ `:173`/`:186`/`:592` below are the `d009f5d8916d`
-    # edition's, not the pre-`#14169` head's (that one already read `:179`/`:225`/`:645`): they are kept
-    # as history, never as a delta to apply. They have moved twice since the pre-merge `:182`/`:585`
-    # edition: `main`'s merge `0656b056d7` shifted two of them, the P2 fix above (which sits BETWEEN
-    # them) added +2 to the third, and the two-line "five pairs as two code spans" correction
-    # (#13991 review P2-A, which sits ABOVE all three) then shifted every one of them by +2 again —
-    # which is why this block states the MEASUREMENT and not a delta:
-    #   :179  the header trio above — main's site, the one this row was created for (`:173` at
-    #         `d009f5d8916d`);
-    #   :225  the §2.5 `:Tag`-family enumeration this branch adds (`:186` at `d009f5d8916d`), which lists all five reader
-    #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
-    #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :652  the same branch's §2.5 provenance sentence (`:592` at `d009f5d8916d`, `:645` just before
-    #         `#14169`), `:11280` -> `:11281`, later moved to `:11590`
-    #         by `#14169` — the ONE surviving `11281` spelling, kept because it is history, not an address.
-    # Re-derive with `grep -n '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
-    # trusting this list on a later head: a line number in prose is exactly the claim this file pins
-    # for the document, and it drifts the same way.
-    # All three name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
-    # addresses for one reader). The count is kept at the measured number rather than deleting a
-    # spelling: re-pointing any one of the three now reds here, which is the discrimination the row
-    # exists for.
     (_AUDIT, "`:5720`", _MCP, 5720, "entity_type=entity_type"),
     (_AUDIT, "`:8515`", _MCP, 8515, "entity_type=entity_type"),
     # ⛔ The four `sdk.py` members of §2.5's `:Tag` row are enumerated in the header as BARE `:NNNN`
@@ -450,12 +432,15 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5250`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11590`'): 1,
-    # 3: the header's BARE spelling of the same address, plus the two BARE sites the #13991 branch
-    # itself adds (§2.5's five-address enumeration and its `:11280` -> `:11281` provenance sentence) —
-    # see the row's own comment for the three line numbers. Measured on the merged document, and again
-    # after `#14169` re-keyed the address:
-    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 3.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 3,
+    # 4: the header's BARE spelling of the same address, the §2.5 five-address enumeration's bare
+    # site, and the two sites the #14246 fix lane added when it re-measured the comparability split
+    # (`mcp_server.py`'s `:11590` is the ELEVENTH non-comparable pair, so the split must name it, and
+    # §2.5's head-declaration sentence states where it sits at the pin). The spelling that was counted
+    # here before `#14169` moved the address (`:11281`, on the `#13991` provenance sentence) is NOT
+    # counted: that sentence is the record of the correction, not a cite of this head. Measured on this
+    # merged document, at `:112` / `:181` / `:227` / `:240`:
+    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 4,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5720`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8515`'): 2,
     # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
@@ -504,7 +489,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22390`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23501'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23313`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:34276`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:34276`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
@@ -1170,6 +1155,169 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
         "so re-spelling the bare header siblings WOULD add pairs and the clause's 'no pair at all' "
         "would be false. Restore the §2.5 one-token spelling, or correct the clause to the measurement."
     )
+
+
+#: The census pairs the header's comparability split calls NON-comparable, with the pin-side line count that
+#: makes each one so: the pair's line is past `ccb49741b2ec`'s copy of its file. MEASURED, one command per
+#: file — `git show ccb49741b2ec:<path> | wc -l` — and the header publishes the same four counts in its
+#: `wc -l` parenthetical, so the two are one measurement and this table is its per-pair form.
+#:
+#: ⛔ `mcp_server.py`'s `11590` is in this set because `main`'s `#14169` moved the address past the pin's
+#: 11,466-line copy; it is NOT this branch's own write, which is why the header's split has to qualify
+#: "this branch's own" rather than assert it for all of them. The `#14246` review's finding 1 is the exact
+#: failure this table exists to make unreachable: the split shipped `224`/`ten`/`131`/`seven` — internally
+#: consistent, and wrong — because nothing DERIVED it, and a self-consistent stale split cannot be caught
+#: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
+_PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
+    ("tortoise/sdk.py", 57951): 56415,
+    ("tortoise/sdk.py", 58099): 56415,
+    ("tortoise/sdk.py", 58315): 56415,
+    ("tortoise/sdk.py", 58317): 56415,
+    ("tortoise/sdk.py", 58966): 56415,
+    ("tortoise/sdk.py", 61999): 56415,
+    ("tortoise/sdk.py", 62019): 56415,
+    ("tortoise/search_engine.py", 7196): 7071,
+    ("tortoise/search_engine.py", 7198): 7071,
+    ("tortoise/hosted_api.py", 50935): 49851,
+    ("tortoise/mcp_server.py", 11590): 11466,
+}
+#: The split's three published sentences. Each is matched on the header's emphasis-stripped body, like every
+#: other figure pattern in this file, and each group is graded as a NUMBER (`_as_int`), so an edition may
+#: state a count in digits or in words without the comparator reporting a false absence.
+_SPLIT_COMPARABLE = re.compile(r"all (\d+) comparable ones resolve at BOTH heads")
+_SPLIT_NONCOMPARABLE = re.compile(r"the (\w+) that are NOT comparable")
+_SPLIT_DRIFT = re.compile(r"the drift is (\d+) of the (\d+) comparable, plus (\w+) of those (\w+) pairs")
+_SPLIT_ABSENT_AT_MAIN = re.compile(r"the\s+(\w+) that do not exist at `main` either")
+
+
+def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
+    """The `N comparable / M not` split is derived from the pin's own file lengths, not trusted as prose.
+
+    WHY THIS EXISTS. `#14246` re-pointed §2.5's `:Tag` traversal from `11281` to `11590`, which moved that
+    `(path, line)` pair past `ccb49741b2ec`'s 11,466-line copy of `tortoise/mcp_server.py` — so the pair
+    left the COMPARABLE population and joined the enumerated non-comparable ones. Every published figure
+    moved with it (`224`/`ten`/`131 of the 224, plus seven of those ten` read `223`/`eleven`/`130 of the
+    223, plus eight of those eleven`) and the headline total did not (`138` either way, because the pair's
+    drifter status does not change — it exists at `main`). Nothing reddened: the split is a literal in the
+    document and `_figure_problems` recomputes only the DENOMINATOR (spellings/pairs/collisions, which are
+    invariant under a re-point). That is a published claim whose value could not vary under ANY mutation of
+    the diff — the rule-3 uncovered-claim shape. The four figures happened to be internally consistent
+    while wrong, so no arithmetic-only arm can catch this class; the pin's file lengths are what decides
+    membership, and they are pinned here.
+
+    WHAT IT GRADES. (1) Every pair in `_PIN_EOF_PAIRS` is still a census pair — a dropped or re-pointed cite
+    must re-derive this table rather than leave it describing a population the document no longer has.
+    (2) The header NAMES each of them at the address it writes, inside the non-comparable enumeration ("each
+    named at the address this document writes for it" is the clause that promised it). (3) The published
+    counts agree with the table: comparable + non-comparable == the pairs the file measures, and the four
+    pinned `wc -l` values are the ones the header states for those files.
+
+    NON-VACUOUS, measured on the pre-fix document (`git show 3cb2090c61:docs/architecture/…`): it reds on
+    all three arms — the split publishes `224`/`ten` against this table's `223`/`11`, `mcp_server.py`'s
+    `11590` is named nowhere in the enumeration, and the pin-side `wc -l` list has no entry for
+    `mcp_server.py`.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    body = _unbolded(text)
+    _spellings, pairs = _resolved_pairs(text)
+
+    # (1) the table describes THIS document's population.
+    orphan = sorted(pair for pair in _PIN_EOF_PAIRS if pair not in pairs)
+    assert not orphan, (
+        f"the comparability split counts {orphan} as non-comparable census pairs, but this document no "
+        "longer writes a one-token spelling that resolves to them. Re-derive `_PIN_EOF_PAIRS` against the "
+        "cites the document carries now — do not drop the entry to make the split agree with itself."
+    )
+
+    # (2) every one of them is NAMED where the header promises to name them: the non-comparable enumeration,
+    # the sentence between "that are NOT comparable" and "past the pin's copy of its file". Either spelling
+    # form the document uses for a pair counts — `SDK/FILE:NNNN` (`sdk.py:57951`) or the bare `:NNNN`
+    # sibling behind an adjacent path (`search_engine.py`'s `:7196`).
+    start = body.find("that are NOT comparable")
+    end = body.find("past the pin's copy of its file")
+    assert start != -1 and end > start, (
+        "the header no longer publishes the non-comparable enumeration this split's figures describe "
+        f"(`that are NOT comparable` at {start}, `past the pin's copy of its file` at {end}) — re-point "
+        "this arm against how the split is published now, do not delete it"
+    )
+    region = body[start:end]
+    unnamed = sorted(
+        pair
+        for pair in _PIN_EOF_PAIRS
+        if not any(
+            form in region
+            for form in (
+                f"`{pair[0]}:{pair[1]}`",
+                f"`{pair[0].rsplit('/', 1)[-1]}:{pair[1]}`",
+                f"`:{pair[1]}`",
+            )
+        )
+    )
+    assert not unnamed, (
+        f"the comparability split counts {len(_PIN_EOF_PAIRS)} pairs as non-comparable but does not name "
+        f"{unnamed} at the address the document writes for it. A pair that left the comparable set is a "
+        "published figure moving: name it in that enumeration, and re-derive the counts the split states."
+    )
+
+    # (3) the published figures agree with the table and with each other.
+    comparable = _SPLIT_COMPARABLE.search(body)
+    noncomparable = _SPLIT_NONCOMPARABLE.search(body)
+    drift = _SPLIT_DRIFT.search(body)
+    absent = _SPLIT_ABSENT_AT_MAIN.search(body)
+    for found, what in (
+        (comparable, "`all N comparable ones resolve at BOTH heads`"),
+        (noncomparable, "`the N that are NOT comparable`"),
+        (drift, "`the drift is N of the M comparable, plus S of those T pairs`"),
+        (absent, "`the N that do not exist at `main` either`"),
+    ):
+        assert found is not None, (
+            f"the header no longer publishes {what} — the comparability split is a published claim, and "
+            "this arm cannot grade a sentence it cannot read. Re-point the pattern against how it is "
+            "written now, do not delete the arm"
+        )
+    expected_comparable = len(pairs) - len(_PIN_EOF_PAIRS)
+    assert int(comparable.group(1)) == expected_comparable, (
+        f"the header says `{comparable.group(1)}` comparable pairs, but this document measures {len(pairs)} "
+        f"pairs and `_PIN_EOF_PAIRS` holds {len(_PIN_EOF_PAIRS)} past the pin's EOF — so {expected_comparable} "
+        "are comparable. Re-measure the split, do not adjust the table to it."
+    )
+    assert _as_int(noncomparable.group(1)) == len(_PIN_EOF_PAIRS), (
+        f"the header says `{noncomparable.group(1)}` pairs are NOT comparable, but `_PIN_EOF_PAIRS` — the "
+        f"pin-side facts, `git show ccb49741b2ec:<path> | wc -l` against each pair's line — measures "
+        f"{len(_PIN_EOF_PAIRS)}. A pair that crossed the pin's EOF is the whole delta here."
+    )
+    comparable_denominator = int(drift.group(2))
+    assert comparable_denominator == expected_comparable, (
+        f"the drift sentence names `of the {comparable_denominator}` comparable pairs while the split's own "
+        f"denominator measures {expected_comparable} — the ratio has to name the population it was taken over"
+    )
+    # The incomparable half splits in two: the pairs that DO exist at the named `main` (and so drift) and the
+    # ones that exist at neither head (and so cannot be compared at all). Both counts are published, and they
+    # must add up to the population `_PIN_EOF_PAIRS` measures — which is what makes "eight of those eleven"
+    # checkable rather than asserted.
+    drifters_incomparable = _as_int(drift.group(3))
+    absent_at_main = _as_int(absent.group(1))
+    assert drifters_incomparable + absent_at_main == len(_PIN_EOF_PAIRS), (
+        f"the split says {drifters_incomparable} of its non-comparable pairs drift and {absent_at_main} "
+        f"exist at neither head — {drifters_incomparable + absent_at_main} in all, but the pin-side facts "
+        f"measure {len(_PIN_EOF_PAIRS)} non-comparable pairs. Every one of them is in exactly one half."
+    )
+    assert _as_int(drift.group(4)) == len(_PIN_EOF_PAIRS), (
+        f"the drift sentence names `of those {drift.group(4)} pairs` while the split counts "
+        f"{len(_PIN_EOF_PAIRS)} non-comparable pairs"
+    )
+    # The pinned `wc -l` values ARE the membership rule, so the header has to state the one for every file a
+    # non-comparable pair lives in — the pin-side fact a reader checks, and the entry `#14246` was missing.
+    for (path, _line), pin_lines in _PIN_EOF_PAIRS.items():
+        stated = (
+            f"{path} | wc -l` -> `{pin_lines}`" in body
+            or f"…/{path.rsplit('/', 1)[-1]}` -> `{pin_lines}`" in body
+        )
+        assert stated, (
+            f"the split's non-comparable membership rests on `{path}` being {pin_lines} lines at the pin, "
+            "but the header's pin-side `wc -l` parenthetical does not state it. Without that figure the "
+            "five numerals above are unverifiable prose, which is how they shipped wrong."
+        )
 
 
 def test_a_carried_forward_figure_is_reported() -> None:
@@ -1967,15 +2115,19 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 61 -> 62 at the #13854 fix lane: the vector-index-parity plan's reader row was re-pointed to
     # `hosted_backup.py:1548` (a comment) for `_index_has_is_operator()`, which was `:2666` at that lane's head
     # — and that document had NO pin at all, so nothing would have reddened the next rotation of it.
-    # 62 -> 63 after #13879's merge: §2.5's `:Tag` row cites `mcp_server.py:11590` (`:11281` as written
-    # then, re-pointed by `#14169`), re-derived from the
+    # 62 -> 63 after #13879's merge: §2.5's `:Tag` row cites `mcp_server.py:11281` (that head's
+    # spelling — `#14169` has since moved the live address to `:11590`), re-derived from the
     # pin-head `10730`, and NOTHING read it — the same class as the `:6989` and `hosted_backup.py:2683`
     # rows above.
     # 63 -> 64 at the #13992 review (P2): the SAME address is written TWICE in the document, and the
-    # row above pins only the §2.5 spelling (`mcp_server.py:11590`) — the header enumerates it BARE as
-    # `:11590`, where no row and no count reached. Reverting just the header half left every arm green,
-    # measured above. One ROW per SITE, never one row per STRING: `:8515`/`:5720` on that same header
-    # line are the neighbours that already carry their own bare-token row.
+    # row above pins only the §2.5 spelling (`mcp_server.py:11590` now, `:11281` then) — the header
+    # enumerated it BARE as
+    # `:11281` THEN, where no row and no count reached; it enumerates the live `:11590` now, which the
+    # bare-token row above does reach. Reverting just the header half left every arm green, measured
+    # above. One ROW per SITE, never one row per STRING: `:8515` (then `:8206`) sits on that same
+    # header line and is the neighbour that already carries its own bare-token row — ⛔ `:5720` is NOT
+    # on that line: its bare sites are the `:5529` passthrough parenthetical and §2.5's table row,
+    # which the `:5720` row covers.
     # 68 -> 72 at the #14043 review (finding 3): four addresses the revision writes at THIS head were
     # in neither the header's enumeration nor `_PINS`, so the header's reader rule sent a reader to the
     # pin, where none of them opens. Same shape as the `:6989` / `hosted_backup.py:2683` rows above:

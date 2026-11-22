@@ -1243,6 +1243,12 @@ SWEEP_NAMES = 66
 #: readings of different pairs of trees; the evidence is the `--repin` run on THIS tree. Every added
 #: shape is an ordinary-word receiver this counter exists to REPORT, not a typed SDK call site, so
 #: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
+#: ⛔ AND RE-MEASURED A THIRD TIME after merging `origin/main` `70fbd1a27d`, which moved
+#: `tortoise/sdk.py` and `tortoise/search_engine.py` again: `--repin` STILL prints
+#: `(11864, "2a6400518a87775c")` on that merged tree and `--check` exits 0 there. The pair did not
+#: move because neither side's new lines carry a receiver shape this sweep counts — the same
+#: measurement, not the previous one carried, and the same rule as every block above: re-run
+#: `--repin` on the tree, and re-pin only what it prints.
 SWEEP_RESIDUE = (11864, "2a6400518a87775c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

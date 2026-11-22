@@ -312,10 +312,13 @@ three `#14012` suites removed from the pool it STILL emits **25 m** at **720.6**
 separate on this tree either, because the cliff is still exactly 720.0 and the three-removed arm now
 sits 0.6 s above it. ⛔ THAT IS 0.4 s PAST the `720.7` / `720.2` pair the block above reads at the
 previous merge, and the 0.4 s is ATTRIBUTED BY SUBTRACTION rather than inferred: this branch adds no
-pool row (the merged manifest is `origin/main` `10e51693f1`'s, byte-identical — the ref moves, the
-blob named here does not), and the SAME manifest with only
+pool row (the merged manifest is `origin/main` `70fbd1a27d`'s, byte-identical — the ref moves, the
+blob named here does not, and the same was true of `10e51693f1`, the previous merge target, whose file
+`main`'s `#14272` then moved by `+3`/`-4` without moving the emission), and the SAME manifest with only
 `main`'s two `#14192` registrations — `test_14192_beta_variance_sum_bound.py` and
-`test_14192_read_wave_tool.py` — dropped from the pool emits **720.7**, so no other row moved. The
+`test_14192_read_wave_tool.py` — dropped from the pool emits **720.7**, so no other row moved. Both
+arms and the subtraction were re-measured after merging `70fbd1a27d` and read the same three numbers,
+which is the only reason they are stated once rather than a third time. The
 pool's composition here, re-read from the emission rather than carried: `#14012`'s three on shards
 `d`, `e`, `i` (`test_14012_resident_cli`, `test_14012_resident_pin`, `test_14012_outside_view`) and
 `#14015`'s M5 `test_miss_rate_m5` on shard `j` — ⛔ NOT the `d`/`resident_cli` placement an earlier
