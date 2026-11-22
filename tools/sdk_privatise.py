@@ -1128,11 +1128,14 @@ SWEEP_NAMES = 66
 #: could not stand for a tree that merged `94d75667dc` — which is why 11858 is not a fabrication
 #: and still not this tree's pin. Everything after this point is the current record.
 #:
-#: ⛔ RE-CUT AGAIN → (11861, "f0647020531c078c"). The 11858 pair does NOT reproduce on the tree
-#: that commits it: `--check` on a detached worktree of `10e51693f1` reports 11861 against its own
-#: 11858 — so the red `94d75667dc` started was still there at the commit that re-pinned over it,
-#: and every PR cut from that tree inherits it. Whatever reading produced 11858, it was not a
-#: reading of THIS tree.
+#: ⛔ RE-CUT AGAIN → (11861, "f0647020531c078c"). The 11858 pair does NOT reproduce on
+#: `10e51693f1` — the MAIN commit that carries it. ⛔ Named, not classed: TWO trees pin that pair,
+#: and the other one, `917ae19efd` (the branch commit above, not an ancestor of this head), is
+#: where it DOES reproduce exactly — so "the tree that commits it" is not one tree, and this
+#: sentence may not say it is. On `10e51693f1`, `--check` in a detached worktree reports 11861
+#: against its own 11858 — so the red `94d75667dc` started was still there at the commit that
+#: re-pinned over it, and every PR cut from that tree inherits it. Whatever reading produced
+#: 11858, it was not a reading of THIS tree.
 #: THE THREE ROWS, ATTRIBUTED BY MEASUREMENT, one commit: `--check` on `94d75667dc^` exits 0 and
 #: on `94d75667dc` reports (11860, "57e0960ca6f20f5a") — so `94d75667dc` (#14224, the read-wave
 #: harness) is where the drift starts, and a whole-tree row-set diff `e74cf1d13d → 13b6b49fe9`
