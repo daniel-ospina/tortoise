@@ -696,11 +696,12 @@ def test_an_INDETERMINATE_applied_is_REFUSED_not_counted_as_a_projection():
     # ⛔ AND WITH NO READABLE `applied` AT ALL (#14222 review round 19, P3): the
     # absent-attribute arm returned `record_no_outcome` before the decline was
     # ever consulted, so this shape was the last false loss among outcomes whose
-    # `applied` is READABLE — while `live_write` reads the token independently of
-    # `applied`. ⛔ NOT the last false loss, full stop: an outcome whose `applied`
-    # property RAISES is read before this arm, so the caller's `try` maps it to
-    # `record_no_outcome` and it is still counted as a loss (deliberate, see the
-    # production comment) — that shape is pinned by the caller, not by this leg.
+    # `applied` READ does not RAISE — while `live_write` reads the token
+    # independently of `applied`. ⛔ NOT the last false loss, full stop: an outcome
+    # whose `applied` property RAISES is read before this arm, so the caller's
+    # `try` maps it to `record_no_outcome` and it is still counted as a loss
+    # (deliberate, see the production comment) — that shape is pinned by the
+    # caller, not by this leg.
     assert projection_worker._classify_fold_outcome(
         types.SimpleNamespace(refusal=decline), 1) is None, (
         "an outcome carrying the seam's healthy-decline token but no readable "
