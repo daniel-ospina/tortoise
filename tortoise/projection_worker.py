@@ -62,13 +62,15 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    (a) A DECLINE by the bound or by a stopping worker (``queue_full`` /
    ``worker_stopping``), which is what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls.
    (b) A DECLINE from a FAULT, equally depth-independent: ``uncopyable`` (the
-   record could not be deep-copied) and ``queue_fault`` (the consumer could not be
-   started). (c) The STRUCTURAL arms, which fold inline on EVERY write at ANY
-   depth, including an idle queue: ``journal_skipped`` (a record-only write),
+   deep snapshot in :func:`submit` failed, so a write that would otherwise already
+   be queued folds inline) and ``queue_fault`` (the consumer could not be started;
+   published before it propagates). Both are counted under
+   ``tortoise_record_projection_inline_fallbacks_total`` and are not configurable
+   away. (c) The STRUCTURAL arms, which fold inline on EVERY write at ANY depth,
+   including an idle queue: ``journal_skipped`` (a record-only write),
    ``record_sink`` (a door that reads the outcome), a non-durable log, and
    ``tenant is None`` (the ``api.EventAPI._emit`` / ``ConversationMiner._emit_event``
-   shape). ``monitoring.record_projection_inline_fallback`` counts (a) and (b) by
-   reason; (c) is this package's gate and reaches no counter. So raising the bound
+   shape). (c) is this package's gate and reaches no counter. So raising the bound
    does NOT remove this residual — it only makes (a) rarer, and a same-tenant
    queued write can be overtaken by a fault or structural fold at zero depth.
    Nothing detects it: both
@@ -743,7 +745,8 @@ class ProjectionWorker:
           processes — and the EPOCH bump is what makes a SNAPSHOT FROM THE PARENT
           unmatchable;
         * **THE THIRD PARTY'S LOCKS TOO**, one layer down: ``prometheus_client``
-          gives every metric family a ``_lock`` and every ``MutexValue`` its own,
+          gives every ``MutexValue`` a ``_lock`` (and a ``Counter`` family one; a
+          plain ``Gauge`` family carries none),
           plain ``threading.Lock``s a child inherits from a peer that did not
           survive the ``fork()``. ``set``, ``inc``, ``get``, ``labels`` and
           ``collect`` all take one, and a blocked lock is not an exception, so the
@@ -857,8 +860,12 @@ class ProjectionWorker:
                         "as a failure rather than assumed to have written "
                         "(#14185)",
                         type(exc).__name__, exc, item.seq)
-            # ⛔ ALL THREE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
-            # never from a value captured at POP time (#14222 review P1-1). The
+            # ⛔ BOTH VALUE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
+            # never from a value captured at POP time (#14222 review P1-1). ⛔ TWO,
+            # not three (review round 11, P3): `_stamp_locked` carries epoch, seq,
+            # depth and positions — NO AGE. The age is recomputed on `collect`
+            # (`PROJECTION_OLDEST_PENDING_SECONDS.set_function`), so a reader
+            # chasing a wrong age belongs in `monitoring`, not here. The
             # pop-time depth counts the item that is about to be folded, so
             # publishing it after the fold reports "1 owed" for a DRAINED queue
             # and "1 owed" for a backlog of 100 — an alert on `depth > 0` would
