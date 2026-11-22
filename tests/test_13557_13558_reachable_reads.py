@@ -1907,7 +1907,12 @@ def test_the_pronoun_subject_parity_gap_is_a_DECLARED_loss_not_an_unstated_one()
     Measured at `6821050cf2`. The `is_copula` post-subject adverb slot names six
     adverbials, and a determiner subject does not depend on it — the noun-phrase run
     swallows the adverb — while the bare-pronoun branch may not. So the two subject
-    classes disagree wherever an adverbial outside that slot is used:
+    classes disagree wherever an adverbial OUTSIDE that slot is used AND the determiner
+    twin still routes — ⛔ not a universal over the adverb vocabulary (turn-5 review, P3,
+    measured): `now` is a member of `_EXISTENCE_ADVERB` and outside the slot, and BOTH
+    subjects are silent for it (`is the export now archived` and `is it now archived` are
+    both `population=None`), because `now` is refused by the subordinator guard — the
+    module states that itself twenty lines above:
 
         `is the export recently archived`  -> ended / is_copula
         `is it recently archived`          -> population=None, signal=None

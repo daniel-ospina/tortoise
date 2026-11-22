@@ -1441,8 +1441,14 @@ _COPULA_SUBJECT = (
 #: noun-phrase run swallows the adverb, while the bare-pronoun branch may not, so the six-member
 #: slot is the only thing standing between a pronoun subject and its answer: **the pronoun's
 #: routing set is EXACTLY that slot** (derive it from :data:`_COPULA_PREFIX` — every member routes
-#: behind a pronoun, and an adverbial outside the slot goes SILENT there while the determiner twin
-#: still routes). Measured example: `is the export recently archived` -> `ended`/`is_copula` while
+#: behind a pronoun, and an adverbial outside the slot goes SILENT there). ⛔ THE DETERMINER HALF IS
+#: "USUALLY ROUTES", NOT "ALWAYS" (turn-5 review, P3, measured): `now` is a member of
+#: :data:`_EXISTENCE_ADVERB` and is OUTSIDE the slot, but BOTH subjects are silent for it —
+#: `is the export now archived` and `is it now archived` are both `population=None, signal=None`,
+#: because this file's own note twenty lines up says `now` is refused by the SUBORDINATOR GUARD, not
+#: routed. So the gap is "outside the slot AND the determiner twin routes", and stating it as a
+#: universal overstates it in the direction this lane has spent rounds removing. Measured example:
+#: `is the export recently archived` -> `ended`/`is_copula` while
 #: `is it recently archived` is `population=None, signal=None`. The negative-question spelling is
 #: the sharpest, because it is this class's own decision: `isn't it archived` ROUTES while its
 #: uncontracted twin `is it not archived` is silent (`not` is not in :data:`_EXISTENCE_ADVERB` at
