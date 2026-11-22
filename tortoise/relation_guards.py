@@ -1,0 +1,523 @@
+"""The relation-PAIR leg — does a pack declare THIS predicate for THESE kinds? (#14263, #11656).
+
+The connect doors already check the **predicate** (#1934/#7551: is this verb in
+the declared vocabulary?) and the **mechanism** (#9963: does the declared
+mechanism of that verb agree with the ``op_type`` I am writing?). Neither of
+those asks the question `#11656` states as a rule:
+
+    **a declared relation connects only the kinds it declares.**
+
+So at the merged head a caller could mint ``Product --blocks--> Feature`` while
+no pack declares ``blocks`` for any pair of those kinds — the edge landed, EP
+priced it, and nothing in the reply said the pack had no such relation. The
+extractor never produces that shape, because it derives each kind's *edgemates*
+from the packs' declared ``relations`` and closes them to a fixpoint
+(``extractor_v2._select_pack_kinds``, ``#9733``); the write path had no such
+leg at all. This module is that leg.
+
+## What it decides — and what it deliberately does not
+
+Given ``(predicate, from_kind, to_kind)`` the verdict is one of four outcomes,
+and the FIRST two of them are the only ones that change anything:
+
+===============  ===============================================  ============
+outcome          when                                             reported?
+===============  ===============================================  ============
+``accept``       the pack declares this predicate for this pair    never
+``normalised``   …or it does, and only the SPELLING differed      never (§1)
+``undeclared``   the predicate is declared, but never for this    always
+                 pair (and not for the reverse pair either)
+``reversed``     the predicate is declared for the reverse pair   always —
+                 and not for the pair as asked                    a DIFFERENT
+                                                                  state (§2)
+``abstained``    the declarations cannot answer (predicate not    never
+                 declared at all, kinds unresolved, registry
+                 unreadable)
+===============  ===============================================  ============
+
+⛔ **NO REFUSAL IS PRODUCIBLE HERE.** ``#1934`` (owner decision, governance
+D1/D2) is warn-not-block on the write doors, and ``docs/ax/ax-principles.md``
+Rule 2's admission test makes a refusal *unwritable* in the ordinary case: for
+an undeclared pair there is nothing the caller can correct — the pack simply
+declares no relation between those two kinds, and the only "fix" is a pack
+edit, which is not a write-time correction. So the write lands as asked and the
+reply carries the honest state. ``tests/test_relation_guards_14263.py`` asserts
+no input can reach a refusal.
+
+⛔ **AND NO ``redirect`` IS PRODUCIBLE — stated, because the absence is a
+decision.** ``#12060``'s contract prefers a redirect over a refusal *when the
+right home is known*. Substituting the caller's predicate for another one the
+pack declares between the same kinds is NOT "a known home": the predicate is the
+edge's MEANING, and swapping it silently rewrites what EP prices (``#9963``
+measured exactly that class — an ``IMPL`` spelling over a relation declared
+``NAND`` raised the target where the declaration lowered it). A predicate
+substitution table would also be a pack-schema addition, which is out of
+scope. What the guard can do instead is name the declared alternatives in the
+reply (``declaredBetweenTheseKinds``), which is the actionable half of a
+redirect without the semantic guess.
+
+## The AX contract (``docs/ax/ax-principles.md`` §1)
+
+Rule 1 splits two classes by **opposite reporting rules**, and both appear here:
+
+* a **re-spelling of the same value** — ``grounded_in`` for a declared
+  ``groundedIn``, or a bare ``feature`` for ``product-strategy:feature`` — is
+  format variance and is applied **silently** (``normalised``). A receipt for it
+  would ask the caller to re-express something we already understood;
+* **supplying a meaning** — asserting that this edge is declared when the pack
+  declares no such thing — is a claim about what the graph now contains, so it
+  is **echoed**: the reply carries the block below, and the warning shape that
+  ``#1934`` already ships (``warnings[]``) carries it too.
+
+The stable machine-readable field, so a client branches on data and never on
+English::
+
+    relation_declaration = {
+      "outcome":  "undeclared_pair" | "reversed_pair",
+      "predicate": "blocks",
+      "from":     "product-strategy:product",
+      "to":       "product-strategy:feature",
+      "rule":     "relation-pair-not-declared",     # WHY, as a stable id
+      "declaredFor": [{"fromKind": "pm:card", "toKind": "pm:card"}],
+      "declaredBetweenTheseKinds": [],              # predicates that DO connect them
+      "override": None,                             # nothing to override: accepted as asked
+      "undo":     "none — the write was stored exactly as asked",
+      "message":  "<the human AX block: state, why, what IS declared>",
+    }
+
+``override`` is ``None`` on purpose and is not a placeholder: ``#12060``'s
+override exists to suppress a change the guard would have made. This guard makes
+no change, so there is nothing to suppress — the honest statement is that the
+write was already accepted as asked. The key stays in the shape so a client can
+read it uniformly.
+
+## Cost
+
+The declarations are read lazily and the verdict is a dict lookup plus string
+folding — no model, no embedding, no graph read (``tests/
+test_relation_guards_14263.py`` asserts zero model calls). The SDK layer reads
+the two endpoint kinds only when the predicate is pack-declared at all: every
+core/structural predicate (``hasPart``, ``related``, ``references`` …) abstains
+before any read, which is the overwhelming majority of edge writes.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+#: The pack declares this predicate for exactly this pair — nothing to say.
+ACCEPT = "accept"
+#: The pack declares it, and only the SPELLING we were handed differed (§1:
+#: a re-spelling is normalised SILENTLY, so this outcome carries no payload).
+NORMALISED = "normalised"
+#: The predicate is declared, but never for this pair in either orientation.
+UNDECLARED_PAIR = "undeclared_pair"
+#: The predicate is declared for the REVERSE pair and not for the pair asked.
+#: A separate state from ``UNDECLARED_PAIR`` on purpose — ``docs/ax/
+#: ax-principles.md`` §2: the reported state must not flatten different
+#: failures into one label, and "you have the ends the wrong way round" is a
+#: different fact from "the pack has no such relation".
+REVERSED_PAIR = "reversed_pair"
+#: The declarations cannot answer. Never a failure, never reported: abstaining
+#: is what keeps a write from depending on which packs happen to be installed
+#: (``#12060`` R4, the same rule the kind guards obey).
+ABSTAIN = "abstain"
+
+#: Stable rule ids, so a client branches on data rather than on our prose.
+RULE_UNDECLARED = "relation-pair-not-declared"
+RULE_REVERSED = "relation-pair-reversed"
+
+#: Reasons an abstention fired. Also stable ids — an abstention is silent in the
+#: REPLY, but a test (and a future counter) must be able to tell which premise
+#: was missing, exactly as ``kind_redirect_skipped`` does for the kind guards.
+ABSTAIN_NO_PREDICATE = "no-predicate"
+ABSTAIN_NOT_DECLARED = "predicate-not-declared"
+ABSTAIN_NO_KINDS = "endpoint-kind-unresolved"
+ABSTAIN_UNREADABLE = "declarations-unreadable"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Spelling folds — the ONE place a token is re-spelled (AX Rule 1, class 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _fold(text: object) -> str:
+    """Fold a token to its spelling-insensitive key.
+
+    Case, surrounding blank, and the three separator characters a caller
+    plausibly substitutes (``_``, ``-``, space) all fold away, so
+    ``grounded_in``, ``grounded-in`` and ``GroundedIn`` all reach the same key
+    as the declared ``groundedIn``. Nothing else folds: a folded key is only
+    ever used to RECOGNISE a declared spelling, never to invent one.
+    """
+    if not isinstance(text, str):
+        return ""
+    out = text.strip().lower()
+    for ch in ("_", "-", " ", "\t"):
+        out = out.replace(ch, "")
+    return out
+
+
+def _local(kind: object) -> str:
+    """The LOCAL half of a ``ns:kind`` spelling (``dev:epic`` → ``epic``).
+
+    A bare kind is its own local half. Used only for the endpoint-kind
+    re-spelling leg below — never to compare two namespaced kinds, which must
+    agree on the namespace too.
+    """
+    if not isinstance(kind, str):
+        return ""
+    return kind.strip().rpartition(":")[2]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The declarations, read in ONE place
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def declared_relation_pairs() -> dict[str, tuple[tuple[str, str], ...]] | None:
+    """``{predicate: ((fromKind, toKind), ...)}`` over every loaded pack.
+
+    ``None`` means the declarations could not be read (no registry, an
+    unreadable row). Every caller must **fail open** on it — abstain, never
+    refuse — because the destructive direction is judging a write against a
+    vocabulary this module could not see.
+
+    Lazy import of ``domain_loader`` for the same reason
+    ``pack_registry.declared_relation_predicates`` uses one: ``domain_loader``
+    imports ``pack_registry``, so a module-scope import is a cycle.
+    """
+    try:
+        from .domain_loader import _get_registry
+
+        reg = _get_registry()
+        if reg is None:
+            return None
+        rows = reg.list_relations()
+        if not isinstance(rows, list):
+            return None
+    except Exception:  # noqa: BLE001, RUF100 — never raise into a caller's gate
+        return None
+    out: dict[str, list[tuple[str, str]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        predicate = row.get("predicate")
+        if not isinstance(predicate, str) or not predicate.strip():
+            continue
+        # Both manifest generations: v3 spells ``fromKind``/``toKind``, the
+        # legacy rows spell ``from``/``to``. ``list_relations`` preserves the
+        # row's own generation, so BOTH are read here rather than one being
+        # treated as "the" shape and silently dropping the other's pairs.
+        from_kind = row.get("fromKind", row.get("from"))
+        to_kind = row.get("toKind", row.get("to"))
+        if not isinstance(from_kind, str) or not isinstance(to_kind, str):
+            # A row declaring no endpoint pair constrains no pair. It stays
+            # DECLARED as a predicate (``declared_relation_predicates`` owns
+            # that answer); it simply contributes nothing to the pair leg.
+            continue
+        out.setdefault(predicate.strip(), []).append(
+            (from_kind.strip(), to_kind.strip()))
+    return {pred: tuple(pairs) for pred, pairs in out.items()}
+
+
+def canonical_predicate(
+    predicate: object,
+    declared: dict[str, tuple[tuple[str, str], ...]] | None = None,
+) -> str | None:
+    """The DECLARED spelling of ``predicate``, or ``None`` when it is not one.
+
+    An exact match wins outright. Otherwise the fold is tried, and it is
+    accepted **only when exactly one declared spelling folds to it** — a fold
+    two declared predicates share names no single relation, and picking one is
+    the guess this module exists to avoid (``docs/ax/ax-principles.md`` §2:
+    "Never normalize a *meaning*"). A retired spelling keeps getting no match
+    here, exactly as it keeps warning on the write path.
+    """
+    if not isinstance(predicate, str) or not predicate.strip():
+        return None
+    want = predicate.strip()
+    if declared is None:
+        declared = declared_relation_pairs()
+    if declared is None:
+        return None
+    if want in declared:
+        return want
+    key = _fold(want)
+    if not key:
+        return None
+    hits = [spelling for spelling in declared if _fold(spelling) == key]
+    return hits[0] if len(hits) == 1 else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The verdict
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class PairVerdict:
+    """What the declarations say about one proposed edge.
+
+    ``outcome`` is one of the module constants. ``payload`` is the AX block —
+    present exactly when the outcome is REPORTED (``UNDECLARED_PAIR`` /
+    ``REVERSED_PAIR``) and ``None`` otherwise, so a caller can attach it without
+    asking which outcomes are silent. ``predicate`` is the spelling to WRITE:
+    the declared one on a ``NORMALISED`` verdict, the caller's own otherwise.
+    """
+
+    outcome: str
+    predicate: str
+    from_kind: str | None = None
+    to_kind: str | None = None
+    payload: dict | None = None
+    reason: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        """Is the write's own statement of itself declared and correct?"""
+        return self.outcome in (ACCEPT, NORMALISED)
+
+    @property
+    def reportable(self) -> bool:
+        """Should the reply carry the honest state?"""
+        return self.payload is not None
+
+
+def _abstain(reason: str, predicate: str, from_kind, to_kind) -> PairVerdict:
+    return PairVerdict(
+        outcome=ABSTAIN, predicate=predicate,
+        from_kind=from_kind if isinstance(from_kind, str) else None,
+        to_kind=to_kind if isinstance(to_kind, str) else None,
+        reason=reason)
+
+
+def _kind_equivalent(asked: str, declared: str) -> bool:
+    """Is the ASKED endpoint kind the SAME kind as the DECLARED one?
+
+    Exact spelling always matches. A BARE asked spelling (``feature``) matches a
+    namespaced declaration's local half (``product-strategy:feature``) — AX Rule
+    1 class 1, the same kind in a different form.
+
+    ⛔ A NAMESPACED asked spelling never matches across namespaces. ``dev:issue``
+    and ``pm:issue`` are different kinds that share a local name, and folding
+    them together is precisely the ambiguity the pack namespace exists to
+    remove — two packs really do declare ``issue`` (``packs/dev``,
+    ``packs/project-management``), so a fold there would let one pack's
+    declaration admit the other's kind.
+    """
+    if asked == declared:
+        return True
+    if ":" in asked:
+        return False
+    return bool(asked) and _local(declared) == asked
+
+
+def _pair_matches(pairs: tuple[tuple[str, str], ...],
+                  from_kind: str, to_kind: str) -> tuple[str, str] | None:
+    """The declared pair this asked pair IS, or ``None``.
+
+    Matched under ``_kind_equivalent`` in BOTH slots, and only when the match is
+    UNIQUE: a bare ``issue`` that two declared pairs resolve to names no single
+    relation, so it resolves to none of them rather than to an arbitrary one.
+    """
+    hits = [pair for pair in pairs
+            if _kind_equivalent(from_kind, pair[0])
+            and _kind_equivalent(to_kind, pair[1])]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _predicates_between(declared: dict[str, tuple[tuple[str, str], ...]],
+                        from_kind: str, to_kind: str) -> list[str]:
+    """Every predicate the packs declare between these two kinds, ANY orientation.
+
+    The actionable half of a redirect without the semantic guess: the reply can
+    say "these kinds connect only via ``contains``" rather than leaving the
+    caller to guess what the pack's own vocabulary offers. Resolved under the
+    same ``_kind_equivalent`` discipline as ``_pair_matches`` — an over-eager
+    hint is a false statement in an agent-facing reply.
+    """
+    out: list[str] = []
+    for predicate, pairs in declared.items():
+        for one, two in pairs:
+            forward = (_kind_equivalent(from_kind, one)
+                       and _kind_equivalent(to_kind, two))
+            reverse = (_kind_equivalent(from_kind, two)
+                       and _kind_equivalent(to_kind, one))
+            if forward or reverse:
+                out.append(predicate)
+                break
+    return sorted(out)
+
+
+def _human_block(*, outcome: str, predicate: str, from_kind: str, to_kind: str,
+                 declared_for: list[dict], between: list[str]) -> str:
+    """The AX human block — what happened, why, and what IS declared.
+
+    The two reported states carry DIFFERENT closing lines, because they are
+    different facts and ``docs/ax/ax-principles.md`` §2 forbids flattening them
+    into one label:
+
+    * ``reversed_pair`` — the pack declares this exact predicate for the reverse
+      orientation, so a correction IS nameable (re-issue with the ends swapped)
+      and the block says so. It is still not a REFUSAL: ``#1934`` makes the
+      write doors warn-not-block, and the caller may well have meant the
+      orientation it wrote.
+    * ``undeclared_pair`` — the pack declares no relation between these kinds in
+      either orientation, so there is nothing the caller can correct from the
+      write side. Rule 2's admission test is what licenses accepting it instead
+      of refusing: a refusal whose third part cannot be written must not exist.
+    """
+    if outcome == REVERSED_PAIR:
+        head = (f"relation {predicate!r} is declared only for the REVERSE "
+                f"orientation ({to_kind} -> {from_kind}), not for "
+                f"{from_kind} -> {to_kind}")
+    else:
+        head = (f"relation {predicate!r} is not declared between {from_kind} "
+                f"and {to_kind}")
+    lines = [head,
+             "  recorded: yes — the edge was written exactly as asked "
+             "(undeclared pairs are warn-not-block, #1934)"]
+    if declared_for:
+        rendered = ", ".join(
+            f"{row['fromKind']} -> {row['toKind']}" for row in declared_for)
+        lines.append(f"  this predicate IS declared for: {rendered}")
+    if between:
+        lines.append("  relations the packs DO declare between these two "
+                     f"kinds: {', '.join(between)}")
+    else:
+        lines.append("  relations the packs declare between these two kinds: none")
+    if outcome == REVERSED_PAIR:
+        lines.append(
+            f"  to match the declaration, re-issue with from/to swapped "
+            f"({to_kind} -> {from_kind}); keep this one if the reverse "
+            f"orientation is what you meant — the graph stored the direction "
+            f"you stated, so EP prices it that way.")
+    elif between:
+        lines.append(
+            f"  a declared alternative for this pair would mean a DIFFERENT "
+            f"edge than {predicate!r}, so this write was not redirected to "
+            f"one: choose from the list above if that is the meaning you "
+            f"intended.")
+    else:
+        lines.append(
+            "  nothing to correct: the pack declares no relation for this "
+            "pair, so there is no right home to redirect the write to. "
+            "Declaring one is a pack change (ontology.relations), not a write "
+            "change.")
+    return "\n".join(lines)
+
+
+def relation_pair_verdict(
+    predicate: object,
+    from_kind: object,
+    to_kind: object,
+    *,
+    declared: dict[str, tuple[tuple[str, str], ...]] | None = None,
+) -> PairVerdict:
+    """Decide one proposed edge against the packs' declared relations.
+
+    Pure except for the lazy declarations read (pass ``declared=`` to make it
+    fully pure). Never raises: an unreadable declaration set, an unknown
+    predicate or an unresolved kind all **abstain**, which is the fail-open
+    direction every gate in this repo takes (a write must not depend on what
+    this module could manage to read).
+
+    ``from_kind``/``to_kind`` of ``None`` mean "the caller could not resolve
+    what these endpoints ARE" — distinct from "resolved to a kind no pack
+    declares", which is a verdict. Unresolved abstains.
+    """
+    raw_predicate = predicate.strip() if isinstance(predicate, str) else ""
+    if not raw_predicate:
+        return _abstain(ABSTAIN_NO_PREDICATE, "", from_kind, to_kind)
+    if declared is None:
+        declared = declared_relation_pairs()
+    if declared is None:
+        return _abstain(ABSTAIN_UNREADABLE, raw_predicate, from_kind, to_kind)
+
+    canonical = canonical_predicate(raw_predicate, declared)
+    if canonical is None:
+        # The PREDICATE leg owns this case (#1934/#7551 already warn
+        # ``undeclared_relation``): there is no declared pair to compare
+        # against, so this leg has no premise and says nothing. Warning twice
+        # for one fact is how a warning stops carrying information.
+        return _abstain(ABSTAIN_NOT_DECLARED, raw_predicate, from_kind, to_kind)
+
+    if not (isinstance(from_kind, str) and from_kind.strip()
+            and isinstance(to_kind, str) and to_kind.strip()):
+        return _abstain(ABSTAIN_NO_KINDS, canonical, from_kind, to_kind)
+    from_kind = from_kind.strip()
+    to_kind = to_kind.strip()
+
+    pairs = declared.get(canonical, ())
+    matched = _pair_matches(pairs, from_kind, to_kind)
+    if matched is not None:
+        # A pure re-spelling (of the predicate or of a bare endpoint kind) is
+        # AX Rule 1 class 1 — SILENT. A receipt here would ask the caller to
+        # re-express something we already understood.
+        outcome = ACCEPT if canonical == raw_predicate else NORMALISED
+        return PairVerdict(outcome=outcome, predicate=canonical,
+                           from_kind=from_kind, to_kind=to_kind)
+
+    reversed_match = _pair_matches(pairs, to_kind, from_kind)
+    outcome = REVERSED_PAIR if reversed_match is not None else UNDECLARED_PAIR
+    rule = RULE_REVERSED if outcome == REVERSED_PAIR else RULE_UNDECLARED
+    declared_for = [{"fromKind": one, "toKind": two} for one, two in pairs]
+    between = _predicates_between(declared, from_kind, to_kind)
+    payload = {
+        "outcome": outcome,
+        "predicate": canonical,
+        "from": from_kind,
+        "to": to_kind,
+        "rule": rule,
+        "declaredFor": declared_for,
+        "declaredBetweenTheseKinds": between,
+        # No change was made, so there is nothing to override — see the module
+        # docstring. The key is present so a client reads one shape.
+        "override": None,
+        "undo": "none — the write was stored exactly as asked",
+        "message": _human_block(
+            outcome=outcome, predicate=canonical, from_kind=from_kind,
+            to_kind=to_kind, declared_for=declared_for, between=between),
+    }
+    return PairVerdict(outcome=outcome, predicate=canonical,
+                       from_kind=from_kind, to_kind=to_kind, payload=payload)
+
+
+def warning_shape(payload: dict) -> dict:
+    """The ``warnings[]`` entry for a reported verdict (``#1934``'s shape).
+
+    The same block the reply carries, under the ``code`` the write path already
+    uses for undeclared things — so a consumer that only reads ``warnings``
+    keeps working, and one that reads ``relation_declaration`` gets the stable
+    field. Never a second judgement: this is a rendering of ``payload``.
+    """
+    return {
+        "code": "undeclared_relation_pair",
+        "message": payload.get("message", ""),
+        "outcome": payload.get("outcome"),
+        "predicate": payload.get("predicate"),
+        "fromKind": payload.get("from"),
+        "toKind": payload.get("to"),
+        "declaredFor": list(payload.get("declaredFor") or ()),
+        "relation_declaration": dict(payload),
+    }
+
+
+__all__ = [
+    "ABSTAIN",
+    "ABSTAIN_NOT_DECLARED",
+    "ABSTAIN_NO_KINDS",
+    "ABSTAIN_NO_PREDICATE",
+    "ABSTAIN_UNREADABLE",
+    "ACCEPT",
+    "NORMALISED",
+    "REVERSED_PAIR",
+    "RULE_REVERSED",
+    "RULE_UNDECLARED",
+    "UNDECLARED_PAIR",
+    "PairVerdict",
+    "canonical_predicate",
+    "declared_relation_pairs",
+    "relation_pair_verdict",
+    "warning_shape",
+]
