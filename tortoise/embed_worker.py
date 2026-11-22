@@ -65,8 +65,9 @@ _HEARTBEAT_S = 1.0
 
 #: ⛔ MAKE AN UNVERIFIABLE PEER A REFUSAL. ``_peer_allowed`` fails OPEN where the
 #: kernel offers no peer credential, because the private ``0700`` socket directory
-#: is still in force and refusing every request would turn a hardening detail into
-#: an outage. That default is wrong for the one deployment where the directory does
+#: the CLIENT mints for the DEFAULT path is still in force (it is absent for an
+#: explicit shared path — see ``_peer_allowed``) and refusing every request would
+#: turn a hardening detail into an outage. That default is wrong for the one deployment where the directory does
 #: NOT protect the socket — an operator who points the lever at a shared path — so
 #: the posture is selectable rather than assumed (review: the peer check was
 #: fail-open at two points, with the macOS gap acknowledged and unimplemented).
@@ -128,8 +129,13 @@ def _peer_allowed(conn: socket.socket) -> bool:
     Direction of the read is the convergent one (vLLM, and the ``myunix.org``
     guidance it follows): reject a uid that is not ours. Where the kernel offers
     no peer credential at all, the failure is REPORTED and the connection is
-    allowed — the private directory is still in force, and refusing every request
-    on such a platform would turn a hardening detail into an outage.
+    allowed — rejecting every request on such a platform would turn a hardening
+    detail into an outage. ⛔ WHAT REMAINS IS CONDITIONAL (review P3, cycle 10):
+    the private ``0700`` directory the CLIENT mints for the DEFAULT socket path,
+    which does not exist when ``TORTOISE_EMBED_WORKER_SOCKET`` points at a shared
+    path. On that deployment the fail-open default protects nothing, which is
+    exactly why it is selectable (``ENV_WORKER_REQUIRE_PEER``) rather than
+    assumed.
     """
     global _peer_credential_note_emitted
     uid = _peer_uid(conn)
@@ -150,8 +156,10 @@ def _peer_allowed(conn: socket.socket) -> bool:
             _peer_credential_note_emitted = True
             _logger.warning(
                 "embed worker: this platform offers no SO_PEERCRED — peer "
-                "identity is unchecked; reliance is on the private socket "
-                "directory (0700). Set %s=1 to REFUSE instead (#14186)",
+                "identity is unchecked; what remains is the private directory the "
+                "CLIENT mints for the DEFAULT socket path, and that directory is "
+                "absent when TORTOISE_EMBED_WORKER_SOCKET points at a shared path. "
+                "Set %s=1 to REFUSE every client instead (#14186)",
                 ENV_WORKER_REQUIRE_PEER)
         return True
     if uid == os.getuid():

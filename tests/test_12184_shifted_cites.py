@@ -429,7 +429,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
     # 1, not 2 (#14220): the SITE moved to `:2950` (below) and the header's HISTORY cite kept
     # `:2921`, which the header arm guards verbatim.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2950`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2950`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37883`'): 1,
     # 3, not 2: the whole-node walk's address is written BARE at three sites — the header's pair
     # (`sdk.py:37883`/`:37906`), the proximity paragraph's "they are `:37883` and `:37906` now", and
@@ -2410,7 +2410,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     `_TOKEN_OCCURRENCES[':6989']` in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
     deletes the only protection on the entry that actually suffered the false correction. The document's
     own shape puts the DECLARED head's figure FIRST with this tree's after it in parens (`:33583`
-    there, `:33637` at this head), not the reverse.
+    there, `:34388` at this head), not the reverse.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     # ⛔ THE WHOLE ENUMERATION, not one entry (review cycle 3, F1). `#13466` re-pointed FOUR of its
@@ -2430,7 +2430,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "subject probe `:7025-7028`",
         "`subject_binding_available()` at `:7031-7044`",
         "index note `:3070`;",
-        "`capture_redactions` writer `:2876` (on this tree `:2921`)",
+        "`capture_redactions` writer `:2876` (on this tree `:2950`)",
         "walk `:4780-4784`",
         "operator leg `:6667`",
         "label scan `:4708-4710`",
@@ -2543,9 +2543,9 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     ("sdk.py:58315-58339", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
     ("sdk.py:58317-58339", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
     ("sdk.py:58317", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 8),
-    ("sdk.py:4265-4268", "tortoise/sdk.py", 4265, "\"s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL \"", 3),
-    ("sdk.py:4399-4406", "tortoise/sdk.py", 4404, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 2),
-    ("sdk.py:2898", "tortoise/sdk.py", 2898, "\"SET s.capture_redactions=$redactions \"", 1),
+    ("sdk.py:4294-4297", "tortoise/sdk.py", 4294, "\"s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL \"", 3),
+    ("sdk.py:4428-4435", "tortoise/sdk.py", 4433, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 2),
+    ("sdk.py:2927", "tortoise/sdk.py", 2927, "\"SET s.capture_redactions=$redactions \"", 1),
     ("sdk.py:31533", "tortoise/sdk.py", 31533, "\"MATCH (t:Tag) \"", 1),
     ("sdk.py:31551", "tortoise/sdk.py", 31551, "\"MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) \"", 1),
     ("sdk.py:24513", "tortoise/sdk.py", 24513, "\"MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) \"", 1),
@@ -2578,18 +2578,30 @@ def test_the_13854_cite_families_open_on_the_line_they_quote() -> None:
     under it moves.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    #: ⛔ COLLECT, DO NOT ABORT AT THE FIRST ROW (review P2, cycle 10). Asserting
+    #: inside the loop meant one row that was ALREADY red at the base (here
+    #: `sdk.py:18035`) masked every later row: three cites this PR's own +29
+    #: insertions moved went unreported, and the suite still read "the same five
+    #: base failures", so the masking was invisible. A gate that reports only the
+    #: first defect of a class is how the rest of that class ships.
+    failures: list[str] = []
     for token, path, line, fragment, expected in _REDEFINED_13854:
-        assert text.count(token) == expected, (
-            f"{_AUDIT} carries {token!r} {text.count(token)}x, not {expected}x — a SITE was re-pointed "
-            "while a sibling kept the string. Re-derive by CONTENT and update the count."
-        )
+        if text.count(token) != expected:
+            failures.append(
+                f"{_AUDIT} carries {token!r} {text.count(token)}x, not {expected}x — a SITE was "
+                "re-pointed while a sibling kept the string. Re-derive by CONTENT and update the count.")
+            continue
         target = (REPO / path).read_text(encoding="utf-8").splitlines()
-        assert 0 < line <= len(target), f"{path} has no line {line}"
-        assert fragment in target[line - 1], (
-            f"{path}:{line} no longer carries {fragment!r} — it reads {target[line - 1].strip()[:96]!r}. "
-            "The cite is bound to a line, so re-derive it from the row's own quoted fragment instead of "
-            "moving it by a delta."
-        )
+        if not 0 < line <= len(target):
+            failures.append(f"{path} has no line {line}")
+            continue
+        if fragment not in target[line - 1]:
+            failures.append(
+                f"{path}:{line} no longer carries {fragment!r} — it reads "
+                f"{target[line - 1].strip()[:96]!r}. The cite is bound to a line, so re-derive it from "
+                "the row's own quoted fragment instead of moving it by a delta.")
+    assert not failures, (
+        f"{len(failures)} row(s) failed:\n" + "\n".join(failures))
 
 
 def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
