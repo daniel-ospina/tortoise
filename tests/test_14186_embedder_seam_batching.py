@@ -41,6 +41,7 @@ import math
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -3620,3 +3621,215 @@ class TestTheExpansionPassStatesItsTrueCost:
             "a SECOND round trip on a remote backing — an operator arming "
             "TORTOISE_ENTITY_KEY_DENSE then has nothing at the call site telling "
             "them the encode is not free")
+
+
+class TestTheDeclineHasALanding:
+    """#14332 review P2/P3: the cold-write decline must land, and two windows.
+
+    ⛔ P2, the product defect. ``backing_booting()`` answers ``True`` for a
+    backing that was NEVER CONSTRUCTED, so a bounded write declines with
+    ``backing_cold`` — "not warm *yet*". In a process that issues ONLY bounded
+    writes, nothing ever constructed that backing either, so "yet" never arrived:
+    ``_peek_backing()`` stayed ``None`` for the life of the process and every
+    derived fold stayed vectorless. The rows below pin the LANDING (the warm) and
+    the call from the decline into it. Mutants they redden on:
+
+    * delete ``embed_seam.warm_backing_async()`` from
+      ``EmbeddingModel.await_write_ready_reason``'s cold arm — the spy row;
+    * make ``warm_backing_async`` a no-op that returns ``True`` — the landing
+      row, because the backing never becomes peekable;
+    * drop the once-guard — the second call would start a second thread.
+
+    ⛔ P3, ``stop()``'s window. ``_run`` checked ``_stop`` before ``_fire``, never
+    inside it, so a ``stop()`` landing between the two still fired a batch and
+    re-resolved a backing through the factory — constructing a worker after
+    teardown had promised it closed none. The mutant is deleting either of the
+    two guards inside ``_fire``.
+    """
+
+    def test_a_bounded_write_starts_the_warm_it_declines_on(
+            self, monkeypatch):
+        """The ``backing_cold`` decline is not a dead end: it starts the landing."""
+        from tortoise import embeddings as embeddings_module
+
+        started: list[bool] = []
+        monkeypatch.setattr(
+            embed_seam, "encodes_in_process", lambda: False)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+        monkeypatch.setattr(
+            embed_seam, "warm_backing_async",
+            lambda: (started.append(True), True)[1])
+
+        reason = embeddings_module.EmbeddingModel.await_write_ready_reason(0.05)
+
+        assert reason == embeddings_module._WRITE_DECLINE_BACKING_COLD, (
+            "the cold-boot arm must still DECLINE — a bounded write must never "
+            f"pay the worker's boot (got {reason!r})")
+        assert started == [True], (
+            "the decline did not start the warm that makes \u201cnot warm yet\u201d "
+            "true: in a process that issues only bounded writes, nothing else "
+            "ever constructs the backing, so `_peek_backing()` stays None for "
+            "the life of the process and the derived folds stay vectorless "
+            "(#14332 review P2)")
+
+    def test_the_warm_lands_the_backing_exactly_once(self, monkeypatch):
+        """The warm CONSTRUCTS the backing (so a later write stops declining)."""
+        embed_seam.reset_seam()
+        recorder = _RecordingBacking()
+        constructed: list[str] = []
+
+        def _construct(name: str):
+            constructed.append(name)
+            return recorder
+
+        monkeypatch.setattr(embed_seam, "_construct", _construct)
+        try:
+            assert embed_seam.warm_backing_async() is True, (
+                "the first warm must report that it STARTED one")
+            thread = embed_seam._warm_thread
+            assert thread is not None
+            thread.join(timeout=10)
+            assert not thread.is_alive(), "the warm thread never finished"
+            assert constructed, (
+                "the warm returned without CONSTRUCTING a backing — it must "
+                "land the backing, not merely report intent")
+            assert embed_seam._peek_backing() is recorder, (
+                "the warm did not land the backing: `_peek_backing()` still "
+                "answers something else, so the next bounded write declines on "
+                "the same cold answer")
+            assert len(constructed) == 1, (
+                f"the backing was constructed {len(constructed)} time(s) — a "
+                "warm run more than once per landing leaks a process each time")
+            assert embed_seam.warm_backing_async() is False, (
+                "a second warm was STARTED over an already-landed backing")
+        finally:
+            embed_seam.reset_seam()
+
+    def test_the_warm_never_starts_over_an_injected_backing(self):
+        """A hermetic backing is what the next encode uses — never boot behind it."""
+        embed_seam.reset_seam()
+        recorder = _RecordingBacking()
+        embed_seam.install_backing(recorder)
+        try:
+            assert embed_seam.warm_backing_async() is False, (
+                "a warm was started while a backing was INJECTED — that spawns a "
+                "real worker inside a hermetic row and retires the test's own "
+                "backing")
+        finally:
+            embed_seam.reset_seam()
+
+    def test_a_stop_landing_in_the_backing_factory_does_not_encode(self):
+        """A ``stop()`` between the pre-fire check and the factory is still a stop.
+
+        REDDENING MUTANT: delete either ``if self._stop:`` guard inside
+        ``_Collector._fire`` — the batch then encodes on a stopped collector and
+        (in production) re-resolves a backing after teardown.
+        """
+        recorder = _RecordingBacking()
+        collector: embed_seam._Collector
+
+        def _factory():
+            # The ``stop()`` lands HERE: after ``_run``'s own check, before the
+            # encode — the exact window #14332's review names (P3).
+            collector._stop = True
+            return recorder
+
+        collector = embed_seam._Collector(_factory)
+        answer: list = []
+
+        def _submit() -> None:
+            try:
+                answer.append(("ok", collector.submit("x", timeout_s=1.0)))
+            except BaseException as exc:  # recorded, asserted below
+                answer.append(("err", exc))
+
+        thread = threading.Thread(target=_submit, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), (
+            "the submit never returned — a stopped collector parked its caller "
+            "instead of declining it")
+        assert answer, "the submit recorded no outcome"
+        kind, value = answer[0]
+        assert kind == "err" and isinstance(value, RuntimeError), (
+            f"a stopped collector answered a ticket with {value!r} instead of "
+            "declining it")
+        assert "stopped" in str(value), (
+            f"the decline does not name the stop: {value!r}")
+        assert recorder.batches == [], (
+            "the collector ENCODED a batch after `stop()` had been set — that is "
+            "work the deployment already tore down, and the factory call above it "
+            "is where a fresh worker gets constructed and never closed")
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` exists — the row's own probe, not the worker's."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, just not ours
+        return True
+    return True
+
+
+class TestTheParentDeathBeltIsArmed:
+    """#14332 review finding 2: the belt's WIRING, not its body.
+
+    ``embed_worker.serve`` starts ``_watch_parent`` with ``args=(parent_pid,
+    stop)``. That "``stop`` IS PASSED" comment records a real regression — the
+    argument was omitted, the thread died on its first line with ``TypeError``,
+    and the parent-death belt never ran. Nothing noticed, because the pipe is the
+    primary mechanism and every other row kills the child through stdin.
+
+    So no row exercised the belt, and the mutant ``args=(parent_pid, stop)`` →
+    ``args=(parent_pid,)`` left the whole suite green (a ``TypeError`` in a daemon
+    thread is silent — the exact "inert enforcer" shape).
+
+    THIS row spawns a REAL worker whose parent pid is provably gone, with stdin
+    HELD OPEN. Only the belt can end that process: the pipe watcher sees a live
+    stdin, so an exit within the heartbeat window is evidence the belt is armed
+    and wired to the stop event. It reddens on the mutant above and on deleting
+    the thread.
+    """
+
+    def test_a_worker_whose_parent_is_gone_exits_with_stdin_held_open(
+            self, tmp_path):
+        # A pid that has PROVABLY exited: reap it, then use its number. A pid
+        # that was never allocated can collide with a REUSED one; a pid this test
+        # just reaped cannot (nothing can reuse it before we read it here).
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        dead_pid = gone.pid
+        assert not _pid_alive(dead_pid), (
+            "the pid chosen as a DEAD parent is still alive — this row would "
+            "prove nothing")
+
+        socket_path = str(tmp_path / "worker.sock")
+        worker = subprocess.Popen(
+            [sys.executable, "-m", "tortoise.embed_worker",
+             "--socket", socket_path,
+             "--parent-pid", str(dead_pid),
+             "--log-level", "ERROR"],
+            # ⛔ STDIN HELD OPEN: closing it would arm the PRIMARY mechanism and
+            # this row would then prove nothing about the belt.
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            try:
+                code = worker.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                raise AssertionError(
+                    "the worker did not exit within 20 s with a dead parent and "
+                    "stdin held open — the parent-death belt is not armed "
+                    "(#14332 review finding 2: `args=(parent_pid, stop)` was "
+                    "omitted once and the thread died silently)") from None
+            assert code == 0, (
+                f"the belt exited with {code}, not 0 — it is meant to be a clean "
+                "os._exit(0)")
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait()

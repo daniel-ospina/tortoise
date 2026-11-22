@@ -1430,11 +1430,19 @@ class _Collector:
     ``asyncio`` task would run the forward pass on whichever loop thread
     happened to be scheduled, so the pin would become a guess.
 
-    ⛔ ONE FORWARD PASS AT A TIME. The collector is a single thread and the
-    backing is called from it, so encodes are serialised. That is deliberate: N
-    concurrent encodes on shared cores are what produced the 2-4 s measurement,
-    and serialising them behind a batching queue is the scheduling change the
-    issue asks for. It also gives the pin one place to be asserted.
+    ⛔ ONE FORWARD PASS AT A TIME — **FROM THIS THREAD**. The collector is a
+    single thread and the batches it fires are serialised, which is deliberate:
+    N concurrent encodes on shared cores are what produced the 2-4 s
+    measurement, and serialising them behind a batching queue is the scheduling
+    change the issue asks for. It also gives the pin one place to be asserted.
+
+    ⛔ IT IS NOT A PROCESS-WIDE LOCK, and saying it was is the over-claim this
+    paragraph carried until #14332's review (P3). :func:`encode_texts` calls
+    ``backing.encode`` on the CALLER's thread, so a direct call and a fired
+    batch can overlap — exactly the 2-4 s contention above. What coalescing buys
+    is that the *folds* share one forward pass instead of one each; a caller
+    that bypasses the queue with :func:`encode_texts` is deliberately not
+    queued behind it, because the write path must not block on a batch window.
     """
 
     def __init__(self, backing_factory) -> None:
@@ -1627,6 +1635,18 @@ class _Collector:
 
     def _fire(self, batch: list[_Ticket]) -> None:
         """Encode ``batch`` in ONE call and hand each ticket its row."""
+        if self._stop:
+            # ⛔ ``stop()`` CAN LAND BETWEEN THE DEQUEUE AND THIS CALL, so the
+            # check in :meth:`_run` is not sufficient on its own (#14332 review
+            # P3): a ``stop()`` arriving after that check still fired a batch and,
+            # worse, re-resolved a backing through the factory below —
+            # constructing a fresh worker (432 MB) that nothing will close,
+            # after ``reset_seam`` had promised teardown. Declining HERE (before
+            # the counters, before the factory) makes "nothing fires afterwards"
+            # true of every point a ``stop()`` can reach.
+            for ticket in batch:
+                self._decline(ticket, _STOPPED_BEFORE_ENCODE)
+            return
         fired_at = time.monotonic()
         # ⛔ TWO DIFFERENT QUANTITIES, published separately because conflating
         # them is a claim that cannot be true on the DEFAULT backing:
@@ -1649,6 +1669,14 @@ class _Collector:
         backing: EmbeddingBacking | None = None
         try:
             backing = self._backing_factory()
+            if self._stop:
+                # ⛔ AND AGAIN AFTER THE FACTORY. The factory is the call that
+                # CONSTRUCTS the backing (a worker begin its 600 s boot here), so
+                # a ``stop()`` that landed DURING it must not be followed by the
+                # encode — the same window one step later (#14332 review P3).
+                for ticket in batch:
+                    self._decline(ticket, _STOPPED_BEFORE_ENCODE)
+                return
             rows = backing.encode([t.text for t in batch],
                                   timeout_s=resolve_timeout_s())
             if rows is not None and len(rows) != len(batch):
@@ -1783,6 +1811,72 @@ _injected: EmbeddingBacking | None = None
 #: The most recent decline, so an operator can read WHY without a log search.
 _last_decline: str | None = None
 _last_decline_at: float | None = None
+#: The background warm started by :func:`warm_backing_async` (#14332 review P2).
+_warm_thread: threading.Thread | None = None
+#: Bumped by every :func:`reset_seam`. A warm that started before a reset must not
+#: leave its backing behind it — the thread cannot be joined (it may be blocked on
+#: this module's lock), so it compares generations and closes what it built.
+_reset_generation = 0
+
+
+def warm_backing_async() -> bool:
+    """Start a background boot of the configured backing. True if one STARTED.
+
+    ⛔ ``backing_booting()`` ANSWERS ``True`` FOR A BACKING THAT WAS NEVER
+    CONSTRUCTED (the configured name is then the only evidence about the phase
+    the FIRST encode will pay), and a bounded write declines on that answer with
+    ``backing_cold`` — "not warm *yet*". The word "yet" was untrue in a process
+    that issues ONLY ``bounded=True`` writes: the decline happens before anything
+    constructs a backing, and nothing else constructs one either, so
+    ``_peek_backing()`` stayed ``None`` for the life of the process and the
+    derived folds never got a vector (#14332 review P2). This is the landing the
+    decline needs: it constructs the backing ON A DAEMON THREAD, so the next
+    bounded write finds it landed (and the worker's own first encode pays its
+    boot, as the design intends) without the caller paying that boot.
+
+    ⛔ CONSTRUCT, DO NOT ``encode``. A worker backing's construction is cheap
+    (spawn + handshake bookkeeping); the 600 s is the model load, which belongs
+    to the first real encode. Warming by encoding an empty batch would run a
+    forward pass nobody asked for.
+
+    ⛔ ONCE, AND NEVER OVER AN INJECTED BACKING. A test's backing is what the
+    next encode uses, so booting a real one behind it would be a live worker in a
+    hermetic row; and a live thread per decline would leak one per request.
+    """
+    global _warm_thread
+    with _lock:
+        if _injected is not None or _backing is not None:
+            return False
+        if _warm_thread is not None and _warm_thread.is_alive():
+            return False
+        thread = threading.Thread(
+            target=_warm_backing, name="embed-seam-warm", daemon=True)
+        _warm_thread = thread
+    # Started OUTSIDE the lock: ``active_backing`` takes it.
+    thread.start()
+    return True
+
+
+def _warm_backing() -> None:
+    """The thread body for :func:`warm_backing_async`. Never raises."""
+    with _lock:
+        generation = _reset_generation
+    try:
+        warmed = active_backing()
+    except Exception:
+        _logger.warning(
+            "embed seam: the background backing warm failed (#14332 review "
+            "P2) — a bounded write will keep declining until something else "
+            "resolves the backing", exc_info=True)
+        return
+    with _lock:
+        stale = _reset_generation != generation
+    if stale:
+        # ⛔ A RESET LANDED WHILE THIS THREAD WAS CONSTRUCTING. The row that
+        # reset has already asserted "nothing of mine is left alive", and a
+        # worker left running here would break that on a teardown nobody asked
+        # to be partial. Close what this thread built and say so.
+        _retire(_Retired(warmed, None))
 
 #: The last published distribution of a backing that RAN and was then replaced.
 #: ⛔ Kept so ``backings[*].latency`` can answer the question its own docstring
@@ -2228,8 +2322,13 @@ def reset_seam() -> None:
     Called from ``conftest`` where it matters and by the seam's own rows.
     """
     global _backing, _backing_name, _collector, _injected
-    global _last_decline, _last_decline_at
+    global _last_decline, _last_decline_at, _warm_thread, _reset_generation
     with _lock:
+        _reset_generation += 1
+        # ⛔ The warm thread is NOT joined: it constructs a backing under this
+        # lock, so joining here would deadlock, and its construction is
+        # idempotent — the row that wants it gone resets AFTER the join point.
+        _warm_thread = None
         collector, _collector = _collector, None
         backing, _backing = _backing, None
         _backing_name = None
