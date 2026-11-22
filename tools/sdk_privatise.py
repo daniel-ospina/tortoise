@@ -1141,9 +1141,16 @@ SWEEP_NAMES = 66
 #: post-squash tip `c5e84ad180f2`, which is where `origin/fix/14125-census-p1s` stands TODAY: it is
 #: a DESCENDANT of `0351fe856942`, pushed after the squash, whose own content never landed, and it
 #: happens to commit the same pair — which is why it reads the same and is still the wrong tree to
-#: name (an earlier cut of this paragraph did, review round 2, P2). `--report --base
-#: 28ca66878d… --top 5000` was run there and on `main` at `70fbd1a27dd5`
-#: (`(11861, "f0647020531c078c")`), both row sets sorted and diffed, and EXACTLY ONE row differs
+#: name (an earlier cut of this paragraph did, review round 2, P2). `main` at `70fbd1a27dd5`
+#: re-measured with `--repin` reads `(11861, "f0647020531c078c")`.
+#: ⛔ THE PAIRS COME FROM `--repin`, NOT `--report`. `--report` prints the untyped COUNT and the
+#: rows and NO digest at all (measured: `--report --base 28ca66878d… --top 5 | grep -c
+#: f0647020531c078c` → **0**), so a pair quoted as `--report`'s output sends a reader to a command
+#: that cannot reproduce it. `--repin` prints `SWEEP_RESIDUE = (n, digest)`; `--check` prints an
+#: observed digest ONLY on its failure path (`observed: (n, digest)` on stderr), never on a
+#: passing run — so a pair quoted from a green tree is `--repin`'s or nothing.
+#: `--report --base 28ca66878d… --top 5000` run at BOTH trees is what yields the row SETS, sorted
+#: and diffed, and EXACTLY ONE row differs
 #: out of an UNCHANGED 856-row SHAPE set on both sides:
 #:   * `proj.g.query` **3643 → 3646** (+3). `94d75667dc76` (#14224) adds three `proj.g.query(...)`
 #:     call sites in the new `tools/read_wave_latency.py` (two pass a `count(n)` query, the third a
