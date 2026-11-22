@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -1389,8 +1390,13 @@ def _seam_opaque_values(node):
     admitting it is therefore an OVER-block, not a correctness win: measured on a
     PEP-563 tree (two live reads plus one annotation-only mention) the walk
     reports ``calls=2 live=3 unresolved=1``, i.e. a third read that does not
-    exist. ⛔ So the behaviour is NOT "right either way" — the PEP-563 case costs
-    a real false read. The cost is accepted deliberately and in the fail-closed
+    exist — and THOSE THREE COUNTS ARE GRADED, not quoted:
+    ``test_the_pep563_over_block_is_graded_and_the_walk_has_no_scope_model``
+    recomputes them on that tree and also pins that the SAME source without the
+    future import reports the SAME counts, which is what makes "the walk has no
+    scope model" a checked claim rather than a rationale. ⛔ So the behaviour is
+    NOT "right either way" — the PEP-563 case costs a real false read. The cost
+    is accepted deliberately and in the fail-closed
     direction (a false block is class B; a deadness claim about an annotation a
     tree DOES evaluate is class A), because the walk has no scope model to tell
     the two trees apart — which is also why the scope clause is load-bearing
@@ -1844,6 +1850,78 @@ def run(sdk):
     with pytest.raises(AssertionError, match="escaped into a binding shape"):
         _seam_check_read_sites(2, e_live, e_calls, e_res, e_unres,
                                "the synthetic escape module")
+
+
+def test_the_pep563_over_block_is_graded_and_the_walk_has_no_scope_model():
+    """The ``_seam_opaque_values`` PEP-563 paragraph, as a claim this test checks.
+
+    ⛔ THE PARAGRAPH THERE QUOTED ``calls=2 live=3 unresolved=1`` AS A
+    MEASUREMENT AND NOTHING RECOMPUTED IT — the same ungraded-numeral class the
+    sum-bound test's ``OBSERVED`` paragraph was corrected for (cycle-2 review,
+    residual 2). Two facts are graded here, and the second is the paragraph's
+    load-bearing claim rather than decoration:
+
+    1. the walk's report on a PEP-563 tree (two live reads plus one
+       annotation-only mention) is exactly ``(live=3, resolved=2, unresolved=1,
+       calls=2)`` — the annotation mention is LIVE-COUNTED, i.e. the arm charges
+       a read for a mention that PEP 563 never evaluates; and
+    2. the SAME source WITHOUT the future import reports the SAME counts — the
+       walk has no scope model, so it cannot tell the evaluated tree from the
+       non-evaluated one. Teach it to consult the import and these two trees
+       diverge, which reds here and asks for the paragraph to be rewritten.
+
+    The over-block is ACCEPTED on purpose (a false block is class B; a deadness
+    claim about an annotation a tree DOES evaluate is class A), so this row pins
+    the cost; it does not demand a fix.
+    """
+    body = '''
+def a(sdk):
+    _a = sdk._tortoise_fts_query
+    _a(query="a", limit=10)
+
+def b(sdk):
+    _b = sdk._tortoise_fts_query
+    _b(query="b", limit=10)
+
+def c(sdk):
+    _ann: sdk._tortoise_fts_query = None
+'''
+    counts = {}
+    for label, src in (("pep563", "from __future__ import annotations\n" + body),
+                       ("no-future", body)):
+        tree = ast.parse(src)
+        mentions = [n for n in ast.walk(tree)
+                    if isinstance(n, ast.Attribute)
+                    and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+        live, resolved, unresolved, calls = _seam_live_reads(tree, mentions)
+        counts[label] = (len(live), len(resolved), len(unresolved), len(calls))
+    # ⛔ THE NUMERALS ARE READ BACK OUT OF THE PARAGRAPH, not restated here: a
+    # literal-only row leaves the sentence free to rot (patch the docstring to
+    # 9/9/9 and a literals-only assert stays green — the exact defect).
+    para = " ".join((_seam_opaque_values.__doc__ or "").split())
+    quoted = re.search(
+        r"reports ``calls=(\d+) live=(\d+) unresolved=(\d+)``", para)
+    assert quoted, (
+        "the `_seam_opaque_values` PEP-563 paragraph no longer quotes the counts "
+        "in the graded form ('reports ``calls=N live=N unresolved=N``') — "
+        "restore the wording or re-point this row, but do not leave the "
+        "measurement ungraded again")
+    doc_calls, doc_live, doc_unresolved = (int(p) for p in quoted.groups())
+    measured = (counts["pep563"][0], counts["pep563"][2], counts["pep563"][3])
+    assert (doc_live, doc_unresolved, doc_calls) == measured, (
+        "the paragraph's counts no longer match the walk: docstring says "
+        f"live={doc_live} unresolved={doc_unresolved} calls={doc_calls}, THIS "
+        f"tree measures {counts['pep563']} (live, resolved, unresolved, calls)")
+    assert counts["pep563"] == (3, 2, 1, 2), (
+        "the PEP-563 arm's counts moved: the docstring quotes calls=2 live=3 "
+        f"unresolved=1, this walk reports {counts['pep563']} "
+        "(live, resolved, unresolved, calls)")
+    assert counts["pep563"] == counts["no-future"], (
+        "the walk now DISTINGUISHES the two trees "
+        f"(pep563={counts['pep563']} no-future={counts['no-future']}) — it has "
+        "gained a scope model, and the `_seam_opaque_values` paragraph that says "
+        "it has none (so the annotation mention is an accepted over-block) has "
+        "to be rewritten together with this row")
 
 
 def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
