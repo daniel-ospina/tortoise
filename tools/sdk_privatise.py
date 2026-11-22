@@ -1195,9 +1195,9 @@ SWEEP_NAMES = 66
 #: fact becomes folklore.
 #:
 #: ⛔ SUPERSEDED BY THE RE-CUT — the sentence that CLOSES "on the tree that carries them, not carried
-#: forward" (it closes the paragraph that OPENS `⛔ RE-CUT → (11858, "a1552662bf07a10b")`; the
-#: paragraph that opens `STALE AS OF THE RE-CUT` sits immediately under that same
-#: sentence and marks the same reading) did NOT survive the commits merged
+#: forward" (it closes the paragraph that OPENS `⛔ RE-CUT → (11858, "a1552662bf07a10b")`, and the
+#: paragraph that opens `STALE AS OF THE RE-CUT` marks that same reading of the
+#: sentence) did NOT survive the commits merged
 #: beside it: the census moved three rows before the pin commit itself landed. Read the re-cut, not
 #: that sentence. ⛔ NAMED BY ITS CLOSING WORDS, NOT BY "the sentence above" (#14282, P3): `main`
 #: wrote that address positionally and it was CORRECT where it wrote it — the merge inserted the
@@ -1210,8 +1210,8 @@ SWEEP_NAMES = 66
 #: from it — so a positional "the re-cut below" cannot name it either way, not because the address
 #: rotted but because it never named this branch's re-cut at all. Both targets are therefore named
 #: by TEXT, the only form that survives an insertion, which is the rule this block already states.
-#: ⛔ AND NO DISTANCE OR OFFSET IS TYPED HERE — not here, and not in the two parentheticals above
-#: either, which name their targets by their OPENING WORDS rather than by "several paragraphs up":
+#: ⛔ AND NO DISTANCE OR OFFSET IS TYPED HERE — not here, and not in the parenthetical above
+#: either, which names its targets by their OPENING WORDS rather than by "several paragraphs up":
 #: a span or an offset restated in this block goes stale at the next edit, which is the reason the
 #: census figure is named by log rather than counted. ⛔ AND THE FIRST FORM OF THAT
 #: QUOTE WAS A PREFIX CALLED AN ENDING (#14282 fix lane, P3): `the sentence that ENDS "`--check`
