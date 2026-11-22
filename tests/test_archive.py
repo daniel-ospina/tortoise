@@ -4601,6 +4601,10 @@ def test_a_link_CHAIN_BEYOND_the_HOP_BOUND_fails_CLOSED(tree: Path) -> None:
     cancelling asker treats UNKNOWN as content, and deleting the whole chain is a removal.
 
     Mutation: `return _UNREADABLE` -> `return _DANGLING` at the bound -> RED here.
+
+    The SIBLING row `test_a_link_CHAIN_PAST_the_HOP_BOUND_that_reaches_code_is_a_removal` measures
+    the same deletion; this one adds the two datum identities beside it, so the polarity is stated
+    in the same place as the verdict it produces.
     """
     _chain(tree, arch._LINK_HOPS + 1)
     datum = arch._blob_following_links(tree, "HEAD", "tortoise/x/__init__.py")
