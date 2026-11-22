@@ -1119,7 +1119,10 @@ SWEEP_NAMES = 66
 #: branch's census file, and named by log rather than counted here, because a count restated in this
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
-#: not carried forward.
+#: not carried forward. ⛔ THAT CLAUSE IS FALSIFIED AND KEPT ONLY AS THE CLAIM THE RE-CUT BELOW
+#: REPLACES: `11858` reproduces on NO tree in this range — `--check` reads 11857 at `94d75667dc^`
+#: and 11860 at `94d75667dc` — so it was never a reading of this tree. Everything after this point
+#: is the current record; this sentence is the one the re-pin was supposed to have replaced.
 #:
 #: ⛔ RE-CUT AGAIN → (11861, "f0647020531c078c"). The 11858 pair does NOT reproduce on the tree
 #: that commits it: `--check` on a detached worktree of `10e51693f1` reports 11861 against its own
