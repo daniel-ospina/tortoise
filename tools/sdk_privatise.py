@@ -1096,19 +1096,10 @@ SWEEP_NAMES = 66
 #: two independent readings, never the derivation of this pin.
 #: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
 #:
-#: ⛔ RE-CUT → (11861, "f0647020531c078c") (#14269). The 11858 pair this block used to carry
-#: described NO tree in this history — not even the commit that wrote it: `10e51693f16` reds
-#: `--check` with observed `(11861, "f0647020531c078c")`, its parent `13b6b49fe9c` reads 11860 (the
-#: `out.update` row below), and `origin/main` `70fbd1a27dd5` reads 11861 too — so `surface-guard`
-#: was red for every head from `#14160` onward, and `python-ci-gate` (which lists `surface-guard` in
-#: its `needs:`) could not go green for anyone. ⛔ THE DECLARATION IS THAT NOTHING MOVED, and it is
-#: measured rather than assumed: the residue ROW REPORT is byte-identical between `10e51693f16` and
-#: this tree (`--report --base 28ca66878d7c --top 6000` in both, 932 lines each, `cmp` clean, same
-#: digest), so no untyped reference shape was added after that pin — the 11858 was mis-measured, not
-#: overtaken. Re-taken with the tool's own `--repin` output, as the red message instructs. The 11857
-#: pair was NOT measured on this branch: it is
+#: ⛔ RE-CUT → (11858, "a1552662bf07a10b"). The 11857 pair was NOT measured on this branch: it is
 #: `main`'s own pin (`e74cf1d13d`), inherited here at the merge and left in place while this branch
-#: kept adding rows under it, so `--check` reds on this tree by exactly ONE. `git log` proves the
+#: kept adding rows under it, so `--check` red on the tree that carried that pair by exactly ONE
+#: (it does not red here — the pin below is the re-measured one). `git log` proves the
 #: inheritance rather than asserting it: the ONLY commit that ever set the constant to that pair is
 #: `e74cf1d13d` itself, and that tree carries no `out.update` (measured: 0 occurrences in
 #: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
@@ -1128,8 +1119,8 @@ SWEEP_NAMES = 66
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
 #: branch's census file, and named by log rather than counted here, because a count restated in this
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
-#: exits 0 at this head on THIS pair (11861), measured on the tree that carries it, not carried
-#: forward.
+#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
+#: not carried forward.
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
 #: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
