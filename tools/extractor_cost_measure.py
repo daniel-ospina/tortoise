@@ -720,10 +720,23 @@ def cost_table(report: dict, rates_peak: dict, rates_off: dict) -> dict:
     arm = cold or warm
     if not arm:
         return {}
+    # #14277 review: the measured in/out below MUST come from the SAME arm that
+    # supplies `hit_ratio` (and that the headline fits are fitted on — `cold`
+    # when present). Reading them from the pooled `_rows` mixes both arms while
+    # pricing the mix at the cold arm's cache ratio, and it made this one
+    # generated document contradict itself: the prose reported the cold-arm
+    # median session (30,647 / 5,768) and this table reported the pooled one
+    # (31,229 / 5,387). Rows carrying no `arm` key are a single-arm report by
+    # construction, so they are in-arm.
+    arm_name = "cold" if cold else "warm"
+
+    def _in_arm(row: dict) -> bool:
+        return row.get("arm") in (None, arm_name)
+
     docs = [r for r in report.get("_rows", [])
-            if r.get("kind") == "doc" and r.get("stages")]
+            if r.get("kind") == "doc" and r.get("stages") and _in_arm(r)]
     sess = [r for r in report.get("_rows", [])
-            if r.get("kind") == "session" and r.get("stages")]
+            if r.get("kind") == "session" and r.get("stages") and _in_arm(r)]
     if not docs:
         return {}
     doc_cache = (arm.get("doc") or {}).get("cache") or {}

@@ -448,3 +448,33 @@ def test_the_first_measured_document_is_labelled_not_a_cold_prefix():
     assert "true cold call" not in text
     assert f"{hits / prompts:.1%} of this item's prompt tokens" in text
     assert f"{hits:,} hit of {prompts:,}" in text
+
+
+def test_the_cost_table_reads_one_arm_and_not_a_pool_of_both():
+    """#14295 review, P1: `cost_table` priced the POOLED cold+warm `_rows`
+    while taking `hit_ratio` from the cold arm alone — and the headline fits
+    (`45,503 + 2.159T`) are fitted on the cold arm, so the table's measured
+    columns were neither arm's statistic. It showed up as one generated
+    document contradicting itself: the prose reported the cold-arm median
+    session (30,647 / 5,768) and the cost table reported the pooled one
+    (31,229 / 5,387).
+
+    This fixture makes the two answers diverge so the pooling cannot come
+    back silently: cold rows are 50k/16k, warm rows are 90k/40k, so the
+    pooled median (70k/28k) is a third value that matches NEITHER arm.
+    """
+    rows = ([_row(arm="cold", prompt_tokens=50_000, completion_tokens=16_000)
+             for _ in range(3)]
+            + [_row(arm="warm", prompt_tokens=90_000, completion_tokens=40_000)
+               for _ in range(3)])
+    report = m.report_from_rows(rows)
+    cost = report["costs"]
+    median = next(r for r in cost["rows"] if r["item"] == "median document")
+
+    assert (median["measured_in"], median["measured_out"]) == (50_000, 16_000), (
+        f"the cost table must read the arm that supplies hit_ratio and the "
+        f"fits (cold); got {median['measured_in']}/{median['measured_out']}")
+    # the pooled answer, spelled out, so the assertion above cannot pass by
+    # both arms happening to share a median
+    assert (median["measured_in"], median["measured_out"]) != (70_000, 28_000)
+    assert cost["hit_ratio"] == report["arms"]["cold"]["doc"]["cache"]["hit_ratio"]

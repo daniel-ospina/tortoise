@@ -68,34 +68,34 @@ rows: 122 (failed: 0)
 
 Measured cache-hit share of prompt tokens: **51.2%** (cold arm) · 64.6% (warm arm). `measured-cold` prices every prompt token at the full input rate — the conservative end `#14275` says it is quoting; `measured-cached` prices at the measured share.
 
-Tokens per median document: **64,503** measured vs **15,859** modelled (#14275's `1.5T + 7k` input, `0.2T` output).
+Tokens per median document: **64,799** measured vs **15,859** modelled (#14275's `1.5T + 7k` input, `0.2T` output).
 
 | item | tokens | modelled in/out | measured in/out | modelled \$ | measured-cold \$ | measured-cached \$ |
 |---|---|---|---|---|---|---|
-| median document | 5,211 | 14,816 / 1,042 | 48,461 / 16,042 | \$0.0057 | \$0.0338 | \$0.0265 |
-| mean document | 8,610 | 19,914 / 1,722 | 62,423 / 22,443 | \$0.0080 | \$0.0457 | \$0.0363 |
-| p75 document | 9,131 | 20,696 / 1,826 | 67,833 / 24,510 | \$0.0084 | \$0.0498 | \$0.0395 |
+| median document | 5,211 | 14,816 / 1,042 | 48,461 / 16,338 | \$0.0057 | \$0.0341 | \$0.0268 |
+| mean document | 8,610 | 19,914 / 1,722 | 64,090 / 24,350 | \$0.0080 | \$0.0484 | \$0.0388 |
+| p75 document | 9,131 | 20,696 / 1,826 | 77,582 / 24,137 | \$0.0084 | \$0.0522 | \$0.0405 |
 | long document | 127,914 | 198,871 / 25,583 | 299,362 / 23,832 | \$0.0904 | \$0.1184 | \$0.0733 |
-| median session | 1,534 | 9,301 / 307 | 31,229 / 5,387 | \$0.0032 | \$0.0158 | \$0.0111 |
+| median session | 1,534 | 9,301 / 307 | 30,647 / 5,768 | \$0.0032 | \$0.0161 | \$0.0115 |
 
 Peak rates (`#14275`'s own: \$0.30/M in, \$1.20/M out, \$0.006/M cache hit). Off-peak in the JSON.
 
-**How big the cache lever actually is.** A PERFECT replay (every prompt token a cache hit, which no real workload achieves) prices the median document at \$0.0195 — 42% below the fully-cold \$0.0338, and the warm arm's measured 64.6% hit share reaches 0.0246. The lever is real but SECOND-ORDER, because it only discounts the input side and the output side is now the larger half of the bill.
+**How big the cache lever actually is.** A PERFECT replay (every prompt token a cache hit, which no real workload achieves) prices the median document at \$0.0199 — 42% below the fully-cold \$0.0341, and the warm arm's measured 64.6% hit share reaches 0.0249. The lever is real but SECOND-ORDER, because it only discounts the input side and the output side is now the larger half of the bill.
 
 | item | modelled \$ (off-peak) | measured-cold \$ | measured-cached \$ |
 |---|---|---|---|
-| median document | \$0.0028 | \$0.0169 | \$0.0132 |
-| mean document | \$0.0040 | \$0.0228 | \$0.0181 |
-| p75 document | \$0.0042 | \$0.0249 | \$0.0198 |
+| median document | \$0.0028 | \$0.0171 | \$0.0134 |
+| mean document | \$0.0040 | \$0.0242 | \$0.0194 |
+| p75 document | \$0.0042 | \$0.0261 | \$0.0203 |
 | long document | \$0.0452 | \$0.0592 | \$0.0367 |
-| median session | \$0.0016 | \$0.0079 | \$0.0056 |
+| median session | \$0.0016 | \$0.0081 | \$0.0057 |
 
 ## What this does to #14275's numbers
 
 ### Confirmed / corrected
 
-- **Cost per median document — CORRECTED.** `$0.0057` modelled → **\$0.0265** measured at peak (4.7×), \$0.0132 off-peak. 1,000 median documents ≈ **\$26.49** at peak, not \$5.6–7.7.
-- **The two constants — CORRECTED, and one of them was never a constant.** Input: `tokens_in = 45,503 + 2.16 × T` per document, so the per-item overhead is **45,503 tokens**, not ~7k, and the pass multiplier is **2.16T**, not 1.5T. Output: `tokens_out = 22,802 + 0.180 × T` — **output is dominated by a constant too, which the model assumed away** (`0.2T` ≈ 1.0k on a median document; measured ≈ 16,042).
+- **Cost per median document — CORRECTED.** `$0.0057` modelled → **\$0.0268** measured at peak (4.7×), \$0.0134 off-peak. 1,000 median documents ≈ **\$26.84** at peak, not \$5.6–7.7.
+- **The two constants — CORRECTED, and one of them was never a constant.** Input: `tokens_in = 45,503 + 2.16 × T` per document, so the per-item overhead is **45,503 tokens**, not ~7k, and the pass multiplier is **2.16T**, not 1.5T. Output: `tokens_out = 22,802 + 0.180 × T` — **output is dominated by a constant too, which the model assumed away** (`0.2T` ≈ 1.0k on a median document; measured ≈ 16,338).
 - **Per-stage:** the fit is per stage in the JSON. The shape is the finding: S1 scales with the document (~2T, R²≈0.99 — it is the only stage that reads the text), while **S2 and S4 are almost pure constants** (~15k and ~26-29k) that a document's length barely moves, so small items are not relatively expensive — they are essentially ALL overhead.
 
 ### The allowances, re-stated in the measured unit
@@ -103,12 +103,12 @@ Peak rates (`#14275`'s own: \$0.30/M in, \$1.20/M out, \$0.006/M cache hit). Off
 | tier | subscription | allowance (tokens) | cost to us peak | % of sub | cost off-peak | % of sub | ≈ documents | ≈ sessions |
 |---|---|---|---|---|---|---|---|---|
 | free | \$0 | 0 | \$0.00 | 0.0% | \$0.00 | 0.0% | 0 | 0 |
-| solo | \$19 | 3,000,000 | \$1.23 | 6.5% | \$0.62 | 3.2% | 47 | 82 |
-| pro | \$25 | 4,000,000 | \$1.64 | 6.6% | \$0.82 | 3.3% | 62 | 109 |
-| team | \$149 | 24,000,000 | \$9.86 | 6.6% | \$4.93 | 3.3% | 372 | 655 |
+| solo | \$19 | 3,000,000 | \$1.24 | 6.5% | \$0.62 | 3.3% | 46 | 82 |
+| pro | \$25 | 4,000,000 | \$1.66 | 6.6% | \$0.83 | 3.3% | 62 | 110 |
+| team | \$149 | 24,000,000 | \$9.94 | 6.7% | \$4.97 | 3.3% | 370 | 659 |
 
-- **The overage rate — CONFIRMED (as a rate above cost).** Our measured cost is **\$0.41 per 1M blended tokens at peak** and **\$0.21 off-peak**, so `#14275`'s \$1.00/1M sits 2.4× above cost at peak and 4.9× off-peak. It is not below cost at either end, which is the property the issue needs from it.
-- **The DOCUMENT COUNT attached to each allowance — CORRECTED.** The token figures already land inside the 5–10% band at peak (6.5–6.6%), so the allowance numbers themselves stand; what the measurement changes is what they BUY. `#14275` promises ≈200/260/1,600 median documents; at the measured 64,503 tokens per median document it is the counts in the table above — ~4× fewer.
+- **The overage rate — CONFIRMED (as a rate above cost).** Our measured cost is **\$0.41 per 1M blended tokens at peak** and **\$0.21 off-peak**, so `#14275`'s \$1.00/1M sits 2.4× above cost at peak and 4.8× off-peak. It is not below cost at either end, which is the property the issue needs from it.
+- **The DOCUMENT COUNT attached to each allowance — CORRECTED.** The token figures already land inside the 5–10% band at peak (6.5–6.6%), so the allowance numbers themselves stand; what the measurement changes is what they BUY. `#14275` promises ≈200/260/1,600 median documents; at the measured 64,799 tokens per median document it is the counts in the table above — ~4× fewer.
 
 ### A rate the issue and the repo disagree on (flagged, not resolved)
 

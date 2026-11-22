@@ -16793,15 +16793,18 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
                max_tokens: int | None,
                stats: dict | None
                ) -> tuple[str | None, object | None, int, int,
-                          float | None, str | None, str | None]:
+                          float | None, str | None, str | None, int]:
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
 
     Returns ``(resp, finish_reason, prompt_tokens, completion_tokens,
-    cost_usd, provider, model)`` — the finish reason AND per-call token
-    counts captured in the calling thread
+    cost_usd, provider, model, cache_hit_tokens)`` — the finish reason AND
+    per-call token counts captured in the calling thread
     right after ``complete()`` returns (F4 #1780; token capture #2134
     Task 0 — never read the shared adapter attrs from the caller thread).
+    The eighth element is the provider's cache-hit split, which the cost row
+    prices on (#14277) — arity is part of this contract, so it is declared
+    here and not only at the return.
 
     #3359: the same in-thread capture also snapshots the provider's OWN
     reported charge (``last_cost_usd`` — ``None`` when the route reports
