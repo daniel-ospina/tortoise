@@ -582,8 +582,15 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
             "separator(s) precede it) — so the sentence's 'a row failing the "
             "presence checks ahead of it … never evaluates it' no longer "
             "describes this emission")
-    # ⛔ EVERY FIGURE IN THIS MESSAGE IS DERIVED FROM THE ENFORCED BOUND AND THE
-    # LIVE SPAN, because RESTATING a derived figure is how this message twice
+    # ⛔ EVERY BAND FIGURE IN THIS MESSAGE IS DERIVED FROM THE ENFORCED BOUND AND
+    # THE LIVE SPAN — the band, its two edges and their deltas, all computed. The
+    # rename anecdote below is NOT derived and does not claim to be: `216`, `+1,080`
+    # and `12,808` are a MEASUREMENT taken at the commit whose span read 11,728,
+    # stated as an anecdote rather than a live figure, so a moved span makes the
+    # anecdote historical rather than false. (Round-28 review: the earlier wording
+    # said EVERY figure was derived, which the anecdote contradicted.)
+    #
+    # RESTATING a derived figure is how this message twice
     # acquired a claim its band did not implement (rounds 21 and 22): one cut
     # promised "an order of magnitude" over a ±7% band, and the next restated the
     # tolerance against the measured 11,728 — correct at that tree and false the
