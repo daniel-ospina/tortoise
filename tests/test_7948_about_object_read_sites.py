@@ -2637,7 +2637,8 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     lowered) — and every true attribution beyond 3 belonged to a reader named in
 #     `_DISTANCE_EXCEPTIONS`, with the code fact that earns each. ⛔ DATED ON PURPOSE,
 #     and the pair is left as measured rather than re-cut: the numbers no longer
-#     reproduce at this head (`#13899` alone moved the door occurrences 31 -> 21, and
+#     reproduce at this head (`#13899` re-cut the door occurrences and two further
+#     table re-cuts landed since, and
 #     this file's fourth exception moves the exceptions' worth), so they are HISTORY
 #     for the decision they record, and the LIVE figures are the arm's own — a lane
 #     that re-measures at HEAD and finds no discrimination there has not refuted it.
@@ -2684,8 +2685,9 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: ⛔ **EVERY FIGURE IN THIS PARAGRAPH IS THE 2026-11-03 MEASUREMENT, NOT A CLAIM
 #: ABOUT THIS HEAD.** Re-derived at `#14249`'s head the same sweep accepts 27 of
 #: 270 pairs (18 rows x 15 doors) and the exceptions are worth 21 -> 27 — the table
-#: has been re-cut twice since, and `#13899` alone moved the door occurrences
-#: 31 -> 21. The pin below is the live figure; this paragraph is the evidence for a
+#: has been re-cut twice since, and `#13899` re-cut the door occurrences (its own
+#: size is recorded by the arm's floor note further down rather than re-derived
+#: here). The pin below is the live figure; this paragraph is the evidence for a
 #: decision (the rejected uniform-2 bound), so it is dated rather than re-counted.
 #: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
 #: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
@@ -3468,10 +3470,11 @@ _ACCEPTED_PAIRS_AT_THIS_HEAD = 36
 #: ⛔ 17 -> 4 on 2026-10-24, with the pair count above and for the same reason: a
 #: row's accepted set was measured over collision hops as well as references, so
 #: the old 17 counted the defect too. ⚠️ The ceiling stays 4 (it is the tripwire
-#: this note describes) while the MEASURED worst row is 3 at this head — rows 2 and
-#: 17 each accept three of the table's doors (`MCP tortoise_recall`,
-#: `MCP tortoise_search`, `SDK search_knowledge`), not four. The earlier wording
-#: here said they "lead at 4", which the measurement refutes; the number is a
+#: this note describes) while the MEASURED worst row is 3 at this head — rows 2,
+#: 17 and 24 all sit at three accepted doors (rows 2 and 17:
+#: `MCP tortoise_recall`, `MCP tortoise_search`, `SDK search_knowledge`; row 24:
+#: the three delete doors) — not four. The earlier wording
+#: here said rows 2 and 17 "lead at 4", which the measurement refutes; the number is a
 #: BOUND, so the pin is left where the accepted count says it belongs.
 _WORST_ROW_AT_THIS_HEAD = 4
 
@@ -3542,8 +3545,12 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     )
     # The tripwire must not be satisfied by a predicate that accepts NOTHING:
     # every true attribution is inside this set by construction.
-    # ⛔ #13899 moved this floor with the table (31 -> 21): the batch retired ten
+    # ⛔ #13899 moved this floor with the table (29 -> 21): the batch retired ten
     # SDK-door occurrences and re-pointed two, and this figure IS that count.
+    # MEASURED at the pre-#13899 tree (`127294ccadf9^`) the §13 table carried 29
+    # occurrences, and the arithmetic is 29 - 10 + 2 = 21 — the `31` this line used
+    # to read is the value TWO retirements earlier (the SDK traversal row took
+    # 31 -> 30, `#11609` batch 1 another).
     assert total >= 21, (
         f"only {total} pairs are accepted although §13's cells name 21 door "
         "occurrences (the count the table arm pins) — the predicate has broken the "
