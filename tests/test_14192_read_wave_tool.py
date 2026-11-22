@@ -641,6 +641,64 @@ def _bind_target_names(target: ast.AST) -> set[str]:
     return out
 
 
+_NAMESPACE_CALLS = frozenset({"globals", "locals", "vars"})
+
+
+def _is_namespace_expr(node: ast.AST) -> bool:
+    """True for an expression naming a LIVE namespace MAPPING — `globals()`/`locals()`/
+    `vars(x)`/`x.__dict__`.
+
+    Used only to SCOPE the string-key rebind below: a store into one of these binds a
+    module-level name, while a store into an ordinary container binds nothing.
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr == "__dict__"
+    return (isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) in _NAMESPACE_CALLS)
+
+
+def _namespace_rebind_names(node: ast.AST) -> set[str]:
+    """Callee NAMES bound through a STRING KEY into a namespace — fail-closed, by name.
+
+    ⛔ THE STRING KEY IS THE AXIS `_bind_target_names` NEVER LEARNED (#14326 review,
+    EACH MEASURED GREEN at `c380075b`: `m=2 c=2 i=0` with a third reach executing the read):
+
+        setattr(builtins, "print", getattr)      # or globals()["print"] = getattr
+        print(sdk, "_tortoise_fts_query")(…, kind="statement")
+
+    Round 7 taught `_bind_target_names` to take an ATTRIBUTE SEGMENT (`_mod.print = …`),
+    which closed half the hole the name allow-lists opened. It never learned the two
+    spellings that carry the SAME name as a CONSTANT: a `setattr` name argument, and a
+    string-keyed store into the namespace mapping itself. Both launder an allow-listed
+    name into `getattr` exactly as the attribute form does — so the pin stayed GREEN while
+    the `intentional_keep` grant for `run()` stood on a pin that could not go red.
+
+    ⛔ SCOPED TO A NAMESPACE RECEIVER ON PURPOSE. A store into an ORDINARY container
+    (`_counts["write"] = 0`) binds no callee; dropping the allow-listed name `write` for it
+    would be a FALSE RED, so the control beside the rows pins that it stays green.
+    """
+    if isinstance(node, ast.Call):
+        # `setattr(<obj>, "<name>", …)` — the attribute form, spelled as a call.
+        if getattr(node.func, "id", None) == "setattr" and len(node.args) >= 2:
+            key = node.args[1]
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                return {key.value}
+        # `<ns>.__dict__.update({"<name>": …})` binds the mapping's KEYS.
+        if (getattr(node.func, "attr", None) == "update"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "__dict__"
+                and node.args and isinstance(node.args[0], ast.Dict)):
+            return {k.value for k in node.args[0].keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+        return set()
+    if (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+            and _is_namespace_expr(node.value)):
+        key = node.slice
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            return {key.value}
+    return set()
+
+
 def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
     """Allow-listed CALLEE NAMES the source REBINDS — they are not pure any more.
 
@@ -714,6 +772,12 @@ def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
                     out |= _PURE_READS | _RECORDING_CALLEES
                 else:
                     out.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.Call, ast.Subscript)):
+            # ⛔ THE SAME NAME, CARRIED AS A STRING CONSTANT (#14326 review at `c380075b`) —
+            # `setattr(builtins, "print", getattr)` and a string-keyed store into
+            # `globals()`/`vars(x)`/`x.__dict__` bind the callee name exactly as the
+            # attribute arm above does. See `_namespace_rebind_names`.
+            out |= _namespace_rebind_names(node)
         elif isinstance(node, ast.Match):
             for case in node.cases:
                 for capture in ast.walk(case.pattern):
@@ -4038,6 +4102,36 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _mod.print = getattr\n'
             '    _mod.print(sdk, "_tortoise_fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ AND THE SAME NAME CARRIED AS A STRING CONSTANT (#14326 review at `c380075b`,
+        # EACH MEASURED GREEN: `m=2 c=2 i=0` with a third reach executing the read). The
+        # attribute spelling directly above was REFUSED while these were not, which is what
+        # makes it an IN-FILE ASYMMETRY rather than a declared boundary: a `setattr` name
+        # argument and a string-keyed store into the namespace mapping bind the callee name
+        # exactly as an attribute segment does. `_namespace_rebind_names` takes all three.
+        "setattr() rebinding a PURE callee": (
+            '    import builtins as _bi\n'
+            '    setattr(_bi, "print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`globals()` string-key store rebinding a PURE callee": (
+            '    globals()["print"] = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`vars()` string-key store rebinding a RECORDING callee": (
+            '    import builtins\n'
+            '    vars(builtins)["write"] = getattr\n'
+            '    write(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], kind="statement")\n'),
+        "`__dict__` string-key store rebinding a PURE callee": (
+            '    import builtins\n'
+            '    builtins.__dict__["print"] = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`__dict__.update({…})` rebinding a PURE callee": (
+            '    import builtins\n'
+            '    builtins.__dict__.update({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         # ⛔ THE REMAINING BIND FORMS AND DELIVERY SPELLINGS (#14326 round 7, EACH MEASURED
         # GREEN while its arm was missing). The rebind audit reaches the census from THREE
         # places — the `Name` arm, the `Constant` arm and `_indirect_reads` — and a laundering
@@ -4104,16 +4198,11 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "literal one level down in a nested ** display": (
             '    _l = _PageFetcher(**{**{"name": "_tortoise_fts_query"}})\n'
             '    _l(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
-        # ⛔ THE KEYWORD-ONLY INDEX (#14326 round 8, MEASURED GREEN while the index was
-        # replaced by `[0]`): every pre-existing kw-only row had ONE such parameter, so the
-        # index could never differ from 0. (The POSITIONAL offset has the peer lane's own row
-        # above — the same shape, deduplicated: a repeated dict key silently shadows one row,
-        # which is exactly the "a row that can never be the failing row" defect this file
-        # deletes clauses for.)
-        "SECOND keyword-only default": (
-            '    def _f(*, _a="x", _N="_tortoise_fts_query"):\n'
-            f'        {reach.format(name="_N")}\n'
-            '    _f()\n'),
+        # ⛔ A KEYWORD-ONLY INDEX — row DELETED as a duplicate, not left beside its twin.
+        # The peer lane's identical row above ("SECOND kw-only parameter default") is the one
+        # that stands. Two distinct keys with identical bodies BOTH execute, so neither was
+        # shadowed — but a row that cannot be the only failing row is exactly the defect this
+        # file deletes clauses for (the positional pair was deduped in `d6ed679`).
         # ⛔ A BARE-NAME THIRD READ IS A READ (#14326 round 8, PRE-EXISTING and unpinned:
         # dropping `_read_calls`' `id` alternative left 25 passed, and this reach went
         # `refuses=True` (c=3) -> `refuses=False` (m=2 c=2)). The `calls == 2` assertion the
@@ -4180,6 +4269,20 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a container that HOLDS the read name and is only subscripted is a FALSE RED — "
         "nothing is executed, and the recording direction #14289 asks for must not red the "
         "census just because `_values` binds a mapping's whole literal to its name")
+
+    # ⛔ THE NAMESPACE ARM IS SCOPED, AND THIS IS ITS OTHER POLARITY (#14326 review at
+    # `c380075b`): `_namespace_rebind_names` takes a string key only when the RECEIVER is a
+    # live namespace (`globals()`/`locals()`/`vars(x)`/`x.__dict__`). A string-keyed store
+    # into an ORDINARY container binds no callee, so dropping the allow-listed name `write`
+    # — or `print` — for it would be the false-red family this pin spends rows deleting.
+    container_store = ('    _counts = {}\n'
+                       '    _counts["write"] = 0\n'
+                       '    _counts["print"] = 0\n'
+                       '    _LOG.write("_tortoise_fts_query")\n')
+    assert not _pin_refuses(_pin_source(container_store)), (
+        "a string-keyed store into an ordinary CONTAINER is not a callee rebind — treating "
+        "it as one would drop `write`/`print` from the allow-lists and RED the recording "
+        "direction; only a NAMESPACE receiver carries a module-level bind")
 
     # ⛔ THE SIXTH CONTROL, the OTHER polarity of the same clause: a subscript STORE under
     # the literal (`_counts["_tortoise_fts_query"] = 0`) is a recording write, not a read
