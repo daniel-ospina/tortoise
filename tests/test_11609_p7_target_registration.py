@@ -761,6 +761,23 @@ class TestThePreviewReceiptIsNotWiderThanTheDefect:
         produces it: the dispatcher's own `tool` (which reds when either literal is
         reverted) and the receipt, with a WORD-BOUNDED match so the live door — and any
         name the surface still advertises — cannot be misread as a retirement.
+
+        ⛔ WHICH HALF IS COVERAGE AND WHICH IS A FORWARD GUARD, MEASURED (#14237 round-5
+        review, P2). The review said the `("receipt", receipt)` row "never reaches a
+        receipt". **Half of that is falsified by primary source**: calling
+        `tortoise_delete_knowledge("p1")` with no `confirmation` takes the preview branch
+        (`mcp_server.py:7144`), that branch DOES build the payload with
+        `_deletion.receipt(...)` (`:7156`), and returns that very dict after overlaying
+        the preview's fields (`:7157-7166`) — so the payload IS the receipt body
+        (`preview is True`, `deleted is False`, a `confirmation` token). What IS true is
+        the sharper half: `:7157-7166` copies `target`/`found`/`nodes_removed`/
+        `edges_removed`/`nodes`/`edges` and **never `tool`**, so no preview literal can
+        reach this row — an assertion here could not fail under the revert it names.
+        That is a FORWARD GUARD (the day a consumer starts forwarding `tool`, the receipt
+        must name the live door), not coverage of this diff, and it is written as such
+        below rather than left to read as a second pin. Driven on the preview path on
+        purpose: the confirm path needs a token and destroys a node to inspect a dict
+        whose `tool` key is absent either way.
         """
         sdk, calls = self._stub(monkeypatch, served, resolved=resolved)
         preview = ms._preview_delete(sdk, "p1")
@@ -776,4 +793,14 @@ class TestThePreviewReceiptIsNotWiderThanTheDefect:
             assert not named, (
                 f"the {surface} a caller receives names the retired {named} — the value "
                 "a caller re-calls must be one `tools/list` advertises")
+        # The receipt row above is the forward guard, and THIS is its falsifier: the
+        # overlay copies six preview fields and never `tool`, which is why no retired
+        # literal can reach a caller (`:7157-7166`). The day that changes, this reds and
+        # the loop entry becomes real coverage of whatever it starts forwarding.
+        assert receipt.get("preview") is True and receipt.get("deleted") is False, (
+            f"the `receipt` row no longer inspects a receipt body: {receipt}")
+        assert "tool" not in receipt, (
+            "`tortoise_delete_knowledge`'s preview reply now carries a `tool` field — the "
+            "receipt row above stops being a forward guard and becomes live coverage, so "
+            "re-measure it (and its revert) instead of trusting this note")
 

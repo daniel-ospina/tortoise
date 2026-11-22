@@ -1122,8 +1122,12 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:
     #: ⚠️ SCOPE: the documents whose every `tortoise_*` mention is a call, and ONE of
     #: them today. The rule is doc-agnostic, but applying it repo-wide would red on docs
-    #: that carry retired call forms right now (`docs/INGEST_CONTRACT.md:358` etc.), which
-    #: is a repair of its own — see the follow-up named in the PR body, not this guard.
+    #: that carry retired call forms right now, which is a repair of its own — **#14291**
+    #: (filed from the round-5 review's P2, with the six measured lines: `tortoise_recall(`
+    #: / `tortoise_update_point(` / `tortoise_create_point(` in `docs/INGEST_CONTRACT.md`,
+    #: `tortoise_mine_conversations(` in `docs/quickstart-selfhosted.md`), not this guard.
+    #: Naming the issue rather than saying "a follow-up" is deliberate: an unnamed
+    #: follow-up is how a class gets declared closed while it is still open.
     REPLACEMENT_NAME = re.compile(r"tortoise_[a-z0-9_]+")
 
     #: A retired name in call form: the name immediately followed by this.
@@ -1244,7 +1248,17 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "nothing (measured: `parametrize` over `()` gives `1 skipped`)")
 
     def test_the_block_splitter_is_structure_not_punctuation(self):
-        """A fence, a table row, a heading and a list item are blocks; a wrapped line is not."""
+        """A fence, a table row, a heading and a list item are blocks; a wrapped line is not.
+
+        ⛔ THE FENCE ROW IS DISCRIMINATING IN BOTH DIRECTIONS, measured (#14237 r5 review,
+        #3442 rule 3 — a test must be able to fail under the revert it names). The first
+        draft of this row put the fence after STRUCTURAL lines, so dropping the fence
+        branch from `blocks` still produced five blocks (the fence merged into the
+        paragraph that followed a list item) and the row stayed GREEN — it named a
+        property it could not see. The second half is the revert's own case: prose with
+        NO blank line before a fence. There, losing the fence branch merges prose+code
+        into one block, so both the count and `blocks[5]`/`blocks[6]` red.
+        """
         text = (
             "Wrapped prose line one\n"
             "and the same paragraph.\n"
@@ -1252,14 +1266,22 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "| a | b |\n"
             "# a heading\n"
             "- a list item\n"
-            "```python\n"
+            "```\n"
             "call()\n"
             "```\n"
+            "Prose directly under the fence, with no blank line.\n"
+            "~~~\n"
+            "code()\n"
+            "~~~\n"
         )
         blocks = [body for _start, _end, body in self.blocks(text)]
-        assert len(blocks) == 5, blocks
+        assert len(blocks) == 7, blocks
         assert blocks[0] == "Wrapped prose line one\nand the same paragraph.\n"
-        assert blocks[4] == "```python\ncall()\n```\n"
+        assert blocks[4] == "```\ncall()\n```\n"
+        assert blocks[5] == "Prose directly under the fence, with no blank line.\n", (
+            "prose and the fence below it were merged into one block — a code sample then "
+            "borrows the replacement a note in the prose names")
+        assert blocks[6] == "~~~\ncode()\n~~~\n"
 
     def test_the_PRE_FIX_text_is_a_violation(self):
         """R2 catches the defect this guard exists for — measured from commit b4da1f5c01.
