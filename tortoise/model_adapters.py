@@ -41,6 +41,7 @@ import contextlib
 import enum
 import errno
 import logging
+import math
 import os
 import socket
 import threading
@@ -55,6 +56,54 @@ from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.models import _emit_usage_sink, _warn_on_model_substitution
 
 _logger = logging.getLogger("tortoise.model_adapters")
+
+
+def _cache_hit_tokens(usage: object) -> int:
+    """The CACHED portion of this call's ``prompt_tokens`` (#14277).
+
+    ``usage["prompt_tokens"]`` is the SUM of cached and uncached input, and the
+    two bill at different rates (DeepSeek's automatic prefix cache is ~50×
+    cheaper on the hit side). A cost reader that sees only the sum cannot price
+    a warm call, which is why ``tools/longmem_eval/costing.py`` already carries
+    a ``prompt_cache_hit_tokens`` dimension — one this module had no producer
+    for until #14277, so the dimension read 0 on every real row.
+
+    Two provider spellings, both read (never one alone):
+
+    * ``prompt_cache_hit_tokens`` — DeepSeek's own field, live-verified on
+      api.deepseek.com (0 on a cold prefix, >0 on a repeated one);
+    * ``prompt_tokens_details.cached_tokens`` — the OpenAI-compatible shape,
+      which some gateway routes report instead.
+
+    Returns 0 when neither is present: a route with no cache dimension has no
+    cached tokens, which is not the same claim as "the cache was cold" — the
+    caller distinguishes them by the presence of the key, not by this value.
+    A non-numeric or negative value is treated as absent rather than coerced
+    into the cost basis (the #5854 rule: a shaped wrong number is worse than a
+    disclosed absence).
+    """
+    if not isinstance(usage, dict):
+        return 0
+    raw = usage.get("prompt_cache_hit_tokens")
+    if raw is None:
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            raw = details.get("cached_tokens")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return 0
+    # A provider can report an integer of ANY length (Python parses a JSON
+    # integer exactly), and ``float(10**400)`` raises OverflowError — so the
+    # guard below would raise where this function promises to treat a bad
+    # value as absent. It would also raise from the LAST statement of each
+    # adapter's success path, i.e. AFTER the paid response was consumed,
+    # discarding a call that succeeded. Bound the magnitude first, the same
+    # 1e300 bound ``extractor_v2._normalise_token_count`` applies for exactly
+    # this reason (#14277 review, P3).
+    if abs(raw) > 1e300:
+        return 0
+    if not math.isfinite(float(raw)) or raw < 0:
+        return 0
+    return int(raw)
 
 
 class OpenRouterModel:
@@ -178,6 +227,17 @@ class OpenRouterModel:
         _provider_cost = usage.get('cost')
         self.last_cost_usd = (None if _provider_cost is None
                               else float(_provider_cost))
+        # #14277: the PROMPT-CACHE split, captured on the same in-thread
+        # snapshot as the token counts above — ``prompt_tokens`` is the SUM of
+        # cached and uncached input, and the cached part bills at a different
+        # rate (DeepSeek's automatic prefix cache), so a cost reader that sees
+        # only ``prompt_tokens`` cannot price a warm call. Two provider
+        # spellings exist and both are read: DeepSeek's own
+        # ``prompt_cache_hit_tokens`` and the OpenAI-compatible
+        # ``prompt_tokens_details.cached_tokens``. Absent on routes that
+        # report neither -> 0, which is correct for them (no cache dimension)
+        # and is what the pricing reader already assumes.
+        self.last_cache_hit_tokens = _cache_hit_tokens(usage)
         # #2185 seam: fire with the response-local usage (provider from the
         # class attr; no-op when no sink is bound).
         _emit_usage_sink(self, usage)
@@ -289,6 +349,9 @@ class DeepSeekDirectModel(OpenRouterModel):
         _provider_cost = usage.get("cost")
         self.last_cost_usd = (None if _provider_cost is None
                               else float(_provider_cost))
+        # #14277: the prompt-cache split — DeepSeek reports it as
+        # ``prompt_cache_hit_tokens`` (live-verified: 0 on a cold prefix).
+        self.last_cache_hit_tokens = _cache_hit_tokens(usage)
         self.last_finish_reason = data["choices"][0].get("finish_reason")
         # #2185 seam (DeepSeekDirectModel has its OWN complete body — the fire
         # must live here too, not just on the OpenRouterModel path).
@@ -1024,6 +1087,11 @@ class RoutingModel:
         self.model: str = getattr(primary, "id", "")
         self.last_prompt_tokens: int = 0
         self.last_completion_tokens: int = 0
+        # #14277: the cached portion of ``last_prompt_tokens`` (0 when the
+        # serving route reports no cache dimension). Forwarded like the two
+        # counts above — a wrapper that drops it hides the cache lever from
+        # every cost row that reads through the wrapper.
+        self.last_cache_hit_tokens: int = 0
         # #2906: provider-reported charge for the last call — forwarded from
         # the serving adapter (None when it did not report one).
         self.last_cost_usd: float | None = None
@@ -1106,6 +1174,7 @@ class RoutingModel:
         # #1987 Task 3: per-call usage + resolved-spec forwards.
         self.last_prompt_tokens = getattr(adapter, "last_prompt_tokens", 0)
         self.last_completion_tokens = getattr(adapter, "last_completion_tokens", 0)
+        self.last_cache_hit_tokens = getattr(adapter, "last_cache_hit_tokens", 0)
         self.last_cost_usd = getattr(adapter, "last_cost_usd", None)
         self.model = getattr(adapter, "id", self.model)
         if failover:
@@ -1302,6 +1371,9 @@ class RotatingModel:
                            if providers else (model or ""))
         self.last_prompt_tokens: int = 0
         self.last_completion_tokens: int = 0
+        # #14277: the cached portion of ``last_prompt_tokens`` — forwarded like
+        # the two counts above (see RoutingModel's note).
+        self.last_cache_hit_tokens: int = 0
         # #2906: provider-reported charge for the last call — forwarded from
         # the serving adapter (None when it did not report one).
         self.last_cost_usd: float | None = None
@@ -1355,6 +1427,7 @@ class RotatingModel:
                 # #1987 Task 3: per-call usage + resolved-spec forwards.
                 self.last_prompt_tokens = getattr(p, "last_prompt_tokens", 0)
                 self.last_completion_tokens = getattr(p, "last_completion_tokens", 0)
+                self.last_cache_hit_tokens = getattr(p, "last_cache_hit_tokens", 0)
                 self.last_cost_usd = getattr(p, "last_cost_usd", None)
                 self.model = getattr(p, "id", self.model)
                 return True, out
