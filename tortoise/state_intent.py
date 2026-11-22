@@ -693,12 +693,21 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: ⛔ AND IT IS `{0,10}`, NOT `{0,8}` (fresh review, P2, measured): the prose above named the
 #: helper's bound while the slot was spelled EIGHT, so the sentence was true of nothing — and the
 #: two-token gap was observable from the REPORT side, not the route side: with `{0,8}` a question
-#: carrying SIX or SEVEN adverbials before the ending word (`have any it has been <6 adverbs>
+#: carrying NINE or TEN adverbials before the ending word (`have any it has been <9 adverbs>
 #: deprecated and been withdrawn`) came back `population=None, signal=None`, i.e. a refused cue with
 #: no notice — duty (b) again, in the very class this bound exists for. At `{0,10}` both report.
+#: ⛔ THE BOUNDARY IS NINE/TEN, AND THIS CORRECTION IS ITSELF A REVIEW FINDING (round-34, P2,
+#: measured): the sentence above first said "SIX or SEVEN", and the one below said "beyond eight
+#: adverbials … both bounds answer identically". Both halves were measurably false — the slot
+#: allows EIGHT, so the n=6,7,8 rows report; the silent band is n=9,10; and the two bounds agree
+#: again only at n>=11, where the 60-character window dominates BOTH. Probed on
+#: `have any it has been <n x just> deprecated and been withdrawn` against a `{0,8}` copy: head
+#: and copy identical for n=1..8 and n>=11, different at n=9,10. The `_EXISTENCE_HELPER` note
+#: ~60 lines above already states nine/ten for the same class, so this file carried two boundaries
+#: for one measurement until now.
 #: Measured over 78 probes (adverb runs 0-12 across six sentence shapes, incl. the relative-clause
 #: and `we have been tracking` twins): 10 diffs, ALL silence -> `existence_unguarded`,
-#: **0 population/shape moves** — the widening is refusal-side and cannot route. Beyond eight
+#: **0 population/shape moves** — the widening is refusal-side and cannot route. Beyond ten
 #: adverbials the 60-character window dominates and both bounds answer identically, which is the
 #: same end-to-end caveat the helper's own note states.
 #: ⛔ AND THE WIDENING IT PAID FOR OVER-REFUSED THE SAME SPELLING INSIDE A RELATIVE CLAUSE
