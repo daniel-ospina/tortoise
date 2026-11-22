@@ -31,10 +31,13 @@ WHAT THIS MODULE IS NOT
   module chooses *when* a fold runs and never *what* it does, so a fourth write
   door cannot get a fourth answer to "what does this event mean in Postgres".
 * **Not a store.** The queue is in memory and is not durable by design: the
-  journal is the durable copy of everything queued here, and a process that dies
-  with a non-empty queue loses nothing a replay cannot restore
-  (``tools/record_runner.py apply``). Nothing is ever DROPPED to make room —
-  see *BACKPRESSURE* below.
+  journal is the **reconstruction** source for everything queued here, and a
+  process that dies with a non-empty queue loses nothing a replay cannot restore
+  (``tools/record_runner.py apply``). ⛔ Durability is the STORE's own
+  persistence plus an off-box copy of it, and ``docs/durability-posture.md`` is
+  the only place that says so — this module links it and does not restate it
+  (`tests/test_durability_posture.py` reds a restated claim, whichever wording
+  it takes). Nothing is ever DROPPED to make room — see *BACKPRESSURE* below.
 * **Not the cache fold.** `live_write`'s ``projection.apply`` (record →
   FalkorDB) still runs inline. Deferring the record is safe because the record
   has an independent, always-available reader and a journal that heals it; the
