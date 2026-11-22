@@ -2556,6 +2556,42 @@ class TestEveryReaderNamesTheLiveListingDoor:
             f"the verdict depends on the SPELLING of the same mention: {entity!r} gave "
             f"{entity_hits}, {plain!r} gave {plain_hits}")
 
+    def test_a_fenced_entity_is_reported_like_the_PLAIN_spelling(self):
+        """The r14 comment's "a fenced entity is ACCEPTED, and correctly so" is SUPERSEDED here.
+
+        ⛔ WHY THIS ROW EXISTS AND WHY IT IS NOT IN THE PARITY TABLE. The r14 fix decodes every
+        unit's SOURCE, so an entity-spelled call inside a FENCE now reds — the earlier comment
+        recorded that shape as accepted, on the reasoning that a fence's `&` is escaped and a
+        code block is not an instruction. That reasoning does not survive the guard's own
+        pinned behaviour: a PLAIN call inside a fence already reds R1, and
+        `test_a_fenced_mention_cannot_borrow_the_note_above_it` PINS that ("a fenced call under
+        a migration note was accepted — a fence is its own block"). So accepting only the
+        ENTITY spelling would be the spelling-dependence this reader exists to close; the r14
+        change is the consistency fix, and this row records the reversal so the next round does
+        not file it as drift.
+
+        The two reports cannot be compared line for line, and that is declared: the entity
+        report names the UNIT's start line (a decoded character has no source offset — see
+        `_entity_only_mentions`), the raw scan names the mention's own line.
+
+        ⚠️ NON-VACUITY, stated honestly: this shape already reds at `722ed8f0a` (the r14 fix
+        landed there), so the row is a PIN on that behaviour rather than a new fix. Its
+        discriminating power is measured by mutation instead — reverting `shown` to the visible
+        `body` reds it (19 failed / 190 passed over this class, the mutant applied and reverted
+        with the tree sha-verified).
+        """
+        plain = "```\ntortoise_list_graphs(x=1)\n```\n"
+        entity = "```\n&#116;ortoise_list_graphs(x=1)\n```\n"
+        assert self.retired_call_forms(plain) == ["tortoise_list_graphs:2"], (
+            f"the PLAIN fenced call is no longer reported, so this row measures nothing: "
+            f"{self.retired_call_forms(plain)}")
+        assert self.retired_call_forms(entity) == ["tortoise_list_graphs:1"], (
+            "an entity-spelled fenced call was accepted — the one spelling a fence would "
+            f"excuse: {self.retired_call_forms(entity)}")
+        assert not self.notes_missing_replacement(entity), (
+            "a call form was graded a dead end as well: "
+            f"{self.notes_missing_replacement(entity)}")
+
     def test_a_reference_definition_is_judged_OUTSIDE_the_block_model(self):
         """The gap unit is STRUCTURAL, and this row pins it as structure (#14237 r15, measured).
 
