@@ -1976,7 +1976,26 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             ["git", "diff", "--numstat", "origin/main...HEAD", "--", "tortoise/sdk.py",
              "tortoise/mcp_server.py", "tortoise/search_engine.py"],
             cwd=REPO, capture_output=True, text=True, check=False)
-        if _numstat.returncode == 0:
+        if _numstat.returncode != 0:
+            # ⛔ A NAMED CANNOT-RUN, never a silent drop (#14038 review cycle 6, P2). `_main_readable`
+            # above proves `git show origin/main:<path>`, which does NOT prove a MERGE BASE: the
+            # three-dot form needs one, and the `test` job checks out at the default `fetch-depth: 1`.
+            # The old `if _numstat.returncode == 0:` had no else, so this arm — the one that MEASURES
+            # whether the branch writes into the three files it calls `main`'s — reported green
+            # without running. A failed diff is now excused only when `git merge-base` cannot find the
+            # base either; with a base in hand, a failed diff is a defect in this arm, not an
+            # environment fact, and it reds.
+            _merge_base = subprocess.run(
+                ["git", "merge-base", "origin/main", "HEAD"],
+                cwd=REPO, capture_output=True, text=True, check=False)
+            assert _merge_base.returncode != 0, (
+                f"`git diff --numstat origin/main...HEAD` exited {_numstat.returncode} although "
+                f"`git merge-base origin/main HEAD` resolved the base "
+                f"({_merge_base.stdout.strip()[:12]}) — the arm measuring whether this branch writes "
+                "into the three files it calls `main`'s would silently not run: "
+                f"{(_numstat.stderr or '').strip()[:300]}"
+            )
+        else:
             assert _numstat.stdout.strip() == "", (
                 "the split says the eleven non-comparable addresses outside `hosted_api.py` are `main`'s "
                 f"own drift, but this branch's diff writes into them:\n{_numstat.stdout}"
