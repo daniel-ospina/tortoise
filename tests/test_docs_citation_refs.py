@@ -5326,6 +5326,28 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         "a `grep --help` that PUBLISHED a universe must be RETURNED, not skipped — the skip excuses "
         "only the platform that published nothing (#14303)")
 
+    # ⛔ THE TWO STREAMS ARE JOINED WITH A SEPARATOR, AND THAT SEPARATOR HAS ITS OWN WITNESS (#14303
+    # review round 6, P2 — MEASURED). Reading "whichever stream carried it" is not enough when a
+    # grep SPLITS a list across both: `(stdout or "") + (stderr or "")` fuses the last name of one
+    # with the first of the other (`--opt-b` + `--last` parsed as `['--opt-b--last']`, silently
+    # dropping `--last`). Only a BSD-shaped grep publishes on stderr, and no real one splits a word,
+    # so removing the separator was green on EVERY platform the fleet runs — a silent revert of the
+    # portability fix. The boundary is exercised here instead of waited for.
+    boundary_stdout = usage(_D5_LONG_OPTION_FLOOR - 1) + "\n  --null"
+    split_help = subprocess.CompletedProcess(
+        args=["grep", "--help"], returncode=2,
+        stdout=boundary_stdout,
+        stderr="data   terminate lines with NUL byte and continue the same option list\n")
+    split = not_a_skip(_d5_documented_long_options, split_help)
+    assert "--null" in split, (
+        "a long option ending `stdout` was LOST when the list continued on `stderr` — the two "
+        "streams are being concatenated without a separator, so the boundary fuses the last name "
+        "of one with the first word of the other (#14303 review round 6, P2 — MEASURED)")
+    assert "--nulldata" not in split, (
+        "the streams FUSED at the boundary: `--null` and the first word on `stderr` were parsed as "
+        "one long option, which invents a spelling `grep --help` never published and drops the real "
+        "one — the separator the two streams are joined with is what prevents it (#14303)")
+
 
 def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypatch):
     r"""The allowance tracks the grep that would RUN the command — measured, never hardcoded.
