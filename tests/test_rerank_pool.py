@@ -1518,6 +1518,99 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
     return _SeamFlow(calls=reads, opaque=opaque or class_bound)
 
 
+def _seam_opts_out(call) -> bool:
+    """`_sites`' own opt-out rule, so the grant's grader counts what it exempts.
+
+    Hoisted out of the census test so the synthetic pin grades the SAME predicate
+    the arm runs — a grant's grader that is only exercised against the one tree it
+    happens to sit on can be vacuous in every other direction.
+    """
+    if call is None:
+        return False
+    for k in call.keywords:
+        if (k.arg == "_rerank_candidates"
+                and isinstance(k.value, ast.Constant)
+                and k.value.value is False):
+            return True
+        if k.arg != "_search_kwargs":
+            continue
+        try:
+            opts = ast.literal_eval(k.value)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(opts, dict) and opts.get("_rerank_candidates") is False:
+            return True
+    return False
+
+
+def _seam_live_reads(tree, seam_mentions):
+    """The grant's grader: (live mentions, resolved, unresolved, distinct calls).
+
+    ⛔ TWO COUNTS, BECAUSE THE TWO RECORDS COUNT DIFFERENT THINGS. `live` is the
+    CENSUS's unit — the mentions an owner-granular grant would absorb — and
+    `calls` is the RECORDED REASON's: the exemption's comment counts CALL SITES
+    ("TWO call sites": a discarded warm-up, and the measured loop). One binding
+    driven twice is ONE mention and TWO reads, so a grader asserting mentions
+    alone left three reads in the tool with the row GREEN — measured at
+    `7d18f1c824` on `_w = SEAM; _w(…); _w(…)`: mentions 2, distinct calls 3
+    (round-9 review, F1-B). Both are returned; the arm asserts both.
+    """
+    live: list = []
+    resolved: list = []
+    unresolved: list = []
+    calls: dict = {}
+    for mention in seam_mentions:
+        flow = _seam_read_calls(tree, mention)
+        fed = flow.calls
+        if not fed and not flow.opaque:
+            continue        # PROVEN dead: nothing here can reach a call
+        if not flow.opaque and all(_seam_opts_out(c) for c in fed):
+            continue        # the census's sanctioned alternative, no grant needed
+        live.append(mention)
+        (unresolved if flow.opaque else resolved).append(mention)
+        for call in fed:
+            # ONE call node reached from two mentions is ONE call site, because
+            # the row it feeds counts the reason's unit, not the walk's paths.
+            calls.setdefault(id(call), call)
+    return live, resolved, unresolved, list(calls.values())
+
+
+def test_the_grant_grader_counts_CALL_SITES_across_ONE_mention():
+    """#14278 (round 9, F1-B) — one binding driven twice is ONE mention, TWO reads.
+
+    `_seam_live_reads` reports both facts because the two records count different
+    things: the census (`_sites`) counts MENTIONS, which is the unit an
+    owner-granular grant absorbs, while the grant's recorded reason counts CALL
+    SITES. Measured at `7d18f1c824`, binding the warm-up once and calling it twice
+    gave 2 mentions / 3 distinct calls and the arm stayed GREEN — the third read
+    inherited a PERMANENT exemption with no recorded reason. The call-site row is
+    what closes it, so this pin exists to make that row's subject visible without
+    mutating `tools/read_wave_latency.py`.
+    """
+    source = '''
+def run(sdk):
+    _w = sdk._tortoise_fts_query
+    _w(query="warm1", limit=10)
+    _w(query="warm2", limit=10)
+    for q in ("q",):
+        sdk._tortoise_fts_query(query=q, limit=10, leg_trace=[])
+'''
+    tree = ast.parse(source)
+    mentions = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute)
+                and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+    live, resolved, unresolved, calls = _seam_live_reads(tree, mentions)
+    assert (len(live), len(resolved), len(unresolved), len(calls)) == (
+        2, 2, 0, 3), (
+        "the grant's grader mis-counted the one-binding-two-calls shape: "
+        f"live={len(live)} resolved={len(resolved)} "
+        f"unresolved={len(unresolved)} calls={len(calls)}")
+    assert len(calls) > len(live), (
+        "this shape is exactly why the arm asserts BOTH counts — the mention "
+        "count alone cannot see the second call, and the recorded reason "
+        "counts call sites")
+
+
 def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     """#14278 F1 — the resolver is not vacuous, and it does not free-ride either.
 
@@ -2080,26 +2173,8 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # out"), so counting an opted-out read here would FALSE-BLOCK the correct fix
     # (measured: a `_rerank_candidates=False` read in `main()` passes the census
     # and reddened this arm — round 4's defect, mirrored).
-    def _opted_out(call) -> bool:
-        """`_sites`' own rule, so this arm counts exactly what the grant exempts."""
-        if call is None:
-            return False
-        for k in call.keywords:
-            if (k.arg == "_rerank_candidates"
-                    and isinstance(k.value, _ast.Constant)
-                    and k.value.value is False):
-                return True
-            if k.arg != "_search_kwargs":
-                continue
-            try:
-                opts = _ast.literal_eval(k.value)
-            except (ValueError, SyntaxError):
-                continue
-            if (isinstance(opts, dict)
-                    and opts.get("_rerank_candidates") is False):
-                return True
-        return False
-
+    # `_seam_opts_out` above is `_sites`' own rule, hoisted so the synthetic pin
+    # grades the predicate this arm actually runs.
     seam_mentions = [n for n in _ast.walk(harness)
                      if isinstance(n, _ast.Attribute)
                      and n.attr in ("tortoise_fts_query",
@@ -2129,20 +2204,8 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # predicate is therefore `not opaque` FIRST, and the count is split into what
     # the walk RESOLVED versus what it had to COUNT unresolved, so the message
     # never claims a read it did not attribute.
-    live: list = []
-    seam_calls: list = []
-    resolved: list = []
-    unresolved: list = []
-    for mention in seam_mentions:
-        flow = _seam_read_calls(harness, mention)
-        fed = flow.calls
-        if not fed and not flow.opaque:
-            continue        # PROVEN dead: nothing here can reach a call
-        if not flow.opaque and all(_opted_out(c) for c in fed):
-            continue        # the census's sanctioned alternative, no grant needed
-        live.append(mention)
-        (unresolved if flow.opaque else resolved).append(mention)
-        seam_calls.extend(fed)
+    live, resolved, unresolved, seam_calls = _seam_live_reads(
+        harness, seam_mentions)
     # ⛔ COUNT CALL SITES, NOT MENTIONS. The object the recorded reason describes is
     # a set of READS (`:296`'s discarded warm-up, `:305`'s measured loop), and one
     # mention can feed several calls — `_w = SEAM; _w(a); _w(b)` is one mention and
@@ -2150,6 +2213,12 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # 2 and the arm passed with THREE call sites inside the granted owner (round-11
     # review, P2 — the remaining half of round 9's F1-B). Distinct by identity, so a
     # mention and the call that consumes it are not double-counted.
+    # `_seam_live_reads` already dedupes by node id — a call reached from two
+    # mentions is one call site, because the reason's unit is the site, not the
+    # walk's paths — and the set is kept here because the COUNT is what this row
+    # means. The mention count is deliberately NOT asserted: a mention that reads
+    # nothing is not a read, so asserting it would false-block a correct tree (a
+    # live mention bound and left unused beside the two that are called).
     read_sites = {id(call) for call in seam_calls}
     assert len(read_sites) == 2, (
         f"{len(read_sites)} un-opted-out seam CALL SITE(s) of `tortoise_fts_query` "

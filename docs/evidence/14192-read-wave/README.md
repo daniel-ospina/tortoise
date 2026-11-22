@@ -1,5 +1,5 @@
 ---
-title: "#14192 — the read path's legs, measured: the four post-fusion reads run as one wave"
+title: "#14192 — the read path's legs, measured: the five post-fusion reads run as one wave"
 type: evidence
 domain: platform
 doc_status: live
