@@ -639,6 +639,12 @@ def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
     """
     out: set[str] = set()
     for node in ast.walk(tree):
+        # ⛔ NO GENERIC `Name(Store)` WALK (#14326 round 8, measured: adding one and then
+        # removing it leaves 25 passed — the per-form arms below already reach every bind,
+        # because `_bind_target_names` takes a bare `Name` as well as an attribute segment).
+        # The four spellings a previous round believed it had lost (an `AnnAssign`, a walrus,
+        # a `for` target, an augmented bind) are each a ROW below, so they red whichever arm
+        # covers them rather than standing on a walk nobody can red.
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 out |= _bind_target_names(target)
@@ -674,7 +680,11 @@ def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
                             or getattr(capture, "rest", None))
                     if name:
                         out.add(name)
-    return frozenset(out & (_PURE_READS | _RECORDING_CALLEES))
+    # ⛔ NO ALLOW-LIST INTERSECTION (#14326 round 8, measured: `frozenset(out)` leaves 25
+    # passed) — all three consumers test `_callee in rebound` only on the branch where
+    # `_callee` is already an allow-listed name, so extra entries cannot change a
+    # verdict. A filter no mutant can red reads as a guard and is not one.
+    return frozenset(out)
 
 
 #: Callees that RECORD a string and cannot execute it. Kept separate from `_PURE_READS`
@@ -691,11 +701,7 @@ def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
 #: that apart from `_COUNTS.setdefault(literal, 0)` — whose SECOND ARGUMENT is what makes it
 #: inert. REMOVED: a row refuses the fetch spelling, and the inert one is an ACCEPTED,
 #: STATED false red rather than bought with an exemption that also admits a fetch.
-_RECORDING_CALLEES = frozenset({
-    "info", "debug", "warning", "warn", "error", "exception", "critical", "log",
-    "write", "writelines", "append", "add", "update", "extend",
-    "format", "format_map",
-})
+_RECORDING_CALLEES = frozenset({"info", "write"})
 
 
 def _carries_read_name(node: ast.AST, consts: dict[str, frozenset[str]]) -> bool:
@@ -803,6 +809,23 @@ def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
             or _callee in rebound)
 
 
+def _dict_display_leaves(node: ast.Dict) -> list[ast.AST]:
+    """Every node a `**{…}` display delivers — its KEYS and its VALUES, RECURSIVELY.
+
+    ⛔ THE ONE-LEVEL FORM WAS A FAIL-OPEN (#14326 round 8, MEASURED GREEN with the pin at 25
+    passed): `_PageFetcher(**{**{"name": "_tortoise_fts_query"}})` delivered the read's name
+    one nesting level down and neither this branch nor `_possible_strings`' `Dict` arm (which
+    unions KEYS only) could see it — so the verdict was decided by a nesting level. A display
+    nested in a display is the same delivery.
+    """
+    out: list[ast.AST] = [k for k in node.keys if k is not None]
+    for value in node.values:
+        if value is None:
+            continue
+        out.extend(_dict_display_leaves(value) if isinstance(value, ast.Dict) else [value])
+    return out
+
+
 def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
     """The operands of `call` that are NOT the object being read.
 
@@ -816,6 +839,12 @@ def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
     # THROUGH a `Starred` into its literal container (measured: deleting the expansion
     # leaves `getattr(*[sdk, "…"])` red). A clause no mutant can red reads to the next lane
     # as an independent check; this file deletes them instead.
+    # ⛔ `[1:]`, AND IT IS UNPINNED (#14326 round 8, measured BOTH ways: widening to
+    # `list(call.args)` leaves 25 passed, and so does the slice) — because a literal in the
+    # FIRST position is already a mention through the `Constant` arm, so the slice only ever
+    # subtracts an operand the census has already counted. Kept as the narrower statement of
+    # intent (`getattr`'s object position is not a name), with the measurement recorded so the
+    # next lane does not read the exclusion as a guard.
     operands = list(call.args)[1:]
     operands.extend(arg for arg in call.args if isinstance(arg, ast.Starred))
     # ⛔ A KEYWORD IS A DELIVERY TOO (#14326 round 6, MEASURED GREEN at `81973329`):
@@ -834,8 +863,7 @@ def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
             # KEY can be the read's NAME too (`**{_N: 1}`, round 7 MEASURED GREEN) — so BOTH
             # sides are walked. `_possible_strings` unions a dict literal's KEYS only (the
             # polarity `for` targets need), which is why this position is walked here.
-            operands.extend(k for k in kw.value.keys if k is not None)
-            operands.extend(v for v in kw.value.values if v is not None)
+            operands.extend(_dict_display_leaves(kw.value))
         elif kw.arg is None and isinstance(kw.value, ast.Call) and \
                 (getattr(kw.value.func, "id", None)
                  or getattr(kw.value.func, "attr", None)) == "dict":
@@ -3712,6 +3740,26 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    print = getattr\n'
             '    _p = (sdk, "_tortoise_fts_query")\n'
             '    print(*_p)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE GENERIC `Name(Store)` SPELLINGS (#14326 round 8, EACH MEASURED GREEN through
+        # the real lane after the merge adopted a per-FORM enumeration): an annotated bind, a
+        # walrus, a `for` target and an augmented bind are all `Name(Store)` nodes — one walk
+        # covers them, and each was a live fail-open without it.
+        "AnnAssign rebinding a pure callee": (
+            '    print: object = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "WALRUS rebinding a pure callee": (
+            '    (print := getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`for` TARGET rebinding a pure callee": (
+            '    for print in (getattr,):\n'
+            '        print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "AUGMENTED bind rebinding a pure callee": (
+            '    print += getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "PARAMETER named as a pure callee": (
             '    def _f(print=getattr):\n'
             '        print(sdk, "_tortoise_fts_query")'
@@ -3739,6 +3787,31 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "literal inside a `dict(...)` spread": (
             '    _l = _PageFetcher(**dict(name="_tortoise_fts_query"))\n'
             '    _l(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ A NESTED `**` DISPLAY IS THE SAME DELIVERY (#14326 round 8, MEASURED GREEN at
+        # `bb89a48`: m=2 c=2 i=0 while the ONE-level sibling above was refused — the verdict
+        # was decided by a nesting level).
+        "literal one level down in a nested ** display": (
+            '    _l = _PageFetcher(**{**{"name": "_tortoise_fts_query"}})\n'
+            '    _l(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE DEFAULT ARM'S TWO OFFSETS (#14326 round 8, EACH MEASURED GREEN while the
+        # arithmetic was replaced by a constant): a PADDED positional parameter moves the
+        # default off index 0, and a SECOND keyword-only parameter moves it off `[0]` — every
+        # pre-existing default row had offset 0, so neither sub-clause could be red.
+        "PADDED positional default": (
+            '    def _f(_pad, _N="_tortoise_fts_query"):\n'
+            f'        {reach.format(name="_N")}\n'
+            '    _f(1)\n'),
+        "SECOND keyword-only default": (
+            '    def _f(*, _a="x", _N="_tortoise_fts_query"):\n'
+            f'        {reach.format(name="_N")}\n'
+            '    _f()\n'),
+        # ⛔ A BARE-NAME THIRD READ IS A READ (#14326 round 8, PRE-EXISTING and unpinned:
+        # dropping `_read_calls`' `id` alternative left 25 passed, and this reach went
+        # `refuses=True` (c=3) -> `refuses=False` (m=2 c=2)). The `calls == 2` assertion the
+        # whole pin rests on has an `id` half nobody had ever reddened.
+        "bare-name read call": (
+            '    _tortoise_fts_query(query=queries[0]["query"], limit=10, '
+            'kind="statement")\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
