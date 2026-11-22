@@ -526,15 +526,34 @@ _EXISTENCE_ADVERB = (
     # `signal=None`, i.e. the round-23 defect one spelling over. Measured over 7 verbs x
     # 7 subjects x 12 spellings: 291 of 588 routed before this list was widened.
     r"very|quite|rather|almost|nearly|too|much|all|as|so|about|in|fact|practice|"
-    r"effect|good|long|since|far)"
+    r"effect|good|long|since|far|"
+    # ⛔ AND THE LIST IS STILL AN ENUMERATION, WHICH IS THE POINT (round-25 review, P1,
+    # measured): `often`, `always`, `sometimes`, `seldom`, `soon`, `again`, `twice`,
+    # `then`, `no longer`, `to date`, `of late`, `at last` are adverbials in NO `-ly`
+    # shape and were not named, so twelve of twelve still routed the whole ended
+    # population with the caller's predicate dropped and `signal=None` — the same defect
+    # one spelling over, for the third round running. The tokens below close the
+    # spellings this review measured; the RESIDUAL is stated rather than called closed:
+    # an adverbial this list does not name still routes, because telling an adverbial
+    # from a noun without a lexicon is the limit `_COPULA_SUBJECT` already states.
+    r"often|always|sometimes|seldom|rarely|soon|again|twice|then|longer|date|late|"
+    # …and the MULTI-WORD adverbials need their own leading word in the gap (`no longer`,
+    # `to date`, `of late`, `at last`): the gap consumes ONE token per iteration, so a
+    # two-word adverbial matched neither half alone. These four join the slot for exactly
+    # that reason; a two-word adverbial this list does not lead is the stated residual.
+    r"last|first|no|to|of|at)"
 )
 _EXISTENCE_HELPER = (
-    # …and the REPETITION BOUND is 5, not 3: `only just very recently` is four adverbials,
-    # and a count bound is a spelling this guard is blind to if it is one short (measured
-    # in the same round). The bound exists to keep the window from swallowing a whole
-    # clause, not to grade English.
-    rf"(?:not\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}"
-    rf"(?:have\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}been\b"
+    # ⛔ `not` IS POSITIONAL, NOT FIRST (round-25 review, P1, measured): the slot used to
+    # accept `(?:not\s+)?` only at the FRONT of the gap, so `has still not been` and
+    # `has recently not been` both routed — a negation after any adverbial re-opened the
+    # hole. `have` joins the same gap alternation for the same reason (the modal passives
+    # `will have recently been`, where `have` is not adjacent to `been`).
+    # …and the REPETITION BOUND is 8, not 5: `has, in fact, only just very recently been`
+    # is five adverbials plus punctuation, and a count bound one short is a spelling this
+    # guard is blind to (measured in three consecutive rounds). The bound keeps the window
+    # from swallowing a whole clause; it does not grade English.
+    rf"(?:[,\s]*(?:not|have|{_EXISTENCE_ADVERB})\b[,\s]+){{0,8}}been\b"
 )
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
@@ -562,7 +581,7 @@ _EXISTENCE_GUARD = (
     # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
     # after. The anchor is the same one the pronoun branch below already uses: the
     # lookahead fires only when the second clause's passive ends an ENDING participle.
-    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -580,7 +599,7 @@ _EXISTENCE_GUARD = (
     # question's).
     rf"(?![^?]{{0,60}}?\b(?:it|they|he|she|we|you)\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
 )
 _EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW

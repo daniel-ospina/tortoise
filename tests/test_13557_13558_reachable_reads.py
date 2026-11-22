@@ -704,6 +704,12 @@ NOT_SELECTED = [
     # Measured: 291 of 588 rounded off the 7x7x12 matrix before the widening.
     "have any users reported the vendor has very recently been deprecated",
     "have any users reported the vendor has only just very recently been deprecated",
+    # …and the non-`-ly` / positional-negation / two-word spellings (round-25 review, P1):
+    # 12 of 12 adverbials, `still not` and `recently not` all routed before this widening.
+    "have any users reported the vendor has often been deprecated",
+    "have any users reported the vendor has still not been deprecated",
+    "have any users reported the vendor has no longer been deprecated",
+    "have any users reported the vendor has, in fact, recently been deprecated",
     # ── and the SILENT direction of the notice's tail (round-16 review, P2) ──
     # `existence_unguarded` carried no tail guard, so ANY tail reported — falsifying the
     # two paragraphs that say a qualifier outside the closed tail list stays silent. The
@@ -894,6 +900,12 @@ NOTICE_ONLY = [
     # Measured: 291 of 588 rounded off the 7x7x12 matrix before the widening.
     "have any users reported the vendor has very recently been deprecated",
     "have any users reported the vendor has only just very recently been deprecated",
+    # …and the non-`-ly` / positional-negation / two-word spellings (round-25 review, P1):
+    # 12 of 12 adverbials, `still not` and `recently not` all routed before this widening.
+    "have any users reported the vendor has often been deprecated",
+    "have any users reported the vendor has still not been deprecated",
+    "have any users reported the vendor has no longer been deprecated",
+    "have any users reported the vendor has, in fact, recently been deprecated",
     # …and the ONE row of round-19's pre-determiner-opener class that REPORTS rather than
     # going silent: it is five words long, so the subject bound exceeded is what the
     # notice names (`is_copula_long_subject`). Its short siblings stay in NOT_SELECTED
@@ -1141,6 +1153,23 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
 #: `_BLOCKED_TAIL`'s CONJUNCTION members — the SECOND of the two silent groups the
 #: guard's note names, and the one whose cause is that guard itself rather than the
 #: subordinator lookahead. Named here so the class is a class, not a set difference.
+    # …and a routed question reports nothing, because it WAS applied.
+    for routed in ("what ended", "has anything been withdrawn"):
+        got = detect_state_question(routed)
+        assert got.population == "ended" and got.signal is None
+        assert missed_route_payload(got) is None
+    # …the other reason a cue can fail to be served is a family with no
+    # lifecycle, and it is a distinct value on the same payload.
+    from tortoise.state_intent import ENDED, StateQuestion
+
+    family = missed_route_payload(StateQuestion(ENDED, "existence", "what ended"),
+                                  reason="family")
+    assert family["reason"] == "family" and family["routed"] is False
+    with pytest.raises(ValueError):
+        missed_route_payload(StateQuestion(ENDED, "existence", "what ended"),
+                             reason="invented")
+
+
 _CONJUNCTION_TAIL_MEMBERS = frozenset(("and", "or", "but", "so", "yet"))
 
 #: `_BLOCKED_TAIL`'s TIME ADVERBS and DETERMINERS — the members whose `<member> the
@@ -1264,21 +1293,6 @@ def test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound():
             f"and the behaviour never disagree")
 
 
-    # …and a routed question reports nothing, because it WAS applied.
-    for routed in ("what ended", "has anything been withdrawn"):
-        got = detect_state_question(routed)
-        assert got.population == "ended" and got.signal is None
-        assert missed_route_payload(got) is None
-    # …the other reason a cue can fail to be served is a family with no
-    # lifecycle, and it is a distinct value on the same payload.
-    from tortoise.state_intent import ENDED, StateQuestion
-
-    family = missed_route_payload(StateQuestion(ENDED, "existence", "what ended"),
-                                  reason="family")
-    assert family["reason"] == "family" and family["routed"] is False
-    with pytest.raises(ValueError):
-        missed_route_payload(StateQuestion(ENDED, "existence", "what ended"),
-                             reason="invented")
 
 
 def test_the_two_silences_the_comments_name_are_measured_not_hoped():
