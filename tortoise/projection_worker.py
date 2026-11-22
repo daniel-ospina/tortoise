@@ -727,14 +727,23 @@ class ProjectionWorker:
           plain ``threading.Lock``s a child inherits from a peer that did not
           survive the ``fork()``. ``set``, ``inc``, ``get``, ``labels`` and
           ``collect`` all take one, and a blocked lock is not an exception, so the
-          suppression in ``_emit`` cannot save the child. The reset therefore also
-          calls ``monitoring.ensure_projection_metrics_fork_safe()``, which replaces
-          them — the SAME reasoning as the two above, applied to the lock nobody
-          here owns. ⛔ This is what makes the publish below safe, and it is the part
-          an earlier revision of this fix left out: dropping the publish from the
-          read path only moved the wedge onto the write and the collect paths
-          (measured: the child blocked in ``MutexValue.set`` from ``submit`` and in
-          ``MutexValue.get`` from ``projection_worker_gauges()``);
+          suppression in ``_emit`` cannot save the child. ``monitoring`` therefore
+          REPLACES them — ``ensure_projection_metrics_fork_safe``, registered at
+          import as an ``os.register_at_fork(after_in_child=...)`` hook — so they
+          are already fresh before this child runs any of our code, and the SAME
+          reasoning as the two locks above applies to the lock nobody here owns.
+          ⛔ THIS METHOD DOES NOT CALL THAT FUNCTION (review round 11, P3-2): an
+          earlier revision of this bullet said it did, so a reader could have
+          deleted the repair from a publish path believing this reset had already
+          run it. The repair is the HOOK's job and it has happened before we get
+          here; every publish path also asks again, which is free (the function is
+          idempotent by pid). ⛔ This is what makes the publish below safe, and it
+          is the part an earlier revision of this fix left out: dropping the
+          publish from the read path only moved the wedge onto the write and the
+          collect paths (measured: the child blocked in ``MutexValue.set`` from
+          ``submit`` and in ``MutexValue.get`` from ``projection_worker_gauges``),
+          and a hook is what covers the paths no helper here reaches — the
+          ``/metrics`` scrape calls ``generate_latest`` directly;
         * the PUBLISH SNAPSHOT, which this method RETURNS rather than applying:
           the publish is a foreign call (cycle 4, P2-2) and the caller makes it
           once the reset has returned — after the prometheus locks above are
