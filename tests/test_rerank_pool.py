@@ -1319,6 +1319,31 @@ def _seam_modelled_binding(node):
     return None
 
 
+def _seam_object_targets(*targets):
+    """Targets that WRITE THROUGH an object, rather than binding a plain name.
+
+    ``_bag[SEAM] = 1`` and ``obj.attr = SEAM`` store the value into a container
+    or a namespace this walk does not follow, so a mention in such a TARGET is an
+    escape — not a binding it can certify dead. Measured before this existed:
+    ``d[sdk._tortoise_fts_query] = 1`` returned ``calls=0, opaque=False``, i.e. the
+    "PROVEN dead" arm, although ``for k in d: k(query=…)`` then calls it
+    (round-23 review).
+
+    ⛔ PLAIN NAME TARGETS ARE EXCLUDED ON PURPOSE. A name that is already a CARRIER
+    would otherwise be reported as an escape and make every modelled one-hop
+    binding opaque — ``_opt = SEAM; _opt(…)`` would stop resolving, which is the
+    opposite defect (a false block on every pin row of the `one-hop` family).
+    """
+    found = []
+    for target in targets:
+        if target is None:
+            continue
+        if any(isinstance(sub, (ast.Subscript, ast.Attribute))
+               for sub in ast.walk(target)):
+            found.append(target)
+    return found
+
+
 def _seam_opaque_values(node):
     """Value positions of a binder this walk does NOT model (#14278 F1).
 
@@ -1369,7 +1394,8 @@ def _seam_opaque_values(node):
     ``await SEAM`` are value positions that evaluate the mention (``await`` even
     calls ``__await__``) and are still read as dead. Neither can hide a real seam
     READ — the seam is a bound method, so no call to it can occur there — so they
-    are documented, not modelled.
+    are documented, not modelled. (A mention in an assignment TARGET is now an
+    escape rather than a residual — see ``_seam_object_targets``.)
 
     ⛔ This is an enumeration, not a proof about future syntax: it is every binder
     kind in the Language Reference's list ("Naming and binding", §4.2.1) that this
@@ -1384,11 +1410,17 @@ def _seam_opaque_values(node):
     walk treats ``None`` as an expression it does not carry.
     """
     if isinstance(node, ast.AugAssign):
-        return [node.value]
+        return [node.value, *_seam_object_targets(node.target)]
     if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)):
         return [node.value]
     if isinstance(node, ast.AnnAssign):
-        return [node.annotation]
+        return [node.annotation, *_seam_object_targets(node.target)]
+    if isinstance(node, ast.Assign):
+        return _seam_object_targets(*node.targets)
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return _seam_object_targets(node.target)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return _seam_object_targets(*(i.optional_vars for i in node.items))
     if isinstance(node, ast.Lambda):
         return [*node.args.defaults, *node.args.kw_defaults]
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1980,6 +2012,10 @@ def annotonly(sdk):
 
 _bare_module: sdk._tortoise_fts_query
 
+def subscripttarget(sdk):
+    _bag = {}
+    _bag[sdk._tortoise_fts_query] = 1
+
 def annotparam(sdk):
     def _g(_x: sdk._tortoise_fts_query):
         pass
@@ -2016,6 +2052,7 @@ def retann(sdk) -> sdk._tortoise_fts_query:
         (0, True, []),                  # `@SEAM` on a class
         (0, True, []),                  # `class _K2(metaclass=SEAM)`
         (0, True, []),                  # `case SEAM.attr:` VALUE pattern
+        (0, True, []),                  # `_bag[SEAM] = 1` — a mention in an OBJECT target
         (0, True, []),                  # MODULE-scope `_bare_module: SEAM` — evaluated + stored
         (0, True, []),                  # `_bare: SEAM` annotation, no value (func-local: over-block)
         (0, True, []),                  # `def _g(_x: SEAM)` parameter annotation
