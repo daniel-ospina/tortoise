@@ -30,7 +30,6 @@ untouched — no extraction logic is added to the drain or the spool.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from tortoise.capture_spool import (
@@ -229,7 +228,7 @@ def test_the_writer_quarantines_a_diverged_snapshot_instead_of_overwriting(tmp_p
     locked = _write_meta(tmp_path, "sess-w", filed_key="OLDKEY", capture_key="OLDKEY",
                          capture_lane="hook", filed_lane="hook")
     stored = [{"role": "user", "content": f"turn-{i}"} for i in range(6)]
-    log = _write_turns(tmp_path, "sess-w", stored)
+    _write_turns(tmp_path, "sess-w", stored)
     _lock(locked)
     try:
         res = write_spool_entry(tmp_path, _snapshot("sess-w", turns=stored[:1]), ROOMY)
@@ -266,7 +265,7 @@ def test_the_writer_appends_to_a_live_session_it_could_not_read(tmp_path):
     log = _write_turns(tmp_path, "sess-w", stored)
     _lock(locked)
     try:
-        grown = stored + [{"role": "assistant", "content": "new"}]
+        grown = [*stored, {"role": "assistant", "content": "new"}]
         res = write_spool_entry(tmp_path, _snapshot("sess-w", turns=grown), ROOMY)
         assert res["written"] is True
         assert res["discards"][-1]["retained"] is True
@@ -290,7 +289,7 @@ def test_the_writer_refuses_when_it_cannot_read_the_LOG_either(tmp_path):
     _lock(locked)
     _lock(log)
     try:
-        grown = list(TURNS) + [{"role": "assistant", "content": "new"}]
+        grown = [*TURNS, {"role": "assistant", "content": "new"}]
         res = write_spool_entry(tmp_path, _snapshot("sess-w", turns=grown), ROOMY)
         assert res["written"] is False
         assert res["discards"][-1]["reason"] == "meta_unreadable"
