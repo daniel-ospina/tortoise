@@ -426,8 +426,8 @@ _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 #: `ModuleNotFoundError: pass` leak — the block below credits `ImportError` back, so
 #: `rename_dropped` reds, along with the three `child dropped…` rows. Un-canonicalising the
 #: CREDIT FILTER alone (`if _RAISED_ALIAS.get(name, name) not in dropped_family`) changes NO
-#: row: 0 of the 37 witness rows differ under that mutant, because a parent arm that would put
-#: the canonical spelling in `dropped_family` has already emptied `reachable` through
+#: row: no witness row differs under that mutant, because a parent arm that would put the
+#: canonical spelling in `dropped_family` has already emptied `reachable` through
 #: `_masked_by`, so the filter is a belt over the masking braces rather than a rule any row can
 #: red. Earlier cuts said "un-canonicalising BOTH of its sides" — both is SUFFICIENT, but
 #: naming the pair as the load-bearing witness read as evidence for a term nothing grades. The
@@ -5202,8 +5202,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             #: withholds the (aliased) name. Only removing BOTH reds it. So it pins the SHAPE
             #: (a same-spelling duplicate below a dropper credits nothing), which is worth a
             #: row, and it pins NEITHER rule: the family-close is witnessed by the three
-            #: `child dropped…` rows above, the masking filter by `parent then child` and
-            #: `child raised, then parent raised`. This comment previously said the row
+            #: `child dropped…` rows above; the MASKING FILTER is witnessed by
+            #: `_parent_then_child_raise` just above this table, the only row that reds when
+            #: the filter ALONE goes — NOT by `parent then child`, which stays green with the filter
+            #: removed AND green with the family-close removed and therefore pins the
+            #: CONJUNCTION, exactly like this row (measured, both configurations); and
+            #: `child raised, then parent raised` pins the ASYMMETRY term of `_masked_by`, not
+            #: the filter. This comment previously said the row
             #: "reaches it through `dropped_family`"; both guards are equally responsible, and
             #: the earlier `_exact_dead_drop` row is what pins `_masked_by`'s exact term on the
             #: CHARGE side.
