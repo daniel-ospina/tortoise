@@ -2666,14 +2666,27 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: uniform 2 accepts 24, a uniform 3 34, a uniform 4 39, a uniform 5 40. ⚠️ The
 #: column this note carried before the scope fix (2026-10-24 at `d07c9e99e`) was
 #: `24/34/43/52` — SUPERSEDED, quoted only so an older figure met elsewhere reads
-#: as superseded rather than as a contradiction of this one. The SHIPPED predicate
-#: — the `_DISTANCE_EXCEPTIONS` budgets applied — accepts 36, i.e. the exceptions
-#: are worth exactly the 34 -> 36 above, stated separately so neither figure hides
-#: the other. Every one of the 31 true attributions is within 3 hops except the
-#: readers named in `_DISTANCE_EXCEPTIONS`. (Counts, not percentages, on purpose:
-#: this file's own rule is that a rate restated against a fixed denominator rots
-#: on the next table growth — a sentence two screens up still read `63/340 =
-#: 18.5 %` after the table grew. The denominator is 19 rows x 22 doors here.)
+#: as superseded rather than as a contradiction of this one.
+#: ⛔ **THE PRESENT-TENSE COUNT IS DELIBERATELY NOT RESTATED HERE (corrected
+#: 2026-11-22, #14248).** This paragraph used to read "the SHIPPED predicate —
+#: the `_DISTANCE_EXCEPTIONS` budgets applied — accepts 36, i.e. the exceptions
+#: are worth exactly the 34 -> 36 above", with "every one of the 31 true
+#: attributions is within 3 hops" over a stated "19 rows x 22 doors". All three
+#: are restated figures, i.e. exactly the rot the note two screens up forbids
+#: ("a figure restated in prose rots; the authoritative count is
+#: `_ACCEPTED_PAIRS_AT_THIS_HEAD`"). Two of them were falsified by this very
+#: change: the fourth exception added here (`mcp_server.py::_preview_delete_edges`,
+#: worth one pair) makes "worth exactly 34 -> 36" — two pairs — contradict the
+#: four readers the sentence then names in the same breath. `36` is also not an
+#: observed count at all but a CEILING (`total <= _ACCEPTED_PAIRS_AT_THIS_HEAD`
+#: in `test_the_attribution_predicate_does_not_swallow_the_whole_table`), so
+#: quoting it as what the predicate "accepts" overstates by construction.
+#: The shipped count, the PURE relation's count at the same budget, the worth of
+#: the exceptions and the denominator are therefore left to the arm that DERIVES
+#: them on the table at this head — read `_ACCEPTED_PAIRS_AT_THIS_HEAD` or run
+#: that arm. (Counts, not percentages, on purpose: this file's own rule is that a
+#: rate restated against a fixed denominator rots on the next table growth — a
+#: sentence two screens up still read `63/340 = 18.5 %` after the table grew.)
 #: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
 #: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
 #: and justified the tighter number with three substitutions it said stayed green
