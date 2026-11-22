@@ -2454,15 +2454,47 @@ class TestTheTicketBoundIsSizedForTheNextPhase:
         the configured one, so the ticket was bounded by the request budget and a
         healthy boot declined.
         """
-        embed_seam.install_backing(_RecordingBacking())  # name = "recording"
+        # ⛔ A REAL retarget, not the injected hatch (review P3, cycle 5): while an
+        # injected backing is installed `active_backing` returns IT and never
+        # consults the lever, so injected + a lever of `worker` is not the next
+        # encode's boot — the arm below pins that separately. This one drives the
+        # path the runbook documents: the live backing IS the resolved one.
+        live = _RecordingBacking()  # name = "recording"
+        monkeypatch.setattr(embed_seam, "_backing", live)
+        monkeypatch.setattr(embed_seam, "_backing_name", live.name)
         monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
         monkeypatch.setenv(embed_seam.ENV_WORKER_STARTUP_S, "123")
         monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "0")
-        bound = embed_seam.resolve_ticket_wait_s(1.0)
-        assert bound == pytest.approx(0.0 + 123.0 + 1.0), (
-            f"a lever flipped to worker sized the ticket bound at {bound}s — the "
-            "request budget, not the boot budget, so the first query declines "
-            "during a healthy boot")
+        try:
+            bound = embed_seam.resolve_ticket_wait_s(1.0)
+            assert bound == pytest.approx(0.0 + 123.0 + 1.0), (
+                f"a lever flipped to worker sized the ticket bound at {bound}s — "
+                "the request budget, not the boot budget, so the first query "
+                "declines during a healthy boot")
+        finally:
+            monkeypatch.setattr(embed_seam, "_backing", None)
+            monkeypatch.setattr(embed_seam, "_backing_name", None)
+
+    def test_an_INJECTED_backing_is_answered_as_itself(self, monkeypatch):
+        """⛔ And the mirror: with one installed, the LEVER is not the question.
+
+        `active_backing` returns `_injected` before it consults the lever, so the
+        next encode uses the injected object whatever the environment says. Sizing
+        its ticket by the configured `worker` boot (a) answered about a backing
+        that will never answer this ticket, and (b) in the failing direction: the
+        valve then abandoned a healthy ticket after ~1.4 s of a real boot
+        (`test_a_ticket_waits_out_a_worker_boot_instead_of_declining`).
+        """
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setenv(embed_seam.ENV_WORKER_STARTUP_S, "123")
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "0")
+        embed_seam.install_backing(_RecordingBacking())  # no startup_pending
+        try:
+            assert embed_seam.backing_booting() is False, (
+                "an injected non-worker backing was sized as a worker boot — the "
+                "lever answered for an object it does not govern")
+        finally:
+            embed_seam.install_backing(None)
 
 
 class TestEncodeMsMeasuresTheEncodeNotTheBoot:
@@ -3096,6 +3128,36 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
             _WRITE_DECLINE_BACKING_COLD, (
                 "a loaded LOCAL model answered READY for a worker that is "
                 "booting — the write then charges the boot to the create")
+
+    def test_the_warm_up_OPT_OUT_does_not_rescue_a_worker_backing(
+            self, cold_model, monkeypatch):
+        """⛔ What the docstring now says, executably (review P2, cycle 5).
+
+        `TORTOISE_EMBEDDER_WARMUP=0` keeps the pre-#13224 synchronous contract
+        **for an `inprocess` backing** — no background lane, nothing to bound. It
+        is NOT a statement about a deployment whose encoder lives elsewhere: there
+        the flag governs a local lane this process does not have, and honouring it
+        would send the create into the seam to pay the worker's 600 s boot. So the
+        flag-off promise is pinned on one arm and its LIMIT on the other; the
+        docstring previously claimed the first for both.
+        """
+        from tortoise.embeddings import _WRITE_DECLINE_BACKING_COLD, EmbeddingModel
+
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "0")
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+        assert EmbeddingModel.await_write_ready_reason(0.05) == \
+            _WRITE_DECLINE_BACKING_COLD, (
+                "the warm-up opt-out answered READY for a booting worker — the "
+                "write then charges the worker's boot to the create")
+        assert cold_model == [], (
+            f"the opt-out path kicked a local load anyway: {cold_model}")
+
+        # And the promise that DOES hold: in-process, flag off ⇒ ready.
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        assert EmbeddingModel.await_write_ready_reason(0.05) is None, (
+            "with the flag off on an IN-PROCESS backing the bound declined — the "
+            "pre-#13224 synchronous contract is broken for dev/test")
 
     def test_a_bounded_write_hands_the_cause_TO_the_log_arm(self, monkeypatch,
                                                             caplog):

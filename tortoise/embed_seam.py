@@ -372,12 +372,17 @@ def encodes_in_process() -> bool:
     (the documented ``fallback_snapshot`` residual). Gate the eager KICKS, not the
     primitive.
 
-    ⛔ AND IT IS APPLIED ONE LAYER EARLIER TOO (review P1):
-    ``EmbeddingModel.await_write_ready_reason`` / ``await_read_ready_reason``
-    answer ``None`` (ready) here as well. Those methods exist to bound a LOCAL
-    load, and with the encoder elsewhere their only effect was to start that load
-    and then decline the write/read that triggered it — a vectorless row or a
-    keyword-only read on a deployment whose encoder was healthy.
+    ⛔ AND IT IS APPLIED ONE LAYER EARLIER TOO (review P1): both readiness bounds
+    consult it before anything else, because they exist to bound a LOCAL load and
+    with the encoder elsewhere their only effect was to start that load and then
+    decline the write/read that triggered it — a vectorless row or a keyword-only
+    read on a deployment whose encoder was healthy. ⛔ THE TWO ANSWERS DIFFER
+    (review P2, cycle 5): the READ bound answers ``None`` (ready) — every read is
+    a round trip, which :func:`backing_booting` can start and wait for — while the
+    WRITE bound answers ``backing_cold`` while the backing BOOTS, because a
+    bounded write may not pay a boot (#4055/#13224). Both are decided above the
+    ``TORTOISE_EMBEDDER_WARMUP`` opt-out, which is a statement about a local
+    background lane, not about where the encoder lives.
 
     ⛔ WHAT IT DOES NOT COVER (review P2): the residual paths that still encode
     in-process and call ``EmbeddingModel.get()`` synchronously —
@@ -484,13 +489,32 @@ def backing_booting(backing: EmbeddingBacking | None = None) -> bool:
     readiness read must not use it.
     """
     candidate = backing if backing is not None else _peek_backing()
-    configured = resolve_backing()
     pending = getattr(candidate, "startup_pending", None)
+    if backing is not None:
+        # ⛔ AN EXPLICIT SUBJECT IS ANSWERED AS ITSELF. The ticket valve asks about
+        # the backing that will FIRE its batch, and that is this object whether or
+        # not it is the configured one — the phase, not the lever, is the question.
+        return bool(pending is not None and pending())
     if candidate is None:
         # Nothing constructed yet: the configured name is the only evidence about
         # which phase the FIRST encode will pay.
-        return configured == BACKING_WORKER
-    if pending is not None and pending():
+        return resolve_backing() == BACKING_WORKER
+    if _injected is not None:
+        # ⛔ AN INJECTED BACKING IS WHAT THE NEXT ENCODE USES (review P3, cycle 5).
+        # `active_backing` returns `_injected` before it consults the lever, so the
+        # configured name says nothing about this process's next encode — asking it
+        # instead sized a real boot by the request budget and declined a healthy
+        # worker at 1.4 s (tests/test_14186…::test_a_ticket_waits_out_a_worker_boot).
+        return bool(pending is not None and pending())
+    configured = resolve_backing()
+    if pending is not None and pending() and configured == getattr(
+            candidate, "name", None):
+        # ⛔ AND ONLY IF IT IS THE BACKING THE NEXT ENCODE WILL USE. When the lever
+        # has moved OFF `worker`, the next encode retires this candidate and
+        # constructs the configured one — an `external` round trip pays no boot —
+        # so declining on the retired backing's boot would leave a derived row
+        # vectorless for a boot nobody pays. Fail-closed either way, but the honest
+        # answer costs nothing here.
         return True
     # ⛔ A LEVER THAT NOW SAYS `worker` WHILE THE LIVE BACKING IS NOT ONE. The
     # candidate answers for the backing it IS, but the next encode will resolve

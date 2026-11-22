@@ -1447,11 +1447,16 @@ class EmbeddingModel:
         backfill, in exchange for a create that cannot exceed the budget.
 
         ⛔ ``TORTOISE_EMBEDDER_WARMUP=0`` (the test/dev opt-out) keeps the
-        PRE-#13224 behaviour EXACTLY: with no background lane to kick, this
-        returns True and the caller's ``get()`` loads synchronously as it always
-        did. A test that relies on a write producing a vector is therefore
-        unaffected, and the bounded path can only run where a background load is
-        the declared behaviour.
+        PRE-#13224 behaviour EXACTLY **for an ``inprocess`` backing**: with no
+        background lane to kick, this returns ``None`` and the caller's ``get()``
+        loads synchronously as it always did, so a test that relies on a write
+        producing a vector is unaffected. ⛔ That promise does NOT extend to
+        ``worker``/``external`` (review P2, cycle 5): the seam precondition is
+        decided ABOVE the opt-out, so a write bound to a booting worker still
+        answers ``backing_cold`` with the flag off. It must — with the encoder
+        elsewhere the flag is a statement about a LOCAL background lane that this
+        process does not have, and honouring it would send the create into the
+        seam to pay the worker's 600 s boot.
         """
         # ⛔ THIS DECISION IS MADE ABOVE BOTH LOCAL FAST PATHS (review P1, cycle
         # 4). It used to sit below them, so in any process holding a LOADED local

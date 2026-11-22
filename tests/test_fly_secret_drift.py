@@ -2789,9 +2789,40 @@ def _span_calls_the_reader(body: list[str], lo: int, hi: int, needle: str) -> bo
             continue
         if stripped.startswith(("from ", "import ")):
             continue
-        if re.search(rf"\b{re.escape(needle)}\s*\(", stripped):
+        if re.search(rf"\b{re.escape(needle)}\s*\(", _code_part(stripped)):
             return True
     return False
+
+
+def _code_part(line: str) -> str:
+    """``line`` without its TRAILING COMMENT — a mention in prose is not a call.
+
+    ⛔ THE INLINE-COMMENT SHAPE (review P3, cycle 5). `_span_calls_the_reader` only
+    excluded lines that START with `#`, so a code line carrying
+    ``… encodes_in_process()  # _embedder_warmup_enabled() is NOT asked here``
+    satisfied the call requirement — the same defect the requirement exists to
+    close, in the other shape. Stripping the comment first closes it.
+
+    The `#` is located outside string literals, because `"# not a comment"` is
+    code: a truncation there would only ever LOSE a detected call, which reds the
+    citation instead of passing it (fail-closed, and a re-pin is the fix).
+    """
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#":
+            return line[:index]
+        index += 1
+    return line
 
 
 def _assert_every_citation_reads_the_flag(
@@ -2973,6 +3004,35 @@ def test_the_citation_arm_refuses_a_cite_that_only_NAMES_the_reader(
     ), f"the mutated cite never reached the checker: {cites}"
     with pytest.raises(AssertionError, match="MENTIONS"):
         _assert_every_citation_reads_the_flag(cites, "docs/infra-runbook.md")
+
+
+def test_a_TRAILING_COMMENT_is_not_a_call():
+    """⛔ The inline-comment shape of the same hole (review P3, cycle 5).
+
+    ``_span_calls_the_reader`` excluded lines that START with ``#``, so a CODE line
+    carrying ``… encodes_in_process()  # _embedder_warmup_enabled() is NOT asked
+    here`` satisfied the call requirement — a mention passing as a read, in the one
+    shape the full-line exclusion does not cover. The span is built from the shapes
+    themselves, not from a literal, so a future edit that drops the comment strip
+    reds here.
+    """
+    needle = "_embedder_warmup_enabled"
+    code_with_inline_mention = [
+        "    seam_encodes_here = encodes_in_process()"
+        f"  # {needle}() is NOT asked here",
+    ]
+    assert not _span_calls_the_reader(
+        code_with_inline_mention, 1, 1, needle), (
+        "a MENTION inside a trailing comment satisfied the call requirement — the "
+        "citation arm can be passed by prose again")
+    assert _span_calls_the_reader(
+        [f"    elif {needle}():  # the reader"], 1, 1, needle), (
+        "a real call carrying a trailing comment was rejected — the strip is "
+        "eating code")
+    assert _span_calls_the_reader(
+        [f'    note = "# {needle}()"; if {needle}(): pass'], 1, 1, needle), (
+        "a '#' inside a STRING literal was treated as a comment, so a real call "
+        "on the same line was lost")
 
 
 def _enclosing_definition(body: list[str], line_no: int, symbol: str) -> str | None:
