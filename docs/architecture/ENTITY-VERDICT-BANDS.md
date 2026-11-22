@@ -330,7 +330,7 @@ hundreds of records together, so every cross-group merge must be actively
 re-verified"* (arXiv:2607.26298 lesson 3; `#12186` round 1's M-4).
 
 In this tree the chain is a `resolved_from` path, and `follow_resolved_from`
-follows to a **fixpoint** (`entity_resolver.py:658-695`) — so a chain is silently
+follows to a **fixpoint** (`entity_resolver.py:658-699`) — so a chain is silently
 collapsed rather than reported, and nothing bounds it.
 
 * **Negative half, at the verdict** (`entity_verdict.hard_vetoes` over the facts
