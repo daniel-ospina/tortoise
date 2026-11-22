@@ -5829,7 +5829,7 @@ def beta_variance_sum_bound(threshold: float) -> float:
     ``CASE WHEN``** (the 8 above + the 72 below), i.e. 90% of the coercion and
     72 of the 73 ``CASE WHEN`` it spares. ⛔ The share is stated as the fraction
     of the COERCION spared (72 of 80), never as the fraction of the spared slice
-    that is coercion (72 of 73 — 99%, a different number); net of the 8 it pays,
+    that is coercion (72 of 73 — 98.6%, a different number); net of the 8 it pays,
     a rejected row still skips 64 coercion ``CASE``s.
     ⛔ NO MILLISECOND FIGURE AND NO ROW COUNT IS
     QUOTED HERE. The shipped artifacts measure the WHOLE function and its

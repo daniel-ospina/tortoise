@@ -338,8 +338,9 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     #   * BEFORE THE ARM, 0 — the coercion is the price of the GUARD. A
     #     `CASE WHEN` ahead of the arm would mean the coercion is paid on rows
     #     the arm then discards, which is the opposite of the correction this
-    #     docstring makes (the arm's presence checks use raw
-    #     `coalesce(…) IS NOT NULL` and contribute none).
+    #     docstring makes (the arm's alternatives use `coalesce(col, literal)`
+    #     comparisons and one BARE `other.status IS NOT NULL`; none emits a
+    #     `CASE WHEN`, measured 0 across `crit[:arm]`).
     #   * BEFORE THE GUARD, 8 — attributable, not coincidental: 4 `CASE WHEN`
     #     per `numeric_operand_cypher` operand x the guard's TWO operands.
     assert crit[:arm].count("CASE WHEN") == 0, (
@@ -463,7 +464,7 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     # 23). The list is what it is; a copy not in it is simply not graded by it.
     coercions_total = guard_cases + coercions
     pct_coercion = round(100 * coercions / coercions_total)
-    pct_slice = round(100 * coercions / spared)
+    pct_slice = round(100 * coercions / spared, 1)
     net_cases = coercions - guard_cases
     selectors = spared - coercions
     function_doc_copies = (
