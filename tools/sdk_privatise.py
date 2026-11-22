@@ -1419,14 +1419,15 @@ SWEEP_NAMES = 66
 #: did not happen: the one new shape is the declared one. A plain `cp` handle and a `set[str]`-style
 #: `.update` are the ordinary-word receivers this sweep deliberately leaves alone; `typed
 #: references still pointing at a public name` is **0** on this tree.
-#: ⛔ RE-MEASURED AGAIN ON THE MERGE WITH `origin/main` `588cf7aeb6` — every numeral above is the
-#: PREVIOUS resolution's (the `0467ba32` fold) and is kept as history, NOT carried: `--repin` on
-#: THIS merged tree prints **(11873, 'b617f45a195476a6')** and `--check` exits 0 with
-#: `typed references still pointing at a public name: 0`, so the pair below is a measurement of the
-#: tree that ships and never an inheritance of either parent's line (the parents DISAGREE — the
-#: branch's 11870 against `main`'s 11861 — so arithmetic across them is a cross-check at most).
-#: Re-pin after any fold that touches this sweep's receivers; the direction the pin exists to catch
-#: is a NEW row SHAPE, and `--repin`'s own row report remains the only thing that attributes a net.
+#: ⛔ RE-PINNED ON THE MERGE WITH `origin/main` `588cf7ae`, and the re-cut is the POINT: the
+#: pin is a reading of a TREE, so it is taken here rather than inherited from either parent.
+#: `--repin` on THIS resolved tree prints **(11873, 'b617f45a195476a6')** and `--check` exits 0
+#: on it with `typed references still pointing at a public name: 0`. ⚠️ The first reading of this
+#: same resolution printed 11864 and was NINE LOW, because `tests/test_7949_capstone_measure.py`
+#: still carried conflict markers when it was taken: a file that does not PARSE is silently
+#: uncounted, so a census of such a tree is a reading of a different tree — the numerals in the
+#: paragraphs above are the PREVIOUS re-cuts' readings of the trees THEY named, kept as history
+#: and never carried as this tree's.
 SWEEP_RESIDUE = (11873, "b617f45a195476a6")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
