@@ -1120,7 +1120,27 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#: ⛔ RE-CUT → (11870, "fccc31bf7f22f941") by the `#14263` relation-pair lane, and BOTH SIDES of
+#: the move are MEASURED on their OWN tree — `--repin` in a detached worktree at `origin/main`
+#: `70fbd1a27dd5` prints `(11861, "f0647020531c078c")`, and `--repin` on THIS tree prints
+#: `(11870, "fccc31bf7f22f941")`, so the base's contribution is read rather than inferred from a
+#: difference. `main`'s own +3 over the 11858 this block used to pin is `main`'s business and is
+#: tracked there (`#14294` measures that same `(11861, "f0647020531c078c")` on that same tree), so
+#: this block declares ONLY the 9 rows this PR owns — and it declares them because `--check` reds
+#: by 12 on this tree, i.e. the base's 3 plus these 9.
+#: THE +9 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic: `--report --base 28ca66878d7c
+#: --top 200` was run on THIS tree AND in a detached worktree at `origin/main` `70fbd1a27dd5`, both
+#: row sets sorted and diffed, and EXACTLY THREE rows differ — `proj.g.query` 3646 → 3647 (+1),
+#: `sdk._get_proj().g.query` 1431 → 1438 (+7) and `s._get_proj().g.query` 29 → 30 (+1), i.e. 1+7+1
+#: = 9 = 11870 − 11861. Every one is this PR's own new code: the pair-leg readers in
+#: `tortoise/sdk.py` (`_endpoint_kind_map`, `_relation_pair_notes`, `_carry_relation_declaration`)
+#: and the one test-side `s._get_proj().g.query(…)` in `tests/test_relation_guards_14263.py`.
+#: All three rows are `Graph.query` calls on a FalkorDB `Graph` — the documented edge this counter
+#: reports and deliberately leaves alone, never an SDK handle — so no new shape was absorbed and
+#: no defect is hidden: the row SHAPE set is unchanged, and `typed references still pointing at a
+#: public name` is **0** on this tree (measured, `--check`). ⛔ NEITHER SIDE'S FIGURE WAS CARRIED BY
+#: ARITHMETIC on the previous pin: both pairs above are `--repin` output on the tree they name.
+SWEEP_RESIDUE = (11870, "fccc31bf7f22f941")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
