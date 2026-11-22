@@ -1651,6 +1651,16 @@ class TestWorkerReadinessIsTheSocketExisting:
         assert elapsed < 2.0, (
             f"a path with no listener behind it parked for {elapsed:.1f}s — the "
             "retry is not bounded")
+        # ⛔ AND THE SHIPPED BOUND ITSELF IS PINNED HERE (review P3). The row
+        # above proves the retry TERMINATES; without this line a regression that
+        # widened the grace to 1.9 s would pass both rows while quietly spending
+        # most of a request budget on a dead socket. The widened row above sets
+        # the constant for itself only (``monkeypatch``), so this reads the
+        # shipped value.
+        assert embed_seam._LineJSONClient._CONNECT_REFUSED_GRACE_S == 0.25, (
+            "the shipped connect-retry grace moved — it is bounded so a dead "
+            "path cannot park a request: "
+            f"{embed_seam._LineJSONClient._CONNECT_REFUSED_GRACE_S}")
 
 
 class _FakeProc:
@@ -2818,11 +2828,13 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
     """#14186 review P1 — the write/read bounds must not kick a load that is not theirs.
 
     ``await_write_ready_reason`` / ``await_read_ready_reason`` exist to bound a
-    LOCAL load. With a ``worker`` / ``external`` backing the encode goes through
-    the SEAM (``compute_embeddings`` → ``embed_seam.encode_texts``), so the only
-    effects those bounds could have were (a) starting a 432 MB in-process load
-    nothing consults and (b) DECLINING the write/read while it ran — a vectorless
-    row, or a keyword-only read, on a deployment whose encoder was healthy.
+    LOCAL load, and with a ``worker`` / ``external`` backing the local model is
+    not this path's encoder. Two review rounds named the two ways that can go
+    wrong — a 432 MB local load started for nothing, and the create's budget
+    charged to the backing's BOOT (``#4055``/``#13224`` forbid charging process
+    initialization to a request) — so the write answers DECLINE-with-the-right-
+    cause and kicks nothing, and the read answers READY (it is defence in depth:
+    ``sdk`` takes its ``_seam_remote`` branch before this ladder).
     """
 
     @pytest.fixture
@@ -2840,15 +2852,18 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
         monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
         return kicked
 
-    def test_a_worker_backing_does_not_kick_a_local_load(
+    def test_a_worker_backing_declines_without_kicking_a_local_load(
             self, cold_model, monkeypatch):
         monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
-        from tortoise.embeddings import EmbeddingModel
+        from tortoise.embeddings import _WRITE_DECLINE_BACKING_COLD, EmbeddingModel
 
-        assert EmbeddingModel.await_write_ready_reason(0.05) is None, (
-            "a bounded write declined on a deployment whose encoder is a worker")
+        reason = EmbeddingModel.await_write_ready_reason(0.05)
+        assert reason == _WRITE_DECLINE_BACKING_COLD, (
+            "a bounded write on a worker-backed deployment answered "
+            f"{reason!r} — the causes are distinct and an operator repairs "
+            "them differently")
         assert EmbeddingModel.await_read_ready_reason(0.05) is None, (
-            "a read declined on a deployment whose encoder is a worker")
+            "the read bound declined on a worker backing")
         assert cold_model == [], (
             "the readiness bounds kicked a LOCAL 432 MB load with the encoder "
             f"served elsewhere: {cold_model}")
@@ -2869,7 +2884,8 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
 
         ⛔ FAIL-SAFE DIRECTION: an unreadable seam answers TRUE (warm), because a
         silent skip is a load that never happens on the configuration that needs
-        it — the mirror of ``hosted_api._embed_prewarm_target``.
+        it — the mirror of ``hosted_api._lifespan``'s arm, which keeps the
+        pre-warm ON when the seam cannot be read.
         """
         from tortoise import sdk as sdk_module
 
@@ -2886,3 +2902,34 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
         monkeypatch.setattr(embed_seam, "encodes_in_process", _unreadable)
         assert sdk_module._embedder_engine_kick_allowed() is True, (
             "an unreadable seam silently skipped the engine-init warm-up")
+
+    def test_the_engine_init_site_CONSULTS_the_gate(self):
+        """The wiring, not just the decision (review P3).
+
+        Deleting the gate at the call site and calling
+        ``EmbeddingModel.start_warm_up()`` unconditionally left every suite green:
+        the helper's own row cannot see its caller. ``sdk.py`` is too large to
+        boot for a unit row, so this pins the ONE fact the wiring is — the
+        engine-init kick sits inside a branch on the helper, with the call in the
+        same block. Same source-level technique ``tests/test_fly_secret_drift.py``
+        already uses to pin a citation.
+        """
+        import inspect
+
+        from tortoise import sdk as sdk_module
+
+        source = inspect.getsource(sdk_module)
+        gate = source.index("if _embedder_engine_kick_allowed():")
+        warm = source.index("EmbeddingModel.start_warm_up()", gate)
+        # The call must be inside the gate's block: indented deeper than the gate
+        # line, and before the next statement at the gate's own indent.
+        gate_line = source.rfind("\n", 0, gate) + 1
+        gate_indent = len(source[gate_line:gate]) - len(
+            source[gate_line:gate].lstrip())
+        warm_line = source.rfind("\n", 0, warm) + 1
+        warm_indent = len(source[warm_line:warm]) - len(
+            source[warm_line:warm].lstrip())
+        assert warm_indent > gate_indent, (
+            "the engine-init warm-up call is not guarded by "
+            "_embedder_engine_kick_allowed() — the SDK kick ignores the embed "
+            "backing again")

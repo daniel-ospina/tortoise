@@ -898,9 +898,10 @@ def _embedder_engine_kick_allowed() -> bool:
     consults — the RSS the ``worker`` backing exists to remove (#13674).
 
     ⛔ FAILS SAFE, in the opposite direction from a skip: a seam that cannot be
-    imported answers ``True`` (warm), mirroring
-    ``hosted_api._embed_prewarm_target``'s fallback. A silent skip on an import
-    error is a load that never happens on the configuration that NEEDS it.
+    imported answers ``True`` (warm), mirroring ``hosted_api._lifespan``'s
+    own arm, which keeps the pre-warm ON when the seam cannot be read. A silent
+    skip on an import error is a load that never happens on the configuration
+    that NEEDS it.
 
     A function rather than an inline ``try`` so the three answers (worker ⇒ no,
     inprocess ⇒ yes, unreadable seam ⇒ yes) are pinnable without building a graph.
@@ -15572,8 +15573,8 @@ class TortoiseSDK:
             # ⛔ AND THE DECISION IS A FUNCTION, NOT AN INLINE IMPORT (review
             # P3): folded into the blanket ``except`` below, a seam that could not
             # be imported silently SKIPPED the warm-up — the mirror image of
-            # ``hosted_api._embed_prewarm_target``, which keeps the pre-warm ON
-            # when the lever cannot be read. :func:`_embedder_engine_kick_allowed`
+            # ``hosted_api._lifespan``, which keeps the pre-warm ON when the seam
+            # cannot be read. :func:`_embedder_engine_kick_allowed`
             # fails SAFE (unreadable lever ⇒ warm) and is pinnable without
             # building a graph.
             try:

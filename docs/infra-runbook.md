@@ -1364,11 +1364,21 @@ Both existed only to make the *in-process* forward pass warm; with the encode el
 432 MB resident that nothing consults (3.66 GB with two overlapping loads, #13674). No lever has to
 be set: the gate is `embed_seam.encodes_in_process()`, read from the `TORTOISE_EMBED_BACKING`
 value. ⛔ The gate is on those KICKS plus the two READINESS BOUNDS
-(`EmbeddingModel.await_write_ready_reason` / `await_read_ready_reason`, which answer "ready" when the
-encoder is not here — they exist to bound a LOCAL load, and with the encoder elsewhere their only
-effect was to start that load and then decline the write or read that triggered it). It is
-deliberately NOT inside `start_warm_up` itself — those bounds read that call's return value as
+(`EmbeddingModel.await_write_ready_reason` / `await_read_ready_reason`), because with the encoder
+elsewhere their only effect was to start a local load and then decline the write that triggered it.
+It is deliberately NOT inside `start_warm_up` itself — those bounds read that call's return value as
 "a load is in flight", so a skip inside it would turn a healthy local load into a decline.
+
+⛔ **A bounded WRITE declines — `backing_cold` — while the backing is not warm, and pays nothing.**
+`encode_for_row(bounded=True)` keeps #13224's promise (a create never waits for setup it did not
+trigger); the derived row is stored without a vector and `graph-scripts/backfill_embeddings.py`
+re-encodes it once the backing answers. The alternative — carrying on into the seam — would charge
+the worker's BOOT to the create (#4055/#13224 forbid exactly that), so it is refused by design.
+
+⚠️ **NOTHING WARMS THE WORKER AT BOOT TODAY.** The lifespan pre-warm is skipped on `worker` /
+`external` (it would load a local copy), and no equivalent kick boots the *worker* — so the first
+encode after a deploy or a lever change is the one that pays the boot, and writes before it lands
+decline as above. A boot-time worker warm is a known follow-up, not something this section promises.
 
 ⚠️ **WHAT THE GATE DOES NOT REMOVE — read this before promising an RSS drop.** A few residual paths
 still encode IN-PROCESS and call `EmbeddingModel.get()` synchronously rather than going through the
@@ -4650,9 +4660,9 @@ operator who read the line above as "CI defends this" would never run it.
 >
 > 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1364`;
 > 2. the SDK **write-path** bound — `tortoise/embeddings.py::await_write_ready_reason`,
->    `:1469` (#13224);
+>    `:1471` (#13224);
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
->    `:1606` (#13528);
+>    `:1618` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
 >    `:3272-3282` (the reader that runs on the deployed box);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
@@ -4678,7 +4688,7 @@ operator who read the line above as "CI defends this" would never run it.
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
 > Number 2 and 3 are the second most likely to be missed, and they change behaviour: with the flag
-> `0` each returns `None` immediately (`:1469-1473`, `:1606-1607`), so the write and read paths fall
+> `0` each returns `None` immediately (`:1471-1475`, `:1618-1619`), so the write and read paths fall
 > back to the **synchronous in-request load** — that fallback is part of what flipping the switch
 > chooses.
 

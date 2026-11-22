@@ -875,10 +875,12 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #:   over this population).
 #:
 #: ``decline`` vocabulary — ``"<leg>:<cause>"``, where ``cause`` is the value
-#: ``EmbeddingModel.await_write_ready_reason`` returned. The four causes need
+#: ``EmbeddingModel.await_write_ready_reason`` returned. The FIVE causes need
 #: OPPOSITE operator responses (install the extra / repair a broken load / retry
-#: later / wait longer), and ``budget_expired`` is the only one where a wait
-#: actually happened — the genuine #13229 cost. Eight values, bounded, because
+#: later / wait longer / re-encode once the remote backing answers), and
+#: ``budget_expired`` is the only one where a LOCAL wait actually happened — the
+#: genuine #13229 cost (``backing_cold`` waits for nothing on purpose: a create
+#: must not pay the backing's boot). Ten values, bounded, because
 #: `_collect_by_label` assumes ONE sample per label value.
 #:
 #: ⛔ **Two same-class causes are deliberately NOT counted here**, and the
