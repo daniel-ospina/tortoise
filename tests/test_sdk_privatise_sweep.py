@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1186 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1205 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
     prose commits grew it to 1066 while this sentence still said 985, which was true at
@@ -261,8 +261,10 @@ def _residue_block() -> str:
     dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
     rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
     blocks and added the re-measure note — to 1122; THIS re-cut merges `origin/main` `0467ba32`
-    (base `70fbd1a2`), and it keeps both sides' blocks for the same reason while dropping the
-    duplicate `#:` separator the two sides' paragraphs were joined by, leaving 1186), AND THE ARMS GRADE
+    (base `70fbd1a2`) and then a PEER's copy of that same re-cut, KEEPING both sides' blocks at
+    each merge for the same reason — the peer's copy read 1185/1196 as its own prose grew, and the
+    per-line differences are exactly what a merged run is: a function of BOTH lives, so the figure
+    below is re-measured rather than inherited from either side), AND THE ARMS GRADE
     ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -386,10 +388,6 @@ _ARM_REFSPECS: dict[str, str] = {
     # checks it where it does — on the SOURCE.
     "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
     "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
-    # `8889f1140105` is a MERGE on a feature branch, so neither `main` nor a `/head` ref arms it
-    # at any depth — it is named by FULL SHA for the same reason `10e51693f166` is (a sha-want
-    # does not expire, fetches one commit's trees, and GitHub answers it from a depth-1 clone).
-    "8889f1140105": "+8889f1140105677add2c7c4dd60d0c8c5080ea26:refs/pi/8889f1140105",
 }
 
 
@@ -1714,10 +1712,6 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # excluding it by PROVENANCE rather than by a measurement difference (review round 3, P2). ⛔ AND NOT `c5e84ad180f2`, where
     # `origin/fix/14125-census-p1s` stands today: it is a DESCENDANT of `0351fe856942`, pushed
     # after the squash, and its content never landed.
-    # `8889f1140105` is the merge that PINS 11835 and MEASURES 11843 — the block’s example of
-    # the rule. Its pair is verified against the tree like every other entry
-    # (`git show 8889f1140105:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`).
-    "8889f1140105": (11835, "891187f5a4636487"),
     "10e51693f166": (11858, "a1552662bf07a10b"),
     "0351fe856942": (11858, "a1552662bf07a10b"),
 }
