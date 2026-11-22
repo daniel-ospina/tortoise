@@ -508,14 +508,25 @@ def _declared_endpoint_locals(
     ⛔ **A NAMESPACED declaration's local half is admitted ONLY when that name is
     not itself a CORE kind (round-3 review, P1).** ``core:goal`` declares
     ``goal`` as its local half, and ``goal`` is ALSO a bare core Point kind
-    (``pack_registry.CORE_KINDS``); admitting the local half made a write
-    between two BASE kinds — ``goal`` -> ``statement`` — read as in-scope and be
-    REPORTED as ``undeclared_pair`` ("the pack declares no relation for this
-    pair"), which is false about a pair no declaration ever addressed and is
-    the exact noise this abstention exists to prevent. The bare spelling of a
-    CORE kind is its own vocabulary, not a re-spelling of a domain kind, so it
-    is compared as a FULL spelling only (``core:goal`` stays in scope; ``goal``
-    on its own does not).
+    (``pack_registry.CORE_ALIASED_KINDS``); admitting the local half made a
+    write between two BASE kinds — ``goal`` -> ``statement`` — read as in-scope
+    and be REPORTED as ``undeclared_pair`` ("the pack declares no relation for
+    this pair"), which is false about a pair no declaration ever addressed and
+    is the exact noise this abstention exists to prevent. The bare spelling of
+    a CORE kind is its own vocabulary, not a re-spelling of a domain kind, so
+    it is compared as a FULL spelling only (``core:goal`` stays in scope;
+    ``goal`` on its own does not).
+
+    ⚠️ That is one place where this gate is deliberately NARROWER than
+    ``_kind_equivalent``, which still folds a bare asked kind onto a namespaced
+    declaration's local half for PAIR MATCHING. The two questions differ — the
+    gate asks whether the caller is speaking the packs' language at all, the
+    match asks whether the two kinds are the same one — and the split is only
+    observable on a declared pair with a core-kind local half on BOTH endpoints,
+    which would abstain here rather than be judged. No shipped pack declares
+    such a pair (each of the four declarations with a core-kind half keeps
+    scope through its other endpoint), so the narrowing silences the base-kind
+    noise and nothing else.
     """
     core = _core_kind_names()
     out: set[str] = set()
@@ -553,6 +564,12 @@ def _core_kind_names() -> frozenset[str]:
     into silence on writes the packs DO speak about, which is the failure this
     module's fail-open rule forbids. Unreachable while ``pack_registry`` imports
     at all: ``CORE_ALIASED_KINDS`` is a module-level constant.
+
+    That constant is the WIDE one on purpose — not the narrower ``CORE_KINDS``:
+    the ``core:``-prefixed Subject kinds (``core:organization``, ``core:team``,
+    …) are core kinds too, and they are exactly the spellings a pack declares
+    (#11000), so sizing this to ``CORE_KINDS`` would let their local halves
+    through as if they were domain kinds.
     """
     try:
         from tortoise.pack_registry import CORE_ALIASED_KINDS

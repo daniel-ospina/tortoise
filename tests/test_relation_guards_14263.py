@@ -314,6 +314,36 @@ class TestAbstention:
         assert relation_pair_verdict(
             "addresses", "dev:epic", "core:goal").outcome == ACCEPT
 
+    def test_an_unreadable_core_list_WIDENS_the_scope_instead_of_abstaining(
+            self, monkeypatch):
+        """The fail-safe direction, pinned rather than described.
+
+        With `CORE_ALIASED_KINDS` unreadable a scope guard cannot tell a core
+        kind from a domain kind, so it falls back to the PRE-FIX behaviour —
+        every local half is admitted and the pair is JUDGED again. That is the
+        recoverable direction: over-reporting the base-kind noise is a cost,
+        while abstaining on a write the packs do speak about is silence about a
+        real pair (`#12060` R4). MEASURED mutant: letting the read raise out of
+        `_core_kind_names` (deleting its `try`) reds this row — `TypeError`
+        instead of a verdict. The `undeclared_pair` expectation is what pins the
+        DIRECTION, so a fail-safe that abstained instead would red here too.
+
+        ⚠️ The DECLARATIONS are loaded BEFORE the patch: the pack registry
+        itself reads `CORE_ALIASED_KINDS` while loading, so an unprimed cache
+        would make the unreadable core list also make the vocabulary
+        unreachable — testing the wrong fail-safe (that one is
+        `test_unreadable_declarations_abstain`).
+        """
+        assert rg.declared_relation_pairs(), (
+            "precondition: the declarations are already loaded/cached")
+        monkeypatch.setattr("tortoise.pack_registry.CORE_ALIASED_KINDS", None)
+        assert rg._core_kind_names() == frozenset(), (
+            "precondition: an unreadable registry yields the empty set")
+        v = relation_pair_verdict("addresses", "goal", "statement")
+        assert v.outcome == UNDECLARED_PAIR, (
+            "the unreadable core list must widen the gate (judge, over-report) "
+            f"rather than abstain; got {v.outcome} ({getattr(v, 'reason', None)})")
+
     def test_unreadable_declarations_abstain(self, monkeypatch):
         monkeypatch.setattr(rg, "declared_relation_pairs", lambda: None)
         v = relation_pair_verdict("dependsOn", "dev:api", "dev:database")
