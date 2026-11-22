@@ -4113,6 +4113,92 @@ def test_an_UNCHANGED_pyi_only_module_is_not_a_removal(tree: Path) -> None:
     )
 
 
+def test_a_MODULE_waiver_over_an_UNCHANGED_STUB_does_not_state_a_removal(
+    tree: Path,
+) -> None:
+    """Round-24 review, F1 (MEASURED): the unused-waiver diagnostic borrowed the RUNTIME answer.
+
+    `_head_carries_runtime_body` answers "does this tree hold the module's runtime body", and this
+    caller used it as "does this tree carry the module AT ALL". The two differ on exactly one
+    shape: a module whose only carrier is an UNCHANGED `.pyi` stub. Nothing was removed there (a
+    stub-only module's only code IS the stub, #12402), but the runtime answer is `False`, so the
+    diagnostic took its removal branch. Measured pre-fix on this fixture, verbatim:
+
+        … carries `tortoise.s` (module) and this tree does not — and NO `module` entry records
+        it, so the removal is UNRECORDED: the entry is what is missing
+
+    over a tree that carries `tortoise/s.pyi` with a `def` in it. Following that line means
+    `archive module tortoise.s`, which freezes a LIVE stub that `surface_violations` then reds as
+    `REAPPEARED as an importable module` — a correct verdict beside a false stated fact with no
+    green route, the class this file keeps removing.
+
+    Mutation: drop the `symbol in head_modules and symbol not in base_runtime_body_modules`
+    branch at the `symbol in base_modules` site -> RED here (the UNRECORDED wording returns).
+    """
+    (tree / "tortoise" / "s.pyi").write_text("def api() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/s.pyi")
+    # a SECOND commit that does not touch the stub, so it is byte-identical on both sides
+    (tree / "tortoise" / "unrelated.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/unrelated.py")
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "the premise is a tree where NOTHING was removed"
+    )
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.s"]
+    )
+
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "UNRECORDED" not in waived[0], waived[0]
+    assert "this tree does not" not in waived[0], waived[0]
+    assert "STILL CARRIES" in waived[0], waived[0]
+    assert "nothing was removed" in waived[0], waived[0]
+
+
+def test_a_MODULE_waiver_over_an_UNCHANGED_STUB_WITH_A_ROW_does_not_state_a_removal(
+    tree: Path,
+) -> None:
+    """Round-24 review, F1 (MEASURED): the same falsity on the ROW branch, one `if` away.
+
+    The row branch asked the runtime predicate too, so a committed `module` row over a module this
+    tree still carries as an unchanged stub printed "this tree does not carry it — the removal IS
+    recorded by that `module` entry". The row's existence is true; `this tree does not carry it`
+    is not, and it is the half an operator acts on. Both branches share `_still_carried_why`, so
+    the two can no longer drift (the shape `_stub_waiver_why` already guards one branch over).
+
+    Mutation: drop that branch at the `key in base_entries` site -> RED here.
+    """
+    (tree / "tortoise" / "s.pyi").write_text("def api() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/s.pyi")
+    arch.save_manifest(
+        {
+            "entries": [
+                {
+                    "kind": "module",
+                    "symbol": "tortoise.s",
+                    "batch": "b-shrink",
+                    "reason": "no per-tool destination (#11609)",
+                    "file": "archive/modules/b-shrink/tortoise.s.py",
+                    "archived_from": "tortoise/s.py",
+                    "archived_at": "a" * 32,
+                }
+            ]
+        },
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.s"]
+    )
+
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "this tree does not carry it" not in waived[0], waived[0]
+    assert "STILL CARRIES" in waived[0], waived[0]
+
+
 def test_a_SYMLINKED_package_init_whose_TARGET_is_deleted_is_a_removal(tree: Path) -> None:
     """P1 (round-20): the CARRIER SETS read raw blobs, so a symlinked `__init__.py` was invisible.
 

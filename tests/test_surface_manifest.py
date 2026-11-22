@@ -7904,6 +7904,35 @@ def test_a_spliced_tool_row_with_no_record_is_red_and_names_the_symbol():
     assert any("DROPPED with no record" in p for p in problems), problems
 
 
+def test_shrink_problems_KEEPS_the_problem_KIND_the_CI_route_filter_reads():
+    """Round-24 review, F2: the `kind` the CI route filter reads must survive `shrink_problems`.
+
+    `shrink_problems` changed `out = [str(p) for p in problems]` to `list(problems)` so `check`
+    could filter by `RemovalProblem.kind` instead of re-deriving the class from message TEXT (two
+    `no-record` wordings printed no route at all under the substring filter). That half of the fix
+    had NO assertion: `RemovalProblem` IS a `str`, so every `in`/equality row in this file stays
+    green when the class is thrown away — a fix whose value cannot be made to vary. Measured: with
+    `[str(p) for p in problems]` restored, no other row in this file reds.
+
+    Mutation: `out = [str(p) for p in problems]` in `shrink_problems` -> RED here (`.kind` is
+    gone; the plain `str` has no such attribute).
+    """
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair(extra_rows=("tortoise_spliced_ghost",))
+
+    problems = sm.shrink_problems(base, now)
+
+    named = [p for p in problems if "tortoise_spliced_ghost" in p]
+    assert named, f"the spliced row must be graded: {problems}"
+    assert isinstance(named[0], sm.RemovalProblem), (
+        "`str()` throws the KIND away, and `check` filters the route block by it: "
+        f"{type(named[0])} carries no route class"
+    )
+    assert named[0].kind == "no-record", (
+        f"the route block keys on this kind; got {named[0].kind!r}: {named[0]}"
+    )
+
+
 def test_a_spliced_row_covered_by_an_archive_entry_is_green():
     """The legitimate case, on a REAL archive entry (an `mcp-tool` row in archive/MANIFEST.json).
 

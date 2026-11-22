@@ -1416,9 +1416,8 @@ def _head_carries_runtime_body(
     root: Path,
     symbol: str,
     head_paths_by_module: dict[str, str],
-    base_paths_by_module: dict[str, str],
 ) -> bool:
-    """Does the HEAD side still carry the module's RUNTIME body? — one answer, two callers.
+    """Does the HEAD side still carry the module's RUNTIME body? — one answer, three call sites.
 
     ⛔ There is ONE predicate here on purpose: a second, body-only copy of this question ("the
     file exists and parses") answers a DIFFERENT thing, and the difference is not cosmetic. A
@@ -1431,9 +1430,19 @@ def _head_carries_runtime_body(
     removal the same run had just graded and credited (review P2 of PR #14039) — a correct
     verdict beside a false stated fact, the class this file keeps having to remove.
 
-    ⛔ Unreadable counts as CONTENT on the BASE side and as REMOVED on the HEAD side; that is why
-    this helper takes both maps and decides the `stubbed` clause itself. Arm 1b is its other
-    caller, so the two can no longer disagree about the same file by construction.
+    ⛔ Unreadable counts as CONTENT on the BASE side and as REMOVED on the HEAD side, which is
+    why the answer is only ever about THIS tree: the helper reads the working tree, never the
+    base commit, so it takes no base map.
+
+    ⛔ WHAT IT DOES *NOT* ANSWER, AND THE CALLERS THAT FORGOT IT (round-24 review, F1/F3 —
+    measured). This is the RUNTIME question, so it answers `False` for a `.pyi` stub and for a
+    bodyless `.py`. "Does this tree still carry the module AT ALL" is a DIFFERENT question, and
+    the two unused-waiver sites (`_still_carried_why` callers) borrowed this one to mean it:
+    a module whose only carrier is an unchanged stub — nothing removed, the stub IS its code
+    (#12402) — therefore took their removal branch and printed "this tree does not … the
+    removal is UNRECORDED" over a tree that carries the module with a `def` in it. Arm 1b is
+    the caller this answer is FOR (it grades a body that left); the diagnostic must ask its own
+    question, which is why that one now has its own helper and its own clause.
     """
 
     head_carrier = head_paths_by_module.get(symbol)
@@ -1462,6 +1471,48 @@ def _head_carries_runtime_body(
         if text is not None and _init_carries_a_body(text):
             return True
     return False
+
+
+def _still_carried_why(prefix: str, head_carrier: str, *, base_carried_code: bool) -> str:
+    """Why a waiver over a module this tree STILL CARRIES waives nothing.
+
+    ⛔ THE QUESTION BELONGS TO THE CALLER, NOT TO `_head_carries_runtime_body` (round-24 review,
+    F1 — measured). The two unused-waiver sites borrowed that helper to mean "does this tree
+    still carry the module AT ALL", and the two questions differ on exactly one shape: a module
+    whose only carrier is an UNCHANGED `.pyi` stub. Nothing was removed there — a stub-only
+    module's only code IS the stub (#12402) — but the runtime answer is `False`, so the
+    diagnostic took its removal branch and printed "this tree does not … so the removal is
+    UNRECORDED" over a tree that carries the module with a `def` in it. Following that line
+    means `archive module <x>`, which freezes a LIVE stub that `surface_violations` then reds as
+    `REAPPEARED`: a false stated fact with no green route, the class this file keeps removing.
+    Measured pre-fix on `tortoise/s.pyi` = `def api() -> int: ...`, unchanged between the base
+    and the head, with `--allow-archive-shrink module:tortoise.s`: `… carries `tortoise.s`
+    (module) and this tree does not — and NO `module` entry records it, so the removal is
+    UNRECORDED`. (No verdict moved — both are `exit 1`.)
+
+    ⛔ ONE CONSTRUCTION, TWO CALL SITES — the same reason `_stub_waiver_why` exists. The sites
+    are the `key in base_entries` row branch and the `symbol in base_modules` package branch, and
+    two earlier rounds fixed one copy while the other stood.
+
+    ⛔ THE CALLER OWNS THE PREMISES, because only it holds the sets: it must have established
+    that this tree still holds a carrier for the module (`symbol in head_modules`, which keeps a
+    `.pyi` and a bodyless `.py` and so IS the path set) and that the base carried no RUNTIME body
+    for it (`symbol not in base_runtime_body_modules`). Both are passed in as `head_carrier` /
+    `base_carried_code` so this sentence can only make a claim the caller measured.
+    """
+
+    held = (
+        "its only code was a `.pyi` stub and this tree still holds that carrier"
+        if base_carried_code
+        else "no file the base held for it carried a statement"
+    )
+    # ⛔ NOT "drop the flag" — the caller already appends that sentence to every `waives nothing`
+    # row, and a second copy read as two instructions at the end of one line.
+    return (
+        f"{prefix} and this tree STILL CARRIES it (`{head_carrier or 'a stub carrier'}`), which "
+        f"holds no runtime statements — {held}, so nothing was removed for the waiver to waive "
+        "and no record is missing (#12402)"
+    )
 
 
 def _file_text(root: Path, path: str) -> str | None:
@@ -2098,15 +2149,13 @@ def shrink_violations(
         # only safe reading — here the file is on disk in the working tree, so an unreadable
         # one is evidence about THIS tree.
         #
-        # ⛔ THE DECISION IS `_head_carries_runtime_body`, not a second copy of this test: the
-        # unused-waiver diagnostic below asks the same question, and when it carried its own copy
-        # it answered with a body-only test — which counts a stub and an unreadable file as
-        # bodies — so one run printed "the body was removed" here and "this tree still carries
-        # it" there (review P2 of PR #14039). The helper answers `stubbed` itself, which is why
-        # there is no `if not stubbed:` wrapper any more.
-        if _head_carries_runtime_body(
-            root, module, head_paths_by_module, base_paths_by_module
-        ):
+        # ⛔ THE DECISION IS `_head_carries_runtime_body`, not a second copy of this test: arm 1b
+        # grades a RUNTIME body that left, which is what this arm is about. (The unused-waiver
+        # diagnostic below needed a DIFFERENT question — "does this tree carry the module at all"
+        # — and borrowing this answer made it claim a removal over an unchanged stub; round-24
+        # review F1 fixed that at ITS call site, in `_still_carried_why`, rather than by relaxing
+        # this helper.)
+        if _head_carries_runtime_body(root, module, head_paths_by_module):
             continue
         # ⛔ THE BASE SIDE ASKS THE WHOLE CARRIER SET, LIKE ARM 1 (round-18 review, P0 — a removal
         # graded GREEN). This gate read ONE carrier — `base_paths_by_module[module]`, the
@@ -2324,10 +2373,14 @@ def shrink_violations(
                 # class this loop exists to remove, on the one branch still unasked. Measured
                 # on the committed row (`module:tortoise.archived.search_legacy`): a waiver
                 # for it claimed the tree carries a module present in neither tree.
-                # So ask the live BODY, exactly as the branch below does.
-                if _head_carries_runtime_body(
-                    root, symbol, head_paths_by_module, base_paths_by_module
-                ):
+                # ⛔ ASK THE LIVE BODY, exactly as the branch below does — and ask "AT ALL"
+                # through the helper that answers THAT question (round-24 review, F1). The
+                # runtime answer is `False` for a module this tree carries as an UNCHANGED
+                # `.pyi` stub, so the borrowed predicate took the removal branch and printed
+                # "this tree does not … so the removal is UNRECORDED" over a module that is
+                # still here. Arm 1b `continue`s on that shape before it can consume the
+                # waiver, which is exactly how it reaches this loop.
+                if _head_carries_runtime_body(root, symbol, head_paths_by_module):
                     why = (
                         f"{base_label} records `{symbol}` ({kind}) and this tree still carries "
                         "it, so nothing was removed for it to waive"
@@ -2340,6 +2393,20 @@ def shrink_violations(
                             base_paths_by_module.get(symbol) or "",
                             head_paths_by_module.get(symbol) or "",
                             base_has_runtime_body=symbol in base_runtime_body_modules,
+                        )
+                    elif symbol in head_modules and symbol not in base_runtime_body_modules:
+                        # ⛔ ASK "AT ALL" WHERE THAT IS THE QUESTION (round-24 review, F1 —
+                        # measured). A module carried as an UNCHANGED `.pyi` stub is `False` to
+                        # the runtime predicate on BOTH sides, so the branch below — written for
+                        # a body that LEFT — said "this tree does not carry it — the removal IS
+                        # recorded" over a tree whose only carrier still holds the module's
+                        # `def`. Nothing left; say that. The `base_runtime_body_modules`
+                        # conjunct keeps the real removal shapes (the base's runtime body gone)
+                        # on the branch below, which states the truth for a removal.
+                        why = _still_carried_why(
+                            f"{base_label} already records `{symbol}` ({kind})",
+                            head_paths_by_module.get(symbol) or "",
+                            base_carried_code=symbol in base_body_modules,
                         )
                     else:
                         why = (
@@ -2359,9 +2426,7 @@ def shrink_violations(
                 # record for the one that did. Undoing an over-statement with an under-statement
                 # is not the fix either: the two answers are distinct facts and each states its
                 # own, which is this loop's stated rule.
-                if _head_carries_runtime_body(
-                    root, symbol, head_paths_by_module, base_paths_by_module
-                ):
+                if _head_carries_runtime_body(root, symbol, head_paths_by_module):
                     why = (
                         f"{base_label} carries `{symbol}` ({kind}) and this tree still carries "
                         "it, so nothing was removed for it to waive"
@@ -2390,6 +2455,25 @@ def shrink_violations(
                             f"{base_label} carries `{symbol}` ({kind}) and NOTHING was removed: "
                             "no file the base held for it carries a statement (a docstring alone, "
                             "or nothing), so there is no removal for a record to name"
+                        )
+                    elif symbol in head_modules and symbol not in base_runtime_body_modules:
+                        # ⛔ THE OTHER "STILL CARRIES IT" SHAPE, AND IT IS NOT THE RUNTIME ONE
+                        # (round-24 review, F1 — measured). A module whose only carrier is a
+                        # `.pyi` stub is `False` to `_head_carries_runtime_body` on BOTH sides,
+                        # so the branches below — written for a body that LEFT — announced a
+                        # record for a removal that never happened while the very same file held
+                        # the module's `def`. Nothing left; say so.
+                        #
+                        # ⛔ AND THE `base_runtime_body_modules` CONJUNCT IS LOAD-BEARING: on a
+                        # real arm-1b shape (base `.py` body gone, head `.pyi` stub) arm 1b does
+                        # NOT consume the waiver when the row exists — it `continue`s past it —
+                        # so that shape reaches here too, and "nothing was removed" would be the
+                        # false half of the split. Only a base with no runtime body is this
+                        # branch's.
+                        why = _still_carried_why(
+                            f"{base_label} carries `{symbol}` ({kind})",
+                            head_paths_by_module.get(symbol) or "",
+                            base_carried_code=True,
                         )
                     elif key in working and not _row_froze_a_stub(working[key]):
                         why = (
