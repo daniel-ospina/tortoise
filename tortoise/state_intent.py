@@ -644,7 +644,14 @@ _EXISTENCE_HELPER = (
 # `have any claims been ever retracted` came back `population=None, signal=None` while `main`
 # routes every one of them to `ended` — #14033's own defect (an unrouted state question that
 # is indistinguishable from "nothing has ended") reintroduced by a guard fixing a different
-# spelling. The slot is ONE adverbial (the fixed set below, not the whole `_EXISTENCE_ADVERB`
+# spelling. ⛔ AND IT IS NOT A CLASS CLOSURE (fresh review, P3, measured): every row named above is
+# QUANTIFIER-headed (`have any …`, `has anything …`). The DEFINITE-subject spelling of the same
+# frame — `has the export been already archived`, `has the export been just archived` — is SILENT
+# at this head AND on `main` (measured), because no shape's head accepts a definite subject with
+# the adverb sitting between `been` and the participle. It is `main`'s behaviour, so it is not a
+# regression here — but it is duty (b) in the same class, and stating it is the difference between
+# a closed class and a measured one. It is open with the rest of the class on #14033.
+# The slot is ONE adverbial (the fixed set below, not the whole `_EXISTENCE_ADVERB`
 # class: those are the ones a customer writes between the auxiliary and the participle, and a
 # wider slot here would swallow a second clause). `have any reports already archived` — where
 # `already` is the AUXILIARY and `archived` stays ATTRIBUTIVE — is `main`'s behaviour traded
@@ -1393,8 +1400,10 @@ _COPULA_SUBJECT = (
 #: `\b` cannot match after `is` inside `isn't` — so a refused-and-reporting pair became a silent
 #: one. `isn't the export archived` and `hasn't the export been archived` came back
 #: `population=None, signal=None` while their UN-contracted twins `is the export not archived`
-#: and `is the export archived` ROUTE (measured: over `8 subjects x 7 endings`, 384 of 384
-#: contracted probes silent and 384 of 384 uncontracted twins routed). A negative question is
+#: and `is the export archived` ROUTE (measured over `8 subjects x 7 endings` — 56 pairs,
+#: re-measured at this head: **0 mismatches**, every contracted twin routing exactly like its
+#: uncontracted pair; the earlier note printed "384 of 384", a count that does not re-derive from
+#: the grid it cites and is not repeated here). A negative question is
 #: still a question about a state, and the ended population answers it the same way it answers
 #: the uncontracted spelling, so the two must not differ — routing, not a notice, is the parity.
 #: The typographic apostrophe is accepted for the same reason as `:data:`_CONTRACTED_AUX``: it is

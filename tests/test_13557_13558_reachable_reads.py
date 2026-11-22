@@ -1182,12 +1182,15 @@ NOTICE_ONLY = [
     # signal=None` while `main` answered every one of them with `ended`/`existence`. A caller
     # cannot distinguish that from "nothing has ended", which is duty (b). `_ALREADY_EVER_AUX`'s
     # arm in `existence_unguarded` reports the cue instead, and the arm is a SIGNAL, so the
-    # routing table is untouched — 0 population/shape moves over the pinned corpus (`SELECTED`
-    # + `NOT_SELECTED` + `NOTICE_ONLY`, 321 DISTINCT queries; ⛔ not the 624 a naive walk of the
-    # three lists yields — `SELECTED` holds `(query, population, shape)` tuples, so a recursive
-    # walk counts 204 population/shape TOKENS as rows, and `NOTICE_ONLY` duplicates `NOT_SELECTED`.
-    # A corpus size that cannot be reproduced from the lists is exactly the kind of stale claim
-    # this module's own cost test exists to prevent, so the reproducible number is the one stated).
+    # routing table is untouched — 0 population/shape moves over the pinned corpus.
+    # ⛔ NO CORPUS SIZE IS STATED, AND THAT IS THE FIX (fresh review, P2, measured): this comment
+    # used to give the corpus as "321 distinct / 624 naive / 204 tokens", all three measured at
+    # `34b339c75d`; a peer lane then added 111 rows and the same measurement at the head gave 369 /
+    # 724 / 216, so the numbers were stale on arrival in a file whose own cost test exists to stop
+    # exactly this. The corpus size is DERIVED, never quoted: import the three lists and count —
+    # and note that a recursive walk of `SELECTED` counts its `(query, population, shape)` tuples'
+    # population/shape TOKENS as rows while `NOTICE_ONLY` duplicates `NOT_SELECTED`, so the naive
+    # walk and the distinct count are different questions and neither is a constant.
     # ⛔ AND THE ACTIVE-VOICE SIBLING IS STILL SILENT ON PURPOSE — `has the partner already
     # cancelled` / `has legal already retracted` (no existential quantifier, so no ending CUE is
     # recognised, and they were silent on `main` too). Pinned in `NOT_SELECTED` only, so an arm
