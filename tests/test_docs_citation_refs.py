@@ -5287,12 +5287,17 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
 
 
 def _d5_pinned_universe(completed: subprocess.CompletedProcess) -> set[str]:
-    """Read the documented universe from a `grep --help` run, or SKIP where it published none.
+    """Read the documented universe from a `grep --help` run, or SKIP where there is none to pin.
 
     ⛔ THE SKIP IS THE PORTABILITY FIX, AND IT NEEDED ITS OWN WITNESS (#14303 review round 14, P2 —
-    MEASURED). BSD grep 2.6.0-FreeBSD answers `--help` with a `usage:` line on STDERR and exit 2, so
-    there is no option list to pin and this cell must SKIP rather than ERROR — which is what made it
-    runnable on macOS at all (#14306's handover). Pinning `_d5_documented_long_options` on its own
+    MEASURED; BSD described correctly in round 16, P3 — MEASURED). BSD grep 2.6.0-FreeBSD answers
+    `--help` with a `usage:` line on STDERR and exit 2, and that line DOES name long options
+    (`--binary-files`, `--color`, `--context`, …) — simply fewer of them than GNU grep's 48, so
+    there is no universe AT OR ABOVE THE FLOOR to pin and this cell must SKIP rather than ERROR.
+    That is what made it runnable on macOS at all (#14306's handover). "No option list at all"
+    would be the wrong reason and is what `_D5NoDocumentedUniverse`'s own message refuses to say:
+    the STREAM is not the problem and neither is a total absence — the list is too short.
+    Pinning `_d5_documented_long_options` on its own
     did not pin THIS conversion: replacing the `pytest.skip` below with a bare `raise` left this
     file at `37 passed` on every platform CI runs, because no shipped GNU grep fails `--help`, so
     the cell would error on a BSD box with a green rail — the regression this fix exists to close,
