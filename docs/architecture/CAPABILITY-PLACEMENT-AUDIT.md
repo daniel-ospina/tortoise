@@ -85,16 +85,17 @@ NOT done here.
 (`record_serve.py:468` is in THIS revision's group above; `projection/__init__.py:14647` is in neither list,
 and STILL the pin's `:14647` is `for e in (` — so absence from these lists does not make an address the
 pin's), and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read.
-⚠️ **So this paragraph types no list of re-pointed rows: every address in the §2.1–§2.7 tables is written
-for THIS tree, and the census above measures how far that is from the pin — 131 of the 228 addresses do not
-land there (123 of the 215 comparable, plus the 8 past the pin's EOF)** — rows 2, 2b, 7, 7b and §2.4's `:Session` reader and `list_sessions` rows among
-them. Every `session_schema`/`hosted_api`
-address they carry was re-derived against this tree, so read them here and never at the pin, where those numbers
-open on something other than the queries the rows quote — a docstring, a comment block, a dict literal, a
-backup-sweep guard. They are named by ROW
-rather than repeated in the enumeration list below, because writing a second spelling of an address a row already
-carries would move the spelling count this header publishes — and that list, not this paragraph, is what a reader
-consults first. The
+⚠️ **So no positional rule can stand in for opening the line, because the tables are MIXED.** §2.4's `:Session`
+reader row still carries its `hosted_api` addresses at the PIN's numbers — the pin's lines there are the
+`(:Session)-[:CONTAINS]->(p:Point)` reads, while this head's are a name lookup, an import and a comment — the
+whole-node row's address above is this head's while the pin's line there is `for e in (`, and one §2.7 row's `sdk.py`
+address opens on neither head (this head: an `after_seq` line; the pin: `_base_a = …`). The rows this revision
+re-pointed by hand are therefore the exceptions, not the rule — rows 2, 2b, 7, 7b, §2.4's `list_sessions` row, and
+§2.4's `:Session` row for its `session_schema` addresses alone (its `hosted_api` twins are still the pin's). Read the
+row's own quoted fragment, then OPEN it at the head you need, and take a hit at either head as a fact about that head
+only — the pin-side numbers land on a docstring, a comment block, a dict literal or a backup-sweep guard, and taking
+one for the other is the failure this paragraph exists to catch. The rows are named by ROW rather than repeated here, because a
+second spelling of an address a row already carries would move the spelling count this header publishes. The
 ratio below is a **whole-document** measurement — every `path.py:NNNN` pair in this file, the `main`-set
 addresses above included — so it is the count of how much of a document written at the pin has since
 moved, not a count of that remainder alone. ⚠️ **An earlier form of this paragraph called the ratio the
