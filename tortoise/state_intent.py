@@ -699,7 +699,7 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: ⛔ THE BOUNDARY IS NINE/TEN, AND THIS CORRECTION IS ITSELF A REVIEW FINDING (round-34, P2,
 #: measured): the sentence above first said "SIX or SEVEN", and the one below said "beyond eight
 #: adverbials … both bounds answer identically". Both halves were measurably false — the slot
-#: allows EIGHT, so the n=6,7,8 rows report; a `{0,8}` copy and this head DIFFER at exactly n=9,10
+#: admits TEN tokens, so the n=1..10 rows report; a `{0,8}` copy and this head DIFFER at exactly n=9,10
 #: (that is the band this paragraph is about — not a "silent band": at head n=9,10 REPORT, while
 #: the copy is silent at n=9,10 AND n>=11); and the two bounds agree
 #: again only at n>=11 — and ⛔ WHAT LIMITS THE RUN THERE IS THE SLOT *WITHIN THIS WINDOW*, NOT THE

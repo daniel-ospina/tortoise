@@ -1813,10 +1813,17 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
         f"silence into a ROUTE at n>=11 (measured: `ended` with `signal=None`), which is the "
         f"#14033 hijack; re-measure before touching it")
     _refusal = dict(_si._ENDING_SIGNALS)["existence_unguarded"]
-    assert "[^?]{0,60}?" in _refusal.pattern, (
+    # ⛔ THE DISCRIMINATOR IS THE WINDOW **AND ITS `been`**, NOT THE WINDOW ALONE (round-39 review,
+    # P2, measured): `existence_unguarded` compiles TWO `[^?]{0,60}?` windows — this refusal arm and
+    # the `already|ever` arm below it — so a bare `"[^?]{0,60}?" in pattern` is propped up by the
+    # OTHER arm and stays green when THIS one is widened to `{0,120}?` (measured: n=11/12 flip to
+    # `existence_unguarded` and all three assertions still passed). `[^?]{0,60}?\bbeen\s+` occurs
+    # exactly once in the pattern and is absent from the `{0,120}?`, `{0,300}?` and `*?` copies.
+    assert "[^?]{0,60}?\\bbeen\\s+" in _refusal.pattern, (
         f"the refusal arm's window changed — widening it makes the over-long adverb run REPORT "
-        f"instead of staying silent (measured: n=11/12/20 go silent -> `existence_unguarded`), so "
-        f"the note above is stale: {_refusal.pattern[:200]!r}")
+        f"instead of staying silent (measured: n=11/12 flip to `existence_unguarded` at "
+        f"`[^?]{{0,120}}?`, and `*?` reports through n=20), so the note above is stale: "
+        f"{_refusal.pattern[:200]!r}")
     assert "[^?]{0,300}" not in _refusal.pattern and "[^?]{0,300}" not in _si._EXISTENCE_WINDOW, (
         "a wide window is in one of these two arms — measured: it routes or reports at n>=11, "
         "which is exactly the trade this contract forbids")
