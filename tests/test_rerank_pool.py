@@ -1692,6 +1692,54 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     assert len(seen_external) >= 12, (
         f"the derived census saw only {sorted(seen_external)} — the trees moved")
 
+    # ⛔ THE GRANT'S RECORDED REASON IS GRADED, not merely written down (#14278
+    # F2). The two claims that justify `read_wave_latency.py`'s PERMANENT
+    # exemption — TWO call sites, ONE of them the per-query loop carrying
+    # `leg_trace` — are also a COVERAGE property: the grant names the OWNER
+    # (`run`), so a third read added inside it inherits the exemption with no
+    # recorded reason, and nothing else in this file would notice. (Measured
+    # before this arm existed: the comment said "twice", which reads as two
+    # EXECUTIONS while the loop executes once per query — a wrong count in the
+    # one place the grant's reason lives.) If this reds, the reason and the tool
+    # disagree: re-derive the comment above, do not delete this arm.
+    harness = _ast.parse((root / "tools" / "read_wave_latency.py").read_text())
+    harness_parent = {id(child): parent for parent in _ast.walk(harness)
+                      for child in _ast.iter_child_nodes(parent)}
+
+    def _enclosing(node):
+        parent = harness_parent.get(id(node))
+        while parent is not None:
+            if isinstance(parent, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                return parent
+            parent = harness_parent.get(id(parent))
+        return None
+
+    seam_calls = [n for n in _ast.walk(harness)
+                  if isinstance(n, _ast.Call)
+                  and getattr(n.func, "attr", None) == "_tortoise_fts_query"]
+    assert len(seam_calls) == 2, (
+        f"{len(seam_calls)} `_tortoise_fts_query` call site(s) in "
+        "tools/read_wave_latency.py, but the exemption's recorded reason says "
+        "TWO (a discarded warm-up, and the measured loop) and the grant is "
+        "owner-granular — a further read inside `run` is exempted with no "
+        "recorded reason. Re-derive the comment in `intentional_keep`.")
+    owners = {(_enclosing(c).name if _enclosing(c) else None)
+              for c in seam_calls}
+    assert owners == {"run"}, (
+        "the exempted reads are not all inside `run`, the only owner the grant "
+        f"names: {sorted(owners, key=str)}")
+    traced = [c for c in seam_calls
+              if any(k.arg == "leg_trace" for k in c.keywords)]
+    assert len(traced) == 1, (
+        "the recorded reason says exactly ONE of the two reads is the MEASURED "
+        f"loop and attaches `leg_trace`: {len(traced)} of {len(seam_calls)} do")
+    parent = harness_parent.get(id(traced[0]))
+    while parent is not None and not isinstance(parent, (_ast.For, _ast.AsyncFor)):
+        parent = harness_parent.get(id(parent))
+    assert parent is not None, (
+        "the `leg_trace` read is not inside a `for` loop, so it does not "
+        "execute once per query and the recorded reason's `1 + N` is wrong")
+
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
     # volunteer pipeline does exactly that) is not an ``ast.Call`` on
     # ``tortoise_fts_query``, so the census above was BLIND to it while the
