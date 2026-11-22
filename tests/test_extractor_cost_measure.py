@@ -184,6 +184,20 @@ def test_a_literal_dollar_is_escaped_outside_code_spans_only():
     assert out.count("\\$") == 1
 
 
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_a_fenced_block_is_never_escaped(fence):
+    """A backslash is literal inside a fence, so escaping `$VAR` there would
+    print a backslash the author never wrote — and the fence is the construct
+    that breaks "prose `$` can always be escaped" if the scan is fence-blind."""
+    doc = (f"# t\n\ntotal $5\n\n{fence}\necho $HOME\n{fence}\n\n"
+           f"after $6\n")
+    out = m.escape_dollars_outside_code(doc)
+    assert f"{fence}\necho $HOME\n{fence}" in out, (
+        "a `$` inside a fenced block must survive byte for byte")
+    assert "total \\$5" in out and "after \\$6" in out, (
+        "prose dollars on both sides of the fence must still be escaped")
+
+
 def test_finalize_markdown_leaves_exactly_one_trailing_newline():
     """Each renderer ends with a blank-line element so consecutive sections
     separate; the LAST one then ends the file on a blank line, which is

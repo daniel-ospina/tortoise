@@ -844,25 +844,49 @@ def _mean_item_tokens(arm_rep: dict) -> float:
 
 
 def escape_dollars_outside_code(markdown: str) -> str:
-    """Backslash-escape every literal ``$`` that is not inside a code span.
+    """Backslash-escape every literal ``$`` that is not in a code span or fence.
 
     A bare ``$`` beside a figure is ambiguous to Markdown's inline parser, and
     the repo's linter (markdownlint 0.41, micromark-based) resolves the
     ambiguity by pairing ``$…$`` spans — which silently re-pairs the
     surrounding ``**emphasis**`` and code-span delimiters too. That produced
-    three findings (MD037 twice, MD038 once) in this report whose POSITION
-    MOVED when unrelated prose changed, so no hand-edit of the generated text
-    could keep them fixed: the defect is the emission, not the sentence it
-    landed on (#14295).
+    three findings (MD037, MD038, MD012) in this report whose POSITION MOVED
+    when unrelated prose changed, so no hand-edit of the generated text could
+    keep them fixed: the defect is the emission, not the sentence it landed
+    on (#14295).
 
     ``\\$`` renders as ``$`` (it is a normal punctuation escape), so the
     rendered report is unchanged while its inline structure no longer depends
-    on how many figures a sentence carries. Inside a code span a backslash is
-    literal, so code spans — located by matching backtick RUNS, so a
-    double-backtick span is handled too — pass through untouched.
+    on how many figures a sentence carries. A backslash is LITERAL inside code,
+    so both kinds of it pass through untouched: inline spans, located by
+    matching backtick RUNS (a double-backtick span is one unit), and fenced
+    blocks, located by their ``` / ~~~ delimiter lines. Escaping a fenced
+    ``$HOME`` would print a backslash the author never wrote.
+
+    Scope, stated so the boundary is not mistaken for completeness: this is a
+    line-local scan, so it does not track an inline span that WRAPS a line, and
+    a line with an odd number of backtick runs leaves that line's tail read as
+    code (bare ``$`` there stays bare — the ``docs`` lint gate reports that
+    direction; it does not fail silently). Neither shape is emitted by this
+    module today: it prints no fences, and every line of its output has an even
+    number of backtick runs.
     """
     out: list[str] = []
+    fence: str = ""
     for line in markdown.split("\n"):
+        stripped = line.lstrip()
+        if fence:
+            out.append(line)
+            if stripped.startswith(fence):
+                fence = ""
+            out.append("\n")
+            continue
+        opener = re.match(r"(`{3,}|~{3,})", stripped)
+        if opener:
+            fence = opener.group(1)[:3]
+            out.append(line)
+            out.append("\n")
+            continue
         parts = re.split(r"(`+)", line)
         in_code = False
         for part in parts:
