@@ -969,8 +969,8 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   gate and at the `tenant is None` gate, both BEFORE any queue or counter is
 #:   touched (⛔ cited by TEXT, not by `file:line`: three citations here were five
 #:   lines off in round 14 — the numbers rot the moment a docstring above them
-#:   grows, the gate's text does not) (measured: armed loop, durable journal, no
-#:   carried#:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
+#:   grows, the gate's text does not) (measured: armed loop, durable journal, no carried
+#:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
 #:   declines, so an operator reconciling "inline folds" against this counter will
 #:   find the structural arms missing from it — which is the correct shape (they
 #:   are the pre-#14185 path, not a degradation) and a wrong sentence if this
@@ -8844,9 +8844,9 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # the loop's own failures and the writes that folded the record on their OWN
         # thread, BY REASON (``queue_full`` / ``worker_stopping`` / ``uncopyable`` /
         # ``queue_fault`` — the four the counter's HELP declares). ⛔ NOT "because the
-        # queue was at its bound": only ``queue_full`` is that, and an operator who
-        # reads the narrowed sentence sizes `TORTOISE_PROJECTION_QUEUE_MAX` up to fix
-        # a `uncopyable` record shape and a `queue_fault`'s thread exhaustion, which
+        # queue was at its bound": only ``queue_full`` is that, and a reader of the old
+        # wording would size `TORTOISE_PROJECTION_QUEUE_MAX` up to fix an `uncopyable`
+        # record shape and a `queue_fault`'s thread exhaustion, which
         # are not bound problems at all (round-15 review, P3). ⚠️ `worker` reports whether an
         # operator armed the loop at all: ``{"armed": false}`` means these
         # gauges are a leftover from a previous arming, not a live reading.
