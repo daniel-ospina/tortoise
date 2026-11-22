@@ -210,7 +210,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:8522`", _MCP, 8522, "entity_type=entity_type"),
     # ⛔ The four `sdk.py` members of §2.5's `:Tag` row are enumerated in the header as BARE `:NNNN`
     # siblings — a spelling none of the rows above reaches (they all require a path or the one-token
-    # form), which is the same one-site-vs-one-string gap the `:11281` header half and `:6989` were:
+    # form), which is the same one-site-vs-one-string gap the `:11590` header half and `:6989` were:
     # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
     # the fragment the header paragraph quotes for it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31572`", "tortoise/sdk.py", 31572, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})"),
@@ -319,9 +319,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
     # §2.6's row, re-pointed to this head by the same review: the census's `:890`/`:1182`/`:1383` do not land
-    # on these statements at this head, and `hosted_backup.py` drifts in TWO steps (`+2` above the pin's `:58`,
-    # `+132` above the pin's `:1175`) — so the offsets are `+2`/`+134`, not one delta. Pinned by content
-    # because the header's enumeration names them and promises exactly that.
+    # on these statements at this head, and `hosted_backup.py` drifts in THREE offset STEPS (`+2` above the
+    # pin's `:58`/`:59`, `+60` above its `:1035`, `+89` above its `:1175`) — so the offsets are
+    # `+2`/`+62`/`+151`, not one delta and not the `+2`/`+134` an earlier draft read off a two-step
+    # `+132` hunk count (the `+134` lands at `:1316`/`:1517`, which are not the statements). Pinned by
+    # content because the header's enumeration names them and promises exactly that.
     (_AUDIT, "hosted_backup.py:892", _HB, 892, '"MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"'),
     (_AUDIT, "hosted_backup.py:1333", _HB, 1333, 'MATCH (n) RETURN labels(n), properties(n)'),
     (_AUDIT, "hosted_backup.py:1534", _HB, 1534, 'MATCH (n) RETURN labels(n), properties(n)'),
@@ -1241,7 +1243,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     # (2) every one of them is NAMED where the header promises to name them: the non-comparable enumeration,
     # the sentence between "that are NOT comparable" and "past the pin's copy of its file". Either spelling
     # form the document uses for a pair counts — `SDK/FILE:NNNN` (`sdk.py:57951`) or the bare `:NNNN`
-    # sibling behind an adjacent path (`search_engine.py`'s `:7196`).
+    # sibling behind an adjacent path (`search_engine.py`'s `:7560`).
     start = body.find("that are NOT comparable")
     end = body.find("past the pin's copy of its file")
     assert start != -1 and end > start, (
