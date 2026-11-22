@@ -276,8 +276,11 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
     ``True`` ⇒ the fold is QUEUED and this write must not wait for it. ``False``
     ⇒ the caller folds inline, exactly as before the worker existed.
 
-    ⛔ FOUR OF THE SIX CONDITIONS ARE CORRECTNESS, NOT CONFIGURATION, and each
-    of those four is a fact only this chokepoint holds:
+    ⛔ FIVE OF THE SEVEN CONDITIONS ARE STRUCTURAL — FOUR CORRECTNESS plus an
+    unimportable loop — AND THE OTHER TWO ARE THE SWITCHES, and each of the four
+    correctness ones is a fact only this chokepoint holds (#14222 review cycle 9,
+    P2: this header said "four of the six", which lost the ``except`` below and
+    made the family look closed at six):
 
     1. **A journal LINE exists** (``not journal_skipped``). On a cut-over graph
        the record IS the write's durable copy (#14002) — there is no line to
