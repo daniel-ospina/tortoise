@@ -1471,8 +1471,25 @@ def test_skill_decide_protocol_tools_are_registered_mcp_tools():
     # confidence container's `recompute=True` arm, so the protocol names the container —
     # and the ARM is pinned separately below, because naming the container alone gets a
     # token list no different from one that asks for the stored calibration view.
-    for required in ("tortoise_check_confidence", "tortoise_create_operator"):
+    # #11609 P7: the SAME move for the wiring door. `tortoise_create_operator` was retired
+    # forward onto `tortoise_link_entities` in the batch that registered it, so the pin
+    # follows the door — and the ARM is pinned below for P2's reason: the container is one
+    # linking verb whose RELATION decides the writer, and a list of targets is the
+    # part/whole fan-out `create_operator` had (one operator over N targets). Naming the
+    # container without the list would admit a protocol that cannot perform that fan-out.
+    # Measured at this head: the door is still SERVED (forwarded), so the `missing` sweep
+    # above cannot catch a stale name; this pin is that sweep's only guard against one.
+    # Canonical-only staleness is caught separately by
+    # `test_m8_deploy_mirror_matches_canonical`, and a revert of BOTH copies by
+    # `test_1652_served_skills_name_only_advertised_tools` — neither of those keeps the
+    # protocol teaching the part/whole fan-out, which is what the arm pin below does.
+    for required in ("tortoise_check_confidence", "tortoise_link_entities"):
         assert required in tokens, f"decide protocol must use {required}"
+    assert "`target_ids=[…]` selects the operator writer" in decide_section, (
+        "the decide protocol must wire through `tortoise_link_entities`'s "
+        "`target_ids=[…]` arm — that arm is the part/whole fan-out the retired "
+        "`tortoise_create_operator` had (one operator over N targets), and the "
+        "plain two-endpoint `link_entities` call does not reproduce it")
     assert "check_confidence(recompute=True)" in decide_section, (
         "the decide protocol must RANK through the confidence container's recompute "
         "arm — the container's default answers the stored calibration view, so a "

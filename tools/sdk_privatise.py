@@ -1197,7 +1197,53 @@ SWEEP_NAMES = 66
 #: `(11860, "267dce26b4191743")` — unchanged from the pre-restoration pin, because every restored
 #: line is `#:`-prose and `edits_for` walks the AST and cannot see a comment. `--check` exits 0
 #: here with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11860, "267dce26b4191743")
+#:
+#: ⛔ RE-CUT → (11858, "a1552662bf07a10b"). The 11857 pair was NOT measured on this branch: it is
+#: `main`'s own pin (`e74cf1d13d`), inherited here at the merge and left in place while this branch
+#: kept adding rows under it, so `--check` reds on this tree by exactly ONE. `git log` proves the
+#: inheritance rather than asserting it: the ONLY commit that ever set the constant to that pair is
+#: `e74cf1d13d` itself, and that tree carries no `out.update` (measured: 0 occurrences in
+#: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
+#: THE ONE ROW: `out.update` 1 — `_global_declarations` in `tests/test_14125_retired_name_calls.py`,
+#: an `out: set[str]` accumulated with `out.update(node.names)` over an `ast.Global`. It arrived with
+#: this branch's own `a4e97d6f5b`, which is why the block above can still claim this branch's census
+#: contribution is "ZERO ROWS" and be wrong at this head — that reading was taken before the row
+#: existed and was never re-measured, the recurrence this pin chain keeps recording.
+#: ⛔ ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: the residue counter was derived over the whole tree
+#: and the SINGLE row removed; `11858 − out.update` prints `(11857, "ed40203dbbf32b87")` — the pinned
+#: pair EXACTLY — so that one row is the whole delta and no other shape moved in either direction.
+#: The row is DECLARED rather than rewritten away, as `main` declared `terms.update` 0 → 1:
+#: a plain `set[str]` in a test helper is the ordinary-word receiver this sweep deliberately leaves
+#: alone, neither an SDK handle nor a FalkorDB `Graph`, and `typed references still pointing at a
+#: public name` stays **0**. Measured on the MERGED tree: this head has `origin/main` `9f83a63bfa`
+#: merged in, and `--repin` printed the same pair before and after that merge, so the merge
+#: contributes no row here either — nor do the sibling commits merged after it (all on this
+#: branch's census file, and named by log rather than counted here, because a count restated in this
+#: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
+#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
+#: not carried forward.
+#:
+#: ⛔ MERGED `origin/main` (`10e51693f166`) INTO THIS BRANCH — the THIRD tree, so the pin below is
+#: `--repin`'s output ON IT and neither side's figure is inherited. Measured with the SAME verb in a
+#: detached worktree of each parent: this branch's head `586c46cf53` prints
+#: `(11860, "267dce26b4191743")`, which is its committed pin, and `origin/main` `10e51693f1` prints
+#: `(11861, "f0647020531c078c")` — ⛔ NOT the `(11858, "a1552662bf07a10b")` main COMMITS, so on
+#: `10e51693f1` main's committed pin is 3 off its own measurement (main's drift, re-pinned over
+#: there, never inherited here).
+#: On the merged tree `--repin` prints `(11864, "2a6400518a87775c")`.
+#: ⛔ ATTRIBUTED BY A ROW-BY-ROW DIFF, NOT BY ARITHMETIC: `--report --base 28ca66878d… --top 5000`
+#: was run on all THREE trees, the row sets sorted and diffed, and each delta is a NAMED set of
+#: shapes rather than a residual. Merged − branch head = **+4**: `proj.g.query` 3643 → 3646 (+3) and
+#: `out.update` 42 → 43 (+1), both `main`'s contribution and neither of them this branch's. Merged −
+#: `main` = **+3**: `g.query` 1499 → 1501 (+2) and `super().query` 75 → 76 (+1), this branch's
+#: end-proof receivers — the two `g.query(…)` counts in `tools/graphevent_home.py` (the NULL-`seq`
+#: count and the total count that make "reached the end" distinguishable from "the read stopped
+#: early") and the `super().query(…)` stub in `tests/test_13094_graphevent_home.py` that stands in
+#: for a FalkorDB connection. `11860 + 4 = 11861 + 3 = 11864` is a CROSS-CHECK of two independent
+#: readings of different pairs of trees; the evidence is the `--repin` run on THIS tree. Every added
+#: shape is an ordinary-word receiver this counter exists to REPORT, not a typed SDK call site, so
+#: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11864, "2a6400518a87775c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
