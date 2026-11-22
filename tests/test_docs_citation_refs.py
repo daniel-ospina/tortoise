@@ -4948,10 +4948,17 @@ def _d5_grep_declined_the_spelling(
         completed: subprocess.CompletedProcess, spelling: str) -> bool:
     """`True` only when grep's own stderr says it does not know THIS spelling of an option.
 
-    ⛔ "rc not in (0, 1)" IS NOT THE QUESTION (#14306 review F2, P1 — MEASURED). Two spellings
-    this cell measures were refused with rc 2 by GNU grep 3.11 for OPPOSITE reasons: an option
-    grep does not implement (`unrecognized option`), and a broken probe (`Is a directory`). The
-    first is a platform fact the cell tolerates; the second must red with its diagnostic.
+    ⛔ "rc not in (0, 1)" IS NOT THE QUESTION (#14306 review F2, P1 — MEASURED). Two rc-2
+    invocations probed while scoping this cell have OPPOSITE meanings: an option grep does not
+    implement (`--definitely-not-an-option` → `unrecognized option`), and a broken probe
+    (`--fixed-regexp … /tmp` → `Is a directory`). The first is a platform fact the cell tolerates;
+    the second must red with its diagnostic.
+    ⛔ AND NOTE WHAT THOSE TWO ARE NOT (MEASURED on GNU grep 3.11, #14306 review F5, P3): NEITHER
+    is one of the three spellings this cell MEASURES. On 3.11 all three run —
+    `--unix-byte-offsets` and `--u` print the blank class (`2`, rc 0, plus the `obsolete` warning)
+    and `--fixed-regexp` counts nothing (rc 1) — so an earlier draft of this paragraph that called
+    them "two spellings this cell measures … refused by GNU grep 3.11" was itself the defect this
+    PR fixes: a reading taken on one command, labelled as another.
     Requiring the message to NAME the spelling is what keeps a refusal of one option from
     licensing another.
 
@@ -5094,6 +5101,92 @@ def test_the_d5_grep_portability_tolerance_covers_a_REFUSAL_and_nothing_else():
         "other option; the partition must red rather than let the omission pass as measured")
 
 
+def _d5_drive_the_cell(cell, *, match: str, what: str) -> None:
+    """Drive a CELL and require its `AssertionError` — a SKIP is charged as a FAILURE.
+
+    ⛔ THE SKIP IS THE MUTANT'S WHOLE ESCAPE (#14306 review F5, P2 — MEASURED, and it was measured
+    on an EARLIER DRAFT OF THESE ARMS). `pytest.skip` raises, and a skip raised anywhere inside a
+    test is reported as SKIPPED — so wrapping the cell in `pytest.raises(AssertionError)` does not
+    witness the assertion at all: the pre-fix cell skips, the wrapper's expectation is never
+    reached, and the arm goes GREEN with the defect back in place. That is the same inert-enforcer
+    shape one level up, in the arm written to close it. So a skip here is a FAILURE with its
+    reason, and so is a cell that returns normally.
+    """
+    try:
+        cell()
+    except AssertionError as exc:
+        assert match in str(exc), (
+            f"the cell red for a DIFFERENT reason than {what} — the arm would otherwise pass on "
+            f"an unrelated failure: {exc}")
+    except pytest.skip.Exception as exc:  # type: ignore[attr-defined]
+        pytest.fail(
+            f"the cell SKIPPED ({exc}) instead of reddening on {what} — a skip is GREEN on the "
+            "rail, so it cannot witness an assertion (#14306 review F5, P2)")
+    else:
+        pytest.fail(
+            f"the cell completed WITHOUT redding on {what} — nothing in it witnessed the "
+            "assertion (#14306 review F5, P2)")
+
+
+def test_the_cell_itself_reds_on_a_SUCCESSFUL_help_that_parsed_too_little(monkeypatch):
+    r"""The `>= 40` floor is reachable THROUGH THE CELL, not only through the helper.
+
+    ⛔ #14306 REVIEW F5 (P2 — MEASURED BY MUTATION), AND IT IS THE SAME INERT-ENFORCER SHAPE ONE
+    LEVEL UP. The sibling arm below pins `_d5_documented_long_options` ITSELF, which is not the
+    same claim as the cell USING it: restoring the old cell body verbatim — parse `stdout` inline,
+    `pytest.skip` when fewer than 40 options, `assert` after the skip — left the WHOLE suite green,
+    because `pytest.skip` RAISES and the cell never reached the helper at all. The sentence that
+    claimed "a revert to skip-then-assert reds a test" was therefore false as written.
+
+    So this arm drives the CELL with an `--help` that EXITED 0 and parsed one option. The fixed
+    cell raises `AssertionError` (RED); a reverted cell SKIPS, and a skip is not an
+    `AssertionError`, so that mutant reds here and nowhere else.
+    """
+    def one_option_help(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0,
+            stdout="Usage: grep [OPTION]... PATTERNS [FILE]...\n  --help <x>\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", one_option_help)
+    _d5_drive_the_cell(
+        test_the_d5_count_reader_knows_every_long_option_grep_documents,
+        match="broken derivation must not be able to certify",
+        what="a `--help` that EXITED 0 and parsed too little")
+
+
+def test_the_alias_cell_reds_a_broken_reader_claim_even_when_grep_declines_everything(monkeypatch):
+    r"""The final skip sits BELOW the reader rows, and only an arm that drives the CELL can say so.
+
+    ⛔ #14306 REVIEW F5 (P2 — MEASURED BY MUTATION). Moving `if not measured: pytest.skip(...)`
+    back above the six reader rows reddened NOTHING, because no arm ever drove this cell with a
+    grep that declines every spelling — so the prose claim that "the reader's own behaviour is
+    asserted unconditionally ABOVE this point" was witnessed by no test at all.
+
+    Here every spelling is refused AND the reader's declared allowance is corrupted, so the two
+    behaviours the claim distinguishes have OPPOSITE outcomes: the fixed cell reaches
+    `assert {"--unix-byte-offsets"} == set(_D5_UNDOCUMENTED_LONG_OPTIONS)` and REDS, while a cell
+    whose skip sits above that row SKIPS first. `pytest.raises(AssertionError)` refuses a skip,
+    which is what makes the position a measurement instead of a sentence.
+    """
+    real_run = subprocess.run
+
+    def declines_every_spelling(cmd, *args, **kwargs):
+        if "--help" in cmd:  # the option universe is derived for real; only verdicts are stubbed
+            return real_run(cmd, *args, **kwargs)
+        spelling = cmd[2]
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=2, stdout="",
+            stderr=f"grep: unrecognized option '{spelling}'\n")
+
+    monkeypatch.setattr(subprocess, "run", declines_every_spelling)
+    monkeypatch.setitem(globals(), "_D5_UNDOCUMENTED_LONG_OPTIONS",
+                        frozenset({"--unix-byte-offsets", "--u"}))
+    _d5_drive_the_cell(
+        test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS,
+        match="undocumented allowance",
+        what="a corrupted reader declaration under a grep that declines every spelling")
+
+
 def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     r"""`_D5_ALL_LONG_OPTIONS` matches `grep --help`, and not through the argument-taking oracle.
 
@@ -5105,8 +5198,11 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     possibilities, measured, while `grep --help` does not mention it) is deliberately ABSENT,
     because it shares `-F`'s identity — including it would make `--fixed-` falsely ambiguous
     (measured: `grep -c --fixed-` is ACCEPTED) and it counts nothing of this class;
-    `--unix-byte-offsets` is PRESENT, in `_D5_UNDOCUMENTED_LONG_OPTIONS`, because grep runs it and
-    it really counts the blank class. Measured on GNU grep 3.11:
+    `--unix-byte-offsets` is PRESENT, in `_D5_UNDOCUMENTED_LONG_OPTIONS`, because **GNU grep 3.11**
+    runs it and it really counts the blank class — ⛔ that is a fact about ONE grep, and 3.12
+    REMOVED it, which is why the alias cell below measures grep's verdict instead of asserting it
+    (#14306 review F5, P3: this sentence said "because grep runs it", unqualified, on a runner
+    whose grep refuses it). Measured on GNU grep 3.11:
       * `grep -c --context 2 '^[+-]$'` prints `2` and exits 0, so `--context` DOES take a separate
         word — it was excluded on a `--color` measurement, and the reader then took the `2` as the
         EXPRESSION and the invocation vanished (false PASS);
@@ -5132,8 +5228,13 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     # CODE, not the count: a grep whose `--help` FAILED published no usage (skip — a platform fact),
     # while a `--help` that SUCCEEDED and still yielded fewer than 40 options is our parser or
     # grep's help layout breaking (RED). The floor now lives in `_d5_documented_long_options` and is
-    # pinned by `test_the_d5_universe_floor_reds_a_broken_derivation_and_skips_only_a_silent_grep`,
-    # so a revert to skip-then-assert reds a test rather than quietly certifying nothing.
+    # pinned at BOTH levels — the helper by
+    # `test_the_d5_universe_floor_reds_a_broken_derivation_and_skips_only_a_silent_grep`, and THIS
+    # cell by `test_the_cell_itself_reds_on_a_SUCCESSFUL_help_that_parsed_too_little`. ⛔ The second
+    # one is not decoration (#14306 review F5, P2 — MEASURED BY MUTATION): the helper-level arm
+    # alone allowed the old skip-then-assert CELL body to be restored with the whole suite GREEN,
+    # because `pytest.skip` RAISES and the cell never reached the helper at all. Only an arm that
+    # drives the cell can hold that claim true.
     completed = subprocess.run(["grep", "--help"], capture_output=True, text=True)
     try:
         documented = _d5_documented_long_options(completed)
@@ -5307,7 +5408,11 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
     # ⛔ LAST, AND ONLY AFTER EVERY READER CLAIM HAS ALREADY BEEN ASSERTED (#14306 review F2, P2).
     # Nothing above this line consults `measured` or `declined`: those six rows are claims about the
     # READER, which is portable, and grep's verdict may not suppress them. This arm is the one thing
-    # that genuinely needs an acceptance to exist, so an oracle-less platform loses only it.
+    # that genuinely needs an acceptance to exist, so an oracle-less platform loses only it — and
+    # the POSITION is itself pinned, by
+    # `test_the_alias_cell_reds_a_broken_reader_claim_even_when_grep_declines_everything`: that arm
+    # drives THIS cell with an all-declining grep and a corrupted reader declaration and requires a
+    # RED, which a skip moved back above the rows cannot produce (#14306 review F5, P2).
     if not measured:
         pytest.skip(
             "this grep runs NONE of the three spellings this cell measures "
