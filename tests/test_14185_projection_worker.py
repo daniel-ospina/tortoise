@@ -574,10 +574,11 @@ def test_the_RESET_ITSELF_replaces_prometheus_locks_not_a_publisher_behind_it(
                      if getattr(holder, "_lock", None) is lock]
         assert not survivors, (
             "the fork reset returned without replacing prometheus's inherited "
-            f"locks ({len(survivors)} survived) — its docstring names "
-            "`monitoring.ensure_projection_metrics_fork_safe()` as what makes its "
-            "own publish safe, so a reverted call must red HERE and not only on a "
-            "path that reaches the same function through `monitoring`")
+            f"locks ({len(survivors)} survived) — the reset makes that call "
+            "itself as the belt to the `os.register_at_fork` hook (which a test "
+            "cannot fire by moving the pid), so a reverted call must red HERE "
+            "and not only on a path that reaches the same function through "
+            "`monitoring`, or through the hook")
     finally:
         for lock in held:
             if lock.locked():

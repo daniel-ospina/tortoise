@@ -1140,8 +1140,9 @@ def ensure_projection_metrics_fork_safe() -> bool:
 
 if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
     # ⛔ THE HOOK, NOT A CALL SITE, and the difference is a live wedge (#14222
-    # review round 11, P2-1). The repair above is reached from the five
-    # projection-metric helpers, which covers the publish arm, the health read
+    # review round 11, P2-1). The repair above is reached from every
+    # projection-metric helper that publishes or reads these families — which
+    # covers the publish arm, the health read
     # (`metrics()` -> `projection_worker_gauges`) and that function's own
     # `collect()`. It does NOT cover the TEXT exposition: `/metrics` calls
     # `generate_latest(REGISTRY)`, whose walk takes the same inherited locks
