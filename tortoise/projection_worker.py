@@ -34,13 +34,16 @@ WHAT THIS MODULE IS NOT
   item in it already has its line in the journal, which is the **reconstruction**
   source for what this loop defers, so a process that dies with a non-empty queue
   loses no journal line and re-derives the fold (``tools/record_runner.py apply``).
-  ⚠️ What a replay brings back is the ROW: that fold is passed no ``derived``, so a
-  row it CREATES lands ``embedding`` NULL, where the live fold would have derived
-  one. ⛔ In every deployment running a FalkorDB server, durability is the store's
+  ⚠️ What a replay brings back is the ROW, and only what the journal line CARRIES:
+  that fold is passed no ``derived``, so a row it CREATES gets no DERIVED vector
+  (``point``/``source``/``event`` keep one the line carried; ``object``/``subject``
+  drop even that), where the live fold would have derived one. ⛔ In every
+  deployment running a FalkorDB server, durability is the store's
   own persistence plus an off-box copy of it and NOTHING ELSE
   (``docs/durability-posture.md``) — the rule that document asks every other file
-  to state and link while it keeps the AUTHORITY itself, and this bullet carries
-  that rule and no authority claim of its own. ⛔ What
+  to state and link while it keeps the AUTHORITY itself, so this bullet states the
+  rule and defers that authority to it; everything else here is scoped to THIS
+  queue's loss, not to a deployment's durability. ⛔ What
   `tests/test_durability_posture.py` enforces is NARROWER than what that document
   reserves, and deliberately so: it fires on the claim SHAPES its own regexes
   match — four alternations inside a 40-character window (``CLAIM_RE``), and the two
@@ -1001,7 +1004,7 @@ class ProjectionWorker:
                 # uncounted-failure + never-drains state the classifier's guard
                 # exists to prevent, so the log calls are guarded the same way
                 # rather than assumed safe.
-                self._quietly(lambda: LOGGER.warning(
+                self._quietly(lambda e=exc, s=item.seq: LOGGER.warning(
                     "projection_worker: the deferred record projection RAISED "
                     "(%s: %s) for journal position %s — the journal holds the "
                     "line and the record does not. This is the named "
@@ -1009,7 +1012,7 @@ class ProjectionWorker:
                     "`tools/record_runner.py apply` re-creates the row idempotently "
                     "(the row only — a fold passed no `derived` leaves `embedding` "
                     "NULL) (#14185)",
-                    type(exc).__name__, exc, item.seq))
+                    type(e).__name__, e, s))
             else:
                 # ⛔ THE CLASSIFIER IS INSIDE ITS OWN GUARD (round-13 review, P3):
                 # it asks the door's return value what happened, and a door whose
@@ -1029,12 +1032,12 @@ class ProjectionWorker:
                     failure = "record_no_outcome"
                     # Guarded for the reason stated above, and for the reason the
                     # classifier is: an escape here leaves `_inflight` set.
-                    self._quietly(lambda: LOGGER.warning(
+                    self._quietly(lambda e=exc, s=item.seq: LOGGER.warning(
                         "projection_worker: the fold's OUTCOME could not be "
                         "classified (%s: %s) for journal position %s — counted "
                         "as a failure rather than assumed to have written "
                         "(#14185)",
-                        type(exc).__name__, exc, item.seq))
+                        type(e).__name__, e, s))
             # ⛔ BOTH VALUE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
             # never from a value captured at POP time (#14222 review P1-1). ⛔ TWO,
             # not three (review round 11, P3): `_stamp_locked` carries epoch, seq,
