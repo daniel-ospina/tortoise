@@ -3351,6 +3351,30 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
     return _d5_grep_verdict(ran, name, grep)
 
 
+def _d5_grade_alias_spelling(
+    spelling: str, grep: str = "grep",
+) -> tuple[subprocess.CompletedProcess, bool]:
+    """Run one alias spelling on `grep` and return `(the run, its THREE-WAY verdict)`.
+
+    ⛔ THE SEAM EXISTS SO THE RULE HAS A WITNESS AT ITS CALL SITE (#14303 review round 3, P3 —
+    MEASURED). The alias cell classifies every spelling the alias answers to. Pinning
+    `_d5_grep_verdict` on its own did NOT pin that cell's USE of it: replacing the loop's verdict
+    with a two-way `ran.returncode in (0, 1)` branch left this whole file GREEN on GNU grep 3.11 AND
+    under a 3.12 shim — the round-8 fail-open read, reinstated with nothing to red it, because no
+    shipped grep answers a third code for a PREFIX spelling. Routing the loop through this function
+    lets a stub grep drive it, which is what
+    `test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal` does.
+
+    ⛔ AND IT IS NOT TRUE THAT "EVERY SPELLING GOES THROUGH THE UNIVERSE" (#14303 review round 10,
+    P3 — MEASURED: the candidate tuple has ONE member and the alias cell probes six spellings). Only
+    `--unix-byte-offsets` is measured by `_d5_grep_runs_long_option`; the four PREFIX spellings and
+    `--fixed-regexp` reach the three-way rule through HERE and nowhere else.
+    """
+    ran = subprocess.run([grep, "-c", spelling, "^[+-]$"], input=_D5_GREP_PROBE,
+                         capture_output=True, text=True, timeout=60)
+    return ran, _d5_grep_verdict(ran, spelling, grep)
+
+
 #: The undocumented aliases the grep ON PATH actually RUNS — the allowance, MEASURED from
 #: `_D5_UNDOCUMENTED_ALIAS_CANDIDATES` (#14138). It is the single candidate on GNU grep <= 3.11 and
 #: EMPTY on grep >= 3.12, which is why it cannot be a literal: the literal was right on exactly one
@@ -5124,22 +5148,6 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     `0` of this class, and admitting the alias would make `--fixed-` falsely ambiguous), so no grep
     version decides it.
     """
-    def grep_probe(spelling: str) -> subprocess.CompletedProcess:
-        # ⛔ NO rc ALLOW-LIST HERE (#14138 mutation review, P3 — MEASURED). A guard of the shape
-        # `rc in (0, 1, 2)` used to sit on the next line and no mutant could red it: every spelling
-        # below is classified, with a better message, BEFORE this run's result is read —
-        # `_d5_grep_verdict` in the live loop below RAISES on a third code, and the single measured
-        # candidate (`--unix-byte-offsets`) reaches the same rule through
-        # `_d5_grep_runs_long_option`, which raises too. ⛔ IT IS NOT "EVERY SPELLING GOES THROUGH
-        # THE UNIVERSE" (#14303 review round 10, P3): only the candidate is measured there, so the
-        # four PREFIX spellings and `--fixed-regexp` never meet it and depend on the loop's own
-        # three-way verdict — a fixer who trusted the old wording and replaced that verdict with a
-        # two-way branch would reinstate the fail-open read this row was removed for, with nothing
-        # reding. A row that cannot be attributed to the behaviour it claims to guard is dead
-        # weight (agent-infra#3442 rule 3), so it is gone rather than explained away.
-        return subprocess.run(["grep", "-c", spelling, "^[+-]$"], input=_D5_GREP_PROBE,
-                              capture_output=True, text=True, timeout=60)
-
     alias_spellings = ("--unix-byte-offsets", "--u", "--un", "--uni", "--unix")
 
     # ⛔ (1) THE LIVE PLATFORM. `runs` is grep's own answer, never this file's memory of a version,
@@ -5151,7 +5159,8 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # in `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`; what this pair of
     # assertions refuses is the other failure — a CONSTANT that no longer matches the live binary.
     runs = _d5_grep_runs_long_option("--unix-byte-offsets")
-    assert runs == (grep_probe("--unix-byte-offsets").returncode in (0, 1)), (
+    assert runs == (
+        _d5_grade_alias_spelling("--unix-byte-offsets")[0].returncode in (0, 1)), (
         "`_d5_grep_runs_long_option` disagrees with a raw probe of the SAME binary — one of the "
         "two reads a refused spelling as a count, or the reverse (#14138)")
     rederived = frozenset(
@@ -5174,8 +5183,7 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # reach this loop without ever meeting its three-way rule, so a two-way branch here would read a
     # non-answer as a refusal and print "(measured: exit 2)" over a run that did not exit 2.
     for spelling in alias_spellings:
-        ran = grep_probe(spelling)
-        accepted = _d5_grep_verdict(ran, spelling)
+        ran, accepted = _d5_grade_alias_spelling(spelling)
         read = _d5_count_prescriptions(f"a count: `grep -c {spelling} '^[+-]$'`\n")
         if accepted:
             assert ran.stdout.strip() == "2", (
@@ -5241,8 +5249,8 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # Reproduced with a stub that refuses `--fixed-regexp` alone (rc 2, everything else delegated):
     # `1 failed, 32 passed`. The exit-code rule is READ FROM `_d5_grep_verdict` rather than restated,
     # so a third code still RAISES here instead of deciding.
-    fixed_regexp = grep_probe("--fixed-regexp")
-    if _d5_grep_verdict(fixed_regexp, "--fixed-regexp"):
+    fixed_regexp, fixed_accepted = _d5_grade_alias_spelling("--fixed-regexp")
+    if fixed_accepted:
         assert fixed_regexp.stdout.strip() == "0", (
             f"`grep -c --fixed-regexp '^[+-]$'` runs on this grep and printed "
             f"{fixed_regexp.stdout.strip()!r} — the exclusion of this alias rests on it counting "
@@ -5363,6 +5371,39 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     # emptied by a probe that could not run (#14138 review, P3).
     with pytest.raises(OSError):
         _d5_grep_runs_long_option("--unix-byte-offsets", str(tmp_path / "grep-that-is-not-here"))
+
+
+def test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal(tmp_path: Path):
+    """The alias cell's THREE-WAY rule, witnessed where it is actually used (#14303 round 3, P3).
+
+    ⛔ THE GAP THIS CLOSES, MEASURED. `_d5_grep_verdict`'s own docstring records the round-8 P2: a
+    two-way `if rc in (0, 1) … else` read a THIRD exit code as a REFUSAL and asserted
+    "(measured: exit 2)" over a run that never exited 2. Pinning the helper did not pin the alias
+    cell's use of it — replacing the loop's verdict with that two-way branch left the whole file
+    GREEN on GNU grep 3.11 AND under the 3.12 shim, because no shipped grep answers a third code for
+    a PREFIX spelling. So the fix for a P2 was itself unwitnessed.
+
+    This stub answers a third code for `--u` ONLY, the smallest input that separates the two forms:
+    the three-way rule RAISES, the two-way one reads a refusal and would then assert
+    `"--u" is REFUSED by this grep (measured: exit 3)` — a false RED over a probe that merely
+    failed. The second half drives a DIFFERENT spelling through the same stub and requires it to be
+    graded normally, so the raise above is attributable to the third code and not to a stub that is
+    simply broken.
+    """
+    stub = tmp_path / "grep-nonanswer-for-one-prefix"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'if [ "$2" = "--u" ]; then echo "grep: input/output error" >&2; exit 3; fi\n'
+        "cat >/dev/null; echo 2; exit 0\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    with pytest.raises(AssertionError, match="neither a count"):
+        _d5_grade_alias_spelling("--u", str(stub))
+    ran, accepted = _d5_grade_alias_spelling("--uni", str(stub))
+    assert (ran.returncode, ran.stdout.strip(), accepted) == (0, "2", True), (
+        "the same stub must be graded normally for a spelling it answers — otherwise the raise "
+        f"above proves nothing about the third code (#14138): got rc={ran.returncode} "
+        f"stdout={ran.stdout.strip()!r} accepted={accepted}")
 
 
 def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
