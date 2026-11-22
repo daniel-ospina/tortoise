@@ -965,11 +965,21 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   ⛔ **NOT EVERY INLINE FOLD IS COUNTED HERE, and the difference is the point**
 #:   (round-14 review, P3): the STRUCTURAL arms fold inline on every write at any
 #:   depth and move no counter at all — `live_write._submitted_to_worker` returns
+<<<<<<< HEAD
 #:   `False` at the `journal_skipped or record_sink is not None or not durable`
 #:   gate and at the `tenant is None` gate, both BEFORE any queue or counter is
 #:   touched (⛔ cited by TEXT, not by `file:line`: three citations here were wrong
 #:   by five lines in round 14, and a gate's text does not rot when a docstring
 #:   above it grows) (measured: armed loop, durable journal, no carried
+||||||| 66c95c9d49c1
+#:   `False` for `journal_skipped or record_sink is not None or not durable`
+#:   (`tortoise/live_write.py:334`) and for a `tenant is None` (`:335`) before any
+#:   queue or counter is touched (measured: armed loop, durable journal, no carried
+=======
+#:   `False` for `journal_skipped or record_sink is not None or not durable`
+#:   (`tortoise/live_write.py:339`) and for a `tenant is None` (`:341`) before any
+#:   queue or counter is touched (measured: armed loop, durable journal, no carried
+>>>>>>> refs/rewritten/origin-fix-14185-projection-worker-3
 #:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
 #:   declines, so an operator reconciling "inline folds" against this counter will
 #:   find the structural arms missing from it — which is the correct shape (they
@@ -6118,7 +6128,7 @@ class HealthProbe:
         # so the cause was recorded and wiped inside ONE read. Measured 5/5
         # reads returning `db.error='probe in flight (0.0s)'`,
         # `start_error=None` — the exact signature this change exists to remove,
-        # on the one surface an operator reads (`hosted_api.py:8575-8580`).
+        # on the one surface an operator reads (`hosted_api.py:8648`).
         # `_run` clears it when a start actually LANDS.
         worker = threading.Thread(
             target=self._run, args=(seq,),
