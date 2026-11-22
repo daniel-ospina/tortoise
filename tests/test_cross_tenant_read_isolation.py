@@ -292,10 +292,15 @@ def _await_extraction(client: TestClient, body: dict, deadline_s: float = 90.0) 
 
     Terminal state is the phase pair's absence with `outcome_known` true — the
     same predicate `test_14232_ingest_ack_split.py` pins for this record. A
-    polled record with NO phase and `outcome_known` false is the opposite: a
-    settled capture that recorded no outcome (a dead tail, `_clear_capture_phase`'s
-    contract), so it fails HERE, naming that, instead of burning the deadline
-    and reporting it as "still running".
+    polled record with NO phase and `outcome_known` false is the one shape this
+    loop must NOT wait on forever, and the docstring will not claim it is
+    identified: a record whose tail DIED after `_clear_capture_phase` retired the
+    phase, and a live capture whose best-effort `queued` phase write was swallowed
+    (`_mark_capture_extraction_phase` deliberately does not fail a committed
+    capture), serve the SAME bytes — `capture_ok` is NULL in both. They are
+    indistinguishable at read time, so this fails CLOSED on the first poll, naming
+    both readings, instead of burning the deadline and reporting a live capture as
+    "still running" (or a dead one as alive).
     """
     url = body.get("status_url")
     if not url:
@@ -309,8 +314,10 @@ def _await_extraction(client: TestClient, body: dict, deadline_s: float = 90.0) 
         block = detail.get("extraction") or {}
         if block.get("phase") is None:
             assert block.get("outcome_known") is True, (
-                "the capture settled with NO outcome recorded — phase absent "
-                f"and outcome_known false (a dead tail): {json.dumps(detail, sort_keys=True)}")
+                "the record carries NO phase and NO outcome — either a DEAD TAIL "
+                "(retired phase, no outcome) or a capture whose best-effort "
+                "`queued` phase write never landed; the two are indistinguishable "
+                f"here, so this fails closed: {json.dumps(detail, sort_keys=True)}")
             return detail
         assert time.monotonic() < deadline, (
             f"extraction did not finish within {deadline_s}s: "
@@ -334,9 +341,10 @@ class _StubPollClient:
     """A `TestClient` stand-in for the wait's four arms (no server, no DB).
 
     The arms below are the branches a real capture only reaches on a particular
-    host (a fast join, a dead tail, a broken poll), so without these rows none of
-    them has a witness and the reviewer-measured "drop the `outcome_known`
-    check" mutant stayed GREEN (#14232 review round J, P3).
+    host (a fast join, a record with no phase and no outcome, a broken poll), so
+    without these rows none of them has a witness and the reviewer-measured
+    "drop the `outcome_known` check" mutant stayed GREEN (#14232 review round J,
+    P3).
     """
 
     def __init__(self, *responses):
@@ -379,8 +387,15 @@ def test_the_extraction_wait_returns_the_record_it_polled_for() -> None:
     assert client.calls == ["/v1/sessions/s-1"] * 2
 
 
-def test_the_extraction_wait_fails_fast_on_a_settled_record_with_no_outcome() -> None:
-    """A dead tail is DECIDED, not "still running": one poll, one clear reason."""
+def test_the_extraction_wait_fails_fast_on_a_record_with_no_phase_and_no_outcome() -> None:
+    """No phase + no outcome is DECIDED — not "still running": one poll, both readings.
+
+    ⛔ The two shapes it covers are indistinguishable at read time (a retired
+    phase with no outcome, or a live capture whose best-effort `queued` write
+    never landed), so the row pins the BOUND and the naming, never an
+    identification: guessing "dead" would be a false red on a live capture and
+    guessing "alive" would be a false green on a dead one.
+    """
     ack = {"session_id": "s-1", "extracted": 0, "status_url": "/v1/sessions/s-1",
            "extraction": {"outcome_known": False, "phase": "extracting"}}
     client = _StubPollClient(
@@ -388,9 +403,9 @@ def test_the_extraction_wait_fails_fast_on_a_settled_record_with_no_outcome() ->
                                "extraction": {"status": "stored", "outcome_known": False}}),
     )
     started = time.monotonic()
-    with pytest.raises(AssertionError, match="settled with NO outcome"):
+    with pytest.raises(AssertionError, match="NO phase and NO outcome"):
         _await_extraction(client, ack, deadline_s=60.0)
-    assert time.monotonic() - started < 5.0, "the dead tail burned the deadline"
+    assert time.monotonic() - started < 5.0, "the undecided record burned the deadline"
     assert len(client.calls) == 1, client.calls
 
 
