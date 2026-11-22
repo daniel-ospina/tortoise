@@ -3433,6 +3433,15 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         Reverting that function's `with` arm to the whole-node walk instead REDS the
         with-body control, which is why both directions carry a row: the same arm decided a
         false PASS and a false RED.
+      - the three clauses a fresh-context review MEASURED unpinned at `bb89a48cee7e` each
+        leave the whole file **25 passed** when reverted, and each now reds exactly one row
+        (applied in place, restored byte-identically — sha256 `c52c28a4cf65`): the
+        `_is_read_ref` Name-`Call` half (`_dispatch(_N)(sdk)(…)` — the only row whose third
+        reach bypasses `getattr`, so `_indirect_reads` cannot cover for the census);
+        `first = len(positional) - len(node.args.defaults)` → `first = 0` (the PADDED
+        positional default; every older default row had one parameter, so the subtraction
+        was never exercised); and `kwonlyargs[index]` → `kwonlyargs[0]` (the SECOND kw-only
+        parameter, for the same reason).
 
     The control at the end is the OTHER direction: a provenance constant whose value merely
     NAMES the read (`print(f"measuring {_NOTE}")`) must stay GREEN, or the narrowing that
@@ -3522,6 +3531,26 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             f'{reach.format(name="_N")})()\n'),
         "POS-ONLY parameter default": (
             '    def _f(_N="_tortoise_fts_query", /):\n'
+            f'        {reach.format(name="_N")}\n'
+            '    _f()\n'),
+        # ⛔ THE DEFAULT ARM'S **ALIGNMENT** ARITHMETIC, not just its presence (#14326
+        # review, MEASURED at `bb89a48cee7e`): every pre-existing default row has exactly
+        # ONE positional parameter, so `first = len(positional) - len(node.args.defaults)`
+        # is always `0` and the subtraction was never exercised — replacing it with
+        # `first = 0` left the whole file **25 passed** while `_N` went unresolved and a
+        # third reach carrying `kind="statement"` was GREEN. Positional defaults align to
+        # the TAIL of the positional parameters, so a PAD in front of the default is what
+        # reds the clause.
+        "PADDED positional default": (
+            '    def _f(_pad, _N="_tortoise_fts_query"):\n'
+            f'        {reach.format(name="_N")}\n'
+            '    _f(1)\n'),
+        # ⛔ …AND ITS KEYWORD-ONLY INDEX (#14326 review, MEASURED at `bb89a48cee7e`):
+        # every kw-only default row has one parameter, so `kwonlyargs[index]` is always
+        # `kwonlyargs[0]` and the index was unpinned — `kwonlyargs[0]` left **25 passed**
+        # while `_N` (the SECOND kw-only parameter) resolved to nothing.
+        "SECOND kw-only parameter default": (
+            '    def _f(*, _a="x", _N="_tortoise_fts_query"):\n'
             f'        {reach.format(name="_N")}\n'
             '    _f()\n'),
         # ⛔ …AND THE MATCH ARM'S `rest=` HALF (#14326 review F1): `case {**rest}` binds the
@@ -3642,6 +3671,17 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "NAME as the fetch subscript's INDEX": (
             '    _N = "_tortoise_fts_query"\n'
             '    vars(type(sdk))[_N]'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE `Name` ARM'S **CALL** HALF, which no row reached (#14326 review, MEASURED
+        # at `bb89a48cee7e`): every other row routes its third reach through `getattr(sdk,
+        # …)`, and `_indirect_reads` runs BEFORE the mentions census, so the Name-`Call`
+        # clause was never the failing clause for any row — deleting it left the whole file
+        # **25 passed** while a bound literal handed to an unknown DISPATCHER (which then
+        # fetches and executes the read) went uncensused. The callee is deliberately unknown
+        # rather than `getattr`, so `_indirect_reads` cannot cover for the census.
+        "NAME handed to an unknown dispatcher": (
+            '    _N = "_tortoise_fts_query"\n'
+            '    _dispatch(_N)(sdk)'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         # ⛔ A REBOUND PURE NAME IS NOT PURE (#14326 round 6, measured GREEN): the purity
         # tests decide by NAME, so `print = getattr` launder the alias through an allow-
