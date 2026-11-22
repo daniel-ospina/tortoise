@@ -583,16 +583,16 @@ def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
 @pytest.mark.parametrize("exc", [
     # The TRANSPORT class: the PostgREST read failed.
     RuntimeError("the allowance read failed: HTTP 500"),
-    # The OTHER class the guard exists for: `resolve_org_limits` raises
+    # A SECOND class the guard exists for: `resolve_org_limits` raises
     # `OrgNotFoundError` (a `QuotaCheckError`) when the org row is missing
     # (`tortoise/quota.py:804`), which is NOT a `RuntimeError`. ⛔ This pair pins
     # BREADTH, not "the realistic one" — a transport failure and a terminal non-2xx
-    # raise `RuntimeError`, so neither class is hypothetical. Pinned because a guard
-    # narrowed to `except RuntimeError` leaves every OTHER row in this file green
-    # while it regresses exactly this path (#14038 review cycle 10, P3).
+    # raise `RuntimeError`, so neither of the two is hypothetical. Pinned because a
+    # guard narrowed to `except RuntimeError` leaves every OTHER row in this file
+    # green while it regresses exactly this path (#14038 review cycle 10, P3).
     quota.OrgNotFoundError("Team 'team-solo-001' not found in control plane"),
-    # ⛔ A THIRD CLASS IN NEITHER of the two above, because two NAMED classes pin
-    # two names, not the guard's BREADTH: a narrowing to
+    # ⛔ A THIRD CLASS IN NEITHER of the two above, because those two NAMED classes
+    # pin two names, not the guard's BREADTH: a narrowing to
     # `except (RuntimeError, quota.OrgNotFoundError)` leaves the two rows above
     # green while `QuotaCheckError` — a real raise of this same instrument
     # (`tortoise/quota.py:727`, an unreadable `pricing.json` tier figure reached
