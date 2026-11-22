@@ -166,9 +166,10 @@ before it could queue, e.g. ``thread.start()`` under thread exhaustion).
 
 WHAT MAKES A WRITE DEFERRABLE AT ALL
 ====================================
-Six conditions, all of them the caller's (`live_write`), because only the
-chokepoint holds the facts. The four that are CORRECTNESS rather than
-configuration:
+Seven conditions, all of them the caller's (`live_write`), because only the
+chokepoint holds the facts. FIVE are structural — the four that are CORRECTNESS
+rather than configuration, plus an UNIMPORTABLE loop — and the other two are the
+SWITCHES (the loop flag and the record's own DSN):
 
 * ⛔ **A record-only write is never deferred** (``journal_skipped``, #14002).
   On a cut-over graph there is no journal line — the record's own commit IS the
@@ -1010,8 +1011,8 @@ class ProjectionWorker:
                     "line and the record does not. This is the named "
                     "disagreement `record_projection.journal_coverage` counts; "
                     "`tools/record_runner.py apply` re-creates the row idempotently "
-                    "(the row only — a fold passed no `derived` leaves `embedding` "
-                    "NULL) (#14185)",
+                    "(the row only — a fold passed no `derived` leaves a DERIVED "
+                    "`embedding` NULL, `object`/`subject` only) (#14185)",
                     type(e).__name__, e, s))
             else:
                 # ⛔ THE CLASSIFIER IS INSIDE ITS OWN GUARD (round-13 review, P3):
