@@ -400,7 +400,9 @@ def test_the_sweep_is_not_vacuous():
 _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 
 #: The subclass spellings that mean the SAME event as an `_RAISED` member, normalised on
-#: the way in (charging) and on the way out (coverage accounting).
+#: the way in (charging) and inside the coverage ACCOUNTING (`_masked_by`'s ordering and
+#: `_covered`'s family-close) — but never in the credit `_covered` RETURNS, which stays the
+#: raw spelling (see its docstring; the `_subclass_credit` row reds if it is normalised).
 #: `ModuleNotFoundError` is how a moved/renamed module actually raises — it is
 #: `ImportError`'s canonical spelling at the seam this file exists for — and
 #: `UnboundLocalError` is `NameError`'s.
@@ -2419,14 +2421,24 @@ def test_every_availability_probe_re_raises_a_programming_error():
             "locally and a hard refusal in CI that names no door (#14114 class "
             f"2, #14125):\n{rendered}\n\n"
             "Insert the re-raise arm immediately before the broad handler (one "
-            "tuple, or separate `except ImportError: raise` — the four names are "
-            "required between them, not in one line). ⛔ CHECK WHAT DROPS FIRST: if a "
-            "NARROW arm ABOVE the re-raise already drops the family — e.g. "
-            "`except ModuleNotFoundError: FLAG = False` above a four-name re-raise — "
-            "the drop site is THAT arm, and inserting or hoisting a re-raise arm "
-            "below it changes nothing (the earlier arm already handled the name, so "
-            "the later one is unreachable for it). Re-raise or delete the EARLIER "
-            "dropping arm; do not add a second arm below it. Keep the broad arm: an "
+            "tuple, or separate `except ImportError: raise` — the required names are "
+            "`(AttributeError, NameError, TypeError)` between them, PLUS `ImportError` "
+            "when the block imports own code INSIDE the `try`, since that is the seam the "
+            "next gate grades; not one line required). ⛔ CHECK WHAT DROPS FIRST, AND WHICH "
+            "GATE YOU ARE IN: if a NARROW arm ABOVE the re-raise already drops the family — "
+            "e.g. `except ModuleNotFoundError: FLAG = False` above a four-name re-raise — "
+            "the drop site is THAT arm, and a LATER re-raise arm cannot recover the name it "
+            "dropped (credit is family-closed against a dropped family, `_covered`). That "
+            "matters where `ImportError` is REQUIRED — a block importing own code inside "
+            "the `try` (the import-seam gate): there, re-raise or delete the EARLIER "
+            "dropping arm. For THIS gate alone `ImportError` is not required, and a "
+            "re-raise arm naming `(AttributeError, NameError, TypeError)` above the broad "
+            "handler DOES clear it (measured, review of PR #14287 cycle 6: the tree holds "
+            "21 root rows that import no own code inside the `try`, 18 of them swallowing) "
+            "— so do not delete such an arm as dead code, and do not re-raise a dropper "
+            "blindly either: on an absent optional/third-party module, re-raising its "
+            "`ModuleNotFoundError` turns a legitimate skip into a collection error (the "
+            "DECLARED RESIDUAL on `_swallows_everything`). Keep the broad arm: an "
             "absent server raises `redis.exceptions.ConnectionError` (a "
             "`RedisError`, NOT an `OSError`), so narrowing to `OSError` would "
             "turn a real skip into an error."
@@ -5347,13 +5359,18 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             {"TypeError"},
         ),
         (
-            #: ⛔ WHAT THIS ROW DOES *NOT* PIN (review of PR #14287, F3). It asserts `set()`,
-            #: and it reaches it through `dropped_family`: arm 1 drops the family, so arm 2's
-            #: credit is withheld at the family-close whether or not `_masked_by`'s
-            #: EXACT-SPELLING term exists. Deleting that term leaves this row green. The term
-            #: is pinned on the CHARGE side, by `_exact_dead_drop` above (same-spelling
-            #: duplicate below a re-raise). This comment previously claimed the row pinned the
-            #: exact term; it does not, and neither does `_unreachable_credit`.
+            #: ⛔ A DECLARED DUPLICATE, not a rule witness (review of PR #14287, F3, measured
+            #: again in cycle 6). With the FAMILY-CLOSE removed this row is still green — the
+            #: masking filter empties `reachable` first (`_masked_by` on the same spelling);
+            #: with the MASKING FILTER removed it is still green — the family-close then
+            #: withholds the (aliased) name. Only removing BOTH reds it. So it pins the SHAPE
+            #: (a same-spelling duplicate below a dropper credits nothing), which is worth a
+            #: row, and it pins NEITHER rule: the family-close is witnessed by the three
+            #: `child dropped…` rows above, the masking filter by `parent then child` and
+            #: `child raised, then parent raised`. This comment previously said the row
+            #: "reaches it through `dropped_family`"; both guards are equally responsible, and
+            #: the earlier `_exact_dead_drop` row is what pins `_masked_by`'s exact term on the
+            #: CHARGE side.
             "same spelling twice",
             "except ModuleNotFoundError:\n    pass\nexcept ModuleNotFoundError:\n    raise\n",
             set(),
@@ -5371,8 +5388,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             f"runs from a PARENT arm to a later CHILD arm and never back (a plain `ImportError` "
             f"still reaches a parent arm below a child one). DROPPING is not limited that way: "
             f"a family an earlier CHILD arm DROPPED cannot be credited by a later PARENT arm "
-            f"(the family-close), so the four `child dropped…` rows and `same spelling twice` "
-            f"are pinned by THAT rule and not by masking direction: "
+            f"(the family-close), so the THREE `child dropped…` rows are pinned by THAT rule "
+            f"and not by masking direction (`same spelling twice` is a declared DUPLICATE that "
+            f"only the conjunction of both guards reds — it witnesses the shape, not a rule): "
             f"{_covered(_masking)} != {_expect}"
         )
 
