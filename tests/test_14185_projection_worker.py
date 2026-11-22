@@ -1309,6 +1309,71 @@ def test_the_MODULE_lock_is_replaced_in_a_forked_child():
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
+def test_the_fork_hook_replaces_prometheus_locks_before_the_METRICS_SCRAPE():
+    """⛔ #14222 review round 11, P2-1: the repair was on five CALL SITES, and the
+    scrape path is not one of them.
+
+    `ensure_projection_metrics_fork_safe()` was reached from the five
+    projection-metric helpers, which covers the publish arm, the health read and
+    that read's `collect()`. It did NOT cover the TEXT exposition: `/metrics`
+    calls `generate_latest(REGISTRY)` directly (`monitoring._Handler.do_GET`), and
+    that walk takes the same inherited locks — `_child_samples` ->
+    `MutexValue.get` -> `with self._lock` for an unlabelled family, and
+    `_multi_samples`' own `with self._lock` for a labelled one. So the first
+    scrape from a child forked while a peer held one of these locks blocked
+    FOREVER, on the one surface Prometheus actually reads.
+
+    The repair is now an `os.register_at_fork(after_in_child=...)` hook, so the
+    locks are replaced before any of our code runs in the child and NO path —
+    scrape included — can reach an inherited one.
+
+    Forked probe, in-suite: the parent's peer thread HOLDS
+    `PROJECTION_QUEUE_DEPTH._value._lock` across the `fork()`; the child must
+    produce the exposition. ⛔ WITH THE HOOK REMOVED the child does not answer 0:
+    it blocks inside `MutexValue.get` until its own alarm fires, and the
+    `except BaseException` arm reports exit **4** (never a raw `SIGALRM`), so the
+    assertion below reds on the mutant without depending on the platform's
+    disposition.
+    """
+    gauge = monitoring.PROJECTION_QUEUE_DEPTH
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with gauge._value._lock:
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, name="prometheus-value-holder",
+                              daemon=True)
+    holder.start()
+    assert holding.wait(5), "the peer never took the prometheus value lock"
+
+    pid = os.fork()
+    if pid == 0:                                   # ── child ──
+        code = 3
+        try:
+            signal.alarm(10)
+            monitoring.generate_latest()           # the `/metrics` path, verbatim
+            code = 0
+        except BaseException:                      # noqa: BLE001, RUF100
+            code = 4
+        finally:
+            os._exit(code)                         # never unwind into pytest
+
+    release.set()
+    holder.join(5)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+        "the forked child could not produce the /metrics exposition: "
+        f"exited={os.WIFEXITED(status)} status="
+        f"{os.WEXITSTATUS(status) if os.WIFEXITED(status) else 'signalled'} — it "
+        "was still blocked in `MutexValue.get` on the prometheus lock its peer "
+        "held at fork(), so no `after_in_child` hook replaced it")
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
 def test_the_fork_reset_does_not_wait_on_the_lock_it_REPLACES(armed):
     """⛔ #14222 review cycle 5, ISSUE 4: decide BEFORE you take the lock.
 
