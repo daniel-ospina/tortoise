@@ -133,6 +133,9 @@ ABSTAIN_NO_PREDICATE = "no-predicate"
 ABSTAIN_NOT_DECLARED = "predicate-not-declared"
 ABSTAIN_NO_KINDS = "endpoint-kind-unresolved"
 ABSTAIN_UNREADABLE = "declarations-unreadable"
+#: The predicate is a declared WORD but declares no kind pair (a
+#: ``declarationOnly: true`` row, or a row naming no endpoints).
+ABSTAIN_NO_DECLARED_PAIR = "predicate-declares-no-pair"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,6 +207,22 @@ def declared_relation_pairs() -> dict[str, tuple[tuple[str, str], ...]] | None:
         predicate = row.get("predicate")
         if not isinstance(predicate, str) or not predicate.strip():
             continue
+        predicate = predicate.strip()
+        # A `declarationOnly: true` row is a vocabulary word its own pack author
+        # has recorded as binding NO write path (`#11083`; `packs/
+        # project-management`'s `onBoard` is the shipped one — "a board is a
+        # VIEW over cards … it keeps its declaration with `declarationOnly: true`
+        # + the reason, so the word stays in the vocabulary"). It stays
+        # RECOGNISED as a predicate (an empty tuple, so `canonical_predicate`
+        # still answers) and contributes NO pair — offering it as the right home
+        # for some pair would contradict the pack author's own recorded intent.
+        # ⚠️ This is not cosmetic: `onBoard` declares the LEGACY `from: Object /
+        # to: Object` shape, i.e. a LABEL pair, which matches EVERY
+        # object-to-object edge — so a caller writing `dependsOn(database, api)`
+        # was told `onBoard` was a declared alternative.
+        out.setdefault(predicate, [])
+        if row.get("declarationOnly"):
+            continue
         # Both manifest generations: v3 spells ``fromKind``/``toKind``, the
         # legacy rows spell ``from``/``to``. ``list_relations`` preserves the
         # row's own generation, so BOTH are read here rather than one being
@@ -215,8 +234,7 @@ def declared_relation_pairs() -> dict[str, tuple[tuple[str, str], ...]] | None:
             # DECLARED as a predicate (``declared_relation_predicates`` owns
             # that answer); it simply contributes nothing to the pair leg.
             continue
-        out.setdefault(predicate.strip(), []).append(
-            (from_kind.strip(), to_kind.strip()))
+        out[predicate].append((from_kind.strip(), to_kind.strip()))
     return {pred: tuple(pairs) for pred, pairs in out.items()}
 
 
@@ -291,29 +309,64 @@ def _abstain(reason: str, predicate: str, from_kind, to_kind) -> PairVerdict:
         reason=reason)
 
 
-def _kind_equivalent(asked: str, declared: str) -> bool:
-    """Is the ASKED endpoint kind the SAME kind as the DECLARED one?
+#: The node LABELS a pack may name in an ``ontology.relations[]`` endpoint
+#: instead of a kind. ``packs/dev`` declares ``ownedBy | core:goal -> Subject``,
+#: ``packs/project-management`` ``assignedTo | pm:card -> Subject`` and
+#: ``packs/venture`` ``holds | venture:investment -> Subject`` — the target is
+#: "a node with the ``:Subject`` label", not one kind, so it constrains every
+#: Subject kind at once.
+#:
+#: ⛔ Mirrored from ``pack_state._ONTOLOGY_LABELS`` (± ``Document``, which that
+#: tuple carries for the generic-``kind`` slot) and NOT imported from it:
+#: ``pack_state`` imports the SDK, so importing it here would close a cycle
+#: through the write path. ``tests/test_relation_guards_14263.py`` pins the two
+#: sets against each other, so a label added there is a red test here rather
+#: than a silent wildcard that stops matching.
+LABEL_ENDPOINTS: frozenset[str] = frozenset({
+    "Object", "Point", "Event", "Subject", "Source", "Document",
+})
 
-    Exact spelling always matches. A BARE asked spelling (``feature``) matches a
-    namespaced declaration's local half (``product-strategy:feature``) — AX Rule
-    1 class 1, the same kind in a different form.
 
-    ⛔ A NAMESPACED asked spelling never matches across namespaces. ``dev:issue``
+def _kind_equivalent(asked_kind: str, declared: str,
+                     asked_label: str | None = None) -> bool:
+    """Is the ASKED endpoint the SAME kind as the DECLARED one?
+
+    Three ways to be the same, and nothing else:
+
+    * the exact kind spelling matches (``dev:epic`` == ``dev:epic``);
+    * a BARE asked kind matches a namespaced declaration's local half
+      (``feature`` == ``product-strategy:feature``) — AX Rule 1 class 1, the
+      same kind in a different form;
+    * the DECLARATION names a node LABEL (``Subject``) and that is the asked
+      node's own label. Without this leg every ``ownedBy``/``assignedTo``/
+      ``holds`` write to a pack-kinded target would be reported as an
+      undeclared pair — three shipped declarations spell their target that
+      way, so the false report would be the COMMON case, on the door whose
+      whole value is that its reports are trustworthy.
+
+    ⛔ A NAMESPACED asked kind never matches across namespaces. ``dev:issue``
     and ``pm:issue`` are different kinds that share a local name, and folding
     them together is precisely the ambiguity the pack namespace exists to
     remove — two packs really do declare ``issue`` (``packs/dev``,
     ``packs/project-management``), so a fold there would let one pack's
     declaration admit the other's kind.
     """
-    if asked == declared:
+    if asked_kind == declared:
         return True
-    if ":" in asked:
-        return False
-    return bool(asked) and _local(declared) == asked
+    if asked_label and declared == asked_label:
+        return True
+    if ":" not in asked_kind and _local(declared) == asked_kind:
+        # A bare asked kind against a LABEL-spelled declaration (`Subject`) is
+        # not a re-spelling: `Subject` is not a kind at all. Guard against
+        # `_local('Subject') == 'Subject'` admitting a bare kind by accident.
+        return declared not in LABEL_ENDPOINTS
+    return False
 
 
 def _pair_matches(pairs: tuple[tuple[str, str], ...],
-                  from_kind: str, to_kind: str) -> tuple[str, str] | None:
+                  from_kind: str, to_kind: str,
+                  from_label: str | None = None,
+                  to_label: str | None = None) -> tuple[str, str] | None:
     """The declared pair this asked pair IS, or ``None``.
 
     Matched under ``_kind_equivalent`` in BOTH slots, and only when the match is
@@ -321,13 +374,15 @@ def _pair_matches(pairs: tuple[tuple[str, str], ...],
     relation, so it resolves to none of them rather than to an arbitrary one.
     """
     hits = [pair for pair in pairs
-            if _kind_equivalent(from_kind, pair[0])
-            and _kind_equivalent(to_kind, pair[1])]
+            if _kind_equivalent(from_kind, pair[0], from_label)
+            and _kind_equivalent(to_kind, pair[1], to_label)]
     return hits[0] if len(hits) == 1 else None
 
 
 def _predicates_between(declared: dict[str, tuple[tuple[str, str], ...]],
-                        from_kind: str, to_kind: str) -> list[str]:
+                        from_kind: str, to_kind: str,
+                        from_label: str | None = None,
+                        to_label: str | None = None) -> list[str]:
     """Every predicate the packs declare between these two kinds, ANY orientation.
 
     The actionable half of a redirect without the semantic guess: the reply can
@@ -339,10 +394,10 @@ def _predicates_between(declared: dict[str, tuple[tuple[str, str], ...]],
     out: list[str] = []
     for predicate, pairs in declared.items():
         for one, two in pairs:
-            forward = (_kind_equivalent(from_kind, one)
-                       and _kind_equivalent(to_kind, two))
-            reverse = (_kind_equivalent(from_kind, two)
-                       and _kind_equivalent(to_kind, one))
+            forward = (_kind_equivalent(from_kind, one, from_label)
+                       and _kind_equivalent(to_kind, two, to_label))
+            reverse = (_kind_equivalent(from_kind, two, from_label)
+                       and _kind_equivalent(to_kind, one, to_label))
             if forward or reverse:
                 out.append(predicate)
                 break
@@ -412,6 +467,8 @@ def relation_pair_verdict(
     from_kind: object,
     to_kind: object,
     *,
+    from_label: str | None = None,
+    to_label: str | None = None,
     declared: dict[str, tuple[tuple[str, str], ...]] | None = None,
 ) -> PairVerdict:
     """Decide one proposed edge against the packs' declared relations.
@@ -425,6 +482,11 @@ def relation_pair_verdict(
     ``from_kind``/``to_kind`` of ``None`` mean "the caller could not resolve
     what these endpoints ARE" — distinct from "resolved to a kind no pack
     declares", which is a verdict. Unresolved abstains.
+
+    ``from_label``/``to_label`` are the endpoints' NODE labels (``Subject``,
+    ``Source`` …). They exist because a pack may declare an endpoint as a label
+    rather than a kind — ``ownedBy | core:goal -> Subject`` — and a kind-only
+    comparison would report every such write as undeclared.
     """
     raw_predicate = predicate.strip() if isinstance(predicate, str) else ""
     if not raw_predicate:
@@ -449,7 +511,14 @@ def relation_pair_verdict(
     to_kind = to_kind.strip()
 
     pairs = declared.get(canonical, ())
-    matched = _pair_matches(pairs, from_kind, to_kind)
+    if not pairs:
+        # The predicate is a DECLARED WORD that declares no kind pair — a
+        # `declarationOnly: true` row ("binds no write path", #11083), or a row
+        # that names no endpoints. There is no pair premise to judge, so this
+        # leg abstains rather than reporting a pair it never had a declaration
+        # for.
+        return _abstain(ABSTAIN_NO_DECLARED_PAIR, canonical, from_kind, to_kind)
+    matched = _pair_matches(pairs, from_kind, to_kind, from_label, to_label)
     if matched is not None:
         # A pure re-spelling (of the predicate or of a bare endpoint kind) is
         # AX Rule 1 class 1 — SILENT. A receipt here would ask the caller to
@@ -458,11 +527,13 @@ def relation_pair_verdict(
         return PairVerdict(outcome=outcome, predicate=canonical,
                            from_kind=from_kind, to_kind=to_kind)
 
-    reversed_match = _pair_matches(pairs, to_kind, from_kind)
+    reversed_match = _pair_matches(pairs, to_kind, from_kind, to_label,
+                                   from_label)
     outcome = REVERSED_PAIR if reversed_match is not None else UNDECLARED_PAIR
     rule = RULE_REVERSED if outcome == REVERSED_PAIR else RULE_UNDECLARED
     declared_for = [{"fromKind": one, "toKind": two} for one, two in pairs]
-    between = _predicates_between(declared, from_kind, to_kind)
+    between = _predicates_between(declared, from_kind, to_kind, from_label,
+                                  to_label)
     payload = {
         "outcome": outcome,
         "predicate": canonical,
@@ -506,6 +577,7 @@ def warning_shape(payload: dict) -> dict:
 __all__ = [
     "ABSTAIN",
     "ABSTAIN_NOT_DECLARED",
+    "ABSTAIN_NO_DECLARED_PAIR",
     "ABSTAIN_NO_KINDS",
     "ABSTAIN_NO_PREDICATE",
     "ABSTAIN_UNREADABLE",

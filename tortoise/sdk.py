@@ -29808,6 +29808,20 @@ class TortoiseSDK:
         # contract — consumers may surface or ignore; the shape is stable).
         if warnings:
             result["warnings"] = warnings
+        # ── #14263: the relation-PAIR leg, on the operator doors ─────────────
+        # `label` is the DOMAIN verb (Layer 3); `op_type` is the MECHANISM
+        # (Layer 1) and is not a relation, so it is never the predicate. An
+        # operator write that names no `label` has nothing for this leg to
+        # judge and pays no graph read. Warn-not-block, exactly as the
+        # predicate and mechanism legs are: the operator has already landed.
+        _declaration_notes = self._relation_pair_notes(
+            predicate=label, source_id=source_id, target_ids=list(target_ids))
+        if _declaration_notes:
+            from tortoise.relation_guards import warning_shape
+
+            result["relation_declaration"] = _declaration_notes[0]
+            result.setdefault("warnings", []).extend(
+                warning_shape(note) for note in _declaration_notes)
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         event_point = dict(result)
@@ -36997,8 +37011,23 @@ class TortoiseSDK:
         # Epic 903-C4 (#1242): a new direct edge changes the factor graph —
         # invalidate warm-start seeds on the endpoints' edges.
         self._get_ep().invalidate_messages([source_id, target_id])
-        return {"direct_edge": op_type, "from": source_id, "to": target_id,
-                "created": created, "deduped": not created}
+        result = {"direct_edge": op_type, "from": source_id, "to": target_id,
+                  "created": created, "deduped": not created}
+        # ── #14263: the relation-PAIR leg ────────────────────────────────────
+        # `label` is the Layer-3 DOMAIN verb and the only thing a pack declares
+        # a kind pair for; `op_type` (IMPL/NAND) is the Layer-1 MECHANISM and
+        # carries no endpoints in any declaration. A write with no `label`
+        # therefore has no declared pair to judge and pays no graph read.
+        # Warn-not-block: the edge has already landed (#1934).
+        _declaration_notes = self._relation_pair_notes(
+            predicate=label, source_id=source_id, target_ids=[target_id])
+        if _declaration_notes:
+            from tortoise.relation_guards import warning_shape
+
+            result["relation_declaration"] = _declaration_notes[0]
+            result["warnings"] = [warning_shape(note)
+                                  for note in _declaration_notes]
+        return result
 
     def _find_operator(self, op_type: str, inputs: list[str],
                        label: str | None = None,
@@ -61835,6 +61864,145 @@ class TortoiseSDK:
 
     # ── Typed structural edges (epic #888 W2, reification rule v3.5 §8) ──
 
+    #: The labels that can carry an ontology KIND, in the order the endpoint
+    #: probe sweeps them. The four epistemic labels plus ``Source`` (a
+    #: ``:Source`` carries ``documentKind``/``sourceKind`` and is an
+    #: ``aboutDocument`` / ``references`` target, so it is a real endpoint of a
+    #: connect write). Kept as a module-level tuple beside the readers that use
+    #: it rather than inlined, so a label added here moves every reader at once.
+    _ENDPOINT_KIND_LABELS: tuple[str, ...] = (
+        "Point", "Subject", "Object", "Event", "Source")
+
+    def _endpoint_kind_map(self, ids) -> dict[str, tuple[str | None, str | None]]:
+        """Each node's ``(label, declared ontology KIND)``, or ``(None, None)``.
+
+        The read half of the relation-PAIR leg (#14263). One batched,
+        label-ANCHORED query per label present — never a bare ``MATCH (n)
+        WHERE n.id IN $ids``, which would discard the per-(label, id) index
+        (the same rule ``_create_direct_edge`` follows for its endpoint probe).
+        The sweep stops as soon as every id is accounted for, so a two-endpoint
+        structural edge costs the one query its first label resolves.
+
+        The LABEL comes back with the kind because a pack may declare an
+        endpoint as a label rather than a kind — ``packs/dev`` declares
+        ``ownedBy | core:goal -> Subject``, and ``Subject`` there is ":Subject",
+        not one kind. Without it every such write would be reported as an
+        undeclared pair, which would make the honest-state report untrustworthy
+        on exactly the doors it exists for.
+
+        The kind slots are read in the ontology's own order and the FIRST
+        non-null wins: a node carries exactly one of them, and ``coalesce``
+        keeps this a single expression rather than eight round trips. ``kind``
+        is read last and only on these labels, matching
+        ``pack_state.graph_kind_namespaces``' label scope (``kind`` is a generic
+        slot that ``:Graph``/``:Pipeline`` also own).
+
+        ⛔ NEVER RAISES and never refuses a write. An unknown node, a node with
+        no kind, a node whose kind is blank, and a failed query all answer
+        ``None`` — which the verdict reads as *unresolved* and abstains on
+        (``#12060`` R4: a write must not depend on what we could read).
+        """
+        out: dict[str, tuple[str | None, str | None]] = {
+            i: (None, None) for i in ids if isinstance(i, str)}
+        want = {i for i in out if i}
+        if not want:
+            return out
+        try:
+            proj = self._get_proj()
+        except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+            return out
+        for label in self._ENDPOINT_KIND_LABELS:
+            if not want:
+                break
+            try:
+                rows = proj.g.query(
+                    f"MATCH (n:{label}) WHERE n.id IN $ids "
+                    "RETURN n.id, coalesce(n.pointKind, n.objectKind, "
+                    "n.subjectKind, n.eventKind, n.documentKind, "
+                    "n.actionKind, n.sourceKind, n.kind)",
+                    params={"ids": sorted(want)},
+                ).result_set
+            except Exception:  # noqa: BLE001, RUF100
+                continue
+            for row in rows:
+                try:
+                    node_id, kind = row[0], row[1]
+                except Exception:  # noqa: BLE001, RUF100
+                    continue
+                if node_id not in want:
+                    continue
+                out[node_id] = (
+                    label,
+                    kind.strip() if isinstance(kind, str) and kind.strip() else None)
+                want.discard(node_id)
+        return out
+
+    def _relation_pair_notes(self, *, predicate, source_id, target_ids) -> list[dict]:
+        """AX blocks for edges whose KIND PAIR no installed pack declares (#14263).
+
+        The ONE reader every connect door shares — ``_create_edge`` (the
+        structural arm, and so ``link_entities``' plain-edge arm),
+        ``_create_direct_edge`` and ``_create_operator`` — so a door cannot
+        start seeing a pair the others miss (the ``#12067``
+        "one reader, shared" rule, for the same reason).
+
+        Returns the reported AX payloads (``relation_guards.UNDECLARED_PAIR`` /
+        ``REVERSED_PAIR``), in target order; ``[]`` when there is nothing to
+        say. Callers attach them to the reply and extend ``warnings``;
+        ⛔ **no caller may turn one into a refusal** — ``#1934`` is
+        warn-not-block and ``docs/ax/ax-principles.md`` §1 Rule 2's admission
+        test makes the refusal unwritable where no correction exists.
+
+        **Two narrowings keep this off the hot path.** (1) The predicate must be
+        OR SPELL a pack-declared relation at all — every structural predicate
+        (``hasPart``, ``related``, ``references`` …) and every invented verb
+        abstains BEFORE any graph read, because the ``#1934``/``#7551``
+        predicate leg already owns those and a pair check has no premise for
+        them. (2) Only endpoints whose id resolves are read, and only when (1)
+        allowed it.
+
+        ``predicate`` is the DOMAIN verb: the ``label`` on the operator paths
+        (the mechanism ``op_type`` is not a relation) and the ``relation`` on
+        the structural path. An absent label means the caller named no domain
+        relation, so there is nothing for this leg to judge.
+        """
+        if not predicate or not isinstance(predicate, str) or not target_ids:
+            return []
+        try:
+            from tortoise.relation_guards import (
+                canonical_predicate,
+                declared_relation_pairs,
+                relation_pair_verdict,
+            )
+        except Exception:  # noqa: BLE001, RUF100
+            return []
+        try:
+            declared = declared_relation_pairs()
+            if declared is None:
+                return []
+            # Narrowing (1): no declared pair for this predicate (under any
+            # spelling) → this leg has no premise. No graph read is paid.
+            canonical = canonical_predicate(predicate, declared)
+            if canonical is None:
+                return []
+            ids = [source_id, *target_ids]
+            kinds = self._endpoint_kind_map(ids)
+            notes: list[dict] = []
+            for target_id in target_ids:
+                src_label, src_kind = kinds.get(source_id, (None, None)) \
+                    if isinstance(source_id, str) else (None, None)
+                tgt_label, tgt_kind = kinds.get(target_id, (None, None)) \
+                    if isinstance(target_id, str) else (None, None)
+                verdict = relation_pair_verdict(
+                    predicate, src_kind, tgt_kind,
+                    from_label=src_label, to_label=tgt_label,
+                    declared=declared)
+                if verdict.reportable and verdict.payload is not None:
+                    notes.append(verdict.payload)
+            return notes
+        except Exception:  # noqa: BLE001, RUF100 — never raise into a write
+            return []
+
     def _create_edge(self, relation: str, from_id: str, to_id: str) -> dict:
         """Create a typed structural edge (epic #888 W2, PR #912).
 
@@ -61902,13 +62070,50 @@ class TortoiseSDK:
         # successful write rather than created-only (`_EdgeHandlers.create_edge`
         # returns `MERGE … RETURN count(*) > 0`, truthy on a dedup hit, which is
         # what closes the crash window between the write and its record).
+        # ── #14263: the packs' BUSINESS LOGIC at this door ───────────────
+        # Two things happen here, and the AX doc (docs/ax/ax-principles.md §1)
+        # decides the reporting class of each:
+        #
+        # 1. RE-SPELLING a declared predicate (`HASPART` / `grounded_in`) is
+        #    format variance — Rule 1 class 1 — so it is applied SILENTLY. A
+        #    receipt here would ask the caller to re-express what we already
+        #    understood. The declared spelling is what gets WRITTEN, so the
+        #    stored edge, its replay record and the pack's own census finally
+        #    agree on one token.
+        # 2. An edge whose KIND PAIR no installed pack declares is a claim about
+        #    what the graph now contains, so it is ECHOED (Rule 1 class 2) and
+        #    the write still lands (#1934 warn-not-block; AX Rule 2's admission
+        #    test makes a refusal unwritable where no correction exists).
+        #
+        # ⛔ Order matters only for the silent leg: the normalised spelling must
+        # be the one `proj.create_edge` validates AND the one the reply reports.
+        try:
+            from tortoise.relation_guards import canonical_predicate
+
+            _canonical = canonical_predicate(relation)
+        except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+            _canonical = None
+        if _canonical:
+            relation = _canonical
+        _declaration_notes = self._relation_pair_notes(
+            predicate=relation, source_id=from_id, target_ids=[to_id])
         created = proj.create_edge(from_id, to_id, relation)  # validates relation
-        return {
+        result = {
             "edge": {"relation": relation, "from": from_id, "to": to_id},
             "created": created,
             "nudges": self._nudge_candidates(
                 relation, exclude_ids=[from_id, to_id]),
         }
+        if _declaration_notes:
+            from tortoise.relation_guards import warning_shape
+
+            # The stable field a client branches on (one shape, everywhere),
+            # plus the #1934 `warnings` entry a consumer that only reads that
+            # list already knows how to surface. One judgement, two renderings.
+            result["relation_declaration"] = _declaration_notes[0]
+            result["warnings"] = [warning_shape(note)
+                                 for note in _declaration_notes]
+        return result
 
     # ── Query Helpers ─────────────────────────────────────────────
 
