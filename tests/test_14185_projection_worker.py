@@ -10,13 +10,15 @@ that asserted them together would stay green while one of them regressed.
 3. a deliberately STALLED projection does not slow a read
    (`test_a_stalled_projection_does_not_slow_a_read`), and the read DECLARES the
    lag instead of returning a confident short answer (#2952's class);
-4. the four CORRECTNESS conditions that decide whether a write may be deferred at
-   all — a journal line exists, no door reads the outcome, the log is a durable
-   journal, and the tenant is carried BY VALUE — plus the RECORD's own arming,
-   which is a SWITCH rather than a correctness rule (`_record_armed`, condition 5
-   of six). Each must answer INLINE when it fails. ⛔ This list previously named
-   "the loop is armed" as one of the four and omitted the tenant condition — the
-   same membership drift `.env.example` carried (cycle-2 review, finding 2).
+4. the conditions that decide whether a write may be deferred at all — FIVE
+   STRUCTURAL (the four CORRECTNESS ones: a journal line exists, no door reads the
+   outcome, the log is a durable journal, and the tenant is carried BY VALUE —
+   plus the UNIMPORTABLE loop) and the TWO SWITCHES (`projection_worker.armed()`
+   and `_record_armed`, the record's own DSN — condition 7 of seven). Each must
+   answer INLINE when it fails. ⛔ This list previously named "the loop is armed"
+   as one of the four and omitted the tenant condition — the same membership
+   drift `.env.example` carried (cycle-2 review, finding 2) — and it then said
+   "four of six", which lost the unimportable-loop arm (cycle-9 review, P2).
 
 DB-free by design: the fold is represented by a callable, which is exactly the
 boundary this module owns (it decides *when* a fold runs, never *what* it does).
@@ -27,6 +29,7 @@ Postgres cannot run in every lane.
 from __future__ import annotations
 
 import collections
+import logging
 import os
 import signal
 import sys
@@ -2041,3 +2044,125 @@ def test_a_queue_fault_folds_inline_instead_of_breaking_the_write(monkeypatch):
                                   outcome="applied"))[1])
     assert write.deferred is False
     assert called == [1], "an unimportable loop must fold inline, not skip the fold"
+
+
+# ── the SHUTDOWN path survives a failed start (#14222 review cycle 9) ──────
+
+
+def test_a_FAILED_thread_start_leaves_no_unstarted_thread_in_the_slot(
+        armed, monkeypatch):
+    """⛔ `thread.start()` RAISING MUST NOT STRAND THE WORKER (#14222 cycle 9, P1).
+
+    Thread/fd exhaustion in `thread.start()` is the arm `submit` names as
+    `queue_fault` — a NAMED, expected failure, not a hypothetical. The defect this
+    pins: `_ensure_started` published `self._thread = thread` BEFORE `start()`, so
+    a failed start left an UNSTARTED `Thread` in the slot. `stop()` then raised
+    ``RuntimeError: cannot join thread before it is started``, and because
+    `shutdown()` marks `_closed` BEFORE it calls `stop()`, the raise skipped the
+    reopen/clear block and left the instance CLOSED with no consumer for the life
+    of the process — every later write declined `worker_stopping` and paid the
+    inline fold, permanently.
+
+    Three assertions, one per consequence, and each reds on its own under the
+    old order:
+    * the write still folds inline and is COUNTED (`queue_fault`);
+    * `shutdown()` does NOT raise;
+    * the instance is NOT poisoned — a later write can defer again.
+
+    ⛔ `threading.Thread.start` is patched on the CLASS for one call only, because
+    the real failure is a transient resource exhaustion rather than a permanent
+    incapacity: the recovery half of this test is the point.
+    """
+    real_start = threading.Thread.start
+    calls = {"n": 0}
+
+    def _flaky_start(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", _flaky_start)
+    worker = projection_worker.worker()
+    before = monitoring.projection_inline_fallback_counts().get("queue_fault", 0)
+    called = []
+
+    write = live_write.write(
+        {"type": "PointAdded"}, log=_Log(), tenant=_TENANT,
+        project=lambda e, s, journal_skipped=False: (
+            called.append(s),
+            types.SimpleNamespace(applied=True, refusal=None,
+                                  outcome="applied"))[1])
+
+    assert write.deferred is False, "a failed start must fold inline"
+    assert called == [1]
+    assert monitoring.projection_inline_fallback_counts().get(
+        "queue_fault", 0) == before + 1, "the queue fault must be counted"
+    assert worker._thread is None, (
+        "a failed start must leave NO thread in the slot — an unstarted Thread "
+        "there is what makes stop() raise RuntimeError")
+
+    # ⛔ THE CONSEQUENCE: `shutdown()` must RETURN, not raise. Under the old order
+    # this raised out of `stop()`'s join — after `_closed` had already been set,
+    # so the reopen/clear block was skipped and the singleton stayed closed.
+    projection_worker.shutdown(drain=False)
+
+    # ⛔ AND THE INSTANCE IS NOT POISONED: the transient failure is over, so the
+    # next write finds a live worker rather than `worker_stopping` forever. This
+    # is the half that reds if `shutdown()` raised and skipped `_WORKER = None`.
+    second = live_write.write(
+        {"type": "PointAdded"}, log=_Log(), tenant=_TENANT,
+        project=lambda e, s, journal_skipped=False: types.SimpleNamespace(
+            applied=True, refusal=None, outcome="applied"))
+    assert second.deferred is True, (
+        "a single failed start must not strand the worker for the process's life")
+
+
+def test_a_RAISING_log_filter_cannot_kill_the_consumer_with_inflight_set(
+        armed):
+    """⛔ THE FAILURE REPORT IS GUARDED TOO (#14222 review cycle 9, P2).
+
+    `Logger.handle` runs every `filter()` OUTSIDE `handleError`, so a raising
+    filter propagates out of `LOGGER.warning`. Both failure reports in `_run` used
+    to be bare calls, and they sit AFTER the pop — so an escape left `_inflight`
+    SET and killed the consumer thread. That is the exact state the classifier's
+    own guard (`except Exception` → `record_no_outcome`) exists to prevent, and
+    the module says so three lines away: phantom depth/positions, an
+    `oldest_pending_seconds` that grows forever, `wait_for_drain` that never
+    answers True, and a failure the counters never see.
+
+    Pinned by consequence rather than by wording: after the fold raises AND the
+    logger raises, the loop is still alive, `_inflight` is cleared, and the
+    failure is counted.
+    """
+    def _project_that_raises(event, seq, journal_skipped=False):
+        raise RuntimeError("the door raised")
+
+    class _Exploding(logging.Filter):
+        def filter(self, record):
+            raise RuntimeError("a filter that raises")
+
+    logger = projection_worker.LOGGER
+    exploding = _Exploding()
+    logger.addFilter(exploding)
+    try:
+        before = monitoring.projection_worker_failure_counts().get(
+            "projection_raised", 0)
+        deferred = projection_worker.submit(
+            record={"type": "PointAdded"}, seq=1, tenant=_TENANT,
+            journal_skipped=False, project=_project_that_raises)
+        assert deferred is True, "the write is queued; the fold is the worker's"
+
+        assert projection_worker.wait_for_drain(timeout=10) is True, (
+            "the queue must drain even when the failure report itself raises")
+        stats = projection_worker.stats()
+        assert stats.queue_depth == 0, ("no phantom depth from a stranded "
+                                        "`_inflight`")
+        assert stats.pending_positions == 0, (
+            "no phantom position from a stranded `_inflight`")
+        assert stats.running is True, "the consumer thread must survive"
+        assert monitoring.projection_worker_failure_counts().get(
+            "projection_raised", 0) == before + 1, (
+            "the failure must be COUNTED even though reporting it raised")
+    finally:
+        logger.removeFilter(exploding)
