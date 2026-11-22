@@ -855,6 +855,30 @@ def _capture_tail_failed(task, proj, session_id, state) -> None:
         except Exception:  # pragma: no cover — pool shut down
             _logger.exception(
                 "capture phase clear submit failed (session %s)", session_id)
+    elif (not cancelled and state is not None and state.get("attempted")
+            and not state.get("finalized")):
+        # ⛔ AND ON THE ARM THAT DID NOT RAISE EITHER (#14232 review, round 2).
+        # `not cancelled` is load-bearing, not defensive: `exc` is None on a
+        # cancelled task (it is only read when the task did not cancel), so
+        # without it this arm fires beside `_capture_abandoned_marker` and a
+        # cancellation submits TWO graph writes where the contract above says it
+        # writes the marker alone (measured: the probe recorded
+        # `['_capture_abandoned_marker', '_clear_capture_phase']`). The clear
+        # exists for the tail that finished WITHOUT an outcome; cancellation
+        # already has its terminal writer.
+        # The terminal `capture_ok` SET is non-fatal: a graph hiccup becomes a
+        # receipt warning, so a tail can finish NORMALLY with `finalized` still
+        # False — nothing recorded, nothing running, and the phase it wrote still
+        # on the record. Without this arm the phase survives until some later
+        # attempt records an outcome, which is the same "still running, forever"
+        # lie this retire exists to end.
+        try:
+            _submit_off_loop(
+                _CAPTURE_MARKER_EXECUTOR, _clear_capture_phase,
+                proj, session_id)
+        except Exception:  # pragma: no cover — pool shut down
+            _logger.exception(
+                "capture phase clear submit failed (session %s)", session_id)
     if exc is not None:
         _logger.error(
             "capture completion failed after its record landed (session %s) — "
@@ -23058,7 +23082,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # would leave capture_ok=None → the next same-session re-POST would
             # legacy-replay instead of re-attempting. Additive warning names the
             # residue.
-            _outcome_recorded = False
+            _terminal_written = True
             try:
                 # ⛔ #10893 (second cycle): a graph round trip INLINE on the single
                 # uvicorn worker until now — the LAST one on this handler's tail.
@@ -23080,39 +23104,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                         "    s.capture_extraction_phase_at=NULL",
                         params={"sid": session_id, "ok": _capture_ok_record,
                                 "extractor": _capture_extractor_record}))
-                _outcome_recorded = True
             except Exception as exc:  # pragma: no cover - graph hiccup
+                _terminal_written = False
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
-                # ⛔ THE TERMINAL STATEMENT ALSO CARRIES THE PHASE CLEAR, so a
-                # failed outcome write is the ONE exit that leaves the pair on the
-                # record — and nothing downstream retires it: the exception is
-                # swallowed here by design (a graph hiccup must not fail a
-                # committed capture), so `_capture_tail_failed` sees a task that
-                # COMPLETED and neither the marker nor the retire arm runs. The
-                # session then advertises `extracting` forever beside an outcome
-                # that was never recorded, while the client the ACK told to poll
-                # gets no terminal answer (measured red at `ea2ea65898fe`:
-                # `tests/test_14232_ingest_ack_split.py::test_a_failed_terminal_write_still_retires_the_phase`).
-                if state is not None and state.get("attempted"):
-                    try:
-                        await _run_off_loop(
-                            _CAPTURE_EXECUTOR, _clear_capture_phase,
-                            proj, session_id)
-                    except Exception:  # pragma: no cover — pool shut down
-                        _logger.exception(
-                            "capture phase clear failed (session %s)", session_id)
-            if state is not None and _outcome_recorded:
+                # ⛔ NO PHASE RETIRE HERE, AND THAT IS DELIBERATE: `finalized`
+                # stays False on this arm, so `_capture_tail_failed`'s
+                # `not cancelled and not finalized` arm retires the pair. ONE
+                # writer for one invariant — a second submit from here would be
+                # the same no-op write twice and two places to keep in step.
+            if state is not None and _terminal_written:
                 # #3129: the outcome is recorded — an abandonment from here on can
                 # no longer leave the NULL→replay shape (nothing below suspends).
-                # ⛔ ONLY when the write LANDED. `finalized` is what suppresses
-                # `_capture_tail_failed`'s phase retire, so setting it after a
-                # FAILED terminal write left the phase pair on the record for
-                # ever: the session reported `extracting` (and `outcome_known:
-                # false`) beside an outcome that was never written, while the
-                # client the ACK told to poll never got a terminal answer
-                # (measured red at `ea2ea65898fe`:
-                # `tests/test_14232_ingest_ack_split.py::test_a_failed_terminal_write_still_retires_the_phase`).
+                # ⛔ ONLY when that write LANDED (#14232 review, round 2). A failed
+                # terminal SET records nothing, so `finalized` there suppressed the
+                # callback's phase retire and left `phase: extracting` beside a
+                # `capture_ok` that was never written — the very "still running,
+                # forever" lie the retire exists to end, on the one arm where no
+                # other write would ever clear it.
                 state["finalized"] = True
         # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
         # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
@@ -52477,7 +52486,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 206 tracked files (756 distinct
+# ABSOLUTE line number from 206 tracked files (755 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

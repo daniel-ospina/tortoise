@@ -272,9 +272,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'sdk.py:22299', "tortoise/sdk.py", 22299, "search_text = _source_search_text(topics=topics)"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", 'sdk.py:22341', "tortoise/sdk.py", 22341, "s.summary=CASE WHEN $sum"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", '`:22464`', "tortoise/sdk.py", 22464, "s.summary, s.topics, s."),
-    (_AUDIT, 'hosted_api.py:24474', 'tortoise/hosted_api.py', 24474, 'MERGE (s:Source {url:$did})'),
-    (_AUDIT, '`:24286`', 'tortoise/hosted_api.py', 24286, 'def _execute_commit_writes'),
-    (_AUDIT, '`:35260`', 'tortoise/hosted_api.py', 35260, 'MERGE (p:PackInstall {namespace: $ns})'),
+    (_AUDIT, 'hosted_api.py:24534', 'tortoise/hosted_api.py', 24534, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:24346`', 'tortoise/hosted_api.py', 24346, 'def _execute_commit_writes'),
+    (_AUDIT, '`:35320`', 'tortoise/hosted_api.py', 35320, 'MERGE (p:PackInstall {namespace: $ns})'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -420,8 +420,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     ("search_engine.py:7201", _SE, 7201, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ('sdk.py:22341', "tortoise/sdk.py", 22341, "s.summary=CASE WHEN $sum"),
     (':22464', "tortoise/sdk.py", 22464, "s.summary, s.topics, s."),
-    ('hosted_api.py:24474', "tortoise/hosted_api.py", 24474, "MERGE (s:Source {url:$did})"),
-    (':24286', "tortoise/hosted_api.py", 24286, "def _execute_commit_writes"),
+    ('hosted_api.py:24534', "tortoise/hosted_api.py", 24534, "MERGE (s:Source {url:$did})"),
+    (':24346', "tortoise/hosted_api.py", 24346, "def _execute_commit_writes"),
 )
 
 
@@ -531,9 +531,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22299'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22341'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22464`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:24474'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24286`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:35260`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:24534'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24346`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:35320`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7167` inside the same function'): 1,
