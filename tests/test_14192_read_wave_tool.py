@@ -604,9 +604,17 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     # the declared residual.
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         _left, _right = _possible_strings(node.left, consts), _possible_strings(node.right, consts)
-        if len(_left) == 1 and len(_right) == 1:
-            return frozenset({next(iter(_left)) + next(iter(_right))})
-        return frozenset().union(_left, _right)
+        if not _left or not _right:
+            return frozenset()  # an operand is not statically resolvable — the residual
+        # ⛔ THE PRODUCT, NOT A UNION (#14326 round 10, MEASURED BOTH WAYS): a UNION was wrong
+        # in both directions on the fallback — it emitted strings that are not concatenations
+        # (`("x" if queries else "_tortoise_") + "fts_query"` passed the pin, `m=2 c=2 i=0`,
+        # because neither operand is a singleton so the join never happened) AND it refused a
+        # concatenation that can never equal the read name
+        # (`("_tortoise_fts_query" if queries else "x") + "_y"`, whose every value ends in
+        # `_y`). Every combination of the two statically-possible sets is a possible value of
+        # the sum, so the product is both the fail-closed and the false-red-correct reading.
+        return frozenset(a + b for a in _left for b in _right)
     return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
 
 
@@ -3628,6 +3636,18 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "literal-only `+` (a compile-time fold)": (
             '    getattr(sdk, "_tortoise_" + "fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE PRODUCT, BOTH DIRECTIONS (#14326 round 10, each MEASURED): a statically
+        # resolvable operand that is a SELECTION joins to every combination, so a sum that CAN
+        # be the read name is refused… (`("x" if q else "_tortoise_") + "fts_query"`,
+        # `"_tortoise_" + ("fts_query" if q else "zzz")`, and a `for`-target prefix all
+        # measured GREEN while the fallback was a UNION).
+        "SELECTED operand joined with a literal": (
+            '    getattr(sdk, ("x" if queries else "_tortoise_") + "fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "for-TARGET prefix joined with a literal": (
+            '    for _P in ("x", "_tortoise_"):\n'
+            '        getattr(sdk, _P + "fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "for target": ('    for _N in ("_tortoise_fts_query",):\n        '
                        f'{reach.format(name="_N")}\n'),
         "comprehension target": (f'    [_N for _N in ("_tortoise_fts_query",)]\n    '
@@ -4062,6 +4082,14 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     # — the `Constant` arm's `isinstance(_parent.ctx, ast.Load)` guard exists for it and
     # had NO row in either direction (#14326 review P3, measured: replacing that guard
     # with `True` left all 25 tests green). A store cannot be CALLED.
+    # ⛔ …AND A CONCATENATION THAT CAN NEVER EQUAL THE READ NAME STAYS GREEN (#14326 round 10,
+    # MEASURED REFUSED while the fallback was a UNION — it emitted the bare read name from an
+    # operand set whose every concatenation ends in `_y`):
+    never_read = ('    getattr(sdk, ("_tortoise_fts_query" if queries else "x") + "_y")'
+                  '(query=queries[0]["query"], limit=10, kind="statement")\n')
+    assert not _pin_refuses(_pin_source(never_read)), (
+        "a sum whose EVERY possible value ends in `_y` is not the read name — the `BinOp` arm "
+        "must join the operands, not union their literal sets")
     literal_store = '    _counts["_tortoise_fts_query"] = 0\n'
     assert not _pin_refuses(_pin_source(literal_store)), (
         "a subscript STORE whose key is the read literal is a FALSE RED — it records under "
