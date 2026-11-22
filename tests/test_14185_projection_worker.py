@@ -507,8 +507,13 @@ def _require_prometheus_lock(holder) -> threading.Lock:
 def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed, monkeypatch):
     """⛔ ROUND 10'S P2 + two P3s: the wedge is prometheus_client's OWN lock.
 
-    `prometheus_client` (0.26.0) gives every metric family a `_lock` and every
-    `MutexValue` its own plain `threading.Lock`. A child that forks while a PEER
+    `prometheus_client` (0.26.0) gives every `MutexValue` its own plain
+    `threading.Lock`, and a metric FAMILY one only when it is LABELLED —
+    `_is_parent()` (`self._labelnames and not self._labelvalues`) gates
+    `self._lock = Lock()` in `MetricWrapperBase.__init__`, so an unlabelled
+    `Gauge`/`Counter`/`Histogram`/`Summary` family carries NONE (the three
+    unlabelled gauges this module repairs are exactly that case; `Info`/`Enum` are
+    the exception and this module defines neither). A child that forks while a PEER
     THREAD holds one inherits a lock with no owner, so its next
     `set`/`get`/`labels`/`collect` blocks FOREVER — and `contextlib.suppress`
     cannot help, because a blocked lock is not an exception.
@@ -531,9 +536,14 @@ def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed,
     positions = monitoring.PROJECTION_PENDING_POSITIONS
 
     # ⛔ THE OBJECTS THAT ACTUALLY CARRY A LOCK: every ``MutexValue``, plus the
-    # ``Counter`` families. A plain ``Gauge`` FAMILY has no ``_lock`` in 0.26.0, so
-    # there is nothing there to inherit — and planting one (as an earlier revision
-    # did) is what made this leg vacuous under a rename.
+    # LABELLED families — here the two ``Counter``s. ⛔ THE DISCRIMINATOR IS
+    # ``labelnames``, NOT THE METRIC TYPE (measured on prometheus-client 0.26.0):
+    # ``MetricWrapperBase.__init__`` takes ``self._lock`` only under
+    # ``if self._is_parent():``, i.e. ``self._labelnames and not
+    # self._labelvalues`` — so a LABELLED ``Gauge`` carries one and an UNLABELLED
+    # ``Counter`` carries none. The three unlabelled ``Gauge``s this module repairs
+    # therefore have nothing here to inherit, and planting a lock on one (as an
+    # earlier revision did) is what made this leg vacuous under a rename.
     held = []
     for holder in (gauge._value, positions._value,
                    monitoring.PROJECTION_WORKER_FAILURE_COUNT,
@@ -625,16 +635,20 @@ def test_a_RENAMED_prometheus_lock_REDS_the_guard_instead_of_passing_vacuously()
     ⛔ Review round 11, P3: the legs plant a ``_lock`` and assert it was replaced, so
     under a prometheus_client that renames ``_lock`` they would pin nothing.
     ``_require_prometheus_lock`` reads the real attribute; this leg pins its RED
-    path on an object that genuinely does not carry one — a plain ``Gauge`` FAMILY
-    (measured: ``"_lock" in dir(Gauge(...))`` → ``False``; only a ``Counter``
-    family and every ``MutexValue`` carry one in 0.26.0).
+    path on a holder that genuinely does not carry one.
 
-    So the same assert fires for both reasons that matter: a renamed attribute, and
-    a family whose shape changed. Both mean "the repair is replacing nothing", which
-    is the wedge coming back behind a green suite.
+    ⛔ NOT a ``Gauge`` family (review round 14, P3). A family's ``_lock`` depends on
+    ``labelnames``, NOT on its type — ``MetricWrapperBase.__init__`` takes
+    ``self._lock`` only under ``if self._is_parent():``, measured on 0.26.0 as a
+    labelled ``Gauge`` HAVING one and an unlabelled ``Counter`` having none.
+    Pinning this on ``PROJECTION_QUEUE_DEPTH`` therefore made the leg depend on that
+    family staying UNLABELLED: a benign label added there would restore the real
+    ``_lock`` and this leg would red with "DID NOT RAISE" while the fork repair was
+    perfectly fine. A dependency-free holder pins the one reason that matters — the
+    attribute is absent — and keeps that family's shape out of the gate.
     """
     with pytest.raises(AssertionError, match="prometheus_client moved or renamed"):
-        _require_prometheus_lock(monitoring.PROJECTION_QUEUE_DEPTH)
+        _require_prometheus_lock(types.SimpleNamespace())
 
 
 def test_a_metrics_failure_never_escapes_into_the_loop(armed, monkeypatch):
