@@ -163,28 +163,14 @@ CAPABILITY_CONTROLS = (
     # same class the `--` anchoring removed: `e.ts < -1` whitespace-strips to
     # `s<-1` and `` n.`a<-b` `` unwraps to `a<-b`, so a comparison and a property
     # NAME both reported a capability reader that walks nothing (#14183 round-14).
-    # The legacy unbracketed `(a)<-r-(b)` is why the arm is anchored on the `)` and
-    # not widened to `<--(`: that spelling carries `)<-` too and would otherwise be
-    # lost from detection.
+    # ⛔ AN UNBRACKETED HOP IS NOT A SPELLING ON THIS ENGINE, so it is not why the
+    # anchor exists (#14183 round-17 review, P1 — an earlier cut of this comment
+    # cited `(a)<-r-(b)` as a lost spelling; it is not one). Measured against the
+    # PINNED image (`falkordb-server:v4.20.6`, `tools/test_lane.py:324`):
+    # `MATCH (a)<-r-(b)`, `(a)-r-(b)`, `(a)-r->(b)` and `(a)-r:T-(b)` are all parse
+    # errors (`Invalid input 'r': expected '-' or '['`), while `-[r]-` and
+    # `-[r:T]->` execute. The anchor is justified by `(a)<--(b)` alone.
     ("inbound hop", "MATCH (a:Point)<--(b) RETURN a", "cypher:)<-"),
-    # ⛔ THE UNBRACKETED HOPS GET THEIR OWN ARMS (#14183 round-16 review, P2). A
-    # literal hop need not be bracketed — `(a)-r->(b)` and `(a)-r-(b)` are
-    # engine-accepted legacy spellings, and this table already pins the INBOUND
-    # `(a)<-r-(b)` as real, so the outbound and undirected siblings cannot go
-    # uncensused. Before these arms existed only the EXISTS-wrapped forms were
-    # caught (incidentally, by the removed `exists {` arm) and the bare forms were
-    # caught by nothing: measured `MATCH (a)-r->(b)` and `MATCH (a)-r-(b)` → `None`.
-    ("outbound UNBRACKETED hop", "MATCH (a)-r->(b) RETURN a", "cypher:->("),
-    ("undirected UNBRACKETED hop", "MATCH (a)-r-(b) RETURN a", "cypher:)-r-("),
-    # the same shape under an existence predicate, which is where the removed
-    # `exists {` arm used to catch it by accident
-    ("undirected UNBRACKETED hop in EXISTS",
-     "MATCH (e) WHERE EXISTS { (e)-r-(p) } RETURN e", "cypher:)-r-("),
-    # the PATTERN arm admits a type suffix on the relationship variable, and this
-    # row is why: without it the typed legacy spelling would be the one shape that
-    # slipped between `-[` and the untyped pattern
-    ("undirected UNBRACKETED hop with a type",
-     "MATCH (a)-r:IMPL-(b) RETURN a", "cypher:)-r-("),
     # procedures and algorithms. `apoc.` is the shape the census's own
     # before/after table advertises, so it is the one that must not ship untested.
     ("path procedure",
@@ -492,12 +478,7 @@ def test_every_capability_arm_is_pinned_or_declared_unreachable():
     describe an arm that no longer exists.
     """
     module = _tool()
-    # ⛔ THE PATTERN ARMS COUNT TOO. A pattern with no control row is an unpinned
-    # claim for exactly the reason a substring is, so its TOKEN joins the arm set
-    # the completeness pin grades (#14183 round-16, P2).
-    arms = set(module.GRAPH_CAPABILITY_CYPHER) | {
-        token.split("cypher:", 1)[1] for token, _ in module.GRAPH_CAPABILITY_PATTERNS
-    }
+    arms = set(module.GRAPH_CAPABILITY_CYPHER)
     pinned = {arm.split("cypher:", 1)[1] for _, _, arm in CAPABILITY_CONTROLS}
     assert not pinned - arms, (
         "a control row pins an arm the tool no longer has — the table is "
@@ -1573,20 +1554,22 @@ def test_the_noise_stripper_is_the_write_gates_grammar_plus_one_backtick_branch(
 def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
     """The arms must not misfile an honest row — the FALSE-BLOCK direction.
 
-    WHY THIS EXISTS. Four arms in this guard's history were contiguous punctuation
-    (``--``, ``<-``, ``size((``, ``exists {``) matched against a haystack with ALL
-    whitespace and backtick quoting removed. That normalisation is what closes the
-    false-PASS holes the rows above pin, and it is also what turns punctuation inside
-    ordinary Cypher into an apparent relationship: `$after - -1` becomes ``--1``,
-    `e.ts < -1` becomes ``s<-1``, `` n.`a--b` `` and `` n.`a<-b` `` unwrap to a
-    property NAME carrying the same characters, `RETURN size((collect(n)))` is a
-    grouping paren with no relationship anywhere, and `EXISTS { (n:Point) }` is a
-    NODE-existence test — an EDGE-existence predicate never reaches that arm,
-    because `-[` / `)<-` / `)--(` are SUBSTRING arms checked first and the PATTERN
-    arms run after all of them, so an `exists {` arm would have shadowed the
-    undirected unbracketed hop rather than the other way round (measured: with the
-    arm restored, `EXISTS { (e)-r-(p) }` returns `cypher:exists {`, not the
-    pattern's `cypher:)-r-(`) (#14183 round-16 review, P3).
+    WHY THIS EXISTS. Four tokens in this guard's history were matched as CONTIGUOUS
+    STRINGS against a haystack with ALL whitespace and backtick quoting removed —
+    ``--``, ``<-``, ``size((`` and ``exists {``. That normalisation is what closes
+    the false-PASS holes the rows above pin, and it is also what turns punctuation
+    inside ordinary Cypher into an apparent relationship: `$after - -1` becomes
+    ``--1``, `e.ts < -1` becomes ``s<-1``, `` n.`a--b` `` and `` n.`a<-b` `` unwrap
+    to a property NAME carrying the same characters, and
+    `RETURN size((collect(n)))` is a grouping paren with no relationship anywhere.
+    ⛔ `exists {` is the fourth and a different mechanism: it was a real arm, but
+    first-match ordering left it reachable ONLY on a NODE-existence predicate
+    (`EXISTS { (n:Point) }`) — an EDGE-existence predicate is decided by one of the
+    five hop arms ordered before it (`-[`, `]->`, `)<-`, `)--(`, `)-->`; a DIRECTED
+    predicate, for instance, is `)-->`) — so the arm could only misfile a predicate
+    that walks nothing, and it was removed (#14183 round-16 review, P3; the
+    five-arm list is the tool's own, corrected after round 18 measured `)-->` on
+    `EXISTS { (e)-->(p) }` and caught a three-arm list here that read as complete).
 
     WHAT IT WOULD BE FALSE WITHOUT. `readers_report()` derives its verdict from this
     predicate, so one misfiled row does not merely red a test: it publishes
@@ -1607,11 +1590,6 @@ def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
     nothing is refused, nothing that walks is smuggled past — and no row in this
     tree reaches it, so it stays a documented residual rather than a rewrite of the
     arm set into a grammar (#14183 round-16 review, P3; see the tool's `)<-` note).
-    ⚠️ The PATTERN arm has its own, ONE, and it is inherent rather than a choice: a
-    real undirected unbracketed hop `(a)-r-(b)` and a subtraction between
-    parenthesised operands `(total) - n - (subtotal)` are the same `)-ident-(`
-    shape, so no syntax-only arm can separate them. It fires (fail-closed) and the
-    tool names it there.
     """
     tool = _tool()
     walks_nothing = (
@@ -1628,17 +1606,6 @@ def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
         # arm was removed and returns `None` after (#14183 round-16 review, P3).
         ("a NODE-existence predicate, which walks nothing",
          "MATCH (n:Point) WHERE EXISTS { (n:Point) } RETURN n"),
-        # ⛔ THE PATTERN ARM'S OWN FALSE-POSITIVE GUARD (#14183 round-16, P2).
-        # `)\-(` and `-r-` would both misfile these; the pattern requires an
-        # IDENTIFIER (`[A-Za-z_]\w*`, never a literal) between the dashes, so it
-        # does not.
-        ("a subtraction of two parenthesised operands", "RETURN (a)-(b)"),
-        ("a literal subtracted between parenthesised operands",
-         "RETURN (a) - 1 - (b)"),
-        # ⚠️ NOT `RETURN (total) - n - (subtotal)`: that is INDISTINGUISHABLE from a
-        # real `(a)-r-(b)` hop by syntax alone — both are `)-ident-(`. The pattern
-        # arm accepts it (fail-closed), and the tool's `GRAPH_CAPABILITY_PATTERNS`
-        # block names it as its ONE residual rather than pretending it is closed.
     )
     misfiled = [
         f"{label}: {cypher!r} — {tool.graph_capability({'snippets': (cypher,)})!r}"
@@ -1653,7 +1620,6 @@ def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
     # The positive control: the anchoring must not have turned detection off.
     for cypher, arm in (
         ("MATCH (a:Point)<--(b) RETURN a", "cypher:)<-"),
-        ("MATCH (a)<-r-(b) RETURN a", "cypher:)<-"),
         ("MATCH (n:Point) WHERE NOT (n)--() RETURN n", "cypher:)--("),
         ("MATCH (a)-->(b) RETURN a", "cypher:)-->"),
         ("MATCH (e:GraphEvent)-[r:TOUCHED]->(p) RETURN p", "cypher:-["),
