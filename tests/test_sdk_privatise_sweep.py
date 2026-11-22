@@ -252,19 +252,22 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1163 lines at this head, measured through THIS
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1165 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`.
     "Re-derive it after a prose edit instead of trusting the figure" was advice nothing
     enforced, and the figure has been carried forward wrong repeatedly because of it:
     1049 was published while the walk returned 1056, then 1050 while it returned 1063, and
-    `#14258`'s own two prose commits took the run to 1066 on `main` while a sibling sentence
-    still said 985 — true at `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of
+    `#14258`'s own two prose commits took the run to 1066 on `main` while THIS sentence still
+    said 985 — true at `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of
     #14258, P3) — then the #14282/#14258 reconciliation recorded below moved it to 1140, the
     re-anchor of `main`'s positionally-addressed note (the `NAMED BY ITS CLOSING WORDS` note in
-    the block) moved it to 1147, and correcting that note's own mis-quoted ending — it called a
-    PREFIX of the sentence its close — moved it to 1152, and correcting that note's FALSE account of
-    how the second address rotted, plus an unreproducible "18 of the last 20" count in the same
-    block, moved it to 1163. Every one of those readings was an honest
+    the block) moved it to 1147, correcting that note's own mis-quoted ending — it called a
+    PREFIX of the sentence its close — moved it to 1152, and correcting that note's FALSE account
+    of how the second address rotted, plus an unreproducible "18 of the last 20" count in the
+    same block, moved it to 1165. ⛔ "THIS sentence", NOT "a sibling sentence" (cycle 2, P3): at
+    `04afeb811d` the only occurrence of the 985 reading in the tree was THIS sentence
+    (`git grep -n "985 lines" 04afeb811d` returns exactly one hit), so a sibling never published
+    it. Every one of those readings was an honest
     attempt at the number the sentence asks for, which is exactly why the number is now a gate
     rather than a note. ⛔ AND NO TOTAL IS ASSERTED HERE: the readings are listed above and their
     count is left to the history, because counting a prose enumeration in this same block is the
@@ -381,7 +384,9 @@ _ARM_REFSPECS: dict[str, str] = {
     # three above rather than replacing them: all five are an `OWN_PINS` key on the MERGED
     # tree, and `test_every_addressed_rev_names_a_fetchable_refspec` requires an address for
     # every one — so this is the union of two independently-correct maps, not a choice. The
-    # shape guards below grade all eleven entries identically.
+    # shape guards below grade every entry in the map identically, by deriving the population
+    # from the map rather than restating its size — a size typed in prose here goes stale on the
+    # next entry added, and nothing grades it (#14282 review cycle 2, P3).
     # ⛔ PR #14258's `OWN_PINS` GREW BY TWO AND THE MAP DID NOT FOLLOW, so
     # `test_the_own_pin_map_matches_each_revs_own_tree`'s `_requires(*sorted(OWN_PINS))` raised
     # `KeyError` instead of SKIPPING in the sharded `test` job — which checks out at
@@ -1608,8 +1613,8 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     of them since the union below, not the six this sentence used to claim
     (#14282 review cycle 3, P3: the six was written before `expected` gained `OWN_PINS`).
 
-    ⛔ AND THAT UNION IS THE MERGE ITSELF (#14282 merged with #14258), WHICH IS WHY IT IS
-    ELEVEN AND NOT THE OLD FIGURE. #14258 independently added two `OWN_PINS` keys,
+    ⛔ AND THAT UNION IS THE MERGE ITSELF (#14282 merged with #14258), WHICH IS WHY THE FIGURE
+    CHANGED FROM A FIXED ONE TO A DERIVED ONE. #14258 independently added two `OWN_PINS` keys,
     `10e51693f166` and `0351fe856942`, and its own reason for iterating `OWN_PINS` here is
     the same one:
     a fixed tuple leaves a newly-added key ungraded, and the failure surfaces not as a red
@@ -1617,11 +1622,11 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     a `fetch-depth: 1` checkout — an ERROR where a SKIP was designed. Both spellings and
     both key sets are kept, because a union that drops one side re-opens the hole it closed.
 
-    ⛔ THE REQUIRED SET INCLUDED ONLY THE SIX, SO A RE-CUT ADDRESS'S DELETION WAS STILL UNGRADED
-    (#14282 review cycle 2, P3). The three addresses the re-cut paragraph publishes were in the
-    map and their SHAPE was graded below, but they were absent from `expected`, so deleting one
-    left this arm GREEN — the loss surfacing at best as a `KeyError` out of `_rearm_command` on
-    the skip path, never as an assertion. `expected` is now the six UNION every `OWN_PINS` key,
+    ⛔ THE REQUIRED SET INCLUDED ONLY THE FIXED TUPLE, SO A RE-CUT ADDRESS'S DELETION WAS STILL
+    UNGRADED (#14282 review cycle 2, P3). The three addresses the re-cut paragraph publishes were
+    in the map and their SHAPE was graded below, but they were absent from `expected`, so deleting
+    one left this arm GREEN — the loss surfacing at best as a `KeyError` out of `_rearm_command` on
+    the skip path, never as an assertion. `expected` is now that tuple UNION every `OWN_PINS` key,
     because a rev the block publishes an OWN PIN for is exactly a rev a skip may name.
 
     ⛔ AND AN ABBREVIATED SOURCE IS THE SAME HOLE ONE SHAPE OVER (#14282 review, P3). The
@@ -1632,8 +1637,11 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     `fatal: couldn't find remote ref 5e83c2a2f6`. A source that IS a sha must therefore be the
     full 40 hex, never in between. ⛔ THAT SENTENCE IS PAST TENSE ON PURPOSE (#14282 review
     cycle 4, P3): it records the predicate that WAS here — this docstring said "matches
-    `[0-9a-f]{7,40}`" in the present tense, 33 lines above a comment saying the predicate is
-    NOT that, so a lane reconciling the two in the wrong direction would re-open this hole. The
+    `[0-9a-f]{7,40}`" in the present tense, a few lines above a comment saying the predicate is
+    NOT that, so a lane reconciling the two in the wrong direction would re-open this hole. ⛔ NO
+    LINE OFFSET IS TYPED (#14282 review cycle 2, P3): this read "33 lines above", which is
+    ungraded and rots on the next insertion — see this file's own rule that an address is named by
+    its TEXT and never by a line number. The
     guard now decides "is a sha" by a CASE-INSENSITIVE HEX PREFIX with a floor of 4 (git's
     minimum abbreviation) and then requires the full 40 LOWERCASE hex — see the comment above
     `if re.match(` below, which is the one place the rule is stated. The negative control drives
@@ -1658,12 +1666,16 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
         # would fetch rev B under rev A's address and every `_ref_sha` premise reading that ref
         # would be a premise about the WRONG TREE — the same "address that resolves to a different
         # tree" defect this block exists to catch, one level down in the re-arm path. The source is
-        # graded ONLY where it IS a sha: FIVE of the older entries address `refs/pull/14108/head`
+        # graded ONLY where it IS a sha: the older entries address `refs/pull/14108/head`
         # (a live pointer rather than an abbreviation of the key — measured: `83e94826a8a`,
         # `2fe01fc775e`, `aee14c5ceb`, `d5ecef0d72`, `d523c9be8c`), `origin/main` addresses a
-        # branch name, and `0351fe856942` (added by #14258) addresses `refs/pull/14160/head`, so
-        # SEVEN of the map's ELEVEN entries carry a non-sha source and are excused; the remaining
-        # FOUR are sha sources and are graded by both assertions below.
+        # branch name, and `0351fe856942` (added by #14258) addresses `refs/pull/14160/head` — so
+        # every entry whose source is a ref NAME is excused; the sha sources are graded by both
+        # assertions below. ⛔ THESE COUNTS ARE NOT TYPED (#14282 review cycle 2, P3): the split
+        # was published as "FIVE … SEVEN of … ELEVEN … the remaining FOUR" and nothing graded it —
+        # mutating those five numerals left the whole suite green — so the population is named by
+        # TEXT and its SIZE comes from the map, which is the only form that survives an entry
+        # being added.
         # ⛔ THE PREDICATE IS A HEX PREFIX, CASE-INSENSITIVE AND UNBOUNDED — NOT
         # `[0-9a-f]{7,40}` (#14282 review cycle 3, P3). The bounded-lowercase band graded only
         # what it admitted, so every sha-shaped source OUTSIDE it fell into the ref-NAME
