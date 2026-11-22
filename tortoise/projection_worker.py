@@ -62,9 +62,16 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    bound or by a stopping worker (``queue_full`` / ``worker_stopping``), which is
    what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls — with the bound at ``1``, or
    once the default saturates. (b) The STRUCTURAL arms, which fold inline on EVERY
-   write at ANY depth, including an idle queue: ``tenant is None`` (the
+   write at ANY depth, including an idle queue — ALL FOUR of the conditions
+   :func:`tortoise.live_write._submitted_to_worker` tests before it touches the
+   queue: ``journal_skipped`` (a record-only write, whose durable copy IS the
+   record), a ``record_sink`` door (it reads the outcome), a NON-DURABLE log (a
+   scratch buffer, which the seam itself declines), and ``tenant is None`` (the
    ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
-   pass no tenant) and every ``record_sink`` door. (c) An inline fold the bound
+   pass no tenant). ⛔ FOUR, not the two this paragraph used to name — a reader who
+   took ``tenant is None`` + ``record_sink`` as the whole family would think a
+   record-only write or a scratch log was counted, and neither is. (c) An inline
+   fold the bound
    cannot reach at all: an UNCOPYABLE record (the deep snapshot in :func:`submit`
    fails, so a write that would otherwise already be queued folds inline instead)
    and a ``submit`` FAULT (the ``queue_fault`` arm in :func:`submit`, published
