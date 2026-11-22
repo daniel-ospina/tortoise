@@ -110,7 +110,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # entry in it and NOTHING red — the document went on naming held addresses over a tree that had
     # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
     # the list into a guard.
-    (_AUDIT, "`:2921`", _SDK, 2921, "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"),
+    # ⛔ `:2921`→`:2950`: the `#14220` seam inserted 29 lines above the site, so the TREE cite moved
+    # while the HISTORY cite in the header (`:2876` at `main ae54df166d`, guarded by
+    # `test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree`) correctly did NOT.
+    # Re-derived by CONTENT at this head; the count follows the re-point, per this file's own rule.
+    (_AUDIT, "`:2950`", _SDK, 2950, "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`sdk.py:37883`", "tortoise/sdk.py", 37883, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:37906`", "tortoise/sdk.py", 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     # ⛔ The three rows below pin SITES the pair rows above cannot reach, because those rows carry
@@ -264,9 +268,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:22225", "tortoise/sdk.py", 22225, "search_text = _source_search_text(topics=topics)"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:22267", "tortoise/sdk.py", 22267, "s.summary=CASE WHEN $sum"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:22390`", "tortoise/sdk.py", 22390, "s.summary, s.topics, s."),
-    (_AUDIT, 'hosted_api.py:23501', 'tortoise/hosted_api.py', 23501, 'MERGE (s:Source {url:$did})'),
-    (_AUDIT, '`:23313`', 'tortoise/hosted_api.py', 23313, 'def _execute_commit_writes'),
-    (_AUDIT, '`:34276`', 'tortoise/hosted_api.py', 34276, 'MERGE (p:PackInstall {namespace: $ns})'),
+    (_AUDIT, 'hosted_api.py:23613', 'tortoise/hosted_api.py', 23613, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:23425`', 'tortoise/hosted_api.py', 23425, 'def _execute_commit_writes'),
+    (_AUDIT, '`:34388`', 'tortoise/hosted_api.py', 34388, 'MERGE (p:PackInstall {namespace: $ns})'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -353,7 +357,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
     # and grades it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16077-16082", "tortoise/sdk.py", 16077, "**JSONL event log (#548):** written when *point* is provided"),
-    (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    (_AUDIT, 'sdk.py:3830', _SDK, 3830, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -384,8 +388,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     ("search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:22267", "tortoise/sdk.py", 22267, "s.summary=CASE WHEN $sum"),
     (":22390", "tortoise/sdk.py", 22390, "s.summary, s.topics, s."),
-    ("hosted_api.py:23501", "tortoise/hosted_api.py", 23501, "MERGE (s:Source {url:$did})"),
-    (":23313", "tortoise/hosted_api.py", 23313, "def _execute_commit_writes"),
+    ("hosted_api.py:23613", "tortoise/hosted_api.py", 23613, "MERGE (s:Source {url:$did})"),
+    (":23425", "tortoise/hosted_api.py", 23425, "def _execute_commit_writes"),
 )
 
 
@@ -423,7 +427,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2921`'): 2,
+    # 1, not 2 (#14220): the SITE moved to `:2950` (below) and the header's HISTORY cite kept
+    # `:2921`, which the header arm guards verbatim.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2950`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37883`'): 1,
     # 3, not 2: the whole-node walk's address is written BARE at three sites — the header's pair
     # (`sdk.py:37883`/`:37906`), the proximity paragraph's "they are `:37883` and `:37906` now", and
@@ -492,9 +498,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22225'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22267'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22390`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23501'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23313`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:34276`'): 1,
+    # 3 → 3 (#14220 moved ALL three occurrences together: header, row 13, and the re-derivation note).
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23613'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23425`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:34388`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
@@ -541,7 +548,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # #14043 review (finding 1): one site each in §6.3. Measured on this document:
     # `grep -o -F 'sdk.py:16077-16082' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16082'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3801'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3830'): 1,
 }
 
 

@@ -1313,15 +1313,15 @@ retired, so read them as "this is what it did last time", not as "this is what i
 ⛔ **It is REPORTED, never folded into `status`** — the same rule as `embedder`, `capture` and
 `wait_bound_breaches`. A deployment serving identical vectors in-process is not degraded, and a
 `worker` backing is not a verdict either. The caller-facing contract for a dense leg that cannot run
-is #2952's per-read declaration, and this change does not touch it. If `seam_status()` itself raises,
-the block arrives with the SAME key set, every value `null`, plus `error`, and `/health` is still a
-**200** — read `backing: null` as INCONCLUSIVE, never as "in-process". ⛔ There are **two** degraded
-arms and they differ in ONE field, so read `injected` by arm: when `seam_status()` itself raises,
-`embed_seam` answers its own arm, which reports `injected` from **module state** (`true` if a test
-installed a backing — the field is a fact about the process, not about the failed read); when the
-IMPORT or the call raises, `_embed_seam_health` publishes every key as `null`, `injected` included. In
-both, `error` is the verdict and `backing: null` means the seam could not be described — never "no
-encoder".
+is #2952's per-read declaration, and this change does not touch it. If the IMPORT of
+`seam_status` fails, or calling it raises out of it, the block arrives with the SAME key set, every
+value `null`, plus `error`, and `/health` is still a **200** — read `backing: null` as INCONCLUSIVE,
+never as "in-process". ⛔ There are **two** degraded arms and their TRIGGERS differ, so read `injected`
+by trigger: when a read INSIDE `seam_status()` raises, `embed_seam` answers its own arm, which
+reports `injected` from **module state** (`true` if a test installed a backing — the field is a fact
+about the process, not about the failed read); when the import fails or the call raises out of the
+module altogether, `_embed_seam_health` publishes every key as `null`, `injected` included. In both,
+`error` is the verdict and `backing: null` means the seam could not be described — never "no encoder".
 
 #### The two levers
 

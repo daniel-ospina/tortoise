@@ -765,9 +765,12 @@ class _LineJSONClient:
                     _LineJSONClient._peer_note_emitted = True
                     _logger.warning(
                         "embed seam: this kernel reports no SO_PEERCRED — the "
-                        "answering peer's uid is UNCHECKED on %s; the only "
-                        "protection is the socket's 0700 directory (#14186)",
-                        self._address)
+                        "answering peer's uid is UNCHECKED on %s; what protects "
+                        "it now is the socket's OWN directory, and only while this "
+                        "uid owns it privately — an explicit %s under a shared "
+                        "parent is unprotected (see the shared-path warning) "
+                        "(#14186)",
+                        self._address, ENV_WORKER_SOCKET)
             elif peer != os.getuid():
                 sock.close()
                 raise RuntimeError(

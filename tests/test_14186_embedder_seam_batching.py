@@ -862,7 +862,10 @@ class TestTheDistributionsAreExported:
         assert "TORTOISE_EMBED_BACKING unreadable" in block["error"]
         assert set(block) == set(hosted_api._EMBED_SEAM_HEALTH_KEYS) | {"error"}
         # The degraded arm's own shape: every key null except ``injected``, which
-        # it answers ``False`` (nothing was injected into a read that failed).
+        # it answers from MODULE STATE — nothing is injected in this row, so it
+        # reads ``False``. (It is NOT "false because the read failed": the field is
+        # a fact about this process, not about the failed read — review P3, cycle
+        # 9 caught this comment still stating the reason the code had abandoned.)
         for key in hosted_api._EMBED_SEAM_HEALTH_KEYS:
             if key == "injected":
                 assert block[key] is False, block[key]
@@ -1812,9 +1815,13 @@ class TestTheClientSaysWhenItCannotVerifyThePeer:
                  if "SO_PEERCRED" in r.getMessage()]
         assert len(notes) == 1, [r.getMessage() for r in notes]
         assert "UNCHECKED" in notes[0].getMessage()
-        assert "0700" in notes[0].getMessage(), (
-            "the note does not say what is left defending the socket: "
-            f"{notes[0].getMessage()!r}")
+        message = notes[0].getMessage()
+        assert "OWN directory" in message, (
+            f"the note does not say what is left defending the socket: {message!r}")
+        assert "shared" in message and "unprotected" in message, (
+            "the note promises the directory unconditionally — an explicit "
+            "TORTOISE_EMBED_WORKER_SOCKET under a shared parent has no 0700 "
+            f"directory and is left unprotected: {message!r}")
 
     def test_a_FOREIGN_uid_is_still_refused(self, tmp_path, monkeypatch):
         """The check itself, so the note above cannot hide a deleted refusal."""

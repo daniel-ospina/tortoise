@@ -116,8 +116,13 @@ def _peer_allowed(conn: socket.socket) -> bool:
 
     The PRIMARY control is the private ``0700`` directory the client mints for
     the socket (:meth:`tortoise.embed_seam.WorkerBacking.socket_path`), which no
-    other user can traverse. This is the belt: it keeps the property when an
-    operator points ``TORTOISE_EMBED_WORKER_SOCKET`` at a shared path, which the
+    other user can traverse. This is the belt against a foreign CLIENT — the one
+    direction this process can police. ⛔ IT DOES NOT COVER THE OTHER ONE (review
+    P3, cycle 9): when an operator points ``TORTOISE_EMBED_WORKER_SOCKET`` at a
+    shared path, a foreign process can bind that path FIRST and become the server,
+    and then this check is the attacker's own code. Neither this lever nor
+    ``TORTOISE_EMBED_WORKER_REQUIRE_PEER`` closes that direction — leaving the path unshared does. What follows
+    describes the client-facing belt, which the
     directory cannot protect.
 
     Direction of the read is the convergent one (vLLM, and the ``myunix.org``

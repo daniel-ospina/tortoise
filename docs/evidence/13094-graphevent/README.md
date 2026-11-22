@@ -168,7 +168,7 @@ answer, with the refutations executed rather than argued:
    half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16203`, contract restated in
    `event_store.append_event`'s own docstring: *"a payload-only emit writes one with no JSONL record
    at all"*). This is not hypothetical: the turn hard-delete lane calls exactly that shape —
-   `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3801`) — and the
+   `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3830`) — and the
    surrounding comment states the split as a contract, *"Two stores, one meaning each"*.
    **Executed pin:** `tests/test_13094_graphevent_home.py::
    test_a_payload_only_emit_writes_the_store_and_no_journal_record` emits one, asserts the store holds
