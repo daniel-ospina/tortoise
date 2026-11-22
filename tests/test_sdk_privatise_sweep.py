@@ -255,15 +255,19 @@ def _residue_block() -> str:
     ⛔ ITS EXTENT IS THE ENTIRE RUN (1152 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`.
     "Re-derive it after a prose edit instead of trusting the figure" was advice nothing
-    enforced, and FIVE separate figures have now been carried forward wrong because of it:
+    enforced, and the figure has been carried forward wrong repeatedly because of it:
     1049 was published while the walk returned 1056, then 1050 while it returned 1063, and
     `#14258`'s own two prose commits took the run to 1066 on `main` while a sibling sentence
     still said 985 — true at `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of
     #14258, P3) — then the #14282/#14258 reconciliation recorded below moved it to 1140, the
     re-anchor of `main`'s positionally-addressed note (the `NAMED BY ITS CLOSING WORDS` note in
     the block) moved it to 1147, and correcting that note's own mis-quoted ending — it called a
-    PREFIX of the sentence its close — moved it to 1152. SIX readings of SIX different trees,
-    every one of them honest, which is exactly why the number is now a gate rather than a note.
+    PREFIX of the sentence its close — moved it to 1152. Every one of those readings was an honest
+    attempt at the number the sentence asks for, which is exactly why the number is now a gate
+    rather than a note. ⛔ AND NO TOTAL IS ASSERTED HERE: the readings are listed above and their
+    count is left to the history, because counting a prose enumeration in this same block is the
+    stale-figure class one level up — "FIVE" and then "SIX" were both published for this one
+    population, by this one block, before the total was dropped.
     `#14086` left one blank line inside the run and it silently
     shrank to 22 until the #14188 repair), AND THE ARMS GRADE
     ALL OF IT
@@ -507,13 +511,21 @@ def test_the_extent_figure_is_the_walks_own_count():
     """The line count `_residue_block()` publishes must be what its OWN walk returns.
 
     ⛔ THE FIGURE WAS ADVICE, NOT A GATE (#14282 review cycle 3, P3), AND IT WAS CARRIED WRONG
-    THREE TIMES BECAUSE OF IT. The docstring said "re-derive it after a prose edit instead of
-    trusting the figure" and nothing enforced that, so the figure drifted to 1049 while the walk
-    returned 1056, and a re-derivation then published 1050 while the walk returned 1063. Each of
-    those was an honest attempt at the number the sentence asks for — which is the point: an
-    instruction to re-derive is not a check, and a figure read off a sentence is exactly the class
-    this PR exists to repair. The sentence is therefore graded here, so a prose edit that changes
-    the extent REDS and names both numbers instead of quietly publishing a stale one.
+    REPEATEDLY BECAUSE OF IT. An instruction to re-derive is not a check, and a figure read off a
+    sentence is exactly the class this PR exists to repair — so the sentence is graded here, and
+    a prose edit that changes the extent REDS, naming both numbers, instead of quietly publishing
+    a stale one.
+
+    ⛔ NO COUNT AND NO HISTORY IS RESTATED HERE (#14282 review, P3). An earlier cut of this
+    docstring said the figure had been carried wrong "three times" while `_residue_block`'s own
+    docstring — the `ITS EXTENT IS THE ENTIRE RUN` paragraph above, named by its TEXT because a
+    positional address rots under the next insertion — said five, then six, in successive cuts of
+    this same branch: three numbers for one population, every one of them authored by this PR, so
+    a reader auditing the count had to re-derive it instead of trusting either. NEITHER place
+    states a total now, which is why there is nothing left here to disagree about. The readings live in ONE place (`_residue_block`'s docstring, beside the
+    figures they name); repeating the enumeration here is the same stale-restatement defect this
+    gate exists to close, one level up. That is why this arm asserts the FIGURE and not the
+    history.
 
     Scoped to THIS sentence's figure: the docstring legitimately quotes other counts (`shrank to
     22`, `round 17`), and a looser match would grade those against the walk and red an honest edit.
