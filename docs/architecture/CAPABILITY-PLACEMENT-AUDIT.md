@@ -234,14 +234,13 @@ way, because each of the five already carries its pair from §2.5. A bare siblin
 agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
 §2.5 token, so a second one-token spelling would red it. Each was
 opened at this head, and ⛔ **none of them
-opens at the pin**: at `ccb49741b2ec` all five of those numbers
-read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31551p;31533p;24513p;24857p'`)
-— and for the `mcp_server.py` one the pin's file does not reach the address at all: it is **11,466
-lines** (`git show ccb49741b2ec:tortoise/mcp_server.py | wc -l`), so `sed -n '11590p'` prints nothing.
-`#14169` rewrote that file (**348 added, 30 removed**: `git show --numstat b4da1f5c018d --
-tortoise/mcp_server.py`) and moved the literal `+309`, to a line 124 past where the pin's file ends —
-so the head these five belong to is this one, and a
-reader sent to the pin would have found a different line at every one of them — which is why they are
+opens at the pin**: at `ccb49741b2ec` the four `sdk.py` numbers
+read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31551p;31533p;24513p;24857p'`),
+and the fifth has **no line there at all** — `git show ccb49741b2ec:tortoise/mcp_server.py | wc -l` -> `11466`, so
+`:11590` is past the pin's EOF, and the address that list carried at the pin was `:10730`, which IS that very
+traversal (`git show ccb49741b2ec:tortoise/mcp_server.py | sed -n '10730p'` -> `OPTIONAL MATCH (t)<-[:TAGGED]-(q)`),
+so the pin's row was right there and only the re-derived `:11281` this file carried until now was not — so the head these five belong to is this one, and a
+reader sent to the pin would have found a different line at four of the five — which is why they are
 enumerated here rather than left to the paragraph's own say-so. ⚠️ **And nine MORE addresses this revision writes at THIS head were in neither list — this PR's own review found them — so they are enumerated here now**: `live.py`: `:667` (the `EPISTEMIC_LABELS` tuple the EP walk is swept per label from; the pin's `:667` is a docstring line), `sdk.py`: `:15873` (the `MATCH (m:GraphEventMeta) RETURN m.first_seq` watermark arm; the pin's `:15873` is a comment line, `# is graded on the merged state like any addressed edit, so a`), `hosted_backup.py`: `:844` (the `max(m.last_seq), max(m.first_seq)` read, the pin's line being an `if not rows` guard) and `:916` (the `MERGE (m:GraphEventMeta) SET …` restore writer, the pin's line being a bare `)`), and — from §2.6, whose row this revision re-pointed to this head — `hosted_backup.py:892` (the `max(e.seq), min(e.seq)` aggregate; the pin's `:892` is `max_seq, min_seq = (rows[0] if rows else (None, None))`), `hosted_backup.py:1333` and `hosted_backup.py:1534` (the two whole-graph RESTORE-side scans, the pin's `:1316` being `dropped_vectors += 1` and its `:1517` a blank line — the `retired_vectors` rename lands later, so at THIS head `:1316` reads `retired_vectors += 1`). and §6.3's `sdk.py`: `:16077-16082` (the `_emit_event` docstring's JSONL contract — the pin's `:16077` is unrelated prose) and `:3801` (the turn hard delete that emits `PointRetracted`; the pin's `:3801` is a different statement, `sdk._graph_write_with_retry(`). ⛔ **THREE of the nine are graded AT THIS SITE; the other six are not, and this sentence said so falsely
 until it was measured.** The §2.6 `:892` row and the `:1333` / `:1534` pair each carry a one- or two-occurrence
 count in `_TOKEN_OCCURRENCES`, so re-pointing one of them here REDS the suite (measured: `:1333`→`:1334`
