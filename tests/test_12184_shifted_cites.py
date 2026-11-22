@@ -78,16 +78,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md (search_engine.py +3, cache_projection.py +2)
     (_AUDIT, "cache_projection.py:3841", _CP, 3841, 'if table == "point"'),
     (_AUDIT, "search_engine.py:4950-4954", _SE, 4954, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)"),
-    (_AUDIT, "search_engine.py:6837", _SE, 6837, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
-    (_AUDIT, "search_engine.py:7196", _SE, 7196, "(n:Point)-[r:aboutSubject]->(:Subject)"),
-    (_AUDIT, "search_engine.py:7198", _SE, 7198, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
+    (_AUDIT, "search_engine.py:7153", _SE, 7153, "(op)-[r2:IMPL|hasPart]-(other:Point)"),
+    (_AUDIT, "search_engine.py:7560", _SE, 7560, "(n:Point)-[r:aboutSubject]->(:Subject)"),
+    (_AUDIT, "search_engine.py:7562", _SE, 7562, "(m:Event)-[r2:aboutSubject]->(:Subject)"),
     # Row 149's TWO BARE range cites carry no `search_engine.py` prefix, so the token-level pins for
     # `6659`/`6661` above do not reach them — they are the only shifted mentions in this document the
     # first pin set missed. Both were already correct at the pre-fix head, so these two are
     # COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this class (`:4549`
     # re-pointed to `:4552`), which is the failure the whole file exists for.
-    (_AUDIT, "`:7195-7198`", _SE, 7195, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
-    (_AUDIT, "`:7201-7214`", _SE, 7201, "def subject_binding_available"),
+    (_AUDIT, "`:7559-7562`", _SE, 7559, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
+    (_AUDIT, "`:7565-7578`", _SE, 7565, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3157", _SE, 3157, "CALL db.idx.fulltext.queryNodes"),
     (_AUDIT, "| `tortoise/search_engine.py:4878-4880` |", _SE, 4878, "MATCH (n:{label_str})"),
     # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4878-4880` is a
@@ -227,7 +227,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:24626", "tortoise/sdk.py", 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
-    (_AUDIT, "search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
+    (_AUDIT, "search_engine.py:7184", _SE, 7184, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3508", _SE, 3508, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3506`", _SE, 3506, "# #11682: the corpus join is PER FAMILY"),
@@ -276,7 +276,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⚠️ Widened from the bare `` `:6681` `` this pass first wrote (review cycle 6, F5): a bare `:NNNN`
     # is exactly the shape the comment above says is excluded — it is satisfied by any sibling spelling
     # of the same digits — and this row was the one of the four that carried it.
-    (_AUDIT, '`:6834` inside the same function', _SE, 6834, 'if expand_ops:'),
+    (_AUDIT, '`:7150` inside the same function', _SE, 7150, 'if expand_ops:'),
     (_AUDIT, '`:3062` derives the label', _SE, 3062, 'label = "Source" if entity_type =='),
     # --- three re-derived addresses that had NO pin at all, so a `+1` mutation left 441 tests green
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
@@ -381,7 +381,7 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
     # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
     ("sdk.py:24626", "tortoise/sdk.py", 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
-    ("search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
+    ("search_engine.py:7184", _SE, 7184, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:22267", "tortoise/sdk.py", 22267, "s.summary=CASE WHEN $sum"),
     (":22390", "tortoise/sdk.py", 22390, "s.summary, s.topics, s."),
     ("hosted_api.py:23501", "tortoise/hosted_api.py", 23501, "MERGE (s:Source {url:$did})"),
@@ -409,11 +409,11 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4950-4954'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6837'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7196'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7198'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7195-7198`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7201-7214`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7153'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7560'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7562'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7559-7562`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7565-7578`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3157'): 5,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4878-4880` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4293'): 1,
@@ -468,7 +468,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24626'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6891'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7184'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3508'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37547'): 1,
@@ -497,7 +497,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:34276`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7150` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28581` at this head'): 1,
     # ⛔ #14087 review round 7: the pin row added for the SAME line's other present-tense address.
@@ -1181,8 +1181,8 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58966): 56415,
     ("tortoise/sdk.py", 61999): 56415,
     ("tortoise/sdk.py", 62019): 56415,
-    ("tortoise/search_engine.py", 7196): 7071,
-    ("tortoise/search_engine.py", 7198): 7071,
+    ("tortoise/search_engine.py", 7560): 7071,
+    ("tortoise/search_engine.py", 7562): 7071,
     ("tortoise/hosted_api.py", 50935): 49851,
     ("tortoise/mcp_server.py", 11590): 11466,
 }
@@ -1237,7 +1237,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     # (2) every one of them is NAMED where the header promises to name them: the non-comparable enumeration,
     # the sentence between "that are NOT comparable" and "past the pin's copy of its file". Either spelling
     # form the document uses for a pair counts — `SDK/FILE:NNNN` (`sdk.py:57951`) or the bare `:NNNN`
-    # sibling behind an adjacent path (`search_engine.py`'s `:7196`).
+    # sibling behind an adjacent path (`search_engine.py`'s `:7560`).
     start = body.find("that are NOT comparable")
     end = body.find("past the pin's copy of its file")
     assert start != -1 and end > start, (
@@ -1995,7 +1995,7 @@ def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
     shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
     assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
     # A range token is accepted on any line INSIDE the range it names (the anchor convention).
-    inside = (_AUDIT, "`:7195-7198`", _SE, 7198, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
+    inside = (_AUDIT, "`:7559-7562`", _SE, 7562, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
     assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
 
 
