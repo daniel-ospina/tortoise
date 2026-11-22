@@ -91,7 +91,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # COMPLETENESS pins: they catch the re-point/double-shift that DID happen in this class (`:4549`
     # re-pointed to `:4552`), which is the failure the whole file exists for.
     (_AUDIT, "`:7559-7562`", _SE, 7559, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
-    (_AUDIT, "`:7565-7578`", _SE, 7565, "def subject_binding_available"),
+    (_AUDIT, "`:7565-7603`", _SE, 7565, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3157", _SE, 3157, "CALL db.idx.fulltext.queryNodes"),
     (_AUDIT, "| `tortoise/search_engine.py:4878-4880` |", _SE, 4878, "MATCH (n:{label_str})"),
     # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4878-4880` is a
@@ -481,7 +481,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7560'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7562'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7559-7562`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7565-7578`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7565-7603`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3157'): 5,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4878-4880` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4293'): 1,

@@ -1076,7 +1076,8 @@ SWEEP_NAMES = 66
 #: ── RE-CUT AT THE TENTH MERGE TREE (`#13998` × `main` `72c104bcbb`) ───────────────
 #: ⛔ BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE — every block is true of the tree it names, and a
 #: reader re-deriving this pin needs the whole chain. Neither side's figure is combined into this
-#: one: the pair below is `--repin`'s output on THIS merged tree, and nothing else.
+#: one: THE PAIR THIS RECORD PRINTS BELOW is `--repin`'s output on the tree this block NAMES
+#: (`#13998` × `main` `72c104bcbb`, the tenth merge tree), and nothing else.
 #: It prints **(11852, '52e4a15116d6f32b')** — the SAME pair as the ninth merge tree, and that is a
 #: measurement rather than a carry: the digest is over the whole `row -> count` multiset, so an
 #: identical digest is an identical residue SET, which says `main`'s `69908d006b..72c104bcbb` commits
