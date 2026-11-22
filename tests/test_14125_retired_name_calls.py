@@ -408,11 +408,14 @@ _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 #: ⛔ WHAT THE MAP FIXES IS THE CHARGE SIDE, and the honest statement of the other side is
 #: that it cannot be fixed here: `_required_names` holds only the concrete parents and the
 #: seam gate tests the literal `"ImportError"`, so a credited subclass spelling satisfies
-#: neither — a block that re-raises ONLY `ModuleNotFoundError` is still red. That is
-#: deliberate, because the arm naming the subclass does not re-raise the plain `ImportError`
-#: that a renamed NAME raises inside an own-code import. The map's live effects are the
-#: charge and the masking (`_masked_by`), where a parent arm really does mask a child one
-#: (review of #14287, P2-2).
+#: neither — a block that SWALLOWS while re-raising ONLY `ModuleNotFoundError` is still red.
+#: ⛔ NOT a block with no dropping arm at all: `swallows` is False there and BOTH gates are
+#: `swallows`-conditioned, so a lone precise re-raise is SKIPPED — GREEN, never red (review
+#: of PR #14287, P2; "the gate reds a correct repair" is the reading that argues for
+#: weakening the gate this census exists to keep). Not crediting the parent is deliberate:
+#: the arm naming the subclass does not re-raise the plain `ImportError` that a renamed NAME
+#: raises inside an own-code import. The map's live effects are the charge and the masking
+#: (`_masked_by`), where a parent arm really does mask a child one (review of #14287, P2-2).
 _RAISED_ALIAS = {
     "ModuleNotFoundError": "ImportError",
     "ZipImportError": "ImportError",
@@ -2405,7 +2408,13 @@ def test_every_availability_probe_re_raises_a_programming_error():
             f"2, #14125):\n{rendered}\n\n"
             "Insert the re-raise arm immediately before the broad handler (one "
             "tuple, or separate `except ImportError: raise` — the four names are "
-            "required between them, not in one line). Keep the broad arm: an "
+            "required between them, not in one line). ⛔ CHECK WHAT DROPS FIRST: if a "
+            "NARROW arm ABOVE the re-raise already drops the family — e.g. "
+            "`except ModuleNotFoundError: FLAG = False` above a four-name re-raise — "
+            "the drop site is THAT arm, and inserting or hoisting a re-raise arm "
+            "below it changes nothing (the earlier arm already handled the name, so "
+            "the later one is unreachable for it). Re-raise or delete the EARLIER "
+            "dropping arm; do not add a second arm below it. Keep the broad arm: an "
             "absent server raises `redis.exceptions.ConnectionError` (a "
             "`RedisError`, NOT an `OSError`), so narrowing to `OSError` would "
             "turn a real skip into an error."
@@ -2433,6 +2442,12 @@ def test_a_probe_that_imports_inside_its_try_covers_the_import_seam():
             "imported module is swallowed as 'storage unavailable' (#14125 "
             f"class 2, the import seam):\n{rendered}\n\n"
             "Add `ImportError` to the arm, or hoist the import above the `try`. "
+            "⛔ CHECK THE ACCOUNTING BEFORE EITHER: if the arm ALREADY names "
+            "`ImportError` but an EARLIER narrow arm drops the same family (e.g. "
+            "`except ModuleNotFoundError: FLAG = False` above it), the name is absent "
+            "from the covered set because the earlier arm handled it — not because "
+            "the spelling is missing. Adding it again, or hoisting, changes nothing; "
+            "re-raise or delete the EARLIER dropping arm. "
             "(A third-party import is out of scope here: for an optional extra, "
             "a skip is the correct outcome.) ⛔ NEITHER REPAIR FITS AN EXTRA-GATED OWN "
             "MODULE (`tortoise.embeddings`, numpy only in the `embeddings` extra) — see "
@@ -4996,11 +5011,20 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
 
     # 4j-octovicesimus-bis. THE SUBCLASS SPELLINGS are the same event: `ModuleNotFoundError`
     #     is how a moved module actually raises at the seam this file exists for, and
-    #     `UnboundLocalError` is `NameError`'s. Neither `_RAISED` (charging) nor the
-    #     coverage credit recognised them, so `except ModuleNotFoundError:` alone was GREEN
-    #     in both gates when it dropped and RED when it re-raised correctly — the exact
-    #     "redded for having fixed it" defect fixed for `raise exc` (review of #14160,
-    #     cycle 10, P1-2).
+    #     `UnboundLocalError` is `NameError`'s. `_RAISED` did not name them, so
+    #     `except ModuleNotFoundError:` alone was GREEN in both gates when it DROPPED —
+    #     `swallows` was False, so `except ModuleNotFoundError: pass` above a RE-RAISING
+    #     broad arm was invisible to both gates, which skip on the charge. RE-RAISING the
+    #     precise arm changed nothing: `swallows` was already False and the coverage credit
+    #     already returned the raw spelling, so the spelling produced no red on either side
+    #     of the fix. The one "red when it re-raised" shape — a precise re-raise above a
+    #     broad arm that DROPS — is red on BOTH trees, and its red is the broad arm's drop,
+    #     not the spelling (measured, review of PR #14287, P2 `4j-octovicesimus-bis`). The
+    #     CHARGE, not the credit, is what closed it (review of #14160, cycle 10, P1-2, as
+    #     corrected for `raise exc`).
+    #     ⛔ Do NOT read this as licence to credit the subclass as its PARENT: that is the
+    #     fail-open `_covered`'s docstring forbids — the seam gate would then read "any
+    #     ImportError propagates" while a reachable arm below could still swallow one.
     _subclass_drop = [
         node
         for node in ast.walk(
@@ -5093,8 +5117,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #: arm, which is already `set(_handler_names(...))` — so it cannot witness the credit
     #: half of the subclass work, and this comment used to present it as if it did. What it
     #: DOES pin, and must keep pinning, is that credit is never CANONICALISED on output: the
-    #: mutation `out |= {_RAISED_ALIAS.get(n, n) …}` reds this row and nothing else. The
-    #: alias map's live effects are the CHARGE side, the masking account, and the
+    #: mutation `out |= {_RAISED_ALIAS.get(n, n) …}` reds this row AND the `child raised,
+    #: then parent raised` masking row below — its canonicalised first arm credits
+    #: `ImportError` where that row expects `ModuleNotFoundError` — so the claim is "these
+    #: two rows", never "nothing else" (review of PR #14287, P3; measured).
+    #: The alias map's live effects are the CHARGE side, the masking account, and the
     #: family-close; the GATE-level witness for the family-close lives in
     #: `test_the_import_seam_census_sees_the_shapes_it_grades` (`rename_dropped`), because a
     #: predicate row cannot see a gate verdict.
