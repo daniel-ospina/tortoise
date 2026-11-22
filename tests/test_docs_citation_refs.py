@@ -5370,9 +5370,13 @@ def test_the_d5_spelling_measurement_FAILS_CLOSED_and_tolerates_a_NAMED_refusal(
     `if ran.returncode not in (0, 1): continue` reds this test AND the cell-level
     `test_the_alias_cell_reds_a_MEASUREMENT_FAILURE_it_must_not_call_portability` (4 failed, 37
     passed); the narrower `if False:` mutant reds these same two. That is not redundancy: this one
-    pins the MAPPING's contract directly, that one pins the CELL's wiring to it. Widening the
-    tolerance past a named refusal reds the second `pytest.raises` here. Both directions are the
-    assertion, not the prose.
+    pins the MAPPING's contract directly, that one pins the CELL's wiring to it. The two DIRECTIONS
+    live in two places, and neither is here: this test's single `pytest.raises` is the NARROWING
+    direction, while WIDENING the tolerance past a named refusal (adding `"Is a directory"` to
+    `_D5_GREP_OPTION_REFUSAL_MARKERS`) leaves this test green and reds the marker row of
+    `test_the_d5_grep_portability_tolerance_covers_a_REFUSAL_and_nothing_else` — MEASURED, 1 failed
+    / 40 passed, that test only (#14306 pins lane review, P3). Both directions are asserted, not
+    merely described.
     """
     def ran(returncode: int, stdout: str, stderr: str) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(args=["grep"], returncode=returncode,
@@ -5409,7 +5413,7 @@ def test_the_d5_alias_cell_SKIPS_LAST_so_a_broken_reader_row_still_REDS(monkeypa
     everything` (#14306 review F5) breaks the FIRST reader row; the arms here break the first `-u`
     row and the LAST row, and the third is what closes the window between them — see below.
 
-    Both arms feed the cell an all-declined grep and call it directly:
+    All three arms feed the cell an all-declined grep and call it directly:
       * with the real reader, the cell must reach the END of its body and SKIP;
       * with one reader row deliberately broken (`_d5_count_prescriptions` returns nothing, so a
         real `-u` prescription goes unread), the cell must RED. A skip winning here means the row
