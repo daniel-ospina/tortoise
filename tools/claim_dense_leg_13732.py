@@ -1522,7 +1522,13 @@ class SeedReport:
         return bool(self.positions_unproven) and self.record_armed is not False
 
     def _fold_note(self) -> str:
-        """WHY a fold is named — one sentence per cause, in `_fold_needed`'s order.
+        """WHY a fold is named — one sentence per cause.
+
+        The NOTE's order is its own, and deliberately not `_fold_needed()`'s: the
+        "ran and lost the row" cause leads here because it is the one an operator
+        can do nothing about by re-reading the queue (#14222 review round 17, P3 —
+        an earlier revision of this docstring claimed it matched `_fold_needed`'s
+        order, which the round that added that cause had already broken).
 
         ⛔ THE NOTE USED TO BE WRITTEN FOR TWO OF THE THREE TRIGGERS (#14222
         review, P2 of the round that read the undrained arm). It opened

@@ -355,7 +355,28 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
             "`tools/record_runner.py apply` folds it idempotently (#14185)",
             seq)
         return "record_no_outcome"
-    if getattr(result, "applied", True) is False:
+    _absent = object()
+    applied = getattr(result, "applied", _absent)
+    if applied is _absent:
+        # ⛔ AN OUTCOME WHOSE `applied` CANNOT BE READ IS "NOTHING WAS OBSERVED", not
+        # a written row (#14222 review round 17, P3). The default used to be `True`,
+        # so an object with no readable `applied` fell through as a PROJECTION —
+        # the opposite of what this docstring says ("answered a value whose outcome
+        # could not be READ … nothing was observed") and of what `live_write` does
+        # on the same input (`getattr(outcome, "applied", False)`, fail-closed).
+        # The raising-property shape was already covered by the caller's `try`;
+        # this is the ABSENT-attribute shape, and it is latent today (both
+        # production doors answer `RecordWrite | None`) — which is exactly why it
+        # is cheap to make fail closed now rather than after a door changes.
+        LOGGER.warning(
+            "projection_worker: the deferred record projection for journal "
+            "position %s answered an object with no readable `applied` — nothing "
+            "could be observed, so this counts as NO OUTCOME rather than as a "
+            "written row. The journal holds the line and "
+            "`tools/record_runner.py apply` folds it idempotently (#14185)",
+            seq)
+        return "record_no_outcome"
+    if applied is False:
         refusal = getattr(result, "refusal", None)
         if refusal is not None and refusal == _non_durable_journal_refusal():
             return None          # the seam's healthy decline, not a loss (#9231)
