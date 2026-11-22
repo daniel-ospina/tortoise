@@ -1374,17 +1374,17 @@ SWEEP_NAMES = 66
 #: `tests/test_14125_retired_name_calls.py`), and never the reason the squash reds.
 #: No other row differs in either direction, so nothing was absorbed: `typed references still
 #: pointing at a public name` is **0** on this tree, and the direction the pin exists to catch — a
-#: NEW row SHAPE — is not what happened here. Re-measured on the MERGED tree with `--repin`,
+#: NEW row SHAPE — is not what happened here. Re-measured on `main`'s own tree with `--repin`,
 #: never carried from the pair quoted above by arithmetic: `(11861, "f0647020531c078c")`, and
 #: `--check` exits 0 on it.
 #: ⛔ MERGED `origin/main` `0467ba329d` INTO THIS PR (the PR was `CONFLICTING`: four commits,
 #: `#14258`, `#14295`, `#14281`, `#14303`) — a NINTH tree, so the pair is `--repin`'s output on
 #: THIS merged tree and neither side's numeral is carried: the branch's 11870 marked its own
 #: pre-merge tree and `main`'s 11861 marked `main`'s, and this is neither. `--repin` prints
-#: **(11860, '6051234d8dab29c8')** and `--check` exits 0 on it with `typed references still
+#: **(11870, '6da40999bb5162fa')** and `--check` exits 0 on it with `typed references still
 #: pointing at a public name: 0`.
-#: ⚠️ THE MERGED PIN IS LOWER THAN BOTH SIDES' (11860 against 11870 / 11861), so the merge NET
-#: REMOVED untyped-receiver rows while also taking main's new files. What this record does NOT
+#: ⚠️ THE MERGED PIN EQUALS THE BRANCH'S PRE-MERGE FIGURE AND SITS 9 ROWS ABOVE `main`'S (11870
+#: against 11870 / 11861), so the merge did NOT net-remove rows. What this record does NOT
 #: do is attribute that net by arithmetic on the three numerals — the direction the pin exists to
 #: catch is a NEW row SHAPE, and `--repin`'s own row report (`--report --base <sha> --top 5000`,
 #: run on this tree against each side's tree) is the only thing that attributes it. Unmeasured
@@ -1393,7 +1393,7 @@ SWEEP_NAMES = 66
 #: brought their own across this merge, so the dead one was deleted with its prose KEPT (a second
 #: assignment is what `tests/test_sdk_privatise_sweep.py`'s one-assignment arm exists to refuse,
 #: because Python binds the LAST while a first-anchored walk grades only the prose above the FIRST).
-SWEEP_RESIDUE = (11860, "6051234d8dab29c8")
+SWEEP_RESIDUE = (11870, "6da40999bb5162fa")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

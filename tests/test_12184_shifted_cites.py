@@ -1854,7 +1854,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     # ⛔ THAT IDENTITY ALONE IS NOT ENOUGH, and it is the whole finding (#14038 review cycle 13, P2): it
     # relates two PUBLISHED numbers to each other, so it agreed with itself on the word `zero` for as long
     # as the sentence said zero — while `origin/main`'s own file sizes refute zero (`hosted_api.py` is
-    # 51,508 lines there against the twelve's `:51607`). A relation between two claims cannot catch a wrong
+    # 51,521 lines there against the twelve's `:51620`). A relation between two claims cannot catch a wrong
     # claim. So `absent_at_main` is compared against `main`'s BLOBS below, and the decomposition against
     # the header's TOTAL.
     assert drifters_incomparable + absent_at_main == len(_PIN_EOF_PAIRS), (
@@ -2014,7 +2014,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             f"the one at this head's {_prov_head_line}, which is what makes it a move and not an "
             f"insertion. Re-derive both addresses.")
     # ⛔ The head ADDRESS is pinned, not merely same-statement: this branch's 114 inserted lines sit
-    # ABOVE `main`'s 51493, so every pair `(n, n+114)` inside that block is a same-statement pair with
+    # ABOVE `main`'s 51,506, so every pair `(n, n+114)` inside that block is a same-statement pair with
     # the right arithmetic — a header could state `main`'s 51,494 (`params["uid"] = actor_filter`) and
     # this head's 51,608 and stay GREEN (#14038 cycle 15, P2 — MEASURED: that doc passed this file while
     # the same-statement and arithmetic arms both held). The split counts ONE pair for this file, so the
