@@ -5113,7 +5113,21 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #: `except ImportError:` drop — reads as a swallow. Measured on this head: as-is `False`,
     #: mutant `True`, and NO other row varies, so the guard could be deleted silently. The pair
     #: below pins both halves: the broad arm that RE-RAISES charges nothing below it, and the
-    #: broad arm that DROPS charges (the control — this is not "broad arms never charge").
+    #: broad arm that DROPS charges.
+    #:
+    #: ⛔ THE SECOND ROW IS A DELIBERATE DUPLICATE, NOT A CONTROL (review of PR #14287 @
+    #: `b83e5511f4`, final P2; follow-up recorded on #14125). Measured, it has NO unique
+    #: discriminating power, and the earlier claim here — "the control, this is not 'broad arms
+    #: never charge'" — was the opposite of what it pins:
+    #:   * that reading applied CONSISTENTLY (drop `names & _BROAD` here AND `_BROAD` from the
+    #:     charge test) leaves this row `True` — green, because its own second arm
+    #:     `except ImportError: <drop>` charges that shape on its own merits;
+    #:   * the `return not _reraises(handler)` → `return False` mutant reds it, but reds the
+    #:     PRE-EXISTING table row `("a broad arm", …, True)` in the `_swallows_everything`
+    #:     table just as hard.
+    #: So the reading is caught by that pre-existing row, not by this one: KEEP BOTH, and do not
+    #: delete the `("a broad arm", …)` table row believing this pair covers it — that is the
+    #: tidy-up this comment used to invite.
     _broad_dead_drop = [
         node
         for node in ast.walk(
