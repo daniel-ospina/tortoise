@@ -1120,9 +1120,13 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward. ⛔ THAT CLAUSE IS FALSIFIED AND KEPT ONLY AS THE CLAIM THE RE-CUT BELOW
-#: REPLACES: `11858` reproduces on NO tree in this range — `--check` reads 11857 at `94d75667dc^`
-#: and 11860 at `94d75667dc` — so it was never a reading of this tree. Everything after this point
-#: is the current record; this sentence is the one the re-pin was supposed to have replaced.
+#: REPLACES: `11858` was never a reading of THIS tree. WHERE THE PAIR CAME FROM is measured too —
+#: `--repin` on `917ae19efd` (a branch commit, NOT an ancestor of this head) prints it exactly:
+#: that tree carries the `out.update` row and NONE of `94d75667dc`'s three `proj.g.query` rows,
+#: because it is not rebased over that commit (`--check` reads 11857 at `94d75667dc^` and 11860 at
+#: `94d75667dc`, so no main tree in that span carries it either). A reading taken on that branch
+#: could not stand for a tree that merged `94d75667dc` — which is why 11858 is not a fabrication
+#: and still not this tree's pin. Everything after this point is the current record.
 #:
 #: ⛔ RE-CUT AGAIN → (11861, "f0647020531c078c"). The 11858 pair does NOT reproduce on the tree
 #: that commits it: `--check` on a detached worktree of `10e51693f1` reports 11861 against its own
