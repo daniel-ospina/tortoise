@@ -1930,6 +1930,11 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             # test that attributes the warning to pytest's own frame
             # (`_pytest/python.py:167`), which is precisely the file:line this
             # line exists to surface. Default `stacklevel=1` names THIS file.
+            # It is spelled out because `ruff`'s B028 requires an EXPLICIT
+            # stacklevel — the value is the default, so nothing changes but the
+            # lint red (`ruff check .` is a required job and a new violation in
+            # a new file reds it).
+            stacklevel=1,
         )
     if _main_readable:
         _measured_absent = sum(1 for _path, _line in _PIN_EOF_PAIRS if _line > _main_sizes[_path])

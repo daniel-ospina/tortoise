@@ -32,10 +32,9 @@ from unittest.mock import patch
 import pytest
 
 from tests.fake_control_plane import FakeControlPlane
-from tortoise import capacity_notice as cn
 from tortoise import allowance_gate as ag
-from tortoise import quota
-from tortoise import email_notify
+from tortoise import capacity_notice as cn
+from tortoise import email_notify, quota
 from tortoise import supabase_control as sc
 from tortoise.supabase_control import (
     org_storage_notice_pct,
