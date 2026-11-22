@@ -1329,24 +1329,38 @@ def test_the_suite_window_is_the_opened_window_not_the_half_bound():
 
     Mutant that reds this row: drop the `_capture_ack_ceiling_s` override from the
     fixture. The ceiling is then 5.0 s and the join the suite actually gets is
-    5 s — not the 30 s the fixture promises.
+    5 s — not the window the fixture promises.
+
+    ⛔ THE WINDOW MUST ALSO COVER A COLD RECORD PHASE, which is a separate fact and
+    a second way this claim can be false: the grace is anchored on ARRIVAL, so a
+    record phase longer than the window leaves the join zero time even with the
+    clamp fully open. Measured on this box: the first capture in a process reached
+    the join with `arrival_age = 123.6 s`. Hence the asserted value is the suite's
+    own constant and the constant carries the cold-start margin — a literal here
+    would silently re-open the race the moment the constant moved.
     """
-    assert ha._CAPTURE_ACK_DEADLINE_S == 30.0, (
+    from tests.conftest import _CAPTURE_ACK_WINDOW_S
+
+    assert ha._CAPTURE_ACK_DEADLINE_S == _CAPTURE_ACK_WINDOW_S, (
         "the fixture must open the window for the whole suite: "
-        f"{ha._CAPTURE_ACK_DEADLINE_S}")
+        f"{ha._CAPTURE_ACK_DEADLINE_S} != {_CAPTURE_ACK_WINDOW_S}")
+    assert _CAPTURE_ACK_WINDOW_S > 123.6, (
+        "the suite window must exceed the MEASURED cold record phase (123.6 s at "
+        "the join on this box, 2026-11-22), or the arrival-anchored grace is already "
+        f"spent when the join starts: {_CAPTURE_ACK_WINDOW_S}s")
     ceiling = ha._capture_ack_ceiling_s()
     assert ceiling == ha._CAPTURE_ACK_DEADLINE_S, (
         f"the join's ceiling is {ceiling}s while the window is "
         f"{ha._CAPTURE_ACK_DEADLINE_S}s — the production clamp "
-        "(`min(window, _TRANSPORT_WAIT_BOUND_S / 2)` = 5 s) is still in place and "
-        "a cold vocabulary compile (~12 s) therefore reds a pre-existing capture "
+        "(`min(window, _TRANSPORT_WAIT_BOUND_S / 2)` = 5 s) is still in place, so a "
+        "cold record phase or a cold vocabulary compile reds a pre-existing capture "
         "assertion on a deadline expiry (#5049 rule 1)")
     # …and the JOIN really uses it: a request that just arrived gets the window.
     import types
 
     request = types.SimpleNamespace(
         state=types.SimpleNamespace(_wait_bound_t0=time.monotonic()))
-    assert ha._capture_ack_grace_s(request) > 25.0, (
+    assert ha._capture_ack_grace_s(request) > 250.0, (
         "the ceiling is open but the join's grace is not: "
         f"{ha._capture_ack_grace_s(request)}")
 

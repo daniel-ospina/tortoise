@@ -2137,6 +2137,13 @@ from tests._verdict import (  # noqa: E402
     reset_process_globals,
 )
 
+#: The window the SUITE opens `_CAPTURE_ACK_DEADLINE_S` to. Deliberately far larger
+#: than any real capture, because the grace is anchored on ARRIVAL and must survive a
+#: COLD record phase: measured 2026-11-22 on this box, the first capture in a process
+#: reached the join with `arrival_age = 123.6 s`. A window below that is already spent
+#: when the join starts, so the ACK defers and a pre-existing in-budget assertion reds.
+_CAPTURE_ACK_WINDOW_S = 300.0
+
 
 @pytest.fixture(autouse=True)
 def _capture_ack_window_is_deterministic(monkeypatch):
@@ -2162,17 +2169,29 @@ def _capture_ack_window_is_deterministic(monkeypatch):
     round 5), and the deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
     commutes this same value to 0 for the ack-path tests. Nothing in the product
     reads this constant differently; it is the test substrate that must not race.
+
+    ⛔ THE WINDOW MUST COVER THE **RECORD** PHASE, not only the extraction. The
+    grace is anchored on ARRIVAL (`_capture_ack_grace_s`), so by the time the join
+    is reached the record phase has already spent part of it — and a COLD one is
+    expensive: measured on this box 2026-11-22, the first capture in a process had
+    `arrival_age = 123.6 s` at the join, which is a spent window at ANY deadline
+    below that and defers the ACK. That is how
+    `test_hosted_api.py::TestSessionCapture::test_capture_session_returns_expected_shape`
+    (a pre-existing row asserting the in-budget receipt) reds — measured RED
+    identically with the pre-change 5 s clamp and with 30 s, so it was never the
+    clamp alone. `_CAPTURE_ACK_WINDOW_S` therefore carries a cold-start margin.
     """
     module = sys.modules.get("tortoise.hosted_api")
     if module is not None:
-        monkeypatch.setattr(module, "_CAPTURE_ACK_DEADLINE_S", 30.0)
+        monkeypatch.setattr(module, "_CAPTURE_ACK_DEADLINE_S",
+                            _CAPTURE_ACK_WINDOW_S)
         # ⛔ THE CLAMP IS OPENED WITH THE WINDOW, or the sentence above is false.
         # The production clamp is `min(window, half the transport bound)`, i.e.
-        # `min(30.0, 5.0) = 5.0` — five seconds of wall clock in front of every
+        # `min(300.0, 5.0) = 5.0` — five seconds of wall clock in front of every
         # "the POST body reports what was extracted" assertion in the suite. The
         # seam is ONE function so this stays a single override, and it reads the
         # LIVE deadline so a row that pins the deadline itself (`_force_join`) still
-        # gets the value it pinned rather than this fixture's 30 s.
+        # gets the value it pinned rather than this fixture's window.
         monkeypatch.setattr(module, "_capture_ack_ceiling_s",
                             lambda: module._CAPTURE_ACK_DEADLINE_S)
         # A tail left pending by a torn-down loop can never run again (its loop is
