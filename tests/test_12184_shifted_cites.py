@@ -264,6 +264,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # §2.4's prose AND row 2b's own copy, which is why each token occurs twice.
     (_AUDIT, "hosted_api.py:21451-21453", "tortoise/hosted_api.py", 21453, "coalesce(n.is_episodic,false) <> true"),
     (_AUDIT, "hosted_api.py:21458", "tortoise/hosted_api.py", 21458, "_stamp_capture_provenance("),
+    # ⛔ The four addresses the `#14038` cycle-3 pass RE-DERIVED BY CONTENT after the −21 fold had left
+    # them pointing at a comment and a receipt builder — and, pinned here, the reason they cannot drift
+    # back silently: `:21128` was a comment (the calls are `21433`/`43794`/`43902`), `hosted_api.py`'s
+    # `:22529` was inside a receipt builder (the call is `:23062`), and `sdk.py:18872` was a blank `#`
+    # with `:18769` a comment (the extractor PAYLOAD read is `:21393`, `pt` bound at `:21321`).
+    # (`:61999`/`:62019` are re-pointed and pinned by the row-2d pass above; not duplicated here.)
+    (_AUDIT, "hosted_api.py:23062", "tortoise/hosted_api.py", 23062, "sdk._find_point_by_content("),
+    (_AUDIT, "sdk.py:21433", _SDK, 21433, "hit_id = self._find_point_by_content("),
+    (_AUDIT, "sdk.py:21393", _SDK, 21393, '_mention_records = pt.get("mentions")'),
+    (_AUDIT, "`:21321`", _SDK, 21321, 'for pt in payload.get("points", []) or []:'),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -351,6 +361,19 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_INDEX, '`entity_verdict.py:43`', _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
     (_EVIDENCE, '(`sdk.py:28581`), so any non-NULL', _SDK, 28581, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, 'called at `sdk.py:28945`', _SDK, 28945, 'result = apply_entity_merge('),
+    # --- row 2d's `:Meta` pair was the last `+21`-class cite in this document, and NOTHING pinned it.
+    # The `#14038` re-cut wrote `sdk.py:62020`/`:62040` at `c5ca268aa96`, where `:62020` WAS the
+    # `MATCH (m:Meta {key:$key}) RETURN m.recordedAt` statement and `:62040` WAS
+    # `def _config_reset_state(`. A later fold took 21 lines out of `sdk.py` above both, so at this
+    # head `:62020` is a DOCSTRING line and `:62040` is the `# #4282 Phase 2` banner — two cites that
+    # read as re-derived and open on prose. Measured, not inferred:
+    # `sed -n '61999p;62019p' tortoise/sdk.py` prints the read and the `def`. Both rows pin the CONTENT
+    # the row's prose claims, because the population arms (`_PIN_EOF_PAIRS`, the census triple) are
+    # INVARIANT under a re-point — they hold every number this pair can be moved to — and the drift
+    # numerator cannot see them either (both sit past the pin's `sdk.py`, so they are non-comparable).
+    # That is the whole uncovered-claim class: only opening the line catches it, so the line is pinned.
+    (_AUDIT, '`sdk.py:61999` (reads)', _SDK, 61999, '"MATCH (m:Meta {key:$key}) RETURN m.recordedAt"'),
+    (_AUDIT, '`sdk.py:62019` (`_config_reset_state`)', _SDK, 62019, 'def _config_reset_state(self) -> dict | None:'),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
     # ⛔ The branch's `+147` to `hosted_backup.py` moved `def _index_has_is_operator()` from
     # `origin/main`'s `:2519` to `:2666` (`:2684` is that def's DOCSTRING line, so the `+4` that
@@ -496,6 +519,10 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21451-21453'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21458'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23062'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21433'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21393'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21321`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37527`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37546` is the `:Source` line'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37567`)**)'): 1,
@@ -657,6 +684,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:15873`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:16077-16082`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3801`'): 1,
+    # row 2d's `:Meta` pair — one SITE each, written once as a one-token spelling (the two-span forms
+    # at `:135`/`:149` are different spellings and cannot satisfy these counts).
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:61999` (reads)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:62019` (`_config_reset_state`)'): 1,
 }
 
 
@@ -1733,8 +1764,8 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58315): 56415,
     ("tortoise/sdk.py", 58317): 56415,
     ("tortoise/sdk.py", 58966): 56415,
-    ("tortoise/sdk.py", 62020): 56415,
-    ("tortoise/sdk.py", 62040): 56415,
+    ("tortoise/sdk.py", 61999): 56415,
+    ("tortoise/sdk.py", 62019): 56415,
     ("tortoise/search_engine.py", 7170): 7071,
     ("tortoise/search_engine.py", 7201): 7071,
     ("tortoise/search_engine.py", 7577): 7071,
@@ -3139,7 +3170,15 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`) and the SUBSTRATE sentence's three
     # OPENING values (`:37527`, `:37546`, `:37567`), which a forward merge had resurrected at +21 while
     # the two graded headlines stayed right.
-    assert len(_PINS) == 107
+    # 107 -> 109 at the `#14038` fix lane's row-2d pass: the `:Meta` pair (`sdk.py:62020`/`:62040`) was
+    # the LAST `+21`-class cite in this document, and it was unobservable to EVERY population arm —
+    # `_figure_problems` is invariant under a re-point (345/229/116/169 hold at any address this pair
+    # takes), and the drift numerator cannot see it because both addresses sit past the pin's `sdk.py`
+    # and are therefore non-comparable. Only opening the line catches this class, so the line is pinned.
+    # 109 -> 113 at the follow-up lane: the two rows the previous fix lane NAMED but did not establish
+    # (2d's `_find_point_by_content` callers, 14's payload-`mentions` read and its `pt` binding) are
+    # re-pointed by content and pinned — four rows, each anchored on the line its row claims.
+    assert len(_PINS) == 113
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
