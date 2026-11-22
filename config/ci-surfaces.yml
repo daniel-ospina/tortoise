@@ -57,9 +57,22 @@ version: 1
 # #14015's M5 row to a 25 m worst shard (arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom), and
 # the 2026-11-23 sweep to the 28 m above (arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of headroom).
 # Those numerals are a
+# 2026-11-16 durations sweep re-packed the same 11 shards to a 23 m worst-shard watchdog, and
+# #12926's own 10.0 s row moved that emission one whole minute further; #14015's M5 row moved it
+# once more, to a 25 m worst shard: arm-2 SUM 56.64 m,
+# x 1.5 = 85.0 m, 5.0 m of headroom — and the 2026-11-23 sweep moved it AGAIN, to a 28 m worst
+# shard: arm-2 SUM 59.64 m, x 1.5 = 89.5 m, 0.5 m of headroom — and main's own #14387 fold then moved
+# the pool another 0.5 s, so at THIS head the same verb packs five shards at 835.7 s (a, c, d, e, k)
+# and six at 835.6 s (b, f, g, h, i, j), `ceil(835.7/60 x 2)` = 28 m: the MINUTE is where the sweep
+# left it and the SECONDS are not, which is the whole reason the sentence below is graded rather than
+# trusted. Those numerals are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head — re-derive them with
 # that verb rather than trusting them, but a restatement is fine when it cites the emission
-# it came from.) ⛔ The cap was NOT
+# it came from — and the promise is GRADED, not just stated:
+# `tests/test_ci_selection.py::test_the_fast_shards_header_block_states_the_measured_emission`
+# compares the per-shard sentence above against the live emission (and its own `ceil(...)` operand
+# against the emitted watchdog), so a carried figure reds a required leg instead of shipping, which
+# is how this block went stale three times before (#14296).) ⛔ The cap was NOT
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).
