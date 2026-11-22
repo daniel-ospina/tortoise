@@ -1120,7 +1120,36 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#: ⛔ SUPERSEDED BY THE RE-CUT BELOW — the sentence above ends "`--check` exits 0 at this head on
+#: the SAME pair", and that reading did NOT survive the commits merged beside it: the census moved
+#: three rows before the pin commit itself landed. Read the re-cut, not that sentence.
+#:
+#: ⛔ RE-CUT → (11861, "f0647020531c078c"), and NONE of the THREE rows between the 11858 pin and
+#: this reading belongs to this change: the pin commit is a tree that does not hold its own number.
+#: MEASURED, never carried forward — `--report --base 28ca66878d7c --top 5000` was run on THREE
+#: trees, each printed row set sorted and diffed. All three print 856 distinct residue SHAPES, so
+#: no shape was added or retired anywhere in the range and only two rows moved their count:
+#:   * `e74cf1d13d` — the commit whose own pin is 11857 — re-derives `(11857, "ed40203dbbf32b87")`
+#:     on its own tree, so that pin was TRUE where it was cut, and the 11857 reading is validated by
+#:     re-measurement rather than assumed;
+#:   * `10e51693f1`, the commit that set 11858, re-derives 11861 on its OWN tree — so 11858 was
+#:     stale at birth, by exactly the three rows the two bullets below name.
+#: THE DELTA IS ATTRIBUTED BY THE ROW DIFF, never by arithmetic on the last pin:
+#:   * `out.update` 42 → 43 (+1), the row `10e51693f1`'s own block declares (the `out: set[str]`
+#:     accumulator in `_global_declarations`, `tests/test_14125_retired_name_calls.py`). That is why
+#:     11858 = 11857 + 1 was the right pair for the tree THAT lane measured: the other three rows
+#:     were not in it yet;
+#:   * `proj.g.query` 3643 → 3646 (+3), all three in `tools/read_wave_latency.py`, added by
+#:     `94d75667dc` (#14224) — an ANCESTOR of the pin commit (`git merge-base --is-ancestor
+#:     94d75667dc 10e51693f1` exits 0) that re-pinned nothing. The sites are two
+#:     `proj.g.query("MATCH (n:Point) RETURN count(n)")` reads in `seed` and one in the corpus id
+#:     read, where `proj = sdk._get_proj()`, so `proj.g` is a FalkorDB `Graph` — this sweep's
+#:     documented edge (a `Graph` is never the SDK), and exactly the ordinary-word receiver the
+#:     counter exists to REPORT rather than rewrite. No public name is legitimised by these rows.
+#: `11857 + 1 + 3 = 11861` is a CROSS-CHECK of the two measured row sets, never their evidence; the
+#: evidence is those `--report` readings and the sort-then-diff between them. `--check` on this tree
+#: now exits 0 with `typed references still pointing at a public name: 0`, measured.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
