@@ -1097,10 +1097,25 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     # exactly the live wrapper shape this test needs.
     binary.write_bytes(Path(sys.executable).read_bytes())
     binary.chmod(0o755)
+    # ⛔ THE COPY NEEDS ITS STDLIB (#14335 follow-up, MEASURED on the `uv` standalone build):
+    # a RELOCATABLE interpreter (`python-build-standalone` — what `uv` installs and what
+    # `actions/setup-python` provisions) resolves its prefix from the EXECUTABLE'S OWN PATH,
+    # so a copy in `tmp_path` finds no `lib/pythonX.Y` and exits immediately:
+    #     cp <uv-python>/bin/python3.9 /tmp/x/redis-server; (sleep 20) | timeout 3 /tmp/x/redis-server
+    #     -> rc=1   (and, with stderr shown: "Could not find platform independent libraries")
+    #     -> rc=124 with `PYTHONHOME=<base_prefix>`   (blocks on stdin, which is the shape
+    #        this test needs)
+    # A Debian-style interpreter has a compiled-in `/usr` fallback and hides the defect, which
+    # is why this only reds on SOME runners — the exact "reds on every PR that runs this
+    # shard" class #14335 was filed to remove. `PYTHONHOME` is the portable override and is
+    # derived from the interpreter we are already running under, so it names the prefix the
+    # copied bytes would have used in place.
+    child_env = {**os.environ, "PYTHONHOME": sys.base_prefix}
     gone = tmp_path / "gone-socket-dir"
     line = f"{binary} unixsocket:{gone}/redis.socket"
     child = subprocess.Popen(
-        [line], executable=str(binary), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL
+        [line], executable=str(binary), stdin=subprocess.PIPE, env=child_env,
+        stdout=subprocess.DEVNULL,
     )
     try:
         seen = False
@@ -1122,9 +1137,12 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
         while child.poll() is None and time.monotonic() < settle_deadline:
             time.sleep(0.05)
         assert child.poll() is None, (
-            "the fixture child exited instead of blocking on stdin — the stand-in "
-            "binary refused its argv[0], so this test would grade a zombie rather "
-            "than a live wrapper-exec'd server"
+            "the fixture child exited instead of blocking on stdin "
+            f"(returncode={child.returncode}) — the stand-in binary did not reach its "
+            "input loop, so this test would grade a zombie rather than a live "
+            "wrapper-exec'd server. On a RELOCATABLE interpreter this is usually a missing "
+            "stdlib for the copied binary (see PYTHONHOME above), not an `argv[0]` refusal; "
+            "reproduce it by running the copy by hand and reading its stderr"
         )
         inventory = reaper._iter_proc_inventory()
         assert inventory is not None
