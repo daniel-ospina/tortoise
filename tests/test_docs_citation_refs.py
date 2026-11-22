@@ -8748,6 +8748,93 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
             "refusing a historical reading is the same defect in the other direction")
 
 
+#: ⛔ A `--numstat` PAIR TYPED FOR A RANGE "RE-TAKEN" AT THE HEAD BEING READ — the sibling
+#: defect of the detector above, in the document that STATES the rule (#14249 review, P2).
+#:
+#: `CYPHER-INVENTORY.md`'s §7 re-cut paragraph tells the reader to "re-TAKE, never carry" a
+#: figure, and then broke that rule in the sentence doing the telling: it claimed the re-taken
+#: range "reads `403 401`", which is its own `381 379` plus `#14260`'s 22-line `sdk.py`
+#: insertion applied a SECOND time. No head on the branch's first-parent line produces that
+#: pair — measured over 25 heads, which read `43 39` or `42 40` — so the figure was the exact
+#: class this PR exists to repair, surviving inside the clause that names it.
+#:
+#: ⛔ WHY NOTHING SAW IT: every alternative in `_TYPED_INDEX_NUMSTAT` above keys on the word
+#: `numstat` within a window that cannot cross a backtick, or on a command span quoted
+#: immediately beside the figure. Here the command span finishes ~250 characters and three
+#: code spans earlier, and the verb is `reads` — absent from that pattern's class. So the
+#: sentence was GREEN in every arm of the file this doc's figures are graded by.
+#:
+#: DECLARED SCOPE: this reads a typed PAIR behind a `range`/`numstat` noun and a present-tense
+#: verb. It does NOT grade every pair this doc types — a pair stated per-hunk beside the
+#: command that prints it (the form §7 uses for `3 1`) is a claim about a DIFF, which no test
+#: can re-derive from a prose page at the merge. Narrow, and it does not describe itself as
+#: complete: the residual is a paraphrase whose noun or verb is outside both lists.
+_TYPED_RETAKEN_NUMSTAT = re.compile(
+    r"(?:\brange\b|\bnumstat\b)[^`]{0,140}?"
+    r"(?:reads?|prints?|print|returns?|reports?|shows?|gives?|lists?|names?|->|\u2192)"
+    r"\s*`\d+\s+\d+`"
+)
+
+
+def test_the_cypher_inventory_types_no_numstat_pair_for_a_range_re_taken_here():
+    """⛔ §7's re-cut paragraph typed `403 401` — a pair no head in this branch produced.
+
+    The paragraph's own rule is that a numstat names its head and is RE-TAKEN, never carried;
+    its own clause then carried one (`381 379` + `#14260`'s 22 lines, applied twice). A figure
+    that no head produces is the defect class this bundle exists to repair, so it is graded
+    rather than trusted — the same doctrine, one file over, as the `05-verify.md` arm above.
+
+    NON-VACUITY, MEASURED: the pre-fix sentence is the witness list in the sibling arm below;
+    injecting it back into this document reds HERE, and the pair is absent from every head in
+    `git log --first-parent origin/main..HEAD` (measured at this head: 25 heads, `43 39` /
+    `42 40`, never that pair — the figure is arithmetic on a figure, not a measurement).
+    """
+    doc = (DOCS / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    typed = [m.group(0) for m in _TYPED_RETAKEN_NUMSTAT.finditer(doc)]
+    assert not typed, (
+        "CYPHER-INVENTORY.md TYPES a numstat pair for a range it says is re-taken here "
+        f"({typed[0]!r}). A numstat is head-bound: state the command and let the reader "
+        "re-derive the pair at the head being merged, or type no figure at all — a carried "
+        "pair is the double-shift §7 exists to record (#14249 review, P2)")
+
+
+def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
+    """Both directions, because a detector whose classes are never exercised is a blacklist.
+
+    MEASURED: replacing `_TYPED_RETAKEN_NUMSTAT` with a never-matching pattern reds the doc
+    arm above only while the defect is present; this arm is the witness that keeps it able to
+    see one, and the allowed list is what keeps it from over-blocking the RETRACTION forms the
+    same paragraph legitimately uses ("no figure is typed here", "re-taken rather than
+    carried").
+    """
+    for _typed in (
+        # ⛔ the sentence that shipped, verbatim from the pre-fix document
+        "so the three-dot form collapses to two-dot and the same range re-taken here "
+        "reads `403 401`",
+        "the same range RE-TAKEN at this head prints `43 39`",
+        "the numstat reads `3 1` at this head",
+        "the range -> `2 0`",
+    ):
+        assert _TYPED_RETAKEN_NUMSTAT.search(_typed), (
+            f"the re-taken-numstat detector does not see {_typed!r} — that spelling of a "
+            "head-bound pair walks through green (#14249 review, P2)")
+    for _allowed in (
+        # the repaired clause: the RULE, with no figure typed for it
+        "so the three-dot form collapses to two-dot, and the range is RE-TAKEN at the head "
+        "you merge rather than carried",
+        # the paragraph's retraction form, which must stay allowed
+        "an earlier cut of this clause typed a pair for the re-taken range, and it was the "
+        "`381 379` above plus `#14260`'s 22-line `sdk.py` insertion applied a SECOND time",
+        "NO figure is typed here; a numstat is head-bound",
+        # the per-hunk form §7 uses for `3 1`: the command's span closes before the pair
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "-> `3 1`)",
+    ):
+        assert not _TYPED_RETAKEN_NUMSTAT.search(_allowed), (
+            f"the re-taken-numstat detector REFUSES {_allowed!r}, which types no current "
+            "pair — refusing a retraction is the same defect in the other direction")
+
+
 def _added_cite_tokens(diff_text: str) -> set[str]:
     """The `sdk.py:<n>` tokens a `--word-diff=plain` patch ADDS to `docs/00_index.md`.
 
