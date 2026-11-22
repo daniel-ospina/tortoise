@@ -344,7 +344,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
     # §2.6's row, re-pointed to this head by the same review: the census's `:890`/`:1182`/`:1383` do not land
     # on these statements at this head, and `hosted_backup.py` drifts in TWO steps (`+2` above the pin's `:58`,
-    # `+132` above the pin's `:1175`) — so the offsets are `+2`/`+134`, not one delta. Pinned by content
+    # and the whole `+151` end to end above it — `:1182`->`:1333`, `:1383`->`:1534`; the block's internal split is
+    # not re-derived) — so one delta is not enough. Pinned by content
     # because the header's enumeration names them and promises exactly that.
     (_AUDIT, "hosted_backup.py:892", _HB, 892, '"MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"'),
     (_AUDIT, "hosted_backup.py:1333", _HB, 1333, 'MATCH (n) RETURN labels(n), properties(n)'),
@@ -2396,7 +2397,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # §2.7's own note (file-scoped drift is "either fixed everywhere or trusted nowhere") is why the
     # file's remaining unpinned sites are closed in the same commit.
     # 77 -> 80 by the rc lane's §2.6 re-cut (`0a53ad23d8`): the three statements it re-pointed at this
-    # head — `hosted_backup.py:892`, `:1316`, `:1517` — needed rows of their own, because a re-point
+    # head — `hosted_backup.py:892`, `:1333`, `:1534` — needed rows of their own, because a re-point
     # whose new address is unpinned "moves the defect rather than closing it" (that re-cut's own
     # re-review). MEASURED, not inferred: the count of `_PINS` rows at each of these heads is
     # 72 (ecb137107e) -> 77 (298d3328db, the five above) -> 80 (0a53ad23d8).
