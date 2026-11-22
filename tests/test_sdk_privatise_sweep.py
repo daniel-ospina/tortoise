@@ -1614,8 +1614,14 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     missing, empty the map and that same line reds naming every rev in `expected` — the fixed
     tuple UNION `OWN_PINS`. ⛔ ITS SIZE IS DERIVED, NEVER TYPED (#14282 review cycle 2, P3, the
     same class the map's own note repairs): this sentence published a figure — "the six", then
-    "ELEVEN" — and each went stale the moment `OWN_PINS` gained a key, because no arm grades a
-    size restated in prose. A reader who needs the population's size reads `expected`.
+    "ELEVEN" — and each went stale the moment `OWN_PINS` gained a key, because no arm grades the
+    size restated in THIS sentence. ⛔ SCOPED TO THIS SENTENCE, DELIBERATELY (#14282 review, P3):
+    an earlier cut of this clause said "no arm grades a size restated in prose", which is FALSE of
+    the tree and its wrong outcome is deletion of a live arm — `tools/sdk_privatise.py`'s counts
+    (`SIX`/`EIGHT`, the `RESIDUE_INTERVAL_COMMITS`/`RESIDUE_CARRIER_COUNT` constants) ARE graded,
+    by the arms in this file, because the numerals there are load-bearing. The rule is about a
+    figure published HERE without a grader, never about prose generally. A reader who needs the
+    population's size reads `expected`.
 
     ⛔ AND THAT UNION IS THE MERGE ITSELF (#14282 merged with #14258), WHICH IS WHY THE FIGURE
     CHANGED FROM A FIXED ONE TO A DERIVED ONE. #14258 independently added two `OWN_PINS` keys,
