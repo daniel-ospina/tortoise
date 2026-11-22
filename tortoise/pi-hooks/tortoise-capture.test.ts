@@ -38,6 +38,7 @@ import {
   DISCARD_COUNT_EXCEEDED,
   DISCARD_HTTP_REJECTED,
   DISCARD_META_UNREADABLE,
+  DISCARD_SPOOL_SATURATED,
   HARNESS,
   MAX_ATTEMPTS,
   MAX_TURNS,
@@ -6437,4 +6438,82 @@ test("the writer REFUSES when it cannot read the LOG either (#12487)", () => {
     "a log this process could not read must never be moved aside",
   );
   assert.equal(readFileSync(logPath, "utf8").split("\n").filter(Boolean).length, 1);
+});
+
+test("a growth of an unreadable entry is counted ONCE (#14347 F2)", () => {
+  // `prior === undefined` is not "nothing is on disk": in the UNUSABLE arm the
+  // entry occupies bytes while its meta cannot be read. Passing
+  // `replacesSessionId: undefined` counted it twice — retained bytes PLUS a
+  // full-entry projection never subtracted — so a growth under the ceiling was
+  // REFUSED while the health line called the same spool healthy. Mirrors
+  // `test_a_growth_of_an_unreadable_entry_is_counted_ONCE`.
+  //
+  // MUTATION THAT REDS THIS: `replacesSessionId: prior ? snapshot.sessionId :
+  // undefined` (the pre-fix line) -> `written` is false.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-growth";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid, filed_key: "OLDKEY" }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  const grown = [...stored, { role: "assistant" as const, content: "turn-6" }];
+
+  // The size this write really lands, measured on a twin spool.
+  const probe = tmpSpool();
+  writeSpoolEntry(probe, snapshot(sid, grown), { maxEntries: 100, maxTotalBytes: 10_000_000, maxEntryBytes: 100_000 });
+  const projected = spoolEntryBytes(probe, sid);
+  const bounds = { maxEntries: 100, maxTotalBytes: projected + 8, maxEntryBytes: 100_000 };
+
+  chmodSync(metaPath, 0o000);
+  let written = false;
+  try {
+    written = writeSpoolEntry(spool, snapshot(sid, grown), bounds).written;
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(written, true, "the replaced entry must be subtracted from the projection");
+  // The admitted entry is now READABLE (the write repaired it), so the health
+  // line must reach the same "room" verdict rather than contradicting the write.
+  assert.equal(
+    spoolSaturated(spool, bounds),
+    false,
+    "the writer admitted the write, so the health line must not read SATURATED",
+  );
+});
+
+test("a REFUSED write does not quarantine the log it refuses to replace (#14347 F3)", () => {
+  // On the diverging disposition the writer used to move the stored log aside
+  // BEFORE the guards decided, so a REFUSED write had already renamed the only
+  // addressable copy of the transcript its own refusal text promised was kept.
+  //
+  // MUTATION THAT REDS THIS: call `quarantineLog(logPath)` inside the
+  // `unusablePrior` block, above the guards.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-refused";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  try {
+    const res = writeSpoolEntry(spool, snapshot(sid, stored.slice(0, 1)), {
+      maxEntries: 100,
+      maxTotalBytes: 1,
+      maxEntryBytes: 100_000,
+    });
+    assert.equal(res.written, false);
+    assert.equal(res.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(
+    readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length,
+    0,
+    "a refused write must leave the entry byte-identical",
+  );
+  assert.equal(readFileSync(logPath, "utf8").split("\n").filter(Boolean).length, 6);
 });
