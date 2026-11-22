@@ -1965,6 +1965,7 @@ def test_an_UNIMPORTABLE_loop_folds_inline_instead_of_breaking_the_write(
     monkeypatch.setitem(sys.modules, "tortoise.projection_worker", None)
 
     called = []
+    fallbacks_before = monitoring.projection_inline_fallback_counts()
     write = live_write.write(
         {"type": "PointAdded"}, log=_Log(), tenant=_TENANT,
         project=lambda e, s, journal_skipped=False: (
@@ -1974,6 +1975,17 @@ def test_an_UNIMPORTABLE_loop_folds_inline_instead_of_breaking_the_write(
 
     assert write.deferred is False
     assert called == [1], "an unimportable loop must fold inline, not skip the fold"
+    # ⛔ THE ARM MOVES NO COUNTER, and the rest of its cost is the inline fold
+    # itself (#14222 round-17 review, P3-4). An unimportable loop means NO worker
+    # exists in this process, so this fold has no queued position it could
+    # overtake: it is a STRUCTURAL arm, not an ordering one. What is mechanically
+    # checkable here is the counter half of that sentence — moving
+    # `tortoise_record_projection_inline_fallbacks_total` would make an operator
+    # reconciling it against "inline folds" read this arm as a queue decline.
+    assert monitoring.projection_inline_fallback_counts() == fallbacks_before, (
+        "a structural arm moves NO inline-fallback counter: that vocabulary is "
+        "the QUEUE declines (queue_full / worker_stopping / uncopyable / "
+        "queue_fault), and this arm never reached the queue")
 
 
 # ── 5. the flag itself ──────────────────────────────────────────────────────

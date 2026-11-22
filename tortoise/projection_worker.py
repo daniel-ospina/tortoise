@@ -95,9 +95,18 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    moves NO counter either. The two remaining conditions are the SWITCHES (the
    unarmed loop and an unarmed record), which also move no counter. ⛔ The
    unimportable arm is easy to lose because it is an ``except`` rather than an
-   ``if``, and it was the one this paragraph omitted; it recurses into the same
-   residual — an inline fold can overtake an earlier queued position — so a reader
-   told "three families" would not have looked for it. The PR's own test counts
+   ``if``, and it was the one this paragraph omitted, so a reader told "three
+   families" would not have looked for it. ⛔ IT IS THE ONE STRUCTURAL ARM THAT
+   CANNOT REACH THE ORDERING RESIDUAL BELOW (#14222 round-17 review, P3-4: an
+   earlier cut said it "recurses into the same residual — an inline fold can
+   overtake an earlier queued position", which is false for THIS arm): an import
+   that raises in ``live_write._submitted_to_worker`` means no
+   ``projection_worker`` module object exists in this process (``sys.modules`` IS
+   the import cache, and a failed load REMOVES the failing module — Python
+   reference §5.3.1/§5.4), so there is no worker and no queue for an inline fold
+   to overtake. Its cost is the inline fold itself, which is why it belongs in the
+   STRUCTURAL family (five conditions, none of which moves a counter) and not in
+   the ordering one. The PR's own test counts
    the same seven conditions as five GATE STATEMENTS (the fused one covers three
    of the seven, and the test's five INCLUDE the two switches, so its set is not
    this paragraph's five structural conditions):
@@ -111,12 +120,14 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    and a ``submit`` FAULT (the ``queue_fault`` arm in :func:`submit`, published
    before it propagates). So raising the bound does NOT remove this residual — it only
    removes arm (a); a same-tenant queued write can be overtaken by a structural-arm
-   fold at zero depth, or by a (c) fold at any depth. Nothing detects it: both
+   fold at zero depth — any of the FOUR CORRECTNESS arms; the unimportable one has
+   no queue to overtake, see above — or by a (c) fold at any depth. Nothing detects it: both
    positions are present, so ``journal_coverage`` / ``record-reconcile`` read
    green. The alternative to that residual is a caller that WAITS on the queue —
    which is the coupling this module exists to remove — so the honest form is the
    declared one: the bound's visible cost is a slower ACK **and** a possible
-   same-tenant reorder, from either arm. Closing it needs an ordering token at
+   same-tenant reorder, from any arm that shares this process with a queue (every
+   arm but the unimportable one). Closing it needs an ordering token at
    the fold seam, which is a change to ``record_projection``, not to this module.
    ⚠️ ``.env.example`` states the same residual where the bound is documented.
 2. **A write's ack excludes projection time.** :func:`submit` appends to a deque
