@@ -1163,11 +1163,15 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         so it is judged as a NOTE, i.e. rejected unless its block also names the
     #:         replacement (#14237 r8 review P2: an earlier wording said such a call "is
     #:         therefore accepted", which is FALSE for a bare instruction);
-    #:       * an HTML block is treated as OPAQUE: its visible text is EMPTY, so a mention
-    #:         inside one must be in R1 call form or it reds. Guessing what a browser displays
-    #:         (a tag strip) was measured to FAIL OPEN — a `<script>`/`<style>` body or a comment
-    #:         after a `>` satisfied R2 while a reader never sees it (#14237 r10 review P1). The
-    #:         over-block is the declared price.
+    #:       * an HTML block is treated as OPAQUE: its visible text is EMPTY, so EVERY mention
+    #:         inside one reds — R2 has no text to match, and R1 reds a call form as it does
+    #:         anywhere else (measured, r11 review P2: nothing survives in an HTML block, so an
+    #:         earlier wording that offered ``an R1 call form`` as an escape was wrong). Inside
+    #:         a PARAGRAPH, an inline HTML tag is likewise a BLOCK BOUNDARY. Guessing what a
+    #:         browser displays (a tag strip) was measured to FAIL OPEN three rounds running
+    #:         (#14237 r10 P1, r11 P1) — a `<script>`/`<style>` body, a comment after a `>`, or
+    #:         a `display:none` span satisfied R2 while a reader never sees it. The over-block
+    #:         is the declared price.
     #:   (b) * a replacement that appears ONLY where a reader cannot see it — an HTML comment, a
     #:         link destination, a link-reference definition — does NOT count (#14237 r8/r9
     #:         reviews), because the body R2 reads is the block's VISIBLE text;
@@ -1288,7 +1292,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 continue
             if token.type in ("fence", "code_block", "html_block") and token.map:
                 begin, finish = off(token.map[0]), off(token.map[1])
-                body = text[begin:finish]
+                # ⛔ A FENCE'S INFO STRING IS NOT DISPLAYED (#14237 r11 review P2): it becomes a
+                # `class` attribute. `token.content` is the code a reader sees, so a fence
+                # ````tortoise_graph_overview` cannot satisfy R2 for its own body.
+                body = token.content if token.type == "fence" else text[begin:finish]
                 if token.type == "html_block":
                     # ⛔ AN HTML BLOCK IS OPAQUE, never tag-stripped (#14237 r10 review P1).
                     # A tag strip is a hand-written HTML guess and it is WRONG in the fail-OPEN
@@ -1315,7 +1322,29 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 found.append((at, end, shown))
                 continue
             if token.map:
-                found.append((off(token.map[0]), off(token.map[1]), shown))
+                begin, finish = off(token.map[0]), off(token.map[1])
+                source = text[begin:finish]
+                if "<" in source:
+                    # ⛔ INLINE HTML IS A BLOCK BOUNDARY (#14237 r11 review P1). Keeping one
+                    # block and reading its text children let an inline `<script>`/`<style>`
+                    # body — or a `display:none` span — satisfy R2 for a mention a reader
+                    # does see (measured: all three ACCEPTED). Guessing which inline containers
+                    # render is HTML semantics again, so a TAG SPAN is opaque and everything
+                    # around it is its own block: the successor must be named in the SAME
+                    # segment, which is the fail-closed direction and is declared.
+                    cursor = 0
+                    for tag in re.finditer(r"<[^>]*>", source):
+                        if tag.start() > cursor:
+                            seg = source[cursor:tag.start()]
+                            found.append((begin + cursor, begin + tag.start(),
+                                          re.sub(r"\]\([^)]*\)", " ", seg)))
+                        cursor = tag.end()
+                    if cursor < len(source):
+                        seg = source[cursor:]
+                        found.append((begin + cursor, finish,
+                                      re.sub(r"\]\([^)]*\)", " ", seg)))
+                    continue
+                found.append((begin, finish, shown))
         return found
 
     @classmethod
@@ -1402,7 +1431,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
         text = ("note one\n\n| a | b |\n| --- | --- |\n| c | d |\n\n<details>\nitem\n"
                 "</details>\n\n```py\ncode()\n```\n\n- item note\n  continuation\n")
         assert [body for _start, _end, body in self.blocks(text)] == [
-            "note one", "a", "b", "c", "d", "", "```py\ncode()\n```\n",
+            "note one", "a", "b", "c", "d", "", "code()\n",
             "item note continuation",
         ], self.blocks(text)
 
@@ -1866,6 +1895,38 @@ class TestEveryReaderNamesTheLiveListingDoor:
             assert self.notes_missing_replacement(text), (
                 f"an invisible HTML construct satisfied R2: {body}")
 
+    @pytest.mark.parametrize("hidden", [
+        '<script>const d = "tortoise_graph_overview";</script>',
+        '<style>/* tortoise_graph_overview */</style>',
+        '<span style="display:none">tortoise_graph_overview</span>',
+    ], ids=["script", "style", "display-none"])
+    def test_an_inline_HTML_span_is_a_block_boundary(self, hidden):
+        """#14237 r11 review P1 — inline HTML is opaque, like an HTML block.
+
+        ⛔ MEASURED BEFORE THE FIX: keeping the paragraph as one block and reading its text
+        children let the BODY of an inline `<script>`/`<style>` — or a `display:none` span —
+        satisfy R2, so a dead-end mention was ACCEPTED while a browser shows the reader the
+        retired door and nothing else. Deciding which inline containers render is HTML
+        semantics again (the guess that failed at r8, r10 and here), so a tag span is opaque
+        and the text around it stops sharing a block: the successor must be named in the SAME
+        segment.
+        """
+        text = f"Call `tortoise_list_graphs` for names. {hidden}\n"
+        assert self.notes_missing_replacement(text), (
+            f"an inline HTML construct satisfied R2 invisibly: {hidden}")
+
+    def test_a_fences_INFO_STRING_is_not_a_replacement(self):
+        """#14237 r11 review P2 — a fence body is the CODE, not its language tag.
+
+        ⛔ MEASURED: a fence body used to be the raw source slice, so
+        ```tortoise_graph_overview satisfied R2 for a dead-end mention inside the fence —
+        an info string becomes a `class` attribute and is never displayed. The body is the
+        fence's CONTENT, which is what a reader sees.
+        """
+        text = '```tortoise_graph_overview\nCall tortoise_list_graphs for names\n```\n'
+        assert self.notes_missing_replacement(text), (
+            "a fence's language tag was counted as a shown replacement")
+
     def test_a_fenced_mention_cannot_borrow_the_note_above_it(self):
         """The r5 shape: a fence is its OWN block, and that is pinned STRUCTURALLY.
 
@@ -1883,7 +1944,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "```\n"
         )
         bodies = [body for _start, _end, body in self.blocks(text)]
-        assert "```python\ngraph = tortoise_list_graphs(graph_id='x')\n```\n" in bodies, (
+        assert "graph = tortoise_list_graphs(graph_id='x')\n" in bodies, (
             f"the fence is not its own block, so a code sample can borrow a note above it: "
             f"{bodies}")
         assert self.retired_call_forms(text), (
