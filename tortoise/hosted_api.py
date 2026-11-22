@@ -428,7 +428,7 @@ else:  # pragma: no cover — Python < 3.9
 # The wait-bound refusal's log line and its analytics prop both read ONE closed
 # vocabulary (`read_stages`), so the capture path marks into THAT timeline
 # rather than growing a second instrument that could not publish at all.
-from tortoise.write_verb import (  # noqa: E402 — the ACK's envelope
+from tortoise.write_verb import (  # noqa: E402, I001 — the ACK's envelope. `I001` is suppressed, NOT dodged: isort wants `read_stages` first plus one statement per ALIASED name (four where `main` carries two), and on this branch that line count is load-bearing — `hosted_api.py`'s line numbers are cited ~900 times in `docs/` (graded by `tests/test_12184_shifted_cites.py`), so an added line here re-points every cite below it. The rule stays ACTIVE everywhere else (pyproject's recorded per-line baseline).
     STATUS_ACCEPTED as _STATUS_ACCEPTED,
     build_write_verb as _build_write_verb,
 )
@@ -694,17 +694,29 @@ def _write_capture_phase(proj, session_id: str, phase: str, at: str) -> None:
 
 
 async def _mark_capture_extraction_phase(proj, session_id: str, phase: str,
-                                         now: str) -> None:
-    """Best-effort phase write: a phase must never fail a committed capture."""
+                                         now: str) -> bool:
+    """Best-effort phase write: a phase must never fail a committed capture.
+
+    Returns whether the RECORD now carries ``phase``. ⛔ The return value is not
+    decoration: the ACK is built from a view that must never name a phase the
+    record does not carry (see :func:`_capture_extraction_started`), so a
+    swallowing writer that reported nothing made every caller claim one anyway
+    (review F5) — the ACK advertised `phase: "queued"` on a graph hiccup while
+    `GET /v1/sessions/{id}` carried no phase at all, and
+    ``session_extraction_status`` could answer ``outcome_known: true`` for the
+    same instant.
+    """
     try:
         from tortoise.session_projection import SESSION_EXTRACTION_PHASES
         if phase not in SESSION_EXTRACTION_PHASES:
-            return
+            return False
         await _run_off_loop(_CAPTURE_EXECUTOR, _write_capture_phase,
                             proj, session_id, phase, now)
-    except Exception:  # noqa: BLE001 — bookkeeping on a committed record
+        return True
+    except Exception:  # bookkeeping on a committed record — never a crash
         _logger.debug("capture phase write failed (session %s)", session_id,
                       exc_info=True)
+        return False
 
 
 async def _capture_extraction_started(proj, session_id: str, view: dict,
@@ -719,11 +731,13 @@ async def _capture_extraction_started(proj, session_id: str, view: dict,
     """
     if not view.get("armed"):
         return
-    await _mark_capture_extraction_phase(proj, session_id, "extracting", now)
     # AFTER the write, so the view never claims a phase the record does not carry
     # yet: the ACK is built from this dict, and a body that is ahead of its own
-    # record is the one thing this change must not produce.
-    view["phase"] = "extracting"
+    # record is the one thing this change must not produce. A DECLINED write
+    # therefore leaves the view naming the phase the record still carries
+    # (`queued`, or none at all) rather than the one this call asked for.
+    if await _mark_capture_extraction_phase(proj, session_id, "extracting", now):
+        view["phase"] = "extracting"
 
 
 def _schedule_capture_completion(task, report, slot, proj, session_id,
@@ -834,6 +848,30 @@ def _capture_tail_failed(task, proj, session_id, state) -> None:
         # poll gets no terminal answer. `capture_ok` is NOT written here — the
         # raise arm keeps its documented NULL→legacy-replay shape ("deliberately
         # scoped to CANCELLATION, not to failures", `_capture_abandoned_marker`).
+        try:
+            _submit_off_loop(
+                _CAPTURE_MARKER_EXECUTOR, _clear_capture_phase,
+                proj, session_id)
+        except Exception:  # pragma: no cover — pool shut down
+            _logger.exception(
+                "capture phase clear submit failed (session %s)", session_id)
+    elif (not cancelled and state is not None and state.get("attempted")
+            and not state.get("finalized")):
+        # ⛔ AND ON THE ARM THAT DID NOT RAISE EITHER (#14232 review, round 2).
+        # `not cancelled` is load-bearing, not defensive: `exc` is None on a
+        # cancelled task (it is only read when the task did not cancel), so
+        # without it this arm fires beside `_capture_abandoned_marker` and a
+        # cancellation submits TWO graph writes where the contract above says it
+        # writes the marker alone (measured: the probe recorded
+        # `['_capture_abandoned_marker', '_clear_capture_phase']`). The clear
+        # exists for the tail that finished WITHOUT an outcome; cancellation
+        # already has its terminal writer.
+        # The terminal `capture_ok` SET is non-fatal: a graph hiccup becomes a
+        # receipt warning, so a tail can finish NORMALLY with `finalized` still
+        # False — nothing recorded, nothing running, and the phase it wrote still
+        # on the record. Without this arm the phase survives until some later
+        # attempt records an outcome, which is the same "still running, forever"
+        # lie this retire exists to end.
         try:
             _submit_off_loop(
                 _CAPTURE_MARKER_EXECUTOR, _clear_capture_phase,
@@ -21614,9 +21652,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # only once a phase write actually happened — the inline lanes finish before
     # any reader could observe one, and two extra graph round trips they cannot
     # observe would be pure cost.
-    _capture_phase_view = {"phase": "queued", "armed": False}
+    # ⛔ NO phase until a write LANDS: the initialiser used to carry
+    # `"phase": "queued"`, which made the ACK's phase a constant rather than a
+    # reading of the record (review F5).
+    _capture_phase_view: dict = {"phase": None, "armed": False}
 
-    async def _extract_capture() -> dict:  # noqa: ANN202 — the extraction lane
+    async def _extract_capture() -> dict:  # the extraction lane
         """The post-record half of a capture: extract, then report what happened.
 
         Runs INLINE on the lanes that do not extract (today's behaviour, today's
@@ -21854,7 +21895,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         return {"extracted": extracted, "meta": meta,
                 "tenant_vocab_warning": tenant_vocab_warning}
 
-    async def _report_capture(_lane_result: dict) -> dict:  # noqa: ANN202
+    async def _report_capture(_lane_result: dict) -> dict:  # the reportable tail
         """Everything the extraction makes reportable, and the receipt (#14232).
 
         Split from `_extract_capture` so the ACK's join window covers ONLY the
@@ -23041,6 +23082,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # would leave capture_ok=None → the next same-session re-POST would
             # legacy-replay instead of re-attempting. Additive warning names the
             # residue.
+            _terminal_written = True
             try:
                 # ⛔ #10893 (second cycle): a graph round trip INLINE on the single
                 # uvicorn worker until now — the LAST one on this handler's tail.
@@ -23063,11 +23105,23 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                         params={"sid": session_id, "ok": _capture_ok_record,
                                 "extractor": _capture_extractor_record}))
             except Exception as exc:  # pragma: no cover - graph hiccup
+                _terminal_written = False
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
-            if state is not None:
+                # ⛔ NO PHASE RETIRE HERE, AND THAT IS DELIBERATE: `finalized`
+                # stays False on this arm, so `_capture_tail_failed`'s
+                # `not cancelled and not finalized` arm retires the pair. ONE
+                # writer for one invariant — a second submit from here would be
+                # the same no-op write twice and two places to keep in step.
+            if state is not None and _terminal_written:
                 # #3129: the outcome is recorded — an abandonment from here on can
                 # no longer leave the NULL→replay shape (nothing below suspends).
+                # ⛔ ONLY when that write LANDED (#14232 review, round 2). A failed
+                # terminal SET records nothing, so `finalized` there suppressed the
+                # callback's phase retire and left `phase: extracting` beside a
+                # `capture_ok` that was never written — the very "still running,
+                # forever" lie the retire exists to end, on the one arm where no
+                # other write would ever clear it.
                 state["finalized"] = True
         # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
         # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
@@ -23259,8 +23313,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # the client that asked, and #2952's rule is that a queued/extracting session
     # SAYS SO wherever it is read. Best-effort: a phase write must never fail a
     # capture whose record already landed.
+    # `armed` records that THIS request took the deferred lane (it is what lets
+    # `_capture_extraction_started` publish the next phase at all); the PHASE is
+    # only claimed when the write landed, so the ACK cannot advertise a phase the
+    # record refused (review F5). The view starts with no phase for that reason:
+    # `session_extraction_status(phase=None)` omits the key entirely.
     _capture_phase_view["armed"] = True
-    await _mark_capture_extraction_phase(proj, session_id, "queued", now)
+    if await _mark_capture_extraction_phase(proj, session_id, "queued", now):
+        _capture_phase_view["phase"] = "queued"
 
     # ⛔ ONE OWNER for capacity from here on. `hand_off()` before the task is
     # created, because the endpoint's teardown runs `slot.release()` when the
@@ -23323,7 +23383,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # would be the one thing worse than answering late (the #2988
                 # doctrine — the bound abandons the AWAIT, never the worker).
                 _joined = await asyncio.wait_for(asyncio.shield(task), _grace)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:  # `asyncio.TimeoutError` IS this builtin (3.11+)
                 _joined = _NO_JOIN
             except asyncio.CancelledError:
                 # The REQUEST went away mid-join. Today that abandoned the
@@ -23385,7 +23445,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # still be running" sentence and writes NO priced deferral, instead of
     # reading a zero as "nothing was extracted" (#12362's defect, and the reason
     # that marker exists).
-    from tortoise.capture_spool import (
+    from tortoise.capture_spool import (  # noqa: I001 — one statement per ALIASED name is the only structural fix; same load-bearing line-shape reason as `E402` above
         UNRECORDED_OUTCOME_KEY as _UNRECORDED_KEY,
         UNRECORDED_OUTCOME_VALUE as _UNRECORDED_VALUE,
     )
@@ -23418,7 +23478,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # says what the record last knew.
         "extraction": session_extraction_status(
             False if retry_failed_capture else None,
-            _capture_lane(), phase=_capture_phase_view["phase"]),
+            _capture_lane(), phase=_capture_phase_view.get("phase")),
         # The ONE address that answers "what happened to this session's memory" —
         # the same projection the CLI's confirmation already polls after a 504.
         # ADDITIVE and new on this endpoint: a client follows it verbatim; it is

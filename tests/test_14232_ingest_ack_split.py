@@ -576,6 +576,45 @@ def test_the_ack_body_cannot_be_read_as_extracted_nothing(client, monkeypatch):
     _drain_tails()
 
 
+def test_the_ack_claims_no_phase_the_record_refused(client, monkeypatch):
+    """Review F5 — the ACK must not advertise a phase its own record lacks.
+
+    `_mark_capture_extraction_phase` swallows every failure BY DESIGN (a phase
+    write may never fail a committed capture), so a caller that assumed success
+    turned the ack's `phase` into a constant: on a graph hiccup the body said
+    `phase: "queued"` and advertised a `status_url` while
+    `GET /v1/sessions/{id}` carried NO phase, and `session_extraction_status`
+    could answer `outcome_known: true` for the same instant. Driven by making
+    the WRITE refuse, which is the only way to reach that arm — and the visible
+    consequence is the one the neighbouring docstring forbids: a body ahead of
+    its own record.
+    """
+    _force_ack(monkeypatch)
+
+    def _refuse(*_args, **_kwargs):
+        raise RuntimeError("graph hiccup during the phase write")
+
+    monkeypatch.setattr(ha, "_write_capture_phase", _refuse)
+    session_id = "s-14232-phase-refused"
+    with _ParkedExtractor() as parked:
+        r = client.post("/v1/sessions", json={
+            "conversation": _CONV, "session_id": session_id})
+        assert r.status_code == 200, r.text
+        assert parked.started.wait(30.0), "the tail never reached the extractor"
+        block = r.json()["extraction"]
+        assert "phase" not in block, (
+            "the ACK named a phase the phase WRITE refused, so the receipt is "
+            f"ahead of its own record: {block}")
+        assert block["outcome_known"] is False, block
+        # …and the status surface agrees with it: one state, two readers. The
+        # record carries no phase, so neither surface may publish one.
+        detail = client.get(f"/v1/sessions/{session_id}").json()["extraction"]
+        assert "phase" not in detail, detail
+        assert detail["outcome_known"] is False, detail
+        parked.release.set()
+    _drain_tails()
+
+
 def test_completion_inside_the_window_still_returns_todays_receipt(client):
     """R3b — the in-budget half. No forcing of the join: it must land.
 
@@ -1169,7 +1208,6 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
     from tests.test_capture_loop_responsiveness import (
         _verdict_async_client,
     )
-    from tests.test_hosted_api import TEST_TEAM
     from tortoise.hosted_api import app
 
     before = ha._CAPTURE_IN_FLIGHT
@@ -1235,7 +1273,6 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
     assert not after_sessions, (
         f"the in-flight session key was never released: {after_sessions} — that "
         f"session id 409s forever")
-    assert TEST_TEAM  # the router auth override this client inherits
 
 
 def test_the_slot_guard_keeps_capacity_for_a_bound_WORKER(client):
