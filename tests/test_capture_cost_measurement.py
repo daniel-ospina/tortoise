@@ -212,7 +212,7 @@ def test_call_once_attributes_cost_to_the_serving_route_on_failover():
 
     stats: dict = {}
     (_resp, _finish, _ptoks, _ctoks,
-     cost_usd, cost_provider, cost_model) = v2._call_once(
+     cost_usd, cost_provider, cost_model, _cache_hit) = v2._call_once(
         model, "s", "u", deadline_s=5, max_tokens=None, stats=stats)
 
     assert cost_provider == "fallback-test-lane"   # the SERVING lane
@@ -1356,12 +1356,18 @@ class DistinctStageCostModel:
                       .setdefault(_PROVIDER, {}).setdefault(_MODEL, {
                           "calls": 0, "prompt_tokens": 0,
                           "completion_tokens": 0, "cost_usd": 0.0,
+                          # #14277: the cache split. This stub reports no
+                          # ``last_cache_hit_tokens``, so every prompt token
+                          # is a MISS — the absence is 0 hits, not 0 input.
+                          "prompt_cache_hit_tokens": 0,
+                          "prompt_cache_miss_tokens": 0,
                           "calls_without_cost": 0, "calls_without_usage": 0,
                           "calls_without_tokens": 0,
                           "usage_present": True}))
             bucket["calls"] += 1
             bucket["prompt_tokens"] += pt
             bucket["completion_tokens"] += ct
+            bucket["prompt_cache_miss_tokens"] += pt
             bucket["cost_usd"] = round(bucket["cost_usd"] + cost, 6)
         return {
             "session_id": session_id,
@@ -1374,6 +1380,9 @@ class DistinctStageCostModel:
             "retries": 0,
             "prompt_tokens": sum(c[1] for c in self.calls),
             "completion_tokens": sum(c[2] for c in self.calls),
+            # #14277
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": sum(c[1] for c in self.calls),
             "cost_usd": round(sum(c[3] for c in self.calls), 6),
             "calls_without_cost": 0,
             "calls_without_usage": 0,
@@ -2748,6 +2757,9 @@ def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
         "harness": "pi",
         "calls": 0, "retries": 0,
         "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0,
+        # #14277: no call reached a roll-up, so there is no cache split to
+        # report either — zero here is the honest reading, not a shaped one.
+        "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0,
         "calls_without_cost": 0, "calls_without_usage": 0,
         "calls_without_tokens": 0,
         "deadline_aborts": 0, "by_stage": {},
@@ -3788,3 +3800,170 @@ def test_report_cli_prints_the_token_section_when_nothing_could_be_priced(
     assert "NO PRICED capture_cost SESSIONS" in text
     assert "#3840: internal calibration, no ceiling" in text
     assert "p50 tokens/capture" in text
+
+
+# ── #14277: the prompt-cache split ─────────────────────────────────────────
+
+class CacheReportingModel(CostReportingModel):
+    """A stub that ALSO reports the cached portion of its prompt tokens.
+
+    Same shape as the production adapters (#14277): ``last_prompt_tokens`` is
+    the SUM, and ``last_cache_hit_tokens`` is the part of it that hit the
+    provider's prefix cache.
+    """
+
+    def __init__(self, prompt_tokens: int = 1000, cache_hit_tokens: int = 800,
+                 **kw):
+        super().__init__(prompt_tokens=prompt_tokens, **kw)
+        self.cache_hit_tokens = cache_hit_tokens
+
+    def complete(self, *, system: str, user: str, max_tokens=None):
+        out = super().complete(system=system, user=user, max_tokens=max_tokens)
+        self.last_cache_hit_tokens = self.cache_hit_tokens
+        return out
+
+
+def test_the_cache_split_is_emitted_on_the_keys_the_pricing_reader_reads():
+    """#14277: `costing._CACHE_KEY`/`_MISS_KEY` had no PRODUCER.
+
+    ``price_usage_envelope`` has priced a cache-hit dimension since before the
+    extractor reported one, so every real capture_cost row carried
+    ``hit = 0`` and cached input was billed at the full miss rate — the
+    discount was implemented and inert. The contract is the KEY NAMES, so this
+    asserts the producer writes exactly the reader's keys rather than a
+    same-shaped pair of its own.
+    """
+    model = CacheReportingModel()
+    out = v2.extract_session_v2(model, _conv())
+    llm = out["stats"]["llm"]
+
+    assert costing._CACHE_KEY == "prompt_cache_hit_tokens"
+    assert costing._MISS_KEY == "prompt_cache_miss_tokens"
+    # session level, rolled beside the counts it divides
+    assert llm["prompt_tokens"] == 3000
+    assert llm["prompt_cache_hit_tokens"] == 2400
+    assert llm["prompt_cache_miss_tokens"] == 600
+    # and per stage on the envelope bucket the reader actually prices
+    for stage in ("s1", "s2", "s4"):
+        bucket = llm["by_stage"][stage][_PROVIDER][_MODEL]
+        assert bucket[costing._CACHE_KEY] == 800
+        assert bucket[costing._MISS_KEY] == 200
+        lane = costing._price_lane(stage, _PROVIDER, _MODEL, bucket,
+                                   costing.lookup_rate(_PROVIDER, _MODEL))
+        assert lane["cache_discount_applied"] is True
+        assert lane["cache_discount_unpriced"] is False
+
+
+def test_a_wrapper_forwards_the_cache_hit_count_the_row_reads():
+    """#14277: the seam reads ``last_cache_hit_tokens`` off WHATEVER it was
+    handed — and production hands it a WRAPPER (``RoutingModel``
+    primary/fallback, ``RotatingModel`` pool), never a bare adapter.
+
+    So the two forwards in ``model_adapters`` (``RoutingModel._call`` and
+    ``RotatingModel``'s ``_attempt``) are load-bearing in the silent
+    direction: a dropped or mistyped one leaves the attribute present and
+    reading 0, so every row served through a fallback prices its cached input
+    at the full miss rate with nothing red. That is the #1987/#2906 shape,
+    which is why the wrapper carries these attrs at all.
+
+    Asserted through ``_call_once`` — the seam that BUILDS the row — at both
+    wrapper levels, and on the failover arm (the SERVING lane's value, not the
+    configured primary's): asserting ``wrapper.last_cache_hit_tokens`` alone
+    would pass for a wrapper nothing reads through.
+    """
+    from tortoise.model_adapters import RotatingModel, RoutingModel, _reset_failover_cooldown
+
+    def row_cache_hit(model) -> int:
+        stats: dict = {}
+        (_resp, _finish, _ptoks, _ctoks,
+         _cost, _cp, _cm, cache_hit) = v2._call_once(
+            model, "s", "u", deadline_s=5, max_tokens=None, stats=stats)
+        return cache_hit
+
+    _reset_failover_cooldown()
+    # level 1 — RoutingModel, primary serving
+    routed = RoutingModel(CacheReportingModel(prompt_tokens=1000,
+                                              cache_hit_tokens=640),
+                          CacheReportingModel(cache_hit_tokens=900),
+                          cooldown_s=0)
+    assert row_cache_hit(routed) == 640
+
+    class Boom(CacheReportingModel):
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            raise RuntimeError("transient upstream")  # no .response → failover
+
+    _reset_failover_cooldown()
+    failed_over = RoutingModel(Boom(cache_hit_tokens=0),
+                               CacheReportingModel(cache_hit_tokens=700),
+                               cooldown_s=0)
+    assert row_cache_hit(failed_over) == 700, (
+        "the forward must come from the lane that SERVED the call")
+
+    # level 2 — RotatingModel's ``_attempt`` forward
+    pool = RotatingModel([CacheReportingModel(cache_hit_tokens=512)],
+                         cooldown_s=0)
+    assert row_cache_hit(pool) == 512
+
+
+def test_a_route_with_no_cache_dimension_still_prices_at_the_miss_rate():
+    """The absence must not become a discount: a model that reports no cache
+    hit at all reads ``hit = 0``, which prices at the full input rate — the
+    pre-#14277 behaviour, unchanged, and NOT a 0-cost input."""
+    model = CostReportingModel()
+    out = v2.extract_session_v2(model, _conv())
+    llm = out["stats"]["llm"]
+    assert llm["prompt_cache_hit_tokens"] == 0
+    assert llm["prompt_cache_miss_tokens"] == 300
+    lane = costing._price_lane("s1", _PROVIDER, _MODEL,
+                               llm["by_stage"]["s1"][_PROVIDER][_MODEL],
+                               costing.lookup_rate(_PROVIDER, _MODEL))
+    assert lane["cache_discount_applied"] is False
+    assert lane["cache_discount_unpriced"] is False
+
+
+def test_a_provider_reporting_more_hits_than_prompt_tokens_is_not_believed():
+    """A hit count larger than the total it is a part of contradicts itself,
+    and the miss complement would go negative — a negative feeds the dollar
+    total, so the split falls back to "no cache information" (an absence)
+    rather than a shaped number (#5854's rule, applied to the split)."""
+    model = CacheReportingModel(prompt_tokens=100, cache_hit_tokens=500)
+    out = v2.extract_session_v2(model, _conv())
+    llm = out["stats"]["llm"]
+    assert llm["prompt_cache_hit_tokens"] == 0
+    assert llm["prompt_cache_miss_tokens"] == 300
+
+
+def test_the_adapter_reads_both_provider_spellings_of_a_cache_hit():
+    """DeepSeek reports ``prompt_cache_hit_tokens``; OpenAI-compatible routes
+    report ``prompt_tokens_details.cached_tokens``. A reader that knows only
+    one spelling records a cold cache on the other — the exact silent-zero
+    this instrumentation exists to remove."""
+    from tortoise.model_adapters import _cache_hit_tokens as hit
+
+    assert hit({"prompt_tokens": 1000, "prompt_cache_hit_tokens": 640}) == 640
+    assert hit({"prompt_tokens": 1000,
+                "prompt_tokens_details": {"cached_tokens": 512}}) == 512
+    # DeepSeek's own field wins when both are present (it is the sum-bearing
+    # side's own accounting, not a derived detail block)
+    assert hit({"prompt_cache_hit_tokens": 640,
+                "prompt_tokens_details": {"cached_tokens": 512}}) == 640
+    # no cache dimension at all, an empty block, a non-usage payload
+    assert hit({"prompt_tokens": 1000}) == 0
+    assert hit({}) == 0
+    assert hit(None) == 0
+    # never coerced from a value that is not a token count
+    assert hit({"prompt_cache_hit_tokens": True}) == 0
+    assert hit({"prompt_cache_hit_tokens": -5}) == 0
+    assert hit({"prompt_cache_hit_tokens": float("nan")}) == 0
+    assert hit({"prompt_cache_hit_tokens": "640"}) == 0
+    # ⛔ a provider-controlled integer of ~400 digits: Python parses a JSON
+    # integer EXACTLY, so it clears the isinstance gate and ``float(10**400)``
+    # raises OverflowError — from the LAST statement of each adapter's success
+    # path, i.e. AFTER the paid response was consumed, discarding the call.
+    # The sibling ``_normalise_token_count`` bounds at 1e300 for this reason
+    # (#14277 review, P3).
+    assert hit({"prompt_cache_hit_tokens": 10 ** 400}) == 0
+    assert hit({"prompt_cache_hit_tokens": -(10 ** 400)}) == 0
+    assert hit({"prompt_tokens_details": {"cached_tokens": 10 ** 400}}) == 0
+    # ...and a merely LARGE value is still a count, not a rejection
+    assert hit({"prompt_cache_hit_tokens": 10 ** 6}) == 10 ** 6
