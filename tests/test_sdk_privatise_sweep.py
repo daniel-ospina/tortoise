@@ -369,9 +369,15 @@ _ARM_REFSPECS: dict[str, str] = {
     #     (measured from a `fetch-depth: 1` clone — `git fetch origin
     #     "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166"` → `* [new ref]`, exit 0,
     #     `cat-file -e` then succeeds), and a sha-want does not expire and fetches one commit's trees
-    #     rather than 200 commits of `main`. ⛔ 40 hex characters is deliberately OUTSIDE the
-    #     7–39-character range the guard rejects, because that range is what distinguishes an
-    #     abbreviation git cannot `want` from a full sha it can.
+    #     rather than 200 commits of `main`.
+    # ⛔ AND BECAUSE IT PINS BY SHA, ITS *SOURCE* IS GRADED AS A FULL SHA (review of PR #14258, P2).
+    # A refspec SOURCE that is hex is a new shape here — every other entry sources a REF
+    # (`refs/pull/14108/head`, `main`). An abbreviated source would print the exact inert remedy this
+    # map exists to forbid (`git fetch origin "+10e51693f166:refs/pi/x"` → `fatal: couldn't find
+    # remote ref`, rc=128) while the suite stayed GREEN, because the arm's
+    # `fullmatch(r"[0-9a-f]{7,39}")` runs on the WHOLE entry and a refspec contains `+` and `:`, so it
+    # can never match hex-only at ANY length. Hex length therefore does no work there; the arm now
+    # checks it where it does — on the SOURCE.
     "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
     "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
 }
@@ -1532,11 +1538,20 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
         assert rev in _ARM_REFSPECS, f"{rev} has no fetchable address — a skip naming it is inert"
         assert not re.fullmatch(r"[0-9a-f]{7,39}", _ARM_REFSPECS[rev]), (
             f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
-        _, _, destination = _ARM_REFSPECS[rev].lstrip("+").partition(":")
+        src, _, destination = _ARM_REFSPECS[rev].lstrip("+").partition(":")
         assert destination, (
             f"{rev} is mapped to a SOURCE-ONLY refspec: git records it in `FETCH_HEAD` and "
             "creates no local ref, so a skip printing it re-arms the object DB and leaves the "
             "ADDRESS assertion UNCHECKED — the round-13 inert remedy")
+        # ⛔ A HEX SOURCE MUST BE A FULL SHA (review of PR #14258, P2). The whole-entry `fullmatch`
+        # above cannot see this: a refspec contains `+` and `:`, so it never matches hex-only at ANY
+        # length — which left an abbreviated SHA SOURCE ungraded. Measured before this assertion
+        # existed: mutating this entry to a 12-hex source (`+10e51693f166:refs/pi/…`) kept the arm
+        # GREEN, while the remedy it would print is `fatal: couldn't find remote ref` (rc=128).
+        if re.fullmatch(r"[0-9a-f]+", src):
+            assert len(src) == 40, (
+                f"{rev} is mapped to a hex SOURCE of {len(src)} characters — git cannot `want` an "
+                "abbreviated sha, so the printed remedy is inert; use the full 40-character sha")
     assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
         "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
     assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
