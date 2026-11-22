@@ -1631,8 +1631,10 @@ def test_a_window_wholly_held_at_plan_time_names_the_PIN_not_the_read():
     five-file set) while the report said "2 node(s) are held by an in-flight READ … re-run
     when those reads finish" for a window that was half PINNED. That remedy does not
     converge: a re-run re-asks the same pin at the same budget and stops in the same place.
-    The comment at `cache_evictor.py:1314` claims this arm "cannot disagree" with the
-    last-hop one, which is exactly what this row pins.
+    The comment at `cache_evictor.py:1313-1314` states that the same pin-before-lease
+    ordering governs the `if not local:` arm above, so the two cannot disagree about the
+    same both-holds condition — and `:1165-1167` states the parallel with gate 6 and with
+    the last-hop arm. That pin-before-lease order is what this row pins.
     """
     from tortoise.cache_evictor import ReadLeases
 
