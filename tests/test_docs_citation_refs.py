@@ -5299,6 +5299,19 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         silent-grep arm is caught by that arm's own kind assertion, not here. `pytest.xfail()` is
         never how a platform fact is declared, and `pytest.mark.xfail` (a decorator, not a raise) is
         unaffected.
+
+        ⛔ EVERY CALL TO `_d5_documented_long_options` / `_d5_pinned_universe` IN THIS CELL GOES
+        THROUGH THIS HELPER — the ONE exception being the silent-grep arm, which calls
+        `_d5_pinned_universe` bare ON PURPOSE because witnessing the skip is its entire job (and it
+        pins the exception KIND in return). Nothing else may be bare (#14328 review round 2, P2 —
+        MEASURED). Three sites used to be: the floor-40 arm, the stderr arm, and the RHS of the
+        comparison below. `_d5_pinned_universe` calls `_d5_documented_long_options`, so a
+        `pytest.skip`/`pytest.xfail` anywhere in that chain reaches the FLOOR-40 arm FIRST — every
+        other arm, including the call-site pins this cell exists for, then never runs. MEASURED at
+        `6f1c9a5bb3` with `_d5_documented_long_options` replaced by `lambda c: pytest.skip(...)`:
+        `1 skipped in 0.03s`, **exit 0**; with `lambda c: pytest.xfail(...)`: `1 xfailed`, **exit
+        0**. So the invariant is load-bearing, not decorative: a new bare call anywhere in this
+        cell re-opens the exact hole the cell closes.
         """
         try:
             return fn(*args)
@@ -5307,7 +5320,8 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
                 "the derivation SKIPPED/XFAILED where it must RAISE — a skip makes every assertion "
                 f"below it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
 
-    assert len(_d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
+    assert len(not_a_skip(
+        _d5_documented_long_options, reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
         _D5_LONG_OPTION_FLOOR), (
         "a successful `grep --help` carrying exactly the floor's worth of long options must be a "
         "universe, or the floor is not a floor (#14303 review, P2)")
@@ -5316,8 +5330,9 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     # ⛔ THE STDERR HALF, READ RATHER THAN TOLERATED: a FAILED `--help` whose usage still yields the
     # floor is a universe, which is the whole point of dropping `check=True`. This arm is the
     # mutant-killer for "parse `stdout` only": with `completed.stdout` alone it raises.
-    assert len(_d5_documented_long_options(
-        reported(2, usage(_D5_LONG_OPTION_FLOOR)))) == _D5_LONG_OPTION_FLOOR, (
+    assert len(not_a_skip(
+        _d5_documented_long_options, reported(
+            2, usage(_D5_LONG_OPTION_FLOOR)))) == _D5_LONG_OPTION_FLOOR, (
         "a `--help` that exited non-zero but PUBLISHED a full option list on stderr must still be "
         "read — BSD grep's usage goes to stderr, and ignoring that stream is what made this cell "
         "unrunnable on macOS (#14303 review, P2)")
@@ -5363,7 +5378,8 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     # above pins that a broken derivation stays an `AssertionError` rather than becoming a skip.
     with pytest.raises(AssertionError, match="broken derivation must not be able to certify"):
         not_a_skip(_d5_pinned_universe, reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
-    assert not_a_skip(_d5_pinned_universe, full_help) == _d5_documented_long_options(full_help), (
+    assert not_a_skip(_d5_pinned_universe, full_help) == not_a_skip(
+        _d5_documented_long_options, full_help), (
         "a `grep --help` that PUBLISHED a universe must be RETURNED, not skipped — the skip excuses "
         "only the platform that published nothing (#14303)")
 
