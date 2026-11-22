@@ -326,7 +326,7 @@ def _door_read_contract() -> set[str]:
     # ⛔ THE DERIVATION IS ITSELF PINNED TO A LITERAL (#14281 review P2, measured). The
     # checks below are DERIVED, so they cannot see the door MOVING: `named_levers` is an
     # intersection with `bool_levers`, which holds only bool-defaulted parameters, so of
-    # the seven levers this file's docstring enumerates (`kind`, `_elevated_timeout_ms`,
+    # the six levers this file's docstring enumerates (`kind`, `_elevated_timeout_ms`,
     # `pool_size`, `order_by`, `claim_class`, `exclude_status`) exactly ZERO are visible
     # to it. MEASURED on the pre-fix form: `order_by="relevance"` added to
     # `hosted_api.py::search`'s read call AND to the harness's measured read left the pin
@@ -566,6 +566,29 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # every `"per_query" in receiver` clause passing (measured). Resolve names bound to
     # ANY expression mentioning `per_query`.
     rows = {"per_query"} | _aliases_of(run_def, lambda v: "per_query" in _names_in(v))
+    # ⛔ AND THE LOOP / COMPREHENSION TARGETS OVER IT (#14281 review P1, measured). The
+    # `rows` closure above resolves NAMES BOUND BY AN ASSIGNMENT, so the one shape that
+    # rewrites every recorded page goes straight through it:
+    #
+    #     for row in per_query:
+    #         row["order"].sort(key=str)
+    #
+    # MEASURED GREEN on the previous form — 14 passed — with every query's `order`
+    # canonicalised, so `compare()` reported `rank_identical: True` over pages the run had
+    # genuinely re-ordered. The receiver is `row`, the loop target, which nothing binds.
+    # So every name in a `for` / comprehension target whose iterable mentions `per_query`
+    # is tainted too. Residual, stated rather than implied: this follows ONE level of
+    # iteration — `for row in per_query:` then `for cell in row.values(): cell.sort()`
+    # relies on `row` already being tainted, which it is, so the mutation of `cell` is
+    # still red; what is NOT followed is a name read back out of a container by a helper
+    # defined outside `run()`.
+    for _node in ast.walk(run_def):
+        if isinstance(_node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            _iter, _target = _node.iter, _node.target
+        else:
+            continue
+        if "per_query" in _names_in(_iter):
+            rows |= _names_in(_target)
     hits: list[int] = []
     for node in ast.walk(run_def):
         if node is artifact_append:
@@ -1177,6 +1200,19 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             f"only {sorted(allowed - {'leg_trace'})}, and each of these changes WHICH rows "
             "survive `limit`, so a mirror that names one times a reader the product does "
             "not run (and hides the page permutation the verdict exists to catch)")
+    # `limit` is the ONE argument that sets the survival window, and the pin's own message
+    # says every forbidden argument "changes WHICH rows survive `limit`" — yet its VALUE was
+    # unpinned, so `limit=1` in the measured read handed `compare()` a one-element page and
+    # no reorder below position 0 could ever be observed: MEASURED GREEN (14 passed) on the
+    # previous form. That re-vacuums the very verdict #14192 built this pin to protect, so
+    # the depth is asserted, not merely named.
+    limit_kw = next((k for k in measured.keywords if k.arg == "limit"), None)
+    assert (limit_kw is not None and isinstance(limit_kw.value, ast.Constant)
+            and limit_kw.value.value == 10), (
+        f"the measured read (line {measured.lineno}) does not pin `limit=10` "
+        f"({ast.unparse(limit_kw.value) if limit_kw is not None else 'omitted'}) — the "
+        "artifact would hold a shallower page than the verdict assumes, and a reorder "
+        "below the surviving depth becomes unobservable")
     assert "leg_trace" not in {k.arg for k in warm.keywords if k.arg}, (
         f"the warm-up (line {warm.lineno}) collects a `leg_trace` — its result is "
         "discarded, so that trace is not the measurement")
@@ -1280,30 +1316,41 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             f"line(s) {mutations} mutate a collection AFTER the measured read — an in-place "
             f"sort/clear reaches the artifact while the measured {what} no longer matches it")
 
-    # ⛔ AND THE COLLECTED LIST ITSELF (`per_query`), AFTER THE LAST `append` (#14281 review
-    # P2, measured). Every structural check above is scoped to the dict the `append`
-    # builds, so REBINDING the list afterwards — `per_query = [dict(pq, order=sorted(
-    # pq["order"], key=str)) for pq in per_query]`, or the same with `list(reversed(…))` —
-    # re-orders every page after the pin's last look and still read GREEN on this head,
-    # while `run()` returns (and `compare()` reads) the re-ordered pages. That is exactly
-    # the expensive direction the docstring names, one level out from `results`, and it was
-    # undeclared as a residual.
     # ⛔ AND MUTATING AN ELEMENT THROUGH AN ALIAS — the half this comment used to claim was
     # already covered (`"per_query" in receiver`) and was NOT (#14281 review F2, measured):
     # `pq = per_query[-1]; pq["order"].sort()` and `for _pq in per_query: …` were both
     # GREEN, because the clause matches a literal receiver and cannot see a name bound to
     # an element. Both halves are now assertions; neither is a sentence.
-    per_query_rebinds = _rebound_after(run_defs[0], "per_query", artifact_append.lineno)
+    #
+    # ⛔ BOTH ANCHORED AT THE READ, NOT AT THE `append` (#14281 review P1, measured). The
+    # first form filtered on `artifact_append.lineno`, so a rebind placed INSIDE the loop
+    # just BEFORE the `append` —
+    #
+    #     if per_query:
+    #         per_query = [{**pq, "order": list(reversed(pq["order"]))} for pq in per_query]
+    #     per_query.append({…})
+    #
+    # — was never inspected: MEASURED GREEN (14 passed) with every earlier row's page
+    # reversed, and the same window re-opens the element shape
+    # (`pq = per_query[-1]; pq["order"].sort()` placed there re-orders rows already
+    # collected). That is the class whose removal `_mutated_after`'s docstring already
+    # records ("a `lineno` filter cannot do scope work"); a filter here was asleep one
+    # statement before the code it protects. Anchoring at `holder.lineno` (the measured
+    # read) keeps the tool's own `per_query = []` initialiser legal: it sits at
+    # tools/read_wave_latency.py:298, BEFORE the read at :305.
+    per_query_rebinds = _rebound_after(run_defs[0], "per_query", holder.lineno)
     assert not per_query_rebinds, (
-        f"`per_query` is rebound at line(s) {per_query_rebinds} after the artifact dict is "
-        "appended — a re-sorted/reversed copy would reach the returned report while every "
-        "page the pin inspected was the measured one")
-    element_mutations = _per_query_element_mutations(run_defs[0], artifact_append.lineno)
+        f"`per_query` is rebound at line(s) {per_query_rebinds} after the measured read — "
+        "a re-sorted/reversed copy would reach the returned report while every page the "
+        "pin inspected was the measured one")
+    element_mutations = _per_query_element_mutations(run_defs[0], holder.lineno)
     assert not element_mutations, (
         f"line(s) {element_mutations} mutate a RECORDED entry through an alias of a "
-        "`per_query` element after it was appended — the returned report would carry a "
-        "page the pin never inspected (a literal receiver is covered by `_mutated_after`; "
-        "this is the aliased spelling, e.g. `pq = per_query[-1]; pq[\"order\"].sort()`)")
+        "`per_query` element after the measured read — the returned report would carry a "
+        "page the pin never inspected (a literal receiver is covered by "
+        "`_mutated_after`; this is the aliased spelling, e.g. `pq = per_query[-1]; "
+        "pq[\"order\"].sort()`, and the window includes the loop body before the "
+        "`append`)")
 
     # ⛔ No `os.environ` mutation ANYWHERE (except the module-level setup pops): reports
     # `git_sha`/`db_uri`/`points`/
