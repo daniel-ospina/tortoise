@@ -2502,19 +2502,21 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # above already reds a live read outside every granted owner, so by the time
     # this row is reached `owners ⊆ granted_owners` holds; a non-empty `live`
     # makes the sets EQUAL, and the only mode left is a grant naming an owner
-    # with NO live read (round-21 mutation pass, measured: moving the warm-up
-    # into a `_warm` helper reds the CENSUS, not this row). The old message
+    # with NO live read (round-21/22 mutation pass, measured: moving the warm-up
+    # into a `_warm` helper WITHOUT widening the grant reds the CENSUS, not this
+    # row; moving it AND widening the grant is green, which is the re-cut this
+    # row must not false-block). The old message
     # claimed "the exempted reads are not all inside an owner the grant names"
     # — false in that mode, which is the same prose-contradicts-code defect this
-    # PR exists to close, one row over from where `d4729e151f` fixed its sibling.
+    # PR exists to close, in the same arm where `d4729e151f` fixed its sibling.
     granted_owners = set(intentional_keep["tools/read_wave_latency.py"])
     assert owners == granted_owners, (
         "the grant and the live reads disagree: the reads sit in "
         f"{sorted(owners, key=str)} but the grant names "
         f"{sorted(granted_owners, key=str)} — a grant naming an owner with NO "
         "live read over-exempts (the opposite direction, a read outside every "
-        "granted owner, is the census's red one row above). Re-derive the "
-        "grant, or the reason the grant cites.")
+        "granted owner, is the CENSUS's red in this test's derived half, above). "
+        "Re-derive the grant, or the reason the grant cites.")
     traced = [c for c in seam_calls
               if any(k.arg == "leg_trace" for k in c.keywords)]
     assert len(traced) == 1, (
