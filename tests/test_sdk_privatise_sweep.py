@@ -252,9 +252,11 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (985 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1066 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
-    line inside the run and it silently shrank to 22 until the #14188 repair), AND THE ARMS GRADE
+    line inside the run and it silently shrank to 22 until the #14188 repair; and PR #14258's own
+    two prose commits grew it to 1066 while this sentence still said 985, which was true at
+    `04afeb811d` and 1010 at `main` `70fbd1a27dd5` — review of #14258, P3), AND THE ARMS GRADE
     ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
@@ -348,6 +350,21 @@ _ARM_REFSPECS: dict[str, str] = {
     RESIDUE_INTERVAL_END: _PR_HEAD_REFSPEC,
     RESIDUE_PR_HEAD: _PR_HEAD_REFSPEC,
     "origin/main": "+main:refs/remotes/origin/main",
+    # ⛔ PR #14258's `OWN_PINS` GREW BY TWO AND THE MAP DID NOT FOLLOW, so
+    # `test_the_own_pin_map_matches_each_revs_own_tree`'s `_requires(*sorted(OWN_PINS))` raised
+    # `KeyError` instead of SKIPPING in the sharded `test` job — which checks out at
+    # `fetch-depth: 1` (`python-ci.yml`'s bare `actions/checkout@v4` has no `with:`), i.e. the
+    # exact shape this two-arm design exists to survive (see the round-16 note above: an arm that
+    # cannot run there is not a guard). An ERROR, not a skip, so it reds the job.
+    # The two entries are NOT the same kind of address, which is why one carries a flag:
+    #   * `0351fe856942` IS `refs/pull/14160/head`'s tip, so a depth-1 fetch of that ref arms it —
+    #     the same convention `RESIDUE_PR_HEAD` already uses for `refs/pull/14108/head`.
+    #   * `10e51693f166` is #14160's SQUASH and lives 8 commits back in `main`'s history, so NO
+    #     depth-1 fetch can arm it. Mapping it to a plain `main` refspec would print a remedy that
+    #     leaves the rev ABSENT — the inert re-arm this map exists to forbid — so it carries the
+    #     `--deepen` that actually reaches it.
+    "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
+    "10e51693f166": "--deepen=200 +refs/heads/main:refs/remotes/origin/main",
 }
 
 
@@ -1491,9 +1508,18 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     `_rearm_command` indexes `_ARM_REFSPECS` directly, so an unmapped rev raises instead of
     printing an inert `git fetch origin <abbreviation>`. This arm keeps the map honest for
     the revs a skip can name today.
+
+    ⛔ AND FOR EVERY `OWN_PINS` KEY (review of PR #14258, P1). The fixed tuple below used to be the
+    WHOLE population, so `OWN_PINS` could grow — it did, by `10e51693f166` and `0351fe856942` — and
+    this arm stayed green over the map that just gained two unmapped revs. The consequence was not
+    a red here but a `KeyError` at SKIP time in `test_the_own_pin_map_matches_each_revs_own_tree`
+    on a `fetch-depth: 1` checkout. Iterating `OWN_PINS` too is what turns that class into the RED
+    this arm is for.
     """
-    for rev in (RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
-                RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"):
+    addressed = (RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
+                 RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main",
+                 *sorted(OWN_PINS))
+    for rev in addressed:
         assert rev in _ARM_REFSPECS, f"{rev} has no fetchable address — a skip naming it is inert"
         assert not re.fullmatch(r"[0-9a-f]{7,39}", _ARM_REFSPECS[rev]), (
             f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
@@ -1502,6 +1528,13 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
             f"{rev} is mapped to a SOURCE-ONLY refspec: git records it in `FETCH_HEAD` and "
             "creates no local ref, so a skip printing it re-arms the object DB and leaves the "
             "ADDRESS assertion UNCHECKED — the round-13 inert remedy")
+        # A `--deepen=<n>` FLAG is allowed as a leading token (a rev deep in `main`'s history is
+        # unreachable by any depth-1 refspec), but it must be well-formed and must not swallow the
+        # refspec: the destination assertion above still has to find a `source:destination`.
+        for token in _ARM_REFSPECS[rev].split():
+            if token.startswith("--"):
+                assert re.fullmatch(r"--deepen=\d+", token), (
+                    f"{rev} is mapped with the flag {token!r}; only `--deepen=<n>` is expected")
     assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
         "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
     assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
