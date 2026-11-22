@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1205 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1218 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
     prose commits grew it to 1066 while this sentence still said 985, which was true at
@@ -261,11 +261,11 @@ def _residue_block() -> str:
     dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
     rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
     blocks and added the re-measure note — to 1122; THIS re-cut merges `origin/main` `0467ba32`
-    (base `70fbd1a2`) and then a PEER's copy of that same re-cut, KEEPING both sides' blocks at
-    each merge for the same reason — the peer's copy read 1185/1196 as its own prose grew, and the
-    per-line differences are exactly what a merged run is: a function of BOTH lives, so the figure
-    below is re-measured rather than inherited from either side), AND THE ARMS GRADE
-    ALL OF IT
+    (base `70fbd1a2`) and then a PEER's own copy of that same re-cut, KEEPING both sides' blocks at
+    each merge for the same reason: the peer's copy read 1185 and then 1196 as its prose grew
+    while this lane's read 1197, and the per-line difference between the two LIVES is exactly what
+    a merged run is — so the figure above is RE-MEASURED here rather than inherited from either
+    side, and the next reflow repeats that), AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
@@ -388,6 +388,20 @@ _ARM_REFSPECS: dict[str, str] = {
     # checks it where it does — on the SOURCE.
     "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
     "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
+    # ⛔ FULL-SHA WANTS, because neither rev has an ADVERTISED ref: `27cd81d55ebd` sits in no ref at
+    # all and `8889f1140105`'s only ref is a local branch (`refs/pull/14086/head` contains neither),
+    # so `+<40-hex>:refs/pi/<rev>` is the only address that resolves — naming a branch would be the
+    # lie this map exists to forbid. ⛔ DURABILITY, not fetchability, is the caveat: an unadvertised
+    # sha is subject to the server's GC, so a re-arm can stop resolving; the pairs stay graded.
+    "8889f1140105": "+8889f1140105677add2c7c4dd60d0c8c5080ea26:refs/pi/8889f1140105",
+    "27cd81d55ebd": "+27cd81d55ebd42948c27051d821df970bbc0ba2f:refs/pi/27cd81d55ebd",
+    # `8889f1140105` is a MERGE on a deleted feature branch, so no depth-1 REF arms it — but a sha
+    # want does, measured from a clone holding neither object: `git fetch --dry-run --depth=1
+    # https://github.com/daniel-ospina/tortoise.git 8889f1140105677add2c7c4dd60d0c8c5080ea26` →
+    # `* branch … -> FETCH_HEAD`, while the same command with an invented sha prints
+    # `fatal: remote error: upload-pack: not our ref` (the negative control that makes the first
+    # line evidence rather than a coincidence). This map grades the FORM of the remedy; the
+    # want-ability behind it is what that pair of commands measures.
 }
 
 
@@ -1712,8 +1726,25 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # excluding it by PROVENANCE rather than by a measurement difference (review round 3, P2). ⛔ AND NOT `c5e84ad180f2`, where
     # `origin/fix/14125-census-p1s` stands today: it is a DESCENDANT of `0351fe856942`, pushed
     # after the squash, and its content never landed.
+    # `8889f1140105` is the merge that PINS 11835 and MEASURES 11843 — the block's example of the
+    # rule. Its pair is verified against the tree like every other entry
+    # (`git show 8889f1140105:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`), and its want-ability
+    # by full sha is measured in `_ARM_REFSPECS`'s comment. The CLAIM in the block must therefore
+    # keep `8889f1140105` as the nearest backticked token before the word `commits`: the digest
+    # `891187f5a4636487` is itself a backtick-hex candidate, so a reordering binds the pair to it.
     "10e51693f166": (11858, "a1552662bf07a10b"),
     "0351fe856942": (11858, "a1552662bf07a10b"),
+    # ⛔ THE RUN-5 ILLUSTRATION'S TWO REVS (review of PR 14183, P2). The `#:` block publishes the
+    # merge `8889f1140105` as committing `(11835, "891187f5a4636487")` while its own tree measures
+    # `11843`, and `27cd81d55ebd` as re-pinning to that measured pair. Both pairs are true
+    # (`git show <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`), so BOTH revs belong here:
+    # a merge of `origin/main` had dropped them from the graded spelling, which left the pairs
+    # ungraded and this arm's coverage quietly narrower than the block claims. ⛔ BOTH LANES added
+    # `8889f1140105` here independently while merging, so ONE entry is kept: a duplicate literal
+    # key in this dict is SILENT (last wins) and would make the pair look double graded when it is
+    # graded once. Measured: `(11835, "891187f5a4636487")` and `(11843, "6aed5368ffa10513")`.
+    "8889f1140105": (11835, "891187f5a4636487"),
+    "27cd81d55ebd": (11843, "6aed5368ffa10513"),
 }
 
 
