@@ -305,6 +305,9 @@ def run(args) -> dict:
             results = sdk._tortoise_fts_query(
                 query=q["query"], limit=10, leg_trace=trace)
         total_ms = (time.perf_counter() - t0) * 1000.0
+        _slots = {}
+        _slots["k"] = results[0]
+        _slots["k"] |= {"id": "REDACTED"}
         per_query.append({
             "qid": q["id"],
             "query": q["query"],
