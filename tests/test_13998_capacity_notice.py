@@ -595,9 +595,14 @@ def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
     # two names, not the guard's BREADTH: a narrowing to
     # `except (RuntimeError, quota.OrgNotFoundError)` leaves the two rows above
     # green while `QuotaCheckError` — a real raise of this same instrument
-    # (`tortoise/quota.py:773`, an empty `org_id`) — escapes `evaluate` and
-    # reaches `sweep_pass` as the generic `error` this row exists to prevent
-    # (#14038 review cycle 11, P3).
+    # (`tortoise/quota.py:727`, an unreadable `pricing.json` tier figure reached
+    # through `_arm_graph_storage` from `resolve_org_limits`) — escapes `evaluate`
+    # and reaches `sweep_pass` as the generic `error` this row exists to prevent
+    # (#14038 review cycle 11, P3). ⛔ NOT the empty-`org_id` raise at `:773`: that
+    # one cannot reach `evaluate` in production at all (`sweep_pass` skips a falsy
+    # id at `capacity_notice.py:1333-1334`, and `notify_account` answers
+    # `unknown-account` before the gauge) — the class is what pins breadth, the
+    # instance must be a reachable one (#14038 review cycle 13, P3).
     quota.QuotaCheckError("resolve_org_limits requires a org_id"),
 ], ids=["transport", "org-not-found", "quota-check-error"])
 def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
@@ -622,7 +627,8 @@ def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
     ⛔ This paragraph deliberately does NOT rank the classes by "which one
     production raises": an earlier cut did, twice, and both times it was wrong (a
     transport failure and a terminal non-2xx raise `RuntimeError`; a missing org row
-    raises `OrgNotFoundError`; an empty `org_id` raises `QuotaCheckError`). ALL THREE
+    raises `OrgNotFoundError`; an unreadable `pricing.json` tier figure raises
+    `QuotaCheckError`). ALL THREE
     params exist to pin breadth, nothing else.
     """
     def raise_on_read(org_id):
@@ -641,8 +647,17 @@ def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
     assert send.calls == [], "a broken gauge mailed a customer"
 
 
+@pytest.mark.parametrize("exc", [
+    # The synthetic transport-ish class.
+    RuntimeError("read_dimension failed before the meter ran"),
+    # ⛔ THE CLASS THE DOCSTRING NAMES, and the one a real wiring fault raises:
+    # `allowance_gate.read_dimension` does `declared[dimension]`
+    # (`tortoise/allowance_gate.py:2042`), so an undeclared dimension is a
+    # `KeyError`, not a `RuntimeError`.
+    KeyError("definitely_not_a_declared_dimension"),
+], ids=["runtime-error", "undeclared-dimension"])
 def test_a_read_dimension_that_raises_is_named_in_the_closed_list(
-        monkeypatch):
+        monkeypatch, exc):
     """`read_dimension` ITSELF failing is named `unreadable-reading`.
 
     ⛔ NOT the meter-fault pin — an earlier cut of this docstring said it graded
@@ -650,11 +665,18 @@ def test_a_read_dimension_that_raises_is_named_in_the_closed_list(
     halves were false. `allowance_gate.read_dimension` catches the METER's own
     exception and answers `None`, so a meter outage never reaches this guard; the
     row below pins that path. What THIS row grades is the wiring fault the guard
-    can catch: `read_dimension` raising before it ever calls the meter (an
-    undeclared dimension makes `declared[dimension]` raise).
+    can catch: `read_dimension` raising before it ever calls the meter.
+
+    ⛔ AND IT GRADES BREADTH, not one class (#14038 review cycle 13, P2). The
+    wiring fault this docstring names is a **`KeyError`** — an undeclared
+    dimension makes `declared[dimension]` raise — which is NOT a `RuntimeError`,
+    so a single `RuntimeError` row left the same narrowing this file pins TWICE
+    for the allowance guard (`except RuntimeError`) invisible here: measured, it
+    kept the whole file green. Two rows, one class each, for the same reason as
+    the sibling above.
     """
     def raise_on_read(dimension, org_id):
-        raise RuntimeError("read_dimension failed before the meter ran")
+        raise exc
 
     monkeypatch.setattr("tortoise.allowance_gate.read_dimension", raise_on_read)
     assert cn.evaluate(ORG_ID, limits=_limits(102)) == (None, "unreadable-reading")

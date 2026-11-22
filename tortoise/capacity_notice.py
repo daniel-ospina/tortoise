@@ -1028,11 +1028,16 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     ``unreadable-allowance`` and ``unreadable-reading`` (a gauge could not be
     read: ``unreadable-allowance`` is the ALLOWANCE instrument raising — which
     includes `OrgNotFoundError`, a STATE rather than a fault (#9567), raised
-    whenever the org record is not there to read: in the chain below, the
-    account read has ALREADY ruled out the plain absence and reports it as
-    ``unknown-account``, so what is left here is the row vanishing between the
-    two reads — or its figure being unusable (a non-number), and
-    ``unreadable-reading`` is a reading
+    when the org record is not there to read: in the chain below, the account
+    read has ALREADY ruled out the plain absence and reports it as
+    ``unknown-account``, so for THAT case what is left here is the row vanishing
+    between the two reads — or its figure being unusable (a non-number). It is
+    not an exhaustive account of the raises that land here: any other exception
+    out of the instrument takes the same branch (a transport `RuntimeError`
+    re-raised out of `_orgs_row_fail_soft`, an unreadable or negative
+    `pricing.json` tier figure surfacing as `QuotaCheckError`), and in REGISTRY
+    mode the two reads are of different stores, so there is no single row to
+    vanish. ``unreadable-reading`` is a reading
     that cannot be turned into a percentage (or ``read_dimension`` itself
     failing). ⛔ A METER that raises is NOT this status: `allowance_gate.read_dimension`
     is a documented non-raising seam that catches the meter's exception and answers

@@ -1929,9 +1929,9 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             # ⛔ NO `stacklevel=2` (#14038 review cycle 10, P3; corrected in cycle 13):
             # from inside a test it attributes the warning to pytest's own frame
             # (`_pytest/python.py:167`) — NOT the file:line this line exists to
-            # surface, and the opposite of what the commit that added it meant
-            # ("stop the warning pointing at pytest"). Default `stacklevel=1`
-            # names THIS file, which is the attribution an operator wants.
+            # surface. Default `stacklevel=1` names THIS file, which is the
+            # attribution an operator wants. (The commit that added `=2` meant
+            # VISIBILITY, not attribution — it is orthogonal to what it chose.)
             # It is spelled out because `ruff`'s B028 requires an EXPLICIT
             # stacklevel — the value is the default, so nothing changes but the
             # lint red (`ruff check .` is a required job and a new violation in
