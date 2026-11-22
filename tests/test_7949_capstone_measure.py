@@ -18408,7 +18408,14 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     else:
         _numstat = _git("diff", "--numstat", f"{_base}...HEAD", "--", _MEMBER_DOC)
         if _numstat.returncode != 0:
-            pass  # unreadable diff is UNMEASURED, never a pass (see the guard below)
+            # ⛔ UNREADABLE IS UNMEASURED, AND UNMEASURED IS NOT A PASS — recorded HERE, not
+            # deferred to the guard below: `_measured` is already non-empty by this point, so
+            # that guard's condition is False and a bare `pass` is a FALSE PASS (review at
+            # `bda80ef`, fault-injected: this arm STAYED GREEN with the read forced to fail).
+            failures.append(
+                f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` was unreadable "
+                f"(exit {_numstat.returncode}), so D5's membership is UNMEASURED here "
+                f"— nothing measured is not a pass (#14260 fix lane, finding 3)")
         else:
             _measured.append(f"the live `{_base}...HEAD` numstat")
             _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
@@ -18425,7 +18432,13 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             # one that answers the sentence's actual question.
             _diff = _git("diff", "-U0", f"{_base}...HEAD", "--", _MEMBER_DOC)
             if _diff.returncode != 0:
-                pass  # unreadable diff is UNMEASURED, never a pass (see the guard below)
+                # Same rule, same reason the guard below cannot see it: an unreadable `-U0`
+                # diff is UNMEASURED, and it is recorded as a FAILURE, never a `pass`
+                # (review at `bda80ef` — the `-U0` read added this second copy of the class).
+                failures.append(
+                    f"`git diff -U0 {_base}...HEAD -- {_MEMBER_DOC}` was unreadable "
+                    f"(exit {_diff.returncode}), so D5's membership is UNMEASURED here "
+                    f"— nothing measured is not a pass (#14260 fix lane, finding 3)")
             else:
                 _diff_carries_target = any(
                     line[:1] in "+-" and _I7_TARGET in line
