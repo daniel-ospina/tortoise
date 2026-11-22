@@ -1505,14 +1505,24 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     to iterate a literal tuple of the revs then in the map, so the three addresses the re-cut
     paragraph publishes (`5e83c2a2f6`, `10e51693f1`, `efe5605e976a`) were added to the map and
     graded by NOTHING: an ABBREVIATION or a SOURCE-ONLY refspec on any of them passed silently,
-    which is exactly the round-12/round-13 inert remedy one level down. The first loop keeps the
-    literal tuple so deleting an entry is still caught; the second grades the SHAPE of every
-    entry the map holds, so folding a new rev in cannot buy an ungraded line.
+    which is exactly the round-12/round-13 inert remedy one level down. The first assertion still
+    requires the revs a skip can name today, so deleting an entry is caught; the loop grades the
+    SHAPE of every entry the map holds, so folding a new rev in cannot buy an ungraded line.
+
+    ⛔ PRESENCE AND NON-VACUITY ARE ONE PREDICATE (#14282 review, P3). These used to be a
+    per-rev `rev in _ARM_REFSPECS` loop followed by `assert _ARM_REFSPECS, "non-vacuity: …"`.
+    Once the loop has proven six keys the map is provably non-empty, so nothing could ever make
+    THAT line the one that reds: it was an assertion whose value cannot vary — the round's
+    own rule 2, a catch not attributable to the guard it claims to prove. A superset assert
+    carries both facts and stays reachable: delete any key and it names the rev that went
+    missing, empty the map and that same line reds with all six named.
     """
-    for rev in (RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
-                RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"):
-        assert rev in _ARM_REFSPECS, f"{rev} has no fetchable address — a skip naming it is inert"
-    assert _ARM_REFSPECS, "non-vacuity: the map still addresses at least one rev"
+    expected = {RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
+                RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"}
+    missing = sorted(expected - set(_ARM_REFSPECS))
+    assert not missing, (
+        f"{missing} have no fetchable address — a skip naming one is inert, and an empty map "
+        "is not a vacuous pass")
     for rev, refspec in _ARM_REFSPECS.items():
         assert not re.fullmatch(r"[0-9a-f]{7,39}", refspec), (
             f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
