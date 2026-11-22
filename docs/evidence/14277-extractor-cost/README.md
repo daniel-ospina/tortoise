@@ -1,3 +1,14 @@
+---
+title: "The extractor's measured token spend (#14277)"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-22
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#14277, #14275, EXTRACTOR-V4-ARCHITECTURE.md, extractor_cost_measure.py"
+---
+
 # The extractor's measured token spend (#14277)
 
 This directory is the **evidence** for `#14277`: the measurement `#14275` said

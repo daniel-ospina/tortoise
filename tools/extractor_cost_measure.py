@@ -70,6 +70,17 @@ LIMITS — stated because an unstated limit reads as a result:
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first, with an UNATTRIBUTED error (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/extractor_cost_measure.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/extractor_cost_measure.py`"
+    )
+
 import argparse
 import json
 import os
@@ -77,7 +88,6 @@ import random
 import re
 import statistics
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
