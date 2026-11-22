@@ -286,18 +286,86 @@ def _names_in(node: ast.AST) -> set[str]:
 
 
 def _artifact_entries(run_def: ast.AST) -> dict[str, ast.AST]:
-    """The `"key": value` pairs of the per-query artifact dict `run()` appends."""
+    """The `"key": value` pairs of the ONE per-query artifact dict `run()` appends.
+
+    ⛔ `EXACTLY ONE`: a first-match lookup validated a decoy — a `_debug_rows.append({
+    "order": [], "legs": []})` placed before the real `per_query.append` satisfied every
+    later assertion while the artifact itself held an empty page (measured).
+    """
+    found: list[dict] = []
     for node in ast.walk(run_def):
         if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "append"
                 and node.args and isinstance(node.args[0], ast.Dict)):
-            keys = [k.value for k in node.args[0].keys
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
-            if "legs" in keys and "order" in keys:
-                return {k.value: v for k, v in zip(
-                    [k for k in node.args[0].keys], node.args[0].values, strict=True)
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
-    raise AssertionError("run() no longer appends a per-query artifact dict with "
-                         "`legs` and `order` — this pin is stale")
+            pairs = {k.value: v for k, v in zip(
+                node.args[0].keys, node.args[0].values, strict=True)
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            if "legs" in pairs and "order" in pairs:
+                found.append(pairs)
+    assert len(found) == 1, (
+        f"run() appends {len(found)} artifact dicts carrying BOTH `legs` and `order` — this "
+        "pin cannot tell which one is the artifact")
+    return found[0]
+
+
+def _is_exactly(node: ast.AST, var: str) -> bool:
+    """`var`, or a transparent `list(var)` / `tuple(var)` — nothing derived, nothing else."""
+    if isinstance(node, ast.Name):
+        return node.id == var
+    return (isinstance(node, ast.Call) and getattr(node.func, "id", None) in ("list", "tuple")
+            and len(node.args) == 1 and not node.keywords
+            and isinstance(node.args[0], ast.Name) and node.args[0].id == var)
+
+
+def _rebound_after(run_def: ast.AST, var: str, lineno: int) -> list[int]:
+    """Line numbers where `var` is rebound after the read — a sorted/emptied page lies."""
+    hits: list[int] = []
+    for node in ast.walk(run_def):
+        if getattr(node, "lineno", -1) <= lineno:
+            continue
+        if isinstance(node, ast.Assign):
+            targets: list[ast.AST] = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr,
+                               ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [i.optional_vars for i in node.items if i.optional_vars is not None]
+        else:
+            continue
+        if any(var in _names_in(t) for t in targets):
+            hits.append(node.lineno)
+    return hits
+
+
+def _environ_mutations(tree: ast.AST) -> list[int]:
+    """Every line that can change `os.environ` — not just the shapes one might enumerate.
+
+    ⛔ The earlier shape tested `os.environ[key] = …` plus three method names, and its
+    `update` branch was INERT (`dict.update`'s first positional is a mapping, so the
+    key test could never fire): measured GREEN with `os.environ.update({…})`,
+    `del os.environ[…]}`, `clear()`, `|=`, and a helper handed the mapping. This one
+    flags the RECEIVER instead of the key — the artifact records no env state at all,
+    so no reasoning about which key matters can make the write safe — and flags
+    `os.environ` passed as an ARGUMENT, which is the only reason to hand the mapping to
+    a helper. Residual, stated rather than implied: a helper that reaches the mapping
+    through `os.environ` inside its own body is not followed (the tool has none).
+    """
+    def _is_environ(node: ast.AST) -> bool:
+        return isinstance(node, ast.Attribute) and node.attr == "environ"
+
+    mutators = {"update", "clear", "pop", "popitem", "setdefault"}
+    hits: list[int] = []
+    for node in ast.walk(tree):
+        subscript = (isinstance(node, ast.Subscript)
+                     and isinstance(node.ctx, (ast.Store, ast.Del))
+                     and _is_environ(node.value))
+        method = (isinstance(node, ast.Call)
+                  and getattr(node.func, "attr", None) in mutators
+                  and _is_environ(getattr(node.func, "value", None)))
+        aug = isinstance(node, ast.AugAssign) and _is_environ(node.target)
+        handed = isinstance(node, ast.Call) and any(_is_environ(a) for a in node.args)
+        if subscript or method or aug or handed:
+            hits.append(node.lineno)
+    return hits
 
 
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
@@ -315,9 +383,16 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     instead of assumed, against the door's OWN call site (``_door_read_contract``):
     every keyword must be one the door names (plus the ``leg_trace`` out-sink), every
     argument must be a keyword (a positional one is invisible to a kwargs check), the
-    measured read must be the one inside the loop, its page must be the ``order`` list
-    the artifact reports, its trace must be the one the ``legs`` table is built from,
-    and no env write may arm a rerank gate the artifact does not record.
+    measured read must be the one inside the loop, its page and trace must be iterated
+    AS THEMSELVES by the ``order``/``legs`` comprehensions of the one artifact dict (and
+    never rebound after the read), and no ``os.environ`` mutation may happen in ``run()``
+    at all — which arm of the fused-rerank gate was in force is not recorded (#14289).
+
+    Accepted FALSE-RED: extracting the id mapping (``"order": _ids(results)``) or the leg
+    table into a helper reds too, because a helper call cannot be proven not to sort or
+    drop what it is handed. A red there costs an edit to this pin, which is the cheap
+    direction — the expensive direction is a sorted page reaching the verdict as
+    ``rank_identical: True`` (measured green against an earlier shape of this check).
 
     ⛔ EVERY STATIC REACH IS CENSUSED, not just the two calls: a bound-method alias
     (``_read = sdk._tortoise_fts_query``), a string LITERAL naming the read
@@ -424,28 +499,29 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     entries = _artifact_entries(run_defs[0])
     for key, var, what in (("order", page_var, "page"), ("legs", trace_var, "trace")):
         value = entries[key]
-        assert isinstance(value, ast.ListComp), (
-            f"the artifact's `{key}` is {ast.unparse(value)} — this pin follows a "
-            f"comprehension over the measured {what}")
-        assert any(var in _names_in(g.iter) for g in value.generators), (
-            f"the artifact's `{key}` is not built from `{var}`, the measured read's "
-            f"{what} — the verdict would report on something else: {ast.unparse(value)}")
+        # ⛔ The iterable must BE the variable. A name-PRESENCE test (`var in names(iter)`)
+        # was measured GREEN with `for r in _stable(results)` — a helper that sorts the
+        # page, which turns a genuine permutation into `rank_identical: True` — with
+        # `_empty(results)`, and with `(results and _decoy)`. A false-red is the accepted
+        # cost: `"order": _ids(results)` now reds too, because this pin cannot prove the
+        # helper is the identity (the message says so).
+        assert any(isinstance(g.iter, (ast.Name, ast.Call)) and _is_exactly(g.iter, var)
+                   for g in value.generators), (
+            f"the artifact's `{key}` iterates {[ast.unparse(g.iter) for g in value.generators]}"
+            f", not `{var}` — the measured read's {what} must be iterated AS ITSELF (a "
+            f"helper call there cannot be proven not to sort/drop it): {ast.unparse(value)}")
+        rebinds = _rebound_after(run_defs[0], var, holder.lineno)
+        assert not rebinds, (
+            f"`{var}` is rebound at line(s) {rebinds} after the read — a sorted/emptied "
+            f"copy would reach the artifact while the measured {what} was discarded")
 
-    # ⛔ No env write may arm a rerank gate: `run()` already mutates `os.environ`, so
-    # this is a plausible edit, and the artifact does not record which arm was in force.
-    env_names = _rerank_env_names()
-    armed = []
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
-                and getattr(node.value, "attr", None) == "environ"
-                and _resolved(node.slice) in env_names):
-            armed.append((node.lineno, _resolved(node.slice)))
-        if (isinstance(node, ast.Call)
-                and getattr(node.func, "attr", None) in ("setdefault", "update", "pop")
-                and getattr(getattr(node.func, "value", None), "attr", None) == "environ"
-                and node.args and _resolved(node.args[0]) in env_names):
-            armed.append((node.lineno, _resolved(node.args[0])))
-    assert not armed, (
-        f"the harness writes the rerank gate(s) {armed} — the artifact does not record "
-        "which arm was in force, so a baseline/after pair could straddle the gate and "
-        "`compare()` would still call it comparable")
+    # ⛔ No `os.environ` mutation at all: `run()` reports `git_sha`/`db_uri`/`points`/
+    # `corpus_seed` but NOT which arm of `TORTOISE_FUSED_RERANK` (or its pool/model
+    # gates) was in force, so an armed or disarmed arm would still compare as
+    # comparable — see #14289. The check is on the RECEIVER, because enumerating the
+    # key shapes is how the previous version ended up with an inert `update` branch.
+    mutated = _environ_mutations(run_defs[0])
+    assert not mutated, (
+        f"`run()` mutates `os.environ` at line(s) {mutated} — the artifact does not record "
+        "which arm of the fused-rerank gate was in force, so a baseline/after pair could "
+        "straddle it and `compare()` would still call them comparable (#14289)")
