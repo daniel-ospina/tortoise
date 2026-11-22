@@ -83,10 +83,12 @@ document back to pin addresses — is the per-row pass the review recommended as
 NOT done here.
 ⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
 (`record_serve.py:468` is in THIS revision's group above; `projection/__init__.py:14647` is in neither list, so it is at the pin),
-and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. ⚠️ **Three
-rows are re-pointed at THIS head and say so nowhere else — rows 2b, 7 and 7b**: every `session_schema`/`hosted_api`
+and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. ⚠️ **Four
+rows are re-pointed at THIS head and say so nowhere else — rows 2b, 7, 7b and §2.4's `:Session` reader row (the one
+carrying the `:912` arm)**: every `session_schema`/`hosted_api`
 address they carry was re-derived against this tree, so read them here and never at the pin, where those numbers
-open on a docstring and on a backup-sweep guard rather than on the queries the rows quote. They are named by ROW
+open on something other than the queries the rows quote — a docstring, a comment block, a dict literal, a
+backup-sweep guard. They are named by ROW
 rather than repeated in the enumeration list below, because writing a second spelling of an address a row already
 carries would move the spelling count this header publishes — and that list, not this paragraph, is what a reader
 consults first. The
@@ -97,7 +99,7 @@ measurement of the pin's own remainder — a label its own population contradict
 this header assigns to `main` are counted in it. On any later head they
 drift **by construction**: a `main` integration that inserts a line above a cited site moves every cite
 below it, with no symbol having changed. ⚠️ **That drift is already measurable against `main`** —
-**135 of this document's 232** `file:line` pairs do not open where the pin has them, against `main` `ae54df166d` — the same
+**131 of this document's 228** `file:line` pairs do not open where the pin has them, against `main` `ae54df166d` — the same
 head the enumeration above names, so the figure and the list describe one comparison rather than two
 (counted as the
 unique `path.py:NNNN` pairs in this file after resolving **every** written path to the module it names
@@ -108,9 +110,9 @@ restored, so `projection/__init__.py` is `tortoise/projection/__init__.py`; a pa
 (`tests/…`, `tools/…`, `tortoise/…`) is resolved AS WRITTEN and never prefixed — **skipping that step is what
 produced the `96 of 218` this header carried before the `#13124` review**, which reported **31 pairs as
 naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
-was itself measured false; a range cite counts once, by its **start** line), which dedupes the **345** as-written spellings to 232 — **113**
+was itself measured false; a range cite counts once, by its **start** line), which dedupes the **345** as-written spellings to 228 — **117**
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
-text; **all 219 comparable ones resolve at BOTH heads** — every written path resolves to a module that
+text; **all 215 comparable ones resolve at BOTH heads** — every written path resolves to a module that
 exists at `ccb49741b2ec` — and **the thirteen that are NOT comparable are addresses written at a head past the pin's EOF** — twelve
 of them re-derived at such a head by this document's own re-points, the thirteenth moved past it by
 `main`'s `#14169` — each
@@ -121,21 +123,21 @@ leg's preview and its COUNT) and `:7577`/`:7579`, `mcp_server.py`'s `:11590` (th
 quotes — the ONE of the thirteen that `main` moved, not this branch), and `hosted_api.py`'s `:51493` (the `s.actor_user_id = $uid`
 condition) — every one of their written lines sits past the pin's copy of its file
 (`git show ccb49741b2ec:tortoise/sdk.py | wc -l` -> `56415`; `…/search_engine.py` -> `7071`; `…/mcp_server.py` -> `11466`; `…/hosted_api.py` -> `49851`), so all thirteen
-were re-derived at a head the pin predates. So the drift is **127 of the 219 comparable, plus eight of those thirteen pairs** (the
+were re-derived at a head the pin predates. So the drift is **123 of the 215 comparable, plus eight of those thirteen pairs** (the
 five that do not exist at `main` either are `sdk.py`'s `:62020`/`:62040`, `hosted_api.py`'s `:51493` and
 `search_engine.py`'s `:7577`/`:7579`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **What "drift" counts, stated so the numerator is checkable rather than agreed with**: a pair DRIFTS when the address the document writes does not hold the fragment it quotes for it at the head being compared — the pin's line and the head's line are the WITNESS, not the rule. Where the two disagree the pair counts, and the rule is why: comparing the two lines would call "unchanged" a citation that opens the wrong line merely because both heads left that line as they found it. ⛔ **No pair's VERDICT is taken from this sentence (#14269 review, P1 — MEASURED at three heads)**: whether a pair drifts is a property of the head being compared, and this page states the rule, never the membership. The measurement the rule would give for one pair, taken at each head the reader might actually use: at the pin `ccb49741b2ec` and at `main` `ae54df166d`, `record_reconcile.py` line 533 holds `MATCH (n:{label}) RETURN properties(n)` and line 582 is BLANK — so the fragment does NOT sit where the document writes it, and the pair DRIFTS at the head the numerator is stated against; at this branch's head line 533 is `wanted = tuple(NODE_TABLES) if labels is None else tuple(labels)` and the fragment has moved to 582. The same pair, two opposite verdicts, because the head changed — which is exactly why the verdict is not typed here as a fact about "the" citation. **That is the whole point: whether a pair drifts is a property of the head being compared, the two lines are read there, and no page can state the membership.** The commands are the ones this file already uses: `git show <head>:<path> | sed -n '<N>p'` for each side of the pair, compared text for text. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
-**The drift is 135 of those 232.** ⚠️ **These counts are a parsing decision, and this header states which
-one it took**: the 232 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
+**The drift is 131 of those 228.** ⚠️ **These counts are a parsing decision, and this header states which
+one it took**: the 228 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
 written as ONE token. The document also writes six pairs as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
 `` `sdk.py` `:2917` ``, `` `sdk.py` `:62020` ``, `` `sdk.py` `:62040` ``,
 `` `projection/entities.py` `:5765` `` and the `#13124` enumeration's
 `` `projection/entities.py` `:5824` ``); three of them are resolved but not counted by the one-token rule —
 **three** of the six are ALSO written one-token (`` `sdk.py` `:62020` ``, its `:62040` sibling and
-`` `projection/entities.py` `:5824` `` in row 13), so they are among the 232 already — and counting that form gives **235 pairs and 138 drifters**. So the
-basis must travel with the figure — 135 and 138 are one measurement under two counting decisions, not two
+`` `projection/entities.py` `:5824` `` in row 13), so they are among the 228 already — and counting that form gives **231 pairs and 134 drifters**. So the
+basis must travel with the figure — 131 and 134 are one measurement under two counting decisions, not two
 findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
 sentence read "…to 211 — 103 … collisions —" around a full paragraph; its alternative basis then quoted a
@@ -237,8 +239,8 @@ orphan GC), and `mcp_server.py`: `:11590` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:
 `sdk.py` ones are spelled as bare `:NNNN` siblings behind one path, as the `mcp_server.py` group above
 does, and NOT as new `path.py:NNNN` pairs (a bare sibling is not counted at all — that is the point):
 a pair spelling would
-add five more **as-written spellings** — 345 → 350 — and so 113 → 118 collisions, since a collision is a
-spelling that shares its `(path, line)` pair with another, while adding **no pair at all**: 232 either
+add five more **as-written spellings** — 345 → 350 — and so 117 → 122 collisions, since a collision is a
+spelling that shares its `(path, line)` pair with another, while adding **no pair at all**: 228 either
 way, because each of the five already carries its pair from §2.5. A bare sibling adds neither. The pin
 agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
 §2.5 token, so a second one-token spelling would red it. Each was
@@ -283,7 +285,7 @@ blanket `-23` to eight `projection/entities.py` cites that were already correct 
 failure this header records, one level up, shipped as a correction. Every one of the 34 was re-taken here
 with the row's own quoted fragment, and the figures below were re-measured afterwards.
 `tests/test_12184_shifted_cites.py`'s `_REDEFINED_13854` pins them by content — **33 rows, which is the TABLE's own length and not the population's arithmetic above** (a range address is ONE row, so the two counts need not agree), and `assert len(_REDEFINED_13854) == 33` makes the figure un-driftable, so the next offset-only edit reds instead of shipping. ⛔ **The claim that stood here read "now pins all 34 by content" — a figure NOTHING graded, measured at `#14269` (the table held 33 then too).** That is the one defect class this paragraph otherwise exists to stop, applied to itself; it is recorded rather than quietly re-worded, because a typed figure with no arm beside it is what produced it.
-⚠️ **The figure counts the file it is written in, so every revision moves it — and it is MEASURED over this file as it now stands, not carried forward**: the form this paragraph replaced quoted `111 of 217`. ⚠️ **It matched the editions up to the one that carried it — which is why it is recorded as provenance, not carried forward.** Measured by this header's own rule: at `43028d178b` (its drift counted at the `main` head the retired sentence names, `534f3e1bee` — **not** at `43028d178b` itself, where the same rule reads 126, and not at `534f3e1bee`'s own edition of this document, which reads `52 of 164`) the document is **314 spellings → 217 pairs → 111 drifters**, so the figure was RIGHT when written; at `295c26ebc8`, the edition that CARRIED it, the same rule gives **320 → 216 → 110**, so the sentence was already one edition stale on arrival. And `111` is a DRIFTER count, so comparing it against a pair count is not a re-measurement — the pairs at `43028d178b` are 217, which is exactly what the retired sentence said. The figures here are **345 written spellings → 232 pairs → 113 collisions → 135 drifters of the 232**, at `main` `ae54df166d`, re-measured against this file rather than carried forward by arithmetic from an earlier edition. ⚠️ **That re-measurement was performed at THIS edition, and the count this paragraph replaces was an EARLIER edition's, not the previous one's** — the edition immediately before this one (`7697a6b762`) already read `327`/`214`/`113`/`122` — `git show 7697a6b762:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | grep -o 'The figures here are .*'`, so that number was **stale** by then, not a count of a different population: this file's own citation set is what the rule counts, so any revision that adds, moves or drops a cite changes it. That is why the figures were recomputed rather than adjusted, and ⛔ a `+N` on an earlier edition's count is exactly the offset-not-content failure recorded one paragraph above. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
+⚠️ **The figure counts the file it is written in, so every revision moves it — and it is MEASURED over this file as it now stands, not carried forward**: the form this paragraph replaced quoted `111 of 217`. ⚠️ **It matched the editions up to the one that carried it — which is why it is recorded as provenance, not carried forward.** Measured by this header's own rule: at `43028d178b` (its drift counted at the `main` head the retired sentence names, `534f3e1bee` — **not** at `43028d178b` itself, where the same rule reads 126, and not at `534f3e1bee`'s own edition of this document, which reads `52 of 164`) the document is **314 spellings → 217 pairs → 111 drifters**, so the figure was RIGHT when written; at `295c26ebc8`, the edition that CARRIED it, the same rule gives **320 → 216 → 110**, so the sentence was already one edition stale on arrival. And `111` is a DRIFTER count, so comparing it against a pair count is not a re-measurement — the pairs at `43028d178b` are 217, which is exactly what the retired sentence said. The figures here are **345 written spellings → 228 pairs → 117 collisions → 131 drifters of the 228**, at `main` `ae54df166d`, re-measured against this file rather than carried forward by arithmetic from an earlier edition. ⚠️ **That re-measurement was performed at THIS edition, and the count this paragraph replaces was an EARLIER edition's, not the previous one's** — an earlier edition, `7697a6b762` (31 editions of this file back), already read `327`/`214`/`113`/`122` — `git show 7697a6b762:docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | grep -o 'The figures here are .*'`, so that number was **stale** by then, not a count of a different population: this file's own citation set is what the rule counts, so any revision that adds, moves or drops a cite changes it. That is why the figures were recomputed rather than adjusted, and ⛔ a `+N` on an earlier edition's count is exactly the offset-not-content failure recorded one paragraph above. ⛔ **A `+N` applied to a previous count is exactly the offset-not-content failure the paragraph above records, one level up**: the earlier form of this header read `98 + 10 = 108`, which was true of the file it was written for and false of this one. Every cite **this revision writes** was opened at the head it names before it was written; the ones it INHERITED were not re-opened, and the ratio above is the measurement of how many of those no longer land.
 ⛔ **An earlier draft of this paragraph asserted a population of "two"** and undercounted it by an order of
 magnitude — the omission class §2.3 records — which is why that count is now MEASURED by
 re-running the stated method over this file (the figures at the top of this header) instead of enumerated here.
@@ -543,11 +545,11 @@ columns in a single `RETURN`. What separates them:
 1. **Inside the walk** — a predicate evaluated on the nodes the traversal visits, so it decides the walk's
    MEMBERSHIP. `t.is_episodic = true` and `t.pointKind = 'event'` in the two `session_schema.py` walks and in
    `_capture_turn_ids` (`sdk.py:3134`), and `(p.pointKind IS NULL OR p.pointKind <> 'event')` in `list_sessions`
-   itself (`hosted_api.py:24788`). These are **`graph`**: change them and the walk visits different nodes.
+   itself (`hosted_api.py:25251`). These are **`graph`**: change them and the walk visits different nodes.
    ⚠️ **Three of this rule's members are cited above for ADJACENCY only, or not at all**, so the rule is
    stated over the walks rather than over the rows, and row 2b counts all eight: the two capture retry-**heal**
-   scans (`sdk.py:20041-20044`, `hosted_api.py:21194-21196` — `coalesce(n.is_episodic, false) <> true`, a
-   READ-then-STAMP whose matched ids are written back at `sdk.py:20049` / `hosted_api.py:21201`) and the C4
+   scans (`sdk.py:20162-20165`, `hosted_api.py:21337-21339` — `coalesce(n.is_episodic, false) <> true`, a
+   READ-then-STAMP whose matched ids are written back at `sdk.py:20170` / `hosted_api.py:21344`) and the C4
    turn-shape filter (`session_reinjection.py:568-570`, `_TURN_SHAPE_FILTER` at `:268` = `coalesce(p.is_episodic,
    false) = true AND …`, inside the `CONTAINS` walk the table above cites at `:561`). ⛔ Earlier revisions of this
    section and of row 2b said "five … walks" as if the set were closed; it was the set *the census had happened

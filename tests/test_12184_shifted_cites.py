@@ -86,7 +86,10 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # class (`:4549` re-pointed to `:4552`), which is the failure the whole file exists for.
     # ⛔ The `6659`/`6661` this comment used to name were a LATER edition's addresses for these same two
     # rows; a re-derivation moved the rows and left the prose, so the comment vouched for a pin set that
-    # no longer exists (`grep '6659\|6661'` matched nothing but this comment). Name what the rows carry now.
+    # no longer exists (`grep '6659\|6661' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md
+    # tests/test_12184_shifted_cites.py` matched nothing but this comment — the scope matters:
+    # unscoped, `grep -rn` over `docs/` does hit other files, e.g.
+    # `docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md`). Name what the rows carry now.
     (_AUDIT, "`:7576-7579`", _SE, 7576, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
     (_AUDIT, "`:7582-7596`", _SE, 7582, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3157", _SE, 3157, "CALL db.idx.fulltext.queryNodes"),
@@ -150,13 +153,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is one of the THIRTEEN that are
     # incomparable at the pin — the whole `_PIN_EOF_PAIRS` table, not this pair alone. Measured at this
-    # head: 13 non-comparable of 232, 219 comparable, and the drift is 127 of the 219 comparable plus
-    # 8 of the 13 = 135 of the 232. ⛔ That numerator was `128` (and the total `136` of `234` pairs) for the
+    # head: 13 non-comparable of 228, 215 comparable, and the drift is 123 of the 215 comparable plus
+    # 8 of the 13 = 131 of the 228. ⛔ That numerator was `128` (and the total `136` of `234` pairs) for the
     # editions up to `3c60ec9207`, and it went stale at `5171be0d53` — the commit that re-pointed the audit's
     # sibling-file cites: re-measured at this head by the header's own rule (per pair, `git show
     # ccb49741b2ec:<path>` against `git show ae54df166d:<path>`, line text for line text, comparability
-    # against the PIN's copy length) it is 127, and the two-code-span basis is 138 of 235. The denominators
-    # moved again when the `session_schema.py` cluster was re-pointed (`234`/`111` -> `232`/`113`), so these
+    # against the PIN's copy length) it is 123, and the two-code-span basis is 134 of 231. The denominators
+    # moved again when the `session_schema.py` cluster was re-pointed (`234`/`111` -> `228`/`117`), so these
     # literals are re-derived by hand whenever the document's cites move — no arm applies this rule. ⛔ This comment said "ONE OF THREE … 211 comparable, 119 of them
     # drifted … 122 of the 214": that was the PRE-re-derivation split, it survived the pass that moved
     # `_PIN_EOF_PAIRS` 11 → 13, and its denominator reconciles with no table this file holds — which is
@@ -688,23 +691,27 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        # ⛔ The drift NUMERATOR (`127`) was the one figure in this header that no arm
-        # could catch, and it was measured rather than assumed: mutating it to `128`
-        # left all 31 arms of `tests/test_12184_shifted_cites.py` GREEN (the split arm
-        # grades both DENOMINATORS — `221` against `_PIN_EOF_PAIRS`, the ratio's own
-        # `of the 221` — and the `8`/`5` partition, but never the count of the 221 that
-        # drift). It is a coverage gap, and the number is whatever the header's own rule
-        # measures at this head: `127` (it read `128` until `5171be0d53` re-pointed the
-        # audit's sibling-file cites; the two-code-span basis moved with it, 139 → 138).
+        # ⛔ The drift NUMERATOR (`123`) was the one figure in this header that no arm
+        # could catch. It was measured rather than assumed AT THE TIME: mutating it by one
+        # left all 31 arms this file THEN had GREEN (the split arm
+        # grades both DENOMINATORS — `215` against `_PIN_EOF_PAIRS`, the ratio's own
+        # `of the 215` — and the `8`/`5` partition, but never the count of the 215 that
+        # drift). ⛔ That result does NOT reproduce at this head and is not a claim about
+        # it: the literals below are asserted now, so the same mutation REDS this arm (34
+        # test functions, up from the 31 it had). It is a coverage gap, and the number is
+        # whatever the header's own rule
+        # measures at this head: `123` (it read `128` until `5171be0d53` re-pointed the
+        # audit's sibling-file cites, and the population has moved twice since — the
+        # two-code-span basis is 134 at this head, from 139 before the first move).
         # Graded as a literal because deriving it needs two
         # historical blobs per pair (`git show <head>:<path> | sed -n '<N>p'` at each,
-        # text for text), which this suite refuses to do 221 times — the docstring
+        # text for text), which this suite refuses to do 215 times — the docstring
         # above already states that this file's job is change-detection, not
         # re-measurement.
-        "127 of the 219 comparable",
-        "135 of this document's 232",
-        "dedupes the **345** as-written spellings to 232 — **113**",
-        "345 written spellings → 232 pairs → 113 collisions → 135 drifters of the 232",
+        "123 of the 215 comparable",
+        "131 of this document's 228",
+        "dedupes the **345** as-written spellings to 228 — **117**",
+        "345 written spellings → 228 pairs → 117 collisions → 131 drifters of the 228",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -753,7 +760,8 @@ _SPELLING = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py):(\d+)")
 #: document wrote MORE THAN ONE, so the comparator enforced a figure the tree contradicts (`#13854`).
 _TWO_SPAN = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.py)`\s*`(?::(\d+))")
 #: ⛔ The figures are matched with the header's EMPHASIS STRIPPED, never against one rendering of them.
-#: `main` bolds the spelling and collision counts (`dedupes the **327** … — **113**`) and not the ratio's
+#: `main` bolds the spelling and collision counts (`dedupes the **345** … — **111**` on the edition this
+#: was verified against) and not the ratio's
 #: three mentions, and which numbers it emphasises is an EDITORIAL choice that has already moved twice —
 #: the patterns before this one were written against an un-bolded edition, found nothing on the merged tree,
 #: and turned the comparator into an early `return ["the header no longer publishes …"]` that read like a
@@ -1080,14 +1088,14 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
                 f"over {published_pairs} it is {published_pairs + extra_pairs}"
             )
         # ⛔ A BAND, not a lower bound. The two bases are one measurement under two counting decisions
-        # (`122 and 123 are one measurement under two counting decisions, not two findings`), and each added
+        # (`131 and 134 are one measurement under two counting decisions, not two findings`), and each added
         # pair adds AT MOST one drifter — so the only legal numerators are `drifters` .. `drifters +
         # extra_pairs`. `alt_drifters < drifters` saw the downward violation and was blind to every
         # overstatement: a numerator inflated by +8 or +67 over the primary's read `problems == []`, which
         # is the exact direction a stale figure takes when a denominator moves under it (`#13599` review,
         # finding 1 — measured on this head before the fix). It is the ONLY guard on this figure: the
         # three-mention agreement arm cannot reach the alternative basis, because the document publishes
-        # `123` in that sentence alone, so there is no second mention to agree with.
+        # `134` in that sentence alone, so there is no second mention to agree with.
         if extra_pairs is not None and not drifters <= alt_drifters <= drifters + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_drifters} drifters against the primary basis's "
@@ -1180,7 +1188,7 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
     """The header's bare-sibling clause is only true while each of the five is ALSO written one-token.
 
     The clause now says a `path.py:NNNN` re-spelling would add "five more **as-written spellings** —
-    345 → 350 — and so 114 → 119 collisions … while adding **no pair at all**: 231 either way, because
+    345 → 350 — and so 117 → 122 collisions … while adding **no pair at all**: 228 either way, because
     each of the five already carries its pair from §2.5". That last half is the load-bearing one, and it
     was FALSE for the sentence it replaced: the previous edition claimed a pair spelling "would add five
     more pairs to the populations the figures above are measured over" (`#13991` review, P2-1), while
@@ -1548,10 +1556,10 @@ def test_a_carried_forward_figure_is_reported() -> None:
     def _mutate(match: re.Match[str], overrides: dict[int, int]) -> str:
         """The matched sentence with capture group *k* replaced by `overrides[k]`, positionally.
 
-        Splitting the SENTENCE on its digits is what makes this positional: `214` occurs twice in the
-        figures sentence (the pair count and the ratio's own denominator) and `327` again in the header
-        line, so a `str.replace` would carry the same edit into a group nobody meant to touch and prove
-        nothing about either.
+        Splitting the SENTENCE on its digits is what makes this positional: `228` occurs twice in the
+        figures sentence (the pair count and the ratio's own denominator) and `345` again in the header's
+        `dedupes the …` line, so a `str.replace` would carry the same edit into a group nobody meant to
+        touch and prove nothing about either.
         """
         parts = re.split(r"(\d+)", match.group(0))
         for index in range(1, len(parts), 2):
@@ -2790,8 +2798,8 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     ("sdk.py:41749", "tortoise/sdk.py", 41749, "\"MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NUL", 3),
     (":42507", "tortoise/sdk.py", 42507, "\"MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url\",", 0),
     ("sdk.py:58987", "tortoise/sdk.py", 58987, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
-    ("sdk.py:20162-20165", "tortoise/sdk.py", 20165, "\"AND coalesce(n.is_episodic, false) <> true \")", 1),
-    ("sdk.py:20170", "tortoise/sdk.py", 20170, "_stamp_capture_provenance(", 1),
+    ("sdk.py:20162-20165", "tortoise/sdk.py", 20165, "\"AND coalesce(n.is_episodic, false) <> true \")", 2),
+    ("sdk.py:20170", "tortoise/sdk.py", 20170, "_stamp_capture_provenance(", 2),
     ("sdk.py:58336-58360", "tortoise/sdk.py", 58338, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
     ("sdk.py:58338-58360", "tortoise/sdk.py", 58338, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
     ("sdk.py:58338", "tortoise/sdk.py", 58338, "\"s.turn_count, s.actor_user_id, s.harness, \"", 8),
