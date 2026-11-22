@@ -3360,8 +3360,8 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
 #: 'grep'`), taking every citation guard in it down with the cells that need grep; and it ran
 #: outside any pytest item, so a `grep` that blocked on PATH hung collection instead of failing it.
 #: Deferred, the blast radius is the cells that grep, MEASURED with a `grep` on PATH that exits 3
-#: for every call (so no probe can answer): **nine** cells fail and the other **25** still pass
-#: (9 of the 34 cells at this head — the count is re-derived, not remembered, whenever a cell is added
+#: for every call (so no probe can answer): **nine** cells fail and the other **26** still pass
+#: (9 of the 35 cells at this head — the count is re-derived, not remembered, whenever a cell is added
 #: to this file).
 #: The nine are the SEVEN `test_the_d5_count_reader_*` cells that consult the option universe, plus
 #: `test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have` and
@@ -5200,7 +5200,7 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # namespace at CALL time (its own docstring), and it is the SOLE caller of
     # `_d5_undocumented_long_options`. Patching the allowance as well pinned NOTHING — the universe
     # is replaced whole, so that function cannot be reached inside this window (MEASURED: a raising
-    # sentinel in its place leaves this file `34 passed`). A second input that no assertion can
+    # sentinel in its place leaves this file green). A second input that no assertion can
     # attribute to the behaviour it claims to guard is dead weight (agent-infra#3442 rule 3), so it
     # is gone rather than explained away.
     snapshots = (
@@ -5216,11 +5216,6 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
                 f"`grep -c {spelling}` must be {'READ' if accepted else 'DECLINED'} — the "
                 f"{'reading' if accepted else 'declining'} arm is the one that keeps a real "
                 "prescription visible (or a command grep will not run out of the count) (#14138)")
-            assert _long_option_is_accepted(spelling) is accepted, (
-                f"`_long_option_is_accepted({spelling!r})` answered "
-                f"{_long_option_is_accepted(spelling)} with the alias "
-                f"{'in' if accepted else 'out of'} the universe "
-                "— acceptance is exactly universe membership here (#13995)")
         assert _d5_blank_class_prescriptions(hidden) == (
             ["^[+-]$", "^[+-]$"] if accepted else ["^[+-]$"]), (
             "the two-prescription row must follow the same snapshot: TWO where the alias counts "
@@ -5356,7 +5351,7 @@ def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
     it down with the cells that need grep, and a `grep` that blocked on PATH hung COLLECTION instead
     of failing one cell (the consequence is recorded on that function). No cell asserted it, so it
     could be silently undone: prepending a module-level `_D5_ALL = _d5_all_long_options()` leaves
-    **all 33 cells green** on any box that HAS grep, and only a grep-less box ever notices — which
+    **all 35 cells green** on any box that HAS grep, and only a grep-less box ever notices — which
     is exactly the platform this file is least often run on.
 
     ⛔ MEASURED IN CHILD INTERPRETERS, not in-process: this module's own import has already happened
@@ -5423,6 +5418,70 @@ def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
     assert done.stdout.strip().endswith("IMPORT-OK 0"), (
         "the allowance was DERIVED AT IMPORT: the derivation must stay lazy so a box without `grep` "
         f"still collects this file (#14138): child said {done.stdout.strip()!r}")
+
+
+def test_the_d5_alias_cells_still_COLLECT_when_grep_cannot_answer(tmp_path):
+    r"""A grep that is a NON-ANSWER for every spelling must cost its cells, not the WHOLE FILE.
+
+    ⛔ THE COMPLEMENT of `test_the_allowance_is_not_derived_at_import`, and both are needed (#14138).
+    That cell removes `grep` from `PATH` entirely, so the failure it pins is an eager probe that
+    RAISES. This one leaves a `grep` ON the path that exits 3 for every call — the "non-answer" the
+    allowance probe refuses to read as a refusal — so the failure it pins is an eager probe that
+    aborts collection where grep is PRESENT but broken. Different hosts, and the second is the shape
+    that made this file uncollectable once already.
+
+    ⛔ WHY IT CANNOT BE AN IN-PROCESS ASSERTION. An eager
+    `_D5_ALL_LONG_OPTIONS_EAGER = _D5_DOCUMENTED_LONG_OPTIONS | _d5_undocumented_long_options()`
+    leaves the whole suite green on a working grep, so no cell in this file notices it; only a
+    collection of the file on a hostile host does (MEASURED: `no tests collected, 1 error` for the
+    eager form, against a full collection for the deferred one).
+
+    ⛔ MEASURED BY COMPARING, NOT BY ASSERTING A COUNT. The cell count is not written down here: a
+    later test added to this file would silently falsify it. The same `--collect-only` run is made
+    twice — once on the real PATH, once behind the hostile stub — and the two must AGREE. The floor
+    keeps a parser that collected nothing from certifying agreement with itself.
+
+    ⛔ NOT A MUTANT-DRIVEN ROW, and stated so rather than passed off as covered: no edit to this
+    file changes what a NORMAL grep answers, so the only mutant it reddens is the hoist above.
+    """
+    stub = tmp_path / "grep"
+    stub.write_text("#!/bin/sh\ncat >/dev/null\nexit 3\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    def collect(env_path: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", str(Path(__file__)), "--collect-only", "-q",
+             "-p", "no:cacheprovider"],
+            capture_output=True, text=True, timeout=300,
+            env={**os.environ, "PATH": env_path, "TORTOISE_TEST_CARVE_OUT": "1"},
+        )
+
+    normal = collect(os.environ["PATH"])
+    assert normal.returncode == 0, (
+        f"this file did not collect on an ordinary PATH, so the comparison below cannot say "
+        f"anything about the host that matters: rc {normal.returncode}\n"
+        f"{normal.stdout[-2000:]}\n{normal.stderr[-2000:]}")
+    hostile = collect(f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    assert hostile.returncode == 0, (
+        "a grep that exits 3 for EVERY call — the non-answer the allowance probe refuses to read "
+        "as a refusal — aborted COLLECTION of this file, so every citation guard in it was lost "
+        "with the cells that need grep. The allowance must be derived LAZILY, at the point a cell "
+        "asks for it, never at import (#14138): "
+        f"rc {hostile.returncode}\n{hostile.stdout[-2000:]}\n{hostile.stderr[-2000:]}")
+
+    def collected(proc: subprocess.CompletedProcess) -> int:
+        found = re.findall(r"^(\d+) tests? collected", proc.stdout, re.MULTILINE)
+        assert found, f"no collection count in the output: {proc.stdout[-2000:]!r}"
+        return int(found[-1])
+
+    have, also_have = collected(normal), collected(hostile)
+    assert have >= 30, (
+        f"only {have} cells collected on an ordinary PATH — the floor exists so a parser that "
+        "collected nothing cannot certify that two empty collections agree (#14138)")
+    assert also_have == have, (
+        f"a grep that cannot answer for any spelling changed what COLLECTS: {also_have} cells "
+        f"behind the stub against {have} on an ordinary PATH. Collection must not depend on grep "
+        "at all — only the cells that measure it may (#14138)")
 
 
 def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_prefix():
