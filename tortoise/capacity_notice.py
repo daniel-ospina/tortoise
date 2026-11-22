@@ -103,7 +103,7 @@ stamp itself is a
 compare-and-swap on the value this pass read (:func:`claim_notice`), so two
 processes cannot interleave into a LOWER mark, and the provider Idempotency-Key
 (`capacity-notice:{org_id}:{pct}`) collapses the cross-process replay that
-survives a crash between send and stamp — inside that key's 24 h retention
+survives a crash between send and stamp — inside that key's 24 h idempotency
 window only. Resend dedupes a repeated key against "the last **24 hours**"
 (`resend.com/docs/dashboard/emails/idempotency-keys`), so a replay that arrives
 later than that sends a SECOND copy and then stamps. ⛔ The bound is stated
@@ -662,7 +662,7 @@ def claim_notice(cp, org_id: str, threshold: int,
     ⛔ SEND-THEN-STAMP, like the #2406 onboarding marker: the stamp follows a
     provider ACCEPT, so a failed send leaves the mark alone (retryable) and the
     provider Idempotency-Key collapses the duplicate a crash between the two
-    produces — inside the key's 24 h retention window only. ⛔ THAT COLLAPSE IS
+    produces — inside the key's 24 h idempotency window only. ⛔ THAT COLLAPSE IS
     BOUNDED BY THE PROVIDER, NOT HERE: Resend keeps
     a key for "the last 24 hours"
     (`resend.com/docs/dashboard/emails/idempotency-keys`), so a crash-replay that
@@ -714,7 +714,7 @@ _ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
 #: the LEDGER, and an unreadable ledger must refuse to send
 #: (`notice-mark-unavailable`) rather than mean "never notified" — the provider
 #: idempotency key collapses only a replay of the SAME threshold, and only inside
-#: that key's 24 h retention window (beyond it the provider sends again), so an
+#: that key's 24 h idempotency window (beyond it the provider sends again), so an
 #: unledgered pass re-sends the one-shot notice every interval forever. Deletion is the
 #: fail-closed direction too (#1096: a deletion column is never an additive tier).
 #: A single PostgREST 400 does not say WHICH column it rejected, which is why

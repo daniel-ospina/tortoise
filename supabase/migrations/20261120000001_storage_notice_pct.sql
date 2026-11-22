@@ -31,7 +31,7 @@
 -- retryable), so two CONCURRENT passes can both read NULL, both pass the pre-send
 -- re-read, and deliver 100 % then 80 %. The re-read narrows that to one round trip
 -- and the Idempotency-Key below dedupes only the SAME threshold, and only inside
--- the provider's 24 h retention window; closing the order
+-- the provider's 24 h idempotency window; closing the order
 -- window needs a pre-send reservation (a stamp-first protocol with a compensating
 -- unset), which is NOT taken here — a known, ACCEPTED residual rather than a
 -- property this column gives you. It needs two live processes reading the same
