@@ -703,16 +703,20 @@ def _raises_a_skip(exc: ast.expr) -> bool:
     `pytest.skip.Exception`, `pytest.xfail.Exception`, `unittest.SkipTest`,
     `_pytest.outcomes.Skipped`.
 
-    ⛔ DECLARED RESIDUAL: a skip exception aliased to a bare name
-    (`_SKIP = pytest.skip.Exception; raise _SKIP(...)`) carries no such part and is therefore
-    CREDITED — a false open in the un-recognised direction. Measured on this tree: **0**
-    handlers of that shape in `tests/`+`tools/`, re-derivable without a pointer: walk every
-    `ast.ExceptHandler` whose last statement is a `Raise`, and check whether the raised name is a
-    bare `Name` rather than a dotted skip path — 0 at this head, so an alias table is deferred
-    until the first live instance, not built ahead of it. ⛔ THE SECTION THAT USED TO BE NAMED
-    HERE DOES NOT CARRY THIS MEASUREMENT: `4j-undetriginta` grades the pytest-skip conversion over
-    four inline sources and states no population at all, so the citation sent a reader to a section
-    that could not confirm the figure it was quoted for (review of #14287, P3).
+    ⛔ DECLARED RESIDUAL — the WHOLE MISS CLASS, not just the alias (review of #14287, P3: the
+    residual named only the first shape, and the class is wider). This predicate recognises a skip
+    by a PART of its dotted path, so anything that hides the signal in neither a part nor a call
+    argument is CREDITED — a false open in the un-recognised direction. Three shapes, each
+    re-derivable from this tree rather than quoted as a count: (a) an alias to a bare name —
+    `_SKIP = pytest.skip.Exception; raise _SKIP(...)`; (b) a skip whose dotted path carries none of
+    the parts — `_pytest.outcomes.XFailed(...)`, `errors.Skip(...)`; (c) a callee that is itself a
+    bare `Name` — `raise _skip_helpers.make()`. Re-derive the population: walk every
+    `ast.ExceptHandler` whose LAST statement is a `Raise`, and ask which of the three shapes its
+    raised expression spells. 0 in `tests/`+`tools/` at this head, so an alias/parts table is
+    deferred until the first live instance, not built ahead of it. ⛔ THE SECTION THAT USED TO BE
+    NAMED HERE DOES NOT CARRY THIS MEASUREMENT: `4j-undetriginta` grades the pytest-skip conversion
+    over four inline sources and states no population at all, so the citation sent a reader to a
+    section that could not confirm the figure it was quoted for (review of #14287, P3).
     """
     node: ast.expr = exc
     if isinstance(node, ast.Call):
@@ -727,7 +731,7 @@ def _raises_a_skip(exc: ast.expr) -> bool:
 
 
 def _reraises(handler: ast.ExceptHandler) -> bool:
-    """Whether the handler ENDS by re-raising (nothing is dropped).
+    """Whether the handler ENDS by SURFACING a failure (nothing is dropped).
 
     The last statement is what decides it, so the correct cleanup shape —
     `except (AttributeError, …): _proj.close(); raise` — counts. A coverage rule
@@ -796,15 +800,22 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
         #
         # ⛔ AND THE RULE IS NOT "the raised object must be the caught one", which was the
         # first cut of this fix and is TOO STRICT: it charges `raise RuntimeError(...) from
-        # exc`, a handler that fails LOUDLY. 345 such handlers exist in `tests/`+`tools/` whose
-        # LAST statement raises an object that is not the caught name AND whose chain it leaves
-        # un-suppressed — no `from None` (measured over the AST, not by grep; on the PLAIN reading
-        # without that exclusion the count is 409, 396 of which carry a cause clause at all — so
-        # the three figures are nested subsets and any of them is re-derivable), 0 of them graded
-        # today — so it would not red
-        # now, but it would red the first widened probe and it false-reds the CORRECT
-        # shape this file's own docstring promises never to charge. Only a conversion into a
-        # SKIP hides the failure.
+        # exc`, a handler that fails LOUDLY. Such handlers exist in `tests/`+`tools/`, and the
+        # count is quoted ONLY together with its CLASS, because the class is what makes it
+        # re-derivable: a review of #14287 reported this figure unreproducible under three
+        # variants (339 / 384 / 397), and EVERY one of those was a different class. Start from
+        # "the LAST statement raises an object that is not the caught name" and add the
+        # exclusions; each one moves the population, so the three figures are NESTED SUBSETS:
+        #   409  ... any chain
+        #   396    ... and carries a cause clause at all
+        #   345    ... and the chain is not suppressed by `from None` (ast.Constant(None))
+        # The figure this comment stands behind is the LAST of the three — **345** handlers, the
+        # population the first-cut rule would have charged. ⛔ `from None` parses to
+        # `ast.Constant(value=None)`, NOT `ast.Name(id="None")`: reading it as a Name is how a
+        # re-derivation lands on 396 and reports the number wrong. None of the 345 is graded
+        # today — so it would not red now, but it WOULD red the first widened probe and
+        # it false-reds the CORRECT shape this file's own docstring promises never to charge.
+        # Only a conversion into a SKIP hides the failure.
         if _last.exc is None:
             return True
         return not _raises_a_skip(_last.exc)
@@ -5754,8 +5765,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             if isinstance(node, ast.ExceptHandler)
         )
         assert _reraises(_handler) is _want, (
-            f"`{_statement}` in a narrow arm must be coverage={_want} ({_label}) — a "
-            "`raise exc` re-raises the caught object and drops nothing"
+            f"`{_statement}` in a narrow arm must be coverage={_want} ({_label}) — the rule is "
+            "`the failure SURFACES`, not `the caught object is re-raised`: a raise that surfaces "
+            "anything (chained, unchained, `from None`, or a different object) is coverage, and "
+            "only a raise that converts the failure into a SKIP drops it"
         )
 
     # 4j-undetriginta. ⛔ THE GATE VERDICT on the pytest-skip conversion (review of #14287,
@@ -5775,11 +5788,12 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "except ImportError as exc:\n        raise pytest.skip.Exception('no engine') from exc\n",
             True,
         ),
-        (
-            "a chained conversion to a REAL error, which fails loudly",
-            "except ImportError as exc:\n        raise RuntimeError('no engine') from exc\n",
-            False,
-        ),
+        #: ⛔ THE `raise RuntimeError(...) from exc` ROW IS DELETED, NOT KEPT HERE (review of
+        #: #14287, P3): it was a second witness of a path already pinned — the `_reraises` row
+        #: `("raise X from exc", True)` above pins that spelling, and "a genuine re-raise, which
+        #: charges nothing" below pins the census-level arm that would have to misread it. No
+        #: mutant reverts one without the other, so the row added no discriminating power; the
+        #: PROPERTY it stated lives in the `_reraises` rows, where it belongs.
         (
             "the plain skip it converts from",
             "except ImportError:\n        pytest.skip('no engine')\n",
