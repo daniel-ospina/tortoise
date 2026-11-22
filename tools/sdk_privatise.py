@@ -1123,8 +1123,9 @@ SWEEP_NAMES = 66
 #:
 #: ⛔ RE-CUT AGAIN → (11861, "f0647020531c078c"). The 11858 pair does NOT reproduce on the tree
 #: that commits it: `--check` on a detached worktree of `10e51693f1` reports 11861 against its own
-#: 11858, so `main` has been red on `surface-guard` since that commit landed and every PR cut from
-#: it inherits the red. Whatever reading produced 11858, it was not a reading of THIS tree.
+#: 11858 — so the red `94d75667dc` started was still there at the commit that re-pinned over it,
+#: and every PR cut from that tree inherits it. Whatever reading produced 11858, it was not a
+#: reading of THIS tree.
 #: THE THREE ROWS, ATTRIBUTED BY MEASUREMENT, one commit: `--check` on `94d75667dc^` exits 0 and
 #: on `94d75667dc` reports (11860, "57e0960ca6f20f5a") — so `94d75667dc` (#14224, the read-wave
 #: harness) is where the drift starts, and a whole-tree row-set diff `e74cf1d13d → 13b6b49fe9`
@@ -1139,11 +1140,11 @@ SWEEP_NAMES = 66
 #: DECLARED, not rewritten: that is the ordinary-word receiver this sweep deliberately leaves
 #: alone, neither an SDK handle nor a typed reference to a public name — `typed references still
 #: pointing at a public name` is 0 at this head, which is the number the retirement owes.
-#: ⛔ WHAT TO TAKE FROM THE DRIFT RATHER THAN THE NUMBER: `04afeb811d` recorded a "zero-row
-#: delta" that was true of ITS OWN commit while the tree it read was already three rows over, and
-#: the 11858 pin was then set from the PREVIOUS PAIR (the `11858 − out.update` reading quoted
-#: above) rather than from `--repin` on the tree that would commit it. A re-pin is a READING of
-#: that tree — one command — and a row-by-row diff explains a delta, it never replaces the read.
+#: ⛔ WHAT TO TAKE FROM THE DRIFT RATHER THAN THE NUMBER: the 11858 pin was set from the PREVIOUS
+#: PAIR (the `11858 − out.update` reading quoted above) rather than from `--repin` on the tree that
+#: would commit it, so an error three rows old was CARRIED FORWARD at the one place that exists to
+#: correct it. A re-pin is a READING of that tree — one command — and a row-by-row diff explains a
+#: delta, it never replaces the read.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
