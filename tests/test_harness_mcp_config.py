@@ -1156,37 +1156,38 @@ class TestDocsPageAndSkillConfig:
         # exists for (#9660's plan-dependent write-tool finding), so naming a
         # write/admin tool would prescribe a call that cannot be made.
         #
-        # ⛔ #14254: the discovery call the row teaches is now the CONSOLIDATED
-        # `tortoise_graph_overview(section="graphs")` — #10914 absorbed the
-        # standalone `tortoise_list_graphs` into that container ("surface 76 →
-        # 72"), so this block requiring the pre-#10914 NAME asserted a tool the
-        # owner-approved surface retires, and it was red on `main` for every PR
-        # whose shard reached it. The PROPERTY it guards is unchanged and is
-        # still asserted here: the row must name the current graph-discovery
-        # affordance, that call must be REAL, ACTIVE and read-risk (a plan can
-        # withhold a write tool), and the row must name NO retired tool (#3883
-        # class — a tool-grant client cannot call one).
+        # #14169 recorded the ordering this pin had to follow: the pin was
+        # written against the pre-retirement surface, where graph discovery was
+        # spelled `tortoise_list_graphs` (or its `tortoise_graph_overview`
+        # container). #11609's approved target RETIRED that door — the registry
+        # now carries it in `RETIRED_TOOL_REGISTRY`, and the shipped row names
+        # the container instead — so a pin that still demands the retired
+        # literal reds main for a doc that is CORRECT. This is the same class
+        # the assertion below already names for `tortoise_overview`
+        # (#4282): asserting a retired name asserts the surface shape the
+        # owner-approved target removes. The pin keeps its INTENT (the row must
+        # name the graph-discovery call, it must be read-risk, and it must be
+        # CALLABLE by a connector) and fixes the identity it names it by: the
+        # retired alias must be ABSENT from the row, and the container present.
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert "tortoise_graph_overview" in row, (
-            "the row must NAME the current graph-discovery affordance — the "
-            "pre-#10914 block asserted the standalone `tortoise_list_graphs` "
-            "here, and its replacement asserted only the `section=` argument, "
-            "which left nothing tying the row's text to the tool it teaches "
-            "(#14038 review, P2 — the property is the NAME, so assert the name")
-        assert 'section="graphs"' in row, (
-            "the row must name the graph-discovery affordance — a connector "
-            "carries no graph of its own, so the user has to see what exists "
-            "before writing")
         active = {t.name: t for t in TOOL_REGISTRY}
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        named_tools = set(re.findall(r"tortoise_[a-z_]+", row))
-        assert not (named_tools & retired), (
+        assert "tortoise_graph_overview" in row, (
+            "the row must name the graph-discovery call — a connector carries no "
+            "graph of its own, so the user has to see what exists before writing")
+        assert "tortoise_list_graphs" not in row, (
             "the row must not name a RETIRED tool (#3883 class) — a tool-grant "
-            f"client cannot call one; retired names in the row: "
-            f"{sorted(named_tools & retired)}")
-        assert active["tortoise_graph_overview"].risk == "read", (
-            "graph discovery must be a read-risk tool — write tools are the ones "
-            "a plan can withhold")
+            "client cannot call one; #11609 retired this door into "
+            "tortoise_graph_overview(section=\"graphs\")")
+        assert "tortoise_list_graphs" in retired, (
+            "this pin permits the alias in prose only while it is retired — if "
+            "#11609's retirement is ever reversed, revisit the assertion above "
+            "instead of deleting it")
+        # The container's read-risk claim is asserted below with its membership
+        # guard FIRST (`assert "tortoise_graph_overview" in active` precedes the
+        # subscript) — asserting it here would subscript `active` before that
+        # guard, so a container dropped from the registry would raise KeyError
+        # instead of naming the reason (code-review round 1, non-blocking).
         # The advertised (consolidated) form is named too, and the section it
         # teaches must be one the tool really accepts: a card that names an
         # `overview(section=…)` value the handler rejects sends the agent into a

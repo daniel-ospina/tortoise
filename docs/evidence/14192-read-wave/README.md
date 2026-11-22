@@ -4,9 +4,10 @@ type: evidence
 domain: platform
 doc_status: live
 created: 2026-11-21
+updated: 2026-11-22
 subjects.team: epistemic-team
-aboutSubjects: Tortoise read path, read-wave latency, rank identity, p50/p95 delta
-aboutObjects: "#14192, tools/read_wave_latency.py, ab-full-read.json, ab-relationships.json"
+aboutSubjects: Tortoise read path, the post-fusion read wave, read latency and rank identity
+aboutObjects: "#14192, #14224, #14262, tools/read_wave_latency.py, ab-full-read.json, ab-relationships.json"
 ---
 
 # #14192 — the read path's legs, measured
