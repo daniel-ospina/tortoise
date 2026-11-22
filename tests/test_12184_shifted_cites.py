@@ -258,9 +258,10 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_SUBSTRATE, "(opening `:37527`", _SDK, 37527, "def record_decision"),
     (_SUBSTRATE, "`:37546` is the `:Source` line", _SDK, 37546, "D10: a document is a ``:Source``, not a"),
     (_SUBSTRATE, "(opening `:37567`)**)", _SDK, 37567, "def _file_human_approval"),
-    # ⛔ And the §"capability placement" heal pair: the two `hosted_api.py` addresses were re-pointed by
+    # ⛔ And the capability-placement heal pair: the two `hosted_api.py` addresses were re-pointed by
     # DELTA in the merge (+114) onto the operator-stamp statement and a comment line, while the fragment
-    # the row quotes (`coalesce(n.is_episodic,false) <> true`) lives 37 lines lower. Pinned by content.
+    # the row quotes (`coalesce(n.is_episodic,false) <> true`) lives 37 lines lower. Pinned by content —
+    # §2.4's prose AND row 2b's own copy, which is why each token occurs twice.
     (_AUDIT, "hosted_api.py:21451-21453", "tortoise/hosted_api.py", 21453, "coalesce(n.is_episodic,false) <> true"),
     (_AUDIT, "hosted_api.py:21458", "tortoise/hosted_api.py", 21458, "_stamp_capture_provenance("),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
@@ -779,6 +780,11 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         "167 of this document's 227",
         "dedupes the **345** as-written spellings to 227 — **118**",
         "345 written spellings → 227 pairs → 118 collisions → 167 drifters of the 227",
+        # ⛔ The ARROW chain and the PROSE form are one claim: the cycle-3 re-cut
+        # (`01a3c7072a`) restored the arrow rendering after the population
+        # de-duplicated back to 227 pairs, so BOTH are asserted — a doc that
+        # publishes one and not the other has lost a site, not just a phrase.
+        "**The drift is 167 of those 227.**",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -3127,11 +3133,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # (`entity_verdict.py:43`), and NOTHING read it — its `sdk.py:28581` sibling was pinned and the
     # neighbour was not, so a rotation of `entity_verdict.py` under that cite would have moved it
     # silently. Same shape as the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
-    # 107 at the #14038 review (cycle 2, P2 ×2): five addresses that NOTHING read — the audit's
-    # heal scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`, re-pointed by DELTA onto the
-    # operator-stamp statement and a comment line, 37 lines off) and the SUBSTRATE sentence's three
+    # 107 at the #14038 review (cycle 2, P2 ×2), RESTORED after the `69898b2866` re-cut silently
+    # dropped these five rows while keeping their occurrence counts (measured: the merge's own conflict
+    # resolution took the older side of this file): five addresses that NOTHING read — the audit's heal
+    # scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`) and the SUBSTRATE sentence's three
     # OPENING values (`:37527`, `:37546`, `:37567`), which a forward merge had resurrected at +21 while
-    # the two graded headlines stayed right. Same shape as every row above: green pins, wrong sentence.
+    # the two graded headlines stayed right.
     assert len(_PINS) == 107
 
 
@@ -3566,4 +3573,43 @@ def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
         assert start <= line <= end, (
             f"{path}:{line} is the anchor pinned for {token!r}, which covers {start}-{end} — a range row "
             "whose anchor sits outside its own range resolves nothing the row quotes."
+        )
+
+
+#: The `g.query(` call that OPENS a statement, as `_read_captured_session` and its neighbours write it.
+#: Used only to bound a span: a row cites ONE statement, so a second opener between the anchor and the
+#: span's END means the END landed in the next statement.
+_QUERY_OPENER = "g.query("
+
+
+def test_the_13854_range_spans_end_inside_the_statement_their_anchor_opens() -> None:
+    """A span must not run past the end of the statement its anchor sits in.
+
+    ⛔ MEASURED DEFECT this arm exists for (#14038, after the `+47e28b549e` fold): the merge moved
+    every `sdk.py` line at or below 5,736 by **−21**, and a re-derivation that shifted a range's
+    START while leaving its END moved the cited closing line 21 lines DOWN — `sdk.py:58336-58360`
+    became `58315-58360`, which opens on `rows = proj.g.query(` and now closes on
+    `extracted_count = proj.g.query(`, a DIFFERENT statement (`:58345`). Every other arm in this
+    file stayed green on it: the token arm only counts occurrences, the anchor arm only asks that
+    the anchor lie inside the range, and the fragment arm reads one line. The correct end is
+    `:58339` (`"s.turn_max_index",`, the last query-string line — the same line `:58360` read at the
+    pre-merge head), derived by CONTENT, not by carrying the number.
+    """
+    for token, path, line, _fragment, _expected in _REDEFINED_13854:
+        found = re.search(r":(\d+)-(\d+)$", token)
+        if not found:
+            continue
+        end = int(found.group(2))
+        target = (REPO / path).read_text(encoding="utf-8").splitlines()
+        # Lines AFTER the anchor, through the span's closing line: a statement may open on the
+        # anchor itself (a range that starts on its own `g.query(`), so the anchor is excluded.
+        reopened = [
+            number
+            for number in range(line + 1, min(end, len(target)) + 1)
+            if _QUERY_OPENER in target[number - 1]
+        ]
+        assert not reopened, (
+            f"{token!r} closes on {path}:{end}, but a new statement opens at {reopened} inside the "
+            f"span (anchor {path}:{line}) — the range's END was carried instead of re-derived. Move it "
+            f"by the same MEASUREMENT that moved the start (grep the row's own closing fragment)."
         )
