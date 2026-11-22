@@ -47,8 +47,9 @@ version: 1
 # carried: `--emit-push-matrix` packs ALL ELEVEN shards at 721.6 s (a-k, two runs, byte-identical), so
 # `ceil(721.6/60 x 2)` = 25 m governs (a shard's job-level
 # wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 25`, so
-# the two agree by construction rather than by a hand re-read. The 0.9 s over `main`'s own
-# emission at `10e51693f1` (720.7 s, quoted in `docs/ops/ci-wall-clock.md` §2) is the union of both
+# the two agree by construction rather than by a hand re-read. The 0.1-0.2 s over `main` at THIS
+# merge base `588cf7ae` (721.4/721.5 s, measured there with the same verb — NOT `10e51693f1`'s 720.7,
+# which is `docs/ops/ci-wall-clock.md` §2's three-rows-dropped reading, not main's own emission) is the union of both
 # parents' registrations plus this branch's
 # `tests/test_13998_capacity_notice.py` at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only
 # because it sits a fraction of a second from rounding the OTHER way: two

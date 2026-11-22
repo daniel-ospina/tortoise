@@ -444,7 +444,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, '`:1263-1268`', _SSM, 1263, '_HITS_ROWS = ('),
     (_AUDIT, '`:274-281`', _SSM, 274, '_REPAIR_PAIR = ('),
     (_AUDIT, 'session_source_prose_migration.py:277-279', _SSM, 277, "AND coalesce(s.summary,'')=$old_sum "),
-    (_AUDIT, '`:1292-1300`', _SSM, 1292, '_CONTROL_LEXICON_ROWS = ('),
+    (_AUDIT, '`:1292-1301`', _SSM, 1292, '_CONTROL_LEXICON_ROWS = ('),
     # --- #14043 review (finding 1, this cycle): §6.3's own two addresses were in neither list and
     # unpinned, and the header's default resolves them to the PIN — where `sdk.py:16077` is unrelated
     # prose and `sdk.py:3801` holds `sdk._graph_write_with_retry(` (the EMPTY line is the OLD `:3777`).
@@ -696,7 +696,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1263-1268`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:274-281`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'session_source_prose_migration.py:277-279'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1300`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1301`'): 2,
     # #14043 review (finding 1): one site each in §6.3. Measured on this document:
     # `grep -o -F 'sdk.py:16077-16082' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16082'): 1,
@@ -3156,7 +3156,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 72 -> 77 at the SAME review's finding 2: the class was still unclosed for FIVE addresses this
     # revision writes — the new §2.2 `:Source` reader row's `session_source_prose_migration.py`
     # cites (`:218-223`, `:1263-1268`, `:274-281`) and row 13's inner pair (`:277-279`) plus its
-    # `_CONTROL_LEXICON_ROWS` read (`:1292-1300`). ⛔ Those five are PIN-STABLE, not head-relative: one
+    # `_CONTROL_LEXICON_ROWS` read (`:1292-1301`). ⛔ Those five are PIN-STABLE, not head-relative: one
     # blob at both heads, so the header's default resolves them right and the defect was purely the
     # missing guard — the document was the only thing naming them, so a merge inserting into that file
     # moved them with nothing red. That is the failure mode the four rows above exist to stop, and
