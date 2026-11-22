@@ -567,6 +567,20 @@ NOT_SELECTED = [
     # supplied their notice; these are the bare frames, and they red without this pin.
     "has anyone complained billing has been just deprecated",
     "has anyone complained billing has been only deprecated",
+    # ⛔ …AND THE BARE QUANTIFIER IS THE SAME CLASS, AND NOTHING PINNED IT (re-cut cycle 8, P3,
+    # measured at the live head). The module states that an adverb OTHER than `already|ever|
+    # recently` between `been` and the participle is REFUSED AND REPORTED and never routed, and the
+    # rows above hold it only for the `billing has been <adverb> deprecated AND been withdrawn`
+    # frames. The same shape with no trailing clause — `have any claims been just retracted` — was
+    # in NO list in this corpus, so the claim's own support ("0 population/shape moves over the
+    # pinned corpus") was a property of the CORPUS and not of the decision: a reviewer widened the
+    # perfect branch to admit `just|only|really|actually|still` and this class pivoted from
+    # `None/existence_unguarded` to `ended/None` while the suite stayed at 411 passed. Both
+    # spellings are pinned here AND in `NOTICE_ONLY` (they report, so BOTH lists must read them),
+    # and the ROUTED twin `have any claims been already retracted` is pinned in `SELECTED`, so the
+    # boundary reds in BOTH directions — a widening and a narrowing each have their own row.
+    "have any claims been just retracted",
+    "have any reports been only withdrawn",
     # ⛔ …AND THE CLITIC-SUBJECT COPULA FRAME, WHICH WAS SILENT AT BOTH ENDS (round-8 review, P2,
     # measured): the copula/perfect shape refuses a subject carrying an auxiliary clitic on
     # purpose, and the comment above says the row then "falls through to `_ENDING_SIGNALS` … and
@@ -1256,6 +1270,13 @@ NOTICE_ONLY = [
     "have any reported it has been in fact just about deprecated and been withdrawn",
     "has anyone complained billing has been just deprecated",
     "has anyone complained billing has been only deprecated",
+    # …and the BARE-QUANTIFIER twin of that class, which had no row anywhere (re-cut cycle 8, P3):
+    # `have any claims been just retracted` / `have any reports been only withdrawn` are refused
+    # AND reported (`None` + `existence_unguarded`), and they are the rows that stop a widening of
+    # the perfect branch from turning this REFUSAL into a route silently. Their routed twin
+    # (`… been already retracted`) is in `SELECTED`, so the pair is falsifiable from BOTH sides.
+    "have any claims been just retracted",
+    "have any reports been only withdrawn",
     "has the billing's been deprecated",
     "has v3's been deprecated",
     "has the billing's been just deprecated",

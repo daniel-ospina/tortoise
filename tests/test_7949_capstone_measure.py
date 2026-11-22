@@ -6735,10 +6735,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("17894", "if vet_enabled and embed_list:"),
-            ("17895", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("15367", "if vet_enabled and complete_list:"),
-            ("15368", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("17970", "if vet_enabled and embed_list:"),
+            ("17971", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("15372", "if vet_enabled and complete_list:"),
+            ("15373", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
         # the VET block's start; its lines of keys (15622-15624) close on
         # line 15625 — DERIVED by content, not by arithmetic: `result["vet"] = {`
@@ -6750,8 +6750,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # which is why every ASSERTED number in this table is verified by
         # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("15701", 'result["classify_later"] = {'),
-            ("15711", 'result["vet"] = {'),
+            ("15706", 'result["classify_later"] = {'),
+            ("15716", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY SWITCH ITSELF (the rebase onto `a1dff7cec8` re-staled it).
         # `#11509` added this bare continuation to the probe's docstring with
@@ -6764,7 +6764,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # this head before the fix: `:12898` is `# the additive keys feed the
         # harness's per-question integrity (M4).`
         ("probes/capstone_measure.py", "is different code", (
-            ("14752", "classify_later = kind_classifier is not None or "
+            ("14757", "classify_later = kind_classifier is not None or "
                       "_classify_later_enabled()"),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). A `+33`
@@ -6789,8 +6789,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # this head. A comment asserts nothing, so read the anchors from the row,
         # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("15252", "except Exception as e:  # never block capture (P1)"),
-            ("15403", "except Exception as e:  # never block capture (P1)"),
+            ("15257", "except Exception as e:  # never block capture (P1)"),
+            ("15408", "except Exception as e:  # never block capture (P1)"),
         )),
         # ⛔ #10988's `:11404` (A4's attribution). The cite is a BARE continuation —
         # `extractor_v2.py:11410-11413`; `:11404` is the EMPTY-kind default only — so
@@ -6806,15 +6806,15 @@ def test_the_bare_continuation_cites_name_what_they_say():
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("14787", "if not edus:"),
-            ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("14792", "if not edus:"),
+            ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("14786", "edus = _edus_from_conversation(conversation)"),
+            ("14791", "edus = _edus_from_conversation(conversation)"),
         )),
         # ⛔ The `_IDLE_CITES` docstring's OWN early-return cite (#12369 review, P3):
         # it said `:14649`, the PRE-merge value, while the `if not edus:` statement is
@@ -6827,12 +6827,12 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # function, and only one of them had a reader — the bare continuation here sat
         # in no row, so `grep -c '14649'` over this file's tests was `0`.
         ("probes/capstone_measure.py", "emits literally", (
-            ("14787", "if not edus:"),
+            ("14792", "if not edus:"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("15711", 'result["vet"] = {'),
-            ("15715", ("exact", "}")),
+            ("15716", 'result["vet"] = {'),
+            ("15720", ("exact", "}")),
         )),
         # ⛔ The SAME two blocks as the probe's `_pass_ran` docstring names them
         # (#11517 review, finding 3). It said the flag-OFF surfaces live at
@@ -6857,12 +6857,12 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # measured by content on the rebased tree, not by arithmetic); `:12975` and
         # `:12979` sit ABOVE the guard and did not move.
         ("probes/capstone_measure.py", "so an acceptance test of", (
-            ("14814", '"classify_later": {"enabled": classify_later,'),
-            ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
-            ("15701", 'result["classify_later"] = {'),
-            ("15707", ("exact", "}")),
-            ("15711", 'result["vet"] = {'),
-            ("15715", ("exact", "}")),
+            ("14819", '"classify_later": {"enabled": classify_later,'),
+            ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("15706", 'result["classify_later"] = {'),
+            ("15712", ("exact", "}")),
+            ("15716", 'result["vet"] = {'),
+            ("15720", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -6929,10 +6929,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # return it names, while every gate reported OK. Two rows because the
         # claim wraps over two lines and a row scopes to ONE line.
         ("README.md", "i.e. BEFORE the", (
-            ("14783", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+            ("14788", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
         )),
         ("README.md", "early return (`", (
-            ("14787", "if not edus:"),
+            ("14792", "if not edus:"),
         )),
         # ⛔ THE TWO RESULT BLOCKS — the S2.2/S2.3 rows above name their bounds in the
         # TABLE, and FOUR prose sites in this same document said `:15563-15569` /
@@ -6942,20 +6942,20 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # nothing red-ed. Held by CONTENT on the block's opening and closing line, so a
         # re-derivation that lands mid-comment reds instead of drifting.
         ("README.md", '`result["classify_later"]` block at', (
-            ("15701", 'result["classify_later"] = {'),
-            ("15707", ("exact", "}")),
+            ("15706", 'result["classify_later"] = {'),
+            ("15712", ("exact", "}")),
         )),
         ("README.md", 'the `result["vet"]` block, and it is corrected to', (
-            ("15711", 'result["vet"] = {'),
-            ("15715", ("exact", "}")),
+            ("15716", 'result["vet"] = {'),
+            ("15720", ("exact", "}")),
         )),
         ("README.md", "the two result blocks)", (
-            ("15701", 'result["classify_later"] = {'),
-            ("15711", 'result["vet"] = {'),
+            ("15706", 'result["classify_later"] = {'),
+            ("15716", 'result["vet"] = {'),
         )),
         ("README.md", "and now reaches the receipt through the seam", (
-            ("15701", 'result["classify_later"] = {'),
-            ("15711", 'result["vet"] = {'),
+            ("15706", 'result["classify_later"] = {'),
+            ("15716", 'result["vet"] = {'),
         )),
         # ⛔ THE LITERAL THE SENTENCE QUOTES, on its OWN row because the claim
         # wraps: `:15589` was left pointing inside `_arm_extract`'s
@@ -6965,7 +6965,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the content this row holds, so a re-derivation that moves the number
         # off the early return reds instead of drifting silently.
         ("README.md", '"s2": {}, "union": {}}', (
-            ("14818", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
         # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
@@ -7002,13 +7002,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # cannot see it, and no row scoped to it — which is exactly the invisibility
         # this pin exists for. Both rows hold the CALL, not the definition.
         ("README.md", "gap filler", (
-            ("15615", "result = execute_embed(complete_list, search, "
+            ("15620", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ...and the probe's own copy of the same number, which sits in prose a
         # reader is sent to rather than in a table.
         ("probes/capstone_run.py", "ONE cite per symbol", (
-            ("15615", "result = execute_embed(complete_list, search, "
+            ("15620", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ⛔ The S1 row's CALL SITE, held on its own row (#11517 rebase review).
@@ -7024,7 +7024,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             # qualifier insert above the call, so the number is re-derived from
             # the tree each time rather than carried from the round that added
             # the row (the row's INTENT is unchanged: pin the CALL).
-            ("17809", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            ("17885", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
         # ⛔ THE FIVE REMAINING BARE STEP CITES ON THE SAME FIVE-LINE CLAIM, and
         # the reason `test (f)` went red on this branch (#11517 review round 5,
@@ -7044,17 +7044,17 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sentence takes three rows rather than one — the same reason the
         # `README.md` "i.e. BEFORE the" claim above takes two.
         ("probes/capstone_run.py", "(S2.1,", (
-            ("17841", "embed_list = run_s2(model, story, master,"),
-            ("17895", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("17917", "embed_list = run_s2(model, story, master,"),
+            ("17971", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
         )),
         ("probes/capstone_run.py", "_apply_classify_kinds`` (S2.3,", (
-            ("15240", "out = kind_classifier.classify_items(items)"),
-            ("15241", '_apply_classify_kinds(embed_list, out["assignments"])'),
+            ("15245", "out = kind_classifier.classify_items(items)"),
+            ("15246", '_apply_classify_kinds(embed_list, out["assignments"])'),
         )),
         ("probes/capstone_run.py", "(S3,", (
-            ("15257", "search = search_graph(sdk, embed_list, story, "
+            ("15262", "search = search_graph(sdk, embed_list, story, "
                       "session_id=session_id)"),
-            ("15278", "s4 = run_s4(model, story, search, embed_list, master,"),
+            ("15283", "s4 = run_s4(model, story, search, embed_list, master,"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
@@ -7809,6 +7809,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15209` (inside the span),
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
         # the blank line immediately before `return OrgInfoResponse(` at `:15258`.
+        # ⛔ AND THE RE-CUT ONTO `origin/main` `0467ba329d` (2026-11-22) RE-MEASURED IT A THIRD
+        # TIME rather than siding: the merged tree prints `:15479`, which is the value THIS side
+        # already carried; the marker's own `origin/main` side said `:15351` and does not
+        # reproduce even at `origin/main`'s head (that tree prints `:15449`), so the three figures
+        # were not two heads' worth of drift plus one — the conflict's "main" figure was stale at
+        # the commit it named. Derived, not nudged: `grep -n 'point_count = await asyncio.to_thread('
+        # tortoise/hosted_api.py` on the RESOLVED tree is the whole method.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
             ("15479", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
