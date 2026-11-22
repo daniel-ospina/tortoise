@@ -54,6 +54,7 @@ import ast
 import asyncio
 import inspect
 import os
+import re
 import sys
 import textwrap
 import uuid
@@ -1906,7 +1907,7 @@ def test_the_pronoun_subject_parity_gap_is_a_DECLARED_loss_not_an_unstated_one()
     Measured at `6821050cf2`. The `is_copula` post-subject adverb slot names six
     adverbials, and a determiner subject does not depend on it — the noun-phrase run
     swallows the adverb — while the bare-pronoun branch may not. So the two subject
-    classes disagree on 22 of 27 measured adverbials:
+    classes disagree wherever an adverbial outside that slot is used:
 
         `is the export recently archived`  -> ended / is_copula
         `is it recently archived`          -> population=None, signal=None
@@ -1917,16 +1918,38 @@ def test_the_pronoun_subject_parity_gap_is_a_DECLARED_loss_not_an_unstated_one()
         `isn't it archived`                -> ended / is_copula   (the contracted head)
         `is it not archived`               -> population=None, signal=None
 
-    Direction is SAFE (silence, never a wrong population) and every one of these rows
-    is silent on `main` `70fbd1a27d` too, so it is a residual of the class rather than a
-    route this PR lost. It is DECLARED here instead of left to be rediscovered.
+    Direction is SAFE (silence, never a wrong population). The SILENCE is pre-existing —
+    both spellings are silent on `main` `70fbd1a27d`, which has no copula shape at all —
+    so the GAP arrives with this class while no route the PR had is lost. It is DECLARED
+    here instead of left to be rediscovered.
 
     ⛔ IF YOU CLOSE THE GAP — by widening the routing slot, or by adding a notice arm
     over it — UPDATE OR DELETE THIS TEST AND the paragraph in `state_intent` that
-    states it. It fails on purpose, so the declaration cannot drift away from the
-    behaviour in either direction: a silent re-narrowing reds here just as a fix does.
+    states it. It fails on purpose in BOTH directions: the SLOT half below reds if a
+    slot member stops routing behind a pronoun (that WIDENS the gap), and the SILENT
+    half reds if an outside-the-slot adverbial starts routing (that closes it).
     """
-    from tortoise.state_intent import detect_state_question
+    from tortoise.state_intent import _COPULA_PREFIX, detect_state_question
+
+    # THE WIDENING GUARD: the pronoun's routing set is exactly `_COPULA_PREFIX`'s slot, so
+    # losing a slot member cannot hide — it turns one of these rows from `ended` into
+    # silence, i.e. it makes the declared gap BIGGER. The members are EXTRACTED from the
+    # constant rather than re-spelled here, so the two cannot drift: a member dropped from
+    # the code reds the row it moved, and a member added to the code reds the shape assert.
+    extracted = re.search(r"\\s\+\(\?:\(\?:([a-z|]+)\)\\s\+\)\?", _COPULA_PREFIX)
+    assert extracted is not None, (
+        f"the post-subject adverb slot is not in the shape this test derives it from — "
+        f"re-measure `_COPULA_PREFIX` before trusting the declaration below: {_COPULA_PREFIX!r}")
+    members = extracted.group(1).split("|")
+    assert len(members) == 6, (
+        f"the post-subject adverb slot changed width ({members!r}) — the pronoun/determiner "
+        f"gap is a function of this slot, so the declaration below must be re-measured")
+    for adverb in members:
+        moved = detect_state_question(f"is it {adverb} archived")
+        assert moved.population == "ended", (
+            f"'is it {adverb} archived' no longer routes ({moved!r}) — a member of the "
+            f"post-subject adverb slot is gone, which WIDENS the pronoun/determiner gap "
+            f"this test declares; the declaration below is now understated")
 
     # The determiner twin ROUTES — that half is what makes this a gap rather than a
     # silence by design, so it is asserted first and separately.
