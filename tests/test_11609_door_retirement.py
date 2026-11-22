@@ -124,6 +124,7 @@ two mechanisms must not hold the same name — `tools/archive_surface.py` enforc
 """
 from __future__ import annotations
 
+import html
 import inspect
 import re
 from collections import Counter
@@ -1173,9 +1174,20 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         therefore accepted", which is FALSE for a bare instruction);
     #:       * ANY block whose inline source contains a `<` is OPAQUE (visible text empty), in
     #:         the paragraph path, the table-CELL path and the HTML-block path alike: ONE rule,
-    #:         applied where all three read it. So every mention in such a block reds — R2 has
-    #:         no text to match and R1 reds a call form as it does anywhere else (measured: an
-    #:         earlier wording offered ``an R1 call form`` as an escape; nothing survives).
+    #:         applied where all FOUR read it — `retired_call_forms` (R1), `notes_missing_
+    #:         replacement` (R2), and `_entity_only_mentions`, the fourth reader, which judges
+    #:         an ENTITY-spelled mention on the block's decoded SOURCE precisely because an
+    #:         opaque block has no visible text at all. So every mention in such a block reds —
+    #:         R2 has no text to match and R1 reds a call form as it does anywhere else
+    #:         (measured: an earlier wording offered ``an R1 call form`` as an escape; nothing
+    #:         survives). ⛔ THE FOURTH READER WAS THE ESCAPE (#14237 r13 review P2, measured):
+    #:         it bailed on `not body`, and `body` is `""` for EVERY opaque block, so
+    #:         `Call &#116;ortoise_list_graphs(x=1) for names. <br>` and four sibling shapes
+    #:         returned `R1 [] R2 []` — ACCEPTED — while this sentence promised otherwise. An
+    #:         entity spelling in a NON-opaque block reds (r12) and a PLAIN spelling in an
+    #:         opaque block reds (r10), so the intersection of the two fixes was the one gap.
+    #:         The rows below pin it per shape, because the sentence is the contract a reader
+    #:         trusts and it may not describe itself more widely than it behaves.
     #:         Approximating "what a browser displays" from the source failed OPEN FOUR rounds
     #:         running — the tag strip (r10), an inline `<script>`/`<style>`/`display:none`
     #:         body (r11), and raw-slice segmentation that re-admitted image alt text, link
@@ -1424,26 +1436,55 @@ class TestEveryReaderNamesTheLiveListingDoor:
         successor. The excess count is order-independent, so neither a preceding nor a
         following plain mention can hide the entity occurrence.
 
+        ⛔ AN OPAQUE BLOCK IS NOT SKIPPED (#14237 r13 review P2, measured fail-open). The
+        first cut bailed on `not body`, and `blocks()` sets `body = ""` for EVERY opaque
+        block — an `html_block`, and any block whose inline source contains a `<` — because
+        nothing in such a block may clear R2. So the ENTITY spelling of a name was invisible
+        to all four readers whenever the same paragraph carried an autolink or a `<br>`:
+        the raw scan cannot see `#116;ortoise_list_graphs`, and this reader skipped the block
+        whose visible body is empty by construction. `Call &#116;ortoise_list_graphs(x=1)
+        for names. <br>` was ACCEPTED. It is the intersection of the r10/r12 fixes that was
+        left open, and the class comment already promised the opposite, so it is closed here
+        rather than declared.
+
         Returns ``(name, block_start, body, call_end)`` where `call_end` is the end offset
-        in `body` of the first entity-spelled occurrence written in CALL form, or -1.
+        in the block's judged text of the first occurrence written in CALL form, or -1.
         Reporting the block's START line is deliberate — the source offset of a decoded
         character does not exist.
         """
         found: list[tuple[str, int, str, int]] = []
         for begin, finish, body in cls.blocks(text):
             raw = text[begin:finish]
-            if "&" not in raw or not body:
+            if "&" not in raw:
                 continue
+            # WHAT THIS BLOCK'S MENTIONS ARE JUDGED ON. When the block has visible text,
+            # `body` IS the decoded text and it is the one to use: `blocks()` already
+            # excluded what a reader cannot see (image alt text, link destinations and
+            # titles, link-reference labels, `html_inline`), and decoding the raw source
+            # instead would re-admit all four — the r11/r12 fail-open, not reopened here.
+            # An OPAQUE block reports `body == ""` on purpose, so its decoded SOURCE is the
+            # only text there is, and judging mentions on it errs to a REPORT: the
+            # fail-closed direction this guard has declared since round 1, and the one the
+            # class comment states ("every mention in such a block reds").
+            if body:
+                shown = body
+            elif "<" in raw:
+                shown = html.unescape(raw)
+            else:
+                continue
+            # `found` still carries `body`, never `shown`: for an opaque block that keeps
+            # R2 fail-closed (an empty body matches no replacement), which is the same
+            # verdict a PLAIN mention in an opaque block already gets from the raw scan.
             raw_counts: dict[str, int] = {}
             for name, _start, _end in cls.name_hits(raw):
                 raw_counts[name] = raw_counts.get(name, 0) + 1
             ends_by_name: dict[str, list[int]] = {}
-            for name, _start, end in cls.name_hits(body):
+            for name, _start, end in cls.name_hits(shown):
                 ends_by_name.setdefault(name, []).append(end)
             for name, ends in ends_by_name.items():
                 if len(ends) <= raw_counts.get(name, 0):
                     continue
-                call_end = next((e for e in ends if cls.is_call_form(body, e)), -1)
+                call_end = next((e for e in ends if cls.is_call_form(shown, e)), -1)
                 found.append((name, begin, body, call_end))
         return found
 
@@ -2280,6 +2321,86 @@ class TestEveryReaderNamesTheLiveListingDoor:
         assert self.retired_call_forms(mixed), (
             "a PLAIN mention in the same block hid an entity-spelled call — the first cut"
             f" of this fix gated on `name in raw` and measured exactly this miss: {mixed!r}")
+
+    @pytest.mark.parametrize("text", [
+        "Call &#116;ortoise_list_graphs(x=1) for names. <br>",
+        "Call &#116;ortoise_list_graphs(x=1) for names. See <https://x.invalid>.",
+        "<div>\nCall &#116;ortoise_list_graphs(x=1) for names.\n</div>",
+        "| a | Call &#116;ortoise_list_graphs(x=1) <br> |",
+    ], ids=["paragraph-with-br", "paragraph-with-autolink", "html-block", "table-cell"])
+    def test_an_ENTITY_call_in_an_OPAQUE_block_is_still_a_call(self, text):
+        """R1 at the INTERSECTION of the r10 and r12 fixes — the gap both left open.
+
+        ⛔ MEASURED at the reviewed head (#14237 r13 review P2), with the class's own
+        methods: every row below returned `R1 [] R2 []`, i.e. ACCEPTED, while the class
+        comment promised "every mention in such a block reds". The two halves had each
+        been fixed in isolation — an entity spelling in a NON-opaque block reds (r12), a
+        PLAIN spelling in an opaque block reds (r10) — and their intersection red neither,
+        because `_entity_only_mentions` bailed on `not body` and `body` is `""` for every
+        opaque block by construction.
+
+        The shapes are ordinary prose: one autolink or one `<br>` in the same ~80-column
+        paragraph as an entity-spelled mention is the whole pre-condition, and the entity
+        spelling is in scope because the reader SEES the door and can copy the call.
+        """
+        assert self.retired_call_forms(text + "\n"), (
+            "an entity-spelled call inside an OPAQUE block was accepted — the block's "
+            f"visible body is empty, so only its decoded source can judge it: {text!r}")
+
+    @pytest.mark.parametrize("text", [
+        "The MCP tool &#116;ortoise_list_graphs lists names. <br>",
+        "The MCP tool &#116;ortoise_list_graphs lists names. See <https://x.invalid>.",
+        "<div>\nThe MCP tool &#116;ortoise_list_graphs lists names.\n</div>",
+        "| a | The MCP tool &#116;ortoise_list_graphs lists names. <br> |",
+    ], ids=["paragraph-with-br", "paragraph-with-autolink", "html-block", "table-cell"])
+    def test_an_ENTITY_dead_end_in_an_OPAQUE_block_is_reported(self, text):
+        """R2 half of the same intersection: the dead end nobody could see.
+
+        A dead end is worse than a call — a reader who copies it gets nothing — and it was
+        ACCEPTED in every opaque shape. R2 reports it because an opaque block's `body` is
+        deliberately `""`, so no replacement can clear it; that is the fail-closed direction
+        the opacity rule declares, applied to the mention instead of to the replacement.
+        """
+        assert self.notes_missing_replacement(text + "\n"), (
+            "an entity-spelled dead end inside an OPAQUE block was accepted: "
+            f"{text!r}")
+
+    def test_closing_the_opaque_entity_gap_does_not_widen_the_entity_rule(self):
+        """The controls: the fix reports the intersection and NOTHING ELSE.
+
+        `shown` is `body` whenever the block has visible text, so the r11/r12 exclusions
+        (image alt text, link destinations and titles, reference labels, `html_inline`) are
+        not re-admitted through the back door — a correct note stays clean, and an unrelated
+        `&amp;` in the same block still cannot manufacture a mention. The opaque branch is
+        reached only when the ONE opacity rule already fired.
+
+        ⚠️ The last row is the DECLARED price, stated here as a bound rather than tuned
+        away: in an opaque block the replacement credit is unreachable, so a note that DOES
+        name the successor is still reported (`R1`) — the same verdict a plainly-spelled
+        note in an opaque block already gets, and the trade the opacity rule has declared
+        since round 1. It is pinned so the next reader learns it from a test.
+        """
+        repaired = "The door &#116;ortoise_list_graphs retired; use `tortoise_graph_overview`.\n"
+        assert self.retired_call_forms(repaired) == [], self.retired_call_forms(repaired)
+        assert self.notes_missing_replacement(repaired) == [], (
+            self.notes_missing_replacement(repaired))
+        amp = (
+            "Tom &amp; Jerry: the door `tortoise_list_graphs` retired; "
+            "use `tortoise_graph_overview`.\n"
+        )
+        assert self.retired_call_forms(amp) == [], self.retired_call_forms(amp)
+        assert self.notes_missing_replacement(amp) == [], self.notes_missing_replacement(amp)
+        # A mention a reader never sees is still a mention: an entity spelling inside a
+        # `<script>` body is reported, which is the fail-CLOSED direction (r11's rule).
+        hidden = '<div><script>var d = "&#116;ortoise_list_graphs(x=1)";</script></div>\n'
+        assert self.retired_call_forms(hidden), (
+            "an entity-spelled call in a script body was accepted, so the opaque branch "
+            f"narrowed the r11 rule instead of widening the r12 one: {hidden!r}")
+        # DECLARED PRICE: opaque block + a named successor is still reported.
+        priced = "Call &#116;ortoise_list_graphs(x=1). Use `tortoise_graph_overview`. <br>\n"
+        assert self.retired_call_forms(priced), (
+            "an opaque block now lets a named successor clear a written call — that would "
+            "be the r11 fail-open returning through the entity path")
 
     def test_declared_residual_a_block_may_name_both_and_still_instruct(self):
         """⚠️ DECLARED RESIDUAL — stated, not tuned (#14237 r5 review).
