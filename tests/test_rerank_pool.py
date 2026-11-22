@@ -1592,7 +1592,9 @@ def _seam_live_reads(tree, seam_mentions):
         (unresolved if flow.opaque else resolved).append(mention)
         for call in fed:
             # ONE call node reached from two mentions is ONE call site, because
-            # the row it feeds counts the reason's unit, not the walk's paths.
+            # the row it feeds counts the READ's unit — a call site the tool
+            # issues (`tools/read_wave_latency.py:296` / `:305`) — not the walk's
+            # paths.
             calls.setdefault(id(call), call)
     return live, resolved, unresolved, list(calls.values())
 
@@ -2469,8 +2471,9 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # feed a call (`sdk._tortoise_fts_query(…)`), reach one through a binding, a
     # container, a loop/comprehension/`with` target, a walrus or a second hop, or
     # read nothing at all (a dead binding). Those cases must NOT share a verdict:
-    # the census records a row for every mention, but what the grant's reason
-    # claims is READS — a dead binding is not one, and a read that opts out needs
+    # the census records a row for every mention, but what this row's expected
+    # count describes is READS — a dead binding is not one, and a read that opts
+    # out needs
     # no grant at all. `_seam_read_calls` follows the value flow to a fixpoint so
     # that "no fed call" means PROVEN dead (#14278 F1: a one-hop resolver read the
     # container and two-hop mutants as dead, so a third undocumented read was
