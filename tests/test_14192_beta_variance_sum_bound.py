@@ -582,13 +582,17 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
             "separator(s) precede it) — so the sentence's 'a row failing the "
             "presence checks ahead of it … never evaluates it' no longer "
             "describes this emission")
-    # ⛔ EVERY BAND FIGURE IN THIS MESSAGE IS DERIVED FROM THE ENFORCED BOUND AND
-    # THE LIVE SPAN — the band, its two edges and their deltas, all computed. The
-    # rename anecdote below is NOT derived and does not claim to be: `216`, `+1,080`
-    # and `12,808` are a MEASUREMENT taken at the commit whose span read 11,728,
-    # stated as an anecdote rather than a live figure, so a moved span makes the
-    # anecdote historical rather than false. (Round-28 review: the earlier wording
-    # said EVERY figure was derived, which the anecdote contradicted.)
+    # ⛔ EVERY BAND FIGURE IN THIS MESSAGE IS READ FROM CODE, NOT RESTATED — the
+    # two edges are the pinned literals below, and the deltas and percentages are
+    # computed from them and the live span. The band is NOT derived from the span:
+    # that is what makes a rename red it. The caller chooses the band; the message
+    # can therefore only be wrong about arithmetic it performed, never about a
+    # tolerance it restated (rounds 21, 22 and 29 reviews: earlier wordings said
+    # the figures were "derived from the enforced bound", which the two pinned
+    # literals contradicted). The rename anecdote below is NOT computed either and
+    # does not claim to be: `216`, `+1,080` and `12,808` are a MEASUREMENT taken at
+    # the commit whose span read 11,728, stated as an anecdote rather than a live
+    # figure, so a moved span makes the anecdote historical rather than false.
     #
     # RESTATING a derived figure is how this message twice
     # acquired a claim its band did not implement (rounds 21 and 22): one cut
