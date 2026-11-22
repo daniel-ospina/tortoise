@@ -374,12 +374,28 @@ def _abstain(reason: str, predicate: str, from_kind, to_kind) -> PairVerdict:
 #: "a node with the ``:Subject`` label", not one kind, so it constrains every
 #: Subject kind at once.
 #:
-#: ⛔ Mirrored from ``pack_state._ONTOLOGY_LABELS`` (± ``Document``, which that
-#: tuple carries for the generic-``kind`` slot) and NOT imported from it:
+#: ⛔ Mirrored from ``pack_state._ONTOLOGY_LABELS`` — the two sets are IDENTICAL,
+#: not "± ``Document``" (round-5 review, P3: the earlier wording claimed a
+#: difference the pin below asserts away) — and NOT imported from it:
 #: ``pack_state`` imports the SDK, so importing it here would close a cycle
 #: through the write path. ``tests/test_relation_guards_14263.py`` pins the two
-#: sets against each other, so a label added there is a red test here rather
-#: than a silent wildcard that stops matching.
+#: sets EQUAL, so a label added there is a red test here rather than a silent
+#: wildcard that stops matching. ``Document`` is in both because
+#: ``_ONTOLOGY_LABELS`` carries it for the generic-``kind`` slot.
+#:
+#: ⚠️ **Residual, stated rather than hidden:** the READ side that has to satisfy a
+#: label-spelled declaration is ``SDK._ENDPOINT_KIND_LABELS`` — the four epistemic
+#: labels plus ``Source``, and deliberately NOT ``Document`` (a document is a
+#: ``:Source`` carrying ``documentKind``, ``#5127``). A pack that declared
+#: ``Document`` as an endpoint would therefore reach no match, and what that costs
+#: depends on the OTHER endpoint (round-6 review/verification, P3 — the first
+#: wording claimed ``undeclared_pair`` for every such write, which is only half
+#: true): where the other end IS in the packs' vocabulary the pair is reported
+#: ``undeclared_pair``; where it is NOT, the scope gate abstains and the write
+#: passes with NO report at all — the worse half, because silence is
+#: indistinguishable from "declared and accepted". Latent today: no shipped pack
+#: names ``Document`` as an endpoint, and closing it means teaching the endpoint
+#: probe about ``documentKind``, not widening this set.
 LABEL_ENDPOINTS: frozenset[str] = frozenset({
     "Object", "Point", "Event", "Subject", "Source", "Document",
 })
