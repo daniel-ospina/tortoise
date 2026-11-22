@@ -961,13 +961,22 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
         pytest.skip(
             "INCONCLUSIVE on this host: the breach landed in "
             f"stage={body['stage']!r} with stages_ms="
-            f"{body.get('stages_ms')} — the gates phase spent the transport "
-            "bound, so this refusal cannot be attributed to the write mark "
-            "(#5049 rule 1). Not a red, not a pass.")
+            f"{body.get('stages_ms')} and marks={[s for s, _ in marks]} — the "
+            "gates phase spent the transport bound, so this refusal cannot be "
+            "attributed to the write mark (#5049 rule 1). Not a red, not a pass.")
     assert body["stage"] == "capture_write", (
         f"the breach must name the stage it landed in: {body}")
     assert body["stages_ms"].get("capture_gates") is not None, (
         f"the finished gate phase must be timed beside it: {body}")
+    # The recorder is LOAD-BEARING here, not decoration (review round 6, P2): a
+    # refusal that names `capture_write` can only have got there past the gates
+    # mark, so this assertion is implied by the one above and cannot red from
+    # load — while a deleted gates mark is caught by the row above
+    # (`test_the_write_mark_sits_between_the_gates_and_the_extraction`). On the
+    # skip arm the same list rides in the skip reason, which is the diagnostic a
+    # reader needs to see WHY the breach landed where it did.
+    assert "capture_gates" in [s for s, _ in marks], (
+        f"marks seen before the breach: {[s for s, _ in marks]}")
     # The bound's own envelope, not any 504: a refusal that lost its cause would
     # satisfy neither assertion below.
     assert "str(slow)" not in body.get("detail", ""), body
