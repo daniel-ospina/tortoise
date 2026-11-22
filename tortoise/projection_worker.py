@@ -100,12 +100,14 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    CANNOT REACH THE ORDERING RESIDUAL BELOW — ON THE PATH IT EXISTS FOR (#14222
    round-17 review, P3-4: an earlier cut said it "recurses into the same residual —
    an inline fold can overtake an earlier queued position", which is FALSE for a
-   load that genuinely FAILS: a failed load REMOVES the failing module from
-   ``sys.modules`` and never produced a module object — Python reference
-   §5.3.1/§5.4 — so no worker and no queue exist for an inline fold to overtake).
-   ⛔ BUT THE ``except`` IS BROADER THAN A FAILED LOAD, so the exclusion is not
-   universal and must not be stated as one: it also answers a HALTED import — a
-   ``sys.modules`` entry of ``None``, which raises ``ModuleNotFoundError`` while a
+   load that genuinely FAILS on FIRST import: a failed load REMOVES the failing
+   module from ``sys.modules`` and never produced a module object — Python
+   reference §5.3.1/§5.4 — so no worker and no queue exist for an inline fold to
+   overtake). ⛔ BUT THE ``except`` IS BROADER THAN THAT ONE PATH, so the exclusion
+   is not universal and must not be stated as one. It also answers (i) a HALTED
+   import — a ``sys.modules`` entry of ``None``, which raises
+   ``ModuleNotFoundError`` — and (ii) a RE-import that fails after an earlier load
+   SUCCEEDED (the entry is dropped, then the new load raises). In both, a
    PREVIOUSLY imported module object, its worker thread and its queue are all
    still alive. There the arm folds inline with an earlier position still queued,
    the later write's row lands first, and its predecessor overwrites it — the
@@ -113,7 +115,7 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    assigning ``None`` into ``sys.modules``) but is not PRODUCED by this tree:
    nothing in ``tortoise/`` assigns ``None`` there. So the arm is charged with the
    INLINE FOLD and not with the residual, and the residual's exclusion from this
-   arm is a fact about the failed-load path — not a guarantee at every raise. Its
+   arm is a fact about a FIRST load that fails — not a guarantee at every raise. Its
    cost is the inline fold itself, which is why it belongs in the
    STRUCTURAL family (five conditions, none of which moves a counter) and not in
    the ordering one. The PR's own test counts
@@ -130,14 +132,15 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    and a ``submit`` FAULT (the ``queue_fault`` arm in :func:`submit`, published
    before it propagates). So raising the bound does NOT remove this residual — it only
    removes arm (a); a same-tenant queued write can be overtaken by a structural-arm
-   fold at zero depth — any of the FOUR CORRECTNESS arms; the unimportable one has
-   no queue to overtake, see above — or by a (c) fold at any depth. Nothing detects it: both
+   fold at zero depth — any of the FOUR CORRECTNESS arms; the unimportable one
+   overtakes only on the HALTED-import and failed-RE-import paths described above,
+   not on a first load that fails — or by a (c) fold at any depth. Nothing detects it: both
    positions are present, so ``journal_coverage`` / ``record-reconcile`` read
    green. The alternative to that residual is a caller that WAITS on the queue —
    which is the coupling this module exists to remove — so the honest form is the
    declared one: the bound's visible cost is a slower ACK **and** a possible
    same-tenant reorder, from any arm that shares this process with a queue (every
-   arm but the unimportable one). Closing it needs an ordering token at
+   arm but the unimportable one ON A FIRST LOAD THAT FAILS). Closing it needs an ordering token at
    the fold seam, which is a change to ``record_projection``, not to this module.
    ⚠️ ``.env.example`` states the same residual where the bound is documented.
 2. **A write's ack excludes projection time.** :func:`submit` appends to a deque
