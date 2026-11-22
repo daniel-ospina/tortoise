@@ -6735,8 +6735,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("17967", "if vet_enabled and embed_list:"),
-            ("17968", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("17970", "if vet_enabled and embed_list:"),
+            ("17971", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
             ("15372", "if vet_enabled and complete_list:"),
             ("15373", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
@@ -7024,7 +7024,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             # qualifier insert above the call, so the number is re-derived from
             # the tree each time rather than carried from the round that added
             # the row (the row's INTENT is unchanged: pin the CALL).
-            ("17882", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            ("17885", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
         # ⛔ THE FIVE REMAINING BARE STEP CITES ON THE SAME FIVE-LINE CLAIM, and
         # the reason `test (f)` went red on this branch (#11517 review round 5,
@@ -7044,8 +7044,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sentence takes three rows rather than one — the same reason the
         # `README.md` "i.e. BEFORE the" claim above takes two.
         ("probes/capstone_run.py", "(S2.1,", (
-            ("17914", "embed_list = run_s2(model, story, master,"),
-            ("17968", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("17917", "embed_list = run_s2(model, story, master,"),
+            ("17971", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
         )),
         ("probes/capstone_run.py", "_apply_classify_kinds`` (S2.3,", (
             ("15245", "out = kind_classifier.classify_items(items)"),
@@ -7922,7 +7922,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-tense one is re-pointed wrongly (measured: 413 passed). `:10353`/`:10406`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
-        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` at `d741bd4a5a`, changing the `register_source(..., raw_state=...)` rename that sits at `:9774` at this head (⛔ `:9683` was its value at `4df5a14635`; this clause read `:9753` — the `documentKind` demotion-rule line, a DIFFERENT statement — until the #14269 re-derivation, and the row's OTHER statement of the same line already read `:9774`, so the two now agree rather than one present-tense fact carrying two numbers)) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which are `94b237fccf`'s pair (measured: `git show 94b237fccf:tortoise/sdk.py \\| grep -n 'subject_binding_available'` -> `10271` (the import) and `10324` (the consume), plus four later lines: a second import, a second consume, a docstring and a comment) and NOT the MERGE head's: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
+        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` at `d741bd4a5a`, changing the `register_source(..., raw_state=...)` rename that sits at `:9753` at this head (⛔ `:9683` was its value at `4df5a14635`; the row's OTHER statement of the same line was already corrected, so one present-tense fact must not carry two numbers)) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which are `94b237fccf`'s pair (measured: `git show 94b237fccf:tortoise/sdk.py \\| grep -n 'subject_binding_available'` -> `10271` (the import) and `10324` (the consume), plus four later lines: a second import, a second consume, a docstring and a comment) and NOT the MERGE head's: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
         "(the same pair at the branch head `2584a86ec1`, `:10353`/`:10406` at the MERGE head)",
     ):
         assert _d5.count(_spelling) == 1, (
@@ -7972,7 +7972,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 281 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 289 cite-shaped `:N` tokens (the `~50` these
     # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -7995,22 +7995,28 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ THE SAME TREATMENT FOR THE CONTENT-REVIEW FILTER (#13589 review, P3). The pin row
     # added for this clause scopes to the phrase `the content-review queue filter that cite
-    # named`, which is DISCRIMINATING because the filter has exactly ONE occurrence in the
-    # file — and a `_pin_row_failures` row only asks whether a number appears SOMEWHERE on the
-    # scoped line, while D5 is ONE line. So the row is satisfied by any `:N` on it and cannot
-    # tell the clause being re-pointed from another occurrence staying put.
-    #
-    # ⛔ SO THE LINE IS DERIVED, NEVER TYPED — that is the whole rule this block exists to state.
-    # No value of this cite is written in this comment ON PURPOSE, and none should be added
-    # "for clarity": the arm below derives it, prints the live value in its failure message, and
-    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` re-derives it directly. This comment
-    # once enumerated the values the cite had carried, each stamped to the head it belonged to;
-    # every pass over that list cost a review round (a stamp attributed to the wrong head, a
-    # count with no recipe, a "never" that was not one), and a head-current number in this block
-    # is the exact rot the arm exists to prevent. The rule generalises: a comment that grades a
-    # rotting figure should state the METHOD, not the figure.
-    #
-    # (the `next(...)` / `agent-infra#3442` reasoning is stated with the assert below)
+    # named`, which is DISCRIMINATING (`:28395` is the file's only `dedup_reviewed IS NULL`),
+    # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
+    # scoped line — and D5 IS ONE LINE carrying `:28395` seven times, so a row satisfied by any
+    # of them cannot tell the clause being re-pointed from another occurrence staying put.
+    # ⛔ `:28067` is NOT the live cite here, and an earlier cut of this comment called it the
+    # file's only `dedup_reviewed IS NULL` (#13746 review, P2). Measured at this head:
+    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28395` (the only hit), while
+    # `sed -n '28067p'` -> a docstring line of `_belief_timeline` (opens `:28048`) naming `entity_identity.resolve_entity_id`, not a line of that module.
+    # `:28067` is a MIDDLE waypoint of D5's own re-point chain, and it takes FOUR commits, not
+    # two: `:28019` -> `:28067` (main's `#13551`), `:28067` -> `:28142` (`#13755`), `:28142` ->
+    # `:28178` (main's `#13724`), `:28178` -> `:28395` (`#13854`) — each hop measured on
+    # `docs/00_index.md`'s `#12296` row
+    # (`git show <sha> -- docs/00_index.md | grep -E '^[+-][^+-]' | grep -oE 'sdk.py:[0-9]+'`
+    # prints exactly those pairs). An earlier cut of this comment collapsed the middle hop and
+    # credited `:28067` -> `:28178` to `#13724`, which never touched `:28067` — the same class
+    # of defect as the premise it replaced, one layer down (`#13746` re-review, P1). So D5 still
+    # prints `:28067` six times and it is still not what the clause says. The live value — and
+    # the one the pin row above asserts — is `:28395`. (`:28358`/`:28359` are the `def` and signature lines, which is a
+    # different statement again; this comment used to conflate all three.)
+    # MEASURED (#13589 review, at that head — the clause reads `sdk.py:28395` here): deleting
+    # the clause's own "sits at `sdk.py:28178`" left the row GREEN. The sentence is therefore
+    # read WHOLE, with its number DERIVED from the source, so both halves are graded: a source move the document did not follow reds, and a document re-point the source did not make reds.
     _dedup_filter_lines = [
         _n for _n, _ln in enumerate(sources["sdk"], 1)
         if "dedup_reviewed IS NULL" in _ln]
@@ -17686,10 +17692,10 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 281 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 289 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `281` reds instead of leaving four comments behind (a
+    any commit moving the line off `289` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
@@ -17900,7 +17906,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 281 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 289 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -17933,7 +17939,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 281 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 289 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
@@ -18230,12 +18236,12 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
     # "CARRIES". Both ends are still pinned so the row cannot drift back to the base's value,
     # which is what a re-derivation-by-offset produces — and `sdk.py:28935` is NOT
-    # `declared = declared_relation_predicates()` at this head (`:29142` is), so a row that kept
+    # `declared = declared_relation_predicates()` at this head (`:29121` is), so a row that kept
     # the base's value would name a line that does not carry the statement.
-    for _provenance in ("its own row now reads `sdk.py:29142`", "the base read `sdk.py:28935`"):
+    for _provenance in ("its own row now reads `sdk.py:29121`", "the base read `sdk.py:28935`"):
         assert _provenance in text, (
             f"D5 no longer states {_provenance!r} about `04-plan.md`. The row carries "
-            "`sdk.py:29142` at this head (`declared = declared_relation_predicates()`) and "
+            "`sdk.py:29121` at this head (`declared = declared_relation_predicates()`) and "
             "the base carried `sdk.py:28935` — pinning "
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-measured at this head)")
@@ -18360,12 +18366,38 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                     f"finding 3)")
             else:
                 _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
-                if _base_copy.returncode == 0 and _I7_TARGET in _base_copy.stdout:
-                    failures.append(
-                        f"D5 calls the I7 range a re-point of THIS diff, but `{_base}`'s "
-                        f"own `{_MEMBER_DOC}` already carries {_I7_TARGET} — so the range "
-                        f"is not this diff's, and the membership names a base that already "
-                        f"agrees with it (#14260 fix lane, finding 3)")
+                if _base_copy.returncode == 0:
+                    # ⛔ BOTH POLARITIES, because one of them is the head this arm was written
+                    # for and the other is the head it LATER meets (#14260 fix lane, finding 3;
+                    # re-measured at the head after `main` absorbed the same re-cut). Once `main`
+                    # carries the range itself, "this diff re-points it" becomes FALSE while the
+                    # single-polarity arm could only ever say so as a dead end — the sentence had
+                    # no spelling it could pass with. The claim and the base are graded against
+                    # each other in BOTH directions, and silence about the range in either
+                    # direction is a failure rather than an exemption.
+                    _base_has = _I7_TARGET in _base_copy.stdout
+                    _claims_i7 = "the I7 range IS a re-point of this diff" in text
+                    _disclaims_i7 = "the I7 range is NOT a re-point of this diff" in text
+                    if _base_has and _claims_i7:
+                        failures.append(
+                            f"D5 calls the I7 range a re-point of THIS diff, but `{_base}`'s "
+                            f"own `{_MEMBER_DOC}` already carries {_I7_TARGET} — so the range "
+                            f"is not this diff's, and the membership names a base that already "
+                            f"agrees with it (#14260 fix lane, finding 3)")
+                    elif not _base_has and not _claims_i7:
+                        failures.append(
+                            f"D5 no longer calls the I7 range a re-point of THIS diff, but "
+                            f"`{_base}`'s own `{_MEMBER_DOC}` does NOT carry {_I7_TARGET} "
+                            f"either — then the range is nobody's and the inherited spelling has "
+                            f"no evidence under it. Exactly one side must carry it, and the "
+                            f"sentence must say which (#14260 fix lane, finding 3)")
+                    elif _base_has and not _disclaims_i7:
+                        failures.append(
+                            f"`{_base}`'s own `{_MEMBER_DOC}` already carries {_I7_TARGET}, so "
+                            f"the INHERITED reading is the one that describes this head: D5 must "
+                            f"say so (`the I7 range is NOT a re-point of this diff`) rather than "
+                            f"naming it as this diff's or dropping the clause "
+                            f"(#14260 fix lane, finding 3)")
     # ⛔ NOTHING MEASURED IS NOT A PASS (#14260 fix lane, finding 3). The fabrication hole this
     # closes was MEASURED: `deadbeefcafe` took the old `pass` branch, so any hex string satisfied
     # the arm. The one exemption is a `--depth 1` clone, where the base ref and every older head
@@ -18548,7 +18580,7 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     re-pointed the `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
     docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
     value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
-    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 281 of
+    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 289 of
     them. A row whose own thesis is that a typed line number rots cannot re-point a figure
     and leave it unread; that is the class #13879 review named when a reverted address
     "reddened no arm at all".
