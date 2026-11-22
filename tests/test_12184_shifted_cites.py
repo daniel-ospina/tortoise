@@ -2202,9 +2202,9 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # row at all (one lives in `_REDEFINED_13854`), while the real net `+7` is the
     # SUBSTRATE-REBUILD-MAP coordinates this re-cut pinned. An attribution that cannot be
     # re-derived is the unbacked-claim class this file exists to prevent, so the entry keeps
-    # only what IS re-derivable: the count, and the fact that every row is resolved against
-    # the tree by the content arm below `(_PINS` pins `(doc, token, path, line, fragment)`, so a
-    # row whose address rots reds instead of being carried)
+    # only what IS re-derivable: the count, and the guarantee the arm enforces — `_PINS` pins
+    # `(doc, token, path, line, fragment)` and the content arm opens every one of them, so a row
+    # whose address rots reds instead of being carried.
     assert len(_PINS) == 90
 
 
