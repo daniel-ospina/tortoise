@@ -1446,7 +1446,8 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
     call-site count mismatch, no named cause; round-12 review, P3), in an escape
     shape it makes the mention `opaque` and the red becomes the unresolved row with
     a message that names an escape (measured: `_m` collides with the tool's own
-    comprehension target at `:336`, `unresolved == 1`). Neither route names the
+    comprehension target in the `member_table` comprehension, `unresolved == 1`).
+    Neither route names the
     collision, so the message is a DIRECTION, not a diagnosis: find the spurious
     mention by walking `_seam_read_calls`, not by reading it.
     """
