@@ -3384,19 +3384,29 @@ def _d5_grade_alias_spelling(
 #: 'grep'`), taking every citation guard in it down with the cells that need grep; and it ran
 #: outside any pytest item, so a `grep` that blocked on PATH hung collection instead of failing it.
 #: Deferred, the blast radius is the cells that grep, MEASURED with a `grep` on PATH that exits 3
-#: for every call (so no probe can answer): **nine** cells fail and the other **26** still pass
-#: (9 of the 35 cells at this head — the count is re-derived, not remembered, whenever a cell is added
-#: to this file).
-#: The nine are the SEVEN `test_the_d5_count_reader_*` cells that consult the option universe, plus
+#: for every call (so no probe can answer): **eight** cells fail, ONE skips, and the other **28**
+#: still pass (37 cells at this head — re-measure rather than trusting these integers whenever a cell
+#: is added to this file).
+#: The eight are the SIX `test_the_d5_count_reader_*` cells that consult the option universe, plus
 #: `test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have` and
-#: `test_the_D5_row_types_no_verdict_about_the_head_being_merged` — and SIX of the nine report the
-#: diagnostic from this file, while those last two and `…knows_every_long_option_grep_documents` fail
-#: on their OWN direct grep calls (`grep --help` raises `CalledProcessError`; the other two carry
-#: their own messages), so "inherits the probe" is true of six, not of nine.
+#: `test_the_D5_row_types_no_verdict_about_the_head_being_merged` — and SIX of the eight report the
+#: diagnostic from this file, while those last two fail on their OWN direct grep calls and carry
+#: their own messages, so "inherits the probe" is true of six, not of eight.
+#: ⛔ THE ONE SKIP IS `test_the_d5_count_reader_knows_every_long_option_grep_documents`, AND IT IS
+#: THE PORTABILITY FIX, NOT A HOLE (#14303 review, P2 — MEASURED at this same hostile grep: it used
+#: to be a ninth FAILURE, on its own direct `grep --help` through `check=True`). A grep that exits 3
+#: for `--help` published no option list at all, so it has no documented universe to pin the option
+#: set against, and `_d5_documented_long_options` raises `_D5NoDocumentedUniverse` for exactly that
+#: case — the same shape BSD grep presents (usage on stderr, exit 2). ⛔ THE FLOOR IS NOT SKIPPED
+#: WITH IT: a `--help` that SUCCEEDED and parsed too little is the derivation breaking, and that
+#: still RAISES (see the docstring there, and the cell that reds it).
+#: `test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal` PASSES here on purpose: it
+#: hands `_d5_grade_alias_spelling` a stub PATH of its own rather than reading the host grep, so it
+#: is independent of the installed binary by construction.
 #: `test_the_d5_count_reader_does_not_describe_itself_as_complete` still PASSES: it greps this file's
 #: source TEXT and never reaches the universe. What the import-time probe did instead was abort
 #: COLLECTION, so NONE of the file's cells ran — that is the difference the laziness buys, not a
-#: count of 9.
+#: count of 8.
 #: A binary that is MISSING outright raises `OSError` from `subprocess` before this function can say
 #: anything (pinned by
 #: `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`). Cached because the probe
@@ -3454,8 +3464,69 @@ _D5_DOCUMENTED_LONG_OPTIONS = frozenset({
 #: --help`'s set (#14138). ⛔ A FUNCTION, not a constant, for the lazy-derivation reason recorded on
 #: `_d5_undocumented_long_options`; `_d5_long_option_candidates` looks it up by name at CALL time, so
 #: a caller that replaces it sees the whole walk follow.
-def _d5_all_long_options() -> frozenset[str]:
-    return _D5_DOCUMENTED_LONG_OPTIONS | _d5_undocumented_long_options()
+#: ⛔ `grep` IS A PARAMETER HERE TOO, AND THIS IS THE UNION'S OWN WITNESS (#14303 review, P2 —
+#: MEASURED). Passing it through to the derivation is not decoration: without it the composition —
+#: DOCUMENTED plus the measured allowance — could be replaced by `_D5_DOCUMENTED_LONG_OPTIONS` alone
+#: and every cell stayed GREEN on the platform CI runs, because on grep >= 3.12 the allowance IS
+#: empty, so dropping it is unobservable there. On that platform the union's only remaining content
+#: is a set it would equal anyway. Driving both arms through a stub grep makes the composition
+#: separable on EVERY platform, which is what
+#: `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer` now does.
+def _d5_all_long_options(grep: str = "grep") -> frozenset[str]:
+    return _D5_DOCUMENTED_LONG_OPTIONS | _d5_undocumented_long_options(grep)
+
+
+#: The floor below which a parsed `grep --help` is not a universe at all. GNU grep 3.11 publishes
+#: **48** long options (MEASURED), so this is a "the parser or grep's help layout broke" floor, not
+#: a description of any one grep (#14303 review, P2 — the finding that the `--help` read was not
+#: portable; #14306 review F1 for the inert-floor shape it guards against).
+_D5_LONG_OPTION_FLOOR = 40
+
+
+class _D5NoDocumentedUniverse(RuntimeError):
+    """This grep published no parsable usage, so there is no option universe to pin against.
+
+    ⛔ IT IS A DISTINCT EXIT, NOT A VERDICT, AND IT EXISTS SO THE FLOOR STAYS REACHABLE (#14303
+    review, P2 — the portability residual from #14306; its review F1 found the trap the naive fix
+    walks into). The cell used to read `grep --help` with `check=True`, which turns BSD grep's usage
+    text on **stderr** with exit **2** into `CalledProcessError`: on such a box the cell errors
+    before any assertion, and it takes the module's other citation guards down with it. The naive
+    repair — `pytest.skip` whenever fewer than 40 options were parsed — moves the floor's failure
+    mode from RED to GREEN, so a broken derivation would silently certify nothing. Discriminating
+    on the EXIT CODE keeps both honest: `--help` FAILED and published no usage is a platform fact
+    (this exception, which the cell skips); `--help` SUCCEEDED and still parsed too little is our
+    derivation breaking (`AssertionError`).
+    """
+
+
+def _d5_documented_long_options(completed: subprocess.CompletedProcess) -> set[str]:
+    """The long options `grep --help` published, read from WHICHEVER STREAM carried them.
+
+    ⛔ `grep --help` IS ITSELF NOT PORTABLE (MEASURED via the #14306 handover, and it is the whole
+    finding): GNU grep writes the option list to stdout and exits 0; BSD grep
+    (`grep (BSD grep, GNU compatible) 2.6.0-FreeBSD`, macOS) writes a `usage:` line to **stderr**
+    and exits **2**. Reading only stdout under `check=True` therefore makes this cell unrunnable on
+    macOS rather than merely indifferent to it. Parsing the union of the two streams costs nothing
+    on GNU grep (stderr is empty) and is what lets the same derivation answer there.
+
+    ⛔ THE FLOOR AND THE EXIT CODE ANSWER DIFFERENT QUESTIONS, AND BOTH ARE LOAD-BEARING. A count
+    alone cannot tell "this grep published no long options" from "our regex stopped matching"; the
+    exit code can, so the floor never degenerates into an excuse.
+    """
+    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)",
+                                (completed.stdout or "") + (completed.stderr or "")))
+    if len(documented) >= _D5_LONG_OPTION_FLOOR:
+        return documented
+    if completed.returncode != 0:
+        raise _D5NoDocumentedUniverse(
+            f"`grep --help` published only {len(documented)} long options and exited "
+            f"{completed.returncode} — this grep answers its usage on another stream or not at "
+            "all (BSD grep 2.6.0-FreeBSD writes usage to stderr and exits 2), so this host has no "
+            "documented universe to pin the option set against (#14303 review, P2)")
+    raise AssertionError(
+        f"only {len(documented)} long options were parsed out of a `grep --help` that exited 0 — "
+        "the derivation is broken, and a broken derivation must not be able to certify anything "
+        f"(the floor is {_D5_LONG_OPTION_FLOOR}; #14027, #14303 review P2)")
 
 
 def _d5_long_option_candidates(name: str) -> list[str]:
@@ -5081,14 +5152,25 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     Non-vacuity: adding a long option to grep, or dropping one from `_d5_all_long_options()`, reds
     here by name; the derived set also has to be big enough to be a real universe (≥ 40), so a
     parser that silently matched nothing cannot pass.
+
+    ⛔ `grep --help` IS NOT PORTABLE, AND THE FLOOR IS NOT A SKIP (#14303 review, P2 — MEASURED via
+    the #14306 handover). BSD grep 2.6.0-FreeBSD publishes a `usage:` line on **stderr** and exits
+    **2**, so the `check=True` form this cell used raised `CalledProcessError` there — the cell could
+    not run on macOS at all, and the module's other citation guards lost the run with it. The read
+    now comes from whichever stream carried the list (`_d5_documented_long_options`), and the two
+    cases the count alone confuses are separated by EXIT CODE: a `--help` that FAILED published no
+    usage and there is nothing to pin (skipped, as the platform fact it is); a `--help` that
+    SUCCEEDED and still parsed fewer than 40 is this derivation breaking, and that RAISES. The floor
+    therefore still fires — witnessed by
+    `test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a_silent_grep`.
     """
-    completed = subprocess.run(["grep", "--help"], capture_output=True, text=True, check=True)
-    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", completed.stdout))
+    completed = subprocess.run(["grep", "--help"], capture_output=True, text=True, timeout=60)
+    try:
+        documented = _d5_documented_long_options(completed)
+    except _D5NoDocumentedUniverse as no_universe:
+        pytest.skip(str(no_universe))
     universe = _d5_all_long_options()
     allowance = _d5_undocumented_long_options()
-    assert len(documented) >= 40, (
-        f"only {len(documented)} long options were parsed out of `grep --help` — the derivation "
-        "is broken, and a broken derivation must not be able to certify anything")
     # ⛔ THE UNDOCUMENTED ALLOWANCE IS A MEASUREMENT, AND ITS CANDIDATES ARE PINNED AS GENUINELY
     # UNDOCUMENTED (#14027 review round 2, P2; #14138). `grep --help` is silent about
     # `--unix-byte-offsets`, so the universe is `documented` PLUS the MEASURED allowance, and a
@@ -5119,6 +5201,51 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
         f"{sorted(_ARG_TAKING_LONG_FLAGS - universe)} — `_resolved_long_option` "
         "resolves every arity entry through `_d5_long_option_candidates`, which can only answer "
         "about documented names (#14027 review round 7, P3 — MEASURED)")
+
+
+def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a_silent_grep():
+    """The `>= 40` floor is REACHABLE, and it is not the skip it can be confused with.
+
+    ⛔ THIS IS THE GUARD THE FIRST CUT OF THE PORTABILITY FIX KILLED (#14303 review, P2 — the
+    #14306 handover; its own review F1 for the mechanism). `pytest.skip` RAISES, so a cell that
+    skips on `len(documented) < 40` makes every assertion below that line unreachable and moves the
+    floor's failure mode from RED to GREEN — the inert-enforcer shape. The two arms below are the
+    mutant that distinguishes them, and neither runs a real grep, so both fire on every platform:
+
+      * a `--help` that SUCCEEDED carrying exactly the floor's worth of long options IS a universe;
+      * a `--help` that SUCCEEDED one short of it is THIS DERIVATION breaking and must RAISE;
+      * a `--help` that FAILED (rc 2, usage on stderr — BSD grep's shape) published no universe at
+        all, which is the ONLY case the skip is allowed to excuse.
+
+    The third arm is also what pins the fix's actual claim: the option list is read from whichever
+    stream carried it, so a usage line on stderr is parsed and counted rather than lost.
+    """
+    def reported(returncode: int, text: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["grep", "--help"], returncode=returncode,
+            stdout=text if returncode == 0 else "", stderr="" if returncode == 0 else text)
+
+    def usage(count: int) -> str:
+        return "Usage: grep [OPTION]... PATTERNS [FILE]...\n" + "\n".join(
+            f"  --opt-{'a' * n} <x>" for n in range(1, count + 1))
+
+    assert len(_d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
+        _D5_LONG_OPTION_FLOOR), (
+        "a successful `grep --help` carrying exactly the floor's worth of long options must be a "
+        "universe, or the floor is not a floor (#14303 review, P2)")
+    with pytest.raises(AssertionError, match="broken derivation must not be able to certify"):
+        _d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
+    # ⛔ THE STDERR HALF, READ RATHER THAN TOLERATED: a FAILED `--help` whose usage still yields the
+    # floor is a universe, which is the whole point of dropping `check=True`. This arm is the
+    # mutant-killer for "parse `stdout` only": with `completed.stdout` alone it raises.
+    assert len(_d5_documented_long_options(
+        reported(2, usage(_D5_LONG_OPTION_FLOOR)))) == _D5_LONG_OPTION_FLOOR, (
+        "a `--help` that exited non-zero but PUBLISHED a full option list on stderr must still be "
+        "read — BSD grep's usage goes to stderr, and ignoring that stream is what made this cell "
+        "unrunnable on macOS (#14303 review, P2)")
+    with pytest.raises(_D5NoDocumentedUniverse, match="exited 2"):
+        _d5_documented_long_options(reported(
+            2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
 
 
 def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypatch):
@@ -5210,13 +5337,21 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
 
     # ⛔ (2) BOTH SNAPSHOTS, HERMETICALLY — so each consequence is exercised on EVERY platform
     # rather than only on the one the runner happens to ship. ⛔ EXACTLY ONE NAME IS PATCHED, and
-    # it is the only one this walk reads: `_d5_all_long_options` is looked up in this module's
-    # namespace at CALL time (its own docstring), and it is the SOLE caller of
-    # `_d5_undocumented_long_options`. Patching the allowance as well pinned NOTHING — the universe
-    # is replaced whole, so that function cannot be reached inside this window (MEASURED: a raising
-    # sentinel in its place leaves this file green). A second input that no assertion can
-    # attribute to the behaviour it claims to guard is dead weight (agent-infra#3442 rule 3), so it
-    # is gone rather than explained away.
+    # it is the only input this walk reads: `_d5_long_option_candidates` resolves
+    # `_d5_all_long_options` by NAME from this module's namespace at CALL time (the `#:` block above
+    # that function states the contract; it has no docstring), so replacing it replaces the whole
+    # universe the walk sees. Patching the allowance as well pinned NOTHING — `_d5_all_long_options`
+    # is replaced whole, so its call to `_d5_undocumented_long_options` cannot be reached inside
+    # this window (MEASURED: a raising sentinel in that slot leaves this file green). ⛔ AND IT IS
+    # NOT THE SOLE CALLER of `_d5_undocumented_long_options`, which is why the dead patch was dead
+    # for a LOCAL reason and not a global one: the module calls it from `_resolved_long_option`'s
+    # prose path, from this cell, and from the stub cell — several callers, none of them reachable
+    # from inside this window. A second input that no assertion can attribute to the behaviour it
+    # claims to guard is dead weight (agent-infra#3442 rule 3), so it is gone rather than explained
+    # away.
+    #   (#14303 review, P3 — the sentence that stood here called that function the "SOLE caller"
+    #   and cited "its own docstring" for a `#:` comment block, both of which the source contradicts
+    #   one screen away; the measurement it justified was right and is kept.)
     snapshots = (
         (_D5_DOCUMENTED_LONG_OPTIONS | {"--unix-byte-offsets"}, True),
         (frozenset(_D5_DOCUMENTED_LONG_OPTIONS), False),
@@ -5344,6 +5479,22 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     assert _d5_undocumented_long_options(refuses) == frozenset(), (
         "a grep that REFUSES `--unix-byte-offsets` must produce an EMPTY allowance — anything else "
         "grades the expression of a command grep will not run (#14138)")
+    # ⛔ AND THE COMPOSITION IS ITS OWN CLAIM, NOT A CONSEQUENCE OF THE DERIVATION (#14303 review,
+    # P2 — MEASURED). `_d5_all_long_options()` is `_D5_DOCUMENTED_LONG_OPTIONS | allowance`, and
+    # the two rows above pin only the right-hand side. The composition mutant — `return
+    # _D5_DOCUMENTED_LONG_OPTIONS`, dropping the allowance — left every cell GREEN on grep >= 3.12,
+    # because there the allowance IS empty, so the union equals the left-hand side anyway: the
+    # platform CI runs is exactly the one that could not see it. These two arms make the union
+    # observable on EVERY platform, which is what threading `grep` through `_d5_all_long_options`
+    # was for.
+    assert _d5_all_long_options(accepts) == _D5_DOCUMENTED_LONG_OPTIONS | {"--unix-byte-offsets"}, (
+        "a grep that RUNS `--unix-byte-offsets` must have it in the WHOLE universe, not only in the "
+        "allowance — a union that drops the measured half is how the documented-alias regression "
+        "came back unobserved on grep >= 3.12 (#14303 review, P2)")
+    assert _d5_all_long_options(refuses) == _D5_DOCUMENTED_LONG_OPTIONS, (
+        "a grep that REFUSES `--unix-byte-offsets` must compose to EXACTLY `grep --help`'s set — "
+        "the allowance is empty there, and a union that still carried the spelling would grade a "
+        "command this grep will not run (#14303 review, P2)")
     with pytest.raises(AssertionError, match="neither a count"):
         _d5_grep_runs_long_option("--unix-byte-offsets", confused)
     # ⛔ AND A GREP THAT IS BROKEN FOR *EVERY* SPELLING IS NOT A GREP THAT REFUSED THIS ONE (#14138
