@@ -53,17 +53,29 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    consumers would let two records for one tenant overtake each other; the
    record's writes are absolute per row, so that is a correctness hazard, not
    only a delay). ⛔ **THE INLINE FALLBACK IS OUTSIDE THAT ORDER, and that is
-   stated rather than implied** (#14222 review cycle 5, ISSUE 3): when the queue
-   is FULL (or the worker is stopping) the caller folds its OWN, LATER position
-   on its own thread, at ``live_write``'s inline call, while an EARLIER position
-   is still queued — so with ``TORTOISE_PROJECTION_QUEUE_MAX=1``, or once the
-   default bound saturates, one writer's row can be overwritten by its
-   predecessor. Nothing detects it: both positions are present, so
-   ``journal_coverage`` / ``record-reconcile`` read green. The alternative to
-   that residual is a caller that WAITS on the queue — which is the coupling this
-   module exists to remove — so the honest form is the declared one: the bound's
-   visible cost is a slower ACK **and** a possible same-tenant reorder during the
-   window in which the queue is saturated. Closing it needs an ordering token at
+   stated rather than implied** (#14222 review cycle 5, ISSUE 3; widened in
+   round 13, P2, because the trigger was understated): when a write does not go
+   through the queue, the caller folds its OWN position on its own thread, at
+   ``live_write``'s inline call, while an EARLIER position may still be queued —
+   so one writer's row can be overwritten by its predecessor. ⚠️ **THERE ARE THREE
+   FAMILIES OF TRIGGER, AND ONLY ONE OF THEM IS THE BOUND.** (a) A DECLINE by the
+   bound or by a stopping worker (``queue_full`` / ``worker_stopping``), which is
+   what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls — with the bound at ``1``, or
+   once the default saturates. (b) The STRUCTURAL arms, which fold inline on EVERY
+   write at ANY depth, including an idle queue: ``tenant is None`` (the
+   ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
+   pass no tenant) and every ``record_sink`` door. (c) An inline fold the bound
+   cannot reach at all: an UNCOPYABLE record (the deep snapshot in :func:`submit`
+   fails, so a write that would otherwise already be queued folds inline instead)
+   and a ``submit`` FAULT (the ``queue_fault`` arm in :func:`submit`, published
+   before it propagates). So raising the bound does NOT remove this residual — it only
+   removes arm (a); a same-tenant queued write can be overtaken by a structural-arm
+   fold at zero depth, or by a (c) fold at any depth. Nothing detects it: both
+   positions are present, so ``journal_coverage`` / ``record-reconcile`` read
+   green. The alternative to that residual is a caller that WAITS on the queue —
+   which is the coupling this module exists to remove — so the honest form is the
+   declared one: the bound's visible cost is a slower ACK **and** a possible
+   same-tenant reorder, from either arm. Closing it needs an ordering token at
    the fold seam, which is a change to ``record_projection``, not to this module.
    ⚠️ ``.env.example`` states the same residual where the bound is documented.
 2. **A write's ack excludes projection time.** :func:`submit` appends to a deque
@@ -198,8 +210,14 @@ ENV_WORKER = "TORTOISE_PROJECTION_WORKER"
 
 #: How many queued projections the bound allows before :func:`submit` starts
 #: declining (and the caller folds inline). Sized so a normal burst is absorbed
-#: and a wedged fold is bounded in MEMORY: one item holds one record, so the
-#: ceiling is a few MB at the default. Read as an integer; an unparseable or
+#: and a wedged fold is bounded in MEMORY — ⛔ AND THE MEMORY FIGURE IS NOT "a few
+#: MB" (round-13 review, P3): an item holds one record, ``submit`` DEEP-COPIES it,
+#: and a record carrying a 1536-dimensional embedding measures **12.8 KiB** per
+#: copy (tracemalloc, this branch), so the default 10,000 is a ceiling of roughly
+#: **125 MiB**, not a few MB — and it scales with the embedding width and the
+#: record's own size. An earlier revision of this comment said "a few MB", which
+#: understated the ceiling by ~30x; use this figure for capacity planning.
+#: Read as an integer; an unparseable or
 #: non-positive value falls back to :data:`DEFAULT_QUEUE_MAX` rather than
 #: disabling the worker (a typo must not silently change the mode).
 ENV_QUEUE_MAX = "TORTOISE_PROJECTION_QUEUE_MAX"
@@ -310,9 +328,10 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
       now" would then state a fact nothing checked.
 
     So the reason names WHAT WAS OBSERVED:
-    ``record_no_outcome`` (the callable answered nothing),
-    ``projection_refused`` (an armed refusal — nothing was written), and the
-    raise arm's ``projection_raised`` is minted by the caller.
+    ``record_no_outcome`` (the callable answered nothing — or answered a value
+    whose outcome could not be READ, which is the same fact: nothing was
+    observed), ``projection_refused`` (an armed refusal — nothing was written),
+    and the raise arm's ``projection_raised`` is minted by the caller.
     `no_durable_journal` is NOT a failure: it is the seam's healthy decline for a
     lane with no journal by design (#9231), and the gate here already refuses to
     queue a non-durable log.
@@ -723,18 +742,37 @@ class ProjectionWorker:
           processes — and the EPOCH bump is what makes a SNAPSHOT FROM THE PARENT
           unmatchable;
         * **THE THIRD PARTY'S LOCKS TOO**, one layer down: ``prometheus_client``
-          gives every metric family a ``_lock`` and every ``MutexValue`` its own,
+          gives every ``MutexValue`` a ``_lock``, and a LABELLED metric family one of
+          its own — ⛔ the discriminator is ``labelnames``, NOT the metric type
+          (``_is_parent()`` is ``self._labelnames and not self._labelvalues``, so a
+          labelled ``Gauge``/``Counter``/``Histogram`` all carry one and an
+          unlabelled family of any type carries none),
           plain ``threading.Lock``s a child inherits from a peer that did not
           survive the ``fork()``. ``set``, ``inc``, ``get``, ``labels`` and
           ``collect`` all take one, and a blocked lock is not an exception, so the
-          suppression in ``_emit`` cannot save the child. The reset therefore also
-          calls ``monitoring.ensure_projection_metrics_fork_safe()``, which replaces
-          them — the SAME reasoning as the two above, applied to the lock nobody
-          here owns. ⛔ This is what makes the publish below safe, and it is the part
-          an earlier revision of this fix left out: dropping the publish from the
-          read path only moved the wedge onto the write and the collect paths
-          (measured: the child blocked in ``MutexValue.set`` from ``submit`` and in
-          ``MutexValue.get`` from ``projection_worker_gauges()``);
+          suppression in ``_emit`` cannot save the child. ``monitoring`` therefore
+          REPLACES them — ``ensure_projection_metrics_fork_safe``, registered at
+          import as an ``os.register_at_fork(after_in_child=...)`` hook — so they
+          are already fresh before this child runs any of our code, and the SAME
+          reasoning as the two locks above applies to the lock nobody here owns.
+          ⛔ THIS METHOD ALSO CALLS IT (review cycle 3, ISSUE 1): an earlier
+          revision of this bullet said it did NOT, because the HOOK's registration
+          is what covers every child before our code runs — and the merge that
+          produced this tree brought that sentence and this call into the same
+          method, 29 lines apart, contradicting each other. Both are true, and they
+          are DIFFERENT mechanisms: the hook repairs the locks in every child,
+          including the paths no helper here reaches; this call is the BELT to that
+          suspender, so the reset's own guarantee holds even where the hook is not
+          registered (a platform without ``os.register_at_fork``, a hook someone
+          unregisters). ``_emit`` swallows every failure, the replacement is
+          lock-free, and it is idempotent by pid, so the belt costs one
+          ``getpid()``. ⛔ This is what makes the publish below safe, and it
+          is the part an earlier revision of this fix left out: dropping the
+          publish from the read path only moved the wedge onto the write and the
+          collect paths (measured: the child blocked in ``MutexValue.set`` from
+          ``submit`` and in ``MutexValue.get`` from ``projection_worker_gauges``),
+          and a hook is what covers the paths no helper here reaches — the
+          ``/metrics`` scrape calls ``generate_latest`` directly;
         * the PUBLISH SNAPSHOT, which this method RETURNS rather than applying:
           the publish is a foreign call (cycle 4, P2-2) and the caller makes it
           once the reset has returned — after the prometheus locks above are
@@ -743,6 +781,13 @@ class ProjectionWorker:
           advertise the parent's permanent backlog), so it is NOT deferred to the
           first write.
         """
+        # ⛔ THIS CALL IS PART OF THE RESET, not a courtesy (#14222 review cycle 3,
+        # ISSUE 1). The HOOK is the primary mechanism and the docstring above says
+        # so; this is the belt to it, so the reset does not depend on the hook being
+        # registered at all. `_emit` swallows every failure (a metrics problem must
+        # never break the fold), the replacement is lock-free, and it is idempotent
+        # by pid — so on the ordinary path this is one `getpid()`.
+        _emit("ensure_projection_metrics_fork_safe")
         self._cond = threading.Condition()
         self._cond_pid = os.getpid()
         self._publish_lock = threading.Lock()
@@ -793,9 +838,34 @@ class ProjectionWorker:
                     "(#14185)",
                     type(exc).__name__, exc, item.seq)
             else:
-                failure = _classify_fold_outcome(result, item.seq)
-            # ⛔ ALL THREE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
-            # never from a value captured at POP time (#14222 review P1-1). The
+                # ⛔ THE CLASSIFIER IS INSIDE ITS OWN GUARD (round-13 review, P3):
+                # it asks the door's return value what happened, and a door whose
+                # `project` returns an object with a RAISING property would raise
+                # HERE — outside the `try` above and BEFORE `_inflight` is cleared
+                # below. That kills the consumer thread with `_inflight` still set,
+                # which makes every lag gauge read a permanent phantom +1,
+                # `oldest_pending_seconds` grow without bound and `wait_for_drain`
+                # never answer True, while `stats().running` correctly reads False
+                # and the next `submit` silently starts a replacement — the exact
+                # "gauge disagrees with reality forever" class this branch treats
+                # as P1-1. An unclassifiable outcome is counted as a failure: the
+                # item is not retried, and the journal line stands for a replay.
+                try:
+                    failure = _classify_fold_outcome(result, item.seq)
+                except Exception as exc:      # noqa: BLE001, RUF100
+                    failure = "record_no_outcome"
+                    LOGGER.warning(
+                        "projection_worker: the fold's OUTCOME could not be "
+                        "classified (%s: %s) for journal position %s — counted "
+                        "as a failure rather than assumed to have written "
+                        "(#14185)",
+                        type(exc).__name__, exc, item.seq)
+            # ⛔ BOTH VALUE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
+            # never from a value captured at POP time (#14222 review P1-1). ⛔ TWO,
+            # not three (review round 11, P3): `_stamp_locked` carries epoch, seq,
+            # depth and positions — NO AGE. The age is recomputed on `collect`
+            # (`PROJECTION_OLDEST_PENDING_SECONDS.set_function`), so a reader
+            # chasing a wrong age belongs in `monitoring`, not here. The
             # pop-time depth counts the item that is about to be folded, so
             # publishing it after the fold reports "1 owed" for a DRAINED queue
             # and "1 owed" for a backlog of 100 — an alert on `depth > 0` would
