@@ -18242,10 +18242,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # closes ONE direction only — a live pair whose result triad is GONE (`diffs > triads`) —
     # NOT the other, which was CLAIMED here and is FALSE (#14183 review, P3, MEASURED). The
     # deletion direction it does NOT close is narrow and POSITIONAL: drop the LAST live
-    # subtraction group and the selection reports `1 passed`, because the surviving triad is
-    # then simply UNGRADED; drop an EARLIER group and it reds at the pairing assert only
-    # because the groups behind it shift into the vacated slot and mispair with their triads —
-    # an accident of `zip` POSITIONS, not a designed check, and its diagnostic names the wrong
+    # subtraction group and THIS NODE reports `1 passed` while the `D5` selection still passes,
+    # because the surviving triad is then simply UNGRADED; drop an EARLIER group and it reds at
+    # the pairing assert only because the groups behind it shift into the vacated slot and
+    # mispair with their triads — an accident of `zip` POSITIONS, not a designed check, and
+    # its diagnostic names the wrong
     # pair. So the residue is stated as a residue: this arm reds on a drift of EITHER side of a
     # pair it can pair POSITIONALLY, and cannot see a deletion at the TAIL. No count is typed
     # to close it — a count here is the head-bound figure this row forbids, and the refuted
@@ -18260,9 +18261,15 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         f"D5 states {len(_diffs)} live subtraction triad(s) but only {len(_triads)} result "
         "triad(s) — the pairing is positional, so a triad that lost its result would be graded "
         "against a refuted one; re-derive the row")
+    # ⛔ `strict=False` IS EXPLICIT AND IS THE CORRECT VALUE (#14183, ruff B905 — MEASURED):
+    # the row deliberately carries MORE result triads than live subtraction groups (the refuted
+    # triads quoted as history have no live subtraction to grade), so `strict=True` would raise
+    # on the states the arm above explicitly permits (`len(_triads) >= len(_diffs)`). Naming it
+    # keeps the truncation INTENTIONAL and visible instead of relying on `zip`'s default, which
+    # is exactly the silent-shortening shape this file treats as a defect elsewhere.
     _bad_diffs = [
         (list(triad), list(diff))
-        for diff, triad in zip(_diffs, _triads)
+        for diff, triad in zip(_diffs, _triads, strict=False)
         if [int(diff[i]) - int(diff[i + 1]) for i in (0, 2, 4)]
         != [int(x.lstrip("+")) for x in triad]]
     assert not _bad_diffs, (
@@ -18629,8 +18636,9 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     `r[key] = st[key]` — neither line carries the symbol, so a reader
     following the second pair landed on unrelated code. It was green because the two
     `_pin_row_failures` rows scoped to that line carry ONLY the opening pair's numbers — the
-    fail-OPEN probe row names `7201` and its consume row names `12168`/`12221`, their values at
-    `f6f202cf5cfb` (the head this finding was measured at — re-derive them, never carry them), and NO row
+    fail-OPEN probe row names `7201` and its consume row names `12168`/`12221` — those are their values
+    at `f6f202cf5cfb`, the head they were READ at (the two-pair defect itself was measured at
+    `c4451dcd03` above; re-derive the numbers, never carry them) — and NO row
     anywhere names `12110` or `12163` (`grep -nE '12110|12163'` finds comment lines and this
     docstring only). ⛔ NO LINE RANGE is quoted for those two rows (#13746 review round 9): an
     earlier cut wrote one, and it identified lines that are not the rows — the span started
