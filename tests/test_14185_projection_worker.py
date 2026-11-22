@@ -478,6 +478,32 @@ def _runs_within(seconds: float, fn) -> bool:
     return done.wait(seconds)
 
 
+def _require_prometheus_lock(holder) -> threading.Lock:
+    """The REAL ``_lock`` on a prometheus object, or a red that names the rename.
+
+    ⛔ Review round 11, P3: these legs PLANT a fresh ``_lock`` on the object and
+    then assert the repair replaced it. Under a prometheus_client that renames the
+    attribute that plant is vacuous in the worst way — the leg creates a ``_lock``
+    nothing in the library touches, the repair "replaces" the plants, every
+    assertion holds, and the REAL lock is still inherited, so the forever-hang is
+    back while the suite is green (reproduced against ``prometheus_client`` 0.26.0
+    with ``_lock`` renamed to ``_mutex``). Reading the real attribute FIRST turns
+    that into a red with a sentence that says what happened.
+
+    ``pyproject.toml`` pins ``prometheus-client>=0.16`` with no upper bound, so a
+    rename arrives on a dependency move rather than on a code change: whoever bumps
+    it gets this message instead of a silently dead repair.
+    """
+    lock = getattr(holder, "_lock", None)
+    assert lock is not None, (
+        f"{type(holder).__name__} has no `_lock` — prometheus_client moved or "
+        "renamed it, so (a) this leg no longer pins the fork repair and (b) "
+        "`monitoring.ensure_projection_metrics_fork_safe` is now replacing nothing, "
+        "which restores the inherited-lock wedge silently. Read the real attribute "
+        "name off the installed package and update BOTH the repair and this helper.")
+    return lock
+
+
 def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed, monkeypatch):
     """⛔ ROUND 10'S P2 + two P3s: the wedge is prometheus_client's OWN lock.
 
@@ -504,8 +530,20 @@ def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed,
     gauge = monitoring.PROJECTION_QUEUE_DEPTH
     positions = monitoring.PROJECTION_PENDING_POSITIONS
 
+    # ⛔ THE OBJECTS THAT ACTUALLY CARRY A LOCK: every ``MutexValue``, plus the
+    # LABELLED families — here the two ``Counter``s. ⛔ THE DISCRIMINATOR IS
+    # ``labelnames``, NOT THE METRIC TYPE (measured on prometheus-client 0.26.0):
+    # ``MetricWrapperBase.__init__`` takes ``self._lock`` only under
+    # ``if self._is_parent():``, i.e. ``self._labelnames and not
+    # self._labelvalues`` — so a LABELLED ``Gauge`` carries one and an UNLABELLED
+    # ``Counter`` carries none. The three unlabelled ``Gauge``s this module repairs
+    # therefore have nothing here to inherit, and planting a lock on one (as an
+    # earlier revision did) is what made this leg vacuous under a rename.
     held = []
-    for holder in (gauge, gauge._value, positions, positions._value):
+    for holder in (gauge._value, positions._value,
+                   monitoring.PROJECTION_WORKER_FAILURE_COUNT,
+                   monitoring.PROJECTION_INLINE_FALLBACK_COUNT):
+        _require_prometheus_lock(holder)     # the REAL attribute, or a red naming it
         lock = threading.Lock()
         lock.acquire()               # the peer thread's lock, held at `fork()`
         holder._lock = lock
@@ -532,6 +570,80 @@ def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed,
 
     # …and the reset really did replace them: the gauges read the child's values.
     assert monitoring.projection_worker_gauges()["queue_depth"] == 1
+
+
+def test_the_RESET_ITSELF_replaces_prometheus_locks_not_a_publisher_behind_it(
+        armed, monkeypatch):
+    """⛔ FINDING 1 (#14222 review): the reset's docstring names a call, so the
+    reset is what must MAKE it — the leg above cannot tell the two apart.
+
+    MEASURED ON THE CODE THAT SHIPPED WITHOUT THIS LEG: `worker.stats()` triggers
+    the reset, and the snapshot the reset returns is published by its CALLER
+    through `monitoring.record_projection_queue_state`, whose first line is
+    `ensure_projection_metrics_fork_safe()`. So every end-to-end path outside the
+    reset reaches the replacement by itself, and a reset that made NO call at all
+    still passed the test above — the docstring's claim ("the reset therefore also
+    calls ... this is what makes the publish below safe") was carried by prose,
+    not by a mechanism, and deleting the call would have red nothing.
+
+    So this leg calls the RESET ALONE — no publish, no read, no health probe — and
+    requires the inherited locks to be gone afterwards.
+    """
+    worker = projection_worker.worker()
+    holders = (                       # the objects that really carry a `_lock`
+        monitoring.PROJECTION_QUEUE_DEPTH._value,
+        monitoring.PROJECTION_PENDING_POSITIONS._value,
+        monitoring.PROJECTION_WORKER_FAILURE_COUNT,
+        monitoring.PROJECTION_INLINE_FALLBACK_COUNT,
+    )
+    held = []
+    for holder in holders:
+        _require_prometheus_lock(holder)     # the REAL attribute, or a red naming it
+        lock = threading.Lock()
+        lock.acquire()               # the peer thread's lock, held at `fork()`
+        holder._lock = lock
+        held.append(lock)
+
+    # A fork is observed by the metrics module too, so the pid gate cannot answer
+    # "already valid here" and short-circuit the replacement.
+    monkeypatch.setattr(monitoring, "_PROJECTION_METRICS_PID", os.getpid() + 1_000_000)
+    try:
+        worker._reset_for_fork_locked()          # THE RESET ALONE
+        survivors = [holder for holder, lock in zip(holders, held, strict=True)
+                     if getattr(holder, "_lock", None) is lock]
+        assert not survivors, (
+            "the fork reset returned without replacing prometheus's inherited "
+            f"locks ({len(survivors)} survived) — the reset makes that call "
+            "itself as the belt to the `os.register_at_fork` hook (which a test "
+            "cannot fire by moving the pid), so a reverted call must red HERE "
+            "and not only on a path that reaches the same function through "
+            "`monitoring`, or through the hook")
+    finally:
+        for lock in held:
+            if lock.locked():
+                lock.release()
+
+
+def test_a_RENAMED_prometheus_lock_REDS_the_guard_instead_of_passing_vacuously():
+    """The guard on the legs above must fire, and on a REAL object.
+
+    ⛔ Review round 11, P3: the legs plant a ``_lock`` and assert it was replaced, so
+    under a prometheus_client that renames ``_lock`` they would pin nothing.
+    ``_require_prometheus_lock`` reads the real attribute; this leg pins its RED
+    path on a holder that genuinely does not carry one.
+
+    ⛔ NOT a ``Gauge`` family (review round 14, P3). A family's ``_lock`` depends on
+    ``labelnames``, NOT on its type — ``MetricWrapperBase.__init__`` takes
+    ``self._lock`` only under ``if self._is_parent():``, measured on 0.26.0 as a
+    labelled ``Gauge`` HAVING one and an unlabelled ``Counter`` having none.
+    Pinning this on ``PROJECTION_QUEUE_DEPTH`` therefore made the leg depend on that
+    family staying UNLABELLED: a benign label added there would restore the real
+    ``_lock`` and this leg would red with "DID NOT RAISE" while the fork repair was
+    perfectly fine. A dependency-free holder pins the one reason that matters — the
+    attribute is absent — and keeps that family's shape out of the gate.
+    """
+    with pytest.raises(AssertionError, match="prometheus_client moved or renamed"):
+        _require_prometheus_lock(types.SimpleNamespace())
 
 
 def test_a_metrics_failure_never_escapes_into_the_loop(armed, monkeypatch):
@@ -1074,6 +1186,63 @@ def test_a_failing_deferred_fold_is_counted_and_the_loop_survives(armed):
         "projection_raised", 0) - before) == 1
 
 
+def test_a_fold_whose_OUTCOME_cannot_be_read_is_counted_not_absorbed(armed):
+    """⛔ #14222 round-13 review, P3: the classifier sat OUTSIDE the fold's `try`.
+
+    `_classify_fold_outcome` asks the door's return value what happened
+    (`getattr(result, "applied", True)` / `getattr(result, "refusal", None)`), so
+    a `project` callable returning an object with a RAISING property raised there —
+    outside the guard around `item.project`, and BEFORE `_inflight` was cleared.
+    That kills the consumer thread while `_inflight` still names an item, so every
+    lag gauge reads a permanent phantom +1, `oldest_pending_seconds` grows without
+    bound, `wait_for_drain` never answers True, and the next `submit` silently
+    starts a replacement consumer — a gauge that disagrees with reality forever.
+
+    The leg drives exactly that shape: a first fold whose outcome object raises,
+    then a second fold that must still run. ⛔ If the classifier is moved back
+    outside its guard, `wait_for_drain` below never returns True (the assertion
+    fails on the drain, not on a phantom gauge), which is the observable the
+    defect produces.
+    """
+    attempts = []
+
+    class _OutcomeThatCannotBeRead:
+        @property
+        def applied(self):
+            raise RuntimeError("the door's outcome is unreadable")
+
+    def project(event, seq, *, journal_skipped=False):
+        attempts.append(seq)
+        if seq == 1:
+            return _OutcomeThatCannotBeRead()
+        return types.SimpleNamespace(applied=True, refusal=None,
+                                     outcome="applied")
+
+    before = monitoring.projection_worker_failure_counts().get(
+        "record_no_outcome", 0)
+    log = _Log()
+    live_write.write({"type": "A"}, log=log, project=project, tenant=_TENANT)
+    live_write.write({"type": "B"}, log=log, project=project, tenant=_TENANT)
+
+    assert projection_worker.wait_for_drain(10) is True, (
+        "the consumer did not finish the queue: an outcome the classifier could "
+        "not read must be COUNTED, not able to kill the loop with `_inflight` set")
+    stats = projection_worker.stats()
+    assert attempts == [1, 2], "the loop stopped on the unreadable outcome"
+    assert stats.failures == 1, (
+        "an unclassifiable fold must be counted as a failure, never assumed to "
+        "have written a row")
+    # ⛔ THE OPERATOR-VISIBLE COUNTER, not only the in-process stat (#14222
+    # round-14 review, P3). `stats.failures` is the loop's own tally; a change
+    # that dropped `_publish_failure` on this arm would leave every assertion
+    # above green while the metric an operator actually reads stayed flat. The
+    # sibling leg above pins `projection_raised` in exactly this shape.
+    assert (monitoring.projection_worker_failure_counts().get(
+        "record_no_outcome", 0) - before) == 1
+    assert stats.projected == 1
+    assert stats.queue_depth == 0 and stats.pending_positions == 0
+
+
 def test_the_fold_runs_in_journal_order(armed):
     """ONE consumer, in order — a second consumer is a correctness hazard.
 
@@ -1305,6 +1474,135 @@ def test_the_MODULE_lock_is_replaced_in_a_forked_child():
         f"{os.WEXITSTATUS(status) if os.WIFEXITED(status) else 'signalled'} — it "
         "was still blocked on `_WORKER_LOCK`, the MODULE lock its peer held at "
         "fork(), so the `after_in_child` hook never replaced it")
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
+def test_the_fork_hook_replaces_prometheus_locks_before_the_METRICS_SCRAPE():
+    """⛔ #14222 review round 11, P2-1: the repair was on CALL SITES, and the
+    scrape path is not one of them.
+
+    `ensure_projection_metrics_fork_safe()` was reached from every projection-metric
+    helper that publishes or reads these families (⛔ no count is stated: the
+    number moves whenever a helper is added, and a stale count beside a coverage
+    argument certifies something false — round-13 review, P3), which covers the
+    publish arm, the health read and
+    that read's `collect()`. It did NOT cover the TEXT exposition: `/metrics`
+    calls `generate_latest(REGISTRY)` directly (`monitoring._Handler.do_GET`), and
+    that walk takes the same inherited locks — `_child_samples` ->
+    `MutexValue.get` -> `with self._lock` for an unlabelled family, and
+    `_multi_samples`' own `with self._lock` for a labelled one. So the first
+    scrape from a child forked while a peer held one of these locks blocked
+    FOREVER, on the one surface Prometheus actually reads.
+
+    The repair is now an `os.register_at_fork(after_in_child=...)` hook, so the
+    locks are replaced before any of our code runs in the child and NO path —
+    scrape included — can reach an inherited one.
+
+    Forked probe, in-suite: the parent's peer thread HOLDS
+    `PROJECTION_QUEUE_DEPTH._value._lock` across the `fork()`; the child must
+    produce the exposition. ⛔ WITH THE HOOK REMOVED the child does not answer 0:
+    it blocks inside `MutexValue.get` until its own alarm fires, and the
+    `except BaseException` arm reports exit **4** (never a raw `SIGALRM`), so the
+    assertion below reds on the mutant without depending on the platform's
+    disposition.
+    """
+    gauge = monitoring.PROJECTION_QUEUE_DEPTH
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with _require_prometheus_lock(gauge._value):   # the REAL lock, not a plant
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, name="prometheus-value-holder",
+                              daemon=True)
+    holder.start()
+    assert holding.wait(5), "the peer never took the prometheus value lock"
+
+    pid = os.fork()
+    if pid == 0:                                   # ── child ──
+        code = 3
+        try:
+            signal.alarm(10)
+            monitoring.generate_latest()           # the `/metrics` path, verbatim
+            code = 0
+        except BaseException:                      # noqa: BLE001, RUF100
+            code = 4
+        finally:
+            os._exit(code)                         # never unwind into pytest
+
+    release.set()
+    holder.join(5)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+        "the forked child could not produce the /metrics exposition: "
+        f"exited={os.WIFEXITED(status)} status="
+        f"{os.WEXITSTATUS(status) if os.WIFEXITED(status) else 'signalled'} — it "
+        "was still blocked in `MutexValue.get` on the prometheus lock its peer "
+        "held at fork(), so no `after_in_child` hook replaced it")
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
+def test_the_fork_hook_replaces_the_REGISTRY_lock_the_scrape_takes_FIRST():
+    """⛔ #14222 review round 12, P3: `registry.collect()` takes the REGISTRY's own
+    lock BEFORE it iterates a single collector.
+
+    The repair replaced the locks of the five projection families — ⛔ NOT "every
+    family this module's exposure path touches": `_handle_endpoint` touches
+    `REQUEST_COUNT` / `REQUEST_LATENCY` BEFORE `generate_latest`, and neither is
+    repaired (see `monitoring`'s residual), which is why the leg ABOVE holds a
+    projection family and THIS leg holds the registry. What those
+    five did not cover is the registry: `CollectorRegistry.collect()` opens with
+    `with self._lock:` (a lock that is
+    neither a family's nor a `MutexValue`'s) to copy `_collector_to_names`, so a
+    child that forked while a peer held the REGISTRY lock blocked on the scrape's
+    FIRST statement and never reached a family at all. The family repair was
+    irrelevant to that wedge, which is why the registry lock is now replaced in the
+    same pass.
+
+    Forked probe, in-suite: the parent's peer thread HOLDS `REGISTRY._lock` across
+    the `fork()`; the child must produce the exposition. ⛔ WITH THE REGISTRY
+    REPLACEMENT REMOVED the child blocks in `registry.collect()` until its own alarm
+    fires and reports exit **4**, so this leg reds on that mutant while the
+    family-level leg stays GREEN — that separation is the point of a second leg.
+    """
+    registry = monitoring.REGISTRY
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with registry._lock:
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, name="registry-lock-holder", daemon=True)
+    holder.start()
+    assert holding.wait(5), "the peer never took the registry lock"
+
+    pid = os.fork()
+    if pid == 0:                                   # ── child ──
+        code = 3
+        try:
+            signal.alarm(10)
+            monitoring.generate_latest()           # `registry.collect()` first
+            code = 0
+        except BaseException:                      # noqa: BLE001, RUF100
+            code = 4
+        finally:
+            os._exit(code)                         # never unwind into pytest
+
+    release.set()
+    holder.join(5)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+        "the forked child could not produce the /metrics exposition: "
+        f"exited={os.WIFEXITED(status)} status="
+        f"{os.WEXITSTATUS(status) if os.WIFEXITED(status) else 'signalled'} — it "
+        "blocked in `registry.collect()` on the registry lock its peer held at "
+        "fork(), before any family lock was touched")
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")

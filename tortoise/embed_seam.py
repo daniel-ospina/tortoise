@@ -109,6 +109,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -249,16 +250,54 @@ DEFAULT_WORKER_STARTUP_S = 600.0
 #: and small enough that the memory is a rounding error against a 432 MB model.
 LATENCY_WINDOW = 512
 
+# ── ceilings for the levers that bound a WAIT ───────────────────────────────
+#
+# ⛔ FLOORED IS NOT ENOUGH — a lever that is only floored accepts ``inf``, and
+# ``inf`` is the exact value that turns a bound into a park (review F1 at
+# ``76e58a21bb``). ``_env_float`` refuses anything non-finite outright; these
+# ceilings exist for the finite-but-absurd value (``1e9``), which is the same
+# park with a longer fuse. Each ceiling is stated against something measured, not
+# picked as a round number.
+
+#: The collection window (ms). Two orders of magnitude above the 20 ms default and
+#: well above the issue's "<= 50 ms" posture: past a minute the window is no
+#: longer batching interactive traffic, it is shelving it. ``submit``'s valve is
+#: ``window + budget + slack``, so an unbounded window is an unbounded TICKET wait.
+MAX_WAIT_MS_CEILING = 60_000.0
+
+#: One fired request's round trip (s). An hour: beyond any provider answer, and
+#: short of the ``inf`` that would let ``sock.settimeout`` / an ``urlopen`` bound
+#: outlive the process it is supposed to protect.
+TIMEOUT_S_CEILING = 3_600.0
+
+#: A worker's boot budget (s). A cold import plus a model load was measured at
+#: 156.5 s + <= 300 s (#13674), so the 600 s default already carries headroom; a
+#: day is two orders past that, and anything longer only means a read parked for
+#: the life of the process when the boot never completes.
+WORKER_STARTUP_S_CEILING = 86_400.0
+
 
 # ── small total helpers ──────────────────────────────────────────────────────
 
 
-def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+def _env_float(name: str, default: float, *, minimum: float = 0.0,
+               maximum: float | None = None) -> float:
     """Read a float lever, refusing an unusable value with a warning.
 
     TOTAL: an unparseable value falls back to ``default`` and says so. Silently
     coercing ``"20ms"`` to 0 would disable the very bound this module exists to
     enforce, and the operator would have no way to see that.
+
+    ⛔ NOT-FINITE IS UNUSABLE, AND IT IS THE DANGEROUS SHAPE (review F1 at
+    ``76e58a21bb``). ``float("inf")`` satisfies any ``>= minimum`` test and is not
+    NaN, so the guard this replaces (``not (value >= minimum) or value != value``)
+    ACCEPTED ``TORTOISE_EMBED_MAX_WAIT_MS=inf``: the collector's
+    ``deadline = ... + window_s`` became infinite, so a lone query's batch could
+    only ever fire on ``max_batch``, and ``submit``'s valve parked the caller
+    effectively forever — the unbounded wait the issue's contradiction test (a)
+    makes unshippable, reachable by one typo. Hence ``math.isfinite`` (which also
+    covers NaN, since ``isfinite(nan)`` is False) AND a ``maximum``: a finite but
+    absurd value is the same park with a longer fuse.
     """
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -267,10 +306,12 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
         value = float(raw.strip())
     except ValueError:
         value = -1.0
-    if not (value >= minimum) or value != value:  # NaN is not >= anything
+    if not math.isfinite(value) or not (value >= minimum) or \
+            (maximum is not None and value > maximum):
         _logger.warning(
-            "%s=%r is not a number >= %s — using the default %s",
-            name, raw, minimum, default)
+            "%s=%r is not a finite number >= %s%s — using the default %s",
+            name, raw, minimum,
+            "" if maximum is None else f" (and <= {maximum})", default)
         return default
     return value
 
@@ -312,11 +353,48 @@ def resolve_backing() -> str:
     return value
 
 
+def encodes_in_process() -> bool:
+    """Does the seam run its forward pass in THIS process? (#14186 review F5)
+
+    ``True`` for ``inprocess`` (the default) and ``False`` for ``worker`` /
+    ``external``. It resolves the LEVER only — it constructs no backing and
+    retires no collector — so a boot path can ask it without side effects.
+    ⛔ THE ONE QUESTION THE EAGER LOADS ASK. ``hosted_api``'s lifespan pre-warm and
+    ``sdk``'s engine-init kick both exist to make the IN-PROCESS forward pass warm.
+    With the encoder elsewhere they buy nothing and cost exactly what the migration
+    exists to remove: 432 MB resident in the serving process (3.66 GB with two
+    overlapping loads, #13674), on top of the worker's own copy.
+
+    ⛔ DELIBERATELY NOT APPLIED INSIDE ``EmbeddingModel.start_warm_up``. The write
+    and read readiness paths read that call's return value as "is a load in
+    flight"; answering ``None`` there would convert a healthy LOCAL load into a
+    decline on a deployment that still uses the in-process encoder for some path
+    (the documented ``fallback_snapshot`` residual). Gate the eager KICKS, not the
+    primitive.
+
+    ⛔ AND IT IS APPLIED ONE LAYER EARLIER TOO (review P1):
+    ``EmbeddingModel.await_write_ready_reason`` / ``await_read_ready_reason``
+    answer ``None`` (ready) here as well. Those methods exist to bound a LOCAL
+    load, and with the encoder elsewhere their only effect was to start that load
+    and then decline the write/read that triggered it — a vectorless row or a
+    keyword-only read on a deployment whose encoder was healthy.
+
+    ⛔ WHAT IT DOES NOT COVER (review P2): the residual paths that still encode
+    in-process and call ``EmbeddingModel.get()`` synchronously —
+    ``entity_resolver`` / ``cross_lens`` arrive through ``_encode``, not through
+    the seam — so with a worker backing those pay the cold load on the request
+    thread instead of at boot. Documented in ``docs/infra-runbook.md`` §4.1.1e;
+    routing them through the seam is a behaviour change, not a gate.
+    """
+    return resolve_backing() == BACKING_INPROCESS
+
+
 def resolve_max_wait_ms(backing: str | None = None) -> float:
     """The collection window in ms — the operator's lever, else the backing default."""
     name = backing if backing is not None else resolve_backing()
     default = DEFAULT_MAX_WAIT_MS_FOR_BACKING.get(name, DEFAULT_MAX_WAIT_MS)
-    return _env_float(ENV_MAX_WAIT_MS, default, minimum=0.0)
+    return _env_float(ENV_MAX_WAIT_MS, default, minimum=0.0,
+                      maximum=MAX_WAIT_MS_CEILING)
 
 
 def resolve_max_batch() -> int:
@@ -326,7 +404,8 @@ def resolve_max_batch() -> int:
 
 def resolve_timeout_s() -> float:
     """The bound on one fired request's round trip (worker / external)."""
-    return _env_float(ENV_TIMEOUT_S, DEFAULT_TIMEOUT_S, minimum=0.1)
+    return _env_float(ENV_TIMEOUT_S, DEFAULT_TIMEOUT_S, minimum=0.1,
+                      maximum=TIMEOUT_S_CEILING)
 
 
 def resolve_worker_startup_s() -> float:
@@ -339,7 +418,8 @@ def resolve_worker_startup_s() -> float:
     request-sized budget.
     """
     return _env_float(
-        ENV_WORKER_STARTUP_S, DEFAULT_WORKER_STARTUP_S, minimum=1.0)
+        ENV_WORKER_STARTUP_S, DEFAULT_WORKER_STARTUP_S, minimum=1.0,
+        maximum=WORKER_STARTUP_S_CEILING)
 
 
 #: Slack added to a ticket's delivery bound, on top of the phase budget it guards:
@@ -377,17 +457,41 @@ def resolve_ticket_wait_s(timeout_s: float,
     a perfectly healthy query. Sizing a bound is a READ, so it reads.
     """
     window_s = max(resolve_max_wait_ms(), 0.0) / 1000.0
+    budget_s = (resolve_worker_startup_s() if backing_booting(backing)
+                else timeout_s)
+    return window_s + budget_s + _TICKET_WAIT_SLACK_S
+
+
+def backing_booting(backing: EmbeddingBacking | None = None) -> bool:
+    """Whether the NEXT encode would pay a BACKING BOOT — a READ, never a resolve.
+
+    ``True`` only when a ``worker`` boot is in flight (or about to be paid, which
+    is the same wait for this question): a warm worker is ``False``, and
+    ``external`` is ``False`` because a round trip has no boot. The configured
+    lever is also read, so a lever that has just moved to ``worker`` while the
+    live backing is still the old one answers ``True`` — the next encode pays the
+    whole boot.
+
+    ⛔ WHY IT IS PUBLIC. Two callers must ask the same question with the same
+    answer: :func:`resolve_ticket_wait_s` (sizing a ticket's bound) and
+    ``EmbeddingModel.await_write_ready_reason`` (deciding whether a bounded write
+    declines or proceeds, #14186). A second copy of this logic is how one of them
+    ends up believing a warm worker is cold — which stored no derived vector for
+    the life of the process instead of for a boot (review P2).
+
+    ⛔ THE BACKING IS PEEKED, NEVER RESOLVED. :func:`active_backing` CONSTRUCTS a
+    backing on first use and retires the collector it replaces, so a health or
+    readiness read must not use it.
+    """
     candidate = backing if backing is not None else _peek_backing()
     configured = resolve_backing()
     pending = getattr(candidate, "startup_pending", None)
     if candidate is None:
         # Nothing constructed yet: the configured name is the only evidence about
         # which phase the FIRST encode will pay.
-        booting = configured == BACKING_WORKER
-    elif pending is not None:
-        booting = pending()
-    else:
-        booting = False
+        return configured == BACKING_WORKER
+    if pending is not None and pending():
+        return True
     # ⛔ A LEVER THAT NOW SAYS `worker` WHILE THE LIVE BACKING IS NOT ONE. The
     # candidate answers for the backing it IS, but the next encode will resolve
     # the CONFIGURED one — and for a worker that first encode pays the whole
@@ -395,11 +499,8 @@ def resolve_ticket_wait_s(timeout_s: float,
     # so this is a supported path: reading only the candidate sized the bound
     # for a steady-state request and declined a healthy boot (review: the phase
     # sizing asked the OLD backing).
-    if not booting and configured == BACKING_WORKER and \
-            getattr(candidate, "name", None) != BACKING_WORKER:
-        booting = True
-    budget_s = resolve_worker_startup_s() if booting else timeout_s
-    return window_s + budget_s + _TICKET_WAIT_SLACK_S
+    return (configured == BACKING_WORKER
+            and getattr(candidate, "name", None) != BACKING_WORKER)
 
 
 # ── vector normalisation ─────────────────────────────────────────────────────
@@ -556,7 +657,6 @@ def _socket_peer_uid(conn: socket.socket) -> int | None:
 
 class _LineJSONClient:
     """A newline-delimited JSON request/response client over a stream socket.
-
     The wire is deliberately trivial — one JSON object per line, no framing
     library, no pickle — because (a) a length-prefixed binary protocol on a
     local socket buys nothing at these sizes and (b) ``json`` is the one
@@ -577,18 +677,51 @@ class _LineJSONClient:
     def __init__(self, address: str) -> None:
         self._address = address
 
+    #: How long a ``connect`` that found NO LISTENER may keep retrying.
+    #:
+    #: ⛔ THE SECOND HALF OF THE READINESS RACE (review F2 at ``76e58a21bb``). The
+    #: worker now renames its socket into place only after ``listen(16)``, so the
+    #: path it publishes is always connectable — but a path can also exist WITHOUT
+    #: a listener behind it: a predecessor that was SIGKILLed leaves its socket
+    #: file, and a predecessor that is mid-``unlink``/``bind`` leaves a window. Both
+    #: answer ``ECONNREFUSED``, and pre-fix either one was a recorded decline on a
+    #: healthy worker. Bounded well inside the request budget (250 ms against the
+    #: 30 s default), because a genuinely dead path must still decline promptly —
+    #: the cost of this belt is bounded, the cost of the false decline is not.
+    _CONNECT_REFUSED_GRACE_S = 0.25
+
     def open_stream(self, timeout_s: float) -> socket.socket:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(timeout_s)
-        sock.connect(self._address)
-        peer = _socket_peer_uid(sock)
-        if peer is not None and peer != os.getuid():
-            sock.close()
-            raise RuntimeError(
-                f"embed seam: the worker socket {self._address} is answered by "
-                f"uid {peer}, not this process's uid {os.getuid()} — refusing to "
-                f"accept vectors from a foreign process (#14186)")
-        return sock
+        deadline = time.monotonic() + timeout_s
+        refused_until = time.monotonic() + min(
+            timeout_s, self._CONNECT_REFUSED_GRACE_S)
+        while True:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(max(deadline - time.monotonic(), 0.001))
+                sock.connect(self._address)
+            except (ConnectionRefusedError, FileNotFoundError):
+                # The path exists with nothing LISTENING behind it
+                # (``ECONNREFUSED``: a SIGKILLed predecessor's leftover file, or a
+                # bound-but-not-listening socket), or it is momentarily absent
+                # while a predecessor unlinks/rebinds (``ENOENT``). Neither is a
+                # verdict on the worker yet. Retry within the grace, then let it
+                # out — a worker that never comes up must decline, not park.
+                sock.close()
+                if time.monotonic() >= refused_until:
+                    raise
+                time.sleep(0.005)
+                continue
+            except BaseException:
+                sock.close()
+                raise
+            peer = _socket_peer_uid(sock)
+            if peer is not None and peer != os.getuid():
+                sock.close()
+                raise RuntimeError(
+                    f"embed seam: the worker socket {self._address} is answered by "
+                    f"uid {peer}, not this process's uid {os.getuid()} — refusing to "
+                    f"accept vectors from a foreign process (#14186)")
+            return sock
 
     def request(self, payload: dict, *, timeout_s: float) -> dict:
         with self.open_stream(timeout_s) as sock:
@@ -768,8 +901,14 @@ class WorkerBacking:
             pid = int(pid_text)
             if pid == os.getpid() or _pid_alive(pid):
                 continue
-            with _swallow_oserror():
-                os.rmdir(os.path.join(root, name))
+            # ⛔ ``rmtree``, NOT ``rmdir`` (review P2). A worker that was SIGKILLed
+            # leaves its socket INSIDE this directory — and since the readiness
+            # fix, possibly a staging sibling too — so ``rmdir`` refused every
+            # directory this function exists to reap and the ``$TMPDIR``
+            # accumulation it claims to bound kept happening. The ``rmdir`` row
+            # that pinned it built an EMPTY directory, a shape the code never
+            # produces: a guard that could not be reddened.
+            shutil.rmtree(os.path.join(root, name), ignore_errors=True)
 
     def startup_pending(self) -> bool:
         """Whether the next encode will pay a boot (review F1).
@@ -933,9 +1072,10 @@ class WorkerBacking:
                     os.unlink(address)
         # The private directory is ours: remove it with the socket, so a backing
         # that is retired leaves nothing behind in the temp dir (review F2).
+        # ⛔ ``rmtree`` for the same reason as the prune above: ``rmdir`` refuses
+        # the directory a killed worker actually leaves (its socket inside it).
         if directory is not None:
-            with _swallow_oserror():
-                os.rmdir(directory)
+            shutil.rmtree(directory, ignore_errors=True)
 
     def describe(self) -> dict:
         alive = self._proc is not None and self._proc.poll() is None
@@ -1705,8 +1845,15 @@ def active_backing() -> EmbeddingBacking:
         retired = _Retired(_backing, _collector)
         _record_snapshot(_backing_name, _collector)
         _backing = _construct(name)
-        _backing_name = name
+        # ⛔ THE COLLECTOR IS CLEARED BEFORE THE NAME MOVES (review P3).
+        # ``seam_status`` reads these under no lock by design (a health read must
+        # not block on a boot), so a reader landing between the two stores would
+        # see the NEW name beside the OLD collector and publish the retired
+        # backing's reservoir as the new one's FRESH measurement — the F3
+        # mis-attribution, in the reset window. Clearing first makes that window
+        # answer "no collector" (null/stale), which is honest.
         _collector = None
+        _backing_name = name
         fresh = _backing
     _retire(retired)
     _logger.info(
@@ -1840,10 +1987,21 @@ def seam_status() -> dict:
                      "collect_ms": {"n","window","p50","p95","max"},
                      "wait_ms": {"n","window","p50","p95","max"},
                      "encode_ms": {...}, "batch_size": {...}},
+         "latency_stale": false,       # do the two blocks above describe
+                                       # the CONFIGURED backing?
          "backings": {                  # EVERY backing, selected or not
              "inprocess": {"max_wait_ms": 0.0, "selected": true},
              "worker":    {"max_wait_ms": 20.0, "selected": false},
              "external":  {"max_wait_ms": 20.0, "selected": false}}}
+
+    ⛔ ``backing`` IS THE CONFIGURED CHOICE — always. The state and the
+    distributions are the LIVE backing's, and between a lever flip and the next
+    encode those are two different backings (review F3): ``backing_state.backing``
+    names the one ``backing_state``/``latency`` actually describe, and
+    ``latency_stale: true`` says they are not the configured one's, so the next
+    encode pays the switch (a boot, for ``worker``). Without that mark the
+    pre-switch distribution was published as fresh exactly when an operator was
+    reading it to verify a rollout.
 
     ⛔ ``backings`` lists ALL THREE whatever is selected. The issue's indicator
     is "p50/p95 exported **per backing**", and a table that only appears once you
@@ -1866,19 +2024,43 @@ def seam_status() -> dict:
     try:
         name = resolve_backing()
         backing = _backing
+        # ⛔ WHOSE OBSERVATIONS ARE ``latency`` AND ``backing_state``?
+        # (review F3 at ``76e58a21bb``.) The live collector encodes through the
+        # backing that was ACTIVE when it fired, and normally that is the
+        # configured one. Between a LEVER FLIP and the next encode — the
+        # documented rollout path, where ``docs/infra-runbook.md`` §4.1.1e tells
+        # the operator to verify with ``jq .embed_seam.backing`` — it is not: the
+        # configured name has already moved while ``_backing``/``_collector``
+        # still belong to the OLD backing, so its counters were published as the
+        # NEW backing's, with no ``latency_stale`` mark. An operator verifying a
+        # switch therefore read the pre-switch distribution as fresh, which is
+        # the one reading this block exists to make impossible.
+        #
+        # INJECTION IS EXEMPT: an injected backing IS what the collector encodes
+        # through, and its own ``describe()`` names it (``backing_state.backing``).
+        live_is_configured = (
+            _injected is not None or _backing_name is None
+            or _backing_name == name)
         per_backing: dict[str, dict] = {}
         for candidate in BACKINGS:
             entry: dict[str, Any] = {
                 "max_wait_ms": resolve_max_wait_ms(candidate),
                 "selected": candidate == name,
             }
-            if candidate == name and _collector is not None:
+            if candidate == name and _collector is not None \
+                    and live_is_configured:
                 entry["latency"] = _collector.snapshot()
             else:
                 # A backing that ran EARLIER in this process keeps its last
                 # distribution, marked stale; one that has never run is an
                 # honest "no observation", never a zero that reads as "instant".
                 prior = _backing_snapshots.get(candidate)
+                if candidate == _backing_name and _collector is not None:
+                    # The LIVE collector belongs to the backing the lever has
+                    # moved away from. Its numbers are real and current — but
+                    # they are THAT backing's, so they are filed under it and
+                    # marked stale, never presented as the configured one's.
+                    prior = _collector.snapshot()
                 entry["latency"] = prior
                 entry["latency_stale"] = prior is not None
             per_backing[candidate] = entry
@@ -1904,6 +2086,11 @@ def seam_status() -> dict:
                     "encode_ms": _Latency().snapshot(),
                     "batch_size": _Latency().snapshot(),
                 }),
+            #: Do ``latency`` (and the ``backing_state`` above) describe the
+            #: CONFIGURED backing? ``false`` ⇒ the lever has moved since the last
+            #: encode, ``backing_state.backing`` names the one they DO describe,
+            #: and the next encode pays the switch (a boot, for ``worker``).
+            "latency_stale": not live_is_configured,
             "backings": per_backing,
         }
         return view
@@ -1912,7 +2099,7 @@ def seam_status() -> dict:
             "backing": None, "max_wait_ms": None, "max_batch": None,
             "timeout_s": None, "last_decline": None, "last_decline_age_s": None,
             "injected": False, "backing_state": None, "latency": None,
-            "backings": None,
+            "latency_stale": None, "backings": None,
             "error": f"{type(exc).__name__}: {exc}"[:200],
         }
 

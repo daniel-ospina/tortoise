@@ -584,6 +584,14 @@ _PROJECTS_EVERYTHING = "*"
 _WALK_SLOT = re.compile(r"[-<]\s*\[([^\]]*)\]")
 #: The Cypher name a relationship pattern binds (`r` in `[r]`, `[r {c:$c}]`).
 _REL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: An f-string interpolation inside a source-spelled FACT. The census resolver renders an
+#: unresolvable leaf as `""`, so a query the code spells `(m:{label})` reaches the walk net
+#: as `(m:)`. A fact is located in that corpus after the SAME elision — see
+#: `_unbounded_walks` for why that is the only spelling that lets this shape be grounded.
+#: ⚠️ It must match a BARE (optionally dotted) NAME only: a Cypher property map also wears
+#: braces (`{url:$u}`, `{: k}` — a `$` parameter and a `:` key are what separate them), and
+#: eliding one of those would delete the ground from every entry that states it.
+_FACT_INTERPOLATION = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\}")
 
 #: A table row: `| 3 | `module.py::Symbol.attr` | reads for | **reach** |`.
 _ROW = re.compile(
@@ -1598,10 +1606,23 @@ def _unbounded_walks(query: str, facts: tuple[str, ...]) -> list[tuple[str, str]
         window = query[low:high]
         bounded = False
         for fact in facts:
-            fact_at = query.find(fact, low, high)
-            if fact_at == -1 or fact_at + len(fact) > high:
+            # ⚠️ The fact is elided of its OWN interpolations before it is located, and
+            # that mirrors what the resolver already did to the QUERY: an unresolvable
+            # leaf contributes `_UNKNOWN` (`""`, census), so a walk the code spells
+            # `(m:{label})` reaches this corpus as `(m:)` while the fact that grounds it
+            # must be spelled as the CODE spells it (`_site_fact_text` reads the source,
+            # and the source-currency arm requires the fact there). Without the elision
+            # a legitimate ground is UNWRITABLE for that shape — the two spellings can
+            # share no contiguous substring that also contains the rendered binding — and
+            # the only ways out would be a fabricated exemption or a §13 row asserting a
+            # read the walk cannot perform. It does not loosen the net: the fact must
+            # still sit inside the walk's own window and still name its own binding, so a
+            # second `UNION` arm or a chained hop reds exactly as before.
+            grounded = _FACT_INTERPOLATION.sub("", fact)
+            fact_at = query.find(grounded, low, high)
+            if fact_at == -1 or fact_at + len(grounded) > high:
                 continue
-            if _names_binding(fact, binding) and _scope_survives(
+            if _names_binding(grounded, binding) and _scope_survives(
                 query, fact_at, start, binding
             ):
                 bounded = True
@@ -2717,6 +2738,20 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
         "`fetch_entity_signals`. The extra hop is the shared home itself, not a "
         "weaker chain: the declaring symbol is one reference further than the "
         "method that used to spell the query inline",
+    ),
+    "mcp_server.py::_preview_delete_edges": (
+        4,
+        "#11609 lane P7 renamed the KEPT delete entry to `tortoise_delete_knowledge` "
+        "(`tool_registry.py`: 'the kept delete entry took the approved target's "
+        "spelling') and left `tortoise_delete` as a #3883 FORWARDING shim "
+        "(`mcp_server.py`: 'this name forwards to it so a caller of the old spelling "
+        "keeps the SAME preview-then-confirm protocol'). The row's cell names the "
+        "spelling callers use, so its chain is `tortoise_delete` -> "
+        "`tortoise_delete_knowledge` -> `_preview_delete` -> `_preview_delete_entity` "
+        "-> `_preview_delete_edges`: one reference longer than the live door's own "
+        "three. The extra hop IS the shim, not a weaker chain — and dropping the "
+        "retired spelling from the cell would drop the fact that it still serves "
+        "this read",
     ),
 }
 
@@ -5554,8 +5589,20 @@ def test_the_module_filter_admits_a_split_traversal():
     # untyped `MATCH ()-[r]->() RETURN count(r)`, so retiring the method (and the
     # §13 row that owned it) removes exactly one symbol key and one walk. The
     # move is re-derived from the tree, not retyped to match a hoped-for total.
-    assert (len(sites), sum(len(lines) for lines in sites.values())) == (27, 41), (
-        "the empty-pattern derivation moved off 27 symbol keys / 41 site rows "
+    # ⛔ 27/41 -> 29/43 with `#14161` (`e74cf1d13da7`, "keep this resident"):
+    # `tortoise/resident_pin.py` arrived carrying TWO untyped closure walks —
+    # `read` and `_closure_for`, one site each, both `OPTIONAL MATCH (n)--(m:{label})`
+    # — so the corpus gains exactly two keys and two rows. Each is registered
+    # (`EMPTY_PATTERN`) rather than given a §13 row, because neither can return an
+    # `aboutObject` edge: both endpoints are pinned to the SAME label while an
+    # `aboutObject` triple runs Point/Session/Event -> Object, and the pattern
+    # returns only neighbour identity, never `type(r)` or an edge property.
+    # ⚠️ NOT `#14169`'s P7 batch — this was attributed to it when the move was
+    # found, and the measurement refutes that: the pre-P7 tree `605d9ebffbe1`
+    # already derives 29/43, `e74cf1d13da7`'s parent `dea00903b50f` derives 27/41,
+    # and P7 touches no file in the derived set's closure.
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (29, 43), (
+        "the empty-pattern derivation moved off 29 symbol keys / 43 site rows "
         f"({len(sites)} keys, "
         f"{sum(len(lines) for lines in sites.values())} rows). The register's "
         "`sites` counts and BOTH completeness directions are stated against "

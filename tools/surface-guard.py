@@ -632,13 +632,43 @@ def main(argv: list[str]) -> int:
             module it imported would be PR-authored — see the `#4828` note above and
             `tests/test_surface_manifest.py::test_the_pinned_gate_imports_only_its_allow_
             listed_modules`. The net that keeps the two copies in step is behavioural:
-            `test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE` drives BOTH
-            drivers against the same duplicated artifact and requires BOTH to refuse.
+            `test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE` and
+            `test_the_duplicate_key_loader_DOES_still_accept_a_merge_key` drive BOTH
+            drivers against the same artifacts and require BOTH to agree — the first
+            version of this copy omitted the merge-tag skip the sibling already had, and
+            the two gates disagreed on a file with no duplicate at all.
             """
 
             def construct_mapping(self, node, deep=False):
+                # ⛔ SKIP THE MERGE TAG, DO NOT FLATTEN BEFORE THE SCAN — the same rule,
+                # and the same two measured reasons, as
+                # `tools/surface_manifest.py::_NoDuplicateKeyLoader`: handing this
+                # pre-scan the raw `<<:` tag makes `construct_object` die with "could not
+                # determine a constructor for the tag 'tag:yaml.org,2002:merge'" on a
+                # file that has no duplicate at all, and flattening FIRST would read the
+                # ordinary `<<: *base` plus an explicit override as a duplicate, which
+                # YAML says it is not. The parent constructor flattens for itself.
                 seen: set = set()
+                merge_seen = False
                 for key_node, _value_node in node.value:
+                    if key_node.tag == "tag:yaml.org,2002:merge":
+                        # ⛔ SKIPPED FROM THE SCAN, NOT FROM THE COUNT (round-28 review,
+                        # P2, measured) — the same rule as the sibling copy: a mapping may
+                        # carry at most ONE merge key, and a second `<<:` is silently
+                        # overwritten by whatever it merges, so skipping it entirely would
+                        # leave this gate grading a value the file contradicts (the very
+                        # false PASS the loader exists to refuse).
+                        if merge_seen:
+                            raise yaml.constructor.ConstructorError(
+                                None, None,
+                                f"duplicate merge key '<<' (line "
+                                f"{key_node.start_mark.line + 1}): a mapping may carry at "
+                                f"most ONE merge key, and a second one is silently "
+                                f"overwritten by whatever it merges — delete one of them",
+                                key_node.start_mark,
+                            )
+                        merge_seen = True
+                        continue
                     try:
                         key = self.construct_object(key_node, deep=deep)
                         hash(key)

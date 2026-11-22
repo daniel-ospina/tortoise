@@ -2757,10 +2757,42 @@ def _embedder_warmup_runbook_citations() -> list[tuple[str, int, int, str | None
     )
 
 
+def _span_calls_the_reader(body: list[str], lo: int, hi: int, needle: str) -> bool:
+    """Whether some line in `lo..hi` CALLS `needle` — not merely spells it.
+
+    ⛔ A MENTION IS NOT A READ (#14186 review F2). The identifier appears in three
+    shapes in this codebase and only the last one reads the flag at run time:
+
+    * an import — `from tortoise.embeddings import _embedder_warmup_enabled`;
+    * a comment discussing the gate (`` ``_embedder_warmup_enabled()`` alone ``);
+    * `elif _embedder_warmup_enabled():` — the reader.
+
+    The needle check accepted the first two, and it did so on the ONE cite the
+    runbook itself calls "the one an operator is most likely to miss": entry 4
+    cited `hosted_api.py:3272-3282`, which is the import plus the comment, while
+    the gate and the thread it starts sat at `:3302-3306`. Needle, NAME↔NUMBER and
+    every identity claim passed, so an operator following the cite mid-incident
+    landed on a comment. The span must therefore contain a CALL; the resolver's
+    own definition is the only exemption (its `def` line is the subject, not a read
+    of it), and the caller makes that exemption.
+    """
+    for raw in body[lo - 1:hi]:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if re.match(r"(?:async\s+)?def\s+", stripped):
+            continue
+        if stripped.startswith(("from ", "import ")):
+            continue
+        if re.search(rf"\b{re.escape(needle)}\s*\(", stripped):
+            return True
+    return False
+
+
 def _assert_every_citation_reads_the_flag(
     cites: list[tuple[str, int, int, str | None]], artifact: str,
 ) -> None:
-    """Every cite must land on code that reads the flag, in the function named.
+    """Every cite must land on code that CALLS the flag, in the function named.
 
     Kept as ONE checker for every artifact that carries these readers: they hold
     the SAME numbers, and a second, slightly different checker is how two copies
@@ -2769,24 +2801,43 @@ def _assert_every_citation_reads_the_flag(
     its `#13674` block (see SCOPE at the top of this section) — but the parameter
     stays, so re-pointing it at another artifact is a marker change rather than a
     second implementation.
+
+    ⛔ THREE PROPERTIES, not two: NAME↔NUMBER, the needle, and — since #14186 F2 —
+    a CALL on a line inside the span. The needle alone is satisfied by an import
+    or a comment, which is how entry 4 came to point at prose for two review
+    rounds while the reader was 30 lines further down.
     """
     # Non-vacuity: a parser that found nothing would clear every assertion below.
     assert len(cites) >= 8, f"{artifact}: the reader list's citations could not be read: {cites}"
+    # The one cite that may NOT carry a call: the flag resolver's own definition,
+    # whose subject is the `def` line itself. Derived from the source, never pinned.
+    resolver_lo, resolver_hi = _resolver_definition_span()
     for fname, lo, hi, symbol in cites:
         assert fname in _READER_NEEDLE, f"{artifact}: unattributed citation: {fname}:{lo}-{hi}"
+        needle = _READER_NEEDLE[fname]
         path = (REPO_ROOT / fname) if fname == "entrypoint.sh" else (REPO_ROOT / "tortoise" / fname)
         body = path.read_text().splitlines()
         assert 1 <= lo <= hi <= len(body), (
             f"{artifact}: {fname}:{lo}-{hi} is outside the file ({len(body)} lines)"
         )
         span = "\n".join(body[lo - 1:hi])
-        assert _READER_NEEDLE[fname] in span, (
+        assert needle in span, (
             f"{artifact}: {fname}:{lo}-{hi} is cited as a TORTOISE_EMBEDDER_WARMUP "
             f"reader, but the cited lines do not read it — a merge moved the code "
             f"and the cite went stale. Re-pin the numbers in {artifact} (the "
             f"function names are the invariant; the numbers are a convenience). "
             f"Cited lines: {span[:300]!r}"
         )
+        is_resolver_definition = (
+            fname == "embeddings.py" and resolver_lo <= lo and hi <= resolver_hi
+        )
+        if fname.endswith(".py") and not is_resolver_definition:
+            assert _span_calls_the_reader(body, lo, hi, needle), (
+                f"{artifact}: {fname}:{lo}-{hi} MENTIONS {needle} without CALLING it — "
+                f"the identifier is present in a comment or an import, which reads no "
+                f"flag (#14186 review F2). Re-pin the cite to the line that calls the "
+                f"reader. Cited lines: {span[:300]!r}"
+            )
         if symbol is None:
             # No function is named for this cite, so there is nothing to bind it
             # to (the resolver definition `:40-50`, and the range cites in prose).
@@ -2819,8 +2870,9 @@ def test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers():
     reads a line number out of it.
 
     The brief's own recorded defect class — "guards that cannot be reddened" —
-    is why this arm is written as the same three properties (the numbers, the
-    needle and the NAME↔NUMBER binding) on the ONE artifact left: #13926 took
+    is why this arm is written as the same four properties (the numbers, the
+    needle, a CALL in the span, and the NAME↔NUMBER binding) on the ONE artifact
+    left: #13926 took
     the name to route (b), this change's `fly-only:` block went with it, and the
     manifest's copy plus `test_the_embedder_warmup_citations_resolve_to_the_flag_readers`
     went with that block. The mutants that used to red that arm red this one.
@@ -2828,6 +2880,94 @@ def test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers():
     _assert_every_citation_reads_the_flag(
         _embedder_warmup_runbook_citations(), "docs/infra-runbook.md"
     )
+
+
+def test_the_citation_arm_refuses_a_cite_that_only_NAMES_the_reader(
+    monkeypatch, tmp_path,
+):
+    """A span that merely SPELLS the flag is not a reader — the #14186 F2 defect.
+
+    Pre-fix, entry 4 of the runbook's operator section cited
+    `hosted_api.py:3272-3282`: the `from tortoise.embeddings import
+    _embedder_warmup_enabled` line plus the comment above it, with the `elif` that
+    actually calls the flag and the thread it starts at `:3302-3306`. The needle
+    check passed (the identifier is in the span), NAME↔NUMBER passed (the import
+    sits inside `_lifespan`) and every identity claim passed — so the operator the
+    paragraph calls "most likely to miss" the reader was sent to a comment.
+
+    The mutant is BUILT FROM THE SOURCE, not pinned: the import line and the
+    comment line are located by their own shape, so this row survives a merge that
+    moves `hosted_api.py`. Two properties make it non-vacuous: the mutant span does
+    contain the needle (the OLD rule clears it — that is the defect) and does not
+    call the reader (the NEW rule must red it).
+    """
+    hosted = (REPO_ROOT / "tortoise" / "hosted_api.py").read_text().splitlines()
+    needle = _READER_NEEDLE["hosted_api.py"]
+    import_line = next(
+        (
+            i
+            for i, ln in enumerate(hosted, 1)
+            if ln.lstrip().startswith("from ") and needle in ln
+        ),
+        None,
+    )
+    comment_line = next(
+        (
+            i
+            for i, ln in enumerate(hosted, 1)
+            if ln.lstrip().startswith("#") and needle in ln
+        ),
+        None,
+    )
+    assert import_line and comment_line, (
+        "hosted_api.py no longer carries BOTH an import and a comment that name "
+        f"{needle} — the mention-only shape this row reproduces is gone, so re-derive "
+        "the mutant instead of deleting the row"
+    )
+    lo, hi = min(import_line, comment_line), max(import_line, comment_line)
+    mutant_span = "\n".join(hosted[lo - 1:hi])
+    assert needle in mutant_span, (
+        f"hosted_api.py:{lo}-{hi} does not even contain {needle} — the mutant no longer "
+        "stands for the cite that PASSED the needle check while reading nothing"
+    )
+    assert not _span_calls_the_reader(hosted, lo, hi, needle), (
+        f"hosted_api.py:{lo}-{hi} calls {needle} — it can no longer stand in for a "
+        "mention-only cite; re-derive the mutant from the import/comment lines"
+    )
+    text = REAL_RUNBOOK.read_text().splitlines()
+    entry = next(
+        (i for i, ln in enumerate(text) if re.match(r">\s*4\.\s", ln)),
+        None,
+    )
+    assert entry is not None, (
+        "docs/infra-runbook.md has no numbered entry 4 in the operator section — "
+        "the cite this row mutates was deleted or renumbered"
+    )
+    cite_idx = next(
+        (i for i in (entry, entry + 1) if _READER_CITE_RE.search(text[i])), None
+    )
+    assert cite_idx is not None, (
+        "entry 4 carries no cite on its own line or the next one — this row mutates "
+        "a RANGE cite, so re-derive it against the entry's new shape"
+    )
+    cite = _READER_CITE_RE.search(text[cite_idx])
+    assert cite is not None and cite.group(2) is not None, (
+        "entry 4's cite is no longer a RANGE — the mention-only mutant is a range, so "
+        "this row needs re-deriving if the cite became a single line"
+    )
+    text[cite_idx] = (
+        text[cite_idx][: cite.start()] + f"`:{lo}-{hi}`" + text[cite_idx][cite.end():]
+    )
+    mutated = tmp_path / "infra-runbook.md"
+    mutated.write_text("\n".join(text) + "\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REAL_RUNBOOK", mutated)
+    cites = _embedder_warmup_runbook_citations()
+    assert any(
+        (fname, c_lo, c_hi) == ("hosted_api.py", lo, hi)
+        for fname, c_lo, c_hi, _sym in cites
+    ), f"the mutated cite never reached the checker: {cites}"
+    with pytest.raises(AssertionError, match="MENTIONS"):
+        _assert_every_citation_reads_the_flag(cites, "docs/infra-runbook.md")
 
 
 def _enclosing_definition(body: list[str], line_no: int, symbol: str) -> str | None:

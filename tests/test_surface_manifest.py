@@ -1425,6 +1425,87 @@ def test_the_duplicate_key_loader_DOES_still_accept_a_merge_key(tmp_path):
     with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'a'"):
         yaml.load("a: 1\na: 2\n", Loader=loader)
 
+    # ⛔ AND THE PINNED GUARD'S OWN COPY MUST AGREE (#14033 review P2, measured). The
+    # guard is base-ref pinned, so it carries a SECOND copy of this loader rather than
+    # importing `tools/surface_manifest.py`; the first cut of that copy omitted the
+    # merge-tag skip added here, and the two gates then DISAGREED on a file with no
+    # duplicate at all — measured on a manifest carrying `<<: *base` plus an explicit
+    # override: the derivation read it, the guard exited 1 with
+    # "could not determine a constructor for the tag 'tag:yaml.org,2002:merge'". A unit
+    # arm over `sm._NoDuplicateKeyLoader` cannot catch that, so drive the REAL guard on
+    # the REAL artifact: a merge-keyed baseline must pass exactly like the plain one.
+    probe = MANIFEST.read_text(encoding="utf-8") + _MERGE_PROBE_BLOCK
+    merge_path = tmp_path / "merge-key.yml"
+    merge_path.write_text(probe, encoding="utf-8")
+    guard = _run("tools/surface-guard.py", "--manifest", str(merge_path))
+    assert guard.returncode == 0, (
+        "the pinned guard refused a manifest that uses a merge key, which the derivation "
+        f"reads — the two copies of the duplicate-check have diverged: {guard.stdout!r} "
+        f"{guard.stderr!r}")
+    assert "tag:yaml.org,2002:merge" not in (guard.stdout + guard.stderr), (
+        "the guard died on the merge tag instead of reading it: "
+        f"{guard.stdout!r} {guard.stderr!r}")
+
+
+#: A merge key plus an explicit override of one merged key (YAML: the explicit key
+#: wins). Appended to the committed baseline so the artifact stays a real manifest —
+#: the guard's own reader must get past the `<<:` tag to grade anything at all.
+_MERGE_PROBE_BLOCK = """
+_parity_probe: &parity_probe
+  probe_key: 1
+  other_key: 2
+_parity_probe_merged:
+  <<: *parity_probe
+  probe_key: 9
+"""
+
+#: A mapping with `<<:` TWICE — the shape the merge-tag skip used to wave through. PyYAML
+#: applies the second merge over the first, so the file says two things and the loader reads
+#: one: the same false PASS the duplicate-key refusal exists to refuse, one tag over.
+_DUPLICATE_MERGE_KEY_BLOCK = """
+_dup_merge_a: &dup_merge_a
+  probe_key: 1
+_dup_merge_b: &dup_merge_b
+  other_key: 2
+_dup_merge_resolved:
+  <<: *dup_merge_a
+  <<: *dup_merge_b
+"""
+
+
+def test_a_SECOND_merge_key_in_one_mapping_is_a_duplicate_and_BOTH_drivers_refuse_it(tmp_path):
+    """Round-28 review, P2 — measured: the merge-tag skip excluded `<<:` from the COUNT.
+
+    Skipping the merge tag from the duplicate SCAN is right (constructing it dies, and
+    flattening first turns a legal override into a false duplicate). Skipping it from the
+    COUNT is a false PASS: `yaml` loads `{<<: *a, <<: *b}` as `*b`'s keys, so a manifest
+    whose text carries two merges is graded as though it carried one — measured on the
+    committed baseline with one extra merge, `surface-guard.py --manifest` exited 0 and
+    printed an OK line while the file contradicted itself. YAML's merge rule allows at
+    most ONE merge key per mapping, so a second one is a duplicate.
+
+    ⛔ ASSERTED ON BOTH DRIVERS: the guard is base-ref pinned and keeps its OWN copy, and
+    that duplication is exactly what let the previous round's fix land on one copy only.
+    """
+    sm = _load_manifest_tool()
+
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate merge key"):
+        yaml.load(
+            "a: &a {x: 1}\nb: &b {y: 2}\ntop:\n  <<: *a\n  <<: *b\n",
+            Loader=sm._NoDuplicateKeyLoader,
+        )
+
+    probe = MANIFEST.read_text(encoding="utf-8") + _DUPLICATE_MERGE_KEY_BLOCK
+    path = tmp_path / "dup-merge.yml"
+    path.write_text(probe, encoding="utf-8")
+    guard = _run("tools/surface-guard.py", "--manifest", str(path))
+    assert guard.returncode == 1, (
+        "the pinned guard graded a manifest that carries `<<:` TWICE — YAML applies the "
+        f"second merge over the first, so the gate reports on a value the file contradicts: "
+        f"{guard.stdout!r}")
+    assert "duplicate merge key" in guard.stdout, (
+        f"the guard refused for the wrong reason: {guard.stdout!r}")
+
 
 def test_the_check_refuses_when_the_ordering_table_is_missing(tmp_path, monkeypatch, capsys):
     sm = _load_manifest_tool()

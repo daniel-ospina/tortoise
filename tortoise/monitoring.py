@@ -25,7 +25,7 @@ from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
-from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram, generate_latest
 
 # #9494: the loaded-module snapshot. Imported HERE (not lazily) because the
 # observation must be taken when the process is still young — this module is
@@ -875,10 +875,12 @@ CACHE_LEG_FAILURE_COUNT = Counter(
 #:   over this population).
 #:
 #: ``decline`` vocabulary — ``"<leg>:<cause>"``, where ``cause`` is the value
-#: ``EmbeddingModel.await_write_ready_reason`` returned. The four causes need
+#: ``EmbeddingModel.await_write_ready_reason`` returned. The FIVE causes need
 #: OPPOSITE operator responses (install the extra / repair a broken load / retry
-#: later / wait longer), and ``budget_expired`` is the only one where a wait
-#: actually happened — the genuine #13229 cost. Eight values, bounded, because
+#: later / wait longer / re-encode once the remote backing answers), and
+#: ``budget_expired`` is the only one where a LOCAL wait actually happened — the
+#: genuine #13229 cost (``backing_cold`` waits for nothing on purpose: a create
+#: must not pay the backing's boot). Ten values, bounded, because
 #: `_collect_by_label` assumes ONE sample per label value.
 #:
 #: ⛔ **Two same-class causes are deliberately NOT counted here**, and the
@@ -940,9 +942,11 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   an event-published one: it is recomputed on collect, because the value drifts
 #:   with the clock and the loop that would push it is the thread a wedge blocks
 #:   (#14222 review cycle 5, ISSUE 1).
-#: * ``PROJECTION_INLINE_FALLBACK_COUNT`` — writes that fell back to folding on
-#:   their own thread because the queue was FULL (or the worker was stopping).
-#:   ⛔ NOTHING IS DROPPED when the bound is reached — a dropped item would be a
+#: * ``PROJECTION_INLINE_FALLBACK_COUNT`` — writes that folded the record on
+#:   their OWN thread: the queue was FULL, the worker was STOPPING, the record
+#:   could not be COPIED for the queue, or ``submit`` FAULTED before it could
+#:   queue (see the reason vocabulary below).
+#:   ⛔ NOTHING IS DROPPED on any of the four — a dropped item would be a
 #:   silently short record — so the visible cost is a slower ACK, and this counter
 #:   is what makes it attributable rather than an unexplained latency.
 #:   ``reason`` is a closed vocabulary of FOUR, one per way an ACK can end up
@@ -976,6 +980,11 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:                             ``None`` when unarmed, but a door's own `project`
 #:                             callable can answer ``None`` for its own reasons
 #:                             (the SDK's unimportable-record-half arm, #10000).
+#:                             ⛔ The SAME fact — nothing was observed — is what
+#:                             an outcome that cannot be READ produces (a raising
+#:                             property on the returned object), which is counted
+#:                             here rather than under a fourth name, so this
+#:                             vocabulary stays CLOSED at three answers.
 #:   ``projection_refused``    an ARMED refusal (`applied=False` with a
 #:                             ``refusal`` token that is not the seam's healthy
 #:                             ``no_durable_journal`` decline, #9231). Counted
@@ -1019,8 +1028,9 @@ PROJECTION_WORKER_FAILURE_COUNT = Counter(
 )
 PROJECTION_INLINE_FALLBACK_COUNT = Counter(
     "tortoise_record_projection_inline_fallbacks_total",
-    "Writes that folded the record on their OWN thread because the projection "
-    "queue was FULL or the worker was STOPPING (#14185) — a slower ack, never a "
+    "Writes that folded the record on their OWN thread — the queue was full, the "
+    "worker was stopping, the record could not be copied for the queue, or the "
+    "submit faulted before it could queue (#14185) — a slower ack, never a "
     "dropped record",
     ["reason"],
 )
@@ -1083,7 +1093,17 @@ def ensure_projection_metrics_fork_safe() -> bool:
     """Replace prometheus_client's inherited locks after a ``fork()`` (#14222).
 
     ⛔ ``prometheus_client`` IS NOT FORK-SAFE, and this is the whole finding: every
-    ``MutexValue`` and every metric family owns a plain ``threading.Lock``. A child
+    ``MutexValue`` and every LABELLED metric family owns a plain ``threading.Lock``.
+    ⛔ THE DISCRIMINATOR IS ``labelnames``, NOT THE METRIC TYPE (measured on
+    ``prometheus-client`` 0.26.0): ``MetricWrapperBase.__init__`` takes
+    ``self._lock`` only under ``if self._is_parent():``, and ``_is_parent()`` is
+    ``self._labelnames and not self._labelvalues``. So a LABELLED family of ANY
+    type carries one (``Gauge(…, ['l'])``, ``Counter(…, ['l'])``,
+    ``Histogram(…, ['l'])`` all measured PRESENT) and an UNLABELLED family of any
+    type carries NONE (measured ABSENT for all three) — and the three unlabelled
+    ``Gauge``s this module repairs, ``PROJECTION_QUEUE_DEPTH`` /
+    ``PROJECTION_PENDING_POSITIONS`` /
+    ``PROJECTION_OLDEST_PENDING_SECONDS``, do not own one at all. A child
     that forked while a PEER THREAD held one inherits a lock with no owner, so the
     child's next ``set``/``inc``/``get``/``labels``/``collect`` blocks FOREVER — and
     ``contextlib.suppress`` cannot help, because a blocked lock is not an exception.
@@ -1109,6 +1129,16 @@ def ensure_projection_metrics_fork_safe() -> bool:
     fork reset republishes them from the child's own state (and a read-only child's
     stale values are a declared residual of the worker's, not this function's).
 
+    ⛔ THE DEFAULT REGISTRY'S OWN LOCK IS REPLACED TOO (round-12 review, P3), and it
+    is in this list rather than the call sites' for a structural reason:
+    ``registry.collect()`` opens with ``with self._lock:`` **before** it iterates a
+    single collector, so a child that forked while a peer held the REGISTRY lock
+    blocked on the scrape's FIRST statement — before any family's lock was touched,
+    which makes the family repair irrelevant to that wedge. ``collect()`` holds it
+    only to copy a dict (``register``/``unregister`` hold it to mutate), so
+    replacing it loses nothing, and the replacement is the same defensive shape as
+    the families above.
+
     RETURNS whether this call replaced anything (``False`` = already valid here).
     """
     global _PROJECTION_METRICS_PID
@@ -1131,8 +1161,73 @@ def ensure_projection_metrics_fork_safe() -> bool:
                 fresh = threading.Lock()
             holder._lock = fresh
             replaced += 1
+    registry_lock = getattr(REGISTRY, "_lock", None)
+    if registry_lock is not None:
+        # ⛔ THE FALLBACK IS NOT DECORATION (round-12 review, and this lane's own
+        # leg caught it): `type(lock)()` raises `TypeError: cannot create
+        # '_thread.lock' instances` for the raw lock `threading.Lock()` returns, so
+        # the families loop's `threading.Lock()` fallback is what actually builds
+        # every fresh lock. A registry block WITHOUT that fallback replaces the
+        # lock on NO fork at all — the TypeError either escapes the hook (CPython
+        # prints it as `Exception ignored in: ...` on stderr and SKIPS the rest of
+        # this function, `_PROJECTION_METRICS_PID` assignment included, rather than
+        # raising to the caller) or is caught by a bare `except: pass` and silently
+        # drops the replacement. A leg red-lined that second shape before this
+        # fallback existed; both outcomes are the same defect.
+        try:
+            fresh_registry_lock = type(registry_lock)()
+        except Exception:      # noqa: BLE001, RUF100
+            fresh_registry_lock = threading.Lock()
+        REGISTRY._lock = fresh_registry_lock
+        replaced += 1
     _PROJECTION_METRICS_PID = pid
     return replaced > 0
+
+
+if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
+    # ⛔ THE HOOK, NOT A CALL SITE, and the difference is a live wedge (#14222
+    # review round 11, P2-1). The repair above is reached from every
+    # projection-metric helper that publishes or reads these families — which
+    # covers the publish arm, the health read
+    # (`metrics()` -> `projection_worker_gauges`) and that function's own
+    # `collect()`. It does NOT cover the TEXT exposition: `/metrics` calls
+    # `generate_latest(REGISTRY)`, whose walk takes the same inherited locks
+    # (`_child_samples` -> `MutexValue.get` -> `with self._lock`, and
+    # `_multi_samples`' own `with self._lock`) but never passes through a helper
+    # here — so the first scrape from a child forked while a peer held one of
+    # these locks blocked FOREVER, on the one surface Prometheus actually reads.
+    #
+    # Registering the repair at `fork()` replaces the locks BEFORE any of our code
+    # runs in the child, so NO path can reach an inherited one — the scrape
+    # included — and a future collect entry point cannot rediscover the hole. It is
+    # the shape the field converges on (client_python#431's own first fix, and
+    # Gunicorn's `post_fork` re-init of process-sensitive telemetry), and the same
+    # one `projection_worker` already uses for its module lock.
+    #
+    # ⛔ The call sites stay: they are the belt to this suspender, and the function
+    # is idempotent by pid (it returns `False` once the process is valid), so a
+    # second call costs one `getpid()`. Removing them is a valid future cleanup
+    # ONLY together with a leg that proves the hook fires on every fork path —
+    # today `test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang`
+    # simulates the fork by moving the pid, which the hook cannot see.
+    #
+    # ⛔ Residual, stated rather than hidden — and stated at its TRUE width, because
+    # an earlier revision of this paragraph narrowed it into a falsehood (round-13
+    # review, P2): what is repaired is the REGISTRY lock and the five projection
+    # families. That is NOT "every lock this module's exposure path takes":
+    # `_Handler._handle_endpoint` touches `REQUEST_COUNT.labels(...).inc()` and
+    # `REQUEST_LATENCY.time()` BEFORE it calls `generate_latest`, and neither family
+    # is in `_PROJECTION_METRIC_FAMILIES` — so a child forked while a peer held one
+    # of THOSE blocks at the handler's first statement, before the scrape body runs.
+    # Nor is any other family's `MutexValue` safe: a child forked while a peer
+    # mutated some unrelated metric can still block when `generate_latest` walks to
+    # that family (the registry walk itself no longer blocks, because its lock IS
+    # replaced). Rebuilding every metric in the registry, or repairing every family
+    # the handler touches, would fork-bomb the values an operator is watching, so
+    # the scope stays the families this module documents plus the registry they are
+    # read through — and this paragraph names what that leaves open instead of
+    # claiming coverage it does not have.
+    os.register_at_fork(after_in_child=ensure_projection_metrics_fork_safe)
 
 
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
@@ -3231,9 +3326,16 @@ def projection_worker_gauges() -> dict[str, float]:
 
     They are unlabelled families, so ``_collect_by_label`` (which assumes one
     sample per label value) cannot read them; this is the unlabelled analogue and
-    it filters on the exported sample suffix the same way, for the same reason
-    ``_collect_by_label`` does: a ``Gauge`` exports ``…_created`` beside its
-    value, and reading the wrong sample would report a timestamp as a depth.
+    it filters on the exported sample suffix the same way ``_collect_by_label``
+    does. ⛔ **The filter is INERT today, and that is stated rather than implied**
+    (review round 11, P3): all three families are ``Gauge``s and
+    ``Gauge._child_samples`` yields exactly ONE sample — the ``…_created`` /
+    ``…_total`` suffixes come from ``Counter._child_samples``, so the promoted
+    exposition carries three lines and no ``_created``. An earlier revision said a
+    ``Gauge`` *does* export ``…_created``, which is false, so the guard read as
+    load-bearing work. It stays because the alternative is a reader that silently
+    reports a timestamp as a depth the day one of these families becomes a
+    ``Counter``.
     """
     ensure_projection_metrics_fork_safe()
     out: dict[str, float] = {}

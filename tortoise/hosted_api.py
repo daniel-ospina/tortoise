@@ -3598,7 +3598,35 @@ async def _lifespan(app):
             # one. Fail-safe: an unset env keeps the pre-warm ON.
             from tortoise.embeddings import _embedder_warmup_enabled
 
-            if _embedder_warmup_enabled():
+            # ⛔ IN-PROCESS ONLY (review F5 at ``76e58a21bb``). With a ``worker``
+            # or ``external`` backing this process never runs a forward pass, so
+            # loading the encoder here buys nothing and costs exactly what the
+            # migration exists to remove: 432 MB resident in the serving process
+            # (3.66 GB with two overlapping loads, #13674) — the WORKER's own
+            # copy is the one the process tree needs. Pre-fix the gate was
+            # ``_embedder_warmup_enabled()`` alone, so the documented migration in
+            # ``docs/infra-runbook.md`` §4.1.1e left two copies resident.
+            #
+            # The boot PAGE-CACHE warm (``entrypoint.sh``, a throwaway process
+            # before ``exec``) is deliberately NOT gated here: it is not resident,
+            # and under ``worker`` it is still useful — the worker loads the same
+            # model from the same interpreter and reads those pages warm.
+            try:
+                from tortoise.embed_seam import encodes_in_process
+
+                seam_encodes_here = encodes_in_process()
+            except Exception as exc:  # never let a lever read block boot
+                _logger.warning(
+                    "embeddings: could not read the embed seam's backing (%s) — "
+                    "keeping the in-process pre-warm", exc)
+                seam_encodes_here = True
+            if not seam_encodes_here:
+                _logger.info(
+                    "embeddings: background pre-warm skipped — the embed seam's "
+                    "encoder does not run in this process (backing=%r), so a "
+                    "local load would only add a second resident copy (#14186)",
+                    os.environ.get("TORTOISE_EMBED_BACKING") or "inprocess")
+            elif _embedder_warmup_enabled():
                 threading.Thread(
                     target=_prewarm_embeddings, name="embedding-prewarm",
                     daemon=True,
@@ -8950,7 +8978,8 @@ def _embedder_health() -> dict:
 #: missing one can).
 _EMBED_SEAM_HEALTH_KEYS = (
     "backing", "max_wait_ms", "max_batch", "timeout_s", "last_decline",
-    "last_decline_age_s", "injected", "backing_state", "latency", "backings",
+    "last_decline_age_s", "injected", "backing_state", "latency",
+    "latency_stale", "backings",
 )
 
 
@@ -8998,7 +9027,16 @@ def _embed_seam_health() -> dict:
         status = seam_status()
     except Exception as exc:  # a health path must always answer
         return {**dict.fromkeys(_EMBED_SEAM_HEALTH_KEYS), "error": str(exc)[:200]}
-    return {key: status.get(key) for key in _EMBED_SEAM_HEALTH_KEYS}
+    block = {key: status.get(key) for key in _EMBED_SEAM_HEALTH_KEYS}
+    # ⛔ ``seam_status()`` NEVER RAISES — it has its OWN degraded arm, returning
+    # every declared key as ``None`` PLUS ``error``. The ``except`` above only
+    # catches a RAISE, so the reason that arm carries was silently dropped: the
+    # block arrived as ``backing: null`` with nothing saying why, contradicting
+    # both this file's own comment and the runbook ("every value null, plus
+    # ``error``"). Carry it through — an extra key cannot ``KeyError`` a consumer.
+    if status.get("error") is not None:
+        block["error"] = status["error"]
+    return block
 
 
 @app.get("/health")
@@ -52388,7 +52426,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (754 distinct
+# ABSOLUTE line number from 206 tracked files (755 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

@@ -46,8 +46,20 @@ a synthetic corpus would test a shape no user produces. When the directory is
 absent (the normal case off the deployment box) the run SYNTHESISES captures of
 the same shape and says so; it never silently substitutes one for the other.
 
-Exit codes: 0 all four criteria met · 1 a criterion failed (the report names
-which) · 2 usage/precondition (no app, no auth, bad corpus).
+Exit codes — THREE-WAY, and the middle one is not a pass:
+
+* `0` — every GRADED criterion met, and the verdict line says `PASS`;
+* `0` — `INCONCLUSIVE`: every host-independent criterion met, but the absolute
+  ack-p95 target was NOT graded because the box is oversubscribed
+  (`load_1m > cpu_count`). The change is not what failed, and the printed banner
+  and the JSON `verdict` both say INCONCLUSIVE — never PASS;
+* `1` — a host-independent criterion failed (refusals, terminal state, extraction
+  evidence, or a graded p95 over the target); the report names which;
+* `2` — usage/precondition (no app, no auth, bad corpus).
+
+The deferral share (`deferred_at_ack`) is REPORTED and never graded: a fast host
+completes extraction inside the window on every session, which is the split
+working, not the split failing.
 """
 from __future__ import annotations
 
@@ -227,7 +239,9 @@ class _InProcessTransport:
         """
         from tortoise.billing import apply_limits
         from tortoise.hosted_api import (
-            _get_onboarding_state, _make_sdk, _update_onboarding_state,
+            _get_onboarding_state,
+            _make_sdk,
+            _update_onboarding_state,
         )
 
         registry = _make_sdk(namespace="registry")._get_registry()
@@ -302,7 +316,9 @@ def _percentile(values: list[float], pct: float) -> float:
     ordered = sorted(values)
     # Nearest-rank: with n=50 a p95 must be an OBSERVED value, never a spline
     # through two of them — the claim "p95 ack" has to be a request the run made.
-    idx = min(len(ordered) - 1, max(0, int(round(pct / 100.0 * len(ordered))) - 1))
+    # `round()` already returns an int in Python 3, so no `int()` wrapper
+    # (ruff RUF046): the cast was redundant and read as if a float could arrive.
+    idx = min(len(ordered) - 1, max(0, round(pct / 100.0 * len(ordered)) - 1))
     return ordered[idx]
 
 
@@ -357,13 +373,20 @@ def run(args) -> int:
     if isinstance(transport, _InProcessTransport):
         transport.authenticate(args.org)
 
-    print(f"#14232 acceptance drain — {transport.label}")
-    print(f"  corpus: {corpus_label}, n={len(corpus)}")
+    # ⛔ `--json` MUST BE PARSEABLE JSON. The preamble is human output, so under
+    # `--json` it goes to stderr; every line below keeps its single destination.
+    _out = sys.stderr if args.json else sys.stdout
+
+    def _say(*a, **kw):
+        print(*a, file=_out, **kw)
+
+    _say(f"#14232 acceptance drain — {transport.label}")
+    _say(f"  corpus: {corpus_label}, n={len(corpus)}")
     if not args.base_url:
         load = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
-        print("  ⚠ rehearsal: latency and extractor are THIS box's, not "
-              "production's" + (f" (load {load:.1f} on {os.cpu_count()} cpus)"
-                                if load is not None else ""))
+        _say("  ⚠ rehearsal: latency and extractor are THIS box's, not "
+             "production's" + (f" (load {load:.1f} on {os.cpu_count()} cpus)"
+                               if load is not None else ""))
 
     acks: list[float] = []
     refusals: list[dict] = []
@@ -454,12 +477,12 @@ def run(args) -> int:
     deferred = sum(1 for o in outcomes
                    if o["status_code"] == 200 and o["deferred_at_ack"])
     ok_terminal = (not stuck) and accepted > 0 and len(terminals) == accepted
-    # The HOST-INDEPENDENT half of the change, and the reason a run can say
-    # something even on a loaded box: on at least one session the ack came back
-    # while the record still carried an in-flight phase, and that capture then
-    # reached a terminal state on its own. If the drain cannot show that, the
-    # split did not happen here — regardless of how fast the box was.
-    ok_deferral = deferred > 0
+    # ⛔ DEFERRAL IS A MEASUREMENT, NOT A CRITERION (review round 5). An earlier
+    # cut made `deferred > 0` a hard failure and called it "host-independent",
+    # which is exactly backwards: a FAST host completes the extraction inside the
+    # window on every session, so `deferred == 0` there is evidence the split
+    # works — measured with the deadline forced to 30 s: 0/3 deferred, all four
+    # criteria PASS, and the tool said FAIL. It is reported, and never graded.
     # Points are the non-negotiable half: without an extracted point the capture
     # stored turns and never extracted, which is the defect. Entities and edges
     # are asserted only where the extractor emits them — the offline `MockModel`
@@ -493,7 +516,9 @@ def run(args) -> int:
         "extraction_evidence": evidence,
         "outcomes": outcomes,
         "criteria": {
-            "ack_p95_within_budget": ok_ack,
+            # `None` = the run declined to grade it (host oversubscribed); the
+            # `verdict` is then INCONCLUSIVE, never PASS.
+            "ack_p95_within_budget": ok_ack if ack_graded else None,
             "zero_refusals": ok_refusal,
             "all_terminal": ok_terminal,
             "extraction_demonstrably_ran": ok_extract,
@@ -504,9 +529,16 @@ def run(args) -> int:
                  "why_not_graded": (None if ack_graded else
                                     "host oversubscribed (load > cpu_count): the "
                                     "absolute p95 would grade the scheduler")},
+        # ⛔ A PASS REQUIRES A GRADED p95: `ok_ack` is still *computed* when the
+        # host is oversubscribed (so the number is printed either way), but it
+        # must not be able to produce PASS on a criterion this run declined to
+        # grade — measured on the first cut of this change, which printed
+        # "NOT GRADED" beside a `VERDICT: PASS` at load 21.29 on 16 cpus.
+        # The deferral share is deliberately ABSENT from both lists: it is the
+        # measurement, not a criterion (see the note above).
         "verdict": (
-            "FAIL" if not all((ok_refusal, ok_terminal, ok_extract, ok_deferral))
-            else "PASS" if ok_ack
+            "FAIL" if not all((ok_refusal, ok_terminal, ok_extract))
+            else "PASS" if (ack_graded and ok_ack)
             else "INCONCLUSIVE"),
     }
 
@@ -530,8 +562,7 @@ def run(args) -> int:
         print(_p(ok_terminal, "terminal on its own",
                  f"{len(terminals)}/{accepted} accepted"
                  + ("" if ok_terminal else f" — stuck: {stuck[:3]}")))
-        print(_p(ok_deferral, "the ack deferred at least once (host-independent)",
-                 f"{deferred}/{accepted} acks came back with extraction in flight"))
+
         print(_p(ok_extract, "extraction demonstrably ran",
                  json.dumps(evidence, default=str)))
         # A MEASUREMENT, not a criterion — printed with `·` so it can never be

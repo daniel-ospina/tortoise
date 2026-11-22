@@ -1155,18 +1155,30 @@ class TestDocsPageAndSkillConfig:
         # connector holding a read-only grant is exactly the user this step
         # exists for (#9660's plan-dependent write-tool finding), so naming a
         # write/admin tool would prescribe a call that cannot be made.
+        #
+        # ⛔ #14254: the discovery call the row teaches is now the CONSOLIDATED
+        # `tortoise_graph_overview(section="graphs")` — #10914 absorbed the
+        # standalone `tortoise_list_graphs` into that container ("surface 76 →
+        # 72"), so this block requiring the pre-#10914 NAME asserted a tool the
+        # owner-approved surface retires, and it was red on `main` for every PR
+        # whose shard reached it. The PROPERTY it guards is unchanged and is
+        # still asserted here: the row must name the current graph-discovery
+        # affordance, that call must be REAL, ACTIVE and read-risk (a plan can
+        # withhold a write tool), and the row must name NO retired tool (#3883
+        # class — a tool-grant client cannot call one).
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert "tortoise_list_graphs" in row, (
-            "the row must name the graph-discovery tool — a connector carries no "
-            "graph of its own, so the user has to see what exists before writing")
+        assert 'section="graphs"' in row, (
+            "the row must name the graph-discovery affordance — a connector "
+            "carries no graph of its own, so the user has to see what exists "
+            "before writing")
         active = {t.name: t for t in TOOL_REGISTRY}
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert "tortoise_list_graphs" in active, (
-            "the row names tortoise_list_graphs, so it must stay in tools/list")
-        assert "tortoise_list_graphs" not in retired, (
+        named_tools = set(re.findall(r"tortoise_[a-z_]+", row))
+        assert not (named_tools & retired), (
             "the row must not name a RETIRED tool (#3883 class) — a tool-grant "
-            "client cannot call one")
-        assert active["tortoise_list_graphs"].risk == "read", (
+            f"client cannot call one; retired names in the row: "
+            f"{sorted(named_tools & retired)}")
+        assert active["tortoise_graph_overview"].risk == "read", (
             "graph discovery must be a read-risk tool — write tools are the ones "
             "a plan can withhold")
         # The advertised (consolidated) form is named too, and the section it
@@ -1186,7 +1198,7 @@ class TestDocsPageAndSkillConfig:
         # agent call these, so an http-exposure flip (the #3883 class this suite
         # already guards for other tools) must fail here rather than silently
         # hiding the tool from a tool-grant client.
-        for name in ("tortoise_list_graphs", "tortoise_graph_overview"):
+        for name in ("tortoise_graph_overview",):
             assert active[name].http_policy is True, (
                 f"step 8 asks the agent to call {name}; it must stay "
                 "http-exposed or a ChatGPT connector cannot make the call "

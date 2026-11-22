@@ -986,8 +986,30 @@ class _NoDuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]
         # actually WROTE (merge tags excluded) and the parent constructor then flattens
         # for itself, which is what supplies the merged values.
         seen: set = set()
+        merge_seen = False
         for key_node, _value_node in node.value:
             if key_node.tag == "tag:yaml.org,2002:merge":
+                # ⛔ SKIPPED FROM THE SCAN, NOT FROM THE COUNT (round-28 review, P2,
+                # measured). Excluding the merge KEY from the duplicate scan entirely made
+                # a map with `<<:` TWICE load as one merge — PyYAML applies them
+                # sequentially and the later one overwrites the earlier, so
+                # `top: {<<: *a, <<: *b}` read as `*b`'s keys while the file said two
+                # things. That is the SAME false PASS this loader exists to refuse, one tag
+                # over, and a forward merge produces it as readily as a duplicated
+                # `cut_at_commit:`. YAML's merge rule allows at most ONE merge key per
+                # mapping, so a second one is a duplicate and is REFUSED; the merge
+                # VALUE is still never constructed here (that is what avoids the
+                # `tag:yaml.org,2002:merge` constructor death and the false block on an
+                # explicit override).
+                if merge_seen:
+                    raise yaml.constructor.ConstructorError(
+                        None, None,
+                        f"duplicate merge key '<<' (line {key_node.start_mark.line + 1}): "
+                        f"a mapping may carry at most ONE merge key, and a second one is "
+                        f"silently overwritten by whatever it merges — delete one of them",
+                        key_node.start_mark,
+                    )
+                merge_seen = True
                 continue
             try:
                 key = self.construct_object(key_node, deep=deep)

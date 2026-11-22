@@ -10654,6 +10654,19 @@ ROWED_BY_THIS_FOLD = (
     # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
     # cannot have a junit figure yet (#3400/#4348).
     "test_14185_projection_worker.py",
+    # #14232 — the ingest ACK split's module, registered on `api` + `core` by this
+    # fold with its `durations:` row in the same commit. Listed here for the reason
+    # every entry above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
+    # file nobody listed has no `durations:` row and nothing reds.
+    "test_14232_ingest_ack_split.py",
+    # #13998 (PR #14038) — the capacity-notice lane's suite, registered on `api` + `core`
+    # by the merge that brought it in. Its `durations:` row did NOT arrive with it, and
+    # `--integrity` stayed green over the absence (it is a 0.90 RATIO check), so only
+    # this tuple can make the ENTRY-RULE pin see the file at all — #14296's review
+    # finding 2, the #13854 / #14086-F1 / #14222-P3 shape. Listed here for the reason
+    # every entry above states: a file nobody lists has no `durations:` row and nothing
+    # reds.
+    "test_13998_capacity_notice.py",
 )
 
 
