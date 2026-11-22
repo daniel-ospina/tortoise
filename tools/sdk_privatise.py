@@ -1100,15 +1100,18 @@ SWEEP_NAMES = 66
 #: `main`'s own pin (`e74cf1d13d`), inherited here at the merge and left in place while this branch
 #: kept adding rows under it, so `--check` reds on this tree by exactly ONE. `git log` proves the
 #: inheritance rather than asserting it: the ONLY commit ON `main` that ever set the constant to
-#: that pair is `e74cf1d13d` itself (⛔ scoped to `main`, NOT "the only commit" — TWO commits SET
-#: it, and the other is the side branch `3f289474f9` (`feat/14012-pin-and-outside-view`), so the
-#: unscoped sentence fails the very `git log` it cites. ⛔ THE COUNT IS THE COMMAND'S, NOT THE
-#: PAIR'S — reproduce it exactly: `git log --all -S'SWEEP_RESIDUE = (11857,
-#: "ed40203dbbf32b87")' -- tools/sdk_privatise.py` returns FIVE, of which those two SET it and the
-#: other three (`a611e89be1`, `917ae19efd`, `10e51693f1`) REPLACE it with 11858/11860. Search the
-#: BARE pair instead of the assignment line and you get NINE — a different set that does not even
-#: contain `917ae19efd` or `10e51693f1` — so the number belongs to the command, and a reader who
-#: runs a shorter one will not find the commits this sentence names), and
+#: that pair is `e74cf1d13d` itself (⛔ scoped to `main`, NOT "the only commit" — the pair is set
+#: by AT LEAST ONE OTHER commit, the side branch's `3f289474f9` (`feat/14012-pin-and-outside-view`,
+#: parent 11856) as well as by `e74cf1d13d` (parent 11843), so the unscoped sentence fails the very
+#: `git log` it cites. ⛔ AND `-S` IS NOT A SETTER COUNT: it also matches a commit whose own pin
+#: REPLACED the pair, so `917ae19efd` and `10e51693f1` (both own 11858, both parent 11857) appear in
+#: a `-S` list without ever setting it. ⛔ AND NO TOTAL FROM `--all` BELONGS IN THIS BLOCK, on two
+#: measured grounds: the search STRING changes the population (`-S` on the bare pair is a different
+#: set from `-S` on the assignment line), and `--all` walks `refs/wip/*` lane snapshots, which are
+#: created and pruned continuously, so a total over them is a fact about the instrument at one
+#: instant — reproduce it per commit
+#: (`git show <sha>:tools/sdk_privatise.py | grep -m1 '^SWEEP_RESIDUE'`, and the same for `<sha>^`),
+#: never restate it), and
 #: that tree carries no `out.update` (measured: 0 occurrences in
 #: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
 #: THE ONE ROW: `out.update` 1 — `_global_declarations` in `tests/test_14125_retired_name_calls.py`,
