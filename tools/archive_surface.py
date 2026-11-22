@@ -2789,17 +2789,17 @@ def anchor_sha(root: Path, paths: list[str], holds=None) -> tuple[str, str]:
     code, out = _git(root, "rev-list", ref, "--", *paths)
     candidates = [c for c in (out.split() if code == 0 else []) if _SHA_RE.match(c)]
     held_a_path = False
-    unreadable_here = False
-    # ⛔ A DEFINITE `False` OUTRANKS AN UNREADABLE CANDIDATE (round-25 review, P2 — measured).
-    # `_UNREADABLE` used to mean exactly "hop bound exhausted", so the refusal below asserted that
-    # cause. Widening it (absolute/escaping target, unreadable mode) made the message state a fact
-    # the code no longer implies — measured: a ONE-hop absolute link was refused with "exceeds
-    # `_LINK_HOPS` (8) hops" — and worse, `unreadable_here` then MASKED the genuine working-tree
-    # refusal: with a readable `False` candidate present the message claimed "This is NOT a
-    # working-tree difference, and committing the source will not change it", both halves false,
-    # while the real remedy (commit the source) was suppressed. A candidate that was READ and did
-    # not hold the code is hard evidence; it decides.
-    false_here = False
+    evaluated = False
+    first_unreadable = False
+    # ⛔ ORDER DECIDES, NOT A COUNT (round-25 review, P2 — measured; this replaces an earlier
+    # aggregate `false_here` that was order-BLIND). `candidates` is NEWEST-FIRST, and only the
+    # newest one's blob is `HEAD`'s — an older commit that disagrees is ordinary HISTORY, not
+    # evidence about the working tree. Gating on "any candidate returned `False`" therefore chose
+    # the wrong message for a CLEAN tree whose newest carrier is an unreadable link while an older
+    # commit held a regular file: it printed "the working tree differs from every commit … commit
+    # the source", both halves false, with a remedy that cannot clear it (committing the identical
+    # absolute link keeps it unreadable). The newest EVALUATED candidate is the one that speaks for
+    # `HEAD`, so it alone decides which refusal is honest.
     for candidate in candidates:
         if not all(_git_blob(root, candidate, path) is not None for path in paths):
             continue
@@ -2807,20 +2807,19 @@ def anchor_sha(root: Path, paths: list[str], holds=None) -> tuple[str, str]:
         verdict = True if holds is None else holds(candidate)
         if verdict:
             return candidate, ref
-        if verdict is None:
-            unreadable_here = True
-        else:
-            false_here = True
-    if held_a_path and unreadable_here and not false_here:
+        if not evaluated:
+            first_unreadable = verdict is None
+        evaluated = True
+    if held_a_path and first_unreadable:
         raise ArchiveRefused(
-            f"the carrier at {', '.join(paths)} cannot be READ at any commit on {ref}: the link "
-            "read returned UNKNOWN for it, which happens when a chain exceeds "
+            f"the carrier at {', '.join(paths)} cannot be READ at the nearest commit on {ref} "
+            "that holds it: the link read returned UNKNOWN, which happens when a chain exceeds "
             f"`_LINK_HOPS` ({_LINK_HOPS}) hops, when the link target is ABSOLUTE or leaves the "
             "repo, or when the blob mode cannot be read. Point the carrier at the file by a "
             "repo-relative path of at most "
-            f"{_LINK_HOPS} hops and archive again. ⛔ This is NOT a working-tree difference (no "
-            "candidate was readable and disagreeing), and committing the source will not "
-            "change it."
+            f"{_LINK_HOPS} hops and archive again. ⛔ This is NOT a working-tree difference — a "
+            "newer commit's disagreement is history, and committing the source will not change "
+            "it."
         )
     if held_a_path:
         # The paths exist on the default branch but no commit holds THIS code: the working tree

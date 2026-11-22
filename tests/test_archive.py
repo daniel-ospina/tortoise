@@ -4729,7 +4729,14 @@ def test_an_UNREADABLE_candidate_does_not_MASK_the_working_tree_refusal(tree: Pa
     it", both halves false, while the real remedy (commit the source) was never shown. A definite
     `False` is hard evidence and decides.
 
-    Mutation: raise on `unreadable_here` without the `not false_here` guard -> RED here.
+    ⛔ `holds` IS INJECTED HERE, SO THIS ROW PINS THE BRANCH SELECTION, NOT THE TREE (round-25
+    review, P3 — the fixture's own tree is clean; only the stub makes the newest candidate
+    disagree). The mirrored direction — a CLEAN tree whose NEWEST carrier is genuinely unreadable
+    while an older commit disagrees — is the shape an order-blind gate got wrong, and it has its
+    own row below (`test_a_CLEAN_tree_whose_newest_carrier_is_unreadable_names_the_READ`).
+
+    Mutation: key the arm on "any candidate returned False" instead of the NEWEST evaluated one
+    -> the mirrored row below REDs (this one stays green, which is exactly why it needed a peer).
     """
     for body in ("def real(x):\n    return x * 2\n", "def real(x):\n    return x + 1\n"):
         (tree / "tortoise" / "real.py").write_text(body, encoding="utf-8")
@@ -4786,3 +4793,49 @@ def test_the_unREADABLE_refusal_names_its_CAUSES_not_only_the_hop_bound(tree: Pa
     assert "cannot be READ" in message, f"the refusal must say the read failed: {message}"
     assert "ABSOLUTE" in message, f"the refusal must name the target shape it can hit: {message}"
     assert "mode cannot be read" in message, f"the refusal must name the unreadable-mode cause: {message}"
+
+
+def test_a_CLEAN_tree_whose_newest_carrier_is_unreadable_names_the_READ(tree: Path) -> None:
+    """P2 (round-25): an order-BLIND gate blamed the working tree on a CLEAN tree.
+
+    Measured pre-fix, `git status --short` and `git diff HEAD` both empty: the newest carrier is a
+    one-hop ABSOLUTE link (unreadable) and an OLDER commit holds a regular file with a different
+    body. Keying the arm on "any candidate returned False" made the older commit's ordinary
+    HISTORY decide, and the caller was told "the working tree differs from every commit there …
+    Commit the source" — both halves false, and the printed remedy cannot clear it, because
+    committing the identical absolute link keeps it unreadable. This is a REAL fixture, not a
+    stubbed predicate: the newest commit's carrier IS the working tree's.
+
+    Mutation: gate on `false_here` (any readable disagreement) instead of the newest evaluated
+    candidate -> RED here.
+    """
+    (tree / "tortoise" / "real.py").write_text("def real(x):\n    return x * 2\n", encoding="utf-8")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").write_text(
+        "def real(x):\n    return x + 1\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/real.py", "tortoise/x/__init__.py")
+
+    # the NEWEST carrier: ABSOLUTE, so `git show` cannot address it at all
+    (tree / "tortoise" / "x" / "__init__.py").unlink()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to(str(tree / "tortoise" / "real.py"))
+    _commit(tree, "tortoise/x/__init__.py")
+
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=tree, capture_output=True, text=True, check=True
+    ).stdout
+    assert dirty == "", f"the fixture must be CLEAN, or it measures the other arm: {dirty!r}"
+
+    body = "def real(x):\n    return x * 2\n"
+    holds = arch.block_holds(
+        tree, arch.MODULE, "tortoise.x", [("tortoise/x/__init__.py", body, None)]
+    )
+    with pytest.raises(arch.ArchiveRefused) as refused:
+        arch.anchor_sha(tree, ["tortoise/x/__init__.py"], holds=holds)
+    message = str(refused.value)
+    assert "cannot be READ" in message, (
+        f"the newest carrier is unreadable, so the READ is what failed: {message}"
+    )
+    assert "the working tree differs from every commit" not in message, (
+        f"a clean tree must not be told it differs from every commit: {message}"
+    )
