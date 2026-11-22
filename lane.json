@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14277-measure-1795308926-p248412-a40a6641",
+  "_sha": "815e35d211768908552abdf21ab37b99e82ee4a1",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14277-measure.log"
+    },
+    {
+      "kind": "branch",
+      "value": "chore/14277-extractor-token-measure"
+    },
+    {
+      "kind": "sha",
+      "value": "6716cd4c5b33576f5a0da5e2fb0bbbbe8fb3dcb2"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14277-measure"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 10806,
+  "ended_at": 1795319732,
+  "exit_code": 0,
+  "heartbeat_at": 1795319732,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14277-measure-1795308926-p248412-a40a6641",
+  "lease_until": 1795356332,
+  "pid": 248412,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795308926,
+  "state": "DONE",
+  "tag": "14277-measure",
+  "worktree": "/home/cmux/tortoise/.worktrees/14277-measure"
+}
