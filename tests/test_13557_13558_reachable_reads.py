@@ -1832,11 +1832,15 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
     # way (measured: `1 failed, 410 passed`), but a message that misdirects costs the next lane
     # the diagnosis, so it now says what it can actually see — ANY wide window in this row.
     assert "[^?]{0,300}" not in _refusal.pattern and "[^?]{0,300}" not in _si._EXISTENCE_WINDOW, (
-        "a wide window is in `existence_unguarded` (or in `_EXISTENCE_WINDOW`) — this row carries "
-        "more windows than the refusal arm and ARM C (the copula arms have their own), and ANY of "
-        "them widened to `{0,300}` lets an over-long run route or report at n>=11, which is exactly "
-        "the trade this contract forbids. Identify which one from the pattern diff, not from this "
-        "message")
+        "a wide window is in `existence_unguarded` (or in `_EXISTENCE_WINDOW`) — this row carries FOUR "
+        "`[^?]` windows: the refusal arm, ARM C's `already|ever` arm, the contracted-aux clitic arm, "
+        "and the copula arm. Widening ANY of them lets a longer span reach through, and the observable "
+        "change is a different answer FOR THAT SPAN: a silent refusal starts reporting, a notice "
+        "changes name, or — for `_EXISTENCE_WINDOW` — a silence becomes a ROUTE, which is the #14033 "
+        "hijack. ⛔ THERE IS NO QUANTIFIED CONSEQUENCE TO ASSERT HERE (turn-5 review, P3, measured): "
+        "a widened window does NOT necessarily move the n>=11 adverb run — the copula and clitic arms "
+        "leave it at `(None, None)`, and an earlier version of this message said they would. Identify "
+        "which arm moved from the pattern diff, not from this message")
     for query in (
         "have any it has been just only already no longer in fact very recently deprecated and "
         "been withdrawn",
