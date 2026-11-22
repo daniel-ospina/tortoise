@@ -1389,11 +1389,12 @@ local fast paths — a process that happens to hold a loaded local model (entity
 even under `worker`) must not answer for an encoder it does not serve with.
 
 ⚠️ **THE BUDGET COVERS `bounded=True` ONLY — the RECORD-TRUTH writes still pay the boot.**
-`compute_embeddings` (`bounded` default `false`) has no such bound, and it must not: a Point's vector
-is stamped into the journal with PRESENCE IS OWNERSHIP, so declining it would record an explicit
-CLEAR that a rebuild reproduces. On `worker`/`external` those calls block on the seam, which waits
-out the boot under `TORTOISE_EMBED_WORKER_STARTUP_S` (600 s) — so the first create/update/capture
-after a deploy can be slow rather than wrong. That is the deliberate trade, not an oversight.
+`compute_embeddings` (no `bounded` opt-in at all — that lever is `encode_for_row`'s, default `false`)
+has no such bound, and it must not: a Point's vector is stamped into the journal with PRESENCE IS
+OWNERSHIP, so declining it would record an explicit CLEAR that a rebuild reproduces. On
+`worker`/`external` those calls block on the seam, which waits out the boot under
+`TORTOISE_EMBED_WORKER_STARTUP_S` (600 s) — so the first create/update/capture after a deploy can be
+slow rather than wrong. That is the deliberate trade, not an oversight.
 
 ⚠️ **NOTHING WARMS THE WORKER AT BOOT TODAY.** The lifespan pre-warm is skipped on `worker` /
 `external` (it would load a local copy), and no equivalent kick boots the *worker* — so the first
