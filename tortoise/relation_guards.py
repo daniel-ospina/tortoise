@@ -30,14 +30,24 @@ outcome          when                                             reported?
 ``reversed``     the predicate is declared for the reverse pair   always —
                  and not for the pair as asked                    a DIFFERENT
                                                                   state (§2)
-``abstained``    the declarations cannot answer, in ANY of four       never
-                 ways: the predicate is not declared at all (the
-                 #1934/#7551 predicate leg owns it); it is a declared
-                 word that declares no kind pair; neither endpoint
-                 kind occurs anywhere in the declared vocabulary
-                 (the pair is outside the packs' domain); or the
-                 kinds/registry could not be read
+``abstained``    the declarations cannot answer — see the five    never
+                 reasons below
 ===============  ===============================================  ============
+
+The five abstention reasons, each with its own stable id so a test (and a
+future counter) can tell which premise was missing rather than reading one
+label for five facts (§2's no-flattening rule applies to abstentions too):
+
+``predicate-not-declared``        the `#1934`/`#7551` predicate leg already owns
+                                  this write; a pair check has no premise
+``predicate-declares-no-pair``    a declared WORD with no kind pair — a
+                                  ``declarationOnly: true`` row, which binds no
+                                  write path
+``outside-declared-scope``        neither endpoint kind occurs anywhere in the
+                                  declared vocabulary, so the pairs are not
+                                  talking about the packs' domain at all
+``endpoint-kind-unresolved``      an endpoint's kind could not be read
+``declarations-unreadable``       the registry could not be read
 
 ⛔ **NO REFUSAL IS PRODUCIBLE HERE.** ``#1934`` (owner decision, governance
 D1/D2) is warn-not-block on the write doors, and ``docs/ax/ax-principles.md``

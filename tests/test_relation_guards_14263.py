@@ -436,6 +436,33 @@ class TestDoors:
         assert out["created"] is True, "the edge must LAND"
         assert out["relation_declaration"]["outcome"] == UNDECLARED_PAIR
 
+    def test_the_structural_doors_refusal_names_its_correction(self, sdk):
+        """AX Rule 2 on the door `link_entities` dispatches a domain verb to.
+
+        Measured before this change: `link_entities("blocks", product, feature)`
+        raised the bare sentence ``Unknown predicate: blocks`` — the caller
+        learned the word was refused and got neither the vocabulary that IS
+        accepted nor the door that would record its verb. The third part is
+        writable here, so the refusal stays and says both.
+
+        ⛔ It must NOT route the caller back to `link_entities`: that is the
+        circular advice, because this method is the arm `link_entities`
+        dispatches to.
+        """
+        product = _obj(sdk, "P", "product-strategy:product")
+        feature = _obj(sdk, "F", "product-strategy:feature")
+        with pytest.raises(ValueError) as exc:
+            sdk.link_entities("blocks", product, feature)
+        message = str(exc.value)
+        # (2) exactly what failed
+        assert "Unknown predicate: blocks" in message
+        # (3) exactly what to do — the accepted vocabulary …
+        assert "hasPart" in message and "dependsOn" in message
+        # … and the doors that record a DOMAIN verb
+        assert "create_operator" in message
+        assert "create_direct_edge" in message
+        assert "label=" in message
+
     def test_the_direct_edge_door_reads_the_LABEL_not_the_mechanism(self, sdk):
         """`op_type` is Layer 1 (a mechanism), never a declared relation."""
         api = _obj(sdk, "API", "dev:api")
