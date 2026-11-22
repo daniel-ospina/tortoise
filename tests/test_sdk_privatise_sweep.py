@@ -348,6 +348,15 @@ _ARM_REFSPECS: dict[str, str] = {
     RESIDUE_INTERVAL_END: _PR_HEAD_REFSPEC,
     RESIDUE_PR_HEAD: _PR_HEAD_REFSPEC,
     "origin/main": "+main:refs/remotes/origin/main",
+    # ⛔ THE RECUT BLOCK'S OWN ADDRESSES (#14282 review, P3). Three revs the block publishes an
+    # OWN PIN for, so `_requires(...)` can name them — and an unmapped rev RAISES instead of
+    # printing an inert command, which is the round-12/13 defect this map exists to prevent.
+    # GitHub serves an ancestor commit by FULL SHA and a DESTINATION is required (round 13), so
+    # each maps to `+<sha>:refs/remotes/origin/<abbrev>`. Measured on this repo: the fetch created
+    # the destination ref at the named sha.
+    "5e83c2a2f6": "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/remotes/origin/5e83c2a2f6",
+    "10e51693f1": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/remotes/origin/10e51693f1",
+    "efe5605e976a": "+efe5605e976af24ea45cc66d2015861d30d3a39c:refs/remotes/origin/efe5605e976a",
 }
 
 
@@ -1640,6 +1649,16 @@ _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 #: re-derives every entry from the repository wherever the objects exist.
 OWN_PINS: dict[str, tuple[int, str]] = {
     "d523c9be8c": (11838, "de5664dc98549d56"),
+    # ⛔ THE RECUT PARAGRAPH'S MEASUREMENT ADDRESSES (#14282 review, P3). It publishes each rev's
+    # own COMMITTED pair — deliberately NOT the pair that rev's `--repin` prints, which is the
+    # re-derivation and would claim another tree's figures. Recording them here is what makes the
+    # addresses REACHABLE: the object-free arm above reds on a rev this map lacks, and the premise
+    # arm below re-derives every entry from the repository. The mutant the review named — naming
+    # `94d75667dc`, whose tree derives the re-cut pair but which COMMITS
+    # (11857, "ed40203dbbf32b87") — therefore reds instead of passing as prose.
+    "5e83c2a2f6": (11858, "a1552662bf07a10b"),
+    "10e51693f1": (11858, "a1552662bf07a10b"),
+    "efe5605e976a": (11858, "a1552662bf07a10b"),
 }
 
 

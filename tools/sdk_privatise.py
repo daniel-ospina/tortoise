@@ -1128,19 +1128,36 @@ SWEEP_NAMES = 66
 #: THE THREE ROWS, named: `proj.g.query` 3643 → 3646, all three in `tools/read_wave_latency.py` —
 #: a file ADDED by `94d75667dc` (`#14224`), which merged ONE MINUTE BEFORE `10e51693f1` (`#14160`)
 #: committed the pair this one replaces. So the pair it replaced was false of the tree it landed on
-#: from the moment it landed, and this is the recurrence the block above records, not a new class:
-#: the pin is graded on PULL REQUESTS only, so `main` drifts off it with nothing measuring it, and
-#: every open PR then grades `main`'s rows as its own (`#14062`). ⛔ THE INHERITANCE IS MEASURED,
+#: from the moment it landed, and this is the recurrence the block above records, not a new class.
+#: ⛔ WHAT MEASURES `main` — MEASURED, NOT ASSUMED (#14282 review, P3). The pin IS graded on `main`:
+#: `python-ci.yml` runs on `push: branches: [main]` and the `surface-guard` job carries no `if:` and
+#: no `paths:` filter, so a main push's own run executes this step — run `44967485260`
+#: (`event=push`, `sha=70fbd1a27dd5`, i.e. `main`) REDS it, and `44952266542` (`b4da1f5c01`) passed
+#: it, so the step demonstrably RUNS on `main` rather than being skipped there. The real mechanism
+#: is DROPPED RUNS, not a missing gate: a superseded main push is routinely discarded before it
+#: starts a job (this workflow's own concurrency block measures 17 of the 20 push-to-main runs
+#: created 2026-10-26T22:40Z..10-27T04:50Z never starting one; re-measured on `main` at this PR's
+#: base, 18 of the last 20 are `cancelled`), so the red arrives after merge or not at all — and
+#: every open PR then grades `main`'s rows as its own (`#14062`). ⛔ CORRECTED: this sentence read
+#: "the pin is graded on PULL REQUESTS only, so `main` drifts off it with nothing measuring it",
+#: which is false of the tree it lands on and sends the next lane looking for a gate to BUILD
+#: instead of at the drop that already happens. What IS true, and different: `surface-guard` is not
+#: a REQUIRED context, so a merge does not wait for it. ⛔ THE INHERITANCE IS MEASURED,
 #: NOT ASSUMED: a `--repin` on `10e51693f1`'s OWN tree prints (11861, "f0647020531c078c") too, so
 #: that delta is the base's and never this lane's, and no arithmetic on the last figure was used.
 #: `typed references still pointing at a public name: 0` on both trees, so no typed call site is
 #: legitimised by re-cutting: the three rows are `proj.g.query` on a FalkorDB project handle, the
 #: ordinary-word receiver shape this pin exists to DECLARE and deliberately leaves alone.
-#: Measured with `--repin`, never by arithmetic on the last pin, on the revs named above
-#: (`5e83c2a2f6`, `10e51693f1`) and on `efe5605e976a` — this branch's PRE-REBASE head, which still
-#: COMMITS the superseded (11858, "a1552662bf07a10b") pair. It is named as what it is, and NOT as a
-#: relative "THIS tree" (#14282 review, P3): its own `--repin` prints the re-cut pair, so the
-#: MEASUREMENT was true and only its ADDRESS was stale.
+#: Measured with `--repin`, never by arithmetic on the last pin, and EACH ADDRESS BELOW IS GRADED
+#: RATHER THAN DEAD WEIGHT (#14282 review, P3): all three revs COMMIT the superseded pair, so a
+#: mutant that swaps one for a rev committing a different pair reds in `OWN_PINS` instead of
+#: passing as prose. `5e83c2a2f6` — `main`'s own tree at this branch's base point, whose `--repin`
+#: prints the re-cut figure. Its own pin is `(11858, "a1552662bf07a10b")`. `10e51693f1` — the
+#: squash that committed that stale pair. Its own pin is `(11858, "a1552662bf07a10b")` too, so the
+#: row set moved under a pin nobody re-measured. `efe5605e976a` — this branch's PRE-REBASE head,
+#: named as what it is and NOT as a relative "THIS tree": its own `--repin` prints the re-cut
+#: pair, so the MEASUREMENT was true and only its ADDRESS was stale. Its own pin is
+#: `(11858, "a1552662bf07a10b")`, the pair it COMMITS.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
