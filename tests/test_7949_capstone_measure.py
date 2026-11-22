@@ -6813,23 +6813,6 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("probes/capstone_measure.py", "with the flag ON", (
             ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
-        # ⛔ THE GATES `_IDLE_CITES["vet"]` NAMES, in the rule's own docstring — the
-        # second surface of one claim (#14269 review). `_IDLE_CITES["vet"]` 40 lines
-        # above was re-pointed `:17967` → `:17970`; this docstring, whose whole
-        # subject is "the FLAG is not the GATE", kept `:17967`, which reads
-        # `vet_s2_pool: dict = {}` — so a reader following the sentence landed on an
-        # assignment. No leg could see it: `_BUNDLE_CITE` needs a cite to NAME its
-        # file (this is a bare continuation), and the only row reaching this
-        # docstring above scopes on "with the flag ON", whose number sits one
-        # markdown line ABOVE the gate sentence. Measured pre-fix, `git grep -n -F
-        # '17967'` here also hits 2 JSON substrings — no other CITE carried it.
-        # Non-vacuity: on the pre-fix line `:17970` is ABSENT (it carried `:17967`),
-        # so this row reds on exactly the number it was added for, and the `_locate_hint`
-        # leg names the live line (`if vet_enabled and embed_list:` at `:17970`).
-        ("probes/capstone_measure.py", "and ``if vet_enabled and complete_list:``", (
-            ("17970", "if vet_enabled and embed_list:"),
-            ("15372", "if vet_enabled and complete_list:"),
-        )),
         ("probes/capstone_measure.py", "follows at", (
             ("14791", "edus = _edus_from_conversation(conversation)"),
         )),
@@ -7341,7 +7324,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to one
         # FILE and the consume pair was re-pointed in one document while the definition
-        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`), and a later `origin/main` merge a further `+32` (`12136`/`12189` -> `12168`/`12221`, which is what the rows below carry) — each re-read by content at the head that moved it.
+        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`), and a later `origin/main` merge a further `+32` (`12136`/`12189` -> `12168`/`12221`) and a further `+59` (`12168`/`12221` -> `12227`/`12280`, which is what the rows below carry) — each re-read by content at the head that moved it.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
             ("7582", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
@@ -7354,7 +7337,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
-        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12111`/`12164` -> `12116`/`12169` pair (`#13556` then added a further `+20` to `12136`/`12189`, and a later `origin/main` merge a further `+32` to the `12168`/`12221` the rows below carry).
+        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12111`/`12164` -> `12116`/`12169` pair (`#13556` then added a further `+20` to `12136`/`12189`, and a later `origin/main` merge a further `+32` to `12168`/`12221` and a further `+59` to the `12227`/`12280` the rows below carry).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("12206", "subject_binding_available,"),
             ("12259", "and not subject_binding_available(graph):"),
@@ -7607,7 +7590,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("12179", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
-            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, onto `12116`/`12169` — the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` (`sdk.py:45`), NOT `#12745`, which is an ancestor of `#13486` — and `#13556`'s own `+20` then took it to `12136`/`12189`, and a later `origin/main` merge a further `+32` took the live values to `12168`/`12221`.
+            # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, onto `12116`/`12169` — the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` (`sdk.py:45`), NOT `#12745`, which is an ancestor of `#13486` — and `#13556`'s own `+20` then took it to `12136`/`12189`, and a later `origin/main` merge a further `+32` took it to `12168`/`12221`, and a further `+59` to the live `12227`/`12280`.
             ("12206", "subject_binding_available,"),
             ("12259", "and not subject_binding_available(graph):"),
         ), "sdk"),
@@ -7989,7 +7972,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 281 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 288 cite-shaped `:N` tokens (the `~50` these
     # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -8060,8 +8043,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "satisfies a row scoped to the line, so this sentence is asserted whole.")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cited
-    # `hosted_api.py:15328-15405` at `09f5c99afd` and cites `hosted_api.py:15449-15526` at this
-    # head (#13844; unmasked by the `#14260` repair). The END of that range is a BLANK line — so the row
+    # `hosted_api.py:15328-15405` at `09f5c99afd`, `hosted_api.py:15346-15423` at #13844, and
+    # `hosted_api.py:15449-15526` at this head (re-derived by CONTENT: `main` moved the
+    # `org_info` block +103 between them). The END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
@@ -17709,10 +17693,10 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 281 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 288 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `281` reds instead of leaving four comments behind (a
+    any commit moving the line off `288` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
@@ -17923,7 +17907,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 281 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 288 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -17954,9 +17938,43 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "sdk",
         "n.dedup_reviewed IS NULL",
     ),
+    # ⛔ THE `+21` CUT'S OWN RE-POINTED PAIR, BOUND TO THE SENTENCES THAT CARRY IT (#14183
+    # review, cycle 5, P3 — MEASURED). That cut re-pointed the paragraph's address and inserted
+    # the `f"session entity-linking failed: …"` address, and NO entry named either: reverting
+    # them to the pre-delta addresses left this file's whole D5 selection GREEN. That is the
+    # class #13879 / #13956 named one layer up — a row whose own thesis is that a typed line
+    # number rots cannot ship its newest corrections unread. Each regex binds the number to the
+    # sentence that gives it its meaning, and the needle is that line's own text, so the number
+    # and the content it describes are graded by the same arm.
+    (
+        'the `f"session entity-linking failed: …"` line',
+        r'`f"session entity-linking failed[^`]*` line sits at `:(?P<n>\d+)`',
+        "sdk",
+        'f"session entity-linking failed:',
+    ),
+    (
+        "the paragraph the cut quoted (`whose payload points ALL fold as PARAPHRASE noops`)",
+        r"`whose payload points ALL fold as PARAPHRASE noops`\) is at `:(?P<n>\d+)`",
+        "sdk",
+        "# whose payload points ALL fold as PARAPHRASE noops",
+    ),
+    # ⛔ THE GATE'S ADDRESS, BOUND THROUGH THE ARITHMETIC THAT PRODUCES IT (#14183 review, cycle 6,
+    # P2 — MEASURED). The row states that address twice and BOTH times as the result of an
+    # expression, and no entry named it: `grep -c 20412 <this file>` was `0`, so restoring the
+    # pre-`+21` value kept every arm green — the two anchors above had readers and the gate they
+    # are compared against did not. Each sibling row binds a `sits at \`:N\`` address; this one
+    # binds through the phrase that carries the number, which is why the pattern is arithmetic
+    # rather than a colon-token. The needle is still the line's own text, so the number and the
+    # statement it describes are graded by the same arm.
+    (
+        'the `if meta.get("route"):` gate (via `20236 + 155`)',
+        r'`20236 \+ 155 = (?P<n>\d+)` for the `if meta\.get\("route"\):` gate',
+        "sdk",
+        'if meta.get("route"):',
+    ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 281 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 288 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
@@ -17978,14 +17996,36 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # import list — ⛔ **not a call site** — and that second address was graded by NOTHING:
     # reverting it to a pre-fix value reddened no arm at all, which is the class this tuple
     # exists to close. The needle is that line's own text, so the number and the content it
-    # describes are read by the same regex. Re-derived at the re-cut's merged head: the
-    # grep `-n 'subject_binding_available,'` prints `12175` and `46094` on `tortoise/sdk.py`
-    # (measured 2026-11-20; `main` named the second at `:45867`, which is 227 lines off).
+    # describes are read by the same regex. ⛔ The pair is HEAD-RELATIVE, so the head it was READ
+    # at travels with it: the grep `-n 'subject_binding_available,'` prints `12175` and `46094` on
+    # `tortoise/sdk.py` at `ae26adf963c` (2026-11-20), and `main` named the second at `:45867` at
+    # that same commit, 227 lines off its then-value. ⛔ THIS HEAD'S pair is deliberately NOT typed
+    # here: the document sentence states both addresses and TWO rows grade them from THERE — this
+    # one for the `also hits` half, the import-address row below for the other — so the figure needs
+    # one home, not two; a copy in a comment is a figure nothing reads, which is the class this file
+    # exists to close.
     (
         "the `sdk.py` import's OTHER hit",
         r"the same grep also hits `:(?P<n>\d+)`",
         "sdk",
         "subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,",
+    ),
+    # ⛔ THE *OTHER* HALF OF THAT SAME PAIR, graded as its own claim (#14183 review, cycle 13 —
+    # MEASURED). The row above reads only the `also hits` address; the document sentence also
+    # states the IMPORT'S address in the same breath, and nothing read it — pointing it at a
+    # NEIGHBOURING import in the same file left the whole covering set GREEN. One row per spelling,
+    # never a second ungraded number: that is the rule this tuple exists to enforce, applied to the
+    # sentence that already broke it once.
+    # ⛔ RESIDUAL, NAMED RATHER THAN IMPLIED: the needle is a SUBSTRING, and the sibling address's
+    # line carries this same token as its PREFIX (it is the dual import), so an edit that pointed
+    # this claim at THAT line instead would satisfy the needle. Accepted, because the alternative —
+    # an exact-whole-line needle — reds on any reformat of a line this PR does not own, and the
+    # direction left open needs the address to become a DIFFERENT import LIST, not merely stale.
+    (
+        "the `subject_binding_available,` import address",
+        r"\(the import at `:(?P<n>\d+)`",
+        "sdk",
+        "subject_binding_available,",
     ),
     # ⛔ THE TWO `sed -n '<n>p'` QUOTES F1 CORRECTED, AND THE REASON THEY ARE HERE
     # (#13956 review, F1 — MEASURED). F1 re-pointed them from `'19560p'`/`'25346p'` to
@@ -18024,6 +18064,10 @@ _D5_CURRENT_CLAIM_LABELS = frozenset({
     "the file's ONLY `dedup_reviewed IS NULL`",
     "the quota guard `if count + est > max_points:`",
     "the `sdk.py` import's OTHER hit",
+    "the `subject_binding_available,` import address",
+    'the `f"session entity-linking failed: …"` line',
+    "the paragraph the cut quoted (`whose payload points ALL fold as PARAPHRASE noops`)",
+    'the `if meta.get("route"):` gate (via `20236 + 155`)',
     "the replay-skips-capture `sed -n` quote",
     "the `# then resolved to the row it replaced.` `sed -n` quote",
 })
@@ -18070,79 +18114,6 @@ def test_every_D5_current_claim_is_still_present() -> None:
 _D5_TRIPLE_RE = re.compile(
     r"`:(?P<a>\d+)` / `:(?P<b>\d+)` / `:(?P<c>\d+)` at THIS head — the three anchors "
     r"`(?P<fa>[^`]+)`, `(?P<fb>[^`]+)` and `(?P<fc>[^`]+)` respectively")
-
-
-#: The I7 range D5 cites inside `04-plan.md`, and the string every membership read of that
-#: document is decided against. MODULE level because more than one reader uses it: the membership
-#: guard below, `_d5_net_adds_target`, and the net-addition arm that pins the difference between
-#: "this diff adds the pair" and "this diff re-touched the line that already holds it".
-_I7_TARGET = "hosted_api.py:15449-15526"
-
-
-def _d5_membership_verdict(
-    *, numstat: str, base_has: bool, diff_carries_target: bool
-) -> str:
-    """What D5's `04-plan.md` membership actually rested on — the ONE decider.
-
-    D5 states that the file "IS in this diff at the head this was read at (`<sha>`), by
-    its PAIR", and both halves of this read ask the same question of two different
-    measurements, so they are decided in one place (the `_pin_row_failures` rule: two
-    copies of a resolution rule are two contracts, and the one that drifts is the one
-    that stops being true). The verdicts, and why each is not the others:
-
-      * ``"landed"`` — the base's own copy already carries the I7 target and this diff
-        does not add it. That is every branch above the merge, AND every lane that
-        re-points a DIFFERENT cite in the same document: the membership is PROVENANCE,
-        still true, and nothing in this branch can make it truer.
-      * ``"repointed"`` — this diff's own `^[+-]` lines carry the target while the base's
-        copy does not, so the pair genuinely enters with this change.
-      * ``"double"`` — the diff adds the target AND the base already carries it: a claim
-        that this is "this diff's" re-point while the base agrees is contradicted by the
-        base, so it stays RED.
-      * ``"dropped"`` — neither this diff nor the base carries it: the sentence names a
-        re-point that exists in neither tree.
-
-    ⛔ ``numstat`` EMPTINESS IS NOT THE QUESTION (#14260 fix lane). It cannot be: a
-    `--numstat` reports HOW MANY lines changed, never WHICH, so reading membership off
-    it answers "does this diff touch the file at all". Measured on PR #14249's head
-    `bf32970447` — `--numstat` = ``2 2``, the base carries `hosted_api.py:15449-15526`,
-    and the diff's own `^[+-]` lines carry it ZERO times — that reading hard-failed a
-    lane which re-pointed a different cite, i.e. the same latent main-red the EMPTY half
-    was fixed for, one branch up.
-    """
-    if not numstat.strip():
-        return "landed" if base_has else "dropped"
-    if diff_carries_target:
-        return "double" if base_has else "repointed"
-    return "landed" if base_has else "dropped"
-
-
-def _d5_net_adds_target(diff_stdout: str) -> bool:
-    """Whether a `-U0` diff NET-ADDS the I7 target, rather than re-touching a line holding it.
-
-    The decider above takes a BOOLEAN `diff_carries_target`, which is the right shape for its
-    table, and this helper answers the half of that question a boolean cannot: a `-U0` read
-    emits BOTH sides of an edited line, so a lane that merely REWORDS the 630-char I7 row on
-    `04-plan.md` produces one `-` and one `+` that each carry the target. A bare `any()`
-    therefore says "this diff adds it" and the decider returns `double` against a base that
-    carries it once — redding an ordinary wording fix with a message that is false for it, a
-    state the lane cannot escape (it can neither stop the base from carrying the pair nor edit
-    that row without producing the `-`/`+` pair). Measured on a wording-only edit of that row:
-    `+`=1, `-`=1 against a base that carries it once (#14269 review, finding 2).
-
-    A genuine duplicate cite is `+` lines OUTNUMBERING `-`; a re-touch is equal counts.
-    """
-    plus = minus = 0
-    for line in diff_stdout.splitlines():
-        if line.startswith(("+++", "---")):
-            continue
-        if _I7_TARGET not in line:
-            continue
-        if line.startswith("+"):
-            plus += 1
-        elif line.startswith("-"):
-            minus += 1
-    return plus > minus
 
 
 def test_the_D5_current_head_anchors_are_the_lines_they_name():
@@ -18252,6 +18223,109 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                 f"{needle!r} is at {hits}. Re-derive by CONTENT "
                 "(`grep -n`), never by carrying the number forward")
 
+    # ⛔ EVERY ARITHMETIC IDENTITY THE ROW STATES IS EVALUATED (#14183 review, cycle 7, P3 —
+    # MEASURED). D5 states its addresses as `a + b = c` expressions, and the `+21`-shifted
+    # spellings were read by NOTHING: mutating `20257 + 155 = 20412` to `= 20391`, changing
+    # `20288 + 155 = 20443` to start from `20267`, or mutating `20267 + 176 = 20443` to
+    # `= 20422` EACH left the whole D5 selection GREEN, so the row could state one fact twice
+    # with two values — the class a sibling commit fixed one paragraph away in this same file.
+    # The census grades the IDENTITY rather than any single address, so a new expression is
+    # covered the moment it is written and a figure that drifts from its own derivation reds
+    # here. NO COUNT of the expressions is typed here: that would be the head-bound figure D5
+    # forbids, and this row's own history is of counts that rotted.
+    # ⛔ ITS RESIDUAL, NAMED RATHER THAN IMPLIED (#14183 review, cycle 8, P3 — MEASURED): the arm
+    # grades the IDENTITY, not the operands, so a COORDINATED operand drift that preserves the sum
+    # (`20267 + 176 = 20443` -> `20260 + 183 = 20443`) stays green. Accepted deliberately, not
+    # overlooked: the operands are the cut's own historical anchors, both TARGETS are graded by the
+    # `_D5_CURRENT_CLAIMS` rows above, and no CURRENT address can become a false PASS this way —
+    # what an operand drift costs is a wrong derivation printed beside a right answer. Closing it
+    # would need a second table asserting "every left operand of a backticked sum is itself a graded
+    # address", which is a new pin with its own failure mode to keep honest, not a spare.
+    _bad_arithmetic = [
+        f"{a} + {b} = {c}"
+        for a, b, c in re.findall(r"`(\d+) \+ (\d+) = (\d+)`", text)
+        if int(a) + int(b) != int(c)]
+    assert not _bad_arithmetic, (
+        f"D5 states arithmetic that does not evaluate: {_bad_arithmetic} — the row derives "
+        "each address from the cut's own anchor plus a measured shift, so a sum that does not "
+        "land means the figure and its derivation have come apart; re-derive both ends by "
+        "content instead of editing one of them (#14183 review, cycle 7, P3)")
+
+    # ⛔ AND THE ROW'S SECOND SPELLING OF THE SAME IDENTITY (#14183 review, cycle 11, P2 —
+    # MEASURED): the offsets are ALSO stated as a triad of results beside the three
+    # subtractions that produce them — "**`+2975` / `+2975` / `+3681`** (22094−19119,
+    # 22052−19077, 29142−25461)" — and the `a + b = c` census above CANNOT see that shape.
+    # Measured before this arm existed: `+2975` -> `+2976` (operands untouched) and
+    # `29142−25461` -> `29142−25471` (results untouched) EACH left the whole D5 selection
+    # GREEN, so the same drift the addition arm closes was still reachable one spelling over.
+    # ⛔ Pairing is POSITIONAL and DELIBERATELY one-way: the row states the live triads first
+    # and then quotes the REFUTED ones (`+2416`/`+2416`/`+3077`, `+366`/`+366`/`+467`) as
+    # history, so a refuted triad has no live subtraction to evaluate against — the arm grades
+    # every triad that HAS one and never the quoted ones. ⛔ AND `len(_triads) >= len(_diffs)`
+    # closes ONE direction only — a live pair whose result triad is GONE (`diffs > triads`) —
+    # NOT the other, which was CLAIMED here and is FALSE (#14183 review, P3, MEASURED). The
+    # deletion direction it does NOT close is narrow and POSITIONAL: drop the LAST live
+    # subtraction group and THIS NODE reports `1 passed` while the `D5` selection still passes,
+    # because the surviving triad is then simply UNGRADED; drop an EARLIER group and it reds at
+    # the pairing assert only because the groups behind it shift into the vacated slot and
+    # mispair with their triads — an accident of `zip` POSITIONS, not a designed check, and
+    # its diagnostic names the wrong
+    # pair. So the residue is stated as a residue: this arm reds on a drift of EITHER side of a
+    # pair it can pair POSITIONALLY, and cannot see a deletion at the TAIL. No count is typed
+    # to close it — a count here is the head-bound figure this row forbids, and the refuted
+    # triads make "how many should there be" undecidable from the text alone.
+    _diffs = re.findall(r"\((\d+)−(\d+), (\d+)−(\d+), (\d+)−(\d+)", text)
+    _triads = re.findall(r"`(\+\d+)` / `(\+\d+)` / `(\+\d+)`", text)
+    assert _diffs, (
+        "D5 no longer states the offset-vs-subtraction triad in the shape this pin reads "
+        "(the pair `**`+N` / `+N` / `+N`**` beside `(a−b, c−d, e−f)`) — re-derive the row and "
+        "update the pin rather than dropping it")
+    assert len(_triads) >= len(_diffs), (
+        f"D5 states {len(_diffs)} live subtraction triad(s) but only {len(_triads)} result "
+        "triad(s) — the pairing is positional, so a triad that lost its result would be graded "
+        "against a refuted one; re-derive the row")
+    # ⛔ `strict=False` IS EXPLICIT AND IS THE CORRECT VALUE (#14183, ruff B905 — MEASURED):
+    # the row deliberately carries MORE result triads than live subtraction groups (the refuted
+    # triads quoted as history have no live subtraction to grade), so `strict=True` would raise
+    # on the states the arm above explicitly permits (`len(_triads) >= len(_diffs)`). Naming it
+    # keeps the truncation INTENTIONAL and visible instead of relying on `zip`'s default, which
+    # is exactly the silent-shortening shape this file treats as a defect elsewhere.
+    _bad_diffs = [
+        (list(triad), list(diff))
+        for diff, triad in zip(_diffs, _triads, strict=False)
+        if [int(diff[i]) - int(diff[i + 1]) for i in (0, 2, 4)]
+        != [int(x.lstrip("+")) for x in triad]]
+    assert not _bad_diffs, (
+        f"D5 states an offset triad that does not evaluate against the subtraction beside it: "
+        f"{_bad_diffs} — the row states BOTH an operand pair and its result, so a drift of "
+        "either side means the figure and its derivation have come apart; re-derive both, never "
+        "edit one (#14183 review, cycle 11, P2)")
+
+    # ⛔ AND THE SUBTRACTAND IS THE ROW'S OWN CURRENT ANCHOR (#14183 review, cycle 12, P3 —
+    # MEASURED). The identity alone accepts a COORDINATED edit: `22094−19119` -> `22095−19120`
+    # keeps the difference, so the triad still evaluates — and the row then names a line the
+    # tree does not carry while its own `at THIS head` triple names the right one, i.e. two
+    # answers for one statement on one line. Measured before this arm: that edit (and the same
+    # edit on `22052−19077` or `29142−25461`) left the WHOLE covering set GREEN — nothing in it
+    # read the subtractand, which is the class this arm closes. ⛔ No count is stated on purpose:
+    # the covered set's size is head-bound, and a bare `N passed` outlives the head that measured
+    # it — the figure this comment used to carry was a whole-suite count with no head named.
+    # The row's live subtraction triples are built FROM the anchors its `at THIS head` clause
+    # states — the new-column triple and the old-column one share their a-side — so the
+    # a-side must BE those anchors, which are graded separately by the anchor-slot loop below (`_D5_TRIPLE_RE`).
+    _triple_match = _D5_TRIPLE_RE.search(text)
+    if _triple_match is not None:
+        _anchors = [int(_triple_match.group(s)) for s in ("a", "b", "c")]
+        _bad_subtractands = [
+            list(d) for d in _diffs
+            if [int(d[i]) for i in (0, 2, 4)] != _anchors]
+        assert not _bad_subtractands, (
+            f"D5's subtraction triples take their a-side from anchors the row does not state "
+            f"as current ({_bad_subtractands} vs {_anchors}) — a coordinated edit that moves "
+            "both operands keeps the difference but names a line the tree does not carry, so "
+            "the row would hand a reader two answers for one statement; re-derive the pair "
+            "from the row's own `at THIS head` anchors (#14183 review, cycle 12, P3)")
+
     triple = _D5_TRIPLE_RE.search(text)
     if triple is None:
         failures.append(
@@ -18304,362 +18378,88 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ THE PAIR IS THE MEASURED ONE, AND ONLY ONE (#13879 review, cycle 3 — MEASURED).
     # This loop used to pin `sdk.py:28682` -> `:28913` AND the I7 range
     # `:15262-15339` -> `:15346-15423` as "the pair 04-plan.md carries at this head". Both
-    # halves were false: `:15346-15423` is not this diff's TARGET (at this head the document
-    # carries `:15449-15526`, and `:15346-15423` survives only on `origin/main`), and
-    # `:15262-15339` was a PREVIOUS head's span — so that sentence fused two heads' spans.
-    # ⛔ BOTH HALVES RE-MEASURED AT THIS HEAD (#14260 fix lane, finding 1 — MEASURED), because
-    # the cut of this note that stood here was itself stale in the opposite direction:
-    # `main`'s `#13854` (issue `#13826`, `ae26adf963`) re-derived `04-plan.md`'s own row from
-    # `sdk.py:28718` to `sdk.py:28935`, and `main`'s `#13971` (`e0accb8fe6`) then moved that
-    # ROW to `sdk.py:29121` — so the row still agrees with `main`. But the FILE IS in the diff,
-    # because this branch re-pointed its I7 range: `git diff --numstat origin/main...HEAD --
-    # …/04-plan.md` prints `1 1` here. It printed nothing only while the row's sole change was
-    # the `sdk.py:29121` provenance; the I7 re-point makes "NOT in this diff" false, which is
-    # the head-bound-membership class this arm has now been wrong in BOTH directions on.
-    # ⛔ SO THE MEMBERSHIP CARRIES THE HEAD IT WAS READ AT, and never stands as "at this head":
-    # a headless membership is true until this branch merges and false the moment it does
-    # (`origin/main...HEAD` for that file is then EMPTY while a phrase-assertion stays green) —
-    # exactly the "a phrase-only assertion was green over the claim" class the block's own
-    # `NOT TYPED AS CURRENT` note above names. Naming the head makes it a READING rather than a claim about the
-    # reader's head, and the assertion below re-runs it at the named head instead of trusting
-    # it; the headless spelling is refused outright.
+    # halves were false: naming `:15346-15423` as this diff's pair was a CHIMERA of two
+    # heads — `main` made that move, so both ends read identically at `origin/main` and
+    # here.
+    # ⛔ RE-MEASURED AT THIS HEAD (measured, never carried): `main`'s `#13854` (issue `#13826`,
+    # `ae26adf963`) re-derived `04-plan.md`'s own row from `sdk.py:28718` to `sdk.py:28935`,
+    # and `main`'s `#13971` (`e0accb8fe6`) then moved both the file and that row to
+    # `sdk.py:29121` (the value `origin/main` STILL carries at that row), while this
+    # branch's own `b186ce98fe73` re-pointed the ROW to `sdk.py:29142` — and the MERGE also
+    # re-pointed the row's I7 range, so the file IS in
+    # ⛔ AND THIS MERGE TAKES `main`'s ADDRESS BACK (`:29121`): `29142` was the branch's
+    # `+21` reading of a symbol `sdk.py` never moved for it — this branch does not edit
+    # `sdk.py` at all (`git diff --numstat origin/main...HEAD -- tortoise/sdk.py` prints
+    # nothing), and `origin/main`'s `#14290` removed the 21 lines `#14260` had added above
+    # it, so `grep -nF 'declared = declared_relation_predicates()' tortoise/sdk.py` reads
+    # `29121` on the tree this lands on.
+    # the diff at this head (measured in the block below). An earlier
+    # cut of this block stated the opposite in both halves (once "NOT in this diff at all", once
+    # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
+    # arm has been wrong in both directions on.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
     # "CARRIES". Both ends are still pinned so the row cannot drift back to the base's value,
     # which is what a re-derivation-by-offset produces — and `sdk.py:28935` is NOT
     # `declared = declared_relation_predicates()` at this head (`:29121` is), so a row that kept
     # the base's value would name a line that does not carry the statement.
-    for _provenance in ("its own row now reads `sdk.py:29121`", "the base read `sdk.py:28935`"):
+    for _provenance in ("its own row now reads `sdk.py:29121`", "→ 28935 →"):
         assert _provenance in text, (
             f"D5 no longer states {_provenance!r} about `04-plan.md`. The row carries "
             "`sdk.py:29121` at this head (`declared = declared_relation_predicates()`) and "
             "the base carried `sdk.py:28935` — pinning "
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-measured at this head)")
-    assert "is the pair `04-plan.md` carries at this head" not in text, (
-        "D5 has gone back to claiming `04-plan.md` carries a re-point PAIR at this "
-        "head, while its row reads ONE address (`sdk.py:29121`) and the one re-point it "
-        "carries is the I7 RANGE, not a `sdk.py` pair. ⛔ Do not restore the old reason "
-        "beside this refusal: the file IS in this diff at this head — `git diff --numstat "
-        "origin/main...HEAD -- …/04-plan.md` prints `1 1` — so 'the file is not in this "
-        "diff at all' is false here. The sentence is refused because its row reads ONE "
-        "address, not because the file is absent (#13879 review, cycle 3; reason re-derived "
-        "at the #14260 fix lane, finding 1)")
-    # ⛔ THE MEMBERSHIP IS A READING AT A NAMED HEAD, NOT A HEADLESS "at this head"
-    # (#14260 fix lane, finding 1 — MEASURED). The sentence this arm required used to read
-    # "IS in this diff AT THIS HEAD": true at the head it was written for, and FALSE the
-    # moment this branch merges, when `origin/main...HEAD` for that file is EMPTY while the
-    # phrase-assertion stayed green. D5's rule is that a figure carries the head it was READ
-    # at, so the membership carries one too — and the named head is then MEASURED, not
-    # trusted, against its own immutable blob.
-    # ⛔ THE MEMBERSHIP IS DECIDED BY REFS THAT ALWAYS EXIST, AND THE NAMED HEAD IS ITS
-    # PROVENANCE (#14260 fix lane, finding 3 — MEASURED). The cut above read ONE thing: the
-    # NAMED head's object. That is fail-OPEN in the exact case it was written for — `git show
-    # <sha>:<path>` returns rc=128 both when that head does not carry the target and when the
-    # object is simply ABSENT, so any hex string satisfied it (measured:
-    # `git show deadbeefcafe:<doc>` → rc 128 → the old `pass`). It is also INERT where it
-    # matters most: `.mergify.yml` squashes (`merge_method: squash`), so a feature-branch sha is
-    # unreachable from `main` the moment this lands — the arm would then grade nothing, forever,
-    # on the one tree it is supposed to protect.
-    # So the enforcement is THREE readings, each from something that survives the merge, and the
-    # named head is checked only when its object happens to be present (it is never the thing
-    # that DECIDES):
-    #   (1) this checkout's own copy of the document carries the I7 re-point's TARGET — always
-    #       readable, and it cannot invert: the target merges WITH the document;
-    #   (2) the live `git diff --numstat <base>...HEAD` membership, from a ref that always
-    #       exists (`origin/main`, then `main`), which is the only home of "is it in THIS
-    #       diff" — and the base's own copy must NOT already carry the target, or the re-point
-    #       is not this diff's;
-    #   (3) the merged-state reading: once `HEAD` is an ancestor of the base the diff is EMPTY
-    #       by construction, and the sentence is history — that is a MEASUREMENT of the state,
-    #       not a skip (this is what keeps the arm honest on `main` instead of inert).
-    # ⛔ AND THE NAMED HEAD IS PROVENANCE, NEVER THE DECIDER (#14260 fix lane, finding 3). It
-    # is graded where its object is present (a wrong head still reds), but it cannot make the
-    # arm green on its own: satisfying that half no longer proves anything the readings below do
-    # not, and the arm no longer carries its claim THROUGH a sha that a squash merge discards.
-    # The residual is stated rather than implied — a sha naming no object is indistinguishable
-    # from one this clone cannot reach, so its existence is ungraded wherever the object is
-    # absent. That is the trade the review prescribed: a typed sha that DECIDES is what made the
-    # arm inert on `main`, which is worse than prose that is merely unverifiable.
-    # ⛔ NOTHING MEASURED IS STILL NOT A PASS, except on a `--depth 1` clone where the base ref
-    # and every older head are absent by CONSTRUCTION (`git rev-parse --is-shallow-repository`),
-    # so absence there is the clone's shape and never read as a pass.
-    _MEMBER_DOC = ("docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md")
-    _member = re.search(
-        r"IS in this diff at the head this was read at \(`(?P<head>[0-9a-f]{40})`\), "
-        r"by its PAIR", text)
-    _measured: list[str] = []
-    if _member is None:
-        failures.append(
-            "D5 no longer states `04-plan.md`'s membership AS OF A NAMED HEAD and by its "
-            "PAIR — the spelling this arm reads is 'IS in this diff at the head this was "
-            "read at (`<full 40-char sha>`), by its PAIR'. Re-derive the sentence and name "
-            "the FULL head you read the numstat at (a prefix is ambiguous about WHICH "
-            "object it names, and this is the one sha in the row that is provenance rather "
-            "than a line number); a headless 'at this head' inverts the moment this branch "
-            "merges and is refused by the next assertion (#14260 fix lane, finding 1)")
-    else:
-        _member_head = _member.group("head")
-        _member_blob = subprocess.run(
-            ["git", "show", f"{_member_head}:{_MEMBER_DOC}"],
-            cwd=_REPO, capture_output=True, text=True)
-        if _member_blob.returncode == 0:
-            _measured.append(f"the named head `{_member_head}`")
-            # The claim is that this document carries the I7 RE-POINT at that head. Its
-            # target is what makes the file's membership real, and it is read out of the
-            # immutable blob rather than out of the reader's tree.
-            if _I7_TARGET not in _member_blob.stdout:
-                failures.append(
-                    f"D5 says `04-plan.md` IS in this diff by its PAIR at the head it "
-                    f"names (`{_member_head}`), but that head's copy does not carry the "
-                    f"I7 re-point's target — so the named head is not the head this was "
-                    f"measured at. Re-derive the head and the range together "
-                    f"(#14260 fix lane, finding 3)")
-    # (1) ALWAYS MEASURABLE, AND IT CANNOT INVERT ON MERGE.
-    _head_copy = (_REPO / _MEMBER_DOC).read_text(encoding="utf-8")
-    if _I7_TARGET not in _head_copy:
-        failures.append(
-            f"this checkout's `{_MEMBER_DOC}` does not carry the I7 re-point's target "
-            f"({_I7_TARGET}) — the document is the thing that makes `04-plan.md`'s "
-            f"membership real, so a copy without the range cannot be 'in this diff by its "
-            f"PAIR'. Re-derive the range by content (#14260 fix lane, finding 3)")
-
-    def _git(*argv: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", *argv], cwd=_REPO, capture_output=True, text=True)
-
-    # (2)/(3) THE "IN THIS DIFF" HALF, FROM A BASE REF THAT ALWAYS EXISTS.
-    _base = next(
-        (ref for ref in ("origin/main", "main")
-         if _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0),
-        None)
-    if _base is None:
-        # STATED, NOT IMPLIED: a `--depth 1` clone has no base ref, so this half is
-        # UNMEASURED there rather than green (see the fabrication guard below).
-        # ⛔ BUT THAT GUARD CANNOT SEE THIS PATH: `_measured` already carries the named head
-        # by this point, so its `if not _measured` condition is False and a bare `pass` here
-        # is a FALSE PASS — measured on a `--single-branch` clone (the named head's blob is
-        # present, neither base ref is), where the arm went GREEN having measured no
-        # membership at all (review at `a963c908`). Same rule the two `git diff` branches
-        # follow: unmeasurable is a RECORDED failure unless the clone is shallow, which is
-        # the ONE shape where the absence is by construction.
-        if _git("rev-parse", "--is-shallow-repository").stdout.strip() != "true":
-            failures.append(
-                "neither `origin/main` nor `main` resolves in this clone and it is NOT "
-                "shallow — so D5's `in this diff` membership CANNOT be measured here, "
-                "and nothing measured is not a pass (#14260 fix lane, finding 3)")
-    elif _git("merge-base", "--is-ancestor", "HEAD", _base).returncode == 0:
-        # (3) THE MERGED STATE. `HEAD` is on/behind the base, so `<base>...HEAD` is empty by
-        # construction and the sentence's membership is history — measured, not skipped.
-        _measured.append(f"the merged state (`HEAD` is an ancestor of `{_base}`)")
-    else:
-        _numstat = _git("diff", "--numstat", f"{_base}...HEAD", "--", _MEMBER_DOC)
-        if _numstat.returncode != 0:
-            # ⛔ UNREADABLE IS UNMEASURED, AND UNMEASURED IS NOT A PASS — recorded HERE, not
-            # deferred to the guard below: `_measured` is already non-empty by this point, so
-            # that guard's condition is False and a bare `pass` is a FALSE PASS (review at
-            # `bda80ef`, fault-injected: this arm STAYED GREEN with the read forced to fail).
-            failures.append(
-                f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` was unreadable "
-                f"(exit {_numstat.returncode}), so D5's membership is UNMEASURED here "
-                f"— nothing measured is not a pass (#14260 fix lane, finding 3)")
-        else:
-            _measured.append(f"the live `{_base}...HEAD` numstat")
-            _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
-            _base_has = (
-                _base_copy.returncode == 0 and _I7_TARGET in _base_copy.stdout)
-            # ⛔ "IN THIS DIFF" IS A QUESTION ABOUT THE DIFF'S OWN LINES, NOT ITS SIZE
-            # (#14260 fix lane, the review at `5fc547aa7e`). `--numstat` says HOW MANY
-            # lines changed; it cannot say WHICH — so a lane that re-points a DIFFERENT
-            # cite in `04-plan.md` has a non-empty numstat while the I7 pair sits exactly
-            # where the base put it. Measured on PR #14249's head `bf32970447`:
-            # `--numstat` = `2 2`, the base carries the target, the diff's `^[+-]` lines
-            # carry it ZERO times — reading membership off non-emptiness hard-failed that
-            # whole class and no commit could satisfy it. The `-U0` read below is the only
-            # one that answers the sentence's actual question.
-            _diff = _git("diff", "-U0", f"{_base}...HEAD", "--", _MEMBER_DOC)
-            if _diff.returncode != 0:
-                # Same rule, same reason the guard below cannot see it: an unreadable `-U0`
-                # diff is UNMEASURED, and it is recorded as a FAILURE, never a `pass`
-                # (review at `bda80ef` — the `-U0` read added this second copy of the class).
-                failures.append(
-                    f"`git diff -U0 {_base}...HEAD -- {_MEMBER_DOC}` was unreadable "
-                    f"(exit {_diff.returncode}), so D5's membership is UNMEASURED here "
-                    f"— nothing measured is not a pass (#14260 fix lane, finding 3)")
-            else:
-                # NET addition, not any `^[+-]` occurrence: a wording edit of the I7 row emits
-                # one `-` and one `+` that BOTH carry the target, which a bare `any()` reads as
-                # "this diff adds it" and reds an ordinary fix against a base that already
-                # carries it (#14269 review, finding 2).
-                _diff_carries_target = _d5_net_adds_target(_diff.stdout)
-                _verdict = _d5_membership_verdict(
-                    numstat=_numstat.stdout,
-                    base_has=_base_has,
-                    diff_carries_target=_diff_carries_target)
-                # ⛔ THE LANDED STATE, MEASURED — NOT A SKIP AND NOT A FAILURE (#14290).
-                # It has TWO shapes and both are the same fact, which is why ONE decider
-                # rules on them (`_d5_membership_verdict`):
-                #   (a) the membership is EMPTY because the re-point already LANDED on the
-                #       base — every branch above the merge has this shape, so #14290's
-                #       own sentence ("IS in this diff at the head this was read at")
-                #       stays true as PROVENANCE while this head carries none of it.
-                #       Before this reading the arm was red on EVERY such branch — a
-                #       latent main-red that could not be satisfied by any commit;
-                #   (b) the membership is NON-EMPTY but the changed lines do not carry the
-                #       pair, because this lane re-points a different cite in the same
-                #       document — the same latent red one branch over, and the review at
-                #       `5fc547aa7e` measured it redding an open PR (#14249).
-                # A DROPPED re-point is the opposite verdict and still REDes in both
-                # shapes: the base does not carry it either, and nothing here put it back.
-                if _verdict == "landed":
-                    _measured.append(
-                        f"the landed state (`{_base}` already carries {_I7_TARGET}"
-                        + ("; this diff's `^[+-]` lines do not re-point it"
-                           if _numstat.stdout.strip() else ")"))
-                elif _verdict == "repointed":
-                    _measured.append(
-                        f"this diff's own `^[+-]` lines carry {_I7_TARGET}")
-                elif _verdict == "double":
-                    failures.append(
-                        f"D5 calls the I7 range a re-point of THIS diff, but `{_base}`'s "
-                        f"own `{_MEMBER_DOC}` already carries {_I7_TARGET} — and this "
-                        f"diff's own `^[+-]` lines carry it again. The range is not this "
-                        f"diff's, and the membership names a base that already agrees "
-                        f"with it (#14260 fix lane, finding 3)")
-                else:
-                    failures.append(
-                        "D5 says `04-plan.md` IS in this diff by its PAIR, but "
-                        + (f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY "
-                           if not _numstat.stdout.strip() else
-                           "this diff's own `^[+-]` lines for that file do not carry it ")
-                        + f"AND `{_base}`'s own copy does not carry {_I7_TARGET} either — "
-                        f"so the re-point is not in this diff and it did not land on the "
-                        f"base. It was dropped. Re-derive the membership (#14260 fix "
-                        f"lane, finding 3)")
-    # ⛔ NOTHING MEASURED IS NOT A PASS (#14260 fix lane, finding 3). The fabrication hole this
-    # closes was MEASURED: `deadbeefcafe` took the old `pass` branch, so any hex string satisfied
-    # the arm. The one exemption is a `--depth 1` clone, where the base ref and every older head
-    # are absent by CONSTRUCTION — there, half (1) above is still graded and the absence is the
-    # clone's shape rather than an unproven claim.
-    if not _measured:
-        _shallow = _git("rev-parse", "--is-shallow-repository").stdout.strip() == "true"
-        if not _shallow:
-            failures.append(
-                "D5's `04-plan.md` membership could not be MEASURED at all: the named head's "
-                "object is absent, no `origin/main`/`main` ref resolves, and this is not a "
-                "shallow clone — so the named head is unverifiable here (a fabricated sha is "
-                "indistinguishable from a pruned one). Name a head that exists and is "
-                "readable, or run the check on a clone that carries the base ref "
-                "(#14260 fix lane, finding 3)")
-    assert "IS in this diff at this head, by its PAIR" not in text, (
-        "D5 has gone back to stating `04-plan.md`'s membership WITHOUT the head it was read "
-        "at ('at this head, by its PAIR'). That spelling is true only until this branch "
-        "merges: `origin/main...HEAD` for that file is EMPTY afterwards, so the membership "
-        "becomes false while a phrase-assertion over it stays green — the class the block's "
-        "own rule forbids ('a phrase-only assertion was green over the old claim, re-landed, "
-        "and was green again'). Name the FULL head (#14260 fix lane, finding 1)")
+    # ⛔ RE-DERIVED AGAIN (#14183 rebuild, MEASURED) — AND THE ANSWER FLIPPED BACK, for a
+    # reason that is not the one an earlier cut of this note recorded. `main`'s `#13971` moved
+    # that row to `sdk.py:29121`; this branch's `b186ce98fe73` re-pointed it to `sdk.py:29142`,
+    # which was its `+21` reading of a `sdk.py` that carried `#14260`'s insertion — and this
+    # branch never edits `sdk.py` (`git diff --numstat origin/main...HEAD -- tortoise/sdk.py`
+    # prints nothing). Once `origin/main`'s `#14290` removed those 21 lines, the re-point lost
+    # its referent and is DROPPED: the row and the I7 range are `main`'s on both heads, so the
+    # file is not in the residual. The lesson is the one the row states about itself — the
+    # membership is a READING at the head you merge, never a fact about a head you remember.
+    # ⛔ THE MEMBERSHIP IS A READING AT THE HEAD YOU MERGE, AND AT THIS HEAD IT IS `NOT in`
+    # (#14183 rebuild, MEASURED). An earlier cut REQUIRED "IS in this diff at this head" with a
+    # typed `2  2` — true while this branch re-pointed `04-plan.md`'s own row to `sdk.py:29142`
+    # and its I7 range, both readings of a `sdk.py` carrying `#14260`'s `+21`. `origin/main`'s
+    # `#14290` removed those 21 lines, so the re-point lost its referent and is dropped: the row
+    # reads `sdk.py:29121` and the range `15449-15526` on BOTH heads, and the command prints nothing.
+    assert "is NOT in this diff at this head" in text, (
+        "D5 no longer states that `04-plan.md` is NOT in this diff. At this head it is not "
+        "(`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints nothing: its own "
+        "row reads `sdk.py:29121` on both heads, and `main` already carries the `15449-15526` "
+        "range). A row that says otherwise names a membership the head does not have")
+    # ⛔ AND THE I7 RANGE IS `main`'S MOVE, NOT THIS DIFF'S (#14183 rebuild, MEASURED):
+    # `git show origin/main:docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md |
+    # grep -c '15346-15423'` -> `0`, so the row must not name it as one of THIS diff's
+    # re-points. The negative arm below still forbids the chimera.
+    assert "15449-15526` on `main`" in text, (
+        "D5 no longer states that the I7 range `15449-15526` is already `main`'s. It is "
+        "(`git show origin/main:docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md "
+        "| grep -c '15346-15423'` -> 0), so naming it as one of this diff's re-points "
+        "claims a membership the head does not have")
     # and the chimera is refused, not merely absent from the message above
     # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
     # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
     # backtick the target, so a literal caught ONE spelling and let three through — green
     # exactly where this arm is supposed to be red. Measured by mutating a /tmp copy: the
     # exact old spelling fired, and all three variants stayed green under the literal.
-    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`?:15346-15423", text) is None, (
-        "D5 names `:15262-15339` -> `:15346-15423` as one of THIS diff's re-points. It is "
-        "not one, and ⛔ the reason is NOT that both ends read identically at `origin/main` "
-        "and at this head — they do not: `:15346-15423` survives only on `origin/main`, "
-        "while this head's document carries `:15449-15526`, and `:15262-15339` was a "
-        "PREVIOUS head's span. A pair whose two halves come from two different heads is the "
-        "chimera D5 exists to forbid (#13879 review, cycle 3; both halves re-derived at the "
-        "#14260 fix lane, finding 1)")
-    assert "sdk.py:29121" in text, (
-        "D5 no longer names `sdk.py:29121`, the value `04-plan.md`'s own row carries at "
-        "this head (`grep -n 'declared_relation_predicates()' "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
-        "address; do not drop it")
+    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`:15346-15423", text) is None, (
+        "D5 names the CHIMERA `:15262-15339 -> `:15346-15423` as one of this diff's "
+        "re-points. `main` made that move, so both ends read identically at `origin/main` and "
+        "here - the head's real pair is `:15346-15423` -> `:15449-15526`, which the assert "
+        "above pins positively (#13879 review, cycle 3; restored at #14183)")
+    assert "`sdk.py:29121`" in text, (
+        "D5 no longer names `sdk.py:29121`, the address the symbol sits at and the one "
+        "`04-plan.md`'s own row carries at this head "
+        "(`grep -nF 'declared = declared_relation_predicates()' tortoise/sdk.py` -> "
+        "`29121:`). Re-derive the address; do not drop it")
 
     assert not failures, (
         "D5's present-tense anchors are not the lines they name "
         "(the class #13602 review findings 1 and 2 measured):\n  - "
         + "\n  - ".join(failures))
-
-
-def test_the_D5_membership_decider_separates_a_landed_file_from_a_re_point():
-    """The `_d5_membership_verdict` table, graded by INPUT (#14260 fix lane).
-
-    ⛔ WHY THIS ARM EXISTS. The review at `5fc547aa7e` found the NON-empty half of the
-    D5 membership read still equated "this diff touches `04-plan.md`" with "this diff
-    re-points the I7 pair", so it hard-failed every lane that re-points a DIFFERENT cite
-    in that document — MEASURED red on an open PR (#14249, head `bf32970447`: `--numstat`
-    = ``2 2``, the base carries the target, the diff's `^[+-]` lines carry it 0 times).
-    That class cannot be reproduced from THIS branch's own git state (its numstat for the
-    document is EMPTY, so it takes the landed branch), which is exactly why the table is
-    graded here by input instead of by a second clone — the same reason
-    `_pin_row_failures` is a function with its own callers.
-    """
-    _DOC = "2\t2\tdoc"
-    _cases = [
-        ("", True, False, "landed", "the merged/landed state"),
-        ("", False, False, "dropped", "EMPTY and the base lacks it: dropped"),
-        (_DOC, True, False, "landed",
-         "#14249's measured shape: a DIFFERENT cite re-pointed, the base already agrees"),
-        (_DOC, False, False, "dropped", "this diff touches the doc but carries no I7 pair"),
-        (_DOC, False, True, "repointed", "the pair enters with this diff"),
-        (_DOC, True, True, "double", "the diff adds a target the base already carries"),
-    ]
-    for _numstat, _base_has, _carries, _expected, _why in _cases:
-        assert _d5_membership_verdict(
-            numstat=_numstat, base_has=_base_has,
-            diff_carries_target=_carries) == _expected, (
-            f"`_d5_membership_verdict(numstat={_numstat!r}, base_has={_base_has}, "
-            f"diff_carries_target={_carries})` is not {_expected!r} ({_why}) — the arm "
-            "decided D5's membership off something other than what the base and this "
-            "diff's own changed lines carry (#14260 fix lane)")
-    # The class is CLOSED: a fourth value would be a state nothing rules on, which is how
-    # an unread verdict gets mistaken for coverage.
-    assert {c[3] for c in _cases} == {"landed", "repointed", "double", "dropped"}
-
-
-def test_the_D5_membership_reads_a_NET_addition_not_a_re_touch():
-    """A wording edit of the I7 row is `landed`, not `double` (#14269 review, finding 2).
-
-    ⛔ WHY THIS ARM EXISTS. `_d5_membership_verdict` takes a BOOLEAN `diff_carries_target`, and
-    the caller used to answer it with `any(^[+-] line carries the target)`. A `-U0` read emits
-    BOTH sides of an edited line, so a lane that only REWORDS the 630-char I7 row produces one
-    `-` and one `+` that each carry the target — `any()` says yes, the decider returns `double`
-    against a base that carries it once, and an ordinary wording fix becomes a RED the lane
-    cannot escape: it can neither stop the base from carrying the pair nor edit that row
-    without producing the `-`/`+` pair. That is the same "no commit can satisfy it" class
-    commit `d0539a142f17` removed for a DIFFERENT-line edit, one shape over — and it was
-    unguarded, because the decider's own table is by INPUT and cannot see how the caller
-    computed its boolean.
-
-    The distinction is a NET addition (`+` outnumbers `-`), which is what a duplicate cite
-    actually looks like; a re-touch is equal counts.
-    """
-    _wording = (
-        "--- a/docs/x.md\n+++ b/docs/x.md\n"
-        f"-old wording {_I7_TARGET} tail\n+new wording {_I7_TARGET} tail\n"
-    )
-    _duplicate = (
-        "--- a/docs/x.md\n+++ b/docs/x.md\n"
-        f"+{_I7_TARGET} added a second time\n"
-    )
-    assert _d5_net_adds_target(_wording) is False, (
-        "a wording-only re-touch of the line that already carries the I7 target must not read "
-        "as this diff ADDING it — one `+` against one `-` is `landed`, and treating it as "
-        "`double` reds an ordinary prose fix with a message that is false for it (#14269 "
-        "review, finding 2)")
-    assert _d5_net_adds_target(_duplicate) is True, (
-        "a real duplicate cite — `+` lines outnumbering `-` — must still read as this diff "
-        "adding the target, so `double` keeps its discriminating power (#14269 review, "
-        "finding 2)")
-    # And the decider still rules the two shapes differently, which is exactly why the caller's
-    # answer has to be the NET one rather than `any()`.
-    assert _d5_membership_verdict(
-        numstat="2\t2\tdocs/x.md", base_has=True,
-        diff_carries_target=_d5_net_adds_target(_wording)) == "landed"
-    assert _d5_membership_verdict(
-        numstat="1\t0\tdocs/x.md", base_has=True,
-        diff_carries_target=_d5_net_adds_target(_duplicate)) == "double"
 
 
 #: The D5 clause that states a `the ONLY …` population of TWO numbers:
@@ -18796,7 +18596,7 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     re-pointed the `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
     docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
     value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
-    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 281 of
+    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 288 of
     them. A row whose own thesis is that a typed line number rots cannot re-point a figure
     and leave it unread; that is the class #13879 review named when a reverted address
     "reddened no arm at all".
@@ -18878,7 +18678,9 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     `r[key] = st[key]` — neither line carries the symbol, so a reader
     following the second pair landed on unrelated code. It was green because the two
     `_pin_row_failures` rows scoped to that line carry ONLY the opening pair's numbers — the
-    fail-OPEN probe row names `7201` and its consume row names `12168`/`12221`, and NO row
+    fail-OPEN probe row names `7201` and its consume row names `12168`/`12221` — those are their values
+    at `f6f202cf5cfb`, the head they were READ at (the two-pair defect itself was measured at
+    `c4451dcd03` above; re-derive the numbers, never carry them) — and NO row
     anywhere names `12110` or `12163` (`grep -nE '12110|12163'` finds comment lines and this
     docstring only). ⛔ NO LINE RANGE is quoted for those two rows (#13746 review round 9): an
     earlier cut wrote one, and it identified lines that are not the rows — the span started
@@ -18953,3 +18755,87 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     assert not failures, (
         "the pair this row names does not open on the symbol the row is about:\n  - "
         + "\n  - ".join(failures))
+
+    # ⛔ ONE CITATION, TWO VALUES, ONE HEAD — the same shape one document over, and it had
+    # NO reader at all (14183 pre-merge review, P2 — MEASURED). `05-verify.md` D5 states
+    # `sdk.py:10326` is `_registry_cache = PackRegistry(packs_dir)` "at the MERGE head"
+    # AND `:10326` "at the branch head `2584a86ec1` too, so this re-cut did NOT move it":
+    # the SAME head named twice, so the two sides must agree — a self-agreement claim that
+    # needs no git to grade. A re-cut changed the FIRST side to `:10347` and left the second
+    # alone, and `:10347` is `if not results:` at that head, so the sentence asserted two
+    # values for one head and neither was read. Both arms run on purpose: the agreement arm
+    # reds on ANY edit that moves one side only (no object, no network); the head arm is the
+    # measurement that the agreement arm cannot make, because both sides could be edited
+    # together to a number that names nothing.
+    #
+    # ⛔ AND WHY THIS ARM LIVES **HERE**, at the end of the file, rather than beside the other
+    # D5 arms: `RECONCILE-A1-A2-A5.md` cites THIS file's own derivation line twice as
+    # `(`:N`)`, and `test_the_reconcile_cites_resolve_where_the_record_says_they_do` DERIVES
+    # `N` from this file's text — so any insertion ABOVE that line re-stales the record and
+    # reds an unrelated pin (MEASURED: a 57-line block placed above it moved the value and
+    # the record's two cites stopped matching). An arm about rot must not itself rot a
+    # citation, so it appends below the number it must not move.
+    #
+    # ⛔ AND FOLDING THIS INTO THE HONOURS CASE ABOVE — the tidier shape, and the one that
+    # file's own convention prefers (`test_the_merge_head_honours_line_is_what_that_head_
+    # carries` already reads this same blob and already skips with the measured remedy) — is
+    # NOT available: that case sits above `:16615`, so moving this arm into it would insert
+    # lines above the derivation line and re-stale the record's two cites. Named here rather
+    # than left for the next lane to rediscover (14183 delta review, P3).
+    _d5 = _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8")
+    _registry = re.search(
+        r"`sdk\.py:(?P<merge>\d+)` is `_registry_cache = PackRegistry\(packs_dir\)` "
+        r"at the MERGE head \(and `:(?P<branch>\d+)` at the branch head "
+        r"`(?P<head>[0-9a-f]{7,40})`", _d5)
+    assert _registry, (
+        "05-verify.md's `_registry_cache` clause no longer matches the form this arm "
+        "reads: `` `sdk.py:N` is `_registry_cache = PackRegistry(packs_dir)` at the "
+        "MERGE head (and `:N` at the branch head `<sha>` `` — if the wording moved, "
+        "re-derive the figure rather than dropping the arm, which is the only reader "
+        "this number has")
+    assert _registry.group("merge") == _registry.group("branch"), (
+        "05-verify.md names `:" + _registry.group("merge") + "` at the MERGE head and "
+        "`:" + _registry.group("branch") + "` at the branch head `"
+        + _registry.group("head") + "` — ONE head, stated twice, so the two sides must "
+        "agree. They do not: an edit moved one side only, the shape that let this pair "
+        "assert two values for one head (14183 review). Re-derive BOTH with `git show "
+        + _registry.group("head") + ":tortoise/sdk.py | grep -n "
+        "'_registry_cache = PackRegistry'` and correct the side that disagrees with the "
+        "head, never by copying the other side forward")
+    _r_head = _registry.group("head")
+    # ⛔ THE HEAD IS PINNED, and this is the one typed constant this arm carries — because an
+    # unpinned one FAILS OPEN (14183 delta review, P2 — MEASURED: move the sha in the
+    # document to an absent value with both numbers untouched, and this arm reported
+    # `1 skipped`, not a failure — the only reader of `_registry_cache`, disarmed by the very
+    # text it grades). A COMMIT SHA is immutable, so typing it does not rot the way a LINE
+    # NUMBER does: this file's derive-never-type rule is about values an insertion moves under
+    # the reader, and `2584a86ec1` cannot move. If the document is ever re-pointed to a
+    # different merge head this REDS and the arm is re-derived with that head — which is the
+    # behaviour an arm exists to have, and the opposite of a silent skip.
+    assert _r_head == "2584a86ec1", (
+        f"05-verify.md now quotes `{_r_head}` as the head its `_registry_cache` figure is "
+        "stated at, while this arm is armed on `2584a86ec1`. Re-arm it on the new head "
+        "(`git show <that-sha>:tortoise/sdk.py | grep -n '_registry_cache = "
+        "PackRegistry'`) — and do not let that turn into a skip: an absent sha here was "
+        "MEASURED reading as `1 skipped` with both numbers untouched, which is a fail-OPEN "
+        "arm (14183 review, P2)")
+    _r_show = subprocess.run(
+        ["git", "show", f"{_r_head}:tortoise/sdk.py"],
+        cwd=_REPO, capture_output=True, text=True)
+    if _r_show.returncode != 0:
+        pytest.skip(
+            f"{_r_head} (the branch head D5 quotes its `_registry_cache` figure for) is "
+            "not carried by this clone, so the figure is UNCHECKED here, not disproved — "
+            "CI's `fetch-depth: 1` checkout lacks it by construction, and it is a rebase "
+            "orphan a default refspec does not fetch (`git fetch origin "
+            "refs/pull/12950/head` re-arms it, as the honours case above records). git: "
+            f"{_r_show.stderr.strip()}")
+    _r_hits = [
+        _n for _n, _line in enumerate(_r_show.stdout.splitlines(), 1)
+        if "_registry_cache = PackRegistry(packs_dir)" in _line]
+    assert _r_hits == [int(_registry.group("merge"))], (
+        f"`_registry_cache = PackRegistry(packs_dir)` sits at {_r_hits} in "
+        f"`{_r_head}:tortoise/sdk.py`, while 05-verify.md D5 names "
+        f"`:{_registry.group('merge')}` for that head — re-derive the figure with "
+        f"`git show {_r_head}:tortoise/sdk.py | grep -n "
+        "'_registry_cache = PackRegistry'`, never carry it forward")
