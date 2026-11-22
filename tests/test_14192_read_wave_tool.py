@@ -461,6 +461,20 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             # the fail-closed direction and is deliberate; narrowing it to `Constant`-only
             # would fail OPEN on a runtime-computed read name.
             return set().union(*(_values(part) for part in value.values))
+        # ⛔ THE SAME `+` ARM, ON THE BIND PATH (#14326 round 12, MEASURED at `c380075b4`):
+        # `_N = "_tortoise_" + "fts_query"; getattr(sdk, _N)(…, kind="statement")` left the pin
+        # GREEN while the INLINE spelling of the same sum was refused — the verdict was decided
+        # by whether the sum was bound first. `_possible_strings` grew the `BinOp`/`Add` arm in
+        # round 9, but `_values` (the BIND resolver) did not, so every round-9/10 `+` row is
+        # INLINE and nothing exercised this path. Both operands here are `Constant`s (or a name
+        # bound to one), which is NOT the declared residual (`_N + "_x"`, an UNRESOLVABLE
+        # operand) — that wording is what made the gap read as covered. Same PRODUCT semantics
+        # as `_possible_strings`: a union is wrong in both directions (round 10).
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+            _left, _right = _values(value.left), _values(value.right)
+            if not _left or not _right:
+                return set()  # an operand is not statically resolvable — the residual
+            return {a + b for a in _left for b in _right}
         return set()
 
     def _store_names(target: ast.AST) -> list[ast.Name]:
@@ -1447,7 +1461,7 @@ def _is_scalar_producer(value: ast.AST) -> bool:
             in _SCALAR_CALLEES)
 
 
-def _builds_new_container(value: ast.AST) -> bool:
+def _builds_new_container(value: ast.AST, rebound: frozenset[str] = frozenset()) -> bool:
     """The value is a COPY — a call to a container BUILDER, or a comprehension.
 
     ⛔ A COPY CANNOT MUTATE THE COLLECTION IT COPIED (#14326 round 9, MEASURED at
@@ -1466,12 +1480,34 @@ def _builds_new_container(value: ast.AST) -> bool:
     while this predicate exempted `_c` from BOTH arms, and the pin reported PASS. So this
     predicate answers only "is the CONTAINER new"; the caller collects the copy names
     separately (`_mutated_after`'s `shallow_copies`) so a write THROUGH a slot still reds.
+
+    ⛔ AND THIS PURITY TEST IS BY NAME, SO THE NAME CAN BE REBOUND (#14326 round 12, MEASURED
+    at `c380075b4`): `list = lambda _x: results; _copy = list(1); _copy.sort()` measured GREEN
+    — a real in-place permutation of the page — because the test keyed on the callee NAME
+    alone. `_is_read_ref` and `_indirect_reads` both consult `_rebound_callee_names` (rounds
+    6-7 exist for exactly this); this exemption did not, so it was the one route by which a
+    shadowed reader stayed "pure". `rebound` is passed in because this predicate has no
+    `tree`; over-approximating purity here is the fail-open direction. RESIDUAL: the caller
+    passes `_rebound_callee_names(tree)` without `consts`, so a rebind laundered through a
+    STRING KEY (`setattr(builtins, "list", …)`) is not seen here — the name-form rebind is
+    what this arm closes, and widening it needs `consts` threaded through `_aliases_of`.
     """
     if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
         return True
-    return (isinstance(value, ast.Call)
-            and (getattr(value.func, "id", None) or getattr(value.func, "attr", None))
-            in _SHALLOW_COPY_CALLEES)
+    if isinstance(value, ast.Call):
+        callee = getattr(value.func, "id", None) or getattr(value.func, "attr", None)
+        return callee in _SHALLOW_COPY_CALLEES and callee not in rebound
+    # ⛔ A DISPLAY THAT ONLY SPREADS THE PAGE COPIES IT (#14326 round 12, MEASURED on the REAL
+    # tool: `_copy = [*results]; _copy.sort()` was `1 failed` while `list(results)` passed).
+    # `[*results]` builds a NEW list over the same element objects, so sorting it cannot permute
+    # the page — while `[results]` HOLDS the list itself (`_box[0].sort()` is correctly RED and
+    # stays so). The property is OBJECT-based, not shape-based. `results * n` and
+    # `copy + []` are the same: a list `+`/`*` always allocates, so neither can alias its
+    # operand. The shallow-copy contract above is unchanged — the caller still collects these
+    # names so a write THROUGH a slot reds.
+    if isinstance(value, (ast.List, ast.Tuple)):
+        return bool(value.elts) and all(isinstance(_e, ast.Starred) for _e in value.elts)
+    return isinstance(value, ast.BinOp) and isinstance(value.op, (ast.Add, ast.Mult))
 
 
 def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
@@ -1547,7 +1583,9 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
             # SCALAR read (`json.dumps(results)`, `str(row)`) is not an alias EITHER
             # (`_is_scalar_producer`), and that gate stays on in both modes.
             resolves = (not _is_scalar_producer(value)
-                        and (copy_is_alias or not _builds_new_container(value)) and (
+                        and (copy_is_alias
+                             or not _builds_new_container(
+                                 value, _rebound_callee_names(tree))) and (
                             predicate(value)
                             or bool(_names_in(value) & out)
                             or any(predicate(operand)
@@ -3508,6 +3546,15 @@ def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
         ("dict() copy of a row", "    _copy = dict(results[0])\n    _copy.update({'x': 1})\n"),
         ("comprehension over the page",
          "    _ids = [_result_id(r) for r in results]\n    _ids.sort()\n"),
+        # ⛔ THE SHAPE-BASED EXEMPTION LEFT THREE INERT EDITS RED (#14326 round 12, MEASURED on
+        # the REAL tool: each `1 failed` while `list(results)` passed). `_builds_new_container`
+        # treated a List display as "holds the page" — true for `[results]`, FALSE for
+        # `[*results]`, which builds a new list over the same element objects. A list `+`/`*`
+        # always allocates, so neither can alias its operand.
+        ("starred spread", "    _copy = [*results]\n    _copy.sort(key=str)\n"),
+        ("repetition", "    _copy = results * 1\n    _copy.sort(key=str)\n"),
+        ("copy concatenated with an empty list",
+         "    _copy = list(results) + []\n    _copy.sort(key=str)\n"),
     ):
         assert not _mutations_of(body), (
             f"[{label}] a COPY of the page is being graded as a mutation of the page — the "
@@ -3521,6 +3568,20 @@ def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
         assert _mutations_of(body), (
             f"[{label}] must stay RED — the copy exemption must not widen into 'nothing is an "
             "alias'")
+    # ⛔ AND THIS PURITY TEST IS BY NAME, SO THE NAME CAN BE REBOUND (#14326 round 12, P1,
+    # MEASURED at `c380075b4`: `list = lambda _x: results; _copy = list(1); _copy.sort()` was
+    # GREEN — a real in-place permutation of the page). `_is_read_ref` and `_indirect_reads`
+    # both consult `_rebound_callee_names` (rounds 6-7 exist for exactly this); the copy
+    # exemption did not, so it was the one route by which a shadowed reader stayed "pure".
+    for label, body in (
+        ("shadowed `list`",
+         "    list = lambda _x: results\n    _copy = list(1)\n    _copy.sort()\n"),
+        ("shadowed `sorted`",
+         "    sorted = lambda _x, **k: results\n    _copy = sorted(1)\n    _copy.sort()\n"),
+    ):
+        assert _mutations_of(body), (
+            f"[{label}] a REBOUND copy callee must not license the exemption — it returns the "
+            "page, so sorting the result permutes what the artifact records")
     # ⛔ THE COPY'S **ELEMENTS** ARE THE PAGE'S OWN OBJECTS (#14326 review P0, MEASURED at
     # `36a6451d4e`): every shape above is a SHALLOW copy, so its slots hold the SAME row
     # dicts the artifact records. The exemption used to cover the whole BIND, so
@@ -4080,6 +4141,20 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "literal-only `+` (a compile-time fold)": (
             '    getattr(sdk, "_tortoise_" + "fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE SAME SUM ONE BIND AWAY (#14326 round 12, MEASURED at `c380075b4`: BOTH rows
+        # below left the pin GREEN while the INLINE spelling above was refused, so the verdict
+        # hinged on whether the sum was bound first). `_possible_strings` grew the `BinOp`/`Add`
+        # arm in round 9 but `_values` — the BIND resolver — did not, and every round-9/10 `+`
+        # row is INLINE, so nothing exercised that path. Both operands are `Constant`s (or a
+        # name bound to one), which is NOT the declared residual (`_N + "_x"`, an UNRESOLVABLE
+        # operand).
+        "bound literal-only `+`": (
+            '    _N = "_tortoise_" + "fts_query"\n'
+            f'    {reach.format(name="_N")}\n'),
+        "bound NAME+literal `+`": (
+            '    _P = "_tortoise_"\n'
+            '    _N = _P + "fts_query"\n'
+            f'    {reach.format(name="_N")}\n'),
         # ⛔ THE PRODUCT, BOTH DIRECTIONS (#14326 round 10, each MEASURED): a statically
         # resolvable operand that is a SELECTION joins to every combination, so a sum that CAN
         # be the read name is refused… (`("x" if q else "_tortoise_") + "fts_query"`,
