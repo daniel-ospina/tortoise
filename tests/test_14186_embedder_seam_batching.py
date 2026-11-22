@@ -1672,6 +1672,54 @@ class _FakeProc:
         return None
 
 
+class TestTheClientSaysWhenItCannotVerifyThePeer:
+    """⛔ An ABSENT credential is not a pass (review P3, cycle 6).
+
+    `_socket_peer_uid` answers ``None`` on a kernel without ``SO_PEERCRED``
+    (macOS's ``LOCAL_PEERCRED`` is not implemented here), and the client's check
+    was then silently a no-op — while the runbook promised the answering peer is
+    always verified. `TORTOISE_EMBED_WORKER_REQUIRE_PEER` cannot help: the WORKER
+    reads it. So the client must SAY which defence is left, exactly once.
+    """
+
+    def test_a_kernel_without_the_credential_is_named_in_the_log(
+            self, tmp_path, monkeypatch, caplog):
+        import logging as _logging
+
+        from tortoise import embed_seam as seam
+
+        monkeypatch.setattr(seam, "_socket_peer_uid", lambda sock: None)
+        monkeypatch.setattr(seam._LineJSONClient, "_peer_note_emitted", False,
+                            raising=False)
+        path = str(tmp_path / "peer.sock")
+        with _ServingThread(path):
+            client = seam._LineJSONClient(path)
+            with caplog.at_level(_logging.WARNING, logger="tortoise.embed_seam"):
+                with client.open_stream(5.0):
+                    pass
+                # Latched: a second connect adds no line.
+                with client.open_stream(5.0):
+                    pass
+        notes = [r for r in caplog.records
+                 if "SO_PEERCRED" in r.getMessage()]
+        assert len(notes) == 1, [r.getMessage() for r in notes]
+        assert "UNCHECKED" in notes[0].getMessage()
+        assert "0700" in notes[0].getMessage(), (
+            "the note does not say what is left defending the socket: "
+            f"{notes[0].getMessage()!r}")
+
+    def test_a_FOREIGN_uid_is_still_refused(self, tmp_path, monkeypatch):
+        """The check itself, so the note above cannot hide a deleted refusal."""
+        from tortoise import embed_seam as seam
+
+        monkeypatch.setattr(seam, "_socket_peer_uid", lambda sock: os.getuid() + 1)
+        path = str(tmp_path / "peer2.sock")
+        with _ServingThread(path):
+            client = seam._LineJSONClient(path)
+            with pytest.raises(RuntimeError, match="uid"):
+                client.open_stream(5.0)
+
+
 class TestTheWorkerSocketCannotBeClaimedByAnotherUser:
     """Review F2: readiness is a PATH, so the path must be ours alone.
 

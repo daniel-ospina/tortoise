@@ -1325,7 +1325,7 @@ the block arrives with the SAME key set, every value `null`, plus `error`, and `
 | `TORTOISE_EMBED_MAX_WAIT_MS` | per backing (below) | The query-batching collection window, in ms. ⛔ Refused unless FINITE and ≤ 60000: an `inf`/`1e9` window makes the collector's deadline infinite and the ticket's valve unbounded (`inf >= 0` passed the old guard). |
 | `TORTOISE_EMBED_MAX_BATCH` | `32` | A batch fires early when it reaches this. |
 | `TORTOISE_EMBED_QUERY_TIMEOUT_S` | `30` | The bound on ONE fired request (worker / external round trip). |
-| `TORTOISE_EMBED_WORKER_SOCKET` | a `0700` directory this process mints (`$TMPDIR/tortoise-embed-worker-<pid>-*/embed.sock`) | Where the worker listens. The private directory is not decoration: readiness is the path's EXISTENCE, and a shared directory would let any local user create it first. An explicit path here is honoured verbatim — and the CLIENT then verifies the answering peer's uid (`SO_PEERCRED`) after `connect`, so an operator-pointed shared path cannot be hijacked by a foreign process either. |
+| `TORTOISE_EMBED_WORKER_SOCKET` | a `0700` directory this process mints (`$TMPDIR/tortoise-embed-worker-<pid>-*/embed.sock`) | Where the worker listens. The private directory is not decoration: readiness is the path's EXISTENCE, and a shared directory would let any local user create it first. An explicit path here is honoured verbatim — and the CLIENT verifies the answering peer's uid (`SO_PEERCRED`) after `connect`, so an operator-pointed shared path cannot be hijacked by a foreign process **on a kernel that reports the credential (Linux)**. ⛔ Where it does not (macOS's `LOCAL_PEERCRED` is not implemented here) the client cannot check and says so once in its log: the defence there is the `0700` directory alone, so an explicit path on such a host is only as private as the directory the operator put it in. |
 | `TORTOISE_EMBED_WORKER_STARTUP_S` | `600` | How long a worker may take to become READY (cold import + model load). Never the per-request budget. |
 | `TORTOISE_EMBED_WORKER_REQUIRE_PEER` | unset | Read by the WORKER process. Unset ⇒ a kernel that reports no peer credential (e.g. macOS, whose `LOCAL_PEERCRED` is not implemented here) is WARNED about once and allowed, on the strength of the private directory. Set to `1` ⇒ such a peer is REFUSED, which is the right posture when the socket lives at an operator-supplied shared path. |
 | `TORTOISE_EMBED_WORKER_PYTHON` | the parent's `sys.executable` | The worker must import the SAME tortoise and extras — a different interpreter is a different encoder. |
@@ -4707,9 +4707,12 @@ operator who read the line above as "CI defends this" would never run it.
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
 > Number 2 and 3 are the second most likely to be missed, and they change behaviour: with the flag
-> `0` each returns `None` immediately (`:1493-1497`, `:1636-1637`), so the write and read paths fall
-> back to the **synchronous in-request load** — that fallback is part of what flipping the switch
-> chooses.
+> `0` the **in-process** write and read bounds each return `None` immediately (`:1493-1497`,
+> `:1636-1637`), so those paths fall back to the **synchronous in-request load** — that fallback is
+> part of what flipping the switch chooses. ⛔ A `worker`/`external` backing is decided ABOVE that
+> opt-out, because the flag governs a LOCAL background lane the deployment does not have: a bounded
+> write declines `backing_cold` while the backing boots rather than loading anything locally (§4.1.1e),
+> and the read answers ready so its round trip can wait out the boot.
 
 **When to flip it.** #13674 Scope item 3 records the `0` value verbatim — *"`TORTOISE_EMBEDDER_WARMUP=0`
 is the *emergency* switch it is, not the steady state"*. Production has run it at `0` while the

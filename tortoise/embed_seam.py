@@ -695,7 +695,11 @@ class _LineJSONClient:
     process that binds the path FIRST and becomes the server. The check that then
     runs on ``accept`` is the attacker's own code (review: the peer-credential
     belt was on the wrong side of the connection). Verified on this side, after
-    ``connect``, ``SO_PEERCRED`` names whoever is actually answering.
+    ``connect``, ``SO_PEERCRED`` names whoever is actually answering — ON A KERNEL
+    THAT REPORTS IT (review P3, cycle 6): where it does not (macOS's
+    ``LOCAL_PEERCRED`` is not implemented here), the check is a no-op by
+    construction and ``open_stream`` says so once in the log. The remaining
+    defence there is the ``0700`` directory, which is why it is not decoration.
     """
 
     def __init__(self, address: str) -> None:
@@ -713,6 +717,9 @@ class _LineJSONClient:
     #: 30 s default), because a genuinely dead path must still decline promptly —
     #: the cost of this belt is bounded, the cost of the false decline is not.
     _CONNECT_REFUSED_GRACE_S = 0.25
+
+    #: Latched so the platform note is one line per process, like the worker's.
+    _peer_note_emitted = False
 
     def open_stream(self, timeout_s: float) -> socket.socket:
         deadline = time.monotonic() + timeout_s
@@ -739,7 +746,24 @@ class _LineJSONClient:
                 sock.close()
                 raise
             peer = _socket_peer_uid(sock)
-            if peer is not None and peer != os.getuid():
+            if peer is None:
+                # ⛔ A KERNEL THAT CANNOT REPORT THE CREDENTIAL IS NOT A PASS
+                # (review P3, cycle 6). This check is the CLIENT half of the
+                # hijack defence, and `_socket_peer_uid` answers ``None`` on a
+                # platform without ``SO_PEERCRED`` (macOS's ``LOCAL_PEERCRED`` is
+                # not implemented here) — where the check is silently a no-op.
+                # ``TORTOISE_EMBED_WORKER_REQUIRE_PEER`` is read by the WORKER, so
+                # it does not help this side. Silence is what made the runbook
+                # claim ("cannot be hijacked") true on Linux and false elsewhere,
+                # so say which defence is actually left: the private directory.
+                if not _LineJSONClient._peer_note_emitted:
+                    _LineJSONClient._peer_note_emitted = True
+                    _logger.warning(
+                        "embed seam: this kernel reports no SO_PEERCRED — the "
+                        "answering peer's uid is UNCHECKED on %s; the only "
+                        "protection is the socket's 0700 directory (#14186)",
+                        self._address)
+            elif peer != os.getuid():
                 sock.close()
                 raise RuntimeError(
                     f"embed seam: the worker socket {self._address} is answered by "
