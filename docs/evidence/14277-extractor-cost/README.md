@@ -64,14 +64,14 @@ measurement.
 1. **The per-item input constant is 45.5k tokens, not ~7k** — and the pass
    multiplier is **2.16T, not 1.5T**.
 2. **Output is dominated by a constant too.** The model assumed `0.2T`
-   (≈1.0k on a median document). Measured: 22.8k fitted, 16.0k on the median
+   (≈1.0k on a median document). Measured: 22.8k fitted, 16.3k on the median
    document. It is the single largest line of the bill, and a cache cannot
    discount it.
 3. **S2 and S4 barely move with document length** (R² ≈ 0.00 — the only stage
    that reads the text is S1, at R² ≈ 0.99). A small item is therefore not
    "relatively expensive": it is essentially *all* overhead. That is why a
-   1,534-token session costs 36.6k tokens of spend — 24× its own token count,
-   below the median document's 64.5k only because it carries so little text.
+   1,534-token session costs 36.4k tokens of spend — 24× its own token count,
+   below the median document's 64.8k only because it carries so little text.
 
 ## Limits — stated, because an unstated limit reads as a result
 
