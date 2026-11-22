@@ -3276,6 +3276,31 @@ _D5_UNDOCUMENTED_ALIAS_CANDIDATES = ("--unix-byte-offsets",)
 _D5_GREP_PROBE = "++\n+\nxx\n-\n\n"
 
 
+def _d5_grep_verdict(ran: subprocess.CompletedProcess, name: str, grep: str = "grep") -> bool:
+    """Read one probe run: True = `grep` RAN `name`, False = it REFUSED it, a THIRD code RAISES.
+
+    ⛔ A THIRD EXIT CODE IS AN ERROR, NOT A REFUSAL (#14138): reading it as "refused" would
+    silently empty the allowance, so a real prescription in the alias spelling would go unread.
+
+    ⛔ ONE IMPLEMENTATION, TWO READERS — and they are different readers on purpose. The allowance
+    probe below asks this question of the alias candidates, where a `False` removes a spelling from
+    the option universe; the alias cell asks it of every spelling the alias answers to, where a
+    `False` is the refusal arm of its own assertion. A second copy of the rule would let the two
+    disagree about what a given exit code means, which is the drift this file bans by name (#14138
+    review round 8, P2 — MEASURED: with a grep that answers a third code for a PREFIX spelling only,
+    a two-way `if rc in (0, 1) … else` read it as a refusal and asserted "(measured: exit 2)" over a
+    run that exited 3).
+    """
+    if ran.returncode in (0, 1):
+        return True
+    if ran.returncode == 2:
+        return False
+    raise AssertionError(
+        f"`{grep} -c {name} '^[+-]$'` exited {ran.returncode}, which is neither a count (0/1) nor "
+        f"grep's invalid-option code (2): {ran.stderr.strip()!r} — a NON-ANSWER cannot decide the "
+        "reader's option universe, and reading it as 'refused' is the fail-open direction (#14138)")
+
+
 def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
     """Does `grep` RUN this long-option spelling? Measured, never remembered (#14138).
 
@@ -3322,15 +3347,7 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
             "broken or the probe is, and rc 2 on the spelling under test would then be an "
             "UNRELATED error read as a refusal (#14138)")
     ran = run(name)
-    if ran.returncode in (0, 1):
-        return True
-    if ran.returncode == 2:
-        return False
-    raise AssertionError(
-        f"`{grep} -c {name} '^[+-]$'` exited {ran.returncode}, which is neither a count (0/1) nor "
-        f"grep's invalid-option code (2): {ran.stderr.strip()!r} — the reader's option universe "
-        "cannot be decided from that, and guessing it would grade a command grep may not run "
-        "(#14138)")
+    return _d5_grep_verdict(ran, name, grep)
 
 
 #: The undocumented aliases the grep ON PATH actually RUNS — the allowance, MEASURED from
@@ -5124,11 +5141,16 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # weakening — the membership claim it made is in the message above, by name.
 
     # Every spelling the alias answers to, on the LIVE grep: READ where grep runs it (and it counts
-    # this class `2`), DECLINED where grep refuses it.
+    # this class `2`), DECLINED where grep REFUSES it — and a THIRD exit code is NEITHER, which is
+    # why the verdict comes from `_d5_grep_verdict` rather than a local two-way branch. Only
+    # `--unix-byte-offsets` itself passes through the allowance probe; the four PREFIX spellings
+    # reach this loop without ever meeting its three-way rule, so a two-way branch here would read a
+    # non-answer as a refusal and print "(measured: exit 2)" over a run that did not exit 2.
     for spelling in alias_spellings:
         ran = grep_probe(spelling)
+        accepted = _d5_grep_verdict(ran, spelling)
         read = _d5_count_prescriptions(f"a count: `grep -c {spelling} '^[+-]$'`\n")
-        if ran.returncode in (0, 1):
+        if accepted:
             assert ran.stdout.strip() == "2", (
                 f"`grep -c {spelling} '^[+-]$'` printed {ran.stdout.strip()!r} on the probe — the "
                 "alias must count THIS class for the false-PASS argument to hold, so an accepted "
@@ -5138,9 +5160,9 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
                 "— declining it leaves a real blank-class prescription unread (#14027, P2)")
         else:
             assert read == [], (
-                f"{spelling!r} is REFUSED by this grep (measured: exit 2) and the reader still "
-                "graded it — grading the expression of a command grep will not run is a false RED "
-                "on a document that merely mentions it (#13995, MEASURED)")
+                f"{spelling!r} is REFUSED by this grep (measured: exit {ran.returncode}) and the "
+                "reader still graded it — grading the expression of a command grep will not run is "
+                "a false RED on a document that merely mentions it (#13995, MEASURED)")
 
     hidden = ("row: `grep -c '^[+-]$'`\n"
               "and: `grep -c --unix-byte-offsets '^[+-]$'`\n")
