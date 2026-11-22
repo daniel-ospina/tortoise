@@ -8006,15 +8006,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # scoped line, while D5 is ONE line. So the row is satisfied by any `:N` on it and cannot
     # tell the clause being re-pointed from another occurrence staying put.
     #
-    # ⛔ SO THE LINE IS DERIVED, NEVER TYPED. That is the whole rule this block exists to state,
-    # and the block itself is the evidence for it: this cite has carried at least four values
-    # (`:28067`, `:28178`, `:28395` and the one the tree holds now), each true at some head and
-    # each stale at many of the heads it sat through — the first three each superseded. Every value named above is HISTORY, stamped to no head on
-    # purpose — do not write the tree's current value here, and do not "fix" those four, because
-    # a head-current number in this block is the exact rot the arm below prevents. The arm
-    # prints the live value in its failure message; `grep -n 'dedup_reviewed IS NULL'
-    # tortoise/sdk.py` re-derives it. (`:28067` was NOT the file's only
-    # `dedup_reviewed IS NULL` at the head an earlier cut was graded on — #13746 review, P2.)
+    # ⛔ SO THE LINE IS DERIVED, NEVER TYPED — that is the whole rule this block exists to state.
+    # No value of this cite is written in this comment ON PURPOSE, and none should be added
+    # "for clarity": the arm below derives it, prints the live value in its failure message, and
+    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` re-derives it directly. This comment
+    # once enumerated the values the cite had carried, each stamped to the head it belonged to;
+    # every pass over that list cost a review round (a stamp attributed to the wrong head, a
+    # count with no recipe, a "never" that was not one), and a head-current number in this block
+    # is the exact rot the arm exists to prevent. The rule generalises: a comment that grades a
+    # rotting figure should state the METHOD, not the figure.
     #
     # (the `next(...)` / `agent-infra#3442` reasoning is stated with the assert below)
     _dedup_filter_lines = [
