@@ -5713,8 +5713,29 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #: the parameter and silently suppress the outcome (the capture would then treat
 #: every turn as unrecorded and fall back to the graph — the safe direction, but
 #: a silent one), so it is reserved like the rest.
+#: ``write_sink`` (#14111) is the third PER-CALL object the signature owns —
+#: and the SECOND append-only OUTCOME sink, after ``record_sink``, NOT a
+#: control on where the write lands. `_emit_event`'s only use of the parameter
+#: is `write_sink.append(write)`, on the far side of the chokepoint: the
+#: destination is already decided by the time the sink is filled, so nothing a
+#: caller puts here can redirect a write (the method's docstring says the same:
+#: "the CHOKEPOINT's own result, verbatim"). The harm a caller prop of that name
+#: does is REINTERPRETATION, not redirection — the prop binds the parameter at
+#: the splat, so the verdict goes to the CALLER's value instead of the sink the
+#: caller named. A list-valued prop silently absorbs the ``LiveWrite`` into
+#: caller data (measured); a NON-list prop raises ``AttributeError`` at the
+#: append, which the door's `except Exception` swallows as a WARNING after the
+#: write has already committed, so the emit's caller learns nothing. Both
+#: directions starve the sink the caller DID name — the same silent, safe-
+#: direction class as ``record_sink`` above, and the same reason to reserve it:
+#: a caller prop must never be reinterpreted as the internal sink.
+#: `_emit_event` cannot see it from inside for the same reason it cannot see any
+#: of these: the binding happens at the caller's splat, one frame up. Reserved
+#: here so the derivation in `tests/test_2296_document_created_journal.py`
+#: (which asserts the reserved sets COVER this signature) and the strip both
+#: stay true.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
-                            "record_sink")
+                            "record_sink", "write_sink")
 
 
 def _drop_reserved_emit_props(props: dict) -> list[str]:
