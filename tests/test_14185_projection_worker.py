@@ -1905,12 +1905,15 @@ def test_a_queue_fault_folds_inline_instead_of_breaking_the_write(monkeypatch):
     inline", which is the pre-#14185 shape and therefore always safe.
     """
     monkeypatch.setenv(projection_worker.ENV_WORKER, "1")
-    # ⛔ BOTH GATES THAT PRECEDE `submit` (#14222 review cycle 5, ISSUE 2). Without
-    # `tenant=` and without the record's own arming, `_submitted_to_worker`
-    # returned False at the `journal_skipped or record_sink is not None or not
-    # durable` gate and at the `tenant is None` gate, and this row passed even with
-    # the `except Exception` around the import deleted — the queue fault was never
-    # exercised. ⛔ Cited by GATE TEXT: the three `:line` numbers that used to sit
+    # ⛔ BOTH MASKING GATES (#14222 review cycle 5, ISSUE 2). `submit` is preceded by
+    # five declines — the fused `journal_skipped / record_sink / durable` gate, the
+    # unimportable-loop gate, `tenant is None`, `not projection_worker.armed()` and
+    # `not _record_armed()` — so "the gates that precede `submit`" is not two of
+    # anything. What this row must get PAST is the pair that masked it: without
+    # `tenant=` and without the record's own arming it was declined by the
+    # `tenant is None` gate and by the `not _record_armed()` gate, and this row then
+    # passed even with the `submit` `except Exception` deleted — the queue fault was
+    # never exercised. ⛔ Cited by GATE TEXT: the `:line` numbers that used to sit
     # here resolved to docstring prose and to a COMMENT (round-16, P2), which is
     # how a reader deletes the wrong line.
     monkeypatch.setenv(record_writer.RECORD_DSN_ENV, _RECORD_DSN)
