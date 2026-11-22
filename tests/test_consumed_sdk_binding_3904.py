@@ -249,14 +249,35 @@ def _vectors_for(name: str, fn: Any) -> tuple[tuple[str, tuple, dict], ...]:
             if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
         ]
         hints = _resolved_hints(fn)
-        minimal = tuple(
-            _typed_value(hints.get(p.name, p.annotation))
-            for p in params
-            if p.default is inspect.Parameter.empty
+
+        def _drive_vector(subset: list[inspect.Parameter]) -> tuple[tuple, dict]:
+            """Positional for the POSITIONAL arms, KEYWORD for the KEYWORD_ONLY ones.
+
+            ⛔ MEASURED (#14169, `tortoise_link_entities`): this helper used to build
+            ONE positional tuple for every parameter, so a handler whose signature has
+            a `*` was driven with `tortoise_link_entities() takes from 2 to 3
+            positional arguments but 14 were given` — a TypeError SWALLOWED by
+            `_drive_handler_cached`, leaving `reads=[]` and reding the gate with a
+            message that blames the handler's declaration for the driver's own bug.
+            The kind of each parameter decides how it is passed, which is the only
+            reading of `inspect.signature` a driver may use.
+            """
+            positional: list[Any] = []
+            keywords: dict[str, Any] = {}
+            for p in subset:
+                value = _typed_value(hints.get(p.name, p.annotation))
+                if p.kind is p.KEYWORD_ONLY:
+                    keywords[p.name] = value
+                else:
+                    positional.append(value)
+            return tuple(positional), keywords
+
+        minimal_args, minimal_kwargs = _drive_vector(
+            [p for p in params if p.default is inspect.Parameter.empty]
         )
-        typed = tuple(_typed_value(hints.get(p.name, p.annotation)) for p in params)
-        vectors.append(("minimal", minimal, {}))
-        vectors.append(("typed", typed, {}))
+        typed_args, typed_kwargs = _drive_vector(params)
+        vectors.append(("minimal", minimal_args, minimal_kwargs))
+        vectors.append(("typed", typed_args, typed_kwargs))
     vectors.extend(_DRIVE_OVERRIDES.get(name, ()))
     return tuple(vectors)
 
@@ -411,6 +432,19 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
                 "consistency": 0.5,
                 "directness": 0.5,
             },
+        ),
+    ),
+    # #14169 added `tortoise_link_entities` to the registry with a `*` in its
+    # signature, and its declared `link_entities` read is the SCALAR-target arm's —
+    # the generic vectors sample every `Any` argument as the benign string `"x"`, so
+    # `target_ids="x"` selects the OPERATOR arm, whose FIRST act is the `operator`
+    # validation error (it never reaches either SDK read). This vector pins the
+    # singular arm: a scalar `to_id`, no `target_ids`, no `operator`, no `semantics`.
+    "tortoise_link_entities": (
+        (
+            "relation-decided-EDGE",
+            (),
+            {"relation": "related", "from_id": "a", "to_id": "b"},
         ),
     ),
 }
