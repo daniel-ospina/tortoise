@@ -399,6 +399,9 @@ def _artifact_entries(run_def: ast.AST) -> tuple[dict[str, ast.AST], ast.Call]:
     return found[0]
 
 
+#: The tool's own id mapping — the ONE wrapper the `order` element check blesses.
+_ID_MAPPERS = {"_result_id"}
+
 _NON_MUTATING = {"list", "tuple", "len", "sorted", "id", "str", "bool", "any", "all",
                  "isinstance"}
 
@@ -406,7 +409,10 @@ _NON_MUTATING = {"list", "tuple", "len", "sorted", "id", "str", "bool", "any", "
 #: mutation. `print(f"nhits={len(results)}")` is the natural next edit to `run()`'s
 #: existing per-query print line, and it mutates nothing.
 _PURE_READS = _NON_MUTATING | {"repr", "int", "float", "type", "min", "max", "sum",
-                               "format", "round", "abs", "set", "dict", "frozenset"}
+                               "format", "round", "abs", "set", "dict", "frozenset",
+                               # Diagnostics: `print(results)` is the natural next edit to
+                               # `run()`'s existing per-query print line and mutates nothing.
+                               "print"}
 
 
 def _names_handed(node: ast.AST) -> set[str]:
@@ -628,8 +634,18 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             receiver = _names_in(node.value)
         callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None) \
             if isinstance(node, ast.Call) else None
-        handed = isinstance(node, ast.Call) and callee not in _NON_MUTATING and any(
-            _names_handed(arg) & watched
+        def _element_only(arg: ast.AST) -> bool:
+            """`results[0]` is an ELEMENT, not the collection (this file says so twice)."""
+            if isinstance(arg, ast.Subscript):
+                return True
+            if isinstance(arg, ast.Call):
+                callee_id = getattr(arg.func, "id", None) or getattr(arg.func, "attr", None)
+                return callee_id in _PURE_READS or any(
+                    _element_only(a) for a in arg.args)
+            return isinstance(arg, ast.JoinedStr)  # an f-string mutates nothing it interpolates
+
+        handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+            _names_handed(arg) & watched and not _element_only(arg)
             for arg in list(node.args) + [k.value for k in node.keywords])
         if receiver & muts or handed:
             hits.append(node.lineno)
@@ -768,7 +784,9 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     test — measured), plus the dunder entries `__setitem__` / `__delitem__`.
     `os.environ` handed to any call (positional or keyword) is red too: the only reason to
     hand the mapping over is to change it. Residual, stated rather than implied: a helper
-    that reaches `os.environ` inside its own body is not followed (the tool has none).
+    that reaches `os.environ` inside its own body is not followed. The scan is over the
+    WHOLE FILE, so a module-level helper that mutates `os.environ` IS caught — the hole is
+    the statically dead reach, not the file's scope.
 
     ⛔ AND THE OTHER STATIC SPELLINGS OF THE SAME OBJECT (#14281 review F1, measured):
     `_aliases_of` walks `Assign`/`AnnAssign`/`NamedExpr` only, so an IMPORT binding was
@@ -860,13 +878,30 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
         aug = isinstance(node, ast.AugAssign) and _is_environ(node.target)
         bound_call = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                       and node.func.id in bound)
+        # ⛔ …and so does a setattr/vars() spelling of the same assignment (#14281 review
+        # P2, both measured green): `setattr(os, "environ", {…})` and
+        # `vars(os)["environ"] = {…}` swap the whole mapping without an `Assign` target.
+        setattr_environ = (isinstance(node, ast.Call)
+                           and getattr(node.func, "id", None) in ("setattr", "delattr")
+                           and len(node.args) >= 2
+                           and isinstance(node.args[1], ast.Constant)
+                           and node.args[1].value == "environ")
+        vars_environ = (isinstance(node, ast.Subscript)
+                        and isinstance(node.ctx, (ast.Store, ast.Del))
+                        and isinstance(node.slice, ast.Constant)
+                        and node.slice.value == "environ"
+                        and ((isinstance(node.value, ast.Call)
+                              and getattr(node.value.func, "id", None) == "vars")
+                             or (isinstance(node.value, ast.Attribute)
+                                 and node.value.attr == "__dict__")))
         # ⛔ `os.environ = {…}` REPLACES the mapping: a rebinding, not a write.
         rebound = (isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete))
                    and any(_is_environ(t) for t in (
                        getattr(node, "targets", None) or [getattr(node, "target", None)])))
         handed = isinstance(node, ast.Call) and any(
             _is_environ(a) for a in list(node.args) + [k.value for k in node.keywords])
-        if not (subscript or method or aug or bound_call or rebound or handed):
+        if not (subscript or method or aug or bound_call or rebound or handed
+                or setattr_environ or vars_environ):
             continue
         module_pop = (isinstance(node, ast.Call)
                       and getattr(node.func, "attr", None) == "pop"
@@ -1414,6 +1449,24 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         # counts, so the target cannot sit purely in the condition.
         _used = _names_in(value.elt.body) if isinstance(value.elt, ast.IfExp) \
             else _names_in(value.elt)
+        if key == "order":
+            # ⛔ STRUCTURAL, because a mention is not a use (#14281 review P1, all three
+            # measured GREEN and each records a CONSTANT page, so `compare()` reports
+            # `rank_identical: True` over a permuted one):
+            #     (r and None) or "X"        (_result_id(r), "X")[1]        r if False else "X"
+            # The element must BE the target, or the target through the blessed id mapper.
+            _targets = _names_in(gen.target)
+            _ok = (isinstance(value.elt, ast.Name) and value.elt.id in _targets) or (
+                isinstance(value.elt, ast.Call) and len(value.elt.args) == 1
+                and not value.elt.keywords
+                and getattr(value.elt.func, "id", None) in _ID_MAPPERS
+                and isinstance(value.elt.args[0], ast.Name)
+                and value.elt.args[0].id in _targets)
+            assert _ok, (
+                f"the artifact's `order` maps each hit through {ast.unparse(value.elt)} — "
+                "only the hit itself or its id mapper is provably the measured page; a "
+                "mention (a BoolOp arm, a tuple index, a constant branch) can record a "
+                "constant and make a permuted page compare as identical")
         assert _used & _names_in(gen.target), (
             f"the artifact's `{key}` does not derive its element from the loop target "
             f"`{ast.unparse(gen.target)}`: {ast.unparse(value.elt)}")
