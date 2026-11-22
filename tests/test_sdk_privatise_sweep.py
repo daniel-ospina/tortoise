@@ -252,13 +252,18 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1122 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1186 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
-    line inside the run and it silently shrank to 22 until the #14188 repair; this re-cut's
+    line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
+    prose commits grew it to 1066 while this sentence still said 985, which was true at
+    `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of #14258, P3), and this re-cut's
     restoration of the branch's dropped blocks took the merged run to 1079, a peer's prose to 1084,
     dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
     rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
-    blocks and added the re-measure note — to 1122), AND THE ARMS GRADE ALL OF IT
+    blocks and added the re-measure note — to 1122; THIS re-cut merges `origin/main` `0467ba32`
+    (base `70fbd1a2`), and it keeps both sides' blocks for the same reason while dropping the
+    duplicate `#:` separator the two sides' paragraphs were joined by, leaving 1186), AND THE ARMS GRADE
+    ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
@@ -351,6 +356,40 @@ _ARM_REFSPECS: dict[str, str] = {
     RESIDUE_INTERVAL_END: _PR_HEAD_REFSPEC,
     RESIDUE_PR_HEAD: _PR_HEAD_REFSPEC,
     "origin/main": "+main:refs/remotes/origin/main",
+    # ⛔ PR #14258's `OWN_PINS` GREW BY TWO AND THE MAP DID NOT FOLLOW, so
+    # `test_the_own_pin_map_matches_each_revs_own_tree`'s `_requires(*sorted(OWN_PINS))` raised
+    # `KeyError` instead of SKIPPING in the sharded `test` job — which checks out at
+    # `fetch-depth: 1` (`python-ci.yml`'s bare `actions/checkout@v4` has no `with:`), i.e. the
+    # exact shape this two-arm design exists to survive (see the round-16 note above: an arm that
+    # cannot run there is not a guard). An ERROR, not a skip, so it reds the job.
+    # The two entries are NOT the same kind of address, which is why one carries a flag:
+    #   * `0351fe856942` IS `refs/pull/14160/head`'s tip, so a depth-1 fetch of that ref arms it —
+    #     the same convention `RESIDUE_PR_HEAD` already uses for `refs/pull/14108/head`.
+    #   * `10e51693f166` is #14160's SQUASH and lives 8 commits back in `main`'s history, so NO
+    #     depth-1 refspec can arm it. The obvious remedy — `--deepen=N +refs/heads/main:…` — WORKS
+    #     ONLY WHILE `main` HAS MOVED FEWER THAN N COMMITS since this was written: `--deepen` reaches
+    #     `N+1` from the tip, `main` moves ~62 commits/day here (`git rev-list --count --since='7 days
+    #     ago' origin/main` → 435), so a deepen would make this message inert again in ~3 days with
+    #     NOTHING reddening (the guard grades syntax and destination, never reachability). So it
+    #     names the commit by FULL SHA: git can `want` a 40-character sha, GitHub answers it
+    #     (measured from a `fetch-depth: 1` clone — `git fetch origin
+    #     "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166"` → `* [new ref]`, exit 0,
+    #     `cat-file -e` then succeeds), and a sha-want does not expire and fetches one commit's trees
+    #     rather than 200 commits of `main`.
+    # ⛔ AND BECAUSE IT PINS BY SHA, ITS *SOURCE* IS GRADED AS A FULL SHA (review of PR #14258, P2).
+    # A refspec SOURCE that is hex is a new shape here — every other entry sources a REF
+    # (`refs/pull/14108/head`, `main`). An abbreviated source would print the exact inert remedy this
+    # map exists to forbid (`git fetch origin "+10e51693f166:refs/pi/x"` → `fatal: couldn't find
+    # remote ref`, rc=128) while the suite stayed GREEN, because the arm's
+    # `fullmatch(r"[0-9a-f]{7,39}")` runs on the WHOLE entry and a refspec contains `+` and `:`, so it
+    # can never match hex-only at ANY length. Hex length therefore does no work there; the arm now
+    # checks it where it does — on the SOURCE.
+    "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
+    "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
+    # `8889f1140105` is a MERGE on a feature branch, so neither `main` nor a `/head` ref arms it
+    # at any depth — it is named by FULL SHA for the same reason `10e51693f166` is (a sha-want
+    # does not expire, fetches one commit's trees, and GitHub answers it from a depth-1 clone).
+    "8889f1140105": "+8889f1140105677add2c7c4dd60d0c8c5080ea26:refs/pi/8889f1140105",
 }
 
 
@@ -1494,17 +1533,35 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     `_rearm_command` indexes `_ARM_REFSPECS` directly, so an unmapped rev raises instead of
     printing an inert `git fetch origin <abbreviation>`. This arm keeps the map honest for
     the revs a skip can name today.
+
+    ⛔ AND FOR EVERY `OWN_PINS` KEY (review of PR #14258, P1). The fixed tuple below used to be the
+    WHOLE population, so `OWN_PINS` could grow — it did, by `10e51693f166` and `0351fe856942` — and
+    this arm stayed green over the map that just gained two unmapped revs. The consequence was not
+    a red here but a `KeyError` at SKIP time in `test_the_own_pin_map_matches_each_revs_own_tree`
+    on a `fetch-depth: 1` checkout. Iterating `OWN_PINS` too is what turns that class into the RED
+    this arm is for.
     """
-    for rev in (RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
-                RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"):
+    addressed = (RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
+                 RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main",
+                 *sorted(OWN_PINS))
+    for rev in addressed:
         assert rev in _ARM_REFSPECS, f"{rev} has no fetchable address — a skip naming it is inert"
         assert not re.fullmatch(r"[0-9a-f]{7,39}", _ARM_REFSPECS[rev]), (
             f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
-        _, _, destination = _ARM_REFSPECS[rev].lstrip("+").partition(":")
+        src, _, destination = _ARM_REFSPECS[rev].lstrip("+").partition(":")
         assert destination, (
             f"{rev} is mapped to a SOURCE-ONLY refspec: git records it in `FETCH_HEAD` and "
             "creates no local ref, so a skip printing it re-arms the object DB and leaves the "
             "ADDRESS assertion UNCHECKED — the round-13 inert remedy")
+        # ⛔ A HEX SOURCE MUST BE A FULL SHA (review of PR #14258, P2). The whole-entry `fullmatch`
+        # above cannot see this: a refspec contains `+` and `:`, so it never matches hex-only at ANY
+        # length — which left an abbreviated SHA SOURCE ungraded. Measured before this assertion
+        # existed: mutating this entry to a 12-hex source (`+10e51693f166:refs/pi/…`) kept the arm
+        # GREEN, while the remedy it would print is `fatal: couldn't find remote ref` (rc=128).
+        if re.fullmatch(r"[0-9a-f]+", src):
+            assert len(src) == 40, (
+                f"{rev} is mapped to a hex SOURCE of {len(src)} characters — git cannot `want` an "
+                "abbreviated sha, so the printed remedy is inert; use the full 40-character sha")
     assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
         "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
     assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
@@ -1632,7 +1689,7 @@ def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
 # prose arms. So the block is graded against `OWN_PINS`, an object-FREE map, and the map is
 # graded against each rev's committed pin by the premise arm that follows it.
 _OWN_PIN_CLAIM_RE = re.compile(
-    r"Its own pin[\s#:]+is[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+    r"(?:Its own pin[\s#:]+is|commits)[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
 _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 
 #: rev -> the `(rows, digest)` pair the block publishes AS that rev's own pin.
@@ -1643,6 +1700,26 @@ _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 #: re-derives every entry from the repository wherever the objects exist.
 OWN_PINS: dict[str, tuple[int, str]] = {
     "d523c9be8c": (11838, "de5664dc98549d56"),
+    # ⛔ THE `commits` SPELLING IS GRADED TOO (review of PR #14258, P3). The regex above used to key
+    # on `Its own pin is` alone, so the re-pin block's `10e51693f166` (#14160) `commits
+    # (11858, "a1552662bf07a10b")` — the same class of claim, written in a different honest form —
+    # was ungraded: a rev published with another tree's pair would have passed in that spelling.
+    # `0351fe856942` is #14160's PRE-squash tip (`refs/pull/14160/head`) and `10e51693f166` the
+    # squash that landed it; both commit the same pair, measured with `git show
+    # <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`. ⛔ `--repin` at the SQUASH tree prints
+    # `(11861, "f0647020531c078c")` — that is the drift this re-pin repairs, so it is `--repin` at
+    # `0351fe856942`, NOT at the squash, that reproduces the pair; an earlier cut of this comment
+    # said "either tree" (review round 2, P2) and the cut that replaced it said "alone", which the
+    # NEXT sentence falsifies — `c5e84ad180f2` reads the same pair too, which is the whole point of
+    # excluding it by PROVENANCE rather than by a measurement difference (review round 3, P2). ⛔ AND NOT `c5e84ad180f2`, where
+    # `origin/fix/14125-census-p1s` stands today: it is a DESCENDANT of `0351fe856942`, pushed
+    # after the squash, and its content never landed.
+    # `8889f1140105` is the merge that PINS 11835 and MEASURES 11843 — the block’s example of
+    # the rule. Its pair is verified against the tree like every other entry
+    # (`git show 8889f1140105:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`).
+    "8889f1140105": (11835, "891187f5a4636487"),
+    "10e51693f166": (11858, "a1552662bf07a10b"),
+    "0351fe856942": (11858, "a1552662bf07a10b"),
 }
 
 
@@ -1651,7 +1728,9 @@ def _own_pin_claims(block: str) -> list[tuple[str, int, str]]:
 
     The rev is the NEAREST backticked hex token BEFORE the claim, because that is how the
     block writes it — the sentence it corrects reads "… `d523c9be8c`, the LAST of the eight,
-    inherits that deletion. … Its own pin is …". No claim returns an empty list; the caller
+    inherits that deletion. … Its own pin is …". Two SPELLINGS are graded, `Its own pin is` and
+    `commits` (PR #14258's review, P3: the second was ungraded, so the same defect written as
+    "`<rev>` commits `(N, "digest")`" passed). No claim returns an empty list; the caller
     asserts non-vacuity so deleting the sentence is not a way to pass.
     """
     claims = []
@@ -1675,6 +1754,18 @@ def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
     assert claims, (
         "non-vacuity: the block still publishes at least one rev's OWN pin — deleting the "
         "sentence is not the fix for a wrong pair")
+    # ⛔ THE `commits` SPELLING MUST BE FOUND, not merely tolerated (#14258 review, P3 and the
+    # mutation-attribution rule). Widening `_OWN_PIN_CLAIM_RE` ADDED an assertion surface — two
+    # block clauses that were ungraded became graded — and without this arm REVERTING the
+    # widening left the suite GREEN (measured: the pre-widening regex finds only `d523c9be8c`,
+    # which is in `OWN_PINS`, so every assertion below passes over a surface that no longer
+    # grades the clause it was widened for). A covered row that nothing holds covered is the
+    # shape this file rejects, so the coverage itself is asserted here.
+    assert {"10e51693f166", "0351fe856942"} <= {rev for rev, _rows, _digest in claims}, (
+        "the `commits (N, \"digest\")` spelling must be GRADED: `_OWN_PIN_CLAIM_RE` has to match "
+        "it, or a rev published with another tree's pair passes in that spelling — which is the "
+        "defect the widening exists for. Findings found: "
+        f"{sorted(rev for rev, _r, _d in claims)}")
     for rev, rows, digest in claims:
         assert rev in OWN_PINS, (
             f"the block publishes `{rev}`'s own pin, but `{rev}` is not in `OWN_PINS`, so "

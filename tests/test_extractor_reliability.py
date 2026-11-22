@@ -1065,12 +1065,13 @@ def test_complete_wires_scaled_deadline(monkeypatch):
             return '{"ok": true}'
 
     def fake_call_once(model, system, user, *, deadline_s, max_tokens, stats):
-        # #3359: _call_once returns the 7-tuple
-        # (resp, finish, prompt_tokens, completion_tokens,
-        #  cost_usd, cost_provider, cost_model) — the cost driver rides the
-        # return value, not the caller's stats dict.
+        # #3359: the cost driver rides the return value, not the caller's stats
+        # dict. #14277: the tuple is EIGHT wide — the last element is the
+        # provider's cache-hit split the cost row now reads. Arity is part of
+        # the contract this double stands in for: a 7-wide fake does not fail
+        # here, it fails inside `_complete`'s unpack (measured on #14277).
         seen["deadline_s"], seen["max_tokens"] = deadline_s, max_tokens
-        return ("ok", model.last_finish_reason, 0, 0, None, None, None)
+        return ("ok", model.last_finish_reason, 0, 0, None, None, None, 0)
 
     monkeypatch.setattr(v2, "_call_once", fake_call_once)
     assert v2._complete(_Rec(), "s", "u", max_tokens=16000) == "ok"
