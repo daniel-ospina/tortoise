@@ -316,7 +316,7 @@ must not suppress the onboarding observation.` comment (not blank) and the
 ``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37002`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
 `:Document` docstring lines are `:37568` in `record_decision` (opening `:37548`;
-`:37491` is the `:Source` line immediately above it, which is what a re-measure by that
+`:37566` is the `url of the document Source` line above it, which is what a re-measure by that
 phrase alone lands on) and `:37610` in `_file_human_approval` (opening `:37588`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a

@@ -88,7 +88,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # rows; a re-derivation moved the rows and left the prose, so the comment vouched for a pin set that
     # no longer exists (`grep '6659\|6661'` matched nothing but this comment). Name what the rows carry now.
     (_AUDIT, "`:7576-7579`", _SE, 7576, "_SUBJECT_SOURCE_SCOPED_PROBE = ("),
-    (_AUDIT, "`:7582-7595`", _SE, 7582, "def subject_binding_available"),
+    (_AUDIT, "`:7582-7596`", _SE, 7582, "def subject_binding_available"),
     (_AUDIT, "search_engine.py:3157", _SE, 3157, "CALL db.idx.fulltext.queryNodes"),
     (_AUDIT, "| `tortoise/search_engine.py:4878-4880` |", _SE, 4878, "MATCH (n:{label_str})"),
     # ⚠️ The token above carries its TABLE context on purpose. A bare `search_engine.py:4878-4880` is a
@@ -148,9 +148,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
-    # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
-    # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:58099`, `search_engine.py`'s two then-current spellings) = 122 of the 214. ⛔ The
+    # so the header counts it as drifted rather than compared, and it is one of the THIRTEEN that are
+    # incomparable at the pin — the whole `_PIN_EOF_PAIRS` table, not this pair alone. Measured at this
+    # head: 13 non-comparable of 234, 221 comparable, and the drift is 128 of the 221 comparable plus
+    # 8 of the 13 = 136 of the 234. ⛔ This comment said "ONE OF THREE … 211 comparable, 119 of them
+    # drifted … 122 of the 214": that was the PRE-re-derivation split, it survived the pass that moved
+    # `_PIN_EOF_PAIRS` 11 → 13, and its denominator reconciles with no table this file holds — which is
+    # the `#14269` review's finding (a figure block is the one place a stale value cannot be caught by
+    # the pin rows beside it). ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
@@ -422,7 +427,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7577'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7579'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7576-7579`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7582-7595`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7582-7596`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:3157'): 5,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/search_engine.py:4878-4880` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4293'): 1,
@@ -1265,7 +1270,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     # (2) every one of them is NAMED where the header promises to name them: the non-comparable enumeration,
     # the sentence between "that are NOT comparable" and "past the pin's copy of its file". Either spelling
     # form the document uses for a pair counts — `SDK/FILE:NNNN` (`sdk.py:57951`) or the bare `:NNNN`
-    # sibling behind an adjacent path (`search_engine.py`'s `:7560`).
+    # sibling behind an adjacent path (`search_engine.py`'s `:7577`).
     start = body.find("that are NOT comparable")
     end = body.find("past the pin's copy of its file")
     assert start != -1 and end > start, (
@@ -1927,6 +1932,48 @@ def test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line() -> None:
     for mutant in (end - 1, end + 1):  # NON-VACUOUS: one short and one long both red
         tampered = doc_text.replace(f"sdk.py:{start}-{end}", f"sdk.py:{start}-{mutant}")
         assert _cited_span_ends(tampered, start) != [end], (
+            f"a span end moved to `:{mutant}` still passed this arm"
+        )
+
+
+def _bare_span_ends(doc_text: str, start: int) -> list[int]:
+    """Every END a BARE `:START-END` span opening at *start* states in *doc_text*.
+
+    The `sdk.py:`-qualified sibling above cannot read a bare token, and the
+    `subject_binding_available` cite is written bare (`at `:7582-7596``), so this is the
+    second spelling of the same question rather than a second definition of "end".
+    """
+    return [int(m.group(1)) for m in re.finditer(rf":{start}-(\d+)", doc_text)]
+
+
+def test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter() -> None:
+    """A span cite must END on the docstring's closing delimiter, not its last text line.
+
+    `#14269` review (P1 / F3): `CAPABILITY-PLACEMENT-AUDIT.md` cited `:7582-7595` — the last
+    TEXT line — while the docstring closes on `:7596`, and the PR body recorded R3 as having
+    CORRECTED exactly this off-by-one at the previous head (`:7201-7214`, close at `:7215`).
+    A `_PINS` row pins a span's START only, so both a short and a long END were green in every
+    other test in this file: measured on a throwaway copy, mutating the END reddened nothing.
+    Derived, not hardcoded — the START is the line carrying the `def`, the END is the first line
+    after it whose stripped text is the bare closing delimiter.
+    """
+    lines = (REPO / "tortoise/search_engine.py").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines, 1) if "def subject_binding_available" in line)
+    end = next(i for i in range(start + 1, len(lines) + 1) if lines[i - 1].strip() == '"""')
+    assert end > start, (
+        f"`search_engine.py:{start}` has no closing delimiter after it, so this arm would grade "
+        "nothing — re-point it at the docstring it is meant to cover."
+    )
+    doc_text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    cited = _bare_span_ends(doc_text, start)
+    assert cited == [end], (
+        f"`CAPABILITY-PLACEMENT-AUDIT.md` cites `:{start}-{cited[0] if cited else '???'}` but that "
+        f"docstring CLOSES on `:{end}` — the span must run THROUGH the closing delimiter "
+        f"(`_PINS` pins the START, so a short END is green everywhere else in this file)"
+    )
+    for mutant in (end - 1, end + 1):  # NON-VACUOUS: one short and one long both red
+        tampered = doc_text.replace(f":{start}-{end}", f":{start}-{mutant}")
+        assert _bare_span_ends(tampered, start) != [end], (
             f"a span end moved to `:{mutant}` still passed this arm"
         )
 
