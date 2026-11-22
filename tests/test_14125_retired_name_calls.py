@@ -686,12 +686,18 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
 #: `pytest.skip.Exception` / `_pytest.outcomes.skip.Exception` (part "skip"),
 #: `pytest.xfail.Exception` / `_pytest.outcomes.xfail.Exception` (part "xfail"),
 #: `_pytest.outcomes.Skipped` (part "Skipped"), `unittest.SkipTest` (part "SkipTest").
-#: ⛔ THE TWO ARMS ARE GRADED SEPARATELY, and the difference is easy to get wrong (an earlier cut
-#: of this paragraph attributed the `ast.Name` tail to `unittest.SkipTest`, which does not reach it):
-#: every `*.<attr>` spelling above answers on the ATTRIBUTE loop, and only a raise whose callee is
-#: a BARE identifier — `raise SkipTest("no engine")` — reaches the `ast.Name` tail at the end of
-#: `_raises_a_skip`. `unittest.SkipTest` therefore grades the "SkipTest" MEMBER, not the tail; the
-#: tail is what the bare-name row of `4j-quinvicesimus` grades.
+#: ⛔ THE TWO ARMS ARE GRADED SEPARATELY, and the difference is easy to get wrong in BOTH
+#: directions — an earlier cut attributed the `ast.Name` tail to `unittest.SkipTest` (which never
+#: reaches it), and the cut that fixed that then said a `unittest.SkipTest` ROW grades the
+#: "SkipTest" member, which NO row does. What is true: every `*.<attr>` spelling above answers on
+#: the ATTRIBUTE loop, and only a raise whose callee is a BARE identifier —
+#: `raise SkipTest("no engine")` — reaches the `ast.Name` tail at the end of `_raises_a_skip`. The
+#: "SkipTest" MEMBER is therefore graded by the BARE-NAME row of `4j-quinvicesimus`, through that
+#: tail: delete the tail (keeping the set) and that row ALONE reds while the four dotted rows stay
+#: green; delete the member and the same row alone reds — both measured. No row spells
+#: `unittest.SkipTest`: the attribute loop recognises it, but a witness for it would pin the same
+#: member a second time with no mutant separating the two, which is the duplicate-witness row an
+#: earlier review of this PR deleted for having no independent discriminating power.
 _SKIP_RAISE_PARTS = frozenset({"skip", "xfail", "Skipped", "SkipTest"})
 
 
