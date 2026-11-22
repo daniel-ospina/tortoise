@@ -2961,7 +2961,12 @@ def test_the_repeat_grader_counts_a_COMPREHENSION_and_not_its_outer_iterable():
     * the OUTERMOST ``generators[0].iter`` is NOT a repeat: it is evaluated once,
       so ``[x for x in SEAM(query="once")]`` is a single read. Counting it would
       false-block a perfectly good rewrite, which is the over-block direction of
-      the same bug.
+      the same bug. ⛔ ONLY that one: the language reference is explicit that
+      "the leftmost ``for`` iterable is evaluated ... once, while targets,
+      SUBSEQUENT ``for`` clauses, ``if`` filters, and the result expression are
+      evaluated as the comprehension iterates" (Python 3.12 reference, §6.2.9
+      comprehensions), so a SECOND generator's iterable IS a repeat — row
+      `subseq` grades exactly that sentence.
 
     The returned NODE is graded, not a bare truthiness, so "it is a repeat" and
     "it is a repeat FOR THE RIGHT REASON" are different assertions.
@@ -2973,6 +2978,7 @@ def reads(queries, sdk):
     [w for w in (sdk._tortoise_fts_query(query="nwarm")
                  for _i in range(len(queries)))]
     [x for x in sdk._tortoise_fts_query(query="once")]
+    [x for _q in queries for x in sdk._tortoise_fts_query(query="subseq")]
     (sdk._tortoise_fts_query(query="gen") for _q in queries)
     {"k": sdk._tortoise_fts_query(query="dictval") for _q in queries}
     [sdk._tortoise_fts_query(query="ifbody") for _q in queries
@@ -2996,6 +3002,7 @@ def reads(queries, sdk):
         "elem": ast.ListComp,        # element: once per item
         "nwarm": ast.GeneratorExp,   # inner generator's element: once per item
         "once": None,                # OUTERMOST iterable of the generator: ONCE
+        "subseq": ast.ListComp,      # a SUBSEQUENT `for` clause's iterable: per item
         "gen": ast.GeneratorExp,     # a generator's element: once per item
         "dictval": ast.DictComp,     # the dict VALUE: once per item
         "ifbody": ast.ListComp,      # the element, beside an `if` clause
