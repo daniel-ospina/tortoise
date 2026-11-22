@@ -1634,24 +1634,28 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # ⛔ A MIRROR of the shipped door, and the one A/B harness whose WHOLE
         # subject is this read's latency (#14192). `run` reads through
         # `sdk._tortoise_fts_query(query=…, limit=10)` at TWO sites: the warm-up
-        # (`:296`, result discarded) and the per-query measurement loop (`:305`,
-        # one call per query — 24 at the recorded width, so `1 + N` executions,
-        # not two). Both are the read `/v1/search` performs, from the tree under
-        # measurement, and opting out would measure a reader neither door runs.
-        # Under `--ab-full-read-from` each arm is ONE `run()` (`:541`, `:556`)
-        # over the SAME seam, so an armed gate is common to both arms and
-        # cancels. What the issue's *Done when* asks for is the p50/p95 DELTA
-        # against the current chain (`verdict.total_delta_p50_ms` /
-        # `…_p95_ms`) plus a rank-identity verdict; the absolute p50/p95 it also
-        # publishes are each arm's own shipped read. Listed rather than opted
-        # out for the same ground `capstone_12186_recall.py` and
-        # `miss_rate_m5.py` hold above.
+        # issued before the per-query loop (result discarded), and the per-query
+        # measurement loop itself (one call per query — 24 at the recorded
+        # width, so `1 + N` executions, not two). Both are the read `/v1/search`
+        # performs, from the tree under measurement, and opting out would measure
+        # a reader neither door runs. Under `--ab-full-read-from` each arm is ONE
+        # `run()` in `main`'s AB branch, over the SAME seam, so an armed gate is
+        # common to both arms and cancels. What the issue's *Done when* asks for
+        # is the p50/p95 DELTA against the current chain
+        # (`verdict.total_delta_p50_ms` / `…_p95_ms`) plus a rank-identity
+        # verdict; the absolute p50/p95 it also publishes are each arm's own
+        # shipped read. Listed rather than opted out for the same ground
+        # `capstone_12186_recall.py` and `miss_rate_m5.py` hold above.
         # ⛔ THIS COMMENT IS THE ONLY RECORDED REASON FOR A PERMANENT EXEMPTION,
-        # so its claims are GRADED — the `read_wave_latency` arm at the end of
-        # this test parses the tool and reds if a third read appears inside the
-        # granted owner `run` (an owner-granular grant would otherwise exempt it
-        # silently), if the `leg_trace` read leaves the per-query loop, or if the
-        # site count stops being two. Re-derive the text; never delete that arm.
+        # and the `read_wave_latency` arm at the end of this test grades its
+        # COUNTABLE parts — how many seam mentions the tool carries, that all of
+        # them sit in the granted owner `run`, that exactly ONE is the traced
+        # per-query loop, and that the traced one is inside a `for` (the `1 + N`
+        # above). It does NOT grade a line number, which is why the shapes above
+        # are named by ROLE rather than by offset: an insertion higher in the
+        # file rots an offset silently, and an ungraded numeral is the same rotted
+        # claim this block exists to stop. Re-derive the text; never delete that
+        # arm.
         "tools/read_wave_latency.py": frozenset({"run"}),
     }
     seen_external: set[str] = set()
@@ -1707,20 +1711,39 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
             parent = harness_parent.get(id(parent))
         return None
 
-    seam_calls = [n for n in _ast.walk(harness)
-                  if isinstance(n, _ast.Call)
-                  and getattr(n.func, "attr", None) == "_tortoise_fts_query"]
-    assert len(seam_calls) == 2, (
-        f"{len(seam_calls)} `_tortoise_fts_query` call site(s) in "
+    # ⛔ MENTIONS, NOT CALLS — the census's own granularity. `_sites` above counts
+    # every ``ast.Attribute`` spelling of the seam (both names; the census is
+    # about the SEAM), so a third read added inside `run` as a BOUND METHOD
+    # (``_m = sdk._tortoise_fts_query``) or under the PUBLIC spelling is absorbed
+    # by the owner-granular grant and would be invisible to a ``Call``-only
+    # predicate (measured: both mutants stayed GREEN against the Call form, which
+    # is the gap this line closes).
+    seam_mentions = [n for n in _ast.walk(harness)
+                     if isinstance(n, _ast.Attribute)
+                     and n.attr in ("tortoise_fts_query",
+                                    "_tortoise_fts_query")]
+    assert len(seam_mentions) == 2, (
+        f"{len(seam_mentions)} seam mention(s) of `tortoise_fts_query` in "
         "tools/read_wave_latency.py, but the exemption's recorded reason says "
         "TWO (a discarded warm-up, and the measured loop) and the grant is "
         "owner-granular — a further read inside `run` is exempted with no "
         "recorded reason. Re-derive the comment in `intentional_keep`.")
-    owners = {(_enclosing(c).name if _enclosing(c) else None)
-              for c in seam_calls}
+    owners = {(_enclosing(m).name if _enclosing(m) else None)
+              for m in seam_mentions}
     assert owners == {"run"}, (
         "the exempted reads are not all inside `run`, the only owner the grant "
         f"names: {sorted(owners, key=str)}")
+    seam_calls = []
+    for mention in seam_mentions:
+        call = next((c for c in _ast.walk(harness)
+                     if isinstance(c, _ast.Call)
+                     and (c.func is mention or mention in c.args
+                          or any(mention is k.value for k in c.keywords))), None)
+        assert call is not None, (
+            f"the seam mention at line {mention.lineno} feeds no call — the "
+            "exemption is claimed for READS, and a mention that reaches none "
+            "proves nothing")
+        seam_calls.append(call)
     traced = [c for c in seam_calls
               if any(k.arg == "leg_trace" for k in c.keywords)]
     assert len(traced) == 1, (
