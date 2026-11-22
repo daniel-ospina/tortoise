@@ -585,11 +585,14 @@ def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
     RuntimeError("the allowance read failed: HTTP 500"),
     # A SECOND class the guard exists for: `resolve_org_limits` raises
     # `OrgNotFoundError` (a `QuotaCheckError`) when the org row is missing
-    # (`tortoise/quota.py:804`), which is NOT a `RuntimeError`. ⛔ This pair pins
+    # (`tortoise/quota.py:804`), which is NOT a `RuntimeError`. ⛔ This row pins
     # BREADTH, not "the realistic one" — a transport failure and a terminal non-2xx
     # raise `RuntimeError`, so neither of the two is hypothetical. Pinned because a
-    # guard narrowed to `except RuntimeError` leaves every OTHER row in this file
-    # green while it regresses exactly this path (#14038 review cycle 10, P3).
+    # guard narrowed to `except RuntimeError` REDS this row (and the third one)
+    # while leaving the `transport` row green — measured at this head by narrowing
+    # the guard: `2 failed, 1 passed` (the two non-`RuntimeError` rows red)
+    # (#14038 review cycle 10, P3; corrected in cycle 18, where an earlier cut of
+    # this sentence still claimed it reds "every OTHER row").
     quota.OrgNotFoundError("Team 'team-solo-001' not found in control plane"),
     # ⛔ A THIRD CLASS IN NEITHER of the two above, because those two NAMED classes
     # pin two names, not the guard's BREADTH: a narrowing to
