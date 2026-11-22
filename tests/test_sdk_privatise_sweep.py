@@ -1948,7 +1948,7 @@ _OWN_PIN_CLAIM_RE = re.compile(
 #: and the orphan arm saw no missing key because the rev was never in `OWN_PINS` either. So a wrong
 #: pair typed into that clause would have passed everything. Scoped to the PHRASE, deliberately:
 #: the digest class stays `[0-9a-f]{16}` lowercase, so a capitalised HEX DIGEST is still a RED (the
-#: uppercase-digest mutant measures `8 == 9`).
+#: uppercase-digest mutant reds the claims-vs-clauses parity arm — one clause with no claim).
 #: How many clauses the pattern must match is NOT typed: it is counted off the block below.
 #: ⛔ THE WRAP IS GRADED HERE BECAUSE A RE-WRAP SILENTLY DISARMS THIS ARM (#14282 review cycle 4,
 #: P1, measured). The pattern was `Its own pin[\s#:]+is` — it tolerated a wrap between `pin` and
