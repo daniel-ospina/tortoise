@@ -557,12 +557,17 @@ def write(event: Mapping[str, Any], *,
     (the `#7951` ordering contract) and after the record ATTEMPT — ⛔ the
     ATTEMPT, not the ROW: with `TORTOISE_PROJECTION_WORKER` armed the record
     write is QUEUED and applied by another thread, so this cache fold can LEAD
-    the record by the queue's lag, and under `TORTOISE_PROJECTION_QUEUE_MAX`'s
-    declared residual it can overwrite a predecessor position still queued for
-    the same tenant. What the ordering here guarantees is CALLER-THREAD order,
-    not store order; a deferred deployment accepts that trade because the cache
-    is what the read path serves today and the record is healed by a replay of
-    the journal (`docs/architecture/STORAGE-ARCHITECTURE.md` §3).
+    the record by the queue's lag. ⛔ The CACHE is never reordered —
+    `projection.apply` folds one event in caller-thread order — but the RECORD
+    seam is: under `TORTOISE_PROJECTION_QUEUE_MAX`'s declared residual an inline
+    fallback can let a predecessor position that is still queued land AFTER this
+    write, so THIS write's record row can be overwritten BY its predecessor
+    (`.env.example` and `projection_worker` state the same direction; an earlier
+    cut of this paragraph inverted it and attributed it to the cache). What the
+    ordering here guarantees is CALLER-THREAD order, not store order; a deferred
+    deployment accepts that trade because the cache is what the read path serves
+    today and the record is healed by a replay of the journal
+    (`docs/architecture/STORAGE-ARCHITECTURE.md` §3).
 
     ``fold=False`` lets the SDK's door keep its own fold decision while still
     getting the append→record ordering and the named outcome from here.

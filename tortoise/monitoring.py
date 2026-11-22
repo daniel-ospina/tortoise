@@ -968,11 +968,19 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   ⛔ **NOT EVERY INLINE FOLD IS COUNTED HERE, and the difference is the point**
 #:   (round-14 review, P3): the STRUCTURAL arms fold inline on every write at any
 #:   depth and move no counter at all — those are FIVE of the SEVEN conditions
-#:   `live_write._submitted_to_worker` tests, and two of the five are named here:
-#:   the function returns `False` at the `journal_skipped or record_sink is not
-#:   None or not durable` gate and at the `tenant is None` gate, both BEFORE any
-#:   queue or counter is touched. The other three structural returns are the
-#:   UNIMPORTABLE loop (`except` around the import) and the two SWITCHES. ⛔ FIVE
+#:   `live_write._submitted_to_worker` tests. ⛔ FIVE CONDITIONS, carried by TWO
+#:   gate STATEMENTS: `journal_skipped or record_sink is not None or not durable`
+#:   covers THREE of them and `tenant is None` the fourth, both BEFORE any queue
+#:   or counter is touched. The fifth structural condition is the UNIMPORTABLE
+#:   loop (`except` around the import — a loop that cannot be imported cannot
+#:   fold). The remaining TWO of the seven are the SWITCHES (the loop flag and the
+#:   record's own DSN), which are CONFIGURATION, not structural — ⛔ NOT "three
+#:   structural returns": an earlier cut of this block folded the switches into the
+#:   structural family ("the other three structural returns are the UNIMPORTABLE
+#:   loop and the two SWITCHES", which is 2 + 3 arithmetic mixing CONDITIONS with
+#:   GATE STATEMENTS), and that contradicts `live_write.py`'s own header: "FIVE OF
+#:   THE SEVEN CONDITIONS ARE STRUCTURAL — FOUR CORRECTNESS plus an unimportable
+#:   loop — AND THE OTHER TWO ARE THE SWITCHES". ⛔ FIVE
 #:   OF SEVEN, not "these two": this block used to stop at the two gates, which
 #:   left a reader believing a zeroed counter meant nothing had folded inline
 #:   (⛔ cited by TEXT, not by `file:line`: three citations here were five

@@ -403,11 +403,14 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
         # this arm returned `record_no_outcome` BEFORE looking — so an outcome
         # carrying the seam's healthy token with no readable `applied` was counted
         # as a LOSS. `live_write` has no such divergence, and the reason is NOT
-        # that it reads the token independently of `applied`: its gate at
-        # live_write.py:748 is `not getattr(outcome, "applied", False) and not
-        # _is_durable_decline(outcome)`, so a `False` DEFAULT makes an ABSENT
+        # that it reads the token independently of `applied`: its gate is
+        # `elif (outcome is not None and not getattr(outcome, "applied", False)
+        # and not _is_durable_decline(outcome))` (⛔ cited by GATE TEXT, not by
+        # `file:line` — a number here has already been wrong-when-written twice,
+        # most recently resolving to a COMMENT five lines above the gate), so a
+        # `False` DEFAULT makes an ABSENT
         # attribute FALSY, that write enters the falsy branch, and the decline is
-        # consulted there (`:749`). With `applied=True` the decline is never read at
+        # consulted in that same branch. With `applied=True` the decline is never read at
         # all — which is exactly why this arm had to look before it answered.
         # Latent today (both doors answer `RecordWrite | None`), and fail-closed in
         # the wrong direction — a false loss count, never a lost row.
@@ -447,8 +450,11 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
     # this arm nor the `_absent` arm above, so it fell through to the `return None`
     # below, i.e. COUNTED AS A WRITTEN ROW. `live_write` reads the same input the
     # other way on BOTH of its surfaces: `not getattr(outcome, "applied", False)`
-    # (:745) and `LiveWrite.applied`'s `bool(getattr(self.record, "applied", False))`
-    # (:466-468) — truthiness, fail-closed. A value that cannot attest a row must
+    # in `write_live_record`'s falsy branch, and `LiveWrite.applied`'s
+    # `bool(getattr(self.record, "applied", False))` — truthiness, fail-closed (⛔
+    # cited by SYMBOL and TEXT, not by `file:line`: the numbers that used to sit
+    # here resolved to a COMMENT and to the `deferred` field declaration). A value
+    # that cannot attest a row must
     # never be read as one. Latent today (both production doors answer
     # `RecordWrite | None`, whose `applied` is a real `bool`), which is why the
     # shape is pinned now rather than after a door changes.

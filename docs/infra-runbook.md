@@ -4668,7 +4668,7 @@ consequences, both load-bearing:
    `record_projection._refuse_an_enumerated_replay` (`tortoise/record_projection.py:7566`). The cursor
    ROW is the fact, not the mode, which is exactly why the flag must be rolled **after** the seeding.
 2. **The order is `sweep` → `seed --journal <path>` → `arm` (per graph) → THEN the flag for the box.**
-   `tortoise/live_write.py:89-95` states that order and names
+   `tortoise/live_write.py:105-109` states that order and names
    `tools/record_allocator_cli.py`'s `CUTOVER_ACK_TEXT` (`:119-147`) as its authority — that text is the
    procedure, not this paragraph; it also carries the four preconditions `arm` refuses without
    `--acknowledge-cutover` (the flag lives in the WRITER's environment; every graph written after the
