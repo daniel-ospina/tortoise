@@ -969,8 +969,8 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   gate and at the `tenant is None` gate, both BEFORE any queue or counter is
 #:   touched (⛔ cited by TEXT, not by `file:line`: three citations here were five
 #:   lines off in round 14 — the numbers rot the moment a docstring above them
-#:   grows, the gate's text does not) (measured: armed loop, durable journal, no
-#:   carried#:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
+#:   grows, the gate's text does not) (measured: armed loop, durable journal, no carried
+#:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
 #:   declines, so an operator reconciling "inline folds" against this counter will
 #:   find the structural arms missing from it — which is the correct shape (they
 #:   are the pre-#14185 path, not a degradation) and a wrong sentence if this
