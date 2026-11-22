@@ -1121,6 +1121,76 @@ SWEEP_NAMES = 66
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
 #:
+#: ⛔ STALE AS OF THE RE-CUT BELOW — THIS SENTENCE DESCRIBES THE PREVIOUS PIN'S TREE, NOT THIS ONE
+#: (#14282 review cycle 2, P3). At THIS head the committed pair is `11861`, and `--check` exits 0
+#: against `11861`, not against `11858`. Read as a statement about the current head, "11858 is
+#: re-measured on the tree that carries them" is false, and accepting it is precisely the
+#: inherited-figure error the re-cut exists to repair. It is kept, marked, because it is the
+#: record of how the SUPERSEDED pair was arrived at.
+#:
+#: RE-PINNED (11858, "a1552662bf07a10b") → (11861, "f0647020531c078c"), measured with `--repin` on
+#: TWO trees rather than derived by arithmetic. `main`'s OWN tree at `5e83c2a2f6` prints the new
+#: figure, and so does this lane's tree, so the +3 belongs to the BASE and this change contributes
+#: NO row at all.
+#: THE THREE ROWS, named: `proj.g.query` 3643 → 3646, all three in `tools/read_wave_latency.py` —
+#: a file ADDED by `94d75667dc` (`#14224`), which merged ONE MINUTE BEFORE `10e51693f1` (`#14160`)
+#: committed the pair this one replaces. So the pair it replaced was false of the tree it landed on
+#: from the moment it landed, and this is the recurrence the block above records, not a new class.
+#: ⛔ WHAT MEASURES `main` — MEASURED, NOT ASSUMED (#14282 review, P3). The pin IS graded on `main`:
+#: `python-ci.yml` runs on `push: branches: [main]` and the `surface-guard` job carries no `if:` and
+#: no `paths:` filter, so a main push's own run executes this step — run `44967485260`
+#: (`event=push`, `sha=70fbd1a27dd5`, i.e. `main`) REDS it, and `44952266542` (`b4da1f5c01`) passed
+#: it, so the step demonstrably RUNS on `main` rather than being skipped there. The real mechanism
+#: is DROPPED RUNS, not a missing gate: a superseded main push is routinely discarded before it
+#: starts a job (this workflow's own concurrency block measures 17 of the 20 push-to-main runs
+#: created 2026-10-26T22:40Z..10-27T04:50Z never starting one; re-measured on `main` at this PR's
+#: base, 18 of the last 20 are `cancelled`), so the red arrives after merge or not at all — and
+#: every open PR then grades `main`'s rows as its own (`#14062`). ⛔ CORRECTED: this sentence read
+#: "the pin is graded on PULL REQUESTS only, so `main` drifts off it with nothing measuring it",
+#: which is false of the tree it lands on and sends the next lane looking for a gate to BUILD
+#: instead of at the drop that already happens. ⛔ CORRECTED AGAIN (#14282 review, P3): the sentence
+#: "`surface-guard` is not a REQUIRED context, so a merge does not wait for it" is FALSE of this
+#: repository, and it is the same wrong conclusion one level down from the one above. `surface-guard`
+#: IS in the required aggregate's `needs:` (`python-ci.yml` leg-table row `surface-guard|…|-`, the
+#: `-` meaning no diff gate, so it must be SUCCESS) and is absent from `DEFERRABLE_LEGS`, so a failed
+#: non-test leg lands in `FAILED_LEGS` → `exit 1` — and `python-ci-gate` is itself the required
+#: context (`merge_conditions` in `.mergify.yml`). A red `surface-guard` therefore BLOCKS EVERY
+#: MERGE through the aggregate, which is why this repair is a merge-unblocking fix and not a
+#: cosmetic pin refresh. ⛔ THE INHERITANCE IS MEASURED,
+#: NOT ASSUMED: a `--repin` on `10e51693f1`'s OWN tree prints (11861, "f0647020531c078c") too, so
+#: that delta is the base's and never this lane's, and no arithmetic on the last figure was used.
+#: `typed references still pointing at a public name: 0` on both trees, so no typed call site is
+#: legitimised by re-cutting: the three rows are `proj.g.query` on a FalkorDB project handle, the
+#: ordinary-word receiver shape this pin exists to DECLARE and deliberately leaves alone.
+#: Measured with `--repin`, never by arithmetic on the last pin, and EACH ADDRESS BELOW IS GRADED
+#: RATHER THAN DEAD WEIGHT (#14282 review, P3): all three revs COMMIT the superseded pair, so a
+#: mutant that swaps one for a rev committing a different pair reds in `OWN_PINS` instead of
+#: passing as prose. `5e83c2a2f6` — `main`'s own tree at this branch's PRE-REBASE base point: the
+#: PRE-REBASE head's parent, NOT the branch's base point, the branch having been rebased onto a
+#: later `main` afterwards. Its `--repin` prints the re-cut figure. Its own pin is
+#: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair 64 s
+#: later. Its own pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already
+#: moved under it, so the pair was committed to a tree it was not a reading of. `efe5605e976a` — this branch's PRE-REBASE head,
+#: named as what it is and NOT as a relative "THIS tree": its own `--repin` prints the re-cut
+#: pair, so the MEASUREMENT was true and only its ADDRESS was stale. Its own pin is
+#: `(11858, "a1552662bf07a10b")`, the pair it COMMITS.
+#:
+#: ⛔ THE SAME PAIR WAS INDEPENDENTLY REACHED ON `main`, AND ITS RECORD IS KEPT BELOW
+#: RATHER THAN PICKED AGAINST (#14282 merged with #14258). Both trees arrived at
+#: `(11861, "f0647020531c078c")` from the SAME +3 — `proj.g.query` 3643 → 3646 in
+#: `tools/read_wave_latency.py` — so neither paragraph is the winner and neither is
+#: superseded prose. The paragraphs ABOVE record what THIS branch measured, and which revs
+#: its OWN addresses (`5e83c2a2f6`, `10e51693f1`, `efe5605e976a`) commit. The paragraphs
+#: BELOW record `#14258`'s independent derivation on `main`, and they carry two facts the
+#: block above does not: a pair must be quoted from `--repin` rather than `--report`, and the
+#: +3 is attributed by a per-rev call-SITE measurement rather than by arithmetic. Both are
+#: LOAD-BEARING, which is why neither side may be dropped by the merge: the revs named below
+#: (`10e51693f166`, `0351fe856942`) are exactly the `OWN_PINS` entries #14258 added, and its
+#: `commits (N, "digest")` claim spelling is graded by an assertion it added to
+#: `test_a_revs_published_own_pin_is_the_pin_that_rev_commits`. Merged rather than chosen,
+#: because resolving a conflict between two CORRECT records by deleting one is how a measured
+#: fact becomes folklore.
+#:
 #: ⛔ SUPERSEDED BY THE RE-CUT BELOW — the sentence above ends "`--check` exits 0 at this head on
 #: the SAME pair", and that reading did NOT survive the commits merged beside it: the census moved
 #: three rows before the pin commit itself landed. Read the re-cut, not that sentence.
