@@ -4665,7 +4665,7 @@ enumerating one. With it OFF, nothing changes on a graph that has not been cut o
 consequences, both load-bearing:
 
 1. **On a graph that holds a `public.record_cursor` row, the ENUMERATED arm is REFUSED by name** —
-   `record_projection._refuse_an_enumerated_replay` (`tortoise/record_projection.py:7566`). The cursor
+   `record_projection._refuse_an_enumerated_replay` (`tortoise/record_projection.py:7569`). The cursor
    ROW is the fact, not the mode, which is exactly why the flag must be rolled **after** the seeding.
 2. **The order is `sweep` → `seed --journal <path>` → `arm` (per graph) → THEN the flag for the box.**
    `tortoise/live_write.py:105-109` states that order and names
