@@ -245,6 +245,25 @@ def _read_calls(tree: ast.AST) -> list[ast.Call]:
             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in _READ_NAMES]
 
 
+class _ResolutionDidNotConverge(RuntimeError):
+    """The bind fixpoint hit its pass budget: the resolver REFUSES rather than spins.
+
+    ⛔ REFUSING IS THE FAIL-CLOSED DIRECTION (#14326 P1). A form whose statically possible
+    values grow on every pass (`_a = _b + "y"` beside `_b = _a + "z"` — a MUTUAL
+    accumulation, which the per-target self-reference staging below cannot see) has no
+    finite product at all. Spinning is not a verdict: the pin would burn the shard's whole
+    budget and time out, which reads to every consumer as neither green nor red. This error
+    is an ordinary test FAILURE naming the shape, so the answer is a red the next author
+    can act on.
+    """
+
+
+#: Passes the fixpoint may take before it refuses. A real file resolves a chain in one pass
+#: per link; 64 links is far past anything in `tools/`, and the budget is what makes a
+#: diverging shape a failed test instead of a hung one.
+_FIXPOINT_MAX_PASSES = 64
+
+
 def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     """Every statically POSSIBLE string literal each name may hold, anywhere in the file.
 
@@ -342,13 +361,33 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     a tuple, a list, a SET or a DICT resolves, because CPython's grammar gives `iter` as an
     arbitrary `expr` and iteration over a literal is statically visible (#14326 review F2).
     """
+    def _self_referential(target: ast.AST, value: ast.AST) -> bool:
+        """True when `value` LOADS the name `target` binds.
+
+        ⛔ THESE MUST BE STAGED, NOT FIXPOINTED (#14326 P1, MEASURED: the pin HUNG). With
+        `Add` on the bind path, `_s = "_tortoise"; _s = _s + "_fts_query"` fed the fixpoint
+        its own output — every pass appended one more `_fts_query` — so `changed` never went
+        False and `_str_constants` never returned (`rc=124` after 60 s; `origin/main`'s
+        version, which had no `Add` arm, returned `{'_s': '_tortoise'}`). The `+=` arm
+        directly below documents this exact hazard and stages for it; a plain `Assign` whose
+        value re-reads its own target is the same accumulation written the other way.
+        """
+        if not isinstance(target, ast.Name):
+            return False
+        return any(isinstance(node, ast.Name) and node.id == target.id
+                   and isinstance(node.ctx, ast.Load) for node in ast.walk(value))
+
     binds: list[tuple[ast.AST, ast.AST]] = []
     augments: list[tuple[ast.Name, ast.AST]] = []
+    staged: list[tuple[ast.Name, ast.AST]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            binds.extend((target, node.value) for target in node.targets)
+            for target in node.targets:
+                (staged if _self_referential(target, node.value) else binds).append(
+                    (target, node.value))
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-            binds.append((node.target, node.value))
+            (staged if _self_referential(node.target, node.value) else binds).append(
+                (node.target, node.value))
         # ⛔ AN AUGMENTED BIND IS A BIND (#14326 review at `a29f3cd8`, MEASURED GREEN at
         # `80d2ab52`): `_N = "_tortoise_"; _N += "fts_query"` then
         # `getattr(sdk, _N)(…, kind="statement")` left the pin GREEN (mentions 2, calls 2,
@@ -563,9 +602,22 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         return False
 
     def _fixpoint() -> None:
-        """Propagate every ordinary bind until nothing grows."""
+        """Propagate every ordinary bind until nothing grows, within a bounded budget.
+
+        ⛔ THE BUDGET IS THE VERDICT (#14326 P1): an unbounded `while changed` over a shape
+        whose product grows every pass never terminates, and a hung pin answers nothing.
+        """
         changed = True
+        passes = 0
         while changed:  # fixed point: a chain of any length resolves in one call
+            passes += 1
+            if passes > _FIXPOINT_MAX_PASSES:
+                raise _ResolutionDidNotConverge(
+                    f"the bind resolver did not converge in {_FIXPOINT_MAX_PASSES} passes: "
+                    "a statically possible value is growing every pass, which is a MUTUAL "
+                    "accumulation (`_a = _b + 'x'` beside `_b = _a + 'y'`) and has no finite "
+                    "product. The pin cannot certify this source, so it REFUSES rather than "
+                    "spin — an unbounded fixpoint is a timeout, not a red.")
             changed = False
             for target, value in binds:
                 if _bind(target, value):
@@ -578,6 +630,20 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     # accumulation its own output (`_a` + `x` + `x` + …) and would never converge — the growth
     # is why this is STAGED, not a precision choice. The propagation below is what lets
     # `_M = _N` (written after the `+=`) resolve to the augmented value.
+    # ⛔ A SELF-REFERENTIAL BIND IS APPLIED ONCE, EXACTLY LIKE `augments` (#14326 P1): the
+    # product is taken against the values the name held BEFORE this bind, so an accumulation
+    # is bounded instead of feeding the fixpoint its own output. `_values` already computes
+    # the product for this shape (`_s + "_x"` -> every value of `_s`, suffixed) — prefixing
+    # `acc` again here would DOUBLE-COUNT the left operand (measured while writing this:
+    # `{'_tortoise_tortoise_fts_query', '_tortoise'}` for `_s = "_tortoise"; _s = _s + …`).
+    # Over-approximate on purpose: the earlier values stay in the set, which is this map's
+    # declared fail-closed polarity (a later bind can only ADD candidates), and an INERT use
+    # of the name stays green because the `Name` arm still requires an executable position.
+    for target, value in staged:
+        acc = out.get(target.id)
+        if acc is None:
+            acc = out[target.id] = set()
+        acc |= _values(value)
     for target, value in augments:
         # ⛔ NOT `out.setdefault(...).update({...})` (#14326): that shape is one row of
         # `tools/sdk_privatise.py`'s untyped-receiver RESIDUE, and adding one moved the
@@ -4354,6 +4420,42 @@ def _mutations_of(body: str) -> list[int]:
     return _mutated_after(run_def, "results", read.lineno, artifact_append=None)
 
 
+def test_a_SELF_REFERENTIAL_bind_TERMINATES_and_still_reaches() -> None:
+    """`_s = _s + "…"` is an ACCUMULATION: bounded, over-approximate, and still a reach.
+
+    ⛔ MEASURED BEFORE THIS FIX (#14326 P1): `_str_constants` never returned on this source
+    — `rc=124` after 60 s — once `_values` grew the `Add` arm, because the fixpoint fed the
+    product its own output (one more `_fts_query` per pass, so `changed` never went False).
+    `origin/main`'s version returned `{'_s': '_tortoise'}`: it had no `Add` arm at all, so
+    this is a REGRESSION that arm introduced, not a pre-existing gap. The verdict stays
+    fail-CLOSED either way — the earlier value remains in the set, this map's declared
+    polarity (a later bind can only ADD candidates) — so the reach is refused and an inert
+    use of the same name is not.
+    """
+    consts = _str_constants(ast.parse(
+        'def f():\n    _s = "_tortoise"\n    _s = _s + "_fts_query"\n'))
+    assert "_tortoise_fts_query" in consts["_s"]
+
+    reach = ('    _s = "_tortoise"\n    _s = _s + "_fts_query"\n'
+             '    getattr(sdk, _s)(query=queries[0]["query"], limit=10, kind="statement")\n')
+    assert _pin_refuses(_pin_source(reach)) is True
+    inert = '    _s = "_tortoise"\n    _s = _s + "x"\n    print(f"note {_s}")\n'
+    assert _pin_refuses(_pin_source(inert)) is False
+
+
+def test_a_BIND_CYCLE_REFUSES_instead_of_spinning() -> None:
+    """Two names accumulating through each other have no finite product — refuse.
+
+    ⛔ A MUTUAL accumulation is NOT the per-target case above (neither bind loads its OWN
+    target), so staging cannot see it and the fixpoint budget is the only guard. The
+    `pytest.raises` is not decoration: without the budget this test HANGS rather than
+    failing, and a hung pin reports neither green nor red to the shard that runs it.
+    """
+    with pytest.raises(_ResolutionDidNotConverge):
+        _str_constants(ast.parse(
+            'def run():\n    _a = "x"\n    _b = _a + "y"\n    _a = _b + "z"\n'))
+
+
 def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     """Each way a name can hold the read's NAME must be a reach the pin refuses.
 
@@ -4488,6 +4590,13 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
                                      f'    for _N in _S:\n        {reach.format(name="_N")}\n'),
         "re-bind AFTER the reach": (f'    _N = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n'
                                     '    _N = "done"\n'),
+        # ⛔ A SELF-REFERENTIAL `+` BIND IS THE SAME REACH WRITTEN AS AN ACCUMULATION
+        # (#14326 P1). Measured at the head this was found on, this row did not pass and did
+        # not fail — `_str_constants` never returned, so the shard TIMED OUT. The resolver now
+        # stages it once against the pre-bind values (`_s` keeps both spellings, the
+        # fail-closed direction) and the reach is refused.
+        "self-referential `+` bind": ('    _s = "_tortoise"\n    _s = _s + "_fts_query"\n'
+                                      f'    {reach.format(name="_s")}\n'),
         "subscript STORE target": ('    _N = "_tortoise_fts_query"\n    _counts = {}\n'
                                    f'    _counts[_N] = "zero"\n    {reach.format(name="_N")}\n'),
         "name chained to name": ('    _N = "_tortoise_fts_query"\n    _A = _N\n'
