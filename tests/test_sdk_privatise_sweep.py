@@ -1949,10 +1949,15 @@ _OWN_PIN_CLAUSE_TEXT_RE = re.compile(
 #: catches a failure the matcher's own tolerances cannot — a PAIR that was wrapped or malformed (the
 #: digest split across lines, or `[\"']` lost) still reads as a clause to the loose form and not to
 #: the strict one. A bare `commits` in prose does NOT count, because the loose form requires the
-#: opening paren: measured on this block `commits` appears as an ordinary word many times and
-#: exactly twice before a pair, and an earlier cut of this assertion counted every one of them and
+#: opening paren: `commits` appears as an ordinary word many times in this block, in several
+#: positions relative to a pair, and an earlier cut of this assertion counted every one of them and
 #: reded an honest block with `6 == 18` — the arm grading the WRONG POPULATION, which is the same
-#: defect class as the wrap it was written to catch, one level up. ⛔ AND IT USES `[\s#:]+` BETWEEN
+#: defect class as the wrap it was written to catch, one level up. ⛔ AND NO POPULATION COUNT IS
+#: PUBLISHED HERE (#14282 review, P3): this sentence said "exactly twice before a pair" and a fresh
+#: reader measured FOUR at the same head — the same stale-restatement class this block has now
+#: retracted three times, so the shape is described and left uncounted, and the assertion below
+#: measures it directly instead of trusting a number written here.
+#: ⛔ AND IT USES `[\s#:]+` BETWEEN
 #: THE PHRASE'S OWN WORDS, not `\s+`: this block's line breaks are `\n#: `, so the `#:` is INSIDE the
 #: gap and `\s+` alone matched one claim fewer than the matcher did — measured, and that asymmetry
 #: is why the word-level separator must match the matcher's while only the pair body is relaxed.
