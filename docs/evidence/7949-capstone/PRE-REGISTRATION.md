@@ -3220,10 +3220,13 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
 - **Why it exists.** `#14277` measures the extractor's real token spend and adds the prompt-cache
   split to the cost envelope, which inserts lines in `tortoise/extractor_v2.py`: **`+5`** before the
   first symbol this document cites and **`+73`** before the rest, so `:15239`→`:15244`,
-  `:15701`→`:15706`, `:17894`→`:17967` and so on. Every cite OUTSIDE this change history is a claim
-  about the tree, and `tests/test_7949_capstone_measure.py` resolves them, so a live cite moves with
-  the code or the suite reds — §10.N entries are frozen history (§10.14) and no pin reads them, which
-  is why this entry's own cites were checked by hand here rather than by the suite.
+  `:15701`→`:15706`, `:17894`→`:17967` and so on. Every cite OUTSIDE §10 is a claim about the
+  tree, and `tests/test_7949_capstone_measure.py` resolves them, so a live cite moves with the code or
+  the suite reds. Inside §10 that holds only for the NEWEST entry: §10.1–§10.39 are frozen history, no
+  pin reads them (§10.14), and none may be re-pointed — but §10.40 IS read, by
+  `test_the_newest_change_control_entry_describes_the_shipped_tree`, which resolves this entry's two
+  `if items:` gates, its two fail-open `except` arms and its `_run_vet_pass` calls. Only the ARROW
+  cites here (`:15239`→`:15244`, `:15701`→`:15706`, `:17894`→`:17967`) are hand-checked.
 - **What moved: cites and nothing that is a protocol value.** No metric, denominator, threshold,
   class set, corpus pin, split or salience pin is touched — §1–§9's criterion VALUES and the E4
   denominator are the ones this record froze. The two `if items:` gates it names are re-pointed
