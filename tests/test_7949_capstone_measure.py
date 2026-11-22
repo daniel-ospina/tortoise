@@ -17763,6 +17763,63 @@ def test_the_D5_row_is_still_one_table_row():
         "for the stray or missing delimiter. Delete or add it; do not re-word around it")
 
 
+# ── The THIRD one-character defect in this bundle: a hard TAB (MD010) ─────────
+#
+# ⛔ WHY THIS EXISTS (MEASURED at `471eb10ce0c6`, the head it was written under). The
+# REQUIRED `docs` check went RED on this bundle with
+# `docs-lint baseline: 5 new, 0 known (baseline), 0 in generated files` — five MD010
+# `Hard tabs` findings, FOUR of them on the D5 row (columns 12606 / 32983 / 34360 /
+# 34363) and ONE on the file-table paragraph (column 4038). They were not five
+# defects: they were the TAB separators of `git diff --numstat` readings pasted raw
+# out of the command's own output — `6<TAB>6` (04-plan.md), `269<TAB>18` and
+# `269<TAB>18<TAB>tortoise/sdk.py` (sdk.py), `8<TAB>8` (docs/00_index.md).
+#
+# Same shape as the `|` and the stray backtick pinned above: ONE character per site,
+# one finding per site, and no local arm can see it — a tab inside a code span is
+# invisible in the rendered prose, so the cite pins in this file stay green while CI
+# reds. ⛔ It cannot be suppressed either: the docs job FAILS a change that ADDS a
+# markdownlint suppression directive (`::error::this change ADDS a markdownlint
+# suppression directive`), so the only fix is to spell the separator as the escape
+# the repo already uses (`docs/oauth-mcp.md` quotes `` `\t` `` when it means a tab).
+#
+# Scope is the whole bundle, not just D5: the fifth tab was on a prose paragraph, and
+# the class is "a raw control character a command's output carries", not "a table".
+
+
+def test_the_bundle_documents_carry_no_hard_tab():
+    """A raw TAB is 1 finding per site in the REQUIRED `docs` check, and no pin sees it.
+
+    Measured at `471eb10ce0c6`: `docs-lint baseline: 5 new, 0 known` from FIVE tab
+    characters across TWO markdown lines of `05-verify.md` (four on the D5 row, one on
+    the file-table paragraph). The fixtures are `--numstat` output, whose columns are
+    tab-separated by construction, so the tab arrives with a paste and looks like part
+    of the reading — which is exactly why it survives every review round that reads the
+    prose. The population is asserted so a reworded or emptied bundle cannot satisfy
+    this arm by carrying no markdown at all.
+    """
+    docs = sorted(_EPIC_CITE_DOCS["05-verify.md"].parent.glob("*.md"))
+    assert len(docs) >= 5, (
+        f"this arm found {len(docs)} markdown file(s) beside 05-verify.md — the bundle "
+        "carries at least five (00-align / 00-plan / 03-test-design / 04-plan / "
+        "05-verify), so a green here would say nothing about the population it guards")
+
+    offenders = [
+        f"{path.name}:{number} (x{line.count(chr(9))})"
+        for path in docs
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "\t" in line
+    ]
+    assert not offenders, (
+        "these bundle lines carry a raw TAB character (file:line, count): "
+        f"{offenders}. The REQUIRED `docs` check reports one MD010 `Hard tabs` finding "
+        "PER SITE (measured: 5 findings from 5 tabs at `471eb10ce0c6`) and the column in "
+        "the report is the tab's own, which is tens of thousands of characters into a "
+        "row like D5 — so the report names a position, not a sentence. Replace the "
+        "character with the escape the repo already uses for a literal tab "
+        "(`` `6\\t6` ``), never with a suppression directive: the docs job fails a "
+        "change that ADDS one")
+
+
 #: Readings this row carried that a MEASUREMENT refuted, each kept beside the measurement
 #: that killed it (#13794). ⛔ An ABSENCE pin, deliberately: the three defects below are
 #: PROSE, so there is no tree line to bind them to, and the only rot-proof assertion is
