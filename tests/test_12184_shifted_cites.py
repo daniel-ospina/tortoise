@@ -2203,6 +2203,13 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # and NOTHING read it — its `sdk.py:28581` sibling was pinned and the neighbour was not, so a
     # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
     # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
+    # 83 -> 90 at the `#14183` re-cut: the seven rows for addresses no arm read - four
+    # present-tense `05-verify.md` D5 addresses (`:28443`, `:28406`, `:28003`, `:28040`, each
+    # `+21` stale after `main`'s `#14260`), and three cites a review OPENED and found on a
+    # comment/`return` line at every head their documents name (`CAPABILITY-PLACEMENT-AUDIT`'s
+    # `tortoise/sdk.py:42507` and `hosted_api.py:49444`, `ENTITY-VERDICT-BANDS`'s
+    # `entities.py:5066` / `:5238`). Every one of the seven is resolved against the tree by the
+    # content arm, so the count is derived rather than asserted.
     assert len(_PINS) == 90
 
 
