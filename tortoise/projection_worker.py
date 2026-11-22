@@ -742,7 +742,8 @@ class ProjectionWorker:
           processes — and the EPOCH bump is what makes a SNAPSHOT FROM THE PARENT
           unmatchable;
         * **THE THIRD PARTY'S LOCKS TOO**, one layer down: ``prometheus_client``
-          gives every metric family a ``_lock`` and every ``MutexValue`` its own,
+          gives every ``MutexValue`` a ``_lock`` (and a ``Counter`` family one; a
+          plain ``Gauge`` family carries none),
           plain ``threading.Lock``s a child inherits from a peer that did not
           survive the ``fork()``. ``set``, ``inc``, ``get``, ``labels`` and
           ``collect`` all take one, and a blocked lock is not an exception, so the
@@ -856,8 +857,12 @@ class ProjectionWorker:
                         "as a failure rather than assumed to have written "
                         "(#14185)",
                         type(exc).__name__, exc, item.seq)
-            # ⛔ ALL THREE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
-            # never from a value captured at POP time (#14222 review P1-1). The
+            # ⛔ BOTH VALUE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
+            # never from a value captured at POP time (#14222 review P1-1). ⛔ TWO,
+            # not three (review round 11, P3): `_stamp_locked` carries epoch, seq,
+            # depth and positions — NO AGE. The age is recomputed on `collect`
+            # (`PROJECTION_OLDEST_PENDING_SECONDS.set_function`), so a reader
+            # chasing a wrong age belongs in `monitoring`, not here. The
             # pop-time depth counts the item that is about to be folded, so
             # publishing it after the fold reports "1 owed" for a DRAINED queue
             # and "1 owed" for a backlog of 100 — an alert on `depth > 0` would

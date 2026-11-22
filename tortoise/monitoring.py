@@ -3314,9 +3314,16 @@ def projection_worker_gauges() -> dict[str, float]:
 
     They are unlabelled families, so ``_collect_by_label`` (which assumes one
     sample per label value) cannot read them; this is the unlabelled analogue and
-    it filters on the exported sample suffix the same way, for the same reason
-    ``_collect_by_label`` does: a ``Gauge`` exports ``…_created`` beside its
-    value, and reading the wrong sample would report a timestamp as a depth.
+    it filters on the exported sample suffix the same way ``_collect_by_label``
+    does. ⛔ **The filter is INERT today, and that is stated rather than implied**
+    (review round 11, P3): all three families are ``Gauge``s and
+    ``Gauge._child_samples`` yields exactly ONE sample — the ``…_created`` /
+    ``…_total`` suffixes come from ``Counter._child_samples``, so the promoted
+    exposition carries three lines and no ``_created``. An earlier revision said a
+    ``Gauge`` *does* export ``…_created``, which is false, so the guard read as
+    load-bearing work. It stays because the alternative is a reader that silently
+    reports a timestamp as a depth the day one of these families becomes a
+    ``Counter``.
     """
     ensure_projection_metrics_fork_safe()
     out: dict[str, float] = {}
