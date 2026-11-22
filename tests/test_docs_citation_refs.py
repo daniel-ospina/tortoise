@@ -3311,8 +3311,10 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
     graded only when grep would run it, so the version split has to be READ FROM GREP rather than
     baked in: a baked-in table is wrong on one of the two platforms whichever way it is written.
 
-    ⛔ A CONTROL RUN MAKES RC 2 ATTRIBUTABLE TO THIS OPTION (#14138 review round 3, P2 — MEASURED).
-    grep exits 2 for ANY error, not just an invalid option: `grep -c --count '^[+-]$' <&-` is
+    ⛔ A CONTROL RUN MAKES A BARE RC 2 ATTRIBUTABLE TO GREP ANSWERING AT ALL — NOT TO THIS OPTION
+    (#14138 review round 3, P2; #14303 review, P2 — the heading that stood here said "attributable
+    to this option", and the residual below refutes that, MEASURED). grep exits 2 for ANY error,
+    not just an invalid option: `grep -c --count '^[+-]$' <&-` is
     `grep: (standard input): Bad file descriptor`, rc 2, on a fully documented spelling, and
     `-f /nonexistent` is the same. Reading a bare rc 2 as "refused" would then EMPTY the allowance
     on a grep that is merely broken — the fail-open direction, and exactly what the paragraph below
@@ -3320,6 +3322,19 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
     run FIRST: if that run does not answer `2`, the probe itself did not work and NOTHING is
     concluded from the second run. Discriminating this way is locale-proof, unlike matching grep's
     translated `unrecognized option` text.
+
+    ⛔ STATED RESIDUAL — THE CONTROL PROVES grep ANSWERS, NOT THAT rc 2 ON THE SPELLING UNDER TEST IS
+    A REFUSAL (#14303 review, P2 — MEASURED). A grep that RUNS the alias but fails that one
+    invocation for an unrelated reason is read as "refused", the allowance empties, and NO CELL
+    REDS: the alias cell's `runs == (grep_probe(…).returncode in (0, 1))` compares this helper
+    against the same raw exit code, so the two agree on the wrong answer. Measured on a `PATH`
+    `grep` that delegates every other spelling (the control answers `2`, rc 0) and exits 2 for
+    `--unix-byte-offsets` and its four prefixes: this file stays GREEN (37 passed at head
+    `f61447b0b09`), which is the same shape GNU grep 3.12 presents LEGITIMATELY — so there is no
+    exit-code discriminator to close it with, and grep's own message is translated (which is why
+    matching text is refused above). Recorded rather than papered over: the gap is real, it is the
+    same fail-open direction the control narrows, and the control narrows it to "grep answered
+    `--count` and refused this" instead of "grep is broken".
 
     ⛔ A THIRD EXIT CODE IS AN ERROR, NOT A REFUSAL: reading it as "refused" would silently empty
     the allowance, so a real prescription in the alias spelling would go unread.
@@ -5175,9 +5190,13 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     # UNDOCUMENTED (#14027 review round 2, P2; #14138). `grep --help` is silent about
     # `--unix-byte-offsets`, so the universe is `documented` PLUS the MEASURED allowance, and a
     # spelling `grep --help` DOES document may never be a candidate: it would be a second name for a
-    # documented option, and the union below would not move because the name is already there — i.e.
-    # a documented candidate is silent on BOTH platforms unless it is refused here by name
-    # (#14138 review, P3 — measured: adding `--colour` to the candidates left every cell green).
+    # documented option, and the union below would not move because the name is already there. ⛔ WHAT
+    # CATCHES IT IS NOT THIS ROW ALONE (#14303 review, P3 — MEASURED at head `f61447b0b09`): adding
+    # `--colour` to the candidates reds this row AND the stub cell, whose `accepts` stub runs ANY
+    # spelling, so the allowance would carry a documented name there (`2 failed, 35 passed`). The
+    # citation that stood here — "adding `--colour` … left every cell green" — was true before that
+    # stub existed and is false now; this row is the better MESSAGE (it names the spelling), never
+    # the unique witness.
     assert not (set(_D5_UNDOCUMENTED_ALIAS_CANDIDATES) & documented), (
         f"{sorted(set(_D5_UNDOCUMENTED_ALIAS_CANDIDATES) & documented)} is declared an undocumented "
         "candidate while `grep --help` DOCUMENTS it — a candidate is by definition a spelling the "
