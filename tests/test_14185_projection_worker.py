@@ -695,14 +695,34 @@ def test_an_INDETERMINATE_applied_is_REFUSED_not_counted_as_a_projection():
         types.SimpleNamespace(applied=False, refusal=decline), 1) is None
     # ⛔ AND WITH NO READABLE `applied` AT ALL (#14222 review round 19, P3): the
     # absent-attribute arm returned `record_no_outcome` before the decline was
-    # ever consulted, so this shape was the ONE false loss left in the function —
-    # while `live_write` reads the token independently of `applied`.
+    # ever consulted, so this shape was the last false loss among outcomes whose
+    # `applied` is READABLE — while `live_write` reads the token independently of
+    # `applied`. ⛔ NOT the last false loss, full stop: an outcome whose `applied`
+    # property RAISES is read before this arm, so the caller's `try` maps it to
+    # `record_no_outcome` and it is still counted as a loss (deliberate, see the
+    # production comment) — that shape is pinned by the caller, not by this leg.
     assert projection_worker._classify_fold_outcome(
         types.SimpleNamespace(refusal=decline), 1) is None, (
         "an outcome carrying the seam's healthy-decline token but no readable "
         "`applied` was counted as a LOSS; `live_write._is_durable_decline` reads "
         "the token independently of `applied`, so the decline must survive the "
         "absent-attribute arm too")
+    # ⛔ AND **ONLY** THE DECLINE IS EXEMPT (#14222 review round 19, P3): a real
+    # ARMED refusal with no readable `applied` is still a LOSS. Without this the
+    # arm could be widened to `if refusal is not None:` and stay green, publishing
+    # `armed: true, failures: {}` — "caught up" — while `circuit_open` (the record
+    # outage this classifier names as the realistic one) wrote nothing. Each token
+    # is read from the seam's own published set, so a rename reds here instead of
+    # passing vacuously.
+    for armed_refusal in ("circuit_open", "no_tenant_carried"):
+        assert armed_refusal in record_writer.LIVE_WRITE_REFUSALS, (
+            f"{armed_refusal!r} is no longer a published live-write refusal; this "
+            "leg would then pin a shape production cannot produce")
+        assert projection_worker._classify_fold_outcome(
+            types.SimpleNamespace(refusal=armed_refusal), 1) == "record_no_outcome", (
+            f"an outcome carrying the ARMED refusal {armed_refusal!r} and no "
+            "readable `applied` was counted as a projection; only the seam's "
+            "healthy decline is exempt from that arm")
 
 
 def test_a_RENAMED_prometheus_lock_REDS_the_guard_instead_of_passing_vacuously():
