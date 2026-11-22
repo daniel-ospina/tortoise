@@ -343,11 +343,23 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     arbitrary `expr` and iteration over a literal is statically visible (#14326 review F2).
     """
     binds: list[tuple[ast.AST, ast.AST]] = []
+    augments: list[tuple[ast.Name, ast.AST]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             binds.extend((target, node.value) for target in node.targets)
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
             binds.append((node.target, node.value))
+        # ⛔ AN AUGMENTED BIND IS A BIND (#14326 review at `a29f3cd8`, MEASURED GREEN at
+        # `80d2ab52`): `_N = "_tortoise_"; _N += "fts_query"` then
+        # `getattr(sdk, _N)(…, kind="statement")` left the pin GREEN (mentions 2, calls 2,
+        # indirect 0) while every OTHER enumerator in this file already carries
+        # `AugAssign` (`_rebound_callee_names`, `_extra_bindings`, `_rebound_after`) — an
+        # in-file asymmetry, not a declared boundary. It is collected SEPARATELY because its
+        # value is the PREVIOUS value PLUS the right-hand side; folding it into `binds` would
+        # feed the accumulation its own output forever (see the staging note below).
+        elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+                and isinstance(node.op, ast.Add)):
+            augments.append((node.target, node.value))
         # ⛔ A `for`/COMPREHENSION TARGET IS A BIND TOO (#14279 review F1): the spelling
         # carries no `Assign` node at all, so no assignment arm above could ever see it.
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
@@ -474,9 +486,15 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         # as `_possible_strings`: a union is wrong in both directions (round 10).
         if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
             _left, _right = _values(value.left), _values(value.right)
-            if not _left or not _right:
-                return set()  # an operand is not statically resolvable — the residual
             return {a + b for a in _left for b in _right}
+        # ⛔ AND THE REPETITION THAT BUILDS THE NAME (#14326 review at `a29f3cd8`, MEASURED
+        # GREEN at `80d2ab52`): `_N = "_tortoise_fts_query" * 1` bound nothing, so
+        # `getattr(sdk, _N)(…, kind="statement")` left the pin GREEN — the inline sibling is
+        # refused through `_possible_strings`, which made this an in-file asymmetry exactly
+        # like the `+` arm above one round earlier.
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mult):
+            return (_repetitions(_values(value.left), _int_literals(value.right))
+                    | _repetitions(_values(value.right), _int_literals(value.left)))
         return set()
 
     def _store_names(target: ast.AST) -> list[ast.Name]:
@@ -544,12 +562,27 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             return grew
         return False
 
-    changed = True
-    while changed:  # fixed point: a chain of any length resolves in one call
-        changed = False
-        for target, value in binds:
-            if _bind(target, value):
-                changed = True
+    def _fixpoint() -> None:
+        """Propagate every ordinary bind until nothing grows."""
+        changed = True
+        while changed:  # fixed point: a chain of any length resolves in one call
+            changed = False
+            for target, value in binds:
+                if _bind(target, value):
+                    changed = True
+
+    _fixpoint()
+    # ⛔ `+=` IS APPLIED ONCE, AGAINST THE PRE-AUGMENT VALUES (#14326 review at `a29f3cd8`):
+    # `_N += "x"` makes `_N` hold the concatenation of what it held BEFORE with `"x"`, so the
+    # product is taken from the map as it stands here. Re-entering it per pass would feed the
+    # accumulation its own output (`_a` + `x` + `x` + …) and would never converge — the growth
+    # is why this is STAGED, not a precision choice. The propagation below is what lets
+    # `_M = _N` (written after the `+=`) resolve to the augmented value.
+    for target, value in augments:
+        out.setdefault(target.id, set()).update(
+            {base + suffix for base in out.get(target.id, ())
+             for suffix in _values(value)})
+    _fixpoint()
     return {name: frozenset(values) for name, values in out.items() if values}
 
 
@@ -559,6 +592,39 @@ def _parents_of(tree: ast.AST) -> dict[int, ast.AST]:
         for child in ast.iter_child_nodes(node):
             parents[id(child)] = node
     return parents
+
+
+def _int_literals(node: ast.AST) -> frozenset[int]:
+    """Every INT `node` can statically be — a literal, or a literal SELECTION of one.
+
+    The companion of `_possible_strings` for the ONE operand a sequence REPETITION needs.
+    A count bound to a NAME is not resolved here (it is not in the string map); that is the
+    stated residual, and it is the same class as `_N + "_x"`: an operand whose value this
+    file cannot see statically.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(
+            node.value, bool):
+        return frozenset((node.value,))
+    if isinstance(node, ast.IfExp):
+        return _int_literals(node.body) | _int_literals(node.orelse)
+    if isinstance(node, ast.BoolOp):
+        return frozenset().union(*(_int_literals(operand) for operand in node.values))
+    return frozenset()
+
+
+def _repetitions(strings: frozenset[str], counts: frozenset[int]) -> frozenset[str]:
+    """The strings a `s * n` can be — the EXACT set, not an over-approximation.
+
+    ⛔ `"_tortoise_fts_query" * 1` IS THE READ NAME (#14326 review at `a29f3cd8`, MEASURED
+    GREEN at `80d2ab52` on BOTH the bind path and inline): `_possible_strings` carried the
+    `+` arm only, so a repetition built the name and the census stayed at mentions 2 / calls
+    2 / indirect 0. Expanding to `{s * n}` for the static counts keeps the precision the `+`
+    arm's PRODUCT semantics bought: `"print" * 2` is `"printprint"` and must NOT drop
+    `print` from the allow-lists.
+    """
+    if not strings or not counts:
+        return frozenset()
+    return frozenset(s * n for s in strings for n in counts)
 
 
 def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> frozenset[str]:
@@ -634,6 +700,13 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
         # `_y`). Every combination of the two statically-possible sets is a possible value of
         # the sum, so the product is both the fail-closed and the false-red-correct reading.
         return frozenset(a + b for a in _left for b in _right)
+    # ⛔ AND A REPETITION BY A STATIC COUNT IS THE SAME LITERAL (#14326 review at
+    # `a29f3cd8`, MEASURED GREEN at `80d2ab52`): `getattr(sdk, "_tortoise_fts_query" * 1)`
+    # reached the read while the `+` spelling was refused. Either operand can be the sequence.
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        return (_repetitions(_possible_strings(node.left, consts), _int_literals(node.right))
+                | _repetitions(_possible_strings(node.right, consts),
+                               _int_literals(node.left)))
     return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
 
 
@@ -663,6 +736,14 @@ def _bind_target_names(target: ast.AST) -> set[str]:
 _NAMESPACE_CALLS = frozenset({"globals", "locals", "vars"})
 _SETATTR_SPELLINGS = frozenset({"setattr"})
 _MAPPING_MUTATORS = frozenset({"update", "setdefault"})
+#: `setdefault(key, default)` takes ONE key positionally; `update(mapping, …)` takes every
+#: positional as a mapping. The split is what keeps a setdefault DEFAULT (a value) out of the
+#: key census — `_COUNTS.setdefault(literal, 0)` is the accepted false red this file states.
+_SETDEFAULT_SPELLINGS = frozenset({"setdefault"})
+#: A mapping BUILT by a call: `dict(print=getattr)` carries the key in its `keyword` node.
+#: Only `dict` is read this way — an arbitrary callee's keyword is not statically a mapping
+#: (the same narrowing `_name_reaching_operands` states for its `**dict(…)` arm).
+_DICT_SPELLINGS = frozenset({"dict"})
 _PARTIAL_SPELLINGS = frozenset({"partial"})
 
 
@@ -730,6 +811,75 @@ def _is_setattr_like(value: ast.AST) -> bool:
                 and _callee_names_of(value.args[0]) & _SETATTR_SPELLINGS)
 
 
+def _mapping_keys_in_keywords(call: ast.Call,
+                              consts: dict[str, frozenset[str]]) -> set[str]:
+    """Every STATIC string KEY a call's `keyword` list puts into a mapping.
+
+    ⛔ CPYTHON KEEPS A KEYWORD IN A SEPARATE NODE LIST (#14326 review cycle 3, MEASURED
+    GREEN at `80d2ab52`: `pin_refuses=False`, `m=2 c=2 i=0`, and the read EXECUTED at
+    runtime): `Call(expr func, expr* args, keyword* keywords)`, and `keyword.arg` is `None`
+    for a `**` spread (PEP 448), so `ns.update(print=getattr)` and
+    `ns.update(**{"print": getattr})` never reached the key resolver — it read `args` only.
+    `_name_reaching_operands` already reads `keywords` for the operand path, which is what
+    makes this an IN-FILE asymmetry rather than a declared residual.
+
+    A keyword's NAME is the key it delivers (`update(print=…)` → key `"print"`); a `**`
+    spread delivers the keys of the mapping it expands, so its VALUE is resolved.
+    """
+    out: set[str] = set()
+    for kw in call.keywords:
+        if kw.arg is not None:
+            out.add(kw.arg)
+        else:
+            out |= _mapping_keys_of(kw.value, consts)
+    return out
+
+
+def _mapping_keys_of(node: ast.AST | None,
+                     consts: dict[str, frozenset[str]]) -> set[str]:
+    """Every STATIC string KEY an expression delivers into a mapping.
+
+    ⛔ THE KEYS ARRIVE IN THREE PLACES, NOT ONE (#14326 review cycle 3, EACH MEASURED GREEN
+    at `80d2ab52` — the predicate GREEN, the read executed): a `Dict` DISPLAY, a `dict(…)`
+    CALL whose keywords ARE its keys, and the CALL's own `keyword` nodes. A `**` spread
+    inside a display (`{**{"print": …}}`) delivers the SPREAD's keys, so the recursion is
+    on the VALUES; `_dict_display_leaves` recurses for the same reason one level over.
+
+    The residual this does NOT resolve, stated rather than implied: `dict([("print", v)])`
+    — a pair ITERABLE — is not a keyword list and is not read here.
+    """
+    if node is None:
+        return set()
+    if isinstance(node, ast.Dict):
+        out: set[str] = set()
+        for key, value in zip(node.keys, node.values, strict=True):
+            out |= (_mapping_keys_of(value, consts) if key is None
+                    else _string_keys_of(key, consts))
+        return out
+    if isinstance(node, ast.Call) and _callee_names_of(node.func) & _DICT_SPELLINGS:
+        return _mapping_keys_in_keywords(node, consts)
+    # a static string handed over bare — `setdefault("print", …)`, `setdefault(_p, …)`
+    return _string_keys_of(node, consts)
+
+
+def _mapping_mutation_keys(call: ast.Call, consts: dict[str, frozenset[str]],
+                           offset: int) -> set[str]:
+    """The keys an `update`/`setdefault` call delivers, from `call.args[offset:]`.
+
+    `offset` is how the call is SPELLED, not what it does: a BOUND call carries the
+    namespace in `func.value` and starts at 0, an UNBOUND one carries it in `args[0]`
+    (`dict.setdefault(_ns, "print", getattr)`) and starts at 1.
+    """
+    args = list(call.args)[offset:]
+    if _callee_names_of(call.func) & _SETDEFAULT_SPELLINGS:
+        args = args[:1]
+    out: set[str] = set()
+    for arg in args:
+        out |= _mapping_keys_of(arg, consts)
+    out |= _mapping_keys_in_keywords(call, consts)
+    return out
+
+
 def _namespace_rebind_names(node: ast.AST, consts: dict[str, frozenset[str]],
                             namespaces: frozenset[str], launderers: frozenset[str]) -> set[str]:
     """Callee NAMES bound into a namespace by a STRING KEY — resolved, fail-closed.
@@ -779,18 +929,21 @@ def _namespace_rebind_names(node: ast.AST, consts: dict[str, frozenset[str]],
                 and _callee_names_of(node.func.args[0]) & (_SETATTR_SPELLINGS | launderers)):
             if node.args:
                 out |= _string_keys_of(node.args[0], consts)
-        # `<ns>.update({"<name>": …})` and `<ns>.__setitem__("<name>", …)`.
-        elif callee & _MAPPING_MUTATORS and _is_namespace_expr(node.func.value, namespaces):
+        # `<ns>.update({"<name>": …})`, `<ns>.update(<name>=…)`, `<ns>.update(**{…})`,
+        # `<ns>.setdefault("<name>", …)` — and the UNBOUND spelling of each.
+        elif (callee & _MAPPING_MUTATORS
+                and _is_namespace_expr(getattr(node.func, "value", None), namespaces)):
             # ⛔ `setdefault` SETS WHEN THE KEY IS ABSENT (#14326 review F1c, MEASURED GREEN):
             # it was outside the closed `{update}` list even on a proper namespace receiver —
             # and unlike `update({…})` it takes the key POSITIONALLY.
-            if node.args:
-                arg = node.args[0]
-                if isinstance(arg, ast.Dict):
-                    for key in arg.keys:
-                        out |= _string_keys_of(key, consts)
-                else:
-                    out |= _string_keys_of(arg, consts)
+            out |= _mapping_mutation_keys(node, consts, offset=0)
+        elif (callee & _MAPPING_MUTATORS and node.args
+                and _is_namespace_expr(node.args[0], namespaces)):
+            # ⛔ THE UNBOUND SPELLING WAS MIRRORED FOR `__setitem__` ONLY (#14326 review
+            # cycle 3, MEASURED GREEN: `dict.setdefault(builtins.__dict__, "print", getattr)`
+            # → `pin_refuses=False` while the bound form above was REFUSED). The namespace is
+            # `args[0]` — ONE positional further in, which is the whole of `offset=1`.
+            out |= _mapping_mutation_keys(node, consts, offset=1)
         elif "__setitem__" in callee and node.args:
             # ⛔ THE UNBOUND SPELLING PUTS THE NAMESPACE IN arg0 (#14326 review F1b, MEASURED
             # GREEN): `dict.__setitem__(builtins.__dict__, "print", getattr)` has receiver
@@ -1540,8 +1693,15 @@ def _builds_new_container(value: ast.AST, rebound: frozenset[str] = frozenset())
     if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
         return True
     if isinstance(value, ast.Call):
+        # ⛔ `rebound` IS A SET OF NAMES, SO IT CAN ONLY SHADOW A NAME (#14326 review at
+        # `a29f3cd8`, MEASURED false red at `80d2ab52`): `results.copy()` is reached through
+        # an ATTRIBUTE, and no bind of the bare name `copy` changes what `results.copy`
+        # resolves to — yet consulting `rebound` unconditionally dropped `copy` from
+        # `_SHALLOW_COPY_CALLEES` and red the INERT `_c = results.copy(); _c.sort(key=str)`.
+        # The thread is consulted only for the one spelling a name bind can launder.
+        is_name = isinstance(value.func, ast.Name)
         callee = getattr(value.func, "id", None) or getattr(value.func, "attr", None)
-        return callee in _SHALLOW_COPY_CALLEES and callee not in rebound
+        return callee in _SHALLOW_COPY_CALLEES and not (is_name and callee in rebound)
     # ⛔ A DISPLAY THAT ONLY SPREADS THE PAGE COPIES IT (#14326 round 12, MEASURED on the REAL
     # tool: `_copy = [*results]; _copy.sort()` was `1 failed` while `list(results)` passed).
     # `[*results]` builds a NEW list over the same element objects, so sorting it cannot permute
@@ -1849,7 +2009,8 @@ def _cannot_carry(node: ast.AST, scalar_names: set[str]) -> bool:
 
 
 def _mutated_after(run_def: ast.AST, var: str, lineno: int,
-                   artifact_append: ast.Call) -> list[int]:
+                   artifact_append: ast.Call,
+                   tree: ast.AST | None = None) -> list[int]:
     """Lines after the read that mutate `var` (or the recorded rows) IN PLACE.
 
     ⛔ In-place mutation is the other half of rebinding: `results.sort()` /
@@ -1970,8 +2131,9 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     direction, filed from a parallel lane). This pin is the static half, and the honest
     form of a static half is to say where it stops.
     """
+    alias_rebinds = _rebound_callee_names(run_def if tree is None else tree)
     aliases = _aliases_of(run_def, _collection_alias_predicate(var), loops=True,
-                          rebound=_rebound_callee_names(run_def))
+                          rebound=alias_rebinds)
     watched = {var} | aliases
     # ⛔ THE RECORDED ROWS ARE A COLLECTION TOO: `_row = per_query[-1]` then
     # `_row["order"] = _row["order"][:5]` truncated the page the verdict reads, with
@@ -1980,7 +2142,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     scalars = _scalar_bound_names(run_def)
     rows = ({"per_query"} | _aliases_of(
         run_def, lambda v: "per_query" in _names_in(v), loops=True,
-        rebound=_rebound_callee_names(run_def))) - scalars
+        rebound=alias_rebinds)) - scalars
     # ⛔ ITERATION TARGETS ARE THE SAME COLLECTION, TO A FIXPOINT — for the MEASURED
     # collections as well as the recorded rows (#14281 review P1, measured). A `for`
     # target binds nothing that `_aliases_of` resolves, so an element rewrite through one
@@ -2024,7 +2186,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         run_def,
         lambda v: _builds_new_container(v) and bool(_names_in(v) & watched),
         loops=True, copy_is_alias=True,
-        rebound=_rebound_callee_names(run_def)) - watched
+        rebound=alias_rebinds) - watched
     # ⛔ A CONTAINER THAT HOLDS THE COLLECTION IS NOT THE COLLECTION — it is an INDEX into
     # the same object graph, so it joins a SECOND set (`holders`), never `muts` (#14281
     # review P1, measured). The distinction is load-bearing in both directions:
@@ -2247,7 +2409,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         return False
 
     bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True,
-                                rebound=_rebound_callee_names(run_def))
+                                rebound=alias_rebinds)
 
     def _mutator_slot_keys(tree: ast.AST) -> dict[str, frozenset[str] | None]:
         """CONTAINER name -> the SLOT KEYS that were ASSIGNED a bound mutator.
@@ -2377,7 +2539,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     #: `_element_only` needs both — `_box = [results]; random.shuffle(_box[0])` was GREEN
     #: with only `holders` (#14281 review P2, measured).
     page_container = holders | _aliases_of(run_def, _container_of_page, loops=True,
-                                           rebound=_rebound_callee_names(run_def))
+                                           rebound=alias_rebinds)
     hits: list[int] = []
     for node in ast.walk(run_def):
         if node is artifact_append:
@@ -3632,6 +3794,54 @@ def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
         assert _mutations_of(body), (
             f"[{label}] a REBOUND copy callee must not license the exemption — it returns the "
             "page, so sorting the result permutes what the artifact records")
+    # ⛔ A BIND OF THE NAME `copy` IS NOT A REBIND OF `results.copy()` (#14326 review at
+    # `a29f3cd8`, item 3 — MEASURED false red at `80d2ab52`: `hits=[6]` on the first body
+    # below, whose sort is INERT). `rebound` is a set of NAMES, so consulting it
+    # unconditionally dropped `copy` from `_SHALLOW_COPY_CALLEES`; an ATTRIBUTE callee
+    # cannot be shadowed by a bind of the bare name, and the false red is the direction this
+    # file spends rows deleting.
+    for label, body in (
+        ("a local bind of the NAME `copy`",
+         "    copy = results[0]\n    _c = results.copy()\n    _c.sort(key=str)\n"),
+        ("a `def copy` shadowing the name",
+         "    def copy(_d):\n        return dict(_d)\n"
+         "    _c = results.copy()\n    _c.sort(key=str)\n"),
+    ):
+        assert not _mutations_of(body), (
+            f"[{label}] a bind of the bare name `copy` cannot change what `results.copy` "
+            "resolves to — grading it as a rebind reds an INERT sort")
+    # ⛔ AND A MODULE-LEVEL REBIND IS THE SAME REBIND (#14326 review at `a29f3cd8`, item 2 —
+    # MEASURED `hits=[]` at `80d2ab52` on a genuinely permuted page): all five `rebound=`
+    # threads were built from `run_def`, so a bind OUTSIDE `run()` was invisible — the same
+    # exemption-by-name fail-open, one SCOPE out. The shipped pin now passes the module tree;
+    # `run_def` alone cannot see the bind at all, which is why this row is built here.
+    module = ast.parse(
+        "list = lambda _x: results\n"
+        "def run(sdk, queries):\n"
+        "    sdk._tortoise_fts_query(query=queries[0]['query'], limit=10)\n"
+        "    results = sdk._tortoise_fts_query(query=queries[0]['query'], limit=10, "
+        "leg_trace=None)\n"
+        "    _c = list(results)\n"
+        "    _c.sort()\n"
+        "    return results\n")
+    module_run = module.body[1]
+    module_read = max((n for n in ast.walk(module_run) if isinstance(n, ast.Call)
+                       and getattr(n.func, "attr", None) == "_tortoise_fts_query"),
+                      key=lambda n: n.lineno)
+    assert _mutated_after(module_run, "results", module_read.lineno,
+                          artifact_append=None, tree=module), (
+        "a MODULE-LEVEL rebind of the copy callee must not license the exemption — the name "
+        "bind sits outside `run()`, so a `run_def`-scoped resolution cannot see it")
+    # ⛔ `rows` IS LOAD-BEARING AND IT HAD NO ROW (#14326 review at `a29f3cd8`, item 4 —
+    # MEASURED: removing `rebound=` at that site reopened the fail-open while the suite
+    # stayed green). The recorded ROW LIST is as mutable as the page, so this row reds on
+    # that deletion; the three other `rebound=` sites the review named as inert are left in
+    # place with their own rows, because a thread nothing can red is not a guard.
+    assert _mutations_of(
+        '    list = lambda _x: per_query\n    _r = list(1)\n'
+        '    _r[-1]["order"].sort()\n'), (
+        "a REBOUND copy callee over the RECORDED ROWS must red — `_r = list(1)` returns "
+        "`per_query` itself, so the row sort permutes what the artifact records")
     # ⛔ THE COPY'S **ELEMENTS** ARE THE PAGE'S OWN OBJECTS (#14326 review P0, MEASURED at
     # `36a6451d4e`): every shape above is a SHALLOW copy, so its slots hold the SAME row
     # dicts the artifact records. The exemption used to cover the whole BIND, so
@@ -4595,6 +4805,40 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    builtins.__dict__.setdefault("print", getattr)\n'
             '    print(sdk, "_tortoise_fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE KEY IS NOT ALWAYS POSITIONAL NOR ALWAYS A DISPLAY (#14326 review cycle 3 at
+        # `80d2ab52`, EACH MEASURED GREEN through the predicate AND at runtime — the read
+        # executed: `pin_refuses=False`, `m=2 c=2 i=0`). All four are the same root one
+        # resolution further out, and each reds on deleting the arm it needs: a keyword's
+        # NAME is a key, `dict(…)`'s keyword is a key, a `**` display's keys are keys, and an
+        # UNBOUND mutator carries the namespace in `args[0]`.
+        "`update(<name>=…)` KEYWORD key": (
+            '    import builtins\n'
+            '    builtins.__dict__.update(print=getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`update(dict(<name>=…))` CALL-built mapping": (
+            '    import builtins\n'
+            '    builtins.__dict__.update(dict(print=getattr))\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`update(**{…})` SPREAD mapping": (
+            '    import builtins\n'
+            '    builtins.__dict__.update(**{"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ A NESTED `**` DISPLAY INSIDE ONE IS THE SAME DELIVERY (#14326 review cycle 3):
+        # `update({**{"print": getattr}})` puts the key one display down, so the `key is
+        # None` arm recurses on the VALUE — skipping it left this row GREEN.
+        "NESTED `**` display inside an `update` mapping": (
+            '    import builtins\n'
+            '    builtins.__dict__.update({**{"print": getattr}})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "UNBOUND `dict.setdefault(<ns>, …)`": (
+            '    import builtins\n'
+            '    dict.setdefault(builtins.__dict__, "print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "SPLATTED `setattr(*[…])` argument list": (
             '    import builtins as _bi\n'
             '    setattr(*[_bi, "print", getattr])\n'
@@ -4637,6 +4881,24 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "AUGMENTED bind rebinding a pure callee": (
             '    print += getattr\n'
             '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE LITERAL IS BUILT, NOT WRITTEN (#14326 review at `a29f3cd8`, each MEASURED
+        # GREEN at `80d2ab52` while the `+` spellings beside them were refused):
+        # `_str_constants` enumerated every bind form EXCEPT `AugAssign` — while every other
+        # enumerator in this file carries it — and neither resolver had a `*`, so the verdict
+        # was decided by an operator. `+=` is applied ONCE against the pre-augment values
+        # (re-feeding it would never converge); `* n` expands for a LITERAL count, which is
+        # exact rather than over-approximate (`"print" * 2` is `"printprint"`, so it must not
+        # drop `print` from the allow-lists).
+        "AUGMENTED `+=` builds the read name": (
+            '    _N = "_tortoise_"\n'
+            '    _N += "fts_query"\n'
+            f'    {reach.format(name="_N")}\n'),
+        "REPETITION by 1 builds the read name": (
+            '    _N = "_tortoise_fts_query" * 1\n'
+            f'    {reach.format(name="_N")}\n'),
+        "INLINE repetition by 1 in the fetch": (
+            '    getattr(sdk, "_tortoise_fts_query" * 1)'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "PARAMETER named as a pure callee": (
             '    def _f(print=getattr):\n'
@@ -4758,6 +5020,19 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a string-keyed store into an ordinary CONTAINER is not a callee rebind — treating "
         "it as one would drop `write`/`print` from the allow-lists and RED the recording "
         "direction; only a NAMESPACE receiver carries a module-level bind")
+
+    # ⛔ THE `setdefault` DEFAULT IS A VALUE, NOT A KEY (#14326 review cycle 3, measured):
+    # `setdefault(key, default)` takes ONE key positionally, so a static string in the SECOND
+    # position — `builtins.__dict__.setdefault("_x", "print")` — binds nothing. Grading it
+    # as a key drops `print` from the allow-lists and reds the recording call beside it, so
+    # this is the false-red polarity of the same arm (measured: deleting the `args[:1]` slice
+    # turns this control RED while every namespace row stays green).
+    setdefault_default = ('    import builtins\n'
+                          '    builtins.__dict__.setdefault("_x", "print")\n'
+                          '    print("_tortoise_fts_query")\n')
+    assert not _pin_refuses(_pin_source(setdefault_default)), (
+        "a `setdefault` DEFAULT that is a callee name binds nothing — the second positional "
+        "is the VALUE, and only the FIRST is a key")
 
     # ⛔ THE SIXTH CONTROL, the OTHER polarity of the same clause: a subscript STORE under
     # the literal (`_counts["_tortoise_fts_query"] = 0`) is a recording write, not a read
@@ -5254,7 +5529,14 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         # ⛔ In-place mutation is the other half: `results.sort()` / `trace.clear()` /
         # `per_query[-1]["order"].sort()` all leave a mutated collection feeding the
         # artifact while every rebinding check passes (measured).
-        mutations = _mutated_after(run_defs[0], var, holder.lineno, artifact_append)
+        # ⛔ THE REBIND RESOLUTION IS MODULE-SCOPED HERE, NOT `run()`-SCOPED (#14326 review at
+        # `a29f3cd8`, item 2 — MEASURED GREEN: a module-level `list = lambda _x: results`
+        # plus `_c = list(results); _c.sort()` inside `run()` was `1 passed` on a genuinely
+        # permuted page, while the same two lines INSIDE `run()` red). The exemption is by
+        # NAME, so the name can be rebound anywhere the module can see it; `tree` is what the
+        # shipped pin has and `run_def` alone cannot. The row tests pass `run_def` themselves
+        # and are unaffected.
+        mutations = _mutated_after(run_defs[0], var, holder.lineno, artifact_append, tree)
         assert not mutations, (
             f"line(s) {mutations} mutate a collection AFTER the measured read — an in-place "
             f"sort/clear reaches the artifact while the measured {what} no longer matches it")
