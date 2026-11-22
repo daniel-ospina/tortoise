@@ -1603,6 +1603,63 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # site under either name must find its grant here.
         "tools/capstone_12186_recall.py": frozenset({
             "tortoise_fts_query", "_tortoise_fts_query", "_query_rows", "run"}),
+        # ⛔ A MIRROR of `extractor_v2._fts_rows`, on the tool's OWN stated contract:
+        # its `query()` docstring says "EXACTLY the leg ``_fts_rows`` runs, at width
+        # ``k``, returning ids", and the call passes the same TWO lever flags the
+        # capture leg passes (`_record_reads=False`, `_valid_time_rerank=False`)
+        # while omitting `_rerank_candidates` — because `_fts_rows` omits it: the
+        # capture path KEEPS the rerank deliberately (the `OVERRIDES:` record at
+        # `tortoise/extractor_v2.py:2931`, which `tortoise/sdk.py` cites beside its
+        # `_rerank_candidates` parameter, and #12297's measured recall@3 delta).
+        # Opting the probe out would make
+        # every M5 figure describe a reader `_fts_rows` does not run — the mirror
+        # would be broken by the "fix", which is the same ground
+        # `window_quality_m2.py` and `capstone_12186_recall.py` hold.
+        # ⛔ THE GRANT IS NOT THE WHOLE ARGUMENT, so the flags are ASSERTED against
+        # the leg this row names: `tests/test_miss_rate_m5.py::
+        # test_the_probe_reads_the_exact_leg_fts_rows_runs` compares the two call
+        # sites keyword by keyword — a literal's VALUE, or a derived flag's
+        # NORMALISED FORM, at every keyword that is not a site coordinate — and it
+        # CALLS the capture leg (`_fts_rows`) with a stub sdk to pin that the read
+        # receives no `_rerank_candidates` in any form at all, because a string-level
+        # scan could not see a `**mapping` key, a nested `**{...}`, a subscript
+        # assignment or a split literal (all four measured green against it) — and pins the
+        # arithmetic that makes the grant harmless at the width the probe MEASURES —
+        # `DEEP_LIMIT` (50) AT OR ABOVE `DEFAULT_FUSED_RERANK_POOL` (40) — a permutation at
+        # equal width is set-preserving — and composition can
+        # only move when `limit < pool` (plus the width the read would resolve if
+        # the gate were armed). The only sub-pool read this file issues is the
+        # width-1 WARM-UP, whose result is discarded.
+        "tools/miss_rate_m5.py": frozenset({"query"}),
+        # ⛔ A MIRROR of the SHIPPED DOOR, not a diagnostic with its own read: this
+        # harness exists to time the real product read (``/v1/search`` and the MCP
+        # ``tortoise_search``, i.e. ``TortoiseSDK._tortoise_fts_query``) and to prove
+        # the fused ranking did not move — its own docstring records that the
+        # ORDERED ids are the verdict, because ``rrf_fusion`` is rank-based, so a
+        # scheduling change that merely permutes a page has changed the product.
+        # Opting it out would measure the latency of a reader the product never runs,
+        # and with the gate armed the re-picked page is exactly what the
+        # rank-identity check exists to catch — the same ground
+        # `window_quality_m2.py` and `tools/miss_rate_m5.py` hold.
+        # ⛔ AND THE MIRROR IS ASSERTED, not declared: `tests/test_14192_read_wave_tool.py::
+        # test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags` DERIVES the
+        # allowed arguments from the `/v1/search` door's own call site
+        # (`tortoise/hosted_api.py::search` hands `query`, `limit`, `read_status_out`,
+        # `_truncation_out`) and reds on any other keyword — `kind`, `pool_size`,
+        # `order_by`, `claim_class`, `_elevated_timeout_ms`, an opt-out like
+        # `_rerank_candidates=False` — on any positional argument, on a splat, on a third
+        # reach of the read as a literal/bound literal (a name COMPUTED at runtime is the
+        # pin's declared residual), on the artifact's `order`/`legs` iterating the measured
+        # page/trace only through a helper or after a rebind, on a second artifact dict
+        # carrying both, and on an `os.environ` mutation ANYWHERE in the file through any
+        # STATIC spelling the guard resolves (`os.environ`, `from os import environ` incl.
+        # `as`, `getattr(os, "environ")`, and their alias/container/bound-mutator chains —
+        # the composed `{"p": os.environ.pop}` slot included, #14281 review P2 — its
+        # residuals are declared on `_environ_mutations`) — "which arm was in force" is not
+        # recorded, see #14289.
+        # Out-sinks (`read_status_out`, `_truncation_out`) are instruments, not levers: the
+        # `/v1/search` door names them too.
+        "tools/read_wave_latency.py": frozenset({"run"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
