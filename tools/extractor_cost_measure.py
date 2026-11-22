@@ -916,7 +916,7 @@ def _left_container(line: str, count: int) -> bool:
 
 
 def _closes_fence(line: str, delim: str, count: int) -> bool:
-    """A closer is AT LEAST as long as its opener, and only spaces follow.
+    """A closer is AT LEAST as long as its opener, and only whitespace follows.
 
     The opener's marker count is stripped, never more and never fewer: a
     ``>``-prefixed line INSIDE a fence is fence CONTENT, so stripping markers
