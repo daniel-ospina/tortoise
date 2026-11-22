@@ -420,9 +420,18 @@ _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 #: masking account (`_masked_by`) — where a parent arm really does mask a child one — and
 #: the family-close in `_covered`'s credit set, which is what stops a dropped family being
 #: credited back by a later arm (review of #14287, P2-2; the three-effect list corrected in
-#: review cycle 4, whose measurement showed the family-close is `_RAISED_ALIAS`-dependent:
-#: un-canonicalising BOTH of its sides re-opens the `ModuleNotFoundError: pass` leak and
-#: reds `rename_dropped`).
+#: review cycle 4, whose measurement showed the family-close is `_RAISED_ALIAS`-dependent).
+#: ⛔ WHICH SIDE OF THE FAMILY-CLOSE IS GRADED — measured, not assumed (review of #14287, P2):
+#: un-canonicalising the DROP ACCUMULATION (`dropped_family |= …`) alone re-opens the
+#: `ModuleNotFoundError: pass` leak — the block below credits `ImportError` back, so
+#: `rename_dropped` reds, along with the three `child dropped…` rows. Un-canonicalising the
+#: CREDIT FILTER alone (`if _RAISED_ALIAS.get(name, name) not in dropped_family`) changes NO
+#: row: 0 of the 37 witness rows differ under that mutant, because a parent arm that would put
+#: the canonical spelling in `dropped_family` has already emptied `reachable` through
+#: `_masked_by`, so the filter is a belt over the masking braces rather than a rule any row can
+#: red. Earlier cuts said "un-canonicalising BOTH of its sides" — both is SUFFICIENT, but
+#: naming the pair as the load-bearing witness read as evidence for a term nothing grades. The
+#: ACCUMULATION side is the one `rename_dropped` grades.
 _RAISED_ALIAS = {
     "ModuleNotFoundError": "ImportError",
     "ZipImportError": "ImportError",
