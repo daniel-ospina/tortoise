@@ -216,6 +216,32 @@ SELECTED = [
     # is the same defect class the relativizer lookahead already has a dedicated row for.
     ("has anything we said we would do been cancelled", "ended", "existence"),
     ("have any of the things we said we would do been withdrawn", "ended", "existence"),
+    # …AND THE PRONOUN BRANCH OF THAT SAME DELETION NEEDS ITS OWN ROWS (round-6 review, P3,
+    # measured): the two rows above are refused by the THIRD lookahead, so restoring
+    # `did|does|do` in the FOURTH (pronoun) lookahead alone left the suite GREEN — a coverage
+    # hole with reachable consequences (`has anything they did, in fact, been archived` and its
+    # twins refuse under that mutant). These rows have a pronoun subject, so only the fourth
+    # lookahead can refuse them, and they red when `do|does|did` is restored there.
+    ("has anything they did, in fact, been archived", "ended", "existence"),
+    ("has anything we did of late been withdrawn", "ended", "existence"),
+    ("has anything you did to date been cancelled", "ended", "existence"),
+    # ⛔ …AND THE OVER-REFUSAL THE `{0,8}` BOUND CAUSED, PINNED AS ROUTING (round-6 review, P2,
+    # measured — this lane's own regression): a RELATIVE clause whose own participle is an ENDING
+    # word was refused at the widened bound while it routed on `main` and on the pre-change head,
+    # and only the TOKEN COUNT separated it from the asyndetic hijack the widening exists for.
+    # The two lookaheads now carry `(?!\s*(?:been|by)\b)` — the ending belongs to the relative
+    # clause when the clause continues or takes an agent — so these three route again while their
+    # asyndetic twins stay refused (NOT_SELECTED). Pin BOTH directions: this list is the half that
+    # reds if the tail-negative is dropped.
+    ("has anything that has been only just very recently deprecated been withdrawn",
+     "ended", "existence"),
+    ("has anything that has been in fact only just superseded been withdrawn", "ended", "existence"),
+    # ⛔ …AND THE AGENT ARM IS WITHDRAWN, WITH ITS COST PINNED (round-7 review, P2, measured): the
+    # negative below tolerates ONLY `been`, because tolerating `by` made the guard blind to the
+    # asyndetic hijack it exists for — `have any users reported it has been deprecated by legal been
+    # withdrawn` returned `ended` with `signal=None`. So a relative clause whose own participle takes
+    # an agent is REFUSED AND REPORTED (see NOT_SELECTED / NOTICE_ONLY) rather than routed: a stated
+    # recall loss in the module's preferred direction, not a silent drop.
     ("what ended", "ended", "wh_whole_question"),
     ("what ended?", "ended", "wh_whole_question"),
     ("what has been withdrawn", "ended", "wh_whole_question"),
@@ -407,7 +433,7 @@ SELECTED = [
     ("has the reports both been archived", "ended", "is_copula"),
     ("have the claims each been withdrawn", "ended", "is_copula"),
     # ── a PREPOSITIONAL `to` IS NOT AN INFINITIVE (review P1 at `42e0c1a662`) ───────
-    # The infinitive exclusion added to `_COPULA_SUBJECT` names `to be` — a PHRASE, not
+    # The infinitive exclusion (`_COPULA_INFINITIVE_REFUSAL`) names `to be` — a PHRASE, not
     # the word `to` — so a `to` that introduces a noun keeps routing. Pinned because the
     # cheap wrong fix is `to`, which would have killed every `is the export to Europe
     # archived` question on this shape.
@@ -422,6 +448,19 @@ SELECTED = [
     ("hasn't the export been archived", "ended", "is_copula"),
     ("isn’t the export archived", "ended", "is_copula"),
     ("aren't the exports archived", "ended", "is_copula"),
+    # ── the INFINITIVE exclusion belongs to the COPULA BRANCH ONLY (review P1, measured) ──
+    # It sits in `_COPULA_INFINITIVE_REFUSAL`, applied to the `is|are|was|were` alternative
+    # and NOT to `_COPULA_SUBJECT`, because that guard is shared with the perfect branch.
+    # In `has … been <participle>` the predicate is already anchored, so a `to be <participle>`
+    # inside the subject is a POST-NOMINAL MODIFIER and the question is legitimate. When the
+    # exclusion lived in the shared guard all four rows below went `None / None` — routed at
+    # the previous head, then SILENT, with `missed_route_payload` None because
+    # `_COPULA_LONG_SUBJECT` is anchored `^(?:is|are|was|were)`. That is the routed->silent
+    # regression this PR exists to remove, so each spelling is pinned as a ROUTE.
+    ("has the contract to be signed been archived", "ended", "is_copula"),
+    ("has the report to be reviewed been archived", "ended", "is_copula"),
+    ("has the decision to be taken been archived", "ended", "is_copula"),
+    ("has the report being reviewed been archived", "ended", "is_copula"),
 ]
 
 
@@ -485,6 +524,19 @@ NOT_SELECTED = [
     # supplied their notice; these are the bare frames, and they red without this pin.
     "has anyone complained billing has been just deprecated",
     "has anyone complained billing has been only deprecated",
+    # ⛔ …AND THE AGENT-PHRASE HIJACK, WHICH THE `by` TOLERANCE RE-OPENED (round-7 review, P2,
+    # measured — this lane's regression, found by a fresh reviewer within the hour): with `by`
+    # tolerated, both lookaheads went blind whenever the reported clause's participle took an
+    # agent, and these ROUTED the whole ended population with the caller's predicate dropped and
+    # `signal=None`. Refused and reported now; both subject classes and the clitic twin are pinned.
+    "have any users reported it has been deprecated by legal been withdrawn",
+    "have any users reported the vendor has been deprecated by legal been withdrawn",
+    "have any users reported the vendor has been deprecated by legal and been withdrawn",
+    "has anyone complained billing has been deprecated by legal been withdrawn",
+    # …and the RELATIVE row the withdrawn `by` arm used to route — refused AND REPORTED (a stated
+    # recall loss: a token-level slot cannot see the relativizer that separates it from the
+    # asyndetic twin above).
+    "has anything that has been in fact only just superseded by legal been withdrawn",
     # ⛔ THE `<preposition> the <noun>` QUALIFIER class on `is_copula`, GIVEN UP by the re-cut
     # review's P1 fix (measured): `as`/`than`/`during`/`until` also head a CLAUSE, so exempting
     # them from the second-NP refusal routed `is the report as the board archived` to the WHOLE
@@ -935,6 +987,15 @@ NOT_SELECTED = [
     "is the export being quietly archived",
     "is the data being constantly archived",
     "is the export getting officially retired",
+    # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (fresh review, P3, measured): the
+    # refusal lookahead allows `{0,6}` words before `to be|being|getting`, so a SUBJECT-LESS
+    # question is refused — but arm B's reporter required `{1,5}`, so these four came back
+    # `population=None, signal=None, payload=None` (SILENT) while each ROUTED at the delta's
+    # base. Refusing is right; going silent is not. Pinned in BOTH lists.
+    "is being archived",
+    "is to be archived",
+    "is getting archived",
+    "was being retired",
 ]
 
 
@@ -995,6 +1056,11 @@ NOTICE_ONLY = [
     "have any reported it has been in fact just about deprecated and been withdrawn",
     "has anyone complained billing has been just deprecated",
     "has anyone complained billing has been only deprecated",
+    "have any users reported it has been deprecated by legal been withdrawn",
+    "have any users reported the vendor has been deprecated by legal been withdrawn",
+    "have any users reported the vendor has been deprecated by legal and been withdrawn",
+    "has anyone complained billing has been deprecated by legal been withdrawn",
+    "has anything that has been in fact only just superseded by legal been withdrawn",
     # ⛔ …AND THEIR ADVERB TWINS (review of this fix, P1, measured): the adverb slot this lane adds
     # to the `been`-anchored window is matched by the SAME slot in the two lookaheads that decide
     # whether a `been` belongs to a second CLAUSE. Without that symmetry these three ROUTED the whole
@@ -1112,6 +1178,12 @@ NOTICE_ONLY = [
     # this is a LIST decision rather than that guard's participle bound. Excluding them
     # WOULD report them (measured: 5 probes flip, 0 pinned rows move) — a recall widening
     # with its own review, deliberately not made inside a claim correction.
+    # ⛔ the zero-word subject of a non-finite copula — refused AND reported (see the note
+    # in `NOT_SELECTED`); arm B's lower bound is zero for exactly these four.
+    "is being archived",
+    "is to be archived",
+    "is getting archived",
+    "was being retired",
 ]
 
 assert set(NOTICE_ONLY) <= set(NOT_SELECTED), (
@@ -1572,7 +1644,11 @@ def test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound():
 
     for member in sorted(_CONJUNCTION_TAIL_MEMBERS):
         # A FIXED FRAME, so the probe is mechanical rather than a claim about which
-        # sentences people say; the natural spellings are pinned in `NOT_SELECTED`.
+        # sentences people say. ⛔ NOT ALSO PINNED IN `NOT_SELECTED` — the earlier cut of
+        # this comment said the natural spellings were, and they were not: the same commit
+        # that added the `NOTICE_ONLY` subset invariant deleted them, because they measure
+        # `signal is None` and that is what THIS loop asserts. A comment naming a list
+        # that does not contain the rows is a claim nothing holds.
         query = f"is the export archived {member} the migration"
         got = detect_state_question(query)
         assert got.population is None, (
@@ -1586,6 +1662,42 @@ def test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound():
             f"and the behaviour never disagree")
 
 
+
+
+def test_the_repetition_bound_is_not_NARROWER_than_the_bound_it_replaced():
+    """The count bound must not re-open the hole it says it closes (review P3, measured).
+
+    The helper this bound replaced was TWO `{0,5}` runs, i.e. effectively ten adverbial
+    tokens. Shipping `{0,8}` while the comment called it a widening from five was a
+    NARROWING of the guard by two tokens, and the direction that matters is the one that
+    matters everywhere in this module: a question the guard no longer matches is ROUTED
+    to the whole ended population with the caller's predicate dropped and `signal=None`.
+
+    Asserted at the GUARD-REGEX level on purpose, and the consequence is stated honestly
+    rather than overstated: the full detector's 60-character window dominates for a sentence
+    this long, so END-TO-END the bound is UNOBSERVABLE at both `{0,8}` and `{0,10}` — measured
+    across 5 heads x 6 adverbials x n=0..13 (420 probes), 0 differences in `detect_state_question`.
+    What this pin holds is the FRAGMENT's property: the guard must not be narrowed below the
+    bound it replaced, because the bound is what keeps a long adverb run from opening the hole
+    the guard exists to close, and a future shorter head or a wider window would make it
+    reachable. It does NOT claim a routing change, and neither does the module comment this
+    mirrors — an earlier cut of both said "ROUTED", which the measurement did not support.
+    """
+    import re
+
+    from tortoise import state_intent
+
+    guard = re.compile(state_intent._EXISTENCE_GUARD)
+    for n in (8, 9, 10):
+        probe = "the vendor has " + "very " * n + "been deprecated"
+        assert guard.match(probe) is None, (
+            f"{n} adverbials did NOT match the refusal guard ({probe!r}) — the bound is "
+            f"narrower than the ten-token bound it replaced. This is the guard FRAGMENT, not "
+            f"a route claim: end-to-end the 60-char window dominates at this length, so the "
+            f"narrowing is unobservable today and becomes a route the moment that changes")
+    assert guard.match("the vendor has " + "very " * 12 + "been deprecated") is not None, (
+        "the bound is unbounded — a count bound still has to keep the window from "
+        "swallowing a whole clause")
 
 
 def test_the_two_silences_the_comments_name_are_measured_not_hoped():
@@ -1855,7 +1967,11 @@ def test_a_missed_cue_names_words_it_saw_whole():
     trailing context INSIDE the match (`\s+[a-z]`), so `group(0)` stopped on the
     first letter of the following noun. Every other signal ends on a `\b`.
     """
-    from tortoise.state_intent import detect_state_question, missed_route_payload
+    from tortoise.state_intent import (
+        _APOSTROPHES,
+        detect_state_question,
+        missed_route_payload,
+    )
 
     # The rows the review measured through the module's own functions.
     measured = {
@@ -1879,7 +1995,15 @@ def test_a_missed_cue_names_words_it_saw_whole():
         # the detector lower-cases and collapses whitespace before it matches, so
         # the cue is a prefix of the NORMALISED query (a `SOC2` in the caller's
         # spelling arrives as `soc2`).
+        # ⛔ AND IT IS NORMALISED ALL THE WAY, APOSTROPHES INCLUDED (round-28 review, P3,
+        # measured): the detector translates the apostrophe inventory to ASCII before it
+        # matches, so the cue for `hasn’t been deprecated` is `hasn't been deprecated` and
+        # a bare `lower()+split()` comparison fails on a CORRECT cue — it passed only
+        # because no pinned row carried a non-ASCII apostrophe. Compare through the
+        # module's own table so a new row cannot slip past on the same technicality.
         normalised = " ".join(query.lower().split())
+        for apostrophe in _APOSTROPHES:
+            normalised = normalised.replace(apostrophe, "'")
         assert normalised.startswith(cue), (query, cue)
         rest = normalised[len(cue):]
         assert not rest or not (rest[0].isalnum() or rest[0] == "_"), (
@@ -3618,7 +3742,11 @@ def test_the_asyndetic_gap_is_blind_to_neither_a_contraction_nor_a_measured_adve
     this guard fails, so every row here is a question whose answer would silently be the
     whole ended population.
     """
-    from tortoise.state_intent import detect_state_question, missed_route_payload
+    from tortoise.state_intent import (
+        _APOSTROPHES,
+        detect_state_question,
+        missed_route_payload,
+    )
 
     for member in _CONTRACTED_AUXILIARIES:
         query = f"have any users reported the vendor {member} been deprecated"
@@ -3631,6 +3759,59 @@ def test_the_asyndetic_gap_is_blind_to_neither_a_contraction_nor_a_measured_adve
         assert missed_route_payload(got) is not None, (
             f"{query!r} is refused but reports nothing — a silent drop is the same defect "
             f"one layer down")
+    # ⛔ THE SAME SENTENCE IN THE APOSTROPHE THE PRODUCT ACTUALLY RECEIVES (round-27
+    # review, P1, measured): 384 of 384 rows in a 6-spelling × 8-subject × 8-verb
+    # population routed on U+2019 while the ASCII twin was refused. `tortoise/
+    # extractor_v2.py` normalises the same inventory before tokenising, for the same
+    # reason; this module is the consumer that sees raw caller text.
+    # ⛔ EVERY CODEPOINT THE NORMALISER TRANSLATES, asserted against the module's OWN
+    # inventory rather than a hand-typed list: the round-27 fix shipped exercising four of
+    # seven, so three could have been deleted from `_APOSTROPHES` with the suite green. A
+    # pin derived from the constant cannot drift off it.
+    for _ap in _APOSTROPHES:
+        member = f"hasn{_ap}t"
+        query = f"have any users reported the vendor {member} been deprecated"
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} ROUTED (population={got.population!r}, signal={got.signal!r}) — "
+            f"the apostrophe {_ap!r} is not U+0027, and a class closed over one codepoint "
+            f"is not closed over the family the caller sends")
+    # ⛔ AND THE INVENTORY IS PINNED AGAINST THE SENDER'S TABLE, NOT AGAINST ITSELF (fresh
+    # review, P1, measured). The first cut asserted `len(_APOSTROPHES) >= 7` and looped over
+    # that same tuple, so it was TAUTOLOGICAL about coverage: the seven handsome codepoints
+    # passed while the EIGHTEEN `tortoise/extractor_v2.py` also folds (`\u201a \u201b \u02b9
+    # \u2032 \u2035 \u00b4 \u02c8 \u05f3 \uff02 \ua78c …`) each still routed the whole
+    # ended population with the caller's predicate dropped and `signal=None`. A pin that reads
+    # the tuple it pins cannot see that the tuple is incomplete — the only failure this class
+    # has. So the assertion is PARITY with the table the sender normalises with: a codepoint
+    # added upstream reds HERE rather than quietly re-opening the hijack.
+    from tortoise.extractor_v2 import _APOSTROPHES as _SENDER_INVENTORY
+
+    _sender = {chr(codepoint) for codepoint in _SENDER_INVENTORY}
+    _missing = _sender - set(_APOSTROPHES)
+    assert not _missing, (
+        f"the sender folds {len(_sender)} apostrophe codepoints and this normaliser covers "
+        f"{len(_APOSTROPHES)} — missing {sorted(hex(ord(c)) for c in _missing)}. Each of "
+        f"those still ROUTES the whole ended population with the caller's predicate dropped "
+        f"and `signal=None`, which is the defect the normaliser exists to close")
+    for _codepoint in _sender:
+        _probe = f"have any users reported the vendor hasn{_codepoint}t been deprecated"
+        _got = detect_state_question(_probe)
+        assert _got.population is None and _got.signal, (
+            f"{_probe!r} ROUTED (population={_got.population!r}, signal={_got.signal!r}) — "
+            f"this codepoint IS in the sender's inventory, so it reaches this module")
+    # ⛔ AND THE CLITIC SPELLINGS (`'s`, `'ve`, `'d`) — the commonest English form of
+    # exactly these auxiliaries, and all of them routed before the clitic pattern.
+    for query in (
+        "have any users reported the vendor's been deprecated",
+        "have any users said the feature's been deprecated",
+        "have any customers said they've been cancelled",
+        "has anyone noticed the plan's been withdrawn",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} ROUTED (population={got.population!r}, signal={got.signal!r}) — a "
+            f"clitic attaches to the SUBJECT, not to a separable auxiliary")
     for member in _MEASURED_ADVERBIALS:
         query = f"have any users reported the vendor has {member} been deprecated"
         got = detect_state_question(query)
@@ -3662,3 +3843,67 @@ def test_the_relativizer_lookahead_is_the_only_refusal_for_its_own_row():
     assert got.population is None and got.signal == "existence_unguarded", (
         f"the relativizer lookahead stopped refusing its own row: {got.population!r}, "
         f"{got.signal!r} — either restore it or delete it and this pin together")
+
+
+def test_the_apostrophe_table_mirrors_the_extractors_inventory():
+    """The apostrophe table is the EXTRACTOR'S inventory, not a re-derivation.
+
+    ⛔ THE FIRST CUT TRANSLATED SEVEN SPELLINGS AND EIGHTEEN ROUTED (round-28 review, P2,
+    measured): `extractor_v2._APOSTROPHES` normalises twenty-five codepoints before it
+    tokenises, because the product actually receives them; this module is the other
+    consumer that sees raw caller text, and it translated seven. `hasn‚t been deprecated`
+    (U+201A) and `hasn‛t been deprecated` (U+201B) routed the whole ended population with
+    the caller's predicate dropped and `signal=None` — spellings the module's own note
+    claimed were covered.
+    ⛔ NOT IMPORTED AT IMPORT TIME on purpose: `state_intent` is the hot read path and
+    `extractor_v2` is a heavy module, so the two tables are kept equal by this assertion
+    rather than by one importing the other.
+    """
+    from tortoise.extractor_v2 import _APOSTROPHES as _EXTRACTOR_APOSTROPHES
+    from tortoise.state_intent import _APOSTROPHES as _STATE_INTENT_APOSTROPHES
+
+    ours = {ord(c) for c in _STATE_INTENT_APOSTROPHES}
+    # the extractor's table is a dict keyed by codepoint
+    theirs = set(_EXTRACTOR_APOSTROPHES)
+    assert ours == theirs, (
+        f"the apostrophe inventories drifted apart. Only in `state_intent`: "
+        f"{sorted(hex(c) for c in ours - theirs)} — only in `extractor_v2`: "
+        f"{sorted(hex(c) for c in theirs - ours)}. A codepoint the extractor normalises "
+        f"and this module does not is a spelling the asyndetic guard is blind to, which is "
+        f"the hijack #14033 exists to refuse; add it to `_APOSTROPHES` rather "
+        f"than trimming this assertion")
+
+
+def test_a_bare_noun_clitic_reports_instead_of_being_served_by_the_copula_shape():
+    """The copula shape must not swallow a subject that carries the auxiliary clitic.
+
+    ⛔ ONE ARTICLE APART, OPPOSITE VERDICTS (round-28 review, P1, measured):
+    `_COPULA_SUBJECT`'s word class admits `'`, so it ate `billing's` whole and the copula
+    shape matched the FULL string on the first pass — `have any users reported billing's
+    been deprecated` returned the ended population with the caller's predicate dropped and
+    `signal=None`, while `have any users reported the billing's been deprecated` was
+    refused with the notice. The guard could not help: the copula shape is matched BEFORE
+    it and never consults it. Measured over a 2,400-row cross-product (5 heads x 8 bare
+    nouns x 5 participles x 6 clitic spellings x det/non-det): 1,200 routed, ALL of them
+    the bare-noun half.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    for query in (
+        "have any users reported billing's been deprecated",
+        "have any users said v3's been deprecated",
+        "have any users reported the search index's been deprecated",
+        "has anyone complained billing's been withdrawn",
+        "have any users reported billing’s been deprecated",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} ROUTED (population={got.population!r}, shape={got.shape!r}, "
+            f"signal={got.signal!r}) — its determiner twin is refused, so the pair "
+            f"disagreeing is the defect, not the spelling")
+        assert missed_route_payload(got) is not None, (
+            f"{query!r} is refused silently — a cue that reaches no answer must say so")
+    # …and the plain copula questions this exclusion could have broken still route.
+    for query in ("is the export archived", "is all the data archived",
+                  "is it archived", "is the export no longer archived"):
+        assert detect_state_question(query).population == "ended", query
