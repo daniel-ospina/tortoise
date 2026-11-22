@@ -3277,7 +3277,15 @@ def test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body():
     is what the pin reports, and lexing resumes after the terminator so the comment exemption
     this file relies on is not traded away for the fix.
     """
-    script = "cat <<EOF\n# $(printf HIDDEN_BY_HEREDOC)\nEOF\n"
+    # ⛔ THE MARKER IS SPLIT BY `""` SO ITS OWN SOURCE CANNOT PRINT IT (review cycle 13, P2,
+    # MEASURED). The premise used to assert only `"HIDDEN_BY_HEREDOC" in ran.stdout`, and a
+    # marker that appears literally in the script satisfies that while executing NOTHING:
+    # measured with the idiomatic quoted delimiter (`cat <<'EOF'`), bash prints the body
+    # verbatim — `# $(printf HIDDEN_BY_HEREDOC)` — so the assertion passed over an INERT
+    # fixture and the test no longer reproduced its hole. `printf HIDDEN_BY_""HEREDOC`
+    # prints `HIDDEN_BY_HEREDOC` while the source contains no contiguous copy of it, so the
+    # premise can only be satisfied by an actual expansion.
+    script = 'cat <<EOF\n# $(printf HIDDEN_BY_""HEREDOC)\nEOF\n'
 
     # PREMISE, executed rather than claimed: the body line really does run.
     ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
@@ -3286,10 +3294,18 @@ def test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body():
         "the heredoc body did NOT expand, so this test no longer reproduces the hole it "
         f"guards: stdout={ran.stdout!r}"
     )
+    # ⛔ AND THE PREMISE ITSELF IS NOT VACUOUS: the marker's SOURCE spelling reaching stdout
+    # means the body was copied, not expanded, and the assertion above would have been
+    # satisfied by the literal `printf HIDDEN_BY_""HEREDOC` text (measured: with the idiomatic
+    # `cat <<'EOF'` the old fixture printed the marker and executed nothing — `2 passed`).
+    assert 'HIDDEN_BY_""HEREDOC' not in ran.stdout, (
+        "the heredoc body did NOT expand — its literal source reached stdout — so the "
+        f"premise above is vacuous: stdout={ran.stdout!r}"
+    )
 
     # THE FIX: the body line is scanned, and its own text is what the pin reports.
     offending = _executable_prose_lines(script)
-    assert offending and "$(printf HIDDEN_BY_HEREDOC)" in offending[0], (
+    assert offending and '$(printf HIDDEN_BY_""HEREDOC)' in offending[0], (
         f"the pin did not see the heredoc body's substitution; it saw {offending!r}"
     )
     with pytest.raises(AssertionError, match="command substitution"):
@@ -3299,7 +3315,7 @@ def test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body():
     # real comment after it is still exempt. This documents backticks in comments, and a fix
     # that swallowed the rest of the block would red the alarm block it is meant to protect.
     assert _executable_prose_lines(script + "echo ok  # see `some-tool`\n") == [
-        "# $(printf HIDDEN_BY_HEREDOC)"
+        '# $(printf HIDDEN_BY_""HEREDOC)'
     ], "lexing did not resume normal comment handling after the heredoc terminator"
 
     # `<<-` terminates on a TAB-indented delimiter; missing it would swallow the rest of the
@@ -3348,7 +3364,7 @@ def test_the_prose_pin_sees_a_heredoc_operator_SPLICED_by_a_backslash_newline():
     …while `_executable_prose_lines` returned `[]`. That is the residual-R1 fail-open reached
     through the ESCAPE model instead of the comment or quote model, so it is pinned here.
     """
-    script = "cat <\\\n<EOF\n# $(printf HIDDEN_BY_SPLICE)\nEOF\n"
+    script = 'cat <\\\n<EOF\n# $(printf HIDDEN_BY_""SPLICE)\nEOF\n'
 
     # PREMISE, executed rather than claimed.
     ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
@@ -3356,6 +3372,13 @@ def test_the_prose_pin_sees_a_heredoc_operator_SPLICED_by_a_backslash_newline():
     assert "HIDDEN_BY_SPLICE" in ran.stdout, (
         "the spliced operator did NOT start a heredoc, so this test no longer reproduces the "
         f"hole it guards: stdout={ran.stdout!r}"
+    )
+    # ⛔ and the premise cannot be satisfied by the literal source (review cycle 13, P2): the
+    # marker is spelled `HIDDEN_BY_""SPLICE` in the script, so a body that was COPIED rather
+    # than expanded reaches stdout with its `""` intact.
+    assert '""' not in ran.stdout, (
+        "the heredoc body was copied, not expanded — the literal source reached stdout, so "
+        f"the premise above is vacuous: stdout={ran.stdout!r}"
     )
 
     # THE FIX: the body line is scanned even though the operator spans the splice.
@@ -3389,7 +3412,7 @@ def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
     """
     # PREMISES, executed rather than claimed: the escape pair is inert, the doubled one is not.
     inert = 'echo "(tag -> \\`publish-pypi.yml\\`) and \\`tortoise-client\\` is published."\n'
-    live = 'echo "(tag -> \\\\`printf SUBSTITUTED`) is published."\n'
+    live = 'echo "(tag -> \\\\`printf SUB""STITUTED`) is published."\n'
     for label, script, want in (
         ("inert", inert, "`tortoise-client`"),
         ("live", live, "SUBSTITUTED"),
@@ -3398,6 +3421,12 @@ def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
         assert ran.returncode == 0, (label, ran.stderr)
         assert want in ran.stdout, (
             f"the {label} spelling did not behave as measured — this test's premise is gone: "
+            f"stdout={ran.stdout!r}"
+        )
+        # ⛔ the live marker is spelled `SUB""STITUTED` in the script, so a substitution that
+        # did NOT run reaches stdout with its `""` intact — asserted, not assumed (cycle 13).
+        assert '""' not in ran.stdout, (
+            f"the {label} spelling printed its own SOURCE, so the premise above is vacuous: "
             f"stdout={ran.stdout!r}"
         )
     assert ran.stderr == "", "a silent substitution is the case the pin exists to catch"
@@ -3424,9 +3453,9 @@ def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
     # is UNESCAPED, so with an EVEN run of backslashes before the newline the next line's `$(`
     # RUNS. The join deleted the pair regardless, leaving `\` glued to `$`, which the skip then
     # ate as an escape pair — `[]`, a silent pass on a live substitution. Measured premises:
-    even_run = 'echo "prose ending in a literal backslash \\\\\n$(printf HIDDEN_BY_RUN)DEN"\n'
-    odd_run = 'echo "prose \\\\\\\n$(printf HIDDEN_ODD)DEN"\n'
-    body = "cat <<EOF\n# prose \\\\\n$(printf HIDDEN_BODY)DEN\nEOF\n"
+    even_run = 'echo "prose ending in a literal backslash \\\\\n$(printf HIDDEN_BY_R""UN)DEN"\n'
+    odd_run = 'echo "prose \\\\\\\n$(printf HIDD""EN_ODD)DEN"\n'
+    body = 'cat <<EOF\n# prose \\\\\n$(printf HIDDEN_BO""DY)DEN\nEOF\n'
     for label, script, want in (
         ("even-run splice (double quotes)", even_run, "HIDDEN_BY_RUN"),
         ("odd-run splice (double quotes)", odd_run, "HIDDEN_ODD"),
@@ -3436,6 +3465,10 @@ def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
         assert ran.returncode == 0, (label, ran.stderr)
         assert want in ran.stdout, (
             f"the {label} shape did not substitute, so this premise is gone: stdout={ran.stdout!r}"
+        )
+        assert '""' not in ran.stdout, (
+            f"the {label} shape printed its own SOURCE, so this premise is vacuous: "
+            f"stdout={ran.stdout!r}"
         )
         assert _executable_prose_lines(script), (
             f"the {label} shape EXECUTES a `$(` and the pin reported nothing — a silent pass "
@@ -3482,9 +3515,14 @@ def test_the_prose_pin_sees_a_dollar_paren_SPLICED_across_a_backslash_newline():
     commit before; this pins the same splice model on the DETECTOR TOKEN, in each region the
     splice applies to, and checks the report still names the physical lines a human can find.
     """
-    body = "cat <<EOF\n# $\\\n(printf HIDDEN_BY_TOKEN)\nEOF\n"
-    tabbed = "cat <<-EOF\n\t# $\\\n(printf HIDDEN_BY_TOKEN)\n\tEOF\n"
-    quoted = 'echo "a\n# $\\\n(printf HIDDEN_BY_TOKEN) tail"\n'
+    # ⛔ THE MARKER IS SPLIT BY `""` SO ITS OWN SOURCE CANNOT PRINT IT (review cycle 13, P2,
+    # MEASURED): `marker in stdout` is vacuous when the marker also appears VERBATIM in the
+    # script, which is what an inert fixture prints. `printf HIDDEN_BY_""TOKEN` prints the
+    # contiguous marker while the source carries no copy of it, and the `"" not in stdout`
+    # assertion below fails if the literal source ever reaches the reader instead.
+    body = 'cat <<EOF\n# $\\\n(printf HIDDEN_BY_""TOKEN)\nEOF\n'
+    tabbed = 'cat <<-EOF\n\t# $\\\n(printf HIDDEN_BY_""TOKEN)\n\tEOF\n'
+    quoted = 'echo "a\n# $\\\n(printf HIDDEN_BY_""TOKEN) tail"\n'
 
     for label, script in (("heredoc body", body), ("<<- body", tabbed), ("dq echo", quoted)):
         # PREMISE, executed: the marker's SOURCE never contains its OUTPUT, so its presence in
@@ -3494,6 +3532,10 @@ def test_the_prose_pin_sees_a_dollar_paren_SPLICED_across_a_backslash_newline():
         assert "HIDDEN_BY_TOKEN" in ran.stdout, (
             f"{label}: the spliced `$( )` did NOT run, so this test no longer reproduces the "
             f"hole it guards: stdout={ran.stdout!r}"
+        )
+        assert '""' not in ran.stdout, (
+            f"{label}: the marker's SOURCE reached stdout, i.e. the substitution did not run "
+            f"and the assertion above is vacuous: stdout={ran.stdout!r}"
         )
         # THE FIX: reported, and the report names the PHYSICAL lines the match spans.
         offending = _executable_prose_lines(script)
