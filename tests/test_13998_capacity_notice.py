@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import dataclasses
 import functools
 import json
 import logging
@@ -32,6 +33,7 @@ import pytest
 
 from tests.fake_control_plane import FakeControlPlane
 from tortoise import capacity_notice as cn
+from tortoise import allowance_gate as ag
 from tortoise import email_notify
 from tortoise import supabase_control as sc
 from tortoise.supabase_control import (
@@ -608,21 +610,46 @@ def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
     assert send.calls == [], "a broken gauge mailed a customer"
 
 
-def test_a_raising_meter_is_named_in_the_closed_list_not_left_to_escape(
+def test_a_read_dimension_that_raises_is_named_in_the_closed_list(
         monkeypatch):
-    """The meter half of the same closed list: a reading that RAISES is named.
+    """`read_dimension` ITSELF failing is named `unreadable-reading`.
 
-    Distinct from the row above because the two instruments are separate seams
-    and only one of them is exercised on each path; a single pin would leave the
-    other half of the documented pair unreachable and ungraded.
+    ⛔ NOT the meter-fault pin — an earlier cut of this docstring said it graded
+    "a reading that RAISES" at "the instrument a real caller would hit", and both
+    halves were false. `allowance_gate.read_dimension` catches the METER's own
+    exception and answers `None`, so a meter outage never reaches this guard; the
+    row below pins that path. What THIS row grades is the wiring fault the guard
+    can catch: `read_dimension` raising before it ever calls the meter (an
+    undeclared dimension makes `declared[dimension]` raise).
     """
     def raise_on_read(dimension, org_id):
-        raise RuntimeError("the meter read failed: HTTP 503")
+        raise RuntimeError("read_dimension failed before the meter ran")
 
     monkeypatch.setattr("tortoise.allowance_gate.read_dimension", raise_on_read)
-    # `reading=None` is the production default: "read it yourself", so the raise
-    # is injected at exactly the instrument a real caller would hit.
     assert cn.evaluate(ORG_ID, limits=_limits(102)) == (None, "unreadable-reading")
+
+
+def test_a_raising_METER_answers_no_reading_through_the_real_seam(monkeypatch):
+    """A meter that RAISES reaches `evaluate` as a MISSING reading — `no-reading`.
+
+    This is the production path, and it is why `unreadable-reading` must not be
+    documented as covering a meter fault: `allowance_gate.read_dimension` is a
+    documented NON-RAISING seam ("it never refuses, never raises for a meter
+    failure … a caller that must not guess gets ``None`` and says so"), so the
+    raise is converted to `None` one layer below this module. The status an
+    operator therefore sees is `no-reading` — the one `sweep_pass` reports as
+    "the gauge is not being written" — which is exactly the conflation the docs
+    now state instead of hiding.
+    """
+    def boom(org_id):
+        raise RuntimeError("the meter read failed: HTTP 503")
+
+    patched = tuple(
+        dataclasses.replace(dim, meter=boom)
+        if dim.dimension == "graph_storage" else dim
+        for dim in ag.DIMENSIONS)
+    monkeypatch.setattr(ag, "DIMENSIONS", patched)
+    assert cn.evaluate(ORG_ID, limits=_limits(102)) == (None, "no-reading")
 
 
 def test_evaluate_sends_nothing_without_an_armed_allowance():

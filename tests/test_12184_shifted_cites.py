@@ -1914,8 +1914,10 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
         # review cycle 9, P1). A green run printed the same thing whether eight arms measured or four
         # were skipped — so a reader of a depth-1 log could not tell "the main-side claims hold" from
         # "the main-side claims were never read". ⛔ `print` does NOT fix that here: capture attaches a
-        # passing test's stdout to the call report only, and every CI leg runs `-r fEs` with default
-        # capture and no `-s`, so the line never reaches `$PYTEST_LOG` — the trap this repo has already
+        # passing test's stdout to the call report only, and the `python-ci` test legs run `-r fEs` with
+        # default capture and no `-s` (not EVERY leg in the repo passes `-r fEs` — the e2e jobs pass
+        # `-rs` — so the claim is scoped to the legs this file runs in), so the line never reaches
+        # `$PYTEST_LOG` — the trap this repo has already
         # measured twice (`tests/conftest.py` #1103 and #7735, and `tests/_tmpdir_hygiene.py`'s answer:
         # a warning IS visible under those flags). So: `warnings.warn`, no assertion change.
         warnings.warn(
