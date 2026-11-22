@@ -943,7 +943,9 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   the head is. Positions alone cannot distinguish a burst of 500 fast folds
 #:   from 500 records stuck behind one wedged statement; this is the number that
 #:   can. ⛔ It is a CALLBACK gauge (``set_function``, registered immediately below
-#:   this family's definition — `monitoring.py:1077`, NOT the bottom of the file), not
+#:   this family's definition as ``PROJECTION_OLDEST_PENDING_SECONDS.set_function(
+#:   _live_oldest_pending_seconds)`` — ⛔ cited by SYMBOL, not by line: the number
+#:   here was `1077` and the next merge moved it to `1078`), not
 #:   an event-published one: it is recomputed on collect, because the value drifts
 #:   with the clock and the loop that would push it is the thread a wedge blocks
 #:   (#14222 review cycle 5, ISSUE 1).
