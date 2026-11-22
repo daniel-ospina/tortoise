@@ -839,27 +839,33 @@ GRAPH_CAPABILITY_CYPHER = (
     "*]",                 # a TYPED variable-length pattern, `-[r:NEXT*]->`
     "*1..", "*..",        # a bounded / open hop count
     "-[",                  # a fixed-length relationship pattern (adjacency)
-    "]->", "<-",           # a TYPED hop (`-[r:T]->`), the type side written
-    # ⛔ AN UNTYPED HOP IS ANCHORED ON ITS NODES, NOT ON `--`. `--` alone over-matched
-    # in the FALSE-BLOCK direction once the snippet is whitespace-stripped (#14183
-    # round-13 review, P3): `$after - -1` becomes `--1` (a unary minus, no walk at
-    # all) and `` n.`a--b` `` unwraps to `a--b` (a property NAME containing two
-    # hyphens, no walk either) — and a row misfiled as capability-bearing publishes
-    # the opposite verdict and reds the census's own "no reader needs a graph
-    # capability" pin over a reader that walks nothing. Cypher always parenthesises
-    # a node, so anchoring on the node's closing paren keeps every real spelling
-    # (`(n)--()`, `(a)-->(b)`, property maps and labels included) and drops both
-    # false shapes. ⚠️ There is no `)<--(` arm on purpose: `<-` is ordered BEFORE
-    # this line and matches every inbound hop, so such an arm could never decide —
-    # the same "arm that can never decide" defect that removed `size((` just below.
+    "]->",                  # a hop written with its type side last, `-[r:T]->`
+    # ⛔ AN UNTYPED HOP IS ANCHORED ON ITS NODES, NOT ON THE DASHES. `--` and `<-`
+    # alone over-match in the FALSE-BLOCK direction once the snippet is
+    # whitespace-stripped and backtick-quoted identifiers are unwrapped (#14183
+    # rounds 13-14, P3): `$after - -1` becomes `--1` (a unary minus), `e.ts < -1`
+    # becomes `s<-1` (a comparison), and `` n.`a--b` `` / `` n.`a<-b` `` unwrap to a
+    # property NAME containing the punctuation. None of the three walks anything,
+    # and a row misfiled as capability-bearing publishes the OPPOSITE verdict and
+    # reds the census's own "no reader needs a graph capability" pin over a reader
+    # that walks nothing.
+    # ⚠️ Cypher always parenthesises the node to the LEFT of an inbound hop, so
+    # anchoring on that closing paren keeps every real spelling — `(a)<--(b)`,
+    # `(a)<-[r:T]-(b)` (also caught by `-[`) and the legacy unbracketed
+    # `(a)<-r-(b)` — and drops both false shapes, which carry a property or digit
+    # in that position rather than a `)`. Same rule for the outbound forms below.
+    ")<-",                 # an INBOUND hop, `(a)<--(b)` / `(a)<-r-(b)`
     ")--(", ")-->",          # an UNDIRECTED / directed node-to-node hop
     "exists {",           # a pattern-existence predicate over an edge
     # ⛔ `size((` WAS AN ARM AND IS GONE (#14183 round-13 review, P3): it contributed
     # ZERO detection — every real adjacency aggregate carries a relationship inside
     # it, so `-[` or the hop arms decide first — while `RETURN size((collect(n)))`
     # (a legitimate grouping paren, no relationship anywhere) was misfiled as an
-    # adjacency aggregate. This file's own `ARMS_NO_SNIPPET_CAN_DECIDE` note said as
-    # much, and an arm that only ever false-positives is not an arm.
+    # adjacency aggregate. The TEST MODULE's `ARMS_NO_SNIPPET_CAN_DECIDE`
+    # (`tests/test_13094_graphevent_home.py`) had already said as much, and an arm
+    # that only ever false-positives is not an arm. `size((` is gone from that set
+    # too, so the partition pin still holds: an arm nothing can decide is not a
+    # spare, it is a false-positive surface.
     "shortestpath",       # path search
     "call algo", "apoc.",  # a graph algorithm / path procedure
     "call db.idx.fulltext", "db.idx.fulltext",
