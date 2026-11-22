@@ -2174,8 +2174,11 @@ def _token_spans(token: str) -> list[tuple[int, int]]:
     unrelated addresses (`:58336`/`:58338`) names two lines, NOT the line between them. Taking
     `min..max` over every number turned such a token into a range, so the arm accepted the `58337`
     the token never mentions — the exact false PASS this arm exists to refuse, one indirection
-    further out. Measured on the shipped tree: **0 of 101** rows carries more than one address, so
+    further out. Measured on the shipped tree: **0 of 102** rows carries more than one address, so
     no row's verdict moves; only the door the next row could have walked through is closed.
+    ⛔ **That population is `_PINS` 88 + `_MAIN_SET_MISSED` 14 = `102` — RE-DERIVE it, never offset
+    it (#14269 review, P3: this read `101` because a `+5` pin delta was applied to a count that was
+    already one short — `96` against `97` — at `main`).**
     """
     return [
         (int(match.group(1)), int(match.group(2) or match.group(1)))
@@ -2266,7 +2269,7 @@ def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them()
     token carries, so a token naming two unrelated addresses became a range spanning the gap: the
     arm accepted the `58337` neither address names. That is the same false PASS this arm exists to
     refuse — a row asserting an address the document does not carry — so it is refused here rather
-    than recorded as a residual. Measured on the shipped tree: 0 of 101 rows carries more than one
+    than recorded as a residual. Measured on the shipped tree: 0 of 102 rows carries more than one
     address, so no row's verdict moves.
     """
     between = (_AUDIT, "`:58336`/`:58338`", _SDK, 58337, "rows = proj.g.query(")
@@ -2286,7 +2289,7 @@ def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
 
     On the PRE-FIX code `_token_span` returned `None` for a token with no digits and the loop
     `continue`d, so such a row was silently exempt from the arm — the gate vouching for a claim it
-    never read. Measured on the shipped tree: 0 of 101 rows has a token with no address.
+    never read. Measured on the shipped tree: 0 of 102 rows has a token with no address.
     """
     unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37568, "``:Document`` node).")
     assert _rows_outside_their_token((unaddressed,)), (
