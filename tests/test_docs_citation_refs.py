@@ -196,6 +196,7 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 import unicodedata
 from functools import cache
 from pathlib import Path
@@ -3372,11 +3373,27 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
 #: A binary that is MISSING outright raises `OSError` from `subprocess` before this function can say
 #: anything (pinned by
 #: `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`). Cached because the probe
-#: spawns a process and nothing within a session changes its answer.
+#: spawns a process and nothing within a session changes its answer (the `grep` parameter is part
+#: of the cache key, so a stub's answer and the local binary's are cached separately).
 @cache
-def _d5_undocumented_long_options() -> frozenset[str]:
+def _d5_undocumented_long_options(grep: str = "grep") -> frozenset[str]:
+    """The allowance for `grep`, MEASURED from the binary — never remembered from a version.
+
+    ⛔ `grep` IS A PARAMETER, NOT A CLOSED-OVER LITERAL (#14303 review, P2 — MEASURED). Every
+    consumer reads the default, so the live behaviour is unchanged; the parameter exists so a STUB
+    can drive the derivation. Without it the only witness was the alias cell's
+    `rederived == _d5_undocumented_long_options()`, and on GNU grep >= 3.12 — the platform CI runs —
+    BOTH sides of that comparison are `frozenset()`. A mutant that hardcodes `return frozenset()`
+    therefore leaves CI green (`10 passed` under the 3.12 shim) and reds only on a <= 3.11 box, so
+    the exact regression this derivation exists to prevent (a remembered table coming back, the
+    #14027 false PASS of an unread blank-class prescription) was unguarded where it mattered most.
+    `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer` now drives it with a
+    stub that RUNS the spelling and one that REFUSES it, which distinguishes "measured" from
+    "remembered" on every platform.
+    """
     return frozenset(
-        alias for alias in _D5_UNDOCUMENTED_ALIAS_CANDIDATES if _d5_grep_runs_long_option(alias))
+        alias for alias in _D5_UNDOCUMENTED_ALIAS_CANDIDATES
+        if _d5_grep_runs_long_option(alias, grep))
 
 #: Every long option `grep --help` documents (GNU grep 3.11 and 3.12 document the same set, pinned
 #: against the binary by `test_the_d5_count_reader_knows_every_long_option_grep_documents`).
@@ -5285,6 +5302,19 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     assert _d5_grep_runs_long_option("--unix-byte-offsets", refuses) is False, (
         "a stub grep that answers `unrecognized option`, exit 2, must read as REFUSED — that is "
         "the GNU grep 3.12 case this allowance exists to follow (#14138)")
+    # ⛔ AND `MEASURED` MUST BE DISTINGUISHABLE FROM `REMEMBERED` ON THE PLATFORM CI RUNS (#14303
+    # review, P2 — MEASURED). On GNU grep >= 3.12 the live allowance is `frozenset()`, so the alias
+    # cell's `rederived == _d5_undocumented_long_options()` is two EMPTY sets compared and no mutant
+    # of the derivation can red it there. Driving the derivation through its `grep` parameter is what
+    # makes the two outcomes separable on every platform: a grep that RUNS the spelling must yield
+    # it, and a grep that REFUSES it must yield the empty set. Delete either row and a hardcoded
+    # `frozenset()` (or a constant that still carries the 3.11-era spelling) survives CI invisibly.
+    assert _d5_undocumented_long_options(accepts) == {"--unix-byte-offsets"}, (
+        "a grep that RUNS `--unix-byte-offsets` must produce it in the measured allowance — an "
+        "empty allowance on such a box leaves a second blank-class prescription unread (#14138)")
+    assert _d5_undocumented_long_options(refuses) == frozenset(), (
+        "a grep that REFUSES `--unix-byte-offsets` must produce an EMPTY allowance — anything else "
+        "grades the expression of a command grep will not run (#14138)")
     with pytest.raises(AssertionError, match="neither a count"):
         _d5_grep_runs_long_option("--unix-byte-offsets", confused)
     # ⛔ AND A GREP THAT IS BROKEN FOR *EVERY* SPELLING IS NOT A GREP THAT REFUSED THIS ONE (#14138
@@ -5312,6 +5342,50 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     # emptied by a probe that could not run (#14138 review, P3).
     with pytest.raises(OSError):
         _d5_grep_runs_long_option("--unix-byte-offsets", str(tmp_path / "grep-that-is-not-here"))
+
+
+def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
+    """The lazy derivation is a CONTRACT, and nothing else pinned it (#14303 review, P3 — MEASURED).
+
+    ⛔ WHY THIS CELL EXISTS. `_d5_undocumented_long_options` is deliberately lazy: an IMPORT-TIME
+    probe made this WHOLE file uncollectable on a box with no `grep`, taking every citation guard in
+    it down with the cells that need grep, and a `grep` that blocked on PATH hung COLLECTION instead
+    of failing one cell (the consequence is recorded on that function). No cell asserted it, so it
+    could be silently undone: prepending a module-level `_D5_ALL = _d5_all_long_options()` leaves
+    **all 33 cells green** on any box that HAS grep, and only a grep-less box ever notices — which
+    is exactly the platform this file is least often run on.
+
+    ⛔ MEASURED IN A CHILD INTERPRETER, not in-process: this module's own import has already
+    happened by the time any cell runs, so an in-process check could never observe it. The child gets
+    a `PATH` that holds no `grep` at all — the box the docstring describes — and must BOTH import
+    successfully AND leave the allowance underived (`currsize == 0`). The two halves catch different
+    regressions: the first reds an eager probe that RAISES in the child, the second reds one that
+    derives without raising (e.g. after a `PATH` fallback), and together they are the difference
+    between "deferred" and "merely not yet called".
+    """
+    grep_free = tmp_path / "no-grep-on-this-path"
+    grep_free.mkdir()
+    driver = (
+        "import importlib.util, sys\n"
+        f"source = {str(Path(__file__).resolve())!r}\n"
+        "spec = importlib.util.spec_from_file_location('d5_import_probe', source)\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "sys.modules['d5_import_probe'] = mod\n"
+        "spec.loader.exec_module(mod)\n"
+        "print('IMPORT-OK', mod._d5_undocumented_long_options.cache_info().currsize)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", driver],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "PATH": str(grep_free)},
+    )
+    assert done.returncode == 0 and "IMPORT-OK" in done.stdout, (
+        "importing this module with NO `grep` on PATH must SUCCEED — an import-time probe aborts "
+        "COLLECTION of this whole file, so 0 of its citation guards run (#14138): "
+        f"rc={done.returncode} stderr={done.stderr.strip()[-500:]!r}")
+    assert done.stdout.strip().endswith("IMPORT-OK 0"), (
+        "the allowance was DERIVED AT IMPORT: the derivation must stay lazy so a box without `grep` "
+        f"still collects this file (#14138): child said {done.stdout.strip()!r}")
 
 
 def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_prefix():
