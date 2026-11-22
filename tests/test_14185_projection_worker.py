@@ -693,6 +693,16 @@ def test_an_INDETERMINATE_applied_is_REFUSED_not_counted_as_a_projection():
         types.SimpleNamespace(applied=None, refusal=decline), 1) is None
     assert projection_worker._classify_fold_outcome(
         types.SimpleNamespace(applied=False, refusal=decline), 1) is None
+    # ⛔ AND WITH NO READABLE `applied` AT ALL (#14222 review round 19, P3): the
+    # absent-attribute arm returned `record_no_outcome` before the decline was
+    # ever consulted, so this shape was the ONE false loss left in the function —
+    # while `live_write` reads the token independently of `applied`.
+    assert projection_worker._classify_fold_outcome(
+        types.SimpleNamespace(refusal=decline), 1) is None, (
+        "an outcome carrying the seam's healthy-decline token but no readable "
+        "`applied` was counted as a LOSS; `live_write._is_durable_decline` reads "
+        "the token independently of `applied`, so the decline must survive the "
+        "absent-attribute arm too")
 
 
 def test_a_RENAMED_prometheus_lock_REDS_the_guard_instead_of_passing_vacuously():
