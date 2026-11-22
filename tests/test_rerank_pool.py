@@ -1749,20 +1749,55 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                      if isinstance(n, _ast.Attribute)
                      and n.attr in ("tortoise_fts_query",
                                     "_tortoise_fts_query")]
+    # ⛔ RESOLVE THE ALIAS, and count only what is actually a READ. A mention can
+    # feed a call (`sdk._tortoise_fts_query(…)`), be bound to a name before use
+    # (`_m = sdk._tortoise_fts_query; _m(…)`), or read nothing at all (a dead
+    # binding). The three cases must NOT share a verdict: the census records a row
+    # for every mention, but what the grant's reason claims is READS — a dead
+    # binding is not one, and a read that opts out needs no grant at all. Measured
+    # before this resolution existed: deleting the warm-up and leaving
+    # `_dead = sdk._tortoise_fts_query` in its place kept the arm GREEN (the dead
+    # mention satisfied the count), and an ALIASED read that opts out reddened it
+    # (census-sanctioned, so a false block).
+    def _fed_calls(mention) -> list:
+        """Every call this mention reaches, directly or through a bound alias."""
+        direct = [c for c in _ast.walk(harness)
+                  if isinstance(c, _ast.Call)
+                  and (c.func is mention or mention in c.args
+                       or any(mention is k.value for k in c.keywords))]
+        if direct:
+            return direct
+        alias_names: set = set()
+        for node in _ast.walk(harness):
+            if not isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+                continue
+            if node.value is not mention:
+                continue
+            targets = (node.targets if isinstance(node, _ast.Assign)
+                       else [node.target])
+            for target in targets:
+                # ⛔ `add`, never `update`: `.update(` is one of the ordinary-word
+                # receiver shapes the SDK residue sweep counts, and a set built
+                # with it moves `sweep_residue` by one on a test-only diff.
+                if isinstance(target, _ast.Name):
+                    alias_names.add(target.id)
+        return [c for c in _ast.walk(harness)
+                if isinstance(c, _ast.Call)
+                and isinstance(c.func, _ast.Name)
+                and c.func.id in alias_names]
+
     live: list = []
     seam_calls: list = []
     for mention in seam_mentions:
-        call = next((c for c in _ast.walk(harness)
-                     if isinstance(c, _ast.Call)
-                     and (c.func is mention or mention in c.args
-                          or any(mention is k.value for k in c.keywords))), None)
-        if _opted_out(call):
-            continue        # the census's sanctioned alternative, not an exemption
+        fed = _fed_calls(mention)
+        if not fed:
+            continue        # a mention that reads nothing is not a read
+        if all(_opted_out(c) for c in fed):
+            continue        # the census's sanctioned alternative, no grant needed
         live.append(mention)
-        if call is not None:
-            seam_calls.append(call)
+        seam_calls.extend(fed)
     assert len(live) == 2, (
-        f"{len(live)} un-opted-out seam mention(s) of `tortoise_fts_query` in "
+        f"{len(live)} un-opted-out seam read(s) of `tortoise_fts_query` in "
         "tools/read_wave_latency.py, but the exemption's recorded reason says "
         "TWO (a discarded warm-up, and the measured loop) and the grant is "
         "owner-granular — a further read inside the granted owner is exempted "
