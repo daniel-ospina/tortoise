@@ -1714,6 +1714,10 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
 _SPLIT_COMPARABLE = re.compile(r"all (\d+) comparable ones resolve at BOTH heads")
 _SPLIT_NONCOMPARABLE = re.compile(r"the (\w+) that are NOT comparable")
 _SPLIT_DRIFT = re.compile(r"the drift is (\d+) of the (\d+) comparable, plus (\w+) of those (\w+) pairs")
+#: ⛔ `(?:do|does)` — the sentence is graded at the count it STATES, so a correct correction from a
+#: plural to a singular count must not read as "the sentence vanished". The arm's own message says to
+#: re-point this pattern rather than delete the arm, and the singular is the shape the truth takes
+#: here (`#14038` review cycle 13: exactly one of the twelve is past `main`'s copy of its file).
 _SPLIT_ABSENT_AT_MAIN = re.compile(r"the\s+(\w+) that (?:do|does) not exist at `main` either")
 
 
@@ -1820,15 +1824,102 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     )
     # The incomparable half splits in two: the pairs that DO exist at the named `main` (and so drift) and the
     # ones that exist at neither head (and so cannot be compared at all). Both counts are published, and they
-    # must add up to the population `_PIN_EOF_PAIRS` measures — which is what makes "eight of those eleven"
-    # checkable rather than asserted.
+    # must add up to the population `_PIN_EOF_PAIRS` measures.
     drifters_incomparable = _as_int(drift.group(3))
     absent_at_main = _as_int(absent.group(1))
+    # ⛔ THAT IDENTITY ALONE IS NOT ENOUGH, and it is the whole finding (#14038 review cycle 13, P2): it
+    # relates two PUBLISHED numbers to each other, so it agreed with itself on the word `zero` for as long
+    # as the sentence said zero — while `origin/main`'s own file sizes refute zero (`hosted_api.py` is
+    # 51,508 lines there against the twelve's `:51607`). A relation between two claims cannot catch a wrong
+    # claim. So `absent_at_main` is compared against `main`'s BLOBS below, and the decomposition against
+    # the header's TOTAL.
     assert drifters_incomparable + absent_at_main == len(_PIN_EOF_PAIRS), (
         f"the split says {drifters_incomparable} of its non-comparable pairs drift and {absent_at_main} "
         f"exist at neither head — {drifters_incomparable + absent_at_main} in all, but the pin-side facts "
         f"measure {len(_PIN_EOF_PAIRS)} non-comparable pairs. Every one of them is in exactly one half."
     )
+    # …and the decomposition has to ADD UP to the numerator the header publishes, which is the third number
+    # the two-term identity above cannot see: `155 of the 215 comparable` + the twelve = 167.
+    _total_m = re.search(r"The drift is (\d+) of those (\d+)", body)
+    assert _total_m is not None, (
+        "the header no longer publishes the drift as `The drift is <N> of those <M>` — this arm reads the "
+        "TOTAL from it to hold the decomposition to it, so re-point the pattern rather than dropping the arm")
+    _drift_total = int(_total_m.group(1))
+    _comparable_drift = int(drift.group(1))
+    assert _comparable_drift + drifters_incomparable + absent_at_main == _drift_total, (
+        f"the header's decomposition does not add up to its own total: {_comparable_drift} comparable "
+        f"drifters + {drifters_incomparable} non-comparable + {absent_at_main} existing at neither head = "
+        f"{_comparable_drift + drifters_incomparable + absent_at_main}, but it publishes `The drift is "
+        f"{_drift_total}`. A decomposition that omits the pair it just disclosed is how `eleven of those "
+        "twelve` shipped beside a 167 that only twelve can reach."
+    )
+    # The disclosure is graded against `main`'s BLOBS where this checkout can read them; where it cannot
+    # (a `fetch-depth: 1` clone), the arms above still grade the sentence and nothing skips.
+    _main_sizes: dict[str, int] = {}
+    _main_readable = True
+    for _path, _line in _PIN_EOF_PAIRS:
+        _blob = _pin_blob_lines(_path, "origin/main")
+        if _blob is None:
+            _main_readable = False
+            break
+        _main_sizes[_path] = len(_blob)
+    if _main_readable:
+        _measured_absent = sum(1 for _path, _line in _PIN_EOF_PAIRS if _line > _main_sizes[_path])
+        assert absent_at_main == _measured_absent, (
+            f"the split says {absent_at_main} of the non-comparable pairs do not exist at `main` either, "
+            f"but `git show origin/main:<path> | wc -l` measures {_measured_absent} of the "
+            f"{len(_PIN_EOF_PAIRS)} whose written line is past `main`'s copy of its file "
+            f"({', '.join(f'{p.rsplit(chr(47), 1)[-1]}:{line}>{_main_sizes[p]}' for p, line in _PIN_EOF_PAIRS if line > _main_sizes[p]) or 'none'}). "
+            "A pair whose address `main` does not carry is not a pair `main` drifts — say the measured "
+            "count, and do not restore the partition this arm used to assert."
+        )
+
+    # ⛔ THE PROVENANCE OF THE ONE PAIR THAT IS NOT `main`'s, GRADED TOO (#14038 review cycle 13, P2).
+    # The header used to call it "this branch's own insertion (`+108` above the commit door)"; measured,
+    # the branch inserts NO such line and the shift is 114. Those are four separate claims — the delta,
+    # the two absolute addresses, and the file growth — and the sentence that states them must be the
+    # measurement of this head, not a number carried from the cut before it.
+    _prov = re.search(
+        r"this branch's own \(`\+(\d+)` above the commit door\) MOVE of it — its statement sits at "
+        r"`main`'s (?:line )?([\d,]+) and at this head's (?:line )?([\d,]+), matching "
+        r"`hosted_api\.py`'s ([\d,]+) -> ([\d,]+) lines",
+        body,
+    )
+    assert _prov is not None, (
+        "the header no longer states, in the graded form, that the one non-comparable `main`-absent pair "
+        "is MOVED by this branch rather than inserted. That sentence carries the provenance of the one "
+        "pair a reader cannot check from the pin — keep it, and keep its five figures, or re-word this "
+        "arm against the wording you use."
+    )
+    _prov_delta = int(_prov.group(1))
+    _prov_main_line, _prov_head_line = (int(g.replace(",", "")) for g in _prov.group(2, 3))
+    _prov_main_len, _prov_head_len = (int(g.replace(",", "")) for g in _prov.group(4, 5))
+    _head_hosted = (REPO / "tortoise/hosted_api.py").read_text(encoding="utf-8").splitlines()
+    assert _prov_head_len == len(_head_hosted), (
+        f"the header says `hosted_api.py` is {_prov_head_len} lines here; the file is "
+        f"{len(_head_hosted)}. A file-length figure is the whole basis of this split — re-derive it.")
+    assert _prov_main_line + _prov_delta == _prov_head_line, (
+        f"the header says the statement moved from `main`'s {_prov_main_line} to {_prov_head_line} "
+        f"here — a `+{_prov_delta}` — but the two addresses differ by {_prov_head_line - _prov_main_line}. "
+        "Either the delta or an address is stale, and the delta is what names the branch's own lines.")
+    if _main_readable and "hosted_api" in _main_sizes:
+        _main_hosted = _pin_blob_lines("tortoise/hosted_api.py", "origin/main") or []
+        assert _prov_main_len == len(_main_hosted), (
+            f"the header says `main`'s `hosted_api.py` is {_prov_main_len} lines; it measures "
+            f"{len(_main_hosted)}. The delta above is `main`-relative, so both ends of it must be measured.")
+        assert len(_head_hosted) - len(_main_hosted) == _prov_delta, (
+            f"the header calls the move `+{_prov_delta}` this branch's own lines, but the branch's "
+            f"`hosted_api.py` is {len(_head_hosted)} lines against `main`'s {len(_main_hosted)} — "
+            f"{len(_head_hosted) - len(_main_hosted)}. Re-derive the delta rather than carrying it.")
+        assert _prov_main_line <= len(_main_hosted) and _prov_head_line <= len(_head_hosted), (
+            f"the provenance sentence names an address past the end of the file it attributes it to "
+            f"(`main` {_prov_main_line} of {len(_main_hosted)}, head {_prov_head_line} of "
+            f"{len(_head_hosted)}) — that is the exists-at-neither-head error one level down.")
+        assert (_head_hosted[_prov_head_line - 1].strip()
+                == _main_hosted[_prov_main_line - 1].strip() != ""), (
+            f"the header says the statement at `main`'s line {_prov_main_line} is the SAME statement as "
+            f"the one at this head's {_prov_head_line}, which is what makes it a move and not an "
+            f"insertion. Re-derive both addresses.")
     assert _as_int(drift.group(4)) == len(_PIN_EOF_PAIRS), (
         f"the drift sentence names `of those {drift.group(4)} pairs` while the split counts "
         f"{len(_PIN_EOF_PAIRS)} non-comparable pairs"
@@ -1845,6 +1936,50 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "but the header's pin-side `wc -l` parenthetical does not state it. Without that figure the "
             "five numerals above are unverifiable prose, which is how they shipped wrong."
         )
+
+
+def test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries() -> None:
+    """Prose that quotes a document's line range must be the range the document carries at THIS head.
+
+    ⛔ WHY THIS CROSS-FILE ARM EXISTS (#14038 review cycle 13, P3). `04-plan.md`'s I7 row is graded
+    structurally in `tests/test_7949_capstone_measure.py`, which parses whatever range the row carries —
+    so the COMMENT BLOCKS beside that guard, which quote the same range in prose, were graded by nothing.
+    They read `:15557-15634` while the row had already been re-derived to `:15563-15640` by the commit
+    that moved it, and the same blocks still attributed the move to "this branch's own 108 inserted
+    lines" when `hosted_api.py` grows 114 against `main`. That is this file's own subject one level down:
+    a figure re-measured in one place and CARRIED in another.
+
+    ⛔ IT LIVES HERE, NOT THERE, on purpose: `test_7949_capstone_measure.py`'s `durations` row pins that
+    file's own `^def test_` count in handwritten prose, so adding a case there would demand a re-write of
+    that row's long enumeration for no benefit — and an arm placed INSIDE the existing bundle test would
+    be INERT the moment that function reds, which it does at this head for reasons that are `main`-side,
+    not this PR's. A separate case in this file always runs.
+
+    Head-free on purpose: the rule is "the citation labelled `at this head` equals the row's", so it
+    needs no history, no `main` and no pin — and it cannot pass by agreeing with itself, because the ROW
+    is the authority and the COMMENT is the claim.
+    """
+    _plan = REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md"
+    _rows = [ln for ln in _plan.read_text(encoding="utf-8").splitlines() if "| **I7** |" in ln]
+    assert len(_rows) == 1, (
+        f"I7 must be exactly ONE line of `04-plan.md` to scope its range cite to, found {len(_rows)} — "
+        "re-word this guard rather than letting it bind the easier of two")
+    _cite = re.search(r"`hosted_api\.py:(\d+)-(\d+)`", _rows[0])
+    assert _cite is not None, (
+        "`04-plan.md` I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
+        "`hosted_api.py` and keep the `:START-END` form, which is what this guard parses")
+    _start, _end = int(_cite.group(1)), int(_cite.group(2))
+    _src = (REPO / "tests/test_7949_capstone_measure.py").read_text(encoding="utf-8")
+    _here = re.findall(r"`:(\d+)-(\d+)` at this head", _src)
+    assert _here, (
+        "no `:START-END` in the bundle test is labelled `at this head`, so this arm cannot run — keep the "
+        "label on the citation that names the CURRENT head's range, do not delete the arm")
+    for _start_s, _end_s in _here:
+        assert (int(_start_s), int(_end_s)) == (_start, _end), (
+            f"the bundle test calls `:{_start_s}-{_end_s}` the range 'at this head', but `04-plan.md`'s "
+            f"I7 row carries `:{_start}-{_end}`. A citation labelled for this head that disagrees with the "
+            "document is the re-derived-number-carried-instead-of-re-derived class: re-derive it from "
+            "the row, or label it with the head it was actually taken at.")
 
 
 def test_a_carried_forward_figure_is_reported() -> None:

@@ -8044,7 +8044,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cited
     # `hosted_api.py:15328-15405` at `09f5c99afd`, `:15346-15423` at #13844's head,
-    # `:15441-15518` at the #13844 re-cut, and `:15557-15634` at this head — every cut
+    # `:15441-15518` at the #13844 re-cut, and `:15563-15640` at this head — every cut
     # re-derived by CONTENT with both ends OPENED. The END of that range is a BLANK line,
     # so the row pins it structurally: the stated last line must still be the blank line
     # immediately before `return OrgInfoResponse(`.
@@ -8087,6 +8087,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         f"04-plan.md I7's range end (`:{_i7_end}`) is no longer the blank line before "
         "`return OrgInfoResponse(` — re-derive BOTH endpoints from `hosted_api.py`, "
         "because the span-membership check above stays green while the end drifts")
+
+    # ⛔ THE PROSE BESIDE THIS GUARD IS GRADED — by
+    # `test_the_epic_bundles_i7_prose_cites_the_range_its_row_carries` in
+    # `tests/test_12184_shifted_cites.py`, not here. This function parses whatever range the row carries,
+    # so the comment blocks above that QUOTE the range in prose were graded by nothing: they read the
+    # stale `:15557-15634` while the row said `:15563-15640` (#14038 review cycle 13, P3). The arm is a
+    # separate case in the census file because a case added HERE would have to re-write this file's own
+    # `durations` row, and an arm placed inside this function would be INERT the moment it reds.
 
     # ⛔ THE BLOCK ARM — the claim `03-test-design.md` actually makes, checked
     # against the structure instead of a number that a tool rewrites under it.
@@ -18235,7 +18243,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # `sdk.py:29121` — so the ROW agrees with `main` here. That says nothing about membership:
     # the file IS in this diff at this head, and NOT because of that row — `git diff --numstat
     # origin/main...HEAD -- …/04-plan.md` prints `1 1`, the I7 row's `hosted_api.py` range, moved
-    # by this branch's own 108 inserted lines (`:15346-15423` → `:15557-15634`). An earlier cut
+    # by this branch's own 114 inserted lines — the STATEMENT is at main's 15449 and at 15563
+    # here (`hosted_api.py` 51,508 -> 51,622 lines), while main's row start (15346) was already
+    # 103 lines stale against its own tree, which is why the ROW moves 15346 -> 15563 = +217 and
+    # only 114 of that is this branch's. An earlier cut
     # of this block stated the opposite in both halves (once "NOT in this diff at all", once "IS
     # in the diff, this branch's re-point [of the sdk.py row]"), which is the head-bound-
     # membership class this arm has been wrong in both directions on — which is why the arm
@@ -18264,7 +18275,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # branch's re-point at another — which is the head-bound-membership class its own comment
     # above forbids. So it RUNS the command the D5 row names and grades the SENTENCE against
     # the output, instead of typing either answer: at this head `--numstat` prints `1 1` (the
-    # I7 row's `hosted_api.py` range moved by this branch's 108 inserted lines), so D5 states
+    # I7 row's `hosted_api.py` range moved by this branch's 114 inserted lines), so D5 states
     # the file IS in the diff. An unreadable `origin/main` (no such ref in a bare/detached
     # checkout) leaves the membership UNCHECKED rather than failing on a premise it cannot
     # derive — but a stated membership is still required, so the row cannot go silent.
