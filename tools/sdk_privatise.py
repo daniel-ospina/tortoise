@@ -1143,8 +1143,12 @@ SWEEP_NAMES = 66
 #: they name; neither is carried from the block above.
 #: ⛔ THIS PR'S OWN CONTRIBUTION IS ZERO ROWS, and that is measured rather than asserted: the pair
 #: below is `--repin`'s output on THIS tree and it is the SAME pair `origin/main`'s tree prints
-#: (cross-checked, never the derivation), because the diff adds no executable line for the AST
-#: walk to see. `--check` exits 0 on this tree with
+#: (cross-checked, never the derivation) — MEASURED at the head that carries the test arm below
+#: too, not assumed from the pre-arm diff: `edits_for` on BOTH files this change touches yields
+#: zero typed references and ZERO residue rows (`tools/sdk_privatise.py` contributes only the two
+#: `residue_all.update`/`after_residue.update` accumulators already inside the pinned set, and
+#: `tests/test_sdk_privatise_sweep.py` contributes nothing), which is why the pair is the base's
+#: and not the branch's. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`, so no public name was legitimised in
 #: either direction and no new SHAPE was absorbed: the direction this pin exists to catch is the
 #: SET moving, and both rows are DECLARED here rather than rewritten away — re-pointing an
