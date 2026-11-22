@@ -9,7 +9,7 @@ aboutSubjects: tortoise
 aboutObjects: tortoise-hosted-api, tortoise-capture, extractor-v4
 ---
 <!-- research-path: issue daniel-ospina/tortoise#14232 comment carrying `<!-- research: v1 -->` -->
-<!-- plan-review: cycles=3, status=as-built, version=3.0.0 -->
+<!-- plan-review: cycles=3, status=as-built, version=3.0.1 -->
 
 # #14232 — capture ACKs fast, extraction completes on the worker
 
@@ -66,11 +66,30 @@ public `TortoiseSDK` method set are untouched — the SDK keeps calling the shar
 
 Both the git history and the current tree were checked; the comparables are recorded in the research
 comment on the issue (`Mem0` < 50 ms ack + queue, `Zep` declared async delay, `Hindsight` 500–2 000 ms
-per batch). ⚠️ **`docs/architecture/PLAN-private-beta-and-scale.md` and
-`docs/architecture/SCALING-ROADMAP.md` do not exist in this repository** (`git ls-tree -r origin/main`
-returns nothing for either name, and `git grep 'SCALING-ROADMAP'` finds no reference). The brief and
-`#14219` both cite them. The comparables they were cited for are re-quoted from `#14219`'s body in the
-research comment, and the missing-doc gap is reported rather than worked around.
+per batch).
+
+⚠️ **The two docs this brief cites did not exist at this branch's base and DO exist now** — they landed
+on `main` as `#14216` while this lane ran, and an earlier revision of this section said they did not
+exist at all (`git ls-tree -r origin/main` genuinely returned nothing for either name at `b4da1f5c01`).
+Corrected here rather than silently dropped, because the correction is load-bearing: they contain the
+destination this split is a step toward, and one of their gates is **stricter than this lane's**:
+
+- `PLAN-private-beta-and-scale.md` **F2** (Track F) — *"write ack ≤ 100 ms p95; projection lag bounded
+  and exported"* — and **G2** measures that same figure. This lane's target is the brief's **1 s**, and
+  its measured p95 is 924 ms (in-process rehearsal).
+- `SCALING-ROADMAP.md` §1/§2.5 — Mem0's **<50 ms ack, queue, scale on depth**; Zep's async ingest; and
+  §3's convergence line: *"they never make a read wait for extraction"*. That is precisely this lane's
+  split, so the comparables now have a home in the repo and this section no longer quotes them second
+  hand from `#14219`.
+- `PLAN-private-beta-and-scale.md` **D3** names this very traffic (`6 × POST /v1/sessions, all 429` in a
+  9 s window), which is what the 429 leg of this lane's gate trace was.
+
+⛔ **The gap between 924 ms and F2's 100 ms is NOT closed by this PR and is not claimed to be**: the ACK
+still carries the gates, the `:Session` MERGE, the turn `:Point`s, the `sessionCaptured` Event and the
+`:Source` materialization, plus the receipt. What this PR removes from the wait is the model call — the
+term that grew without bound. Closing the rest is F2's remaining synchronous-capture work (`#4625`), and
+the honest statement of the split's contribution is **"ack no longer waits on extraction"**, not "ack is
+now fast".
 
 ## 6. Wiring
 
@@ -265,8 +284,9 @@ research comment, and the missing-doc gap is reported rather than worked around.
 
 **Out of scope — must NOT be raised** (note; file; do not chase):
 
-- the missing `docs/architecture/PLAN-private-beta-and-scale.md` / `SCALING-ROADMAP.md` (reported, not
-  authored here);
+- `PLAN-private-beta-and-scale.md` **F2**'s remaining synchronous-capture work (the ack still carries the
+  record writes; `#4625` owns it) — this lane removes the model call from the wait, not the ack's whole
+  cost;
 - the `_session_extraction_estimate` quota gate's full-graph `count_org_usage` scan (pre-existing,
   `#4625`-class, bounded by `_graph_offload`);
 - per-user limits (`#11758`), capture caps (`#4010`), the document-pack surface itself (`#14219`);

@@ -17,9 +17,13 @@ WHAT THIS MEASURES, AND WHY THOSE FOUR THINGS
    read from the SAME projection the product serves (`capture_ok` present and the
    in-flight phase cleared), so the check cannot agree with a state no client can
    see.
-4. **extraction demonstrably ran behind the ack** — points, entities and edges
-   for a drained session. Without this, 1-3 are all satisfiable by a capture that
-   stores turns and never extracts, i.e. by the bug.
+4. **extraction demonstrably ran** — points, entities and edges for a drained
+   session. Without this, 1-3 are all satisfiable by a capture that stores turns
+   and never extracts, i.e. by the bug. Beside it the tool REPORTS, without
+   grading, the share of acks that came back with extraction still in flight
+   (`deferred_at_ack`): a run that defers on 0 of 50 is a run that was fast
+   enough, not a failed split, so making the share a pass/fail would grade the
+   host's load rather than the change.
 
     uv run python tools/acceptance_14232_drain.py --n 50
     uv run python tools/acceptance_14232_drain.py --n 50 --json
@@ -383,13 +387,21 @@ def run(args) -> int:
             refusals.append({"session_id": cap["session_id"],
                              "status": r.status_code,
                              "detail": (body or {}) if isinstance(body, dict) else str(r.text)[:200]})
+        phase_at_ack = (((body or {}).get("extraction") or {}).get("phase")
+                        if isinstance(body, dict) else None)
+        ack_status = (body or {}).get("status") if isinstance(body, dict) else None
         outcomes.append({
             "session_id": cap["session_id"],
             "status_code": r.status_code,
             "ack_ms": round(elapsed * 1000.0, 1),
-            "ack_status": (body or {}).get("status") if isinstance(body, dict) else None,
-            "phase_at_ack": (((body or {}).get("extraction") or {})
-                             .get("phase")) if isinstance(body, dict) else None,
+            "ack_status": ack_status,
+            "phase_at_ack": phase_at_ack,
+            # "the ack came back before extraction finished" — the property this
+            # tool MEASURES. It is deliberately NOT a criterion: a run where
+            # extraction happens to finish inside the budget is a legitimate run,
+            # so grading it would be grading the machine's load. Recorded per ack
+            # so the share can be reported beside the criteria.
+            "deferred_at_ack": bool(phase_at_ack) or ack_status == "accepted",
         })
 
     # ── criterion 3: every session reaches a terminal state, on its own ──
@@ -427,6 +439,8 @@ def run(args) -> int:
     ok_ack = p95 <= args.max_ack_p95
     ok_refusal = not refusals
     accepted = sum(1 for o in outcomes if o["status_code"] == 200)
+    deferred = sum(1 for o in outcomes
+                   if o["status_code"] == 200 and o["deferred_at_ack"])
     ok_terminal = (not stuck) and accepted > 0 and len(terminals) == accepted
     # Points are the non-negotiable half: without an extracted point the capture
     # stored turns and never extracted, which is the defect. Entities and edges
@@ -456,6 +470,7 @@ def run(args) -> int:
         "refusals": refusals,
         "accepted": accepted,
         "terminal": len(terminals),
+        "deferred_at_ack": {"n": deferred, "of": accepted},
         "stuck": stuck,
         "extraction_evidence": evidence,
         "outcomes": outcomes,
@@ -482,8 +497,15 @@ def run(args) -> int:
         print(_p(ok_terminal, "terminal on its own",
                  f"{len(terminals)}/{accepted} accepted"
                  + ("" if ok_terminal else f" — stuck: {stuck[:3]}")))
-        print(_p(ok_extract, "extraction ran behind the ack",
+        print(_p(ok_extract, "extraction demonstrably ran",
                  json.dumps(evidence, default=str)))
+        # A MEASUREMENT, not a criterion — printed with `·` so it can never be
+        # read as a PASS/FAIL. It answers "did the split actually defer?" on
+        # this run; grading it would red a run that was merely fast enough.
+        print(f"  · deferred at ack: {deferred}/{accepted} "
+              f"({'the ack returned before extraction finished' if deferred
+                 else 'extraction finished inside the budget on every session'}; "
+              f"measured, not graded)")
         print()
         print(f"VERDICT: {report['verdict']}")
 
