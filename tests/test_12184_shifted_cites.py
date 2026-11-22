@@ -1738,17 +1738,24 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
 
     WHAT IT GRADES. (1) Every pair in `_PIN_EOF_PAIRS` is still a census pair — a dropped or re-pointed cite
     must re-derive this table rather than leave it describing a population the document no longer has.
-    (2) The header NAMES each of them at the address it writes, inside the non-comparable enumeration.
-    ⛔ WHICH ARM CATCHES WHAT — stated precisely, because an earlier cut of this sentence got it wrong:
-    a cite RE-POINTED elsewhere in the document leaves this region's text untouched, so arm 2 stays
-    green and it is ARM 1 that reds (the pair leaves the census population, so the static table now
-    describes a pair the document no longer writes — verified on a mutated body: re-pointing the
-    document's own `mcp_server.py:11590` spelling gives `unnamed = []` and `orphan = [(…mcp_server.py,
-    11590)]`). Arm 2 reds only when the ENUMERATION ITSELF stops naming one of the twelve — the pair
-    dropped or edited out of the sentence. ⛔ It is NOT "the only place the twelve are written":
-    `mcp_server.py`'s `:11590` alone also appears at five other sites in this document, outside the
-    graded region. That is exactly why arm 2 grades the ENUMERATION REGION and never claims uniqueness
-    across the prose at large. (3) The published
+    (2) The header NAMES each of them at the address it writes, somewhere inside the non-comparable
+    BLOCK — the graded region runs from `that are NOT comparable` to the pin line-count sentence's
+    `past the pin's copy of its file`, which is WIDER than the enumeration sentence.
+    ⛔ WHICH ARM CATCHES WHAT — an earlier cut of this docstring got it wrong TWICE, so both halves are
+    pinned to a measurement here:
+    · a cite RE-POINTED elsewhere in the document leaves this region's text untouched, so arm 2 stays
+      green and it is ARM 1 that reds (the pair leaves the census population, so the static table now
+      describes a pair the document no longer writes — verified on a mutated body: re-pointing the
+      document's own `mcp_server.py:11590` spelling gives `unnamed = []` and `orphan =
+      [(…mcp_server.py, 11590)]`). Ten of the twelve are caught this way; the two that also carry a
+      one-token spelling inside the region red both arms.
+    · arm 2 reds when the REGION names none of the three accepted forms for a pair. Because the region
+      is wider than the sentence, that is NOT "the enumeration stopped naming it": the block writes
+      `hosted_api.py:51607` three times — twice in the sentence, once in the pin-count paragraph — so
+      stripping BOTH sentence spellings still leaves `unnamed = []` (measured on a mutated body).
+    ⛔ And it is NOT "the only place the twelve are written": `mcp_server.py`'s `:11590` alone also
+    appears at five other sites in this document, outside the graded region — which is why arm 2 grades
+    a REGION and never claims uniqueness across the prose at large. (3) The published
     counts agree with the table: comparable + non-comparable == the pairs the file measures, and the four
     pinned `wc -l` values are the ones the header states for those files.
 
