@@ -2294,6 +2294,16 @@ class TestTheRequiredEmbedderFlagBindsOnARemoteBacking:
         """
         monkeypatch.delenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", raising=False)
         self._dead_backing(monkeypatch)
+        # ⛔ THE MODEL IS STUBBED ABSENT ON PURPOSE. This row asserts the DECLINE
+        # VOCABULARY of the remote branch, and without the stub
+        # ``fallback_snapshot.build_snapshot`` loads a real sentence-transformers
+        # model — measured 129.6 s of this file's 161 s — to prove nothing about
+        # that vocabulary. Its neighbour (the ARMED row) deliberately keeps the
+        # real environment and costs 0.37 s, because THAT pin is about which
+        # branch refuses.
+        from tortoise.embeddings import EmbeddingModel
+        monkeypatch.setattr(EmbeddingModel, "get",
+                            classmethod(lambda cls, load_timeout=None: None))
         sdk = self._sdk(tmp_path)
         trace: list = []
         try:

@@ -1323,7 +1323,7 @@ about the process, not about the failed read); when the import fails or the call
 module altogether, `_embed_seam_health` publishes every key as `null`, `injected` included. In both,
 `error` is the verdict and `backing: null` means the seam could not be described — never "no encoder".
 
-#### The two levers
+#### The levers
 
 | variable | default | what it does |
 |---|---|---|
@@ -1406,7 +1406,11 @@ something this section promises.
 
 ⚠️ **WHAT THE GATE DOES NOT REMOVE — read this before promising an RSS drop.** A few residual paths
 still encode IN-PROCESS and call `EmbeddingModel.get()` synchronously rather than going through the
-seam: entity resolution and the cross-lens pass arrive via `embeddings._encode`. With `worker` /
+seam: entity resolution and the cross-lens pass arrive via `embeddings._encode`, and the READ-MISS path
+does too — `fallback_snapshot.build_snapshot` / `_encode_query` call `EmbeddingModel.get()` directly, so
+the first search against a fresh or empty graph pays the load on its own thread (`embed_seam`'s
+`encodes_in_process` docstring names this `fallback_snapshot` residual too, which is why the two docs
+must not disagree about it). With `worker` /
 `external` those are no longer warmed at boot, so the FIRST such call pays the cold load
 (13.5 s warm cache, ~57 s cold, `_LOAD_TIMEOUT_S` 300 s) on its own request thread. Routing them
 through the seam is a behaviour change, tracked separately; until then the serving process still
