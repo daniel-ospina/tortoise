@@ -2582,28 +2582,58 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
             "GITHUB_OUTPUT": str(out),
             "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
         }
+        # `bash -e`: the runner's shell is `/usr/bin/bash -e {0}` (read off the live run
+        # 44995025534), so the block is exercised under errexit, not under a laxer shell
+        # than the one it ships to (review cycle 1, P2 — `bash -c` stayed green while the
+        # real step aborted).
         completed = subprocess.run(
-            ["bash", "-c", run], cwd=str(REPO_ROOT), env=env, capture_output=True, text=True
+            ["bash", "-e", "-c", run], cwd=str(REPO_ROOT), env=env, capture_output=True, text=True
         )
-        return completed.returncode, completed.stdout + completed.stderr
+        return completed.returncode, completed.stdout + completed.stderr, out.read_text()
 
     # (a) a FAIL verdict: the verdict VALUE must reach the log, or the log cannot be read.
-    rc, printed = execute('printf \'{"verdict": "FAIL", "exit_code": 1, "arms": []}\\n\'; exit 1')
+    rc, printed, published = execute(
+        'printf \'{"verdict": "FAIL", "exit_code": 1, "arms": []}\\n\'; exit 1'
+    )
     assert rc == 1, printed
     assert "FAIL" in printed, (
         "the canary reached a FAIL verdict and printed nothing readable — the log says "
         "no more about the artifact than a crashed run does, which is the state in which "
         "a broken published artifact gets diagnosed as a detector fault (#12660)"
     )
+    assert published.strip() == "exit_code=1", published
 
     # (b) the interpreter dies before the tool can report: the log must SAY so, and must
     #     not show a fabricated verdict.
-    rc, printed = execute("exit 1")
+    rc, printed, published = execute("exit 1")
     assert rc == 2, printed
     assert printed.strip(), "a run with no verdict printed nothing at all — unreadable"
     assert '"verdict"' not in printed, (
         "a run that wrote no verdict file still printed verdict JSON: the log now claims "
         "a reading that does not exist"
+    )
+    assert published.strip() == "exit_code=2", published
+
+    # (c) ⛔ PRINTING THE READING MUST NEVER CHANGE THE READING (review cycle 1, P1, MEASURED).
+    # `exit_code=` is the only severity signal the alert has and `exit "$rc"` is the round-18
+    # gate. With the display block placed between them and the write, a verdict.json that is
+    # present but UNREADABLE (permissions, a directory, a damaged mount — `-s` cannot tell)
+    # makes `cat` fail under `-e` and aborts the step before either runs: measured
+    # `$GITHUB_OUTPUT` EMPTY and the step exiting **1** — the "cut a release" code — while its
+    # own logic had decided 2. The stub chmods the file it was just redirected into, so this
+    # is the real state, not a simulation of it.
+    rc, printed, published = execute(
+        'printf \'{"verdict": "FAIL", "exit_code": 1}\\n\'; '
+        'chmod 000 "$RUNNER_TEMP/canary/verdict.json"; exit 1'
+    )
+    assert rc == 2, (
+        f"an unreadable verdict file made the step exit {rc}: the display ran before the "
+        "exit, so a detector fault is published as exit 1 (the release call) "
+        f"— printed: {printed!r}"
+    )
+    assert published.strip() == "exit_code=2", (
+        "the severity signal was not published — `cat` failing under `-e` aborted the step "
+        f"before `$GITHUB_OUTPUT` was written: {published!r}"
     )
 
 

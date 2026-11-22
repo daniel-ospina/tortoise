@@ -158,13 +158,24 @@ jobs:
           # reading (and say so when there is none) instead of leaving the two
           # indistinguishable. Pinned by
           # `test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read`.
+          #
+          # ⛔ PUBLISH THE SEVERITY SIGNAL BEFORE PRINTING IT, and never let the DISPLAY
+          # decide the exit (review cycle 1, P1, MEASURED). `exit_code=` is the only
+          # severity signal the alert has, and the step's own final exit is the round-18
+          # gate. Both were downstream of the display, so a `cat` that failed under `-e` (a
+          # present-but-unreadable verdict.json — permissions, a directory, a damaged
+          # mount) aborted the step BEFORE either ran: measured the output sink EMPTY and
+          # the step exiting 1 — the "cut a release" code — while its own logic had decided
+          # 2. `-s` cannot catch it (`-s` is true for an unreadable file); only `-e` + the
+          # ordering can, so the write moves first and the read is guarded.
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           if [ -s "$RUNNER_TEMP/canary/verdict.json" ]; then
             echo "published-artifact-canary exit_code=$rc published_fail=$published_fail — the verdict.json the exit code was derived from:"
-            cat "$RUNNER_TEMP/canary/verdict.json"
+            # `|| true`: printing the reading must never be able to change the reading.
+            cat "$RUNNER_TEMP/canary/verdict.json" || true
           else
-            echo "published-artifact-canary wrote NO verdict file — a DETECTOR fault, not a release call (exit_code=$rc)"
+            echo "published-artifact-canary wrote NO verdict file — nothing was measured (exit_code=$rc)"
           fi
-          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
       # `always()` — not `failure()` — so this step is still considered when the JOB is
       # cancelled (its `if` is re-evaluated during the cancellation grace window) and when
