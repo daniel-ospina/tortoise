@@ -1570,6 +1570,22 @@ class TestCapabilityModel:
         dropped["no_such_wrapped_method"] = "tortoise_create_point"
         assert any("stale map" in v
                    for v in write_surface_map_violations(dropped))
+        # ⛔ THE VALUE IS GRADED TOO, and this mutation is the one that proves it
+        # (`#14249` review P2-1). The two cases above move a KEY, so they only ever
+        # exercise the `dead` and `inverse` clauses: pointing a method at a DIFFERENT
+        # live, write-classified door stated nothing any clause could refuse, which is
+        # how `link_entities -> tortoise_create_point` stayed green while the entry's
+        # own comment claimed the pair is what makes the wrap site checkable.
+        # The pair below is measured wrong against the source (the arm builds the tool's
+        # own handler reach), and `tortoise_create_point` is live and write-typed, so
+        # only the reach clause can red it — deleting that clause reds this line.
+        wrong_door = dict(DECLARED_WRITE_SURFACE_MAP)
+        wrong_door["link_entities"] = "tortoise_create_point"
+        assert any("wrong door" in v
+                   for v in write_surface_map_violations(wrong_door)), (
+            "a method pointed at a live write tool whose handler never reaches it "
+            "must red — otherwise the map's VALUE is ungraded"
+        )
         # FORWARD: a wrap site with no map entry is reported (no KeyError)
         # #4282 Phase 2: the dropped key must be a method that really HAS a wrap
         # site in `tortoise/mcp_server.py` — this mutation is only non-vacuous
