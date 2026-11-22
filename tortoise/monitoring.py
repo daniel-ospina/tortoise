@@ -978,6 +978,11 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:                             ``None`` when unarmed, but a door's own `project`
 #:                             callable can answer ``None`` for its own reasons
 #:                             (the SDK's unimportable-record-half arm, #10000).
+#:                             ⛔ The SAME fact — nothing was observed — is what
+#:                             an outcome that cannot be READ produces (a raising
+#:                             property on the returned object), which is counted
+#:                             here rather than under a fourth name, so this
+#:                             vocabulary stays CLOSED at three answers.
 #:   ``projection_refused``    an ARMED refusal (`applied=False` with a
 #:                             ``refusal`` token that is not the seam's healthy
 #:                             ``no_durable_journal`` decline, #9231). Counted
