@@ -690,11 +690,25 @@ _CONTRACTED_AUX = (
 #: uses — see that constant) and `_COPULA_LONG_SUBJECT`'s arm B — because fixing the refusal
 #: without widening the report trades a wrong route for a silent drop: measured, with only the
 #: refusal side widened, `is the export getting archived` came back `signal=None`.
-#: ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: the `to <adverb> <verb>` window is bounded
-#: to TWO adverbs (a third puts the phrase outside the subject's own word bound anyway), and a
-#: non-finite verb this list does not name (`to wind up archived`) still routes — a closed list is
-#: the mechanism this module uses everywhere and the residual it always carries.
-_NONFINITE_COPULA = r"(?:to\s+(?:[a-z]+\s+){0,2}(?:be|get|become|became)|being|getting)"
+#: ⛔ AND THE FOUR PHRASAL / RESULTATIVE VERBS THE FIRST CUT LEFT OUT (fresh review, P2,
+#: measured): `to wind up`, `to end up`, `to turn out` and `to stay` are the SAME scheduled or
+#: continuing frame — each still ROUTED the whole ended population with the qualifier dropped and
+#: `signal=None`, `is the export to wind up archived` among them, which is #14033's own defect
+#: four spellings over. Measured on the widened class over 18 998 probes: 1 040 move
+#: ROUTE -> REFUSED+REPORTED (`is_copula_long_subject`) and 140 move SILENT -> REFUSED+REPORTED,
+#: with **0** route -> silence moves — the one direction this widening must not take, because
+#: refusing without reporting is the other half of #14033, and it is why both consumers move
+#: together (a refusal-side-only widening was measured doing exactly that in the previous round).
+#: The PREPOSITIONAL `to` is untouched: `is the export to Europe archived` still routes, pinned.
+#: ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: the `to <word> <word> <verb>` window is
+#: bounded to TWO preceding words (a third puts the phrase outside the subject's own word bound
+#: anyway), and a non-finite verb this list does not name (`to remain archived`, `to keep
+#: archived`) still routes — a closed list is the mechanism this module uses everywhere and the
+#: residual it always carries.
+_NONFINITE_COPULA = (
+    r"(?:to\s+(?:[a-z]+\s+){0,2}"
+    r"(?:be|get|become|became|wind up|end up|turn out|stay)|being|getting)"
+)
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -1065,8 +1079,21 @@ _COPULA_SUBJECT = (
     # second clause whose own auxiliary was contracted: the contracted twins ROUTED the
     # whole ended population with the caller's predicate dropped and `signal=None`, while
     # every UN-contracted twin was refused. The class is interpolated from
-    # :data:`_CONTRACTED_AUX` — one home, three consumers, so the fourth copy cannot go
-    # missing the way this one did.
+    # :data:`_CONTRACTED_AUX` — one home, THREE consumers (this lookahead and both
+    # `_EXISTENCE_GUARD` lookaheads), which is what keeps THOSE three from drifting.
+    # ⛔ …AND THAT IS THE WHOLE CLAIM. Two more copies of the finite-auxiliary class live
+    # in this module and neither is a `_CONTRACTED_AUX` consumer, on purpose and measured
+    # (fresh review, P2 — the prose here used to promise "so the fourth copy cannot go
+    # missing", which was false on the day it was written):
+    #   * `_WHICH_MODIFIED_NOUN`'s auxiliary slot was a fourth copy and IS interpolated
+    #     now, because its drift was a SILENCE — `which customer claims hasn't been
+    #     archived` returned `population=None, signal=None` while the un-contracted twin
+    #     reported `which_modified_noun`;
+    #   * `_COPULA_LONG_SUBJECT`'s arm A keeps its OWN hand-typed run and adds NO
+    #     contraction, because there the contraction is a NEGATIVE member (a second finite
+    #     verb in the subject SUPPRESSES the report), so interpolating it would trade 1 180
+    #     measured notices for silence — the direction this module refuses. Pinned by
+    #     `test_the_contraction_in_a_LONG_subject_stays_on_the_safe_side`.
     rf"where|whereas|after|before|now|what|how|why|{_CONTRACTED_AUX}|"
     r"has|have|had|is|are|was|were|will|would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
     # ⛔ THE NON-FINITE COPULA IS **NOT** IN THIS LIST, DELIBERATELY (review P1,
@@ -1178,9 +1205,46 @@ _COPULA_SUBJECT = (
     # consults it. Excluding the clitic here lets the row fall through to
     # `_ENDING_SIGNALS`, where the clitic alternative refuses it and reports.
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
-    r"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)"
-    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)"
-    r"[a-z0-9][a-z0-9'’._/-]*){0,3}"
+    # ⛔ ONLY THE AUXILIARY READING, NOT EVERY POSSESSIVE (round-29 review, P1, measured):
+    # the first cut of this exclusion was `(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)` at EVERY
+    # subject word, which refused the whole POSSESSIVE-SUBJECT class — `is the board's
+    # decision archived`, `is Q3's report archived`, `is O'Brien's claim retracted` — 800
+    # of 800 rows in a 4-head × 2-det × 20-subject × 5-participle population, SILENTLY
+    # (`signal=None`, so not even a notice). Those are exactly the multi-word subjects this
+    # slot was widened to admit, and `21cc92e90c` served them (⛔ ABSOLUTE, never `HEAD~1` —
+    # the file forbids relative revisions in prose because the first cut of a note twenty
+    # lines above said `HEAD~1` and by the time it was read it had become round 21; measured
+    # here, `a3886ee055^` is `3d4d5d5b62`, which REFUSED all three of these silently — it is
+    # the very regression this sentence describes, not the revision that served them).
+    # The clitic that matters is the
+    # one on the FINAL word that IS the auxiliary (`billing's been`), so the exclusion is
+    # anchored on the following `been`.
+    # ⚠️ A "guard only the last word" rewrite (`(?:word\s+){0,3}(?!clitic)word`) LEAKS: the
+    # regex backtracks the clitic word into the leading group and `is billing's been
+    # deprecated` routes again (48 of 96 measured).
+    # ⛔ AND THE ANCHOR CANNOT BE ADJACENT (round-30 review, P1, measured): `\s+been\b`
+    # was defeated by ONE ADVERB — `has billing's just been deprecated`,
+    # `has the vendor's recently been deprecated`, `is the board's very recently been
+    # deprecated` all served the ended population with the caller's predicate dropped and
+    # `signal=None`, because the interruption let the row into this slot, whose word class
+    # accepts the literal `been`. Over a 37,800-row clitic population, 17,568 rows newly
+    # routed and 1,296 that had been refused WITH a notice (`is_copula_long_subject`)
+    # became silent. So the gap between the clitic and `been` tolerates up to three
+    # adverbial words, and `been` itself is FORBIDDEN as a subject word — that is what
+    # stops the slot from swallowing the whole clause.
+    # ⛔ AND THE GAP IS THE MODULE'S OWN ADVERB CLASS, NOT "ANY WORD" (round-30 review,
+    # measured both ways): a free `[a-z-]+` gap closed the hijack and then refused the
+    # POSSESSIVE-SUBJECT class the same way — `has the client's contract been archived` and
+    # `has the vendor's invoice been retired` are legitimate questions whose subject noun
+    # happens to sit between the clitic and `been`, and they went silent. The distinguishing
+    # feature is grammatical ROLE (adverb vs noun), which needs the lexicon this detector
+    # does not have, so the gap is `_EXISTENCE_ADVERB` — the same closed table the asyndetic
+    # guard already uses. RESIDUAL: an adverb outside that table re-opens the hijack for
+    # this one spelling; it is the same boundary stated at `_EXISTENCE_ADVERB` itself.
+    rf"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+(?:{_EXISTENCE_ADVERB})){{0,3}}[,\s]+been\b)"
+    r"(?!been\b)[a-z0-9][a-z0-9'’._/-]*"
+    rf"(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+(?:{_EXISTENCE_ADVERB})){{0,3}}[,\s]+been\b)"
+    r"(?!been\b)[a-z0-9][a-z0-9'’._/-]*){0,3}"
     r"|(?:i|you|he|she|it|we|they|there)(?![-/])"
     r")"
 )
@@ -1316,7 +1380,19 @@ _WHICH_MODIFIED_NOUN = re.compile(
     rf"^which\s+(?:of\s+)?"
     rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
     rf"[a-z0-9][a-z0-9'’._/-]*\s+[a-z0-9][a-z0-9'’._/-]*\s+"
-    rf"(?:is|are|was|were|has|have|had)\s+(?:been\s+)?(?:{_ENDING_WORDS})\b"
+    # ⛔ AND THE AUXILIARY SLOT IS THE `_CONTRACTED_AUX` CLASS, NOT FOUR HAND-TYPED WORDS
+    # (fresh review, P2, measured). This row is the fourth copy of the finite-auxiliary
+    # class, and its drift was a SILENCE: the row insists the ending participle be preceded
+    # by the wh-phrase's own auxiliary, so a CONTRACTED auxiliary failed to match and the
+    # question was neither routed nor reported —
+    #
+    #   `which customer claims has been archived`     -> reported `which_modified_noun`
+    #   `which customer claims hasn't been archived`  -> `population=None, signal=None`
+    #
+    # with the typographic twin (`hasn’t`) silent too. Measured after interpolating the
+    # class: 1 920 probes move SILENT -> REPORTED, 0 move in any other direction (this row
+    # is a notice row, so it can only ever ADD a report).
+    rf"(?:{_CONTRACTED_AUX}|is|are|was|were|has|have|had)\s+(?:been\s+)?(?:{_ENDING_WORDS})\b"
 )
 
 #: A copula question whose SUBJECT is longer than the shape's four-word bound
@@ -1356,6 +1432,18 @@ _COPULA_LONG_SUBJECT = re.compile(
     # carries its own verb, which the list below already refuses.
     rf"(?:because|that|given|since|when|while|if|unless|after|before|now|"
     rf"which|who|whom|whose|where|is|are|was|were|has|have|had|do|does|did|will|"
+    # ⛔ NO `_CONTRACTED_AUX` HERE, AND THAT IS A MEASURED DECISION, NOT AN OVERSIGHT
+    # (fresh review, P2). Everywhere else in this module the contraction class is
+    # interpolated because leaving it out costs a notice. Here the list is a NEGATIVE
+    # member — a second finite verb inside the subject means the ending participle is that
+    # clause's, so NOTHING is reported — and interpolating the contractions was measured
+    # converting 1 180 rows from `signal='is_copula_long_subject'` to `signal=None` (e.g.
+    # `is the team the report hasn't been filed by archived`). A silent decline is the
+    # direction #14033 exists to remove, so the un-contracted run stays and the resulting
+    # asymmetry is stated: a contraction in the subject leaves the notice ON (the safe
+    # direction, a report and never a route — the same trade this row's notice-leak note
+    # records for a lexical second verb). Pinned by
+    # `test_the_contraction_in_a_LONG_subject_stays_on_the_safe_side`.
     rf"would|can|could|may|might|must|should)\b)"
     rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{5,}}"
     rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
@@ -1369,13 +1457,19 @@ _COPULA_LONG_SUBJECT = re.compile(
     # lookahead (`_COPULA_INFINITIVE_REFUSAL`) allows `{0,6}` words before the non-finite
     # verb, so with `{1,5}` here the ZERO-word endpoint — a SUBJECT-LESS non-finite question —
     # was refused with NO report, which is the silence this module's contract forbids and the
-    # exact reason arm B exists. Measured at the delta's base these ROUTED (`ended / is_copula`)
-    # and at the head they were `population=None, signal=None, payload=None`:
+    # exact reason arm B exists. ⛔ THE MEASURED HISTORY, WITH THE COMMITS NAMED, because an
+    # earlier cut of this note said "at the delta's base these ROUTED" and that is FALSE —
+    # the base of the commit that fixed it was ALREADY silent (re-measured, all four rows):
+    #   at `0e52593c91` (before `_COPULA_INFINITIVE_REFUSAL` landed)      -> ended / is_copula
+    #   at `d8295ea8b2` (the refusal landed, arm B still `{1,5}`)          -> None / None / no payload
+    #   at this commit (the refusal + arm B `{0,5}`)                       -> None / is_copula_long_subject
     #   `is being archived` / `is to be archived` / `is getting archived` / `was being retired`
-    # Enumerated class 4 auxiliaries x 6 non-finite forms x 5 endings = 120 rows, all silent.
+    # Enumerated class 4 auxiliaries x 6 non-finite forms x 5 endings = 120 rows. ⛔ ALL 120
+    # gain `is_copula_long_subject` — an earlier cut of this note said "56 rows gain" one line
+    # below the "= 120 rows" it was describing, which reads as 64 still unreported. Measured.
     # The verdict (refuse) is right — a scheduled or progressive state must not be served —
     # but the report must survive it. Measured after widening: 0 population changes across
-    # 34,560 probes, 56 rows gain `is_copula_long_subject` (exactly the zero-word class).
+    # 34,560 probes.
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     rf"(?!.*\b(?:because|that|given|since|when|while|if|unless|which|who|whom|"
     rf"whose|where)\b)"
@@ -1446,8 +1540,29 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `been <ending>` clause supplied their notice. A signal cannot affect routing (it is only
     # computed when NO shape applies), so widening the slot here cannot create a route.
     ("existence_unguarded", re.compile(
-        _EXISTENCE_HEAD
+        "(?:"
+        + _EXISTENCE_HEAD
         + rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        # ⛔ A CLITIC SUBJECT IS ALSO A CUE THAT MUST REPORT (round-8 review, P2, measured):
+        # the copula/perfect shape refuses a clitic-bearing subject on purpose, and the
+        # comment above says the row then "falls through to `_ENDING_SIGNALS`, where the
+        # clitic alternative refuses it and reports" — true only when the question ALSO
+        # carries an existential head. With a bare copula head there is nothing to fall
+        # through TO, so `has the billing's been deprecated` returned NOTHING AT ALL
+        # (no population, no notice) while its parent routed it `ended`: measured, all of
+        # 8 determiners x 4 nouns = 32/32 silent refusals. A row with `been <ending>` in it
+        # is a state cue; this arm is what breaks that silence. It is a SIGNAL arm, not a
+        # shape, so it cannot route anything.
+        + "|"
+        + r"\b(?:has|have|had|is|are|was|were)\s+[^?]{0,40}?['\u2019](?:s|ve|d)"
+        # ⛔ THE WIDE REFUSAL SLOT, NOT THE NARROW WINDOW ONE (round-9 review, P2, measured): the
+        # first cut of this arm used `_EXISTENCE_ADVERB_SLOT` (`already|ever|recently`), so the
+        # adverb class the guard itself refuses on blinded it — `has the billing's been just
+        # deprecated` and `… been only just deprecated` were still refused SILENTLY, one adverb
+        # away from the frame this arm exists for. The row's first arm already uses the wide slot;
+        # this arm now matches it.
+        + rf"\s+been\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        + ")"
         + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
     ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
@@ -1674,7 +1789,6 @@ class StateQuestion:
     is shown `hasn't`. That is deliberate — the cue is what the PATTERN saw — but a
     caller comparing it against their own string will not find it, so the contract
     says so here rather than leaving the difference to be discovered.
-    population instead of asserting one.
     """
     population: str | None = None
     shape: str | None = None
@@ -1697,7 +1811,11 @@ class StateQuestion:
 #: measured). `_EXISTENCE_GUARD`'s contraction class is closed over `'` (U+0027) alone,
 #: while the product routinely receives the typographic forms — `tortoise/extractor_v2.py`
 #: normalises the same inventory before tokenising for exactly that reason, and this
-#: module's own copula lookahead admits `\u2019` beside `'` (one token class, at `:1219`;
+#: module's own copula lookahead admits `\u2019` beside `'` (one token class; the
+#: class is spelled with the escape, so it is the `['’]` suffix of the word slot in
+#: `_COPULA_SUBJECT` — pointed at by NAME rather than by line number, because a line
+#: pointer is invalidated by the next comment inserted above it, which is exactly what
+#: happened to the `:1219` this note used to carry);
 #: the INVENTORY below is what makes the rest of the family reachable at all).
 #: ⛔ ONE CONSTANT, so the test that pins the family cannot drift off it: the pin asserts
 #: THIS tuple and exercises every member, which is what makes a codepoint added to the
@@ -1766,8 +1884,11 @@ def detect_state_question(text: str | None) -> StateQuestion:
     # CALLER'S RAW TEXT (round-27 review, P1, measured). The contraction class is closed
     # over `'` (U+0027), but the product routinely RECEIVES U+2019 — `tortoise/
     # extractor_v2.py` normalises the whole `‘’‚‛` inventory before tokenising for exactly
-    # that reason, and this module's own token classes admit `’` beside `'` in eleven
-    # places. `detect_state_question` receives the string from `sdk.py` untouched, so
+    # that reason, and this module's own word classes admit `’` beside `'` (the class is
+    # `['’]`, spelled from `_APOSTROPHES` — ⛔ NO COUNT HERE: an earlier cut of this note said
+    # "eleven places" and its sibling said "eighteen", and the file carries neither number
+    # consistently, so the count was replaced by the constant that decides it).
+    # `detect_state_question` receives the string from `sdk.py` untouched, so
     # `have any users reported the vendor hasn’t been deprecated` (U+2019) routed the whole
     # ended population with the caller's predicate dropped and `signal=None` — 384 of 384
     # rows in a 6-spelling × 8-subject × 8-verb population — while its ASCII twin was
