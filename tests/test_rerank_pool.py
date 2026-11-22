@@ -1740,8 +1740,10 @@ def _seam_live_reads(tree, seam_mentions):
         for call in fed:
             # ONE call node reached from two mentions is ONE call site, because
             # the row it feeds counts the READ's unit — a call site the tool
-            # issues (`tools/read_wave_latency.py:296` / `:305`) — not the walk's
-            # paths.
+            # issues (its discarded warm-up and its per-query loop) — not the
+            # walk's paths. ⛔ The offsets are NOT quoted: an earlier cut of this
+            # note cited `tools/read_wave_latency.py` by line, which nothing
+            # grades and which rots on the first edit above it (round-25 review).
             calls.setdefault(id(call), call)
     return live, resolved, unresolved, list(calls.values())
 
@@ -1814,8 +1816,8 @@ def test_the_grant_grader_counts_CALL_SITES_across_ONE_mention():
     `_seam_live_reads` reports both facts because the two units differ: the census
     (`_sites`) counts MENTIONS, which is the unit an
     owner-granular grant absorbs, while the READ's count is the tool's own CALL
-    SITES (`tools/read_wave_latency.py:296` the discarded warm-up, `:305` the
-    per-query loop). Measured at `7d18f1c824`, binding the warm-up once and calling it twice
+    SITES (the tool's discarded warm-up and its per-query loop, cited by ROLE —
+    an earlier cut of this note cited them by line offset, which nothing grades). Measured at `7d18f1c824`, binding the warm-up once and calling it twice
     gave 2 mentions / 3 distinct calls and the arm stayed GREEN — the third read
     inherited a PERMANENT exemption with no recorded reason. The call-site row is
     what closes it, so this pin exists to make that row's subject visible without
@@ -1840,10 +1842,16 @@ def run(sdk):
         f"live={len(live)} resolved={len(resolved)} "
         f"unresolved={len(unresolved)} calls={len(calls)}")
     # ⛔ NO `len(calls) > len(live)` ROW HERE. It is IMPLIED by the exact tuple
-    # above (3 > 2 whenever that assert passes), so it could never be the red:
-    # the round-21 mutation pass measured that mutating the dedup key lands on the
-    # tuple, never here. An assertion no mutation of the diff can redden is dead
-    # weight (agent-infra#3442 rule 3) — the counts tuple is the guard.
+    # above (3 > 2 whenever that assert passes), so it could never be the red. An
+    # assertion no mutation of the diff can redden is dead weight
+    # (agent-infra#3442 rule 3) — the counts tuple is the guard.
+    # ⛔ AND THE DEDUP IS UNGRADED, stated rather than claimed: no fixture in this
+    # file has ONE call node reached from two mentions, so replacing
+    # `calls.setdefault(id(call), call)` with an append-style key leaves every test
+    # green (measured, round-25 review). The docstring's "one call node reached
+    # from two mentions is ONE call site" is therefore a property this pin does not
+    # exercise; its failure direction is an over-count (a false block), not a
+    # deadness claim — residual, not closed.
     # ⛔ AND THE ROW'S OWN PREDICATE, not only the counts it reads. `expected=3`
     # holds for this shape and the pre-fix verdict (`2`, the mention count) must
     # RAISE — so replacing the row's `read_sites` with `live` reds HERE instead of
@@ -2023,17 +2031,30 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     so the scope whose escape prevents the fail-open was the ungraded one —
     `ann-module` closes it.
 
-    ⛔ AND EVERY BRANCH OF THE TWO ENUMERATIONS HAS A ROW, because a pin cannot be
-    a tripwire for a binding kind it never exercises: measured at `93178a6495`,
-    eight mechanisms — including the function-boundary stop that marks a
-    method-body binding as a LOCAL — could be deleted with the pin byte-identical
-    and GREEN (round-12 review, P3). The `with-target`/`ann` rows grade the two
-    modelled forms nothing else reached; `aug`/`lambda-default`/`def-default`/
-    `class-base`/`class-type-param`/`type-stmt-type-param` grade the escape
-    branches; `decorator-def`/`decorator-class`/`class-kwarg`/`match-value` grade
-    the four that were still bare — and the decorator ones are a REAL read, since
-    Python CALLS a decorator (round-13 review, P3); `method-local` is the row that
-    must stay DEAD.
+    ⛔ WHICH BRANCHES HAVE A ROW — named, because the previous sentence claimed
+    "EVERY BRANCH" and that was false at this head (round-25 review measured nine
+    clauses still deletable with all 73 tests green):
+
+      GRADED (each deletion reds the pin): `Assign`/`AnnAssign`/`AugAssign` value
+      and OBJECT target, `For` target (plain and object), comprehension target,
+      `With` target (plain and object), walrus, `Lambda` and `FunctionDef`
+      POSITIONAL and KEYWORD-ONLY defaults, decorator (def and class), class
+      base/keyword/type-param, `type` statement, `match` subject and value
+      pattern, `except` type, `return`, `yield`, `yield from`, module-scope and
+      function-local `AnnAssign` annotations, `args.args` annotations, and the
+      `Return` value.
+
+      ⛔ NOT GRADED — NAMED RESIDUALS, not claimed closed: the `AsyncFunctionDef`,
+      `AsyncFor` and `AsyncWith` members of the same isinstance tuples, and the
+      `posonlyargs`/`kwonlyargs`/`vararg`/`kwarg` annotation positions of
+      `FunctionDef`. Deleting any of those leaves every row green, and six of them
+      (an `async def` default, decorator or annotation; an `async for` target or
+      object target; an `async with` target or object target) turn a real shape
+      into the PROVEN-dead verdict — the fail-open this walk exists to forbid.
+      They are residuals because that is what they measured as; a pin that
+      claimed them closed would be the defect this paragraph is fixing. A
+      decorator row IS graded and is a REAL read, since Python CALLS a decorator
+      (round-13 review, P3); `method-local` is the row that must stay DEAD.
     """
     source = '''
 class SDK:
@@ -2822,7 +2843,8 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         harness, seam_mentions)
     # ⛔ COUNT CALL SITES, NOT MENTIONS. The object this row's expected count
     # describes is
-    # a set of READS (`:296`'s discarded warm-up, `:305`'s measured loop), and one
+    # a set of READS (the tool's discarded warm-up and its measured loop, cited by
+    # role), and one
     # mention can feed several calls — `_w = SEAM; _w(a); _w(b)` is one mention and
     # TWO reads. While this row asserted on mentions, that spelling kept `live` at
     # 2 and the arm passed with THREE call sites inside the granted owner (round-11
