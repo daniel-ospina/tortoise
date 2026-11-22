@@ -5256,12 +5256,31 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         return "Usage: grep [OPTION]... PATTERNS [FILE]...\n" + "\n".join(
             f"  --opt-{'a' * n} <x>" for n in range(1, count + 1))
 
+    def not_a_skip(fn, *args):
+        """Call `fn`, turning a `pytest.skip` into a FAILURE.
+
+        ⛔ THE SKIP IS THE LAUNDERING HOLE (#14303 review round 5, P2 — MEASURED). `pytest.skip`
+        raises `Skipped`, which is NOT an `AssertionError`, so it escapes every `pytest.raises`
+        arm below and skips the WHOLE cell — the suite exits 0 and the floor's failure mode moves
+        from RED to GREEN, which is exactly the inert-enforcer shape this cell exists to refuse.
+        MEASURED: reinstating `pytest.skip` where the derivation must raise reported
+        `36 passed, 1 skipped` (exit 0) against a baseline of `37 passed`. `pytest.fail` raises
+        `Failed`, which is not an `AssertionError` either, so it escapes the `pytest.raises` and
+        reds the cell.
+        """
+        try:
+            return fn(*args)
+        except pytest.skip.Exception as exc:  # the shape under test
+            pytest.fail(
+                "the derivation SKIPPED where it must RAISE — a skip makes every assertion below "
+                f"it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
+
     assert len(_d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
         _D5_LONG_OPTION_FLOOR), (
         "a successful `grep --help` carrying exactly the floor's worth of long options must be a "
         "universe, or the floor is not a floor (#14303 review, P2)")
     with pytest.raises(AssertionError, match="broken derivation must not be able to certify"):
-        _d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
+        not_a_skip(_d5_documented_long_options, reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
     # ⛔ THE STDERR HALF, READ RATHER THAN TOLERATED: a FAILED `--help` whose usage still yields the
     # floor is a universe, which is the whole point of dropping `check=True`. This arm is the
     # mutant-killer for "parse `stdout` only": with `completed.stdout` alone it raises.
@@ -5271,7 +5290,7 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         "read — BSD grep's usage goes to stderr, and ignoring that stream is what made this cell "
         "unrunnable on macOS (#14303 review, P2)")
     with pytest.raises(_D5NoDocumentedUniverse, match="exited 2"):
-        _d5_documented_long_options(reported(
+        not_a_skip(_d5_documented_long_options, reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
 
 
@@ -5523,8 +5542,11 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     # cell's `rederived == _d5_undocumented_long_options()` is two EMPTY sets compared and no mutant
     # of the derivation can red it there. Driving the derivation through its `grep` parameter is what
     # makes the two outcomes separable on every platform: a grep that RUNS the spelling must yield
-    # it, and a grep that REFUSES it must yield the empty set. Delete either row and a hardcoded
-    # `frozenset()` (or a constant that still carries the 3.11-era spelling) survives CI invisibly.
+    # it, and a grep that REFUSES it must yield the empty set. ⛔ THE ROWS ARE NOT EACH OTHER'S
+    # ONLY WITNESS (#14303 review round 5, P3 — MEASURED): dropping either row still leaves a
+    # hardcoded `frozenset()` RED under the 3.12 shim, because the OTHER row and the alias cell's
+    # `rederived == …` comparison also fire. What the rows buy is ATTRIBUTION — they name the
+    # derivation as the thing that broke, instead of leaving a downstream comparison to report it.
     assert _d5_undocumented_long_options(accepts) == {"--unix-byte-offsets"}, (
         "a grep that RUNS `--unix-byte-offsets` must produce it in the measured allowance — an "
         "empty allowance on such a box leaves a second blank-class prescription unread (#14138)")
