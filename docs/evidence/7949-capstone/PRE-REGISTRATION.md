@@ -3214,3 +3214,23 @@ registration said was missing.
 **Prereq for a reader re-deriving this.** `uv run python tools/pack_relation_census.py --json` prints
 the declaration half hermetically; `--write-probe` is what fills `written`, and
 `docs/evidence/11083/pack-relation-census.json` is the committed artifact that carries it.
+
+### 10.40 — `#14277`'s extractor instrumentation moves every `extractor_v2.py` cite, and no value moves with it (2026-11-22, `#14277`)
+
+- **Why it exists.** `#14277` measures the extractor's real token spend and adds the prompt-cache
+  split to the cost envelope, which inserts lines in `tortoise/extractor_v2.py`: **`+5`** before the
+  first symbol this document cites and **`+73`** before the rest, so `:15239`→`:15244`,
+  `:15701`→`:15706`, `:17894`→`:17967` and so on. Every cite in this file is a claim about the tree,
+  and `tests/test_7949_capstone_measure.py` resolves them, so they move with the code or the suite
+  reds.
+- **What moved: cites and nothing that is a protocol value.** No metric, denominator, threshold,
+  class set, corpus pin, split or salience pin is touched — §1–§9's criterion VALUES and the E4
+  denominator are the ones this record froze. The two `if items:` gates it names are re-pointed
+  (`:15244`/`:15397`), as are the two fail-open `except` arms (`:15257`/`:15408`) and the
+  `_run_vet_pass` calls (`:17968` for the S2 pass, `:15373` for the union pass).
+- **`document_sha256` is re-cut in this same commit**, per §8's rule for *any* edit to this file —
+  the §10.38 precedent, not a new reading of it. ⛔ Re-cutting a digest is a mechanical consequence
+  of an edit to a *cite*; it is not the owner's re-registration, which is what §10.5's "the owner's
+  call" covers (a threshold or a control-arm definition changing).
+- **This entry is LIVE for this tree** — it has no successor, so it must not carry a supersede
+  marker.
