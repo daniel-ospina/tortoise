@@ -73,7 +73,7 @@ an aggregate, a predicate delete, or the schema those depend on; those are SQL s
 The **serving** row is exactly one statement *in this table* — so a re-home re-points one censused read
 and not a family of them. ⚠️ That is a fact about the TABLE, not about the tree: the export endpoint's
 own whole-graph scan (`hosted_api.py:33404`) is a serving reader under this census's own class rule and
-is deliberately **not censused** (`#14204`; the exclusion is stated in §6 step 4 and in the restore row's
+is deliberately **not censused** (`#14204`; the exclusion is stated in §7 step 4 and in the restore row's
 own `why`), so a re-point driven by this census alone would leave the export endpoint reading the old
 home. A re-home must re-point it too.
 

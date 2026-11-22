@@ -1582,7 +1582,11 @@ def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
     property NAME carrying the same characters, `RETURN size((collect(n)))` is a
     grouping paren with no relationship anywhere, and `EXISTS { (n:Point) }` is a
     NODE-existence test — an EDGE-existence predicate never reaches that arm,
-    because `-[` / `)<-` / `)--(` decide it first (#14183 round-16 review, P3).
+    because `-[` / `)<-` / `)--(` are SUBSTRING arms checked first and the PATTERN
+    arms run after all of them, so an `exists {` arm would have shadowed the
+    undirected unbracketed hop rather than the other way round (measured: with the
+    arm restored, `EXISTS { (e)-r-(p) }` returns `cypher:exists {`, not the
+    pattern's `cypher:)-r-(`) (#14183 round-16 review, P3).
 
     WHAT IT WOULD BE FALSE WITHOUT. `readers_report()` derives its verdict from this
     predicate, so one misfiled row does not merely red a test: it publishes
