@@ -361,6 +361,7 @@ That judgement is `out["relation_declarations"]`.
   "fromId": "01J8…",
   "toId": "01J8…",
   "rule": "relation-pair-not-declared",
+  "direction": "bidirectional",
   "declaredFor": [
     {"fromKind": "pm:card", "toKind": "Subject"},
     {"fromKind": "venture:actionItem", "toKind": "Subject"}
@@ -379,7 +380,10 @@ That judgement is `out["relation_declarations"]`.
   bullet below), a **different field on a different object**; a client that
   branches on `rule` will never match it against `code` (#14284 review F2).
   `tests/test_relation_guards_14263.py::TestTheContractExampleIsTheEmittedPayload`
-  compares this block to a real emitted payload, so the two cannot drift.
+  compares every STABLE field of this block (the ones above, `direction`
+  included) to a real emitted payload, so THOSE cannot drift silently — a field
+  ADDED to the payload still needs an example line here, and the pin checks the
+  compared set, not the payload's whole key set (round-4 review, F1).
 - ⛔ **`declaredFor` is what the predicate IS declared for — never the pair being
   judged.** If it listed this example's own `dev:api -> dev:database` together with
   `outcome: undeclared_pair`, the block would contradict itself (that was the
@@ -391,7 +395,12 @@ That judgement is `out["relation_declarations"]`.
 - **Absent judgements are silent by design.** An `accept` (the pack declares
   this predicate for this pair), a re-spelling of a declared predicate (applied
   silently — the declared spelling is what gets WRITTEN) and every abstention
-  contribute NOTHING. An empty list is the normal, common case: a bundle of
+  contribute NOTHING. ⚠️ That "applied" half holds on the operator, direct and
+  `create_edge` doors; on a `{"relation": …}` connection a re-spelled predicate
+  is REFUSED by Phase-1 validation (`_check_connection` tests the canonical
+  allow-list), so the same edge that `create_edge("HASPART", …)` writes is
+  rejected here — a route asymmetry filed as #14300, not something this
+  section's silence covers. An empty list is the normal, common case: a bundle of
   `ownedBy`/`hasPart` edges between declared pairs reports nothing at all.
 - **Every connection ROUTE reports, the relation route included.** A
   `{"relation": …}` connection is written through the projection primitive, so

@@ -36588,7 +36588,17 @@ class TortoiseSDK:
                                        for note in _rel_notes]},
                         relation_declarations,
                         connection=conn.get("ref") or i, source=src)
-                ids["connections"].append(conn_result)
+                # ⛔ The `ids` DESCRIPTOR keeps its documented §6.1 shape. The
+                # report belongs in `results` (granular) and
+                # `relation_declarations` (bulk) — the direct route keeps it out
+                # of `ids` for the same reason (see the STABLE-descriptor note
+                # on `ids["connections"]` there). `_carry_relation_declaration`
+                # mutates `conn_result` IN PLACE, so appending that object put
+                # `relation_declaration`/`warnings` inside `ids` — a shape change
+                # no client asked for (round-4 review, F2).
+                ids["connections"].append(
+                    {key: value for key, value in conn_result.items()
+                     if key not in ("relation_declaration", "warnings")})
             if results is not None:
                 results.append({"section": "connections", "index": i,
                                 "ref": conn.get("ref"), "item": conn,

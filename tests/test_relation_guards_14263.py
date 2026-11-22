@@ -744,6 +744,23 @@ class TestIngestCarriesTheReport:
                            if r["section"] == "connections")["result"]
         assert conn_result["relation_declaration"]["outcome"] == UNDECLARED_PAIR
 
+    def test_the_ids_descriptor_keeps_its_documented_shape(self, sdk):
+        """Round-4 review F2 — the report must not leak into `ids`.
+
+        `_carry_relation_declaration` mutates the connection's result dict IN
+        PLACE, and the relation route used to append that same object to
+        `ids["connections"]`, so the documented §6.1 descriptor grew
+        `relation_declaration` and a `warnings` list of DICTS inside `ids` — a
+        key the envelope reserves for key-prefixed strings. The direct route
+        keeps its report out of `ids` for exactly this reason.
+        """
+        out = sdk._ingest(_relation_bundle("hasPart"))
+        descriptor = out["ids"]["connections"][0]
+        assert set(descriptor) == {"relation", "from", "to", "deduped"}, (
+            f"the `ids` descriptor changed shape: {sorted(descriptor)}")
+        assert out["relation_declarations"], (
+            "…and the report still happened: it belongs in the rollup")
+
     def test_a_declared_pair_on_the_relation_route_stays_silent(self, sdk):
         """The other direction: the new door must not start inventing reports."""
         out = sdk._ingest(_relation_bundle("dependsOn", from_kind="dev:api",
@@ -787,8 +804,12 @@ class TestTheContractExampleIsTheEmittedPayload:
     #: Everything in the block that is a FACT about the verdict. The id fields
     #: (`target`/`connection`/`fromId`/`toId`) are per-write and are shown in the
     #: doc as placeholders on purpose, so they are not compared.
-    STABLE = ("outcome", "predicate", "from", "to", "rule", "declaredFor",
-              "declaredBetweenTheseKinds", "override", "undo")
+    #: ⛔ `direction` is IN the compared set (round-4 review, F1): it became a
+    #: payload field on the doors that resolve a direction, and an allow-list
+    #: that did not name it would have watched the doc gain a field-blind pin —
+    #: which is exactly what happened before this round.
+    STABLE = ("outcome", "predicate", "from", "to", "rule", "direction",
+              "declaredFor", "declaredBetweenTheseKinds", "override", "undo")
 
     @staticmethod
     def _documented_example() -> dict:
@@ -805,6 +826,12 @@ class TestTheContractExampleIsTheEmittedPayload:
         assert {k: documented[k] for k in self.STABLE} == {
             k: emitted[k] for k in self.STABLE}, (
             "INGEST_CONTRACT.md §3.3 drifted from the payload it documents")
+        # the compared set must not silently fall behind the payload: a field the
+        # code emits that the pin does not name is a doc gap this test cannot see
+        # (round-4 review, F1 — `direction` was added and the pin stayed green).
+        assert set(self.STABLE) <= set(emitted), (
+            "this test compares a field the payload does not carry: "
+            f"{sorted(set(self.STABLE) - set(emitted))}")
 
     def test_the_example_publishes_the_RULE_id_and_not_the_warning_CODE(self):
         documented = self._documented_example()
