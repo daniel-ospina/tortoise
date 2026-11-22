@@ -26,7 +26,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -1087,7 +1086,16 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     filter drops this process; the inventory must list it.
     """
     binary = tmp_path / "redis-server"
-    binary.write_bytes(Path(shutil.which("cat") or "/bin/cat").read_bytes())
+    # ⛔ NOT a renamed copy of `cat` (#14335). On a runner whose coreutils is the
+    # uutils MULTICALL binary (`ubuntu-26.04`: `/usr/bin/cat` is a hardlink into
+    # `/usr/bin/coreutils`), a copy refuses to run — the multicall dispatches on the
+    # basename of `argv[0]`, prints `coreutils: unknown program 'redis-server'` and
+    # EXITS. `comm` survives the zombie, so the test then graded a corpse: an empty
+    # `/proc/<pid>/cmdline` made `socket_dir` None, and `test-carve-out` false-redded on
+    # every PR that ran this shard. CPython does not dispatch on `argv[0]`: exec'd with
+    # `argc == 1` and a pipe on stdin it reads a program from stdin and BLOCKS, which is
+    # exactly the live wrapper shape this test needs.
+    binary.write_bytes(Path(sys.executable).read_bytes())
     binary.chmod(0o755)
     gone = tmp_path / "gone-socket-dir"
     line = f"{binary} unixsocket:{gone}/redis.socket"
@@ -1106,6 +1114,18 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
                 break
             time.sleep(0.02)
         assert seen, "the fixture process never came up with comm == redis-server"
+        # ⛔ AND IT MUST STAY LIVE THROUGH A SETTLE (#14335). `comm` survives a zombie,
+        # and an instantly-exiting stand-in can be observed BEFORE it dies — so a single
+        # `poll()` races, and the test then fails as `assert None == '/tmp/…'`, a message
+        # that names nothing. A binary that cannot hold this shape cannot exercise it.
+        settle_deadline = time.monotonic() + 1.0
+        while child.poll() is None and time.monotonic() < settle_deadline:
+            time.sleep(0.05)
+        assert child.poll() is None, (
+            "the fixture child exited instead of blocking on stdin — the stand-in "
+            "binary refused its argv[0], so this test would grade a zombie rather "
+            "than a live wrapper-exec'd server"
+        )
         inventory = reaper._iter_proc_inventory()
         assert inventory is not None
         # Written against the rows ALONE, so the pre-fix tree fails on the FACT
