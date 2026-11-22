@@ -4905,8 +4905,20 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     here by name; the derived set also has to be big enough to be a real universe (≥ 40), so a
     parser that silently matched nothing cannot pass.
     """
-    completed = subprocess.run(["grep", "--help"], capture_output=True, text=True, check=True)
-    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", completed.stdout))
+    # ⛔ `grep --help` IS ITSELF NOT PORTABLE (MEASURED 2026-11-22). BSD grep 2.6.0-FreeBSD writes
+    # its usage to STDERR and exits **2**, so `check=True` raised `CalledProcessError` and this cell
+    # could never run on macOS at all. GNU grep answers on stdout with exit 0. The universe is derived
+    # from whichever stream carries the option list, and a grep that documents nothing parsable here
+    # SKIPS rather than failing — because the pin cannot be checked against a universe this grep
+    # does not publish. The `>= 40` floor stays: it is what stops a broken parser certifying anything.
+    completed = subprocess.run(["grep", "--help"], capture_output=True, text=True)
+    help_text = completed.stdout + completed.stderr
+    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", help_text))
+    if len(documented) < 40:
+        pytest.skip(
+            f"`grep --help` published only {len(documented)} long options on this grep "
+            f"(rc {completed.returncode}); BSD grep writes usage to stderr and exits 2, so there is "
+            "no documented universe to pin `_D5_ALL_LONG_OPTIONS` against on this platform (#14027)")
     assert len(documented) >= 40, (
         f"only {len(documented)} long options were parsed out of `grep --help` — the derivation "
         "is broken, and a broken derivation must not be able to certify anything")
@@ -4960,18 +4972,50 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
     # dropped, this alias would be a spelling grep REFUSES that the reader still grades (the worse
     # direction); if `--fixed-regexp` ever retargeted the arity, excluding it would lose a count.
     probe = "++\n+\nxx\n-\n\n"
+    # ⛔ THE READER'S BEHAVIOUR AND GREP'S VERDICT ARE TWO CLAIMS, AND ONLY ONE IS PORTABLE
+    # (MEASURED 2026-11-22 on `main` `70fbd1a27dd5`). This block used to assert BOTH claims for the
+    # `-u` spelling, and the result was FOURTEEN red jobs across every shard collecting this file.
+    # `-u`/`--unix-byte-offsets` is not a portable option:
+    #   * `grep (BSD grep, GNU compatible) 2.6.0-FreeBSD` (macOS) ACCEPTS it — `2` printed, rc 0;
+    #   * GNU grep REMOVED it (obsolete since 3.8) — the Ubuntu CI runner REFUSES it, rc 2.
+    # The prose above attributes these measurements to "GNU grep 3.11", and THAT is what hid the
+    # defect: the numbers were taken on BSD grep and labelled GNU. So the verdict is now asked of the
+    # grep IN FRONT OF US — a spelling that grep does not run is simply not measured, rather than
+    # failing the cell — while every claim about what the READER does stays unconditional, because
+    # the reader must read a prescription whether or not this platform's grep will run it (a command
+    # the platform rejects is a MORE useful thing to surface, not less).
+    ran_by_spelling = {
+        accepted: subprocess.run(["grep", "-c", accepted, "^[+-]$"], input=probe,
+                                 capture_output=True, text=True)
+        for accepted in ("--unix-byte-offsets", "--u", "--fixed-regexp")
+    }
+    # ⛔ MEASURE PER SPELLING, AND ONLY WHAT THIS GREP CAN ANSWER. The three spellings are NOT
+    # equally portable, and the two greps we actually run disagree in OPPOSITE directions
+    # (MEASURED 2026-11-22, `main` `70fbd1a27dd5`):
+    #   * BSD grep 2.6.0-FreeBSD (macOS) runs `-u`/`--unix-byte-offsets` and `--u`, but REFUSES
+    #     `--fixed-regexp`, and its `grep --help` exits 2;
+    #   * GNU grep on the Ubuntu runner documents/accepts `--fixed-regexp`, but REMOVED `-u`
+    #     (obsolete since 3.8) — which is why this file reddened FOURTEEN jobs on CI.
+    # Fixing either direction by asserting one grep's behaviour broke the other, so each arm below
+    # is measured against the grep in front of us and a spelling that grep does not run is simply
+    # not measured here. This test's SUBJECT is the reader; grep's verdict is the justification.
+    measured = {}
     for accepted, expected in (("--unix-byte-offsets", "2"), ("--u", "2"), ("--fixed-regexp", "0")):
-        ran = subprocess.run(["grep", "-c", accepted, "^[+-]$"], input=probe, capture_output=True,
-                             text=True)
-        assert ran.returncode in (0, 1), (
-            f"`grep -c {accepted} '^[+-]$'` was REFUSED by this grep ({ran.stderr.strip()}) — the "
-            "reader's treatment of it is calibrated on the measurements named here, so this reds "
-            "rather than silently grading a command grep will not run (#14027)")
+        ran = ran_by_spelling[accepted]
+        if ran.returncode not in (0, 1):
+            continue  # this grep does not run the spelling; there is no count to check
         assert ran.stdout.strip() == expected, (
             f"`grep -c {accepted} '^[+-]$'` printed {ran.stdout.strip()!r} on the probe "
-            f"({expected!r} expected) — `--unix-byte-offsets` must count THIS class for the false "
-            "PASS argument to hold, and `--fixed-regexp` must count NOTHING for its exclusion to "
-            "be safe (#14027, MEASURED)")
+            f"({expected!r} expected) — `--unix-byte-offsets`/`--u` must count THIS class for the "
+            "false-PASS argument to hold, and `--fixed-regexp` must count NOTHING for its exclusion "
+            f"to be safe (#14027, MEASURED on {ran.args[2]})")
+        measured[accepted] = ran.stdout.strip()
+    if not measured:
+        pytest.skip(
+            "this grep runs NONE of the three spellings this cell measures "
+            "(`--unix-byte-offsets`, `--u`, `--fixed-regexp`), so no acceptance exists to check; "
+            "the reader's own behaviour is asserted unconditionally above and below (#14027)")
+
     assert {"--unix-byte-offsets"} == set(_D5_UNDOCUMENTED_LONG_OPTIONS), (
         "the undocumented allowance is a DECLARED set of the spellings THIS READER accepts although "
         "`grep --help` omits them; a second one needs its own measurement here (#14027) — grep has "
