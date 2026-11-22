@@ -1765,7 +1765,7 @@ def test_a_window_wholly_unanswerable_at_plan_time_names_the_UNANSWERABLE_pin():
 def test_a_plan_time_window_holding_BOTH_pin_states_names_the_UNANSWERABLE_one():
     """The plan-time precedence, when a window holds a pinned node AND an unanswerable one.
 
-    ⛔ Swapping the two arms at `cache_evictor.py:1170-1172` (asking `pinned` before
+    ⛔ Swapping the two arms at `cache_evictor.py:1170-1173` (asking `pinned` before
     `pin-unanswerable`) left all 211 tests green, while the report offered `unpin` for the
     nodes nothing established as pinned. ⛔ THE ARM ORDER IS OBSERVABLE WITH UNANSWERABLE
     HOLDS ALONE, which is why that same swap also reds the wholly-unanswerable row beside
