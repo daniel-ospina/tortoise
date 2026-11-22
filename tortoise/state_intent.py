@@ -690,11 +690,25 @@ _CONTRACTED_AUX = (
 #: uses — see that constant) and `_COPULA_LONG_SUBJECT`'s arm B — because fixing the refusal
 #: without widening the report trades a wrong route for a silent drop: measured, with only the
 #: refusal side widened, `is the export getting archived` came back `signal=None`.
-#: ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: the `to <adverb> <verb>` window is bounded
-#: to TWO adverbs (a third puts the phrase outside the subject's own word bound anyway), and a
-#: non-finite verb this list does not name (`to wind up archived`) still routes — a closed list is
-#: the mechanism this module uses everywhere and the residual it always carries.
-_NONFINITE_COPULA = r"(?:to\s+(?:[a-z]+\s+){0,2}(?:be|get|become|became)|being|getting)"
+#: ⛔ AND THE FOUR PHRASAL / RESULTATIVE VERBS THE FIRST CUT LEFT OUT (fresh review, P2,
+#: measured): `to wind up`, `to end up`, `to turn out` and `to stay` are the SAME scheduled or
+#: continuing frame — each still ROUTED the whole ended population with the qualifier dropped and
+#: `signal=None`, `is the export to wind up archived` among them, which is #14033's own defect
+#: four spellings over. Measured on the widened class over 18 998 probes: 1 040 move
+#: ROUTE -> REFUSED+REPORTED (`is_copula_long_subject`) and 140 move SILENT -> REFUSED+REPORTED,
+#: with **0** route -> silence moves — the one direction this widening must not take, because
+#: refusing without reporting is the other half of #14033, and it is why both consumers move
+#: together (a refusal-side-only widening was measured doing exactly that in the previous round).
+#: The PREPOSITIONAL `to` is untouched: `is the export to Europe archived` still routes, pinned.
+#: ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: the `to <word> <word> <verb>` window is
+#: bounded to TWO preceding words (a third puts the phrase outside the subject's own word bound
+#: anyway), and a non-finite verb this list does not name (`to remain archived`, `to keep
+#: archived`) still routes — a closed list is the mechanism this module uses everywhere and the
+#: residual it always carries.
+_NONFINITE_COPULA = (
+    r"(?:to\s+(?:[a-z]+\s+){0,2}"
+    r"(?:be|get|become|became|wind up|end up|turn out|stay)|being|getting)"
+)
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -1065,8 +1079,21 @@ _COPULA_SUBJECT = (
     # second clause whose own auxiliary was contracted: the contracted twins ROUTED the
     # whole ended population with the caller's predicate dropped and `signal=None`, while
     # every UN-contracted twin was refused. The class is interpolated from
-    # :data:`_CONTRACTED_AUX` — one home, three consumers, so the fourth copy cannot go
-    # missing the way this one did.
+    # :data:`_CONTRACTED_AUX` — one home, THREE consumers (this lookahead and both
+    # `_EXISTENCE_GUARD` lookaheads), which is what keeps THOSE three from drifting.
+    # ⛔ …AND THAT IS THE WHOLE CLAIM. Two more copies of the finite-auxiliary class live
+    # in this module and neither is a `_CONTRACTED_AUX` consumer, on purpose and measured
+    # (fresh review, P2 — the prose here used to promise "so the fourth copy cannot go
+    # missing", which was false on the day it was written):
+    #   * `_WHICH_MODIFIED_NOUN`'s auxiliary slot was a fourth copy and IS interpolated
+    #     now, because its drift was a SILENCE — `which customer claims hasn't been
+    #     archived` returned `population=None, signal=None` while the un-contracted twin
+    #     reported `which_modified_noun`;
+    #   * `_COPULA_LONG_SUBJECT`'s arm A keeps its OWN hand-typed run and adds NO
+    #     contraction, because there the contraction is a NEGATIVE member (a second finite
+    #     verb in the subject SUPPRESSES the report), so interpolating it would trade 1 180
+    #     measured notices for silence — the direction this module refuses. Pinned by
+    #     `test_the_contraction_in_a_LONG_subject_stays_on_the_safe_side`.
     rf"where|whereas|after|before|now|what|how|why|{_CONTRACTED_AUX}|"
     r"has|have|had|is|are|was|were|will|would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
     # ⛔ THE NON-FINITE COPULA IS **NOT** IN THIS LIST, DELIBERATELY (review P1,
@@ -1318,7 +1345,19 @@ _WHICH_MODIFIED_NOUN = re.compile(
     rf"^which\s+(?:of\s+)?"
     rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
     rf"[a-z0-9][a-z0-9'’._/-]*\s+[a-z0-9][a-z0-9'’._/-]*\s+"
-    rf"(?:is|are|was|were|has|have|had)\s+(?:been\s+)?(?:{_ENDING_WORDS})\b"
+    # ⛔ AND THE AUXILIARY SLOT IS THE `_CONTRACTED_AUX` CLASS, NOT FOUR HAND-TYPED WORDS
+    # (fresh review, P2, measured). This row is the fourth copy of the finite-auxiliary
+    # class, and its drift was a SILENCE: the row insists the ending participle be preceded
+    # by the wh-phrase's own auxiliary, so a CONTRACTED auxiliary failed to match and the
+    # question was neither routed nor reported —
+    #
+    #   `which customer claims has been archived`     -> reported `which_modified_noun`
+    #   `which customer claims hasn't been archived`  -> `population=None, signal=None`
+    #
+    # with the typographic twin (`hasn’t`) silent too. Measured after interpolating the
+    # class: 1 920 probes move SILENT -> REPORTED, 0 move in any other direction (this row
+    # is a notice row, so it can only ever ADD a report).
+    rf"(?:{_CONTRACTED_AUX}|is|are|was|were|has|have|had)\s+(?:been\s+)?(?:{_ENDING_WORDS})\b"
 )
 
 #: A copula question whose SUBJECT is longer than the shape's four-word bound
@@ -1358,6 +1397,18 @@ _COPULA_LONG_SUBJECT = re.compile(
     # carries its own verb, which the list below already refuses.
     rf"(?:because|that|given|since|when|while|if|unless|after|before|now|"
     rf"which|who|whom|whose|where|is|are|was|were|has|have|had|do|does|did|will|"
+    # ⛔ NO `_CONTRACTED_AUX` HERE, AND THAT IS A MEASURED DECISION, NOT AN OVERSIGHT
+    # (fresh review, P2). Everywhere else in this module the contraction class is
+    # interpolated because leaving it out costs a notice. Here the list is a NEGATIVE
+    # member — a second finite verb inside the subject means the ending participle is that
+    # clause's, so NOTHING is reported — and interpolating the contractions was measured
+    # converting 1 180 rows from `signal='is_copula_long_subject'` to `signal=None` (e.g.
+    # `is the team the report hasn't been filed by archived`). A silent decline is the
+    # direction #14033 exists to remove, so the un-contracted run stays and the resulting
+    # asymmetry is stated: a contraction in the subject leaves the notice ON (the safe
+    # direction, a report and never a route — the same trade this row's notice-leak note
+    # records for a lexical second verb). Pinned by
+    # `test_the_contraction_in_a_LONG_subject_stays_on_the_safe_side`.
     rf"would|can|could|may|might|must|should)\b)"
     rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{5,}}"
     rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"

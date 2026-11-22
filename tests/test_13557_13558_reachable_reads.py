@@ -995,6 +995,15 @@ NOT_SELECTED = [
     "is the export to eventually be archived",
     "is the export to get archived",
     "is the export to become archived",
+    # ── …and the FOUR PHRASAL / RESULTATIVE verbs the class was missing (fresh review,
+    # P2, measured). `to wind up`, `to end up`, `to turn out` and `to stay` are the same
+    # scheduled or continuing frame as `to be`, and each ROUTED the whole ended population
+    # with the qualifier dropped and `signal=None`. Refused now, and REPORTED, because
+    # refusing without a notice is the other half of #14033.
+    "is the export to wind up archived",
+    "is the export to end up archived",
+    "is the export to turn out archived",
+    "is the export to stay archived",
     # ── …and the CONTRACTED asyndetic twin this shape swallowed (round-28 review, P1) ──
     # `has anyone reported v3 hasn't been deprecated` ROUTED through the perfect branch and
     # dropped the caller's own verb (`reported`) with `signal=None`, while its UN-contracted
@@ -1204,6 +1213,14 @@ NOTICE_ONLY = [
     "is to be archived",
     "is getting archived",
     "was being retired",
+    # ⛔ …and the four PHRASAL / RESULTATIVE non-finite verbs (fresh review, P2, measured):
+    # `to wind up|end up|turn out|stay` were outside `_NONFINITE_COPULA`, so the shape ROUTED
+    # them and served a scheduled/continuing state as the ended population. Refused AND
+    # reported now — pinned in BOTH lists, so deleting either half reds.
+    "is the export to wind up archived",
+    "is the export to end up archived",
+    "is the export to turn out archived",
+    "is the export to stay archived",
 ]
 
 assert set(NOTICE_ONLY) <= set(NOT_SELECTED), (
@@ -1277,6 +1294,20 @@ def test_an_INFINITIVE_or_PROGRESSIVE_subject_is_REFUSED_and_REPORTED():
         "is the export scheduled to be archived",
         "is the report to be retired",
         "is the claim being withdrawn",
+        # ⛔ THE PHRASAL / RESULTATIVE VERBS ARE THE SAME ROLE (fresh review, P2,
+        # measured). `to wind up`, `to end up`, `to turn out` and `to stay` are the same
+        # scheduled or continuing frame as `to be`, and each ROUTED the whole ended
+        # population with the qualifier dropped and `signal=None` — `is the export to
+        # wind up archived` among them. Listed here AND in `NOT_SELECTED`/`NOTICE_ONLY`,
+        # with an adverb and a `supposed to` frame so the two consumers are driven
+        # through the widened class rather than one spelling of it.
+        "is the export to wind up archived",
+        "is the export to end up archived",
+        "is the export to turn out archived",
+        "is the export to stay archived",
+        "is the export to eventually wind up archived",
+        "is the export supposed to stay archived",
+        "is the report to end up retired",
     ]
     for query in refused:
         got = detect_state_question(query)
@@ -1290,11 +1321,25 @@ def test_an_INFINITIVE_or_PROGRESSIVE_subject_is_REFUSED_and_REPORTED():
             f"distinguishable from an empty answer")
 
     # a prepositional `to` introduces a NOUN, not an infinitive: it must keep routing
-    for query in ("is the export to Europe archived", "is the export archived"):
+    for query in ("is the export to Europe archived", "is the export archived",
+                  "is the export to the vendor archived",
+                  "is the export to legal archived"):
         got = detect_state_question(query)
         assert got.population == "ended", (
             f"{query!r} is a plain state question but no longer routes ({got!r}) — the "
             f"infinitive guard was widened to the word `to`")
+
+    # ⛔ AND THE CLOSED LIST'S RESIDUAL IS A MEASUREMENT, NOT A SENTENCE (fresh review,
+    # P2). `_NONFINITE_COPULA` names a closed set of non-finite verbs; a non-finite verb
+    # OUTSIDE it still routes, which the constant's own note says. Pinning one keeps that
+    # claim falsifiable: a later widening that swallows them reds here, and a reader can
+    # see the size of what is left rather than inferring zero from silence.
+    for query in ("is the export to remain archived", "is the export to keep archived"):
+        got = detect_state_question(query)
+        assert got.population == "ended" and got.signal is None, (
+            f"{query!r} moved to {got!r} — `remain`/`keep` are NAMED as the non-finite "
+            f"verbs this closed list does not carry, so a change here means the note on "
+            f"`_NONFINITE_COPULA` now understates the class it covers")
 
     # ⛔ THE TWO SILENCES THIS FIX LEAVES, STATED AND PINNED (a report that claimed the
     # class closed would be the drift this branch has already paid for twice):
@@ -1313,6 +1358,92 @@ def test_an_INFINITIVE_or_PROGRESSIVE_subject_is_REFUSED_and_REPORTED():
             f"{query!r} moved to {got!r} — the stated silences of the infinitive class "
             f"are not silences any more, so the prose on `_COPULA_SUBJECT` and the "
             f"`_COPULA_LONG_SUBJECT` arm-B note are now wrong")
+
+
+def test_a_contracted_auxiliary_does_not_silence_the_which_modified_noun_row():
+    r"""The fourth copy of the finite-auxiliary class (fresh review, P2, measured).
+
+    ``_WHICH_MODIFIED_NOUN`` insists the ending participle be preceded by the wh-phrase's
+    OWN auxiliary, and that slot was hand-typed (``is|are|was|were|has|have|had``). A
+    CONTRACTED auxiliary therefore failed to match, and because this row reports rather
+    than routes, the failure was the module's worst direction — silence, not a wrong
+    route:
+
+        `which customer claims has been archived`     -> `which_modified_noun`
+        `which customer claims hasn't been archived`  -> `population=None, signal=None`
+
+    The slot is now interpolated from :data:`_CONTRACTED_AUX`, so the contraction is the
+    same class as its un-contracted twin. The typographic apostrophe is exercised too:
+    the module normalises the sender's inventory, and a spelling that accepted only ASCII
+    would leave the class open for every phone keyboard that types `’`.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    pairs = [
+        # (un-contracted twin, contracted twin) — the FIRST must not change, the second
+        # must agree with it.
+        ("which customer claims has been archived",
+         "which customer claims hasn't been archived"),
+        ("which vendor reports have been retracted",
+         "which vendor reports haven't been retracted"),
+        ("which board requests had been withdrawn",
+         "which board requests hadn't been withdrawn"),
+    ]
+    for plain, contracted in pairs:
+        want = detect_state_question(plain)
+        assert want.population is None and want.signal == "which_modified_noun", (
+            f"{plain!r} is the row's pinned baseline and now reads {want!r} — the "
+            f"comparison below would be measuring the wrong thing")
+        for spelling in (contracted, contracted.replace("'", "’")):
+            got = detect_state_question(spelling)
+            assert got.population is None and got.signal == "which_modified_noun", (
+                f"{spelling!r} returned {got!r} while its un-contracted twin reported "
+                f"`which_modified_noun` — the auxiliary slot is not the "
+                f"`_CONTRACTED_AUX` class, so a contracted state question is SILENT, "
+                f"which is #14033's own defect one guard over")
+    # …and the discriminator the row exists for still holds: a subordinate clause puts a
+    # LEXICAL verb where the auxiliary must be, contraction or not.
+    for query in ("which vendor said our commitments were archived",
+                  "which vendor said our commitments weren't archived"):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal is None, (
+            f"{query!r} reports {got.signal!r} — the two-word window that keeps the "
+            f"subordinate-clause class out was widened along with the auxiliary slot")
+
+
+def test_the_contraction_in_a_LONG_subject_stays_on_the_safe_side():
+    r"""`_COPULA_LONG_SUBJECT` arm A is the ONE copy that deliberately omits contractions.
+
+    Everywhere else the contraction class is interpolated from :data:`_CONTRACTED_AUX`
+    because leaving it out costs a NOTICE. In arm A's negative lookahead the effect is
+    the opposite — a second finite verb inside the subject SUPPRESSES the report — so
+    interpolating the contractions was measured converting 1 180 rows from
+    ``signal='is_copula_long_subject'`` to ``signal=None``, e.g.
+    ``is the team the report hasn't been filed by archived``. A silent decline is the
+    direction #14033 exists to remove, so the un-contracted run stays and this test
+    makes the asymmetry a measurement rather than a sentence in a comment.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    # The un-contracted spelling is SUPPRESSED by the hand-typed run (`has` is a member).
+    quiet = "is the team the report has not been filed by archived"
+    got = detect_state_question(quiet)
+    assert got.population is None and got.signal is None, (
+        f"{quiet!r} reports {got.signal!r} — arm A's second-verb suppression no longer "
+        f"holds for `has`, so the asymmetry this test pins has moved")
+    # The CONTRACTED twin must stay on the SAFE side: a report, never a silence. If a
+    # future round interpolates `_CONTRACTED_AUX` here "for consistency", this reds and
+    # names the measured cost instead of quietly converting notices into silence.
+    for query in (
+        "is the team the report hasn't been filed by archived",
+        "is the team the report hasn’t been filed by archived",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal == "is_copula_long_subject", (
+            f"{query!r} returned {got!r} — `_COPULA_LONG_SUBJECT` arm A gained "
+            f"`_CONTRACTED_AUX`, which was measured converting 1 180 reports into "
+            f"SILENCE. That is the module's worst direction; if the change is wanted, "
+            f"update the notice-scope paragraph and this test together")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
