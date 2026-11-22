@@ -5917,17 +5917,33 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
         elif isinstance(node, ast.Call):
             # ⛔ THE SAME STORE, CARRIED AS A STRING CONSTANT (#14326 review P1): the
             # module-attribute arm above is a spelling, and `setattr(mod, "TortoiseSDK", X)`
-            # binds exactly the same attribute. Fail-closed on the NAME alone — this pin
-            # cannot resolve which receiver the setattr targets.
+            # binds exactly the same attribute. ⛔ NO RECEIVER TEST (#14326 review P1,
+            # MEASURED GREEN at `b6be3373`): requiring `args[0]` to be a bare `Name`
+            # exempted the module-dotted spelling of the SAME store —
+            # `setattr(tortoise.sdk, "TortoiseSDK", _Mirror)` — and buying nothing: deleting
+            # that conjunct leaves 31 passed, because the tool's own `setattr` calls pass the
+            # attribute name as a VARIABLE, which the `Constant` test below already exempts.
+            # Fail-closed on the NAME alone, at any receiver.
             if (getattr(node.func, "id", None) == "setattr" and len(node.args) >= 2
-                    and isinstance(node.args[0], ast.Name)
                     and isinstance(node.args[1], ast.Constant)
                     and node.args[1].value == _SDK_CONSTRUCTOR):
                 out.append(
                     f"line {node.lineno} `setattr`s `{_SDK_CONSTRUCTOR}` on "
-                    f"`{node.args[0].id}` — the same store as an attribute write, carried "
-                    "as a string constant, so `run()`'s deferred import can resolve to a "
-                    "different class")
+                    f"`{ast.unparse(node.args[0])}` — the same store as an attribute write, "
+                    "carried as a string constant, so `run()`'s deferred import can resolve "
+                    "to a different class")
+            # ⛔ THE SAME STORE THROUGH A MAPPING-UPDATE CALL (#14326 review P1, the residual
+            # the reviewer flagged shape-only): `x.__dict__.update({"TortoiseSDK": _Mirror})`
+            # is the attribute store with the key in a dict, and it needs no receiver test for
+            # the same reason as `setattr` — a NON-constant key is not this clause's subject.
+            elif (getattr(node.func, "attr", None) == "update" and node.args
+                    and isinstance(node.args[0], ast.Dict)
+                    and any(isinstance(k, ast.Constant) and k.value == _SDK_CONSTRUCTOR
+                            for k in node.args[0].keys)):
+                out.append(
+                    f"line {node.lineno} `.update`s `{_SDK_CONSTRUCTOR}` into "
+                    f"`{ast.unparse(node.func.value)}` — the same rebind through a mapping "
+                    "key, so the pin's provenance clause does not bound it")
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
                 and isinstance(node.slice, ast.Constant) \
                 and node.slice.value == _SDK_CONSTRUCTOR:
@@ -6071,6 +6087,16 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                      + 'setattr(_t, "TortoiseSDK", _Mirror)\n')
     got = ctor_findings(setattr_store)
     assert got and any("setattr`s" in g for g in got), got
+
+    # ⛔ THE MODULE-DOTTED AND INDEXED RECEIVERS OF THE SAME `setattr` (#14326 review P1,
+    # MEASURED GREEN at `b6be3373`): requiring the receiver to be a bare `Name` exempted
+    # `setattr(tortoise.sdk, "TortoiseSDK", _Mirror)` — one line, the same rebind — while
+    # buying nothing (deleting that conjunct left 31 passed). No receiver test now.
+    for mod_dotted in ('setattr(tortoise.sdk, "TortoiseSDK", _Mirror)\n',
+                       'setattr(sys.modules["tortoise.sdk"], "TortoiseSDK", _Mirror)\n',
+                       '_t.__dict__.update({"TortoiseSDK": _Mirror})\n'):
+        got = ctor_findings(shipped + mod_dotted)
+        assert got, mod_dotted
 
     keyed_store = (shipped + 'sys.modules["tortoise.sdk"] = _M\n')
     assert ctor_findings(keyed_store) == []          # an unrelated KEY is not this store
