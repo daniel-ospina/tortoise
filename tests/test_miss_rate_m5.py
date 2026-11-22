@@ -5,7 +5,7 @@ numbers `#13989`'s allowance sizing will quote, and they sit on an instrument
 whose failure mode is SILENT — the curve is arithmetic on a mass distribution, so
 an inverted ordering, a sampler seeded from the same stream as the eviction order,
 or a curve read off the wrong population still produces a table of plausible
-rates. Three things are pinned here, each closing a different way the record rots:
+rates. Four things are pinned here, each closing a different way the record rots:
 
 1. **The arithmetic.** ``mass_order`` / ``resident_ids`` / ``weighted_sample`` /
    ``covered_mass`` / ``coverage_for`` / ``marginal_pp_per_mb`` /
@@ -36,6 +36,12 @@ rates. Three things are pinned here, each closing a different way the record rot
    value that was nonetheless printed under the wrong doubling interval. Two figures
    CANNOT be recomputed and are not claimed: §10's reproducibility band (it needs
    two re-runs) and the ``:Point`` floor's M2 column (M2's measurement, cited).
+4. **The read the figures came from.** ``query()`` calls itself a MIRROR of
+   ``extractor_v2._fts_rows``, which is the ground the rerank census grants it, so
+   the two call sites are compared keyword by keyword against each other (§5) —
+   including the derived flags a literal-only comparison silently skips — and the
+   width the probe measures at is held at or above the pool the granted lever would
+   re-pick.
 
 ⛔ **The evidence bundle IS committed, and the declared-absence guard is gone.**
 ``docs/evidence/14015-m5-miss-rate/measurement.json`` landed in a later commit on
@@ -112,6 +118,11 @@ from tools.miss_rate_m5 import (  # noqa: E402
     weighted_sample,
     windows_table,
     zipf_masses,
+)
+from tortoise.rerank import (  # noqa: E402
+    DEFAULT_FUSED_RERANK_POOL,
+    fused_rerank_pool_width,
+    rerank_pool_enabled,
 )
 
 
@@ -1588,3 +1599,558 @@ def test_every_readme_table_is_registered_in_the_cell_pins():
     assert not unregistered, (
         "the record publishes table(s) the cell pins do not recompute — a figure there is "
         f"membership-only, so a real-but-wrong value passes: {unregistered}")
+
+
+# ── 5. the read this probe measures: a MIRROR of `_fts_rows`, not a reader of its own ──
+
+#: The names whose VALUES may differ between the mirror and its reference, because
+#: they are the site's own COORDINATES rather than part of the leg's shape: the leg
+#: selector (`kind` / `entity_type`), the width (`k` / `limit`) and the trace sink
+#: the probe collects for its own accounting. Every OTHER name both sites hand over
+#: must agree with `_fts_rows` in form, not merely in name.
+_SITE_COORDINATES = frozenset({"entity_type", "limit", "leg_trace"})
+
+
+def _flag_form(node: ast.expr, subject: str | None) -> object:
+    """A handed value as a COMPARABLE form: a literal, or a normalised expression.
+
+    ⛔ ``subject`` IS REQUIRED AND IS BOUND. Abstracting any left-hand `Name`
+    (`subject = node.left.id`) compared `include_terminal=k in ("object", "subject")`
+    EQUAL to the reference's `entity_type in ("object", "subject")` — measured green
+    with `k` as the width, i.e. the probe reading a terminal-EXCLUDED population on
+    the object/subject legs while `_fts_rows` reads terminal-included, and nothing
+    else in the suite can see it (`check_leg_ids` cannot fire: fewer rows, all inside
+    the population; the re-cut artifact just publishes an inflated miss). So the
+    caller hands the site's OWN leg selector, and a condition derived from anything
+    else is returned with its raw shape — which never equals the reference's.
+
+    ⛔ THE LITERAL-ONLY COMPARISON WAS MEASURED GREEN OVER A REAL BREAK. Comparing
+    only when both nodes were `ast.Constant` skipped exactly the derived flags —
+    `include_terminal=kind in ("object", "subject")` is an `ast.Compare` — so
+    editing the probe alone to `include_terminal=False` (or `=True`, or to a
+    one-element tuple) left this pin green, and the census cannot see it either (the
+    grant exempts the owner by NAME). That is the shape this pin exists to close:
+    the probe would read a different population than the leg it calls a mirror.
+    Ported from `tests/test_window_quality_m2.py::_expr_form`, which closed the same
+    hole for the other `_fts_rows` mirror. The operator and the comparator constants
+    are kept as well, so a narrowing (`kind in ("object",)`) reds.
+    """
+    try:
+        return ("literal", ast.literal_eval(node))
+    except (ValueError, SyntaxError):
+        pass
+    if not (subject and isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name) and node.left.id == subject):
+        return ("raw", ast.dump(node))
+
+    class _Abstract(ast.NodeTransformer):
+        def visit_Name(self, inner: ast.Name) -> ast.Name:
+            if inner.id != subject:
+                return inner
+            return ast.copy_location(ast.Name(id="<arg>", ctx=inner.ctx), inner)
+
+    return ("expr", ast.dump(_Abstract().visit(ast.parse(ast.unparse(node), mode="eval").body)))
+
+
+def _read_call_keywords(path: Path, owner: str) -> tuple[dict[str, ast.expr], tuple[str, ...]]:
+    """The keyword arguments ONE function hands ``(sdk.)tortoise_fts_query``.
+
+    Returns ``(named, splats)`` — the keyword VALUE nodes by name, and the
+    ``**mapping`` names in source order. A splat hands the read names no reader of
+    this file can see, so it is returned rather than dropped: the caller has to say
+    what it knows about it. A missing owner, a re-shaped call or a second call in
+    the same owner RAISES, because "found no site" must never read as "the two sites
+    agree".
+    """
+    tree = ast.parse(path.read_text())
+    owners = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == owner]
+    assert len(owners) == 1, f"{path.name}:{owner} matched {len(owners)} definitions"
+    calls = [n for n in ast.walk(owners[0]) if isinstance(n, ast.Call)
+             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None))
+             in ("tortoise_fts_query", "_tortoise_fts_query")]
+    assert len(calls) == 1, (
+        f"{path.name}:{owner} calls the rerankable read {len(calls)} times — this pin "
+        "reads ONE call's keywords, and a second call would be unguarded")
+    named = {k.arg: k.value for k in calls[0].keywords if k.arg is not None}
+    splats = tuple(getattr(k.value, "id", "<expr>") for k in calls[0].keywords if k.arg is None)
+    return named, splats
+
+
+def _read_call_node(path: Path, owner: str) -> ast.Call:
+    """The ONE ``(sdk.)tortoise_fts_query`` call inside ``owner``."""
+    tree = ast.parse(path.read_text())
+    owners = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == owner]
+    assert len(owners) == 1, f"{path.name}:{owner} matched {len(owners)} definitions"
+    calls = [n for n in ast.walk(owners[0]) if isinstance(n, ast.Call)
+             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None))
+             in ("tortoise_fts_query", "_tortoise_fts_query")]
+    assert len(calls) == 1, f"{path.name}:{owner} holds {len(calls)} read calls"
+    return calls[0]
+
+
+def _sdk_construction(path: Path) -> str:
+    """What the module-level ``sdk`` NAME is assigned (unparsed).
+
+    ``cur["sdk"] = sdk`` pins the SLOT to a name; the name itself is this, and a
+    wrapper only has to rebind the name to replace every read behind the slot.
+    """
+    tree = ast.parse(path.read_text())
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    stores = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Name) and n.id == "sdk" and isinstance(n.ctx, ast.Store)]
+    assert len(stores) == 1, (
+        f"{path.name} assigns `sdk` at {len(stores)} places — this pin knows one")
+    element, container = stores[0], stores[0]
+    while isinstance(parents.get(id(container)), ast.Tuple):
+        element, container = container, parents[id(container)]
+    assign = parents.get(id(container))
+    if isinstance(assign, ast.Assign) and isinstance(assign.value, ast.Tuple) \
+            and isinstance(container, ast.Tuple):
+        for left, right in zip(container.elts, assign.value.elts, strict=True):
+            if left is element:
+                return ast.unparse(right)
+    assert isinstance(assign, ast.Assign), f"{path.name}: `sdk` is not plainly assigned"
+    return ast.unparse(assign.value)
+
+
+def _receiver_relays(path: Path) -> list[str]:
+    """Every way the file could swap the read's receiver or its method.
+
+    ⛔ REFUSED OUTRIGHT, NOT ENUMERATED. The tool has no attribute store, no
+    ``setattr``/``getattr``/``__setattr__`` call and no ``__dict__``/``vars()`` mention at
+    all, so a name-shaped check was always going to be one spelling behind: a
+    constant-string match missed ``setattr(sdk, "_tortoise" + "_fts_query", …)``, and a
+    bare-``setattr`` match missed ``builtins.setattr(...)`` and
+    ``sdk.__dict__["_tortoise_fts_query"] = …`` (all three measured green). Any route to
+    the read that is not ``cur["sdk"]._tortoise_fts_query(...)`` is out of scope here.
+    """
+    tree = ast.parse(path.read_text())
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+            found.append(f"{path.name}:{node.lineno} stores an attribute ({node.attr})")
+        if isinstance(node, ast.Attribute) and node.attr == "__dict__":
+            found.append(f"{path.name}:{node.lineno} reaches an object's __dict__")
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
+                and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str) \
+                and node.slice.value in ("tortoise_fts_query", "_tortoise_fts_query"):
+            found.append(
+                f"{path.name}:{node.lineno} stores the read's method by subscript")
+        if (isinstance(node, ast.Call)
+                and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+                in ("setattr", "getattr", "__setattr__", "vars")):
+            found.append(
+                f"{path.name}:{node.lineno} calls "
+                f"{getattr(node.func, 'id', None) or getattr(node.func, 'attr', None)}")
+    return sorted(found)
+
+
+def _sdk_bindings(path: Path) -> list[str]:
+    """What every ``cur["sdk"] = ...`` store in the file is assigned FROM.
+
+    A receiver can be swapped for a wrapper in ONE line, so the binding is read
+    structurally: each ``Store`` subscript keyed ``"sdk"`` must sit in a tuple
+    assignment whose matching right-hand side is a bare name, and that name is what
+    is returned here (``["sdk"]`` on the shipped tool).
+    """
+    tree = ast.parse(path.read_text())
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+                and isinstance(node.slice, ast.Constant) and node.slice.value == "sdk"):
+            continue
+        element, container = node, node
+        while isinstance(parents.get(id(container)), ast.Tuple):
+            element = container
+            container = parents[id(container)]
+        assign = parents.get(id(container))
+        assert isinstance(assign, ast.Assign), (
+            f"{path.name}:{node.lineno} stores `cur[\"sdk\"]` outside a plain assignment")
+        if isinstance(container, ast.Tuple):
+            index = next(i for i, e in enumerate(container.elts) if e is element)
+            value = (assign.value.elts[index]
+                     if isinstance(assign.value, ast.Tuple) and index < len(assign.value.elts)
+                     else assign.value)
+        else:
+            value = assign.value
+        out.append(ast.unparse(value))
+    return out
+
+
+def _owner_node(path: Path, owner: str) -> ast.AST:
+    """The ONE definition named ``owner`` in ``path``."""
+    tree = ast.parse(path.read_text())
+    owners = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == owner]
+    assert len(owners) == 1, f"{path.name}:{owner} matched {len(owners)} definitions"
+    return owners[0]
+
+
+def _function_params(path: Path, owner: str) -> list[str]:
+    """``owner``'s positional parameter names, in order."""
+    tree = ast.parse(path.read_text())
+    owners = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == owner]
+    assert len(owners) == 1, f"{path.name}:{owner} matched {len(owners)} definitions"
+    return [a.arg for a in owners[0].args.args]
+
+
+def _read_call_widths(path: Path) -> list[tuple[int, ast.expr]]:
+    """Every call to the probe's OWN ``query()``: its line and the width it hands.
+
+    ``query`` is a local function, so the third positional argument is the ``limit``
+    the read runs at — the number the rerank's composition rule compares against the
+    pool, and therefore the number the census grant's safety rests on.
+    """
+    tree = ast.parse(path.read_text())
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "query"]
+    widths = []
+    for call in calls:
+        assert len(call.args) == 3, (
+            f"{path.name}:{call.lineno} calls `query()` with {len(call.args)} positional "
+            "arguments — this pin reads the third as the width")
+        widths.append((call.lineno, call.args[2]))
+    return sorted(widths)
+
+
+def test_the_probe_reads_the_exact_leg_fts_rows_runs():
+    """The probe's ``query()`` is a MIRROR, and the census grant says so.
+
+    ``tests/test_rerank_pool.py``'s ``intentional_keep`` row for this file exists on
+    the ground that ``query()``'s docstring claims *"EXACTLY the leg ``_fts_rows``
+    runs, at width ``k``"* — it passes the same two lever flags the capture leg
+    passes and omits ``_rerank_candidates`` because ``_fts_rows`` omits it (the
+    capture path keeps the rerank deliberately: the ``OVERRIDES:`` record at
+    ``tortoise/extractor_v2.py:2931``, cited by ``tortoise/sdk.py`` beside its
+    ``_rerank_candidates`` parameter, and #12297's measured recall@3). That row can
+    only say the file is ALLOWED to run the lever, so the contract it cites is
+    ASSERTED here against the leg it names: without this, adding
+    ``_rerank_candidates=False`` to the probe would leave the census green and
+    silently make every M5 figure describe a reader the capture path never runs (the
+    shape ``test_window_quality_m2.py::
+    test_the_mirror_reads_the_exact_lever_flags_its_reference_leg_does`` closed for
+    the other ``_fts_rows`` mirror).
+
+    AND the width: composition can only move when ``limit < _pool_n`` (``sdk.py``'s
+    ``_rerank_candidates`` parameter COMMENT (line 45702), and the pool slice it
+    describes), so the grant
+    is inert at the width the probe MEASURES
+    only while ``DEEP_LIMIT`` stays at or above the pool the read would resolve ONCE THE
+    GATE IS ARMED — a raised default, and the env knob the width really resolves
+    through, are both pinned. The only sub-pool read this file issues is the width-1
+    warm-up, whose result is discarded.
+    """
+    probe, probe_splats = _read_call_keywords(TOOL, "query")
+    reference, reference_splats = _read_call_keywords(
+        ROOT / "tortoise" / "extractor_v2.py", "_fts_rows")
+    # Anti-vacuity: a derivation that silently found nothing would make every
+    # comparison below trivially true.
+    levers = {"_record_reads", "_valid_time_rerank", "include_terminal"}
+    assert levers <= set(reference), (
+        f"the reference leg passes {sorted(reference)} — the levers this pin is about "
+        "are not among them, so the mirror claim has moved and this pin is stale")
+    assert not probe_splats, (
+        f"tools/miss_rate_m5.py::query splats {list(probe_splats)} into the read, so "
+        "whatever names that mapping carries are invisible to this pin")
+    assert reference_splats == ("extra",), (
+        f"extractor_v2.py::_fts_rows splats {list(reference_splats)}; the only splat "
+        "this pin knows is `**extra` (#4509's per-session `exclude_turn_echo_session`)")
+    # ⛔ AND WHAT THE SPLAT CARRIES — which an AST scan cannot answer. `**extra` is
+    # checked by NAME above, and a lever hiding inside it left every AST shape
+    # GREEN: a dict key, a nested `**{...}`, a subscript assignment, and — the one
+    # that killed the AST guard — a SPLIT literal (`"_rerank" "_candidates"`, or
+    # `extra.update({"_rerank" + "_candidates": False})`), measured. The capture
+    # path's own behaviour is therefore driven directly in
+    # `test_the_capture_leg_hands_the_read_no_rerank_opt_out` below, which needs no
+    # spelling. What stays here is the AST-visible half: the reference must not gain
+    # the lever as a KEYWORD either.
+    additive = set(probe) - set(reference)
+    assert additive <= {"leg_trace"}, (
+        f"the probe passes keyword(s) the capture leg does not: {sorted(additive)} — "
+        "only the trace sink may be added")
+    # ⛔ AND THE SINK ITSELF, separately: `leg_trace` is the probe's OWN accounting
+    # (`legs_seen` is built from it), so LOSING it is the quiet direction the
+    # subset test above cannot name — a dropped coordinate used to report an empty
+    # list and advise adding the keyword that had just been removed.
+    assert "leg_trace" in probe, (
+        "tools/miss_rate_m5.py::query no longer passes `leg_trace` — the probe's own "
+        "`legs_seen` accounting is built from that trace, so the run would publish "
+        "`legs_seen` claims it never observed")
+    assert not set(reference) - set(probe), (
+        f"the probe does NOT pass {sorted(set(reference) - set(probe))}, which the "
+        "capture leg does — the mirror has been broken in the quiet direction")
+    # ⛔ AND THE RECEIVER. The keyword comparison above constrains the CALL SITE, not
+    # what the read is invoked ON: a wrapper interposed between the SDK and the call
+    # (`cur["sdk"] = _TracedSdk(sdk)` with a `_tortoise_fts_query` that appends
+    # `_rerank_candidates=False`) reproduced the exact break this whole change exists to
+    # prevent — the probe reading a rerank-free reader — with BOTH new pins and the
+    # census GREEN (the wrapper's inner call is a call site that opts out, and the
+    # census's rule is "opt out OR be granted"). So the receiver is pinned by name, the
+    # tool is pinned to define no relay, the `sdk` NAME is pinned to the constructed
+    # `TortoiseSDK(...)`, and the file may neither rebind the read's method nor reach it
+    # through `setattr`/`getattr`.
+    call_node = _read_call_node(TOOL, "query")
+    receiver = call_node.func.value
+
+    def _is_sdk_slot(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+                and node.value.id == "cur"
+                and isinstance(node.slice, ast.Constant) and node.slice.value == "sdk")
+
+    assert _is_sdk_slot(receiver), (
+        "tools/miss_rate_m5.py::query no longer calls the read on the `cur[\"sdk\"]` "
+        f"slot ({ast.unparse(receiver)}) — an interposed wrapper can append a lever the "
+        "keyword list above never sees")
+    relays = [n.name for n in ast.walk(ast.parse(TOOL.read_text()))
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name in ("tortoise_fts_query", "_tortoise_fts_query")]
+    assert not relays, (
+        f"tools/miss_rate_m5.py defines {relays} — a relay that forwards to the read is "
+        "exactly where a lever can be appended invisibly")
+    # ⛔ AND WHAT THE RECEIVER'S NAME IS BOUND TO, because `cur["sdk"] = sdk` only says
+    # the slot holds whatever `sdk` names: rebinding that name to a wrapper
+    # (`sdk = _TracedSdk(sdk)`) or monkeypatching the method onto it
+    # (`setattr(sdk, "_tortoise_fts_query", …)` / `sdk._tortoise_fts_query = …`) put a
+    # rerank-free reader behind the probe's reads with EVERY pin above still green —
+    # measured, and the census cannot see it either (its walk finds the inner call
+    # already opted out, and its rule is "opt out OR be granted").
+    assert _sdk_construction(TOOL).startswith("TortoiseSDK("), (
+        f"the tool's `sdk` name is bound from {_sdk_construction(TOOL)!r}, not the "
+        "constructed `TortoiseSDK(...)` — the probe's reads must run on the SDK the tool "
+        "built, not on a wrapper around it")
+    assert not _receiver_relays(TOOL), (
+        "tools/miss_rate_m5.py stores an attribute or reaches one dynamically: "
+        f"{_receiver_relays(TOOL)} — that is where a lever can be appended invisibly")
+    assert _sdk_bindings(TOOL) == ['sdk'], (
+        f"`cur[\"sdk\"]` is bound from {_sdk_bindings(TOOL)} — the probe's reads must run "
+        "on the SDK object the tool was given, not on a wrapper around it")
+    # The lever the census grant turns ON must be absent at BOTH sites.
+    for site, kw in (("probe", probe), ("reference", reference)):
+        assert "_rerank_candidates" not in kw, (
+            f"the {site} now passes `_rerank_candidates` — the capture path KEEPS the "
+            "rerank (its OVERRIDES record), so opting out of it is a different reader")
+    # ⛔ THE COORDINATES ARE NOT A FREE PASS EITHER. They may differ in NAME (each
+    # site names its own parameter), but each must still be handed as that site's
+    # OWN PARAMETER — a hardcoded leg (`entity_type="point"`) or width (`limit=3`)
+    # at either site would leave the loop below silent, because both are excluded
+    # from it as coordinates. Measured: both of those stayed green.
+    def _selector(kw: dict[str, ast.expr], site: str) -> str:
+        node = kw.get("entity_type")
+        assert isinstance(node, ast.Name), (
+            f"the {site} hands `entity_type={ast.unparse(node) if node else '<missing>'}`, "
+            "not its own parameter — a hardcoded leg reads a different population, and "
+            "the comparison below cannot see a coordinate")
+        return node.id
+
+    probe_subject = _selector(probe, "probe")
+    reference_subject = _selector(reference, "reference")
+    assert probe_subject in _function_params(TOOL, "query"), (
+        f"the probe hands `entity_type` from {probe_subject!r}, which is not one of "
+        f"`query()`'s parameters — a local or a hardcoded leg is not the caller's")
+    assert reference_subject in _function_params(
+        ROOT / "tortoise" / "extractor_v2.py", "_fts_rows"), (
+        f"the reference hands `entity_type` from {reference_subject!r}, which is not one "
+        "of `_fts_rows`'s parameters")
+    assert probe_subject != reference_subject, (
+        f"both sites hand `entity_type` from a parameter named {probe_subject!r} — one of "
+        "them is no longer forwarding its own argument, so the derived-flag comparison "
+        "below would abstract the same name on both sides and prove nothing")
+    # ⛔ THE REFERENCE'S WIDTH, the other coordinate: hardcoding it there
+    # (`limit=3`) leaves the probe's 50-row read comparing against a 3-row leg —
+    # measured green — so it must be `_fts_rows`'s own `limit` parameter, and the
+    # probe's the same.
+    reference_params = _function_params(ROOT / "tortoise" / "extractor_v2.py", "_fts_rows")
+    ref_width = reference.get("limit")
+    assert isinstance(ref_width, ast.Name) and ref_width.id in reference_params, (
+        "the reference hands `limit="
+        f"{ast.unparse(ref_width) if ref_width else '<missing>'}`, not its own parameter "
+        f"({reference_params}) — the mirror is then comparing against a different width")
+    # ⛔ THE WIDTH IS THE OWNER'S OWN THIRD PARAMETER, not merely "a Name": an inner
+    # alias (`limit=_W` with `_W = 3`) satisfied a bare `isinstance(..., Name)` while
+    # the read ran at width 3 and the artifact still printed `deep_limit: 50` —
+    # measured green. Pinning the parameter NAME closes it, because `_read_call_widths`
+    # below already pins what the callers hand that parameter.
+    width = probe.get("limit")
+    query_params = _function_params(TOOL, "query")
+    assert len(query_params) >= 3, (
+        f"`query()` no longer takes three positional parameters ({query_params}) — this "
+        "pin reads the third as the width")
+    assert isinstance(width, ast.Name) and width.id == query_params[2], (
+        "the probe hands `limit="
+        f"{ast.unparse(width) if width else '<missing>'}`, not `{query_params[2]}` — its "
+        "own third parameter. An alias between the parameter and the read is exactly how "
+        "the measured width escapes the arithmetic below")
+    # ⛔ AND NO PARAMETER OF `query()` MAY BE REBOUND IN ITS BODY. The width walk below
+    # covered index 2 only, so `kind = "point"` as the body's first statement red the
+    # leg to points with every arm above GREEN (measured) — the same hole the width
+    # case closed, one parameter over. The body binds none of them today.
+    rebound = sorted(
+        (name, n.lineno)
+        for name in query_params
+        for n in ast.walk(_owner_node(TOOL, "query"))
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id == name)
+    assert not rebound, (
+        f"`query()` rebinds {sorted({name for name, _ in rebound})} at line(s) "
+        f"{[lineno for _, lineno in rebound]} — the arguments handed to the read are no "
+        "longer the ones the callers passed, so nothing here can see what it really reads")
+    # …and every shared name that is NOT a site coordinate must agree in FORM: a
+    # literal is compared as its value, a derived flag as its normalised expression
+    # over the site's OWN leg selector.
+    shared = (set(probe) & set(reference)) - _SITE_COORDINATES
+    assert shared == levers, (
+        f"the shared non-coordinate keywords are {sorted(shared)}, not the levers this "
+        "pin claims to compare — a new keyword needs a decision here, not a pass")
+    for name in sorted(shared):
+        left = _flag_form(probe[name], probe_subject)
+        right = _flag_form(reference[name], reference_subject)
+        assert left == right, (
+            f"`{name}` is {left!r} at the probe and {right!r} at `_fts_rows` — a "
+            "mirror that disagrees with its reference leg describes a reader the "
+            "capture path does not run")
+    # ⛔ AND `DEEP_LIMIT` ITSELF CANNOT BE SHADOWED. The name is pinned at the call
+    # sites, but `DEEP_LIMIT = 3` as the first statement of `measure()`'s loop body
+    # reinstated the literal-3 break with every assertion above GREEN (measured); the
+    # arithmetic below reads the IMPORTED constant and cannot see a local. The module's
+    # OWN definition is the one legitimate store.
+    tool_tree = ast.parse(TOOL.read_text())
+    tool_parents: dict[int, ast.AST] = {}
+    for _node in ast.walk(tool_tree):
+        for _child in ast.iter_child_nodes(_node):
+            tool_parents[id(_child)] = _node
+    deep_stores = [n for n in ast.walk(tool_tree)
+                   if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                   and n.id == "DEEP_LIMIT"]
+    module_defs = [n for n in deep_stores
+                   if isinstance(tool_parents.get(id(tool_parents.get(id(n)))), ast.Module)]
+    assert len(deep_stores) == 1 and len(module_defs) == 1 and module_defs[0] is deep_stores[0], (
+        "tools/miss_rate_m5.py rebinds `DEEP_LIMIT` away from its module-level "
+        f"definition (stores at {[n.lineno for n in deep_stores]}) — the width the "
+        "measured read runs at is then not the constant asserted below")
+    # ⛔ AND THE WIDTH THE MEASURED CALL ACTUALLY HANDS. The arithmetic below pins a
+    # module constant; nothing tied the read to it, so `query(kind, row["query"], 3)`
+    # — a width BELOW the pool, i.e. exactly the re-pickable case — stayed green
+    # while the artifact still reported `deep_limit: 50` (measured). So every call to
+    # the probe's own `query()` is pinned to a width the grant is safe at: the
+    # sampled read at `DEEP_LIMIT`, the discarded warm-up at the literal 1.
+    widths = _read_call_widths(TOOL)
+    measured = [(ln, w) for ln, w in widths
+                if isinstance(w, ast.Name) and w.id == "DEEP_LIMIT"]
+    warm = [(ln, w) for ln, w in widths
+            if isinstance(w, ast.Constant) and w.value == 1]
+    assert len(widths) == 2 and len(measured) == 1 and len(warm) == 1, (
+        "the probe's `query()` calls are no longer exactly one sampled read at "
+        f"`DEEP_LIMIT` plus one width-1 warm-up: {[(ln, ast.unparse(w)) for ln, w in widths]} "
+        "— this pin knows those two widths, and any other one is unguarded")
+    # …and the arithmetic that keeps the granted lever out of the MEASURED read.
+    # ⛔ `>=`, NOT `>`: `rerank_pool` is a PERMUTATION, never a filter
+    # (`tortoise/rerank.py` — "same length, same identities, same objects
+    # reordered"), so at `pool == limit` the whole page is permuted and the ID SET
+    # the probe counts is unchanged. The strict form false-RED a safe configuration
+    # (`TORTOISE_FUSED_RERANK_POOL = DEEP_LIMIT`) and was measured doing so.
+    assert DEEP_LIMIT >= DEFAULT_FUSED_RERANK_POOL, (
+        f"DEEP_LIMIT={DEEP_LIMIT} is below the rerank pool default "
+        f"({DEFAULT_FUSED_RERANK_POOL}): composition can move when `limit < pool`, so "
+        "the granted lever would start re-picking which rows the probe counts")
+    # ⛔ THE GATE-ARMED CASE, which the default alone does not cover: the read
+    # resolves its pool through `fused_rerank_pool_width()`, so an ambient
+    # `TORTOISE_FUSED_RERANK_POOL` above `DEEP_LIMIT` would put the measured page
+    # back inside the re-pickable window while every assertion above stayed green.
+    # Checked only when the gate is armed: with the lever OFF nothing can re-pick.
+    if rerank_pool_enabled():
+        armed_width = fused_rerank_pool_width()
+        assert armed_width <= DEEP_LIMIT, (
+            f"the fused-rerank gate is armed and resolves its pool width to {armed_width}, "
+            f"which is ABOVE DEEP_LIMIT={DEEP_LIMIT} — the probe's measured page would be "
+            "re-picked by the very lever the census grant declares inert; run the "
+            "measurement with the gate off or a pool width at or below the depth")
+
+
+def test_the_capture_leg_hands_the_read_no_rerank_opt_out():
+    """`extractor_v2._fts_rows` keeps the rerank — measured by DRIVING it.
+
+    ⛔ WHY THIS IS NOT ANOTHER AST SCAN. The census grant says the probe mirrors the
+    capture leg, and the capture leg is recorded as KEEPING the lever (its
+    ``OVERRIDES:`` record at ``extractor_v2.py:2931``). An AST scan cannot hold that
+    line: the leg builds a ``**extra`` mapping, so the lever can reach the read as a
+    dict key, a nested ``**{...}``, a subscript assignment, or a SPLIT literal
+    (``"_rerank" "_candidates"`` / ``extra.update({"_rerank" + "_candidates": False})``)
+    — every one of those was measured GREEN against a string-constant walk, and the
+    call-site census cannot see them either (it reads ``ast.keyword``s only). So the
+    leg is CALLED, with a stub sdk that records what the read actually receives: no
+    spelling, no indirection, no mapping shape can survive it.
+
+    The same call also pins the two levers BEHAVIOURALLY — the AST comparison in
+    ``test_the_probe_reads_the_exact_leg_fts_rows_runs`` reads the same literals, but
+    only here is it observable that the derived ``include_terminal`` really comes out
+    TRUE for the object/subject legs and FALSE for points.
+
+    Population, derived rather than remembered: ``_derive_queries`` emits exactly
+    ``object``/``event``/``point`` (``extractor_v2.py:2822``) and its only caller
+    passes every one of those to ``_fts_rows`` (``:3420``), so all three are driven
+    here; ``subject`` is driven for symmetry with the other stub drive
+    (`tests/test_time_aware_sdk_2520.py`'s four-leg one), NOT because production reaches
+    it — `_derive_queries` never emits it. ⛔ ``event`` was MISSING from the first
+    shape list and a leg-conditional opt-out
+    (``if entity_type == "event": extra = dict(extra, _rerank_candidates=False)``)
+    was measured fully GREEN — the population is the guard, not the four shapes
+    ``extra`` happens to build.
+
+    Residual, named: a branch reachable only under another FLAG (an env gate), or keyed
+    on a width this pin does not drive, is not covered; anything keyed on the entity type
+    or on the two driven widths (3 and the probe's own ``DEEP_LIMIT``) is.
+    """
+    from tortoise.extractor_v2 import _fts_rows  # heavy module: imported at use, not at collection
+
+    class _Recorder:
+        """A stub sdk: it records the read's keyword arguments and returns no rows."""
+
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def _tortoise_fts_query(self, *args, **kwargs):
+            self.calls.append(kwargs)
+            return []
+
+    shapes = (("point", None), ("point", "session-1"), ("object", None),
+              ("event", None), ("subject", "session-1"))
+    # ⛔ AND THE WIDTH THE PROBE'S OWN MEASURED READ USES. Driving only ``limit=3`` left
+    # a width-keyed opt-out (`if limit >= 40: extra = dict(extra, _rerank_candidates=False)`)
+    # GREEN (measured) — a branch that is neither env-gated nor entity-keyed, so it is
+    # the same class as the ``event`` gap above, on the other axis.
+    for limit in (3, DEEP_LIMIT):
+        for entity_type, session in shapes:
+            recorder = _Recorder()
+            _fts_rows(recorder, entity_type, "mirror probe", limit=limit, session_id=session)
+            assert len(recorder.calls) == 1, (
+                f"_fts_rows({entity_type!r}, limit={limit}, session_id={session!r}) made "
+                f"{len(recorder.calls)} reads — this pin reads the ONE it makes")
+            kwargs = recorder.calls[0]
+            assert "_rerank_candidates" not in kwargs, (
+                f"`extractor_v2._fts_rows` hands `_rerank_candidates="
+                f"{kwargs['_rerank_candidates']!r}` on the {entity_type} leg at "
+                f"limit={limit}: the capture path is recorded as KEEPING the rerank, so "
+                "this is a departure that needs its own OVERRIDES record and this pin "
+                "updated")
+            assert kwargs["_record_reads"] is False, kwargs
+            assert kwargs["_valid_time_rerank"] is False, kwargs
+            assert kwargs["include_terminal"] is (entity_type in ("object", "subject")), (
+                f"the {entity_type} leg now reads include_terminal="
+                f"{kwargs['include_terminal']!r} — the capture path opts the entity/subject "
+                "prior INTO terminal rows (#3301) and leaves terminal Points out")
+            assert kwargs["entity_type"] == entity_type, kwargs
+            assert kwargs["limit"] == limit, (
+                f"the read ran at limit={kwargs['limit']!r} when the leg was called with "
+                f"limit={limit} — the width is the one number the composition rule is "
+                "stated over")
+            if entity_type == "point" and session:
+                assert kwargs["exclude_turn_echo_session"] == session, kwargs
