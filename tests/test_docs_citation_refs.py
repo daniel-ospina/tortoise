@@ -5210,12 +5210,22 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # version decides: it is `-F` (a LITERAL pattern), which counts `0` of this class on the same
     # probe (measured on 3.11 AND 3.12), so declining it cannot hide a prescription — and listing it
     # would make `--fixed-` falsely ambiguous against `--fixed-strings`, which grep ACCEPTS.
+    # ⛔ THE COUNTING FACT IS ASSERTED ONLY WHERE grep RUNS THE SPELLING (#14138 review round 9, P2
+    # — MEASURED). Requiring `rc in (0, 1)` in the SAME `and` made acceptance a hard PLATFORM
+    # REQUIREMENT: a grep that DROPS this obsolete alias — the way GNU 3.12 dropped
+    # `--unix-byte-offsets` — reds this cell while the reader is untouched and still CORRECT,
+    # because declining a spelling grep will not run cannot hide anything, so the exclusion stays
+    # fail-closed there. That is the #13995 false RED this cell exists to end, one alias over.
+    # Reproduced with a stub that refuses `--fixed-regexp` alone (rc 2, everything else delegated):
+    # `1 failed, 32 passed`. The exit-code rule is READ FROM `_d5_grep_verdict` rather than restated,
+    # so a third code still RAISES here instead of deciding.
     fixed_regexp = grep_probe("--fixed-regexp")
-    assert fixed_regexp.returncode in (0, 1) and fixed_regexp.stdout.strip() == "0", (
-        f"`grep -c --fixed-regexp '^[+-]$'` answered rc {fixed_regexp.returncode}, "
-        f"{fixed_regexp.stdout.strip()!r} — the exclusion of this alias rests on grep accepting it "
-        "and it counting NOTHING of this class; if that changed, the exclusion is no longer "
-        "fail-closed and needs its own treatment (#14027, MEASURED)")
+    if _d5_grep_verdict(fixed_regexp, "--fixed-regexp"):
+        assert fixed_regexp.stdout.strip() == "0", (
+            f"`grep -c --fixed-regexp '^[+-]$'` runs on this grep and printed "
+            f"{fixed_regexp.stdout.strip()!r} — the exclusion of this alias rests on it counting "
+            "NOTHING of this class, so if that changed, declining it could hide a blank-class "
+            "prescription and the exclusion needs its own treatment (#14027, MEASURED)")
     assert "--fixed-regexp" not in _d5_all_long_options(), (
         "`--fixed-regexp` would make `--fixed-` falsely ambiguous against `--fixed-strings`, and "
         "grep ACCEPTS `--fixed-` (measured) — the alias must stay out of the universe, which means "
@@ -5226,10 +5236,15 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     assert _d5_long_option_candidates("--fixed-") == ["--fixed-strings"], (
         "`--fixed-` abbreviates `--fixed-strings` and nothing else in the universe — the reason "
         "`--fixed-regexp` may not be added (#14027)")
+    # ⛔ THIS ROW WITNESSES MEMBERSHIP, NOT THE COUNTING FACT (#14138 review round 9, P3). The
+    # reader declines `--fixed-regexp` because it is absent from the measured universe, so the row
+    # answers `[]` whether or not the alias counts this class — crediting it to the `counts 0`
+    # measurement (as the previous wording did) named a witness that cannot observe the claim. The
+    # counting fact is witnessed above, and only where grep runs the spelling.
     assert _d5_count_prescriptions("a count: `grep -c --fixed-regexp '^[+-]$'`\n") == [], (
-        "`--fixed-regexp` is `-F`: a LITERAL pattern, which counts `0` of this class on the probe "
-        "(measured), so declining it cannot hide a blank-class prescription — that measurement is "
-        "what makes the exclusion safe (#14027)")
+        "`--fixed-regexp` is not in the measured option universe, so the reader DECLINES this "
+        "unknown spelling — this is the candidate-membership door, and it must stay closed "
+        "(#14027)")
 
 
 def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_path: Path):
