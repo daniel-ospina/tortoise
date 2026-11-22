@@ -77,12 +77,16 @@ _CONV = [
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
-#: The window the DEPLOYED handler uses (`hosted_api._CAPTURE_ACK_DEADLINE_S`).
-#: Named here as a literal on purpose: the suite's autouse fixture opens the
-#: module constant to 30 s (so no pre-existing assertion races a deadline), which
-#: means "the production value" is not readable from the module during a test —
-#: and a row that claims to exercise it must pin the number it claims to exercise.
-_PRODUCTION_ACK_DEADLINE_S = 0.5
+#: The window the DEPLOYED handler uses, READ FROM THE MODULE at import time.
+#: It has to be read here rather than in the row: the suite's autouse fixture opens
+#: `ha._CAPTURE_ACK_DEADLINE_S` to 30 s for the whole session (so no pre-existing
+#: assertion races a deadline), so by the time a test body runs the module attribute
+#: is no longer the deployed value. Reading it at import — before any fixture runs —
+#: is what makes the row's claim ("a value too tight would keep every suite green")
+#: about the REAL constant: a literal here would keep passing while
+#: `hosted_api._CAPTURE_ACK_DEADLINE_S` was changed to anything at all (measured by
+#: review round 5: `0.5 → 0.05` in `hosted_api.py` left this module green).
+_PRODUCTION_ACK_DEADLINE_S = ha._CAPTURE_ACK_DEADLINE_S
 
 
 def _force_ack(monkeypatch):
@@ -602,6 +606,17 @@ def test_the_in_budget_receipt_survives_the_production_deadline(
     — which is why the row is worth running on every host rather than only on
     an idle one.
     """
+    # ⛔ THE DEPLOYED VALUE IS READ AT IMPORT, not here: the suite's autouse
+    # fixture has already opened `ha._CAPTURE_ACK_DEADLINE_S` to 30 s by the time
+    # any test body runs (that is what keeps the other rows off a wall clock), so
+    # reading the live attribute would compare the fixture's value with itself.
+    # Review round 5 measured the consequence of getting this wrong: a literal
+    # here left this module GREEN while `hosted_api._CAPTURE_ACK_DEADLINE_S` was
+    # changed `0.5 → 0.05`, i.e. the row certified a constant it never read.
+    assert _PRODUCTION_ACK_DEADLINE_S == 0.5, (
+        "the deployed ack window moved. This row is written against 0.5 s; if the "
+        "constant is now a different number, re-derive the row rather than letting "
+        f"it certify a value nobody deploys: {_PRODUCTION_ACK_DEADLINE_S}")
     started = time.monotonic()
     warm = client.post("/v1/sessions", json={
         "conversation": _CONV, "session_id": "s-14232-prod-window-warm"})
@@ -714,7 +729,13 @@ def test_a_same_session_repost_during_the_REPORT_half_is_refused(
     So this row parks the REPORT half (`read_stages.mark` at the
     `STAGE_CAPTURE_TAIL` mark, the first thing `_report_capture` does after the
     model call) and holds the second POST in that exact window. Delete
-    `slot.tail_pending()` and this row gets a 200 replay instead of the 409.
+    `slot.tail_pending()` and the KEY IS GONE before the report half even starts
+    (`worker_done` runs when the extraction returns, and with no pending tail it
+    releases), so this row reds on its own precondition — "the session key must
+    still be held while the REPORT half runs" — rather than on the 409 below.
+    ⛔ The mechanism is the precondition firing, and that is the honest statement:
+    an earlier draft of this docstring said "you get a 200 replay", which round 5
+    measured to be false (the row fails earlier and for a clearer reason).
     """
     _force_ack(monkeypatch)
     session_id = "s-14232-report-window"
@@ -853,6 +874,24 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 3.0)
     real_write = ha._write_session_and_turns
 
+    # ⛔ RECORD the marks as well as slow the write down. The bound is a WALL CLOCK
+    # and the gates phase has SEVEN awaits in it (#5049 rule 1; review round 5
+    # measured this row red 1-in-6 at load ≈ cpus even with the quota read
+    # stubbed). The mark's EXISTENCE and its ORDER are properties of the code, so
+    # they are pinned deterministically by
+    # `test_the_write_mark_sits_between_the_gates_and_the_extraction` below. This
+    # row keeps the end-to-end half and reports INCONCLUSIVE when the payload says
+    # the breach did not land after the write mark — that outcome says nothing
+    # about the mark, whichever way the box was loaded.
+    marks: list[tuple[str, float]] = []
+    real_mark = ha._mark_capture_stage
+
+    def _recording_mark(stage, *args, **kwargs):
+        marks.append((stage, time.monotonic()))
+        return real_mark(stage, *args, **kwargs)
+
+    monkeypatch.setattr(ha, "_mark_capture_stage", _recording_mark)
+
     def _slow_write(*args, **kwargs):
         time.sleep(5.0)
         return real_write(*args, **kwargs)
@@ -872,6 +911,17 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
             "conversation": _CONV, "session_id": "s-14232-slow"})
     assert r.status_code == 504, r.text
     body = r.json()
+    if body["stage"] != "capture_write":
+        # The gates phase spent the whole transport bound on this host, so the
+        # refusal names `capture_gates` — CORRECT behaviour, and no evidence about
+        # the write mark. INCONCLUSIVE, never a red that blames the code under
+        # test (#5049 rule 1); the mark itself is pinned deterministically below.
+        pytest.skip(
+            "INCONCLUSIVE on this host: the breach landed in "
+            f"stage={body['stage']!r} with stages_ms="
+            f"{body.get('stages_ms')} — the gates phase spent the transport "
+            "bound, so this refusal cannot be attributed to the write mark "
+            "(#5049 rule 1). Not a red, not a pass.")
     assert body["stage"] == "capture_write", (
         f"the breach must name the stage it landed in: {body}")
     assert body["stages_ms"].get("capture_gates") is not None, (
@@ -879,6 +929,48 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     # The bound's own envelope, not any 504: a refusal that lost its cause would
     # satisfy neither assertion below.
     assert "str(slow)" not in body.get("detail", ""), body
+
+
+def test_the_write_mark_sits_between_the_gates_and_the_extraction(
+        client, monkeypatch):
+    """Step 8's DETERMINISTIC half: the stage marks exist, and they are ORDERED.
+
+    `test_a_504_on_this_path_names_its_stage` can only be as attributable as the
+    wall clock allows, and review round 5 measured that its gates phase carries
+    seven awaits — on a loaded host the breach legitimately lands in
+    `capture_gates`, where the row must report INCONCLUSIVE. What is NOT a matter
+    of luck is the property production did not have: this path MARKS the stage it
+    is in, in order, so a refusal can name its cause instead of `unmarked`/`{}`.
+
+    This row asserts the order from the marks the handler emits on one ordinary
+    capture — `capture_gates` → `capture_write` → later stages — with no transport
+    bound, no sleep and no deadline in play. Delete
+    `_mark_capture_stage(STAGE_CAPTURE_WRITE)` and `capture_write` is absent: that
+    is the mutant the row above names and cannot always attribute.
+    """
+    _force_ack(monkeypatch)
+    seen: list[str] = []
+    real_mark = ha._mark_capture_stage
+
+    def _recording_mark(stage, *args, **kwargs):
+        seen.append(stage)
+        return real_mark(stage, *args, **kwargs)
+
+    monkeypatch.setattr(ha, "_mark_capture_stage", _recording_mark)
+    r = client.post("/v1/sessions", json={
+        "conversation": _CONV, "session_id": "s-14232-mark-order"})
+    assert r.status_code == 200, r.text
+    _drain_tails()
+
+    assert "capture_gates" in seen, f"the gates phase must be marked: {seen}"
+    assert "capture_write" in seen, (
+        "the write phase must be marked — without it a transport-bound refusal on "
+        f"this path falls back to naming the gates phase: {seen}")
+    assert seen.index("capture_gates") < seen.index("capture_write"), (
+        f"the write mark must come AFTER the gates mark: {seen}")
+    later = [s for s in seen if s not in ("capture_gates", "capture_write")]
+    assert later, (
+        f"the path must go on to mark its later stages too: {seen}")
 
 
 # ── R6: capacity always comes back ───────────────────────────────────────
