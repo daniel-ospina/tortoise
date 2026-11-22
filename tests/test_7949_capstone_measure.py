@@ -18242,10 +18242,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # closes ONE direction only — a live pair whose result triad is GONE (`diffs > triads`) —
     # NOT the other, which was CLAIMED here and is FALSE (#14183 review, P3, MEASURED). The
     # deletion direction it does NOT close is narrow and POSITIONAL: drop the LAST live
-    # subtraction group and the selection reports `1 passed`, because the surviving triad is
-    # then simply UNGRADED; drop an EARLIER group and it reds at the pairing assert only
-    # because the groups behind it shift into the vacated slot and mispair with their triads —
-    # an accident of `zip` POSITIONS, not a designed check, and its diagnostic names the wrong
+    # subtraction group and THIS NODE reports `1 passed` while the `D5` selection still passes,
+    # because the surviving triad is then simply UNGRADED; drop an EARLIER group and it reds at
+    # the pairing assert only because the groups behind it shift into the vacated slot and
+    # mispair with their triads — an accident of `zip` POSITIONS, not a designed check, and
+    # its diagnostic names the wrong
     # pair. So the residue is stated as a residue: this arm reds on a drift of EITHER side of a
     # pair it can pair POSITIONALLY, and cannot see a deletion at the TAIL. No count is typed
     # to close it — a count here is the head-bound figure this row forbids, and the refuted
