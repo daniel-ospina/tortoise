@@ -304,20 +304,31 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     over-approximate, which is the fail-closed direction this map exists to take; the
     `for`-target arm above is the same argument one statement earlier.
 
-    RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`, an
-    f-string WITH A PLACEHOLDER (`f"{p}_tortoise_fts_query"`), `_N + "_x"`, a parameter), a
-    value read out of a container or an attribute (`_CFG["read"]`, `self._read`) and an
-    unpack whose RIGHT-HAND SIDE is an attribute or a call (`_N, _M = cfg.pair`,
-    `_a, _b = pair()`) are not resolved here — nothing about them is statically pairable, and
-    they are named rather than implied (#14326 review P3).
+    RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`,
+    `_N + "_x"`, a parameter), a value read out of a container or an attribute
+    (`_CFG["read"]`, `self._read`) and an unpack whose RIGHT-HAND SIDE is an attribute or a
+    call (`_N, _M = cfg.pair`, `_a, _b = pair()`) are not resolved here — nothing about them
+    is statically pairable, and they are named rather than implied (#14326 review P3).
+
+    ⛔ AN f-STRING IS OVER-APPROXIMATED, NOT RESIDUAL, AND THE DOCSTRING USED TO CLAIM THE
+    OPPOSITE (#14326 round 5, MEASURED at `6f66ac53`): the `JoinedStr` arms feed every part
+    to the resolver, a `FormattedValue` part yields nothing of its own, and a CONSTANT
+    fragment is resolved — so `_N = f"{p}_tortoise_fts_query"` yields `{'_tortoise_fts_query'}`
+    for `_N`. That is the fail-CLOSED direction this file takes everywhere: used as a
+    reach it REDS (`getattr(sdk, _N)(…, kind="statement")`, measured `indirect=1`), while a
+    name that merely LABELS the read stays GREEN because the `Name` arm requires an
+    executable position (`_lbl = f"{p}_tortoise_fts_query"; logging.info(_lbl)` measured
+    `refuses=False`). Stated this way because the alternative — resolving `JoinedStr` only
+    when every part is a `Constant` — would make a RUNTIME-COMPUTED read name fail OPEN,
+    which is the class this whole pin exists to close.
 
     ⛔ A PLACEHOLDER-FREE f-STRING IS NOT RESIDUAL, AND NEITHER IS A SELECTION BETWEEN
     LITERALS (#14326 review P6, each MEASURED GREEN at `8f13cb24`): `f"_tortoise_fts_query"`
     parses to `JoinedStr([Constant(...)])` — nothing is computed — and `IfExp`/`BoolOp` only
     SELECT between literal operands, which this file's own `_collection_operands` already
     expands. All three resolve here now, in `_values` AND in `_possible_strings` (the
-    inline-operand path); what stays residual is the `FormattedValue` case, which resolves
-    to nothing.
+    inline-operand path). A placeholder-bearing f-string is over-approximated by its
+    CONSTANT fragments rather than left unresolved — see the residual note above.
 
     A literal ITERABLE is not residual, whatever its type: a `for`/comprehension target over
     a tuple, a list, a SET or a DICT resolves, because CPython's grammar gives `iter` as an
@@ -425,9 +436,15 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         if isinstance(value, ast.BoolOp):
             return set().union(*(_values(operand) for operand in value.values))
         if isinstance(value, ast.JoinedStr):
-            # Every part that IS a constant is statically known; a `FormattedValue` part
-            # yields `set()` from the fall-through, so `f"{p}_tortoise_fts_query"` resolves
-            # to nothing here and stays inside the declared residual.
+            # ⛔ EVERY CONSTANT FRAGMENT IS STATICALLY KNOWN, AND A `FormattedValue` PART
+            # CONTRIBUTES NOTHING OF ITS OWN — it does NOT disable the whole arm (#14326
+            # round 5, MEASURED at `6f66ac53`): `f"{p}_tortoise_fts_query"` therefore
+            # yields `{'_tortoise_fts_query'}`, which REDS when the name is executed and
+            # leaves an inert label GREEN (the `Name` arm needs an executable position).
+            # This comment previously claimed the placeholder case "resolves to nothing",
+            # which contradicted the code and the residual list — the over-approximation is
+            # the fail-closed direction and is deliberate; narrowing it to `Constant`-only
+            # would fail OPEN on a runtime-computed read name.
             return set().union(*(_values(part) for part in value.values))
         return set()
 
@@ -544,8 +561,11 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     # `getattr(sdk, f"_tortoise_fts_query")(…)` and `getattr(sdk, (A if c else B))(…)`
     # reach the read with the name inline and never touch `_values` at all. `_collection_operands`
     # already expands the first two, so resolving them here closes the asymmetry; the
-    # `JoinedStr` arm only ever contributes a part that is EXACTLY a constant, so a
-    # `f"{x}_tortoise_fts_query"` still resolves to nothing (the declared residual).
+    # `JoinedStr` arm feeds every part through, so a CONSTANT fragment is resolved while a
+    # `FormattedValue` contributes nothing — `f"{x}_tortoise_fts_query"` is therefore
+    # OVER-APPROXIMATED to the name (fail-closed, RED when executed, GREEN as an inert
+    # label), NOT residual (#14326 round 5, measured at `6f66ac53`; the claim that it
+    # "resolves to nothing" contradicted this very code).
     if isinstance(node, ast.IfExp):
         return _possible_strings(node.body, consts) | _possible_strings(node.orelse, consts)
     if isinstance(node, ast.BoolOp):
@@ -557,74 +577,125 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
 
 
-def _rebound_pure_names(tree: ast.AST) -> frozenset[str]:
-    """`_PURE_READS` names the source REBINDS — they are not pure any more.
+def _bind_target_names(target: ast.AST) -> set[str]:
+    """Every callee NAME a bind TARGET can introduce — a `Name` id or an attribute's last
+    segment.
+
+    ⛔ THE ATTRIBUTE SEGMENT IS THE POINT (#14326 round 7, MEASURED GREEN at `d790e1f0`):
+    both allow-lists below are consulted through
+    `getattr(func, "id", None) or getattr(func, "attr", None)`, so an ATTRIBUTE call is
+    allow-listed by its last segment exactly as a bare name is: `_buf.write = getattr`
+    then `_buf.write(sdk, "_tortoise_fts_query")(…, kind="statement")` passed the pin
+    (`m=2 c=2 i=0`), and so did `_mod.print = getattr` + `_mod.print(sdk, …)`. Rebinding
+    the NAME closed only half the hole the name allow-list opened. A store into a
+    container binds no callee, and over-collecting its LOAD names only ever drops a name
+    from an allow-list — the fail-closed direction.
+    """
+    out: set[str] = set()
+    for sub in ast.walk(target):
+        if isinstance(sub, ast.Name):
+            out.add(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            out.add(sub.attr)
+    return out
+
+
+def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
+    """Allow-listed CALLEE NAMES the source REBINDS — they are not pure any more.
 
     ⛔ THE PURITY TESTS ARE BY NAME, SO THE NAME CAN BE REBOUND (#14326 round 6, MEASURED
     GREEN at `81973329`): `print = getattr` then `print(sdk, _N)(query=…, kind="statement")`
-    passed the pin — and so did `dict = getattr` and `type = getattr` — while the file's own
-    comment claimed "a name alias of `getattr` does not become a way through".
+    passed the pin (`m=2 c=2 i=0`) — and the same for `dict = getattr` and `type = getattr`
+    with the literal inline — while the file's own comment claimed "a name alias of
+    `getattr` does not become a way through". It did, through every name this file trusts.
+    A shadowed/assigned pure name is therefore dropped from the allow-list: fail-closed.
 
-    ⛔ ONE WALK OVER BIND NODES, NOT SEVEN PER-STATEMENT ARMS (#14326 round 7, measured):
-    round 6 spelled an arm per statement form (`Assign`, `AnnAssign`/`AugAssign`/`NamedExpr`,
-    `For`/`With`/`comprehension`, `except … as`, `def`/`class`, `arg`) and SIX of the seven
-    could be disabled with all 25 tests still green — each one an unpinned lever
-    (`print: object = getattr`, `(print := getattr)`, `for print in (getattr,)`,
-    `with _ctx() as print:`, `except Exception as print:`, `def print(*a): …`,
-    `def _f(print=getattr)`, …). Every one of those binds a name in a `Store` context, so
-    this reads the ONE fact that covers them all. The remaining arms are the binds that are
-    NOT `Name(Store)` nodes: a parameter, a `def`/`class` name, an `except … as`, and an
-    ALIAS (`import …` / `from … import … as …`, which round 6 missed entirely: measured,
-    `from operator import attrgetter as print` laundered the allow-list). An ATTRIBUTE store
-    onto a builtins name (`builtins.print = getattr`) is the same laundering one level out.
+    ⛔ AND THE BIND FORMS ARE NOT EXHAUSTED BY `Assign` (#14326 round 7, each MEASURED
+    GREEN at `d790e1f0` while `print = getattr` was REFUSED — the same laundering, one
+    spelling over):
+
+        from builtins import getattr as print   # an IMPORT binds the name
+        print(sdk, "_tortoise_fts_query")(…, kind="statement")
+
+        match getattr:                          # a MATCH CAPTURE binds the name
+            case print:
+                print(sdk, "_tortoise_fts_query")(…, kind="statement")
+
+    The import arm takes `asname`, else the first dotted component (`import a.b` binds
+    `a`); `from x import *` binds an UNKNOWABLE set, so it drops EVERY allow-listed name —
+    the polarity this map already takes for a computed value. The capture arm mirrors
+    `_str_constants`' own `MatchAs`/`MatchMapping.rest` enumeration.
+
+    ⛔ AND A `with` BINDS ITS `optional_vars`, NOT ITS BODY (#14326 round 7, MEASURED — the
+    arm walked `ast.walk(node)` for `With`/`AsyncWith`, which has no `.target`, so EVERY
+    NAME IN THE WITH-BODY counted as a bind):
+
+        with open("/dev/null") as _fh:
+            print(_fh)                     # a LOAD of `print`…
+        print("_tortoise_fts_query")       # …so this RECORDING call was REFUSED
+
+    — a false RED on the pin's own recording-direction control, decided by whether an
+    unrelated line happened to sit inside a `with`. `items[*].optional_vars` is the bind.
     """
     out: set[str] = set()
     for node in ast.walk(tree):
-        bound: str | None = None
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            bound = node.id
-        elif isinstance(node, ast.arg):
-            bound = node.arg
-        elif isinstance(node, ast.alias):
-            bound = node.asname or node.name.split(".")[0]
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound = node.name
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                out |= _bind_target_names(target)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr,
+                               ast.For, ast.AsyncFor, ast.comprehension)):
+            # Every arm here binds through `.target` — an annotated/augmented/walrus bind,
+            # and a `for`/comprehension TARGET, which carries no `Assign` node at all.
+            out |= _bind_target_names(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            # ⛔ `optional_vars` IS THE BIND (`with … as X`); the ITEMS' context expressions
+            # and the BODY are neither.
+            for item in node.items:
+                if item.optional_vars is not None:
+                    out |= _bind_target_names(item.optional_vars)
         elif isinstance(node, ast.ExceptHandler):
-            # The `except … as` bind — the arm round 6 missed (measured: `except Exception as
-            # print:` then `print(sdk, _N)(...)` passed the pin).
-            bound = node.name
-        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
-            # `builtins.print = getattr` — the same laundering one level out (measured).
-            bound = node.attr
-        if bound:
-            out.add(bound)
-    # ⛔ NO `& _PURE_READS` INTERSECTION (#14326 round 7, measured): consumers ask
-    # `_callee in rebound` ONLY on the branch where `_callee not in _PURE_READS` already
-    # failed, so extra (non-pure) names in this set cannot change a verdict — the
-    # intersection was a size optimisation no mutant could red, and this file deletes
-    # those.
-    return frozenset(out)
+            if node.name:
+                out.add(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.arg):
+            out.add(node.arg)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name == "*":
+                    # `from x import *` binds an unknowable set — fail closed.
+                    out |= _PURE_READS | _RECORDING_CALLEES
+                else:
+                    out.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.Match):
+            for case in node.cases:
+                for capture in ast.walk(case.pattern):
+                    name = (getattr(capture, "name", None)
+                            or getattr(capture, "rest", None))
+                    if name:
+                        out.add(name)
+    return frozenset(out & (_PURE_READS | _RECORDING_CALLEES))
 
 
-#: Callees that RECORD a string and cannot execute it — an EXEMPTION from the census, so
-#: every entry is a potential FAIL-OPEN and must have a row proving it is required.
-#: ⛔ TWO ENTRIES ONLY, BOTH MEASURED (#14326 round 7). Round 6 shipped seventeen and round
-#: 7 measured what that cost:
-#:
-#:  - `setdefault` was a REAL FETCH, not a recording: `dict.setdefault(k)` RETURNS the value
-#:    at `k`, so `_FETCHERS.setdefault("_tortoise_fts_query")(sdk)(…, kind="statement")`
-#:    passed the pin (mentions 2, calls 2, indirect 0) while the identical lookup spelled
-#:    `_FETCHERS.get(…)` was refused. An exemption granted on the SHAPE of one example
-#:    (`_COUNTS.setdefault(literal, 0)`, whose second argument is what makes it inert) opened
-#:    a fetch. REMOVED, and a row now refuses the fetch spelling.
-#:  - the other fourteen (`debug`, `warning`, `warn`, `error`, `exception`, `critical`,
-#:    `log`, `writelines`, `append`, `add`, `update`, `extend`, `format`, `format_map`) had
-#:    NO row that could red them — dropping each left 25 passed. An unmeasured exemption
-#:    from a census is a fail-open widening by construction, so they are DELETED rather than
-#:    kept: the declared polarity is that an unknown callee is treated as an executor, and
-#:    `_LOG.debug(literal)` is a FALSE RED this file accepts and states rather than a hole
-#:    it cannot see.
-_RECORDING_CALLEES = frozenset({"info", "write"})
+#: Callees that RECORD a string and cannot execute it. Kept separate from `_PURE_READS`
+#: because that set also grades MUTATION (`_PURE_CALLEES`), where a logger method must stay
+#: a mutator-adjacent unknown; this set is used by the CENSUS arms ONLY.
+#: ⛔ EACH ENTRY IS A CENSUS EXEMPTION, i.e. a potential FAIL-OPEN, so each must have a
+#: recording control that reds if it is dropped — the controls below cover the inline,
+#: NAME-carried, splatted and keyword spellings.
+#: ⛔ `setdefault` IS A FETCH, NOT A RECORDING (#14326 round 7, MEASURED GREEN with it here):
+#: `dict.setdefault(k)` RETURNS the value at `k`, so
+#:     _FETCHERS.setdefault("_tortoise_fts_query")(sdk)(…, kind="statement")
+#: passed the pin (mentions 2, calls 2, indirect 0) while the identical lookup spelled
+#: `_FETCHERS.get(…)` was refused. The exemption is granted on the NAME, so it could not tell
+#: that apart from `_COUNTS.setdefault(literal, 0)` — whose SECOND ARGUMENT is what makes it
+#: inert. REMOVED: a row refuses the fetch spelling, and the inert one is an ACCEPTED,
+#: STATED false red rather than bought with an exemption that also admits a fetch.
+_RECORDING_CALLEES = frozenset({
+    "info", "debug", "warning", "warn", "error", "exception", "critical", "log",
+    "write", "writelines", "append", "add", "update", "extend",
+    "format", "format_map",
+})
 
 
 def _carries_read_name(node: ast.AST, consts: dict[str, frozenset[str]]) -> bool:
@@ -662,8 +733,10 @@ def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
         # same non-read. Both directions are pinned in
         # `test_EVERY_static_binding_form_is_a_READ_reach`.
         # ⛔ A REBOUND PURE NAME IS NOT PURE (#14326 round 6, measured): `print = getattr`
-        # then `print(sdk, _N)(…)` passed the pin. `rebound` drops every `_PURE_READS`
-        # name the source assigns, so the allow-list cannot be laundered by shadowing.
+        # then `print(sdk, _N)(…)` passed the pin. `rebound` drops every allow-listed
+        # callee name the source rebinds — `_PURE_READS` or `_RECORDING_CALLEES`, by NAME
+        # or (round 7) by the ATTRIBUTE segment a call is allow-listed by — so neither list
+        # can be laundered by shadowing.
         if isinstance(_np, ast.Call):
             _callee = (getattr(_np.func, "id", None)
                        or getattr(_np.func, "attr", None))
@@ -720,7 +793,9 @@ def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
     # (#14326 round 6, both measured at `81973329`): `print = getattr` then
     # `print(sdk, _N)(…)` passed the pin, while `_LOG.info("_tortoise_fts_query")` and
     # `_COUNTS.setdefault("_tortoise_fts_query", 0)` were FALSE REDS although the same
-    # recording act written as a subscript STORE must stay green.
+    # recording act written as a subscript STORE must stay green. `rebound` carries the
+    # bind forms BOTH lists need — see `_rebound_callee_names`, which owns that enumeration
+    # (round 7 added imports, `match` captures, `with` targets and attribute segments).
     if not isinstance(_parent, ast.Call):
         return False
     _callee = getattr(_parent.func, "id", None) or getattr(_parent.func, "attr", None)
@@ -758,13 +833,13 @@ def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
             # `**{"name": "_tortoise_fts_query"}`: the VALUES are the argument values, and a
             # KEY can be the read's NAME too (`**{_N: 1}`, round 7 MEASURED GREEN) — so BOTH
             # sides are walked. `_possible_strings` unions a dict literal's KEYS only (the
-            # polarity `for` targets need), which is why the spread position is walked here.
+            # polarity `for` targets need), which is why this position is walked here.
             operands.extend(k for k in kw.value.keys if k is not None)
             operands.extend(v for v in kw.value.values if v is not None)
         elif kw.arg is None and isinstance(kw.value, ast.Call) and \
                 (getattr(kw.value.func, "id", None)
                  or getattr(kw.value.func, "attr", None)) == "dict":
-            # `**dict(name="_tortoise_fts_query")` — the same delivery built by a call
+            # `**dict(name="_tortoise_fts_query")` — the same delivery built by a CALL
             # (round 7, MEASURED GREEN). Only `dict` is read this way: an arbitrary callee's
             # keyword is not statically a mapping.
             operands.extend(k.value for k in kw.value.keywords)
@@ -867,7 +942,7 @@ def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
     """
     consts = _str_constants(tree) if consts is None else consts
     parents = _parents_of(tree) if parents is None else parents
-    rebound = _rebound_pure_names(tree)
+    rebound = _rebound_callee_names(tree)
     mentions = [n for n in ast.walk(tree) if _is_read_ref(n, parents, consts, rebound)]
     return mentions, _read_calls(tree), _indirect_reads(tree, consts, rebound)
 
@@ -3348,7 +3423,16 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         2, indirect 0, so a third reach carrying `kind="statement"` shipped the lever). The
         two INLINE rows pin `_possible_strings` — a literal written inline in the `getattr`
         operand is not a bind at all, so it never reaches `_values`;
-      - at `origin/main` -> the `AnnAssign`/unpack/chained/walrus rows pass as well.
+      - at `origin/main` -> the `AnnAssign`/unpack/chained/walrus rows pass as well;
+      - delete one arm of `_rebound_callee_names` -> that arm's row goes GREEN (#14326 round
+        7, EACH MEASURED at `d790e1f0` with the arm removed and restored byte-identically:
+        `from x import … as print` / `from x import *` / `match getattr: case print:` /
+        `with _mk() as print:` / `_buf.write = getattr` + `_buf.write(sdk, …)` all reached
+        the read at mentions 2, calls 2, indirect 0 — while the `print = getattr` row was
+        REFUSED, so the enumeration was incomplete rather than the class being open).
+        Reverting that function's `with` arm to the whole-node walk instead REDS the
+        with-body control, which is why both directions carry a row: the same arm decided a
+        false PASS and a false RED.
 
     The control at the end is the OTHER direction: a provenance constant whose value merely
     NAMES the read (`print(f"measuring {_NOTE}")`) must stay GREEN, or the narrowing that
@@ -3578,11 +3662,48 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # the pair through a SPLAT. A fetcher that WRITES by name reaches the read's name too.
         "`setattr` over an f-string name": (
             '    setattr(sdk, f"_tortoise_fts_query", 1)\n'),
-        # ⛔ THE REBOUND EXEMPTION HAS TO COVER EVERY DELIVERY, NOT JUST THE INLINE ONE
-        # (#14326 round 7, each MEASURED GREEN while its clause existed unpinned): the audit
-        # around `rebound` is reached from three places — the `Name` arm, the `Constant` arm
-        # (the inline row above) and `_indirect_reads` (the two splat rows here). A laundering
-        # alias plus a name-carried or splatted container was refused by the last two only.
+        # ⛔ A REBOUND PURE NAME IS ONE SPELLING OUT (#14326 round 7, EACH MEASURED GREEN at
+        # `d790e1f0` while the `print = getattr` row above was REFUSED): `_rebound_callee_names`
+        # enumerated `Assign`/`AnnAssign`/`AugAssign`/`NamedExpr`/`for`/`except`/`def`/`class`/
+        # `arg` — every bind form EXCEPT an import, a `match` capture and a `with` target, so
+        # the same laundering came back through each of them. Every row below reds on
+        # deleting its arm, measured.
+        "from-import binding a pure name": (
+            '    from builtins import getattr as print\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`from x import *` binds any allow-listed name": (
+            '    from builtins import *\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`match` CAPTURE binding a pure name": (
+            '    match getattr:\n'
+            '        case print:\n'
+            '            print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`with … as` binding a pure name": (
+            '    with _mk() as print:\n'
+            '        print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE ALLOW-LISTS ARE CONSULTED BY `id` **OR** `attr`, SO AN ATTRIBUTE REBIND
+        # LAUNDERS THEM TOO (#14326 round 7, EACH MEASURED GREEN at `d790e1f0`): dropping a
+        # NAME the source assigns closed only half the hole — `_buf.write = getattr` then
+        # `_buf.write(sdk, …)` passed (`m=2 c=2 i=0`), and so did `_mod.print = getattr`,
+        # because `write` is a `_RECORDING_CALLEES` entry and `print` is a `_PURE_READS` one.
+        # `_bind_target_names` therefore takes an attribute target's LAST SEGMENT.
+        "ATTRIBUTE rebind of a RECORDING callee": (
+            '    _buf.write = getattr\n'
+            '    _buf.write(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "ATTRIBUTE rebind of a PURE callee": (
+            '    _mod.print = getattr\n'
+            '    _mod.print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE REMAINING BIND FORMS AND DELIVERY SPELLINGS (#14326 round 7, EACH MEASURED
+        # GREEN while its arm was missing). The rebind audit reaches the census from THREE
+        # places — the `Name` arm, the `Constant` arm and `_indirect_reads` — and a laundering
+        # alias combined with a name-carried or splatted container was refused by only the
+        # last of them until these rows existed.
         "REBOUND pure name + NAME-carried literal": (
             '    print = getattr\n'
             '    _N = "_tortoise_fts_query"\n'
@@ -3591,36 +3712,6 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    print = getattr\n'
             '    _p = (sdk, "_tortoise_fts_query")\n'
             '    print(*_p)(query=queries[0]["query"], limit=10, kind="statement")\n'),
-        # ⛔ AN IMPORT ALIAS REBINDS TOO (#14326 round 7, MEASURED GREEN: mentions 2, calls 2,
-        # indirect 0). `alias = (identifier name, identifier? asname)` binds exactly like an
-        # assignment, and round 6's per-statement arms had no import branch.
-        "IMPORT alias shadowing a pure name": (
-            '    from operator import attrgetter as print\n'
-            '    print(sdk, "_tortoise_fts_query")'
-            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
-        # ⛔ AND AN ATTRIBUTE STORE ONTO A BUILTIN (#14326 round 7, MEASURED GREEN): the same
-        # laundering one level out, which no `Name`-based collection can see.
-        "ATTRIBUTE store onto a builtin name": (
-            '    import builtins\n'
-            '    builtins.print = getattr\n'
-            '    print(sdk, "_tortoise_fts_query")'
-            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
-        # ⛔ A `**` MAPPING'S KEY IS A DELIVERY (#14326 round 7, MEASURED GREEN: mentions 2,
-        # calls 2, indirect 0). The spread position contributes the mapping's VALUES, but a
-        # key can be the read's NAME too — `**{_N: 1}` delivers it — and the positional mirror
-        # `getattr(*{_N: 1})` was already refused through `_possible_strings`' `Dict` KEYS arm,
-        # so the two polarities of the same shape disagreed.
-        "literal as a **KEY of the spread mapping": (
-            '    _N = "_tortoise_fts_query"\n'
-            '    _l = _PageFetcher(**{_N: 1})\n'
-            '    _l(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
-        "literal inside a `dict(...)` spread": (
-            '    _l = _PageFetcher(**dict(name="_tortoise_fts_query"))\n'
-            '    _l(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
-        # ⛔ EACH REMAINING BIND FORM OF `_rebound_pure_names` (#14326 round 7, each MEASURED
-        # GREEN with its arm removed — the arms are what make the laundering fail closed, and
-        # a PARAMETER, a `def` name and an `except … as` target are binds no `Name(Store)`
-        # walk sees).
         "PARAMETER named as a pure callee": (
             '    def _f(print=getattr):\n'
             '        print(sdk, "_tortoise_fts_query")'
@@ -3637,6 +3728,17 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    except Exception as print:\n'
             '        print(sdk, "_tortoise_fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ A `**` MAPPING'S KEY AND A `dict(...)` SPREAD (#14326 round 7, both MEASURED
+        # GREEN: mentions 2, calls 2, indirect 0) while the positional mirror
+        # `getattr(*{_N: 1})` was already refused through `_possible_strings`' `Dict` KEYS arm
+        # — the two polarities of one shape disagreed.
+        "literal as a **KEY of the spread mapping": (
+            '    _N = "_tortoise_fts_query"\n'
+            '    _l = _PageFetcher(**{_N: 1})\n'
+            '    _l(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "literal inside a `dict(...)` spread": (
+            '    _l = _PageFetcher(**dict(name="_tortoise_fts_query"))\n'
+            '    _l(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -3717,30 +3819,32 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     for label, body in (
             ("logger method", '    _LOG.info("_tortoise_fts_query")\n'),
             ("stderr write", '    sys.stderr.write("_tortoise_fts_query")\n'),
-            ("print, inline", '    print("_tortoise_fts_query")\n'),
-            # the NAME-carried spelling, which reaches the census through the `Name` arm
-            # (round 7, measured: without the recording exemption there it GREEN->REFUSED)
+            # the NAME-carried and CONTAINER spellings reach the other two arms, so they are
+            # pinned here as well (round 7, each measured GREEN->REFUSED without its exemption)
             ("logger method, name-carried",
              '    _N = "_tortoise_fts_query"\n    _LOG.info(_N)\n'),
-            # the CONTAINER spellings reach the census through `_indirect_reads` instead
-            # (round 7, measured: both GREEN->REFUSED without its recording exemption)
-            ("logger method, splatted",
-             '    _LOG.info(*("_tortoise_fts_query",))\n'),
-            ("logger method, keyword",
-             '    _LOG.info(msg="_tortoise_fts_query")\n')):
+            ("logger method, splatted", '    _LOG.info(*("_tortoise_fts_query",))\n'),
+            ("logger method, keyword", '    _LOG.info(msg="_tortoise_fts_query")\n'),
+            ("print, inline", '    print("_tortoise_fts_query")\n'),
+            # ⛔ A WITH-BODY LOAD IS NOT A BIND (#14326 round 7, MEASURED RED at `d790e1f0`):
+            # the `with` arm walked the whole STATEMENT (a `With` node has no `.target`), so
+            # any pure-name load inside a `with` body dropped that name from the allow-list —
+            # and the SAME recording call below was then refused, decided by an unrelated
+            # line sitting inside a `with`. This row is the arm's false-red attribution; the
+            # `with … as` row above is its fail-open attribution.
+            ("print, beside a with-body LOAD of `print`",
+             '    with open("/dev/null") as _fh:\n'
+             '        print(_fh)\n'
+             '    print("_tortoise_fts_query")\n')):
         assert not _pin_refuses(_pin_source(body)), (
             f"[{label}] recording the read's NAME is a FALSE RED — nothing is executed, and "
             "the recording direction #14289 asks for must not depend on whether the act is "
             "spelled as a call or as a subscript store")
     # ⛔ BUT A DICT LOOKUP IS A FETCH, NOT A RECORDING (#14326 round 7, MEASURED GREEN with
-    # `setdefault` in `_RECORDING_CALLEES`): `dict.setdefault(k)` RETURNS the value at `k`, so
-    # exempting the name exempted the fetch
-    #     _FETCHERS.setdefault("_tortoise_fts_query")(sdk)(query=…, kind="statement")
-    # (mentions 2, calls 2, indirect 0) while the identical lookup spelled `.get(…)` was
-    # refused. The entry is REMOVED. The false-RED direction it leaves behind
-    # (`_COUNTS.setdefault("_tortoise_fts_query", 0)`, inert because of its second argument)
-    # is ACCEPTED and stated here rather than bought with an exemption that also admits the
-    # fetch: an exemption is granted on the NAME, so it cannot tell the two apart.
+    # `setdefault` exempted): `dict.setdefault(k)` RETURNS the value at `k`, so the exemption
+    # admitted `_FETCHERS.setdefault(literal)(sdk)(…, kind="statement")` while the identical
+    # lookup spelled `.get(…)` was refused. The entry is REMOVED rather than narrowed,
+    # because an exemption is granted on the NAME and cannot see the difference.
     assert _pin_refuses(_pin_source(
         '    _FETCHERS.setdefault("_tortoise_fts_query")(sdk)'
         '(query=queries[0]["query"], limit=10, kind="statement")\n')), (
