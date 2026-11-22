@@ -27,9 +27,24 @@ EP never prices it (``blocks`` is a Layer-3 operator label, not a structural
 edge; an earlier draft of this docstring claimed the opposite). That
 pre-existing refusal is a RESIDUAL this module does not change. ``_create_edge``
 IS reachable, but only for the pack-declared verbs the allow-list also carries
-(``hasPart``, ``dependsOn``, ``ownedBy``) — so the doors where a declared verb
-reached the graph with no pair check are the operator and direct-edge ``label``
-paths and ``ingest``, and that is where the leg was missing.
+(``hasPart``, ``dependsOn``, ``ownedBy``) — so the CONNECT doors where a declared
+verb reached the graph with no pair check are the operator and direct-edge
+``label`` paths and ``ingest``, and that is where the leg was missing.
+
+⛔ **That enumeration is the CONNECT doors only — it is NOT a claim of coverage
+from every route, and must not be read as one (#14304).** The ENTITY door is
+outside it: ``_create_object``'s ``ownedBy`` / ``managedBy`` / ``authoredBy``
+properties wire their edge through the projection-level writers
+(``proj.create_owned_by`` → ``_EdgeHandlers.create_edge``), which run no door, so
+a pack-declared verb still reaches the graph THERE with no pair judgement.
+MEASURED at ``2ea69d1c20``: ``create_object(…, objectKind="dev:api",
+ownedBy=<Subject>)`` writes the ``ownedBy`` edge and returns a reply carrying
+neither ``relation_declaration`` nor ``warnings``, while the identical pair
+through ``ingest``'s relation route reports ``undeclared_pair``. Closing that gap
+belongs at the MINT — where every ``proj.create_edge`` caller of a declared verb
+is judged at once — rather than at one more door; tracked as #14304, and
+``sdk.py``'s ``R5 class 4`` comment inside ``_create_edge`` states the same
+producer from the journal's side.
 
 ## What it decides — and what it deliberately does not
 
