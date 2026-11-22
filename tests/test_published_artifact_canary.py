@@ -2825,10 +2825,45 @@ def _strip_shell_comments(script: str) -> str:
 
 
 def _executable_prose_lines(script: str) -> list[str]:
-    """The lines of `script` that carry a backtick or a `$(`, comments excluded."""
-    return [
-        line for line in _strip_shell_comments(script).splitlines() if "`" in line or "$(" in line
-    ]
+    """The lines of `script` that carry a backtick or a `$(`, comments excluded.
+
+    ⛔ THE DETECTOR TOKEN IS SPLICEABLE TOO (review cycle 11, P1, MEASURED). `$(` is the only
+    TWO-BYTE token this scans for, and the shell deletes a backslash+newline pair BEFORE
+    tokenizing —
+    in an unquoted heredoc body and inside double quotes as much as anywhere else. So a body
+    line `# $`⏎`(printf X)` is a LIVE `$(printf X)` while NEITHER physical line contains `$(`:
+
+        $ printf 'cat <<EOF\n# $\\\n(printf QQMARK)\nEOF\n' | bash -e -
+        # QQMARK                    rc 0
+
+    …and a per-line scan reported nothing at all. The heredoc OPERATOR splice was closed one
+    commit earlier; this is the same splice model applied to the token the detector actually
+    looks for, which is why the scan runs over the JOINED reading (splices deleted, exactly as
+    the shell does) and each hit is mapped back to the PHYSICAL lines it spans — the report
+    must still quote text a human can find in the file. A spliced BACKTICK needs no special
+    case: a backtick is one byte, so any line containing one is already flagged.
+    """
+    stripped = _strip_shell_comments(script)
+    physical = stripped.splitlines()
+    joined: list[str] = []
+    owners: list[int] = []  # physical line index of each joined character
+    line_no = 0
+    i = 0
+    while i < len(stripped):
+        if stripped.startswith("\\\n", i):
+            i += 2
+            line_no += 1
+            continue
+        joined.append(stripped[i])
+        owners.append(line_no)
+        if stripped[i] == "\n":
+            line_no += 1
+        i += 1
+    hits: set[int] = set()
+    for match in re.finditer(r"`|\$\(", "".join(joined)):
+        hits.add(owners[match.start()])
+        hits.add(owners[min(match.end() - 1, len(owners) - 1)])
+    return [physical[n] for n in sorted(hits) if n < len(physical)]
 
 
 def _assert_no_executable_prose(script: str) -> None:
@@ -3059,6 +3094,56 @@ def test_the_prose_pin_sees_a_heredoc_operator_SPLICED_by_a_backslash_newline():
     assert _executable_prose_lines("cat <<EOF\n# $(printf PLAIN)\nEOF\n") == [
         "# $(printf PLAIN)"
     ]
+
+
+def test_the_prose_pin_sees_a_dollar_paren_SPLICED_across_a_backslash_newline():
+    """`$(` is TWO bytes, so a splice can hide it while bash still executes it (P1, cycle 11).
+
+    The shell deletes a backslash+newline pair before tokenizing, in an unquoted heredoc body
+    and inside double quotes as much as anywhere else. So a body line whose `$` and `(` land on
+    different physical lines IS a live `$( )`, and a per-physical-line scan sees neither line as
+    carrying `$(`. Measured:
+
+        $ printf 'cat <<EOF\n# $\\\n(printf QQMARK)\nEOF\n' | bash -e -
+        # QQMARK                    rc 0
+
+    …with `_executable_prose_lines` returning `[]`. The heredoc OPERATOR splice was closed the
+    commit before; this pins the same splice model on the DETECTOR TOKEN, in each region the
+    splice applies to, and checks the report still names the physical lines a human can find.
+    """
+    body = "cat <<EOF\n# $\\\n(printf HIDDEN_BY_TOKEN)\nEOF\n"
+    tabbed = "cat <<-EOF\n\t# $\\\n(printf HIDDEN_BY_TOKEN)\n\tEOF\n"
+    quoted = 'echo "a\n# $\\\n(printf HIDDEN_BY_TOKEN) tail"\n'
+
+    for label, script in (("heredoc body", body), ("<<- body", tabbed), ("dq echo", quoted)):
+        # PREMISE, executed: the marker's SOURCE never contains its OUTPUT, so its presence in
+        # stdout proves the substitution ran rather than that the text was echoed.
+        ran = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True)
+        assert ran.returncode == 0, (label, ran.stderr)
+        assert "HIDDEN_BY_TOKEN" in ran.stdout, (
+            f"{label}: the spliced `$( )` did NOT run, so this test no longer reproduces the "
+            f"hole it guards: stdout={ran.stdout!r}"
+        )
+        # THE FIX: reported, and the report names the PHYSICAL lines the match spans.
+        offending = _executable_prose_lines(script)
+        assert offending, f"{label}: the pin went SILENT over an executing substitution"
+        assert any("$" in line for line in offending), (
+            f"{label}: the report must quote the line carrying the split token: {offending!r}"
+        )
+        with pytest.raises(AssertionError, match="command substitution"):
+            _assert_no_executable_prose(script)
+
+    # ⛔ NON-VACUOUS, PRE-FIX SIDE: a per-LINE scan (what this replaced) cannot see the token.
+    for label, script in (("heredoc body", body), ("dq echo", quoted)):
+        pre_fix = [
+            line
+            for line in _strip_shell_comments(script).splitlines()
+            if "`" in line or "$(" in line
+        ]
+        assert pre_fix == [], (
+            f"{label}: the per-line scan CAUGHT this, so the test no longer reproduces the "
+            f"spliced-token hole it guards: {pre_fix!r}"
+        )
 
 
 def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):
