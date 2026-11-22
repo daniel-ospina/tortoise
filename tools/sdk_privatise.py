@@ -1116,22 +1116,24 @@ SWEEP_NAMES = 66
 #: public name` stays **0**. Measured on the MERGED tree: this head has `origin/main` `9f83a63bfa`
 #: merged in, and `--repin` printed the same pair before and after that merge, so the merge
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
-#: branch's census file, and named by log rather than counted here, because a count restated in this
-#: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
-#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
-#: not carried forward.
-#: ⛔ RE-CUT → (11861, "f0647020531c078c"). NOT this branch's rows, and not `main`'s either —
-#: the 11858 pair above is not reproducible from the tree that recorded it. Measured THREE ways,
-#: each a run rather than an argument:
+#: branch's census file AT THAT POINT, and named by log rather than counted here, because a count
+#: restated in this block goes stale at the next sibling push, the class `2465cda150` was written to
+#: stop): `--check` exits 1 at this head against that 11858 pin, because this tree derives 11861 —
+#: which is exactly the drift the re-cut below absorbs, not a figure carried forward.
+#: ⛔ RE-CUT → (11861, "f0647020531c078c"). BOTH moved rows are already on `main` — `--repin` on a
+#: detached `70fbd1a27d` (main, this PR's merge base) derives this SAME pair against main's own
+#: 11858 pin, and `--check` exits 1 THERE — so this is main's reading, not this branch's, and the
+#: re-cut absorbs a drift that predates every commit the PR adds. Measured THREE ways, each a run:
 #:   * `--repin` on THIS (merged) tree prints the pair below;
-#:   * the tree of the commit that cut 11858 — `10e51693f1`, on this branch — re-measured in a
-#:     DETACHED worktree (`git worktree add --detach <tmp> 10e51693f1`) prints THE SAME pair and
-#:     `--check` exits 1 THERE, against its own 11858 pin. So the 11858 did not reproduce at its own
-#:     commit, and no tree since has ever derived it: this re-cut absorbs rows that predate every
-#:     commit this PR adds;
-#:   * this PR's ONLY tracked source change is `tests/test_14125_retired_name_calls.py`, and putting
-#:     `origin/main`'s version of that one file back leaves the pair byte-identical — 0 rows. So the
-#:     census's own contribution to this pin is ZERO, measured, not assumed from the file list.
+#:   * the tree of the commit that cut 11858 — `10e51693f1`, on this branch AND on `main` —
+#:     re-measured in a DETACHED worktree prints THE SAME pair and `--check` exits 1 THERE, against
+#:     its own 11858 pin. So 11858 did not reproduce at its own commit: this re-cut absorbs rows that
+#:     predate every commit the PR adds, which is why `main` derives them too;
+#:   * putting `origin/main`'s version of this PR's census file
+#:     (`tests/test_14125_retired_name_calls.py`) back into THIS tree leaves the pair byte-identical
+#:     — 0 rows — so that file, the subject of this PR, contributes nothing to the pin. The two rows
+#:     that moved are the ones the block below attributes (`out.update`, `proj.g.query`), both on
+#:     `main`.
 #: The row NAMES are unchanged (856 rows) on every tree measured above, but two of their COUNTS
 #: moved, so the DIGEST necessarily moved too (`f0647020531c078c` vs the pinned `a1552662bf07a10b`) —
 #: that is what reds `--check`, and it is why a count-only attribution is unsafe here: a bare
