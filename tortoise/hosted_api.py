@@ -646,6 +646,23 @@ _NO_JOIN = object()
 _CAPTURE_TAIL_TASKS: set = set()
 
 
+def _capture_ack_ceiling_s() -> float:
+    """The join's ceiling: the ACK window, CLAMPED to half the transport bound.
+
+    Split out of `_capture_ack_grace_s` so the test substrate has exactly ONE
+    seam to pin, because the clamp silently defeats a raised window: with the
+    suite's window opened to 30 s the ceiling was still ``min(30, 10/2) = 5 s``,
+    so the fixture's claim that no pre-existing assertion races a deadline was
+    false — a cold `build_master_list` costs ~12 s, and two rows in the suite
+    carry per-row warm-ups for that reason (review round 5, measured).
+
+    Tests override THIS function; the clamp itself keeps the production shape
+    and stays pinned by `test_the_ack_window_is_anchored_on_arrival`, which
+    restores the real function before it asserts the half-bound ceiling.
+    """
+    return min(_CAPTURE_ACK_DEADLINE_S, _mcp_auth._TRANSPORT_WAIT_BOUND_S / 2.0)
+
+
 def _capture_ack_grace_s(request) -> float:
     """Seconds left before this request must answer, or 0 when it must answer NOW.
 
@@ -669,8 +686,7 @@ def _capture_ack_grace_s(request) -> float:
     # silently disable the compatibility half. The transport ceiling still clamps
     # it, so the response can never approach the refusal this change exists to
     # avoid.
-    ceiling = min(_CAPTURE_ACK_DEADLINE_S,
-                  _mcp_auth._TRANSPORT_WAIT_BOUND_S / 2.0)
+    ceiling = _capture_ack_ceiling_s()
     t0 = getattr(getattr(request, "state", None), "_wait_bound_t0", None)
     if not isinstance(t0, (int, float)):
         return _CAPTURE_ACK_DEADLINE_S
@@ -717,16 +733,28 @@ async def _capture_extraction_started(proj, session_id: str, view: dict,
 
     No-op unless this request took the deferred lane (``view["armed"]``): the
     inline lanes finish before any reader could see a phase, so writing one there
-    would be two extra graph round trips that nobody can observe. The view is
-    also what the ACK reads, so the body names the phase the RECORD carries
-    rather than a guess.
+    would be two extra graph round trips that nobody can observe.
+
+    ⛔ THE RECORD WRITE COMES FIRST AND THE VIEW SECOND, and the order is
+    load-bearing: ``view`` is the dict the deferred ACK is built from, so the body
+    may only name a phase the RECORD already carries. Setting the view first would
+    let the ACK claim ``extracting`` over a record that still said ``queued``.
+
+    ⚠️ The assignment below IS reachable, and review round 5's "never read after it
+    is written, so the ACK can only ever say queued" reading of it was wrong: the
+    deferred branch awaits ``asyncio.wait_for(asyncio.shield(task), _grace)``
+    before it builds the ACK, so the task runs INSIDE that window and can reach
+    this line. On the timeout path the ACK therefore names ``extracting`` — and it
+    agrees with the record, which was written first. When the window is already
+    spent (``_grace == 0``, so there is no await at all) or a cold
+    ``build_master_list`` has not returned yet, the ACK says ``queued``, which is
+    also what the record says. **The ACK may LAG the record; it may never LEAD it**
+    — that is the property, and it is pinned deterministically by
+    `test_the_extraction_started_phase_write_precedes_the_ack_view`.
     """
     if not view.get("armed"):
         return
     await _mark_capture_extraction_phase(proj, session_id, "extracting", now)
-    # AFTER the write, so the view never claims a phase the record does not carry
-    # yet: the ACK is built from this dict, and a body that is ahead of its own
-    # record is the one thing this change must not produce.
     view["phase"] = "extracting"
 
 
@@ -21361,11 +21389,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # production breach could not name its stage because nothing on this path
     # marked one, and `stage=unmarked` is the absence of a measurement, never a
     # claim about where the time went.
-    # Which in-flight phase the RECORD carries, shared with the ACK body (so the
-    # receipt and the status surface cannot name different phases) and `armed`
-    # only once a phase write actually happened — the inline lanes finish before
-    # any reader could observe one, and two extra graph round trips they cannot
-    # observe would be pure cost.
+    # Which in-flight phase the RECORD carries, shared with the ACK body so a
+    # receipt never names a phase the record does not carry (it may LAG the record
+    # — a join that expired before the worker wrote `extracting` answers
+    # `queued` — but never LEAD it), and `armed` only once a phase write actually
+    # happened: the inline lanes finish before any reader could observe one, and
+    # two extra graph round trips they cannot observe would be pure cost.
     _capture_phase_view = {"phase": "queued", "armed": False}
 
     async def _extract_capture() -> dict:  # the extraction lane

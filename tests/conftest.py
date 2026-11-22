@@ -2153,15 +2153,28 @@ def _capture_ack_window_is_deterministic(monkeypatch):
     race. `#5049` rule 1 forbids exactly that: a deadline expiry may not produce a
     verdict about the code under test.
 
-    So the window is opened for the whole suite (still clamped by the transport
-    bound, which is 10 s, so the join is effectively unbounded here), and the
-    deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
+    So the window is opened for the whole suite AND the clamp is opened with it,
+    so the join is genuinely unbounded here (
+    `_capture_ack_ceiling_s` is overridden below — opening only the window left
+    `min(30.0, _TRANSPORT_WAIT_BOUND_S / 2.0)` = **5 s**, which is not unbounded and
+    is shorter than a cold `build_master_list` (~12 s; measured), so the rows this
+    fixture exists to protect still raced a deadline on a cold shard — review
+    round 5), and the deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
     commutes this same value to 0 for the ack-path tests. Nothing in the product
     reads this constant differently; it is the test substrate that must not race.
     """
     module = sys.modules.get("tortoise.hosted_api")
     if module is not None:
         monkeypatch.setattr(module, "_CAPTURE_ACK_DEADLINE_S", 30.0)
+        # ⛔ THE CLAMP IS OPENED WITH THE WINDOW, or the sentence above is false.
+        # The production clamp is `min(window, half the transport bound)`, i.e.
+        # `min(30.0, 5.0) = 5.0` — five seconds of wall clock in front of every
+        # "the POST body reports what was extracted" assertion in the suite. The
+        # seam is ONE function so this stays a single override, and it reads the
+        # LIVE deadline so a row that pins the deadline itself (`_force_join`) still
+        # gets the value it pinned rather than this fixture's 30 s.
+        monkeypatch.setattr(module, "_capture_ack_ceiling_s",
+                            lambda: module._CAPTURE_ACK_DEADLINE_S)
         # A tail left pending by a torn-down loop can never run again (its loop is
         # gone), so holding a strong reference to it only makes the registry lie
         # about what is live.

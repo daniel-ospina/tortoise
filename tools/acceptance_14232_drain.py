@@ -53,9 +53,17 @@ Exit codes — THREE-WAY, and the middle one is not a pass:
   ack-p95 target was NOT graded because the box is oversubscribed
   (`load_1m > cpu_count`). The change is not what failed, and the printed banner
   and the JSON `verdict` both say INCONCLUSIVE — never PASS;
-* `1` — a host-independent criterion failed (refusals, terminal state, extraction
-  evidence, or a graded p95 over the target); the report names which;
+* `1` — a criterion that RAN failed: refusals, terminal state, or extraction
+  evidence, **or a graded ack p95 over the target**, the report names which;
 * `2` — usage/precondition (no app, no auth, bad corpus).
+
+⛔ A GRADED FAILURE IS NEVER `INCONCLUSIVE`, and this is the one shape the tool
+is easy to get wrong in both directions: the p95 may not produce PASS on a box
+that declined to grade it (it might otherwise have run at all), and it must not
+produce `INCONCLUSIVE`/exit 0 on a box that DID grade it and saw a breach — that
+would print `[FAIL] ack p95` and exit 0 in the same run, leaving the issue's
+headline criterion unfalsifiable in the very artifact the issue is accepted on
+(review round 5, F1). `_verdict()` is the one place that decision lives.
 
 The deferral share (`deferred_at_ack`) is REPORTED and never graded: a fast host
 completes extraction inside the window on every session, which is the split
@@ -332,6 +340,41 @@ def _is_terminal(detail: dict) -> tuple[bool, str]:
     return False, f"status={ex.get('status')} outcome_known={ex.get('outcome_known')}"
 
 
+def _verdict(*, ok_refusal: bool, ok_terminal: bool, ok_extract: bool,
+             ack_graded: bool, ok_ack: bool) -> str:
+    """Grade one run: `PASS` / `INCONCLUSIVE` / `FAIL` — the whole decision, once.
+
+    Kept as a pure function because the ONE way this is easy to get wrong is the
+    asymmetry between its two arms, and prose could not pin either:
+
+    * a criterion this run DECLINED to grade (`ack_graded` False) may not produce
+      `PASS` — measured on the first cut, which printed `NOT GRADED` beside
+      `VERDICT: PASS` at load 21.29 on 16 cpus;
+    * a criterion that WAS graded and FAILED may not produce `INCONCLUSIVE`/
+      exit 0 — the symmetric hole, measured by review round 5: the `[FAIL] ack
+      p95` banner and a `0` exit code in the same run.
+
+    The host-INDEPENDENT criteria are graded on every host, so they short-circuit
+    everything: `FAIL` first, then the p95 question, then `PASS`.
+    """
+    if not all((ok_refusal, ok_terminal, ok_extract)):
+        return "FAIL"
+    if not ack_graded:
+        return "INCONCLUSIVE"
+    return "PASS" if ok_ack else "FAIL"
+
+
+def _exit_code(verdict: str) -> int:
+    """The shell contract: `PASS` and `INCONCLUSIVE` exit 0, `FAIL` exits 1.
+
+    `INCONCLUSIVE` at 0 is deliberate (the change is not what failed) and only
+    correct because `_verdict` never returns it for a criterion that RAN and
+    failed. This is its own function so the mapping cannot drift from the
+    verdict, and so a test can assert it rather than restate it.
+    """
+    return 0 if verdict in ("PASS", "INCONCLUSIVE") else 1
+
+
 def run(args) -> int:
     corpus: list[dict]
     if args.sessions_dir:
@@ -536,10 +579,11 @@ def run(args) -> int:
         # "NOT GRADED" beside a `VERDICT: PASS` at load 21.29 on 16 cpus.
         # The deferral share is deliberately ABSENT from both lists: it is the
         # measurement, not a criterion (see the note above).
-        "verdict": (
-            "FAIL" if not all((ok_refusal, ok_terminal, ok_extract))
-            else "PASS" if (ack_graded and ok_ack)
-            else "INCONCLUSIVE"),
+        # ⛔ `_verdict` owns the decision (and with it the two fail-open arms — see
+        # its docstring); this call site must not restate the conjunction.
+        "verdict": _verdict(ok_refusal=ok_refusal, ok_terminal=ok_terminal,
+                            ok_extract=ok_extract, ack_graded=ack_graded,
+                            ok_ack=ok_ack),
     }
 
     if args.json:
@@ -580,8 +624,11 @@ def run(args) -> int:
     # ⛔ THREE-WAY, and the middle one is not a pass: an INCONCLUSIVE run graded
     # every host-INDEPENDENT criterion and could not grade the absolute one, so it
     # exits 0 (the change is not what failed) while the printed and JSON verdict
-    # say INCONCLUSIVE — never PASS. A host-independent failure is a FAIL (1).
-    return 0 if report["verdict"] in ("PASS", "INCONCLUSIVE") else 1
+    # say INCONCLUSIVE — never PASS. A criterion that RAN and failed — the
+    # host-independent three OR a graded p95 breach — is a FAIL (1); `_verdict`
+    # decides that, including the breach, which used to exit 0 beside its own
+    # `[FAIL]` banner.
+    return _exit_code(report["verdict"])
 
 
 def main(argv: list[str] | None = None) -> int:

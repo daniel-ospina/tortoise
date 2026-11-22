@@ -43,8 +43,10 @@ by patching `_capture_ack_grace_s`, so no test asserts anything through a sleep.
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -88,6 +90,12 @@ _CONV = [
 #: review round 5: `0.5 → 0.05` in `hosted_api.py` left this module green).
 _PRODUCTION_ACK_DEADLINE_S = ha._CAPTURE_ACK_DEADLINE_S
 
+#: The REAL ceiling function, captured at import for the same reason: the suite's
+#: autouse fixture replaces it (so the clamp cannot hold the opened window down to
+#: 5 s), and the row that asserts the CLAMP therefore has to put the real one back
+#: before it measures the half-bound ceiling.
+_REAL_ACK_CEILING = ha._capture_ack_ceiling_s
+
 
 def _force_ack(monkeypatch):
     """Force the ACK path: the join window is zero, so completion cannot arrive.
@@ -113,8 +121,12 @@ def _force_join(monkeypatch, seconds: float):
     green.
 
     The transport ceiling is pinned to its production value too
-    (`_TRANSPORT_WAIT_BOUND_S` = 10 s), so the clamp under test is
-    `min(seconds, 5.0)` rather than whatever a neighbouring test left behind.
+    (`_TRANSPORT_WAIT_BOUND_S` = 10 s), so the value this helper pins is the one
+    the join uses: the suite fixture opens the CLAMP along with the window
+    (`_capture_ack_ceiling_s` → the live `_CAPTURE_ACK_DEADLINE_S`), so the clamp
+    here is `seconds` rather than `min(seconds, 5.0)`. The clamp's own
+    production shape is asserted by
+    `test_the_ack_window_is_anchored_on_arrival`, which restores the real ceiling.
     """
     monkeypatch.setattr(ha, "_CAPTURE_ACK_DEADLINE_S", seconds)
     monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 10.0)
@@ -201,6 +213,10 @@ def test_the_ack_window_is_anchored_on_arrival(monkeypatch):
     """
     import types
 
+    # ⛔ The suite fixture opens the clamp (`_capture_ack_ceiling_s`) so no other
+    # row races a deadline; THIS row is the one that asserts the clamp, so it puts
+    # the real function back before measuring the half-bound ceiling.
+    monkeypatch.setattr(ha, "_capture_ack_ceiling_s", _REAL_ACK_CEILING)
     monkeypatch.setattr(ha, "_CAPTURE_ACK_DEADLINE_S", 0.5)
     monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 10.0)
 
@@ -926,9 +942,21 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
         f"the breach must name the stage it landed in: {body}")
     assert body["stages_ms"].get("capture_gates") is not None, (
         f"the finished gate phase must be timed beside it: {body}")
-    # The bound's own envelope, not any 504: a refusal that lost its cause would
-    # satisfy neither assertion below.
-    assert "str(slow)" not in body.get("detail", ""), body
+    # ⛔ THE BOUND'S OWN ENVELOPE, MEASURED — not a guess about the body's shape.
+    # A breaching request carries `detail` = the transport bound's static sentence
+    # (`_send_wait_bound_refusal`: `{"detail": _TRANSPORT_WAIT_BOUND_MESSAGE,
+    # **stage_fields}`), so `detail` IS present on this path. Review round 5's F1
+    # premise ("the refusal body carries no `detail` at all", so the row should
+    # read `"detail" not in body`) was measurably wrong: applied, it reds on a 504
+    # that is behaving exactly as shipped. The falsifiable property is the
+    # sentence's IDENTITY — the refusal names the BOUND, never the caller's
+    # exception text and never generic prose. Mutants that red it: fold `detail`
+    # from the raised exception, or swap the constant for new wording. The old
+    # line (`"str(slow)" not in body.get("detail", "")`) could not vary under ANY
+    # mutation and advertised a check that did not exist.
+    assert body.get("detail") == ha._mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE, (
+        "a stage refusal must carry the transport bound's own sentence beside its "
+        f"stage envelope, not a caller-specific or generic message: {body}")
 
 
 def test_the_write_mark_sits_between_the_gates_and_the_extraction(
@@ -1231,3 +1259,168 @@ def test_a_retry_in_flight_says_so_on_the_ack_AND_on_the_status_url(
     final = client.get(f"/v1/sessions/{session_id}").json()["extraction"]
     assert final["outcome_known"] is True, final
     assert "phase" not in final, final
+
+
+# ── the test SUBSTRATE's own claim (review round 5, F2) ───────────────────
+
+def test_the_suite_window_is_the_opened_window_not_the_half_bound():
+    """The autouse fixture's claim, pinned: the CLAMP is opened with the window.
+
+    `tests/conftest.py::_capture_ack_window_is_deterministic` opens
+    `_CAPTURE_ACK_DEADLINE_S` to 30 s so that no pre-existing
+    "the POST body reports what was extracted" assertion races a deadline
+    (`#5049` rule 1). That claim was FALSE: `_capture_ack_grace_s` clamps to
+    `min(window, _TRANSPORT_WAIT_BOUND_S / 2)` = `min(30, 5)` = **5 s**, and a cold
+    `build_master_list` is ~12 s, so the rows the fixture exists to protect still
+    red on a cold shard — measured, and the reason two rows in this suite carry
+    per-row warm-ups (review round 5).
+
+    Mutant that reds this row: drop the `_capture_ack_ceiling_s` override from the
+    fixture. The ceiling is then 5.0 s and the join the suite actually gets is
+    5 s — not the 30 s the fixture promises.
+    """
+    assert ha._CAPTURE_ACK_DEADLINE_S == 30.0, (
+        "the fixture must open the window for the whole suite: "
+        f"{ha._CAPTURE_ACK_DEADLINE_S}")
+    ceiling = ha._capture_ack_ceiling_s()
+    assert ceiling == ha._CAPTURE_ACK_DEADLINE_S, (
+        f"the join's ceiling is {ceiling}s while the window is "
+        f"{ha._CAPTURE_ACK_DEADLINE_S}s — the production clamp "
+        "(`min(window, _TRANSPORT_WAIT_BOUND_S / 2)` = 5 s) is still in place and "
+        "a cold vocabulary compile (~12 s) therefore reds a pre-existing capture "
+        "assertion on a deadline expiry (#5049 rule 1)")
+    # …and the JOIN really uses it: a request that just arrived gets the window.
+    import types
+
+    request = types.SimpleNamespace(
+        state=types.SimpleNamespace(_wait_bound_t0=time.monotonic()))
+    assert ha._capture_ack_grace_s(request) > 25.0, (
+        "the ceiling is open but the join's grace is not: "
+        f"{ha._capture_ack_grace_s(request)}")
+
+
+# ── the phase VIEW's one property (review round 5, F3) ────────────────────
+
+def test_the_extraction_started_phase_write_precedes_the_ack_view(client,
+                                                                  monkeypatch):
+    """The RECORD is written before the ACK's view, and the view IS written.
+
+    `_capture_extraction_started` exists so the deferred ACK can name the phase the
+    RECORD carries. Review round 5 read the `view["phase"] = "extracting"`
+    assignment as dead ("no await between `create_task` and the ACK, so the ACK can
+    only ever say `queued`"). That reading is wrong — the deferred branch awaits
+    `asyncio.wait_for(asyncio.shield(task), _grace)` before building the ACK, so the
+    task runs inside the window and does reach the assignment — but the assignment
+    had NO row that could red it, which is the defect the finding names either way.
+    This row is that row, and it is deterministic (no sleep, no deadline).
+
+    Two mutants, both red here:
+      * delete `view["phase"] = "extracting"` → the last assertion reds (the view
+        stays `queued`, so an ACK built from it lags a record that says
+        `extracting`, i.e. the property is gone);
+      * move the assignment ABOVE the record write → the `seen` assertion reds (the
+        view would claim a phase the record does not carry yet — the one thing the
+        ACK must never do).
+    """
+    _force_ack(monkeypatch)
+    session_id = "s-14232-phase-view"
+    r = client.post("/v1/sessions", json={
+        "conversation": _CONV, "session_id": session_id})
+    assert r.status_code == 200, r.text
+    _drain_tails()  # the deferred tail finished: the record's phase is cleared
+
+    view = {"phase": "queued", "armed": True}
+    seen: list[tuple[str, dict]] = []
+    real_mark = ha._mark_capture_extraction_phase
+
+    async def _recording_mark(proj, sid, phase, now):
+        # The view AS IT IS DURING the record write.
+        seen.append((phase, dict(view)))
+        return await real_mark(proj, sid, phase, now)
+
+    monkeypatch.setattr(ha, "_mark_capture_extraction_phase", _recording_mark)
+    now = datetime.now(UTC).isoformat()
+
+    asyncio.run(ha._capture_extraction_started(_proj(), session_id, view, now))
+
+    assert seen == [("extracting", {"phase": "queued", "armed": True})], (
+        "the record write must happen BEFORE the view is updated, and it must say "
+        f"`extracting`: {seen}")
+    assert view["phase"] == "extracting", (
+        "the view the deferred ACK is built from must name the phase the record now "
+        f"carries — otherwise the ACK lags a record it is supposed to describe: {view}")
+    row = _session_row(session_id)
+    assert row and row[0][3] == "extracting", (
+        f"the RECORD must carry the phase the view names: {row}")
+
+    # The armed guard: an inline (never-deferred) lane writes no phase at all.
+    disarmed = {"phase": "queued", "armed": False}
+    before = len(seen)
+    asyncio.run(ha._capture_extraction_started(_proj(), session_id, disarmed, now))
+    assert len(seen) == before and disarmed["phase"] == "queued", (
+        "an unarmed view must not write a phase and must not claim one: "
+        f"{seen} {disarmed}")
+
+
+# ── the acceptance artifact's verdict (review round 5, F1) ────────────────
+
+def _drain_tool():
+    """The acceptance tool, imported as a module (it is a script, not a package)."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "tools" / "acceptance_14232_drain.py"
+    spec = importlib.util.spec_from_file_location("_acceptance_14232_drain", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("host_independent_ok", [True, False])
+@pytest.mark.parametrize("ack_graded,ok_ack", [
+    (True, True),    # graded, met            -> PASS
+    (True, False),   # graded, BREACH         -> FAIL  (the fail-open this pins)
+    (False, True),   # not graded, p95 met    -> INCONCLUSIVE (never PASS)
+    (False, False),  # not graded, p95 breach -> INCONCLUSIVE (no verdict on it)
+])
+def test_the_acceptance_verdict_cannot_fail_open(host_independent_ok, ack_graded,
+                                                 ok_ack):
+    """`_verdict` — the graded p95 must be able to FAIL the run, and to exit 1.
+
+    The two arms are symmetric holes and the tool had only closed one of them:
+
+    * a criterion this run DECLINED to grade may not produce `PASS` (fixed
+      earlier: `NOT GRADED` beside `VERDICT: PASS` at load 21.29);
+    * a criterion that RAN and FAILED may not produce `INCONCLUSIVE`/exit 0 —
+      which printed `[FAIL] ack p95` and exited 0 in the same run, leaving the
+      issue's headline criterion unfalsifiable in the artifact the PR body cites
+      as the issue's done-when (review round 5, F1).
+
+    Mutant: restore `"FAIL" if not all((ok_refusal, ok_terminal, ok_extract))` with
+    no p95 arm → the `(True, False)` case returns INCONCLUSIVE and reds.
+    """
+    drain = _drain_tool()
+    verdict = drain._verdict(ok_refusal=host_independent_ok,
+                             ok_terminal=host_independent_ok,
+                             ok_extract=host_independent_ok,
+                             ack_graded=ack_graded, ok_ack=ok_ack)
+
+    if not host_independent_ok:
+        expected = "FAIL"
+        why = ("a host-independent criterion failed — that is a FAIL on every "
+               "host, whatever the p95 said")
+    elif ack_graded:
+        expected = "PASS" if ok_ack else "FAIL"
+        why = ("a GRADED p95 that breached must FAIL the run, not be excused as "
+               "INCONCLUSIVE")
+    else:
+        expected = "INCONCLUSIVE"
+        why = "a p95 this host declined to grade is not a pass"
+    assert verdict == expected, f"{why}: expected {expected}, got {verdict}"
+
+    # …and the EXIT CODE follows it: INCONCLUSIVE exits 0 (the change is not what
+    # failed), FAIL exits 1. A run that printed FAIL and exited 0 is the fail-open
+    # this whole row exists to pin, so the mapping is asserted, not restated.
+    assert drain._exit_code(verdict) == (1 if expected == "FAIL" else 0), (
+        f"verdict {verdict} must exit {1 if expected == 'FAIL' else 0}, not "
+        f"{drain._exit_code(verdict)} — a FAIL that exits 0 is the fail-open")
