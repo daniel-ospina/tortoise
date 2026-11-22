@@ -1611,9 +1611,13 @@ def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
 
     ⛔ MENTIONS ARE NOT ASSERTED. A mention that reads nothing is not a read, so
     a `len(mentions)` row would false-block a correct tree — a mention bound and
-    left unused beside the two that are actually called. `live` already excludes
-    a PROVEN-dead mention, which is why the row counts CALL SITES rather than
-    live mentions.
+    left unused beside the two that are actually called. `live` already drops a
+    PROVEN-dead mention AND a fully opted-out one, so `len(live)` is not
+    `len(mentions)` either — but that is NOT why the row counts CALL SITES. It
+    counts call sites because ONE live mention can feed TWO reads (`live == 1,
+    read_sites == 2`; `_seam_live_reads`' own docstring: "One binding driven
+    twice is ONE mention and TWO reads"). The filter and the multiplicity are
+    different facts, and the row exists for the second.
 
     ⛔ AND THE CALL-SITE ROW ALONE IS A FAIL-OPEN, which is why it does not stand
     alone. A mention that ESCAPED into a shape the walk cannot follow adds no call
