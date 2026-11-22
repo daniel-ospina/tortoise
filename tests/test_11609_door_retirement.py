@@ -1163,18 +1163,18 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         so it is judged as a NOTE, i.e. rejected unless its block also names the
     #:         replacement (#14237 r8 review P2: an earlier wording said such a call "is
     #:         therefore accepted", which is FALSE for a bare instruction);
-    #:       * inside an HTML block, the block's TEXT is visible (its tags are stripped), so a
-    #:         replacement written as raw HTML text in the same block counts.
+    #:       * an HTML block is treated as OPAQUE: its visible text is EMPTY, so EVERY mention
+    #:         inside one reds — R2 has no text to match, and R1 reds a call form as it does
+    #:         anywhere else (measured, r11 review P2: nothing survives in an HTML block, so an
+    #:         earlier wording that offered ``an R1 call form`` as an escape was wrong). Inside
+    #:         a PARAGRAPH, an inline HTML tag is likewise a BLOCK BOUNDARY. Guessing what a
+    #:         browser displays (a tag strip) was measured to FAIL OPEN three rounds running
+    #:         (#14237 r10 P1, r11 P1) — a `<script>`/`<style>` body, a comment after a `>`, or
+    #:         a `display:none` span satisfied R2 while a reader never sees it. The over-block
+    #:         is the declared price.
     #:   (b) * a replacement that appears ONLY where a reader cannot see it — an HTML comment, a
     #:         link destination, a link-reference definition — does NOT count (#14237 r8/r9
-    #:         reviews), because the body R2 reads is the block's VISIBLE text. ⛔ MEASURED
-    #:         FALSE for one shape until r10 (#14237 r10 review P2): a comment containing a
-    #:         `>` was NOT stripped, because `<[^>]*>` ended the "tag" at that character and
-    #:         left the rest of the comment behind as visible text — so the replacement DID
-    #:         count and an instruction was ACCEPTED. Comments are now stripped before tags,
-    #:         and `test_a_replacement_a_reader_cannot_SEE_is_not_a_replacement` carries the
-    #:         in-block variants that pin it (the pre-existing `comment-with-gt` row passed on
-    #:         the block split alone and never exercised this);
+    #:         reviews), because the body R2 reads is the block's VISIBLE text;
     #:       * a mention that falls in NO block at all (a link-reference definition, a
     #:         preamble) is REPORTED, not ignored — `test_a_mention_outside_every_block_is_reported`
     #:         pins it, and that row exists because "no block means clean" was measured as a
@@ -1229,10 +1229,12 @@ class TestEveryReaderNamesTheLiveListingDoor:
     MD = MarkdownIt("commonmark").enable("table")
 
     #: A retired name in call form: the name followed by an OPENING BRACKET, optionally
-    #: after HORIZONTAL space and/or an inline-markdown delimiter RUN (backtick, `*`, `_`,
-    #: `~`). `name(args)`, `name (args)` and `` `name`(args) `` all RENDER as a call a
-    #: reader can copy. HORIZONTAL only — a newline is never a call.
-    CALL_FORM = re.compile(r"(?:[ \t]*[`*_~]+)*[ \t]*\(")
+    #: after HORIZONTAL space, an inline-markdown delimiter RUN (backtick, `*`, `_`, `~`),
+    #: and/or an inline HTML TAG (`<code>`, `</code>`, `<kbd>`, `<br>`). `name(args)`,
+    #: `name (args)`, `` `name`(args) `` and `<code>name</code>(args)` all RENDER as a call a
+    #: reader can copy (#14237 r10 review P2 — the tag form was ACCEPTED before it was added).
+    #: HORIZONTAL only — a newline is never a call.
+    CALL_FORM = re.compile(r"(?:[ \t]*(?:[`*_~]+|</?[A-Za-z][^>]*>))*[ \t]*\(")
 
     @classmethod
     def is_call_form(cls, text: str, at: int) -> bool:
@@ -1294,16 +1296,20 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 continue
             if token.type in ("fence", "code_block", "html_block") and token.map:
                 begin, finish = off(token.map[0]), off(token.map[1])
-                body = text[begin:finish]
+                # ⛔ A FENCE'S INFO STRING IS NOT DISPLAYED (#14237 r11 review P2): it becomes a
+                # `class` attribute. `token.content` is the code a reader sees, so a fence
+                # ````tortoise_graph_overview` cannot satisfy R2 for its own body.
+                body = token.content if token.type == "fence" else text[begin:finish]
                 if token.type == "html_block":
-                    # An HTML block IS rendered, so its text is visible; its tags are not.
-                    # ⛔ COMMENTS FIRST, THEN TAGS. A tag strip alone is defeated by a `>`
-                    # INSIDE a comment: `<[^>]*>` ends the "tag" at that `>`, leaving the
-                    # rest of the comment (`the live door is X -->`) behind as VISIBLE
-                    # text, so a replacement only the source can see satisfied R2
-                    # (#14237 r10 review P2, measured fail-OPEN).
-                    body = re.sub(r"<!--.*?-->", " ", body, flags=re.S)
-                    body = re.sub(r"<[^>]*>", " ", body)
+                    # ⛔ AN HTML BLOCK IS OPAQUE, never tag-stripped (#14237 r10 review P1).
+                    # A tag strip is a hand-written HTML guess and it is WRONG in the fail-OPEN
+                    # direction: a `<script>`/`<style>` body, and a comment after a `>`, are
+                    # never displayed, yet they stayed in the "visible" text and satisfied R2
+                    # — measured: `<div>…<script>const door =
+                    # "tortoise_graph_overview";</script></div>` ACCEPTED a dead-end mention.
+                    # Nothing in the block counts as shown, so every mention inside it must be
+                    # in R1 call form or it reds. Fail-CLOSED, and declared as a bound.
+                    body = ""
                 found.append((begin, finish, body))
                 continue
             if token.type != "inline":
@@ -1326,7 +1332,29 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 found.append((at, end, shown))
                 continue
             if token.map:
-                found.append((off(token.map[0]), off(token.map[1]), shown))
+                begin, finish = off(token.map[0]), off(token.map[1])
+                source = text[begin:finish]
+                if "<" in source:
+                    # ⛔ INLINE HTML IS A BLOCK BOUNDARY (#14237 r11 review P1). Keeping one
+                    # block and reading its text children let an inline `<script>`/`<style>`
+                    # body — or a `display:none` span — satisfy R2 for a mention a reader
+                    # does see (measured: all three ACCEPTED). Guessing which inline containers
+                    # render is HTML semantics again, so a TAG SPAN is opaque and everything
+                    # around it is its own block: the successor must be named in the SAME
+                    # segment, which is the fail-closed direction and is declared.
+                    cursor = 0
+                    for tag in re.finditer(r"<[^>]*>", source):
+                        if tag.start() > cursor:
+                            seg = source[cursor:tag.start()]
+                            found.append((begin + cursor, begin + tag.start(),
+                                          re.sub(r"\]\([^)]*\)", " ", seg)))
+                        cursor = tag.end()
+                    if cursor < len(source):
+                        seg = source[cursor:]
+                        found.append((begin + cursor, finish,
+                                      re.sub(r"\]\([^)]*\)", " ", seg)))
+                    continue
+                found.append((begin, finish, shown))
         return found
 
     @classmethod
@@ -1414,30 +1442,34 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "nothing (measured: `parametrize` over `()` gives `1 skipped`)")
 
     def test_the_block_model_is_the_commonmark_parser(self):
-        """The block unit is the PARSER's, not a hand-written construct table.
+        """The block units are the PARSER's, pinned EXACTLY so a hand-written model reds.
 
-        ⛔ WHY THIS ROW EXISTS AT ALL (#14237 r9 review, and the four rounds before it). The
-        previous model was a regex table of constructs, and every review round found another
-        construct it did not know — a pipe-less table (r6), a setext underline and a
-        blockquote (r7), `1)`, a lone `-` and `***` (r8), a TAB after a list marker, an HTML
-        block and a link-reference definition (r9). Reimplementing Markdown is the defect, so
-        the model is now `MarkdownIt("commonmark")` — a DECLARED test dependency of this repo
-        (the `test` extra in pyproject) — and every construct markdown defines is a boundary
-        by construction, with nothing left to widen.
+        ⛔ WHY THIS ROW EXISTS (#14237 r9 review, and the four rounds before it). The previous
+        model was a regex table of constructs, and every review round found another construct it
+        did not know — a pipe-less table (r6), a setext underline and a blockquote (r7), `1)`, a
+        lone `-` and `***` (r8), a TAB after a list marker, an HTML block and a link-reference
+        definition (r9). Reimplementing Markdown is the defect, so the model is now
+        `MarkdownIt("commonmark").enable("table")`, a DECLARED test dependency of this repo (the
+        `test` extra in pyproject), and every construct markdown defines is a boundary by
+        construction.
 
-        The assertion is deliberately structural: if `blocks` stops asking the parser, this
-        reds, and the next reader is told why rather than re-deriving it.
+        ⛔ THE ASSERTION IS THE EXACT BLOCK LIST (#14237 r10 review P2): an earlier form asserted
+        `len(blocks) >= 4` plus two `any(...)` checks, and a hand-written model kept alongside
+        the parser satisfied all of them, so the row could not fail under the revert it names.
+        The bodies below are only reachable through the parser: the table is split into its
+        CELLS, the HTML block contributes an OPAQUE empty body, the fence carries its own body,
+        and the list item carries its continuation line.
         """
         active = self.MD.get_active_rules()["block"]
         for rule in ("heading", "lheading", "list", "blockquote", "hr", "fence",
                      "html_block", "table"):
             assert rule in active, (rule, active)
-        text = "note one\n\n| a | b |\n| --- | --- |\n| c | d |\n\n<details>\n-\titem\n</details>\n"
-        blocks = self.blocks(text)
-        assert len(blocks) >= 4, blocks
-        # the parser splits a table into CELLS and an HTML block from the paragraph above it
-        assert any(body.strip() == "c" for _s, _e, body in blocks), blocks
-        assert any("item" in body for _s, _e, body in blocks), blocks
+        text = ("note one\n\n| a | b |\n| --- | --- |\n| c | d |\n\n<details>\nitem\n"
+                "</details>\n\n```py\ncode()\n```\n\n- item note\n  continuation\n")
+        assert [body for _start, _end, body in self.blocks(text)] == [
+            "note one", "a", "b", "c", "d", "", "code()\n",
+            "item note continuation",
+        ], self.blocks(text)
 
     @pytest.mark.parametrize("kind,text", [
         ("heading",
@@ -1529,10 +1561,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
     def test_a_blank_line_ends_a_list_item(self):
         """The blank-line boundary, pinned — deleting it stayed GREEN before this row.
 
-        ⛔ MEASURED (#14237 r7 review P2): dropping the `flush_item()` on the blank-line
-        branch left all 27 rows green while turning this shape from REJECTED (2 blocks) into
-        ACCEPTED (1 block) — an indented code sample under a parent item's note would then
-        borrow that note's replacement. This is the boundary that keeps the r5 fence
+        ⛔ MEASURED (#14237 r7 review P2, re-measured under the parser model at r10): where the
+        blank line did not end the item, this shape went from REJECTED to ACCEPTED and an
+        indented code sample under a parent item's note borrowed that note's replacement. This
+        is the boundary that keeps the r5 fence
         fail-open closed, so it gets a row that names it.
         """
         text = (
@@ -1600,13 +1632,15 @@ class TestEveryReaderNamesTheLiveListingDoor:
     def test_a_paragraph_is_CLOSED_by_every_block_start(self, mid):
         """Every close of the open paragraph, pinned by a verdict that FLIPS.
 
-        ⛔ MEASURED (#14237 r8 review P1): FIVE of `blocks()`'s twelve closing flushes could be
-        deleted with every row still green — each one turns this shape from REJECTED into
-        ACCEPTED, because a note that is never flushed stays open and swallows the
-        instruction below it. `test_a_blank_line_ends_a_list_item` pinned the FLUSH_ITEM half
-        of one branch and left the `flush(paragraph…)` call one line above it unpinned, which
-        is the same "names a property it cannot see" defect one level down. This row drives
-        the paragraph half across every kind of block start, so losing any one of them reds.
+        ⛔ WHAT THIS ROW PINS, and the history it inherits. It asserts that a block start
+        CLOSES the open paragraph, so the instruction after it cannot inherit the note above:
+        every kind of block start is a case below. The failure it defends against was measured
+        under the RETIRED hand-written model (#14237 r8 review P1), where five of that
+        splitter's closing flushes could be deleted with every row still green and the note
+        stayed open and swallowed the instruction; that splitter is GONE (replaced by the
+        CommonMark parser, see `blocks`), so those flushes no longer exist and are not what
+        this row can fail on today. What it can fail on is a block start that the model stops
+        treating as one — measured at r9/r10, that is still the shape that fails open.
         """
         note = "Note: `tortoise_list_graphs` retired into `tortoise_graph_overview`.\n"
         text = note + mid + "Call tortoise_list_graphs for names.\n"
@@ -1663,18 +1697,8 @@ class TestEveryReaderNamesTheLiveListingDoor:
         "[1]: https://example.invalid/tortoise_graph_overview\nCall `tortoise_list_graphs` for names.\n",
         "See [tortoise_list_graphs][1] for names.\n\n[1]: https://example.invalid/tortoise_graph_overview\n",
         "<!-- see > the live door is `tortoise_graph_overview` -->\nCall `tortoise_list_graphs` for names.\n",
-        # ⛔ #14237 r10 review P2 — the row ABOVE passes on the BLOCK split alone (the comment
-        # is its own block, so the Call never shares it) and therefore does NOT pin the
-        # visibility property it claims to. These two put the comment INSIDE an HTML block,
-        # where a `>` (or a `<b>`) in the comment made `<[^>]*>` end the "tag" at that
-        # character and leave the rest of the comment behind as VISIBLE text — measured
-        # ACCEPTED until comments were stripped before tags, i.e. the exact fail-OPEN the
-        # declared bound below says cannot happen.
-        "<div>\n<!-- see > the live door is `tortoise_graph_overview` -->\nCall `tortoise_list_graphs` for names.\n</div>\n",
-        "<details>\n<!-- see <b> tortoise_graph_overview -->\nCall `tortoise_list_graphs` for names.\n</details>\n",
     ], ids=["html-comment", "link-target", "html-attribute", "ref-definition",
-            "ref-link-text", "comment-with-gt", "comment-with-gt-INSIDE-html-block",
-            "comment-with-tag-INSIDE-html-block"])
+            "ref-link-text", "comment-with-gt"])
     def test_a_replacement_a_reader_cannot_SEE_is_not_a_replacement(self, text):
         """R2 intersects the block's VISIBLE text, not its markdown source.
 
@@ -1733,15 +1757,15 @@ class TestEveryReaderNamesTheLiveListingDoor:
     @pytest.mark.parametrize("mid", ["# Heading\n", "```\nx\n```\n", "***\n"],
                              ids=["heading", "fence", "thematic-break"])
     def test_a_list_item_is_CLOSED_by_the_next_structural_block(self, mid):
-        """The `flush_item()` half of the table and heading branches, pinned.
+        """A structural block CLOSES the open list item, pinned.
 
-        ⛔ MEASURED (#14237 r8 review P1): deleting `flush_item()` from either branch left every
-        row green while this shape flipped from REJECTED to ACCEPTED — the still-open item
-        swallowed the indented instruction below the table row / heading, so the item's note
-        named the replacement for it. (The `flush(paragraph…)` half of these two branches is
-        NOT pinned and does not need to be: measured, deleting it only DISCARDS the open
-        paragraph, so its mentions land in no block and red — a lost flush there can only fail
-        closed, never merge two blocks.)
+        ⛔ WHY THE PARAMS ARE WHAT THEY ARE (#14237 r8 P1, corrected at r10 P2). The property is
+        "the block that starts here CLOSES the open list item", so an indented instruction under
+        it cannot inherit the item's note. The params are exactly the constructs that INTERRUPT a
+        list item in CommonMark — a heading, a fence and a thematic break. A TABLE ROW cannot:
+        measured, markdown-it keeps `| a | b |` + its delimiter row INSIDE the item's paragraph,
+        so the old `table-row` param graded nothing (it was removed, not fixed, and the property
+        is unchanged).
         """
         item_note = "- note: the live door is `tortoise_graph_overview(section=\"graphs\")`.\n"
         instruction = "  Call tortoise_list_graphs for names.\n"
@@ -1754,8 +1778,9 @@ class TestEveryReaderNamesTheLiveListingDoor:
         """A row has no terminator, so cell scoping keeps a note from clearing an instruction.
 
         ⛔ THE PROPERTY IS KEPT FROM THE SENTENCE-ERA TEST, RE-EXPRESSED AGAINST THE RULE THAT
-        SHIPPED (#14237 round-2 review, measured; merged from the peer's
-        `test_a_table_cell_is_its_own_sentence`). It is the row-unit fail-open: a migration
+        SHIPPED (#14237 round-2 review, measured; the peer's sentence-era row
+        `test_a_table_cell_is_its_own_sentence` was merged into THIS test and no longer exists).
+        It is the row-unit fail-open: a migration
         note in one cell and an INSTRUCTION in the next share a markdown row, so a ROW-unit R2
         would clear the instruction on its neighbour's replacement. Measured below on both
         halves — the instruction cell alone reds, the note cell alone passes.
@@ -1791,7 +1816,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
         instruction to call `tortoise_list_graphs`, and R2 accepted it on the parent's
         word. A hard-wrapped CONTINUATION (no marker) must still join its item — that half
         is pinned by the three real notes the round-6 review measured and by
-        `test_the_block_splitter_is_structure_not_punctuation`.
+        `test_a_list_item_keeps_its_indented_continuation`.
         """
         text = (
             "- The listing door is `tortoise_graph_overview(section=\"graphs\")`; use it.\n"
@@ -1891,6 +1916,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
         "Call _`tortoise_list_graphs`_(graph_id=x) to read one graph.\n",
         "Call *`tortoise_list_graphs`*(graph_id=x) to read one graph.\n",
         "Call `tortoise_list_graphs` (graph_id=x) to read one graph.\n",
+        # #14237 r10 review P2: a call wrapped in inline HTML renders as the same call.
+        "Call <code>tortoise_list_graphs</code>(graph_id=x). Door: tortoise_graph_overview.\n",
+        "Call <kbd>tortoise_list_graphs</kbd>(x). Door: tortoise_graph_overview.\n",
+        "Call `tortoise_list_graphs`<br>(x). Door: tortoise_graph_overview.\n",
         "```python\ngraph = tortoise_list_graphs(graph_id='x')\n```\n",
     ])
     def test_a_copyable_call_is_rejected_even_beside_the_replacement(self, text):
@@ -1903,12 +1932,66 @@ class TestEveryReaderNamesTheLiveListingDoor:
         assert self.retired_call_forms(text), (
             f"a copyable call of a retired door was accepted: {text!r}")
 
-    def test_a_fenced_mention_cannot_borrow_the_note_above_it(self):
-        """The r5 shape: a fence was not a boundary, so the note's "retired" cleared it.
+    def test_an_HTML_block_is_opaque(self):
+        """#14237 r10 review P1 — the named fixture for the fail-open an HTML block caused.
 
-        ⛔ The fence DIRECTLY follows the note — no blank line — because that is the shape
-        a blank-line-only splitter gets wrong (measured: with the fence branch removed
-        from `blocks`, this fixture reds, which is what makes the row discriminating).
+        ⛔ MEASURED BEFORE THE FIX: the block's "visible" text came from a tag strip, so a
+        `<script>` body, a `<style>` body or a comment after a `>` — none of which a reader
+        sees — satisfied R2 for a dead-end mention below it and the document was ACCEPTED.
+        An HTML block's text is now EMPTY, so every mention inside one must be a CALL or red.
+        """
+        for body in (
+            '<script>const d = "tortoise_graph_overview";</script>',
+            '<style>/* tortoise_graph_overview */</style>',
+            '<!-- a > b: tortoise_graph_overview -->',
+            '<img alt="a > b" src="tortoise_graph_overview.png">',
+        ):
+            text = f'<div>\nCall tortoise_list_graphs for names.\n{body}\n</div>\n'
+            assert self.blocks(text) and all(b == "" for _s, _e, b in self.blocks(text)), (
+                f"an HTML block's body is not opaque: {self.blocks(text)}")
+            assert self.notes_missing_replacement(text), (
+                f"an invisible HTML construct satisfied R2: {body}")
+
+    @pytest.mark.parametrize("hidden", [
+        '<script>const d = "tortoise_graph_overview";</script>',
+        '<style>/* tortoise_graph_overview */</style>',
+        '<span style="display:none">tortoise_graph_overview</span>',
+    ], ids=["script", "style", "display-none"])
+    def test_an_inline_HTML_span_is_a_block_boundary(self, hidden):
+        """#14237 r11 review P1 — inline HTML is opaque, like an HTML block.
+
+        ⛔ MEASURED BEFORE THE FIX: keeping the paragraph as one block and reading its text
+        children let the BODY of an inline `<script>`/`<style>` — or a `display:none` span —
+        satisfy R2, so a dead-end mention was ACCEPTED while a browser shows the reader the
+        retired door and nothing else. Deciding which inline containers render is HTML
+        semantics again (the guess that failed at r8, r10 and here), so a tag span is opaque
+        and the text around it stops sharing a block: the successor must be named in the SAME
+        segment.
+        """
+        text = f"Call `tortoise_list_graphs` for names. {hidden}\n"
+        assert self.notes_missing_replacement(text), (
+            f"an inline HTML construct satisfied R2 invisibly: {hidden}")
+
+    def test_a_fences_INFO_STRING_is_not_a_replacement(self):
+        """#14237 r11 review P2 — a fence body is the CODE, not its language tag.
+
+        ⛔ MEASURED: a fence body used to be the raw source slice, so
+        ```tortoise_graph_overview satisfied R2 for a dead-end mention inside the fence —
+        an info string becomes a `class` attribute and is never displayed. The body is the
+        fence's CONTENT, which is what a reader sees.
+        """
+        text = '```tortoise_graph_overview\nCall tortoise_list_graphs for names\n```\n'
+        assert self.notes_missing_replacement(text), (
+            "a fence's language tag was counted as a shown replacement")
+
+    def test_a_fenced_mention_cannot_borrow_the_note_above_it(self):
+        """The r5 shape: a fence is its OWN block, and that is pinned STRUCTURALLY.
+
+        ⛔ The verdict half of this row cannot see the fence branch (#14237 r10 review P2,
+        measured: deleting `fence` from the branch leaves the whole class GREEN — the mention
+        then lands in NO BLOCK and is reported for that reason instead). So the row asserts the
+        BODY of the fence's own block, which only exists if the branch ran: the parser hands the
+        fence its content as one unit, and an indented code block gets the same treatment.
         """
         text = (
             "(the door `tortoise_list_graphs` retired forward into "
@@ -1917,6 +2000,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "graph = tortoise_list_graphs(graph_id='x')\n"
             "```\n"
         )
+        bodies = [body for _start, _end, body in self.blocks(text)]
+        assert "graph = tortoise_list_graphs(graph_id='x')\n" in bodies, (
+            f"the fence is not its own block, so a code sample can borrow a note above it: "
+            f"{bodies}")
         assert self.retired_call_forms(text), (
             "a fenced call under a migration note was accepted — a fence is its own block")
         bare = (
@@ -1927,8 +2014,17 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "```\n"
         )
         assert self.notes_missing_replacement(bare), (
-            "a bare retired name inside its own fence borrowed the note's replacement — "
-            "without the fence branch in `blocks`, the note and the code share a paragraph")
+            "a bare retired name inside its own fence borrowed the note's replacement")
+        indented = (
+            "the MCP tool `tortoise_graph_overview(section=\"graphs\")` lists names\n"
+            "\n"
+            "    tortoise_list_graphs\n"
+        )
+        bodies = [body for _start, _end, body in self.blocks(indented)]
+        assert "    tortoise_list_graphs\n" in bodies, (
+            f"an indented code block is not its own block: {bodies}")
+        assert self.notes_missing_replacement(indented), (
+            "an indented code sample borrowed the note's replacement")
 
     def test_declared_residual_a_block_may_name_both_and_still_instruct(self):
         """⚠️ DECLARED RESIDUAL — stated, not tuned (#14237 r5 review).
