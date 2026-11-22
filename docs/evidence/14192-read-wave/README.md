@@ -1,3 +1,14 @@
+---
+title: "#14192 — the read path's legs, measured: the four post-fusion reads run as one wave"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-21
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph, search read path, vector layer, FalkorDB
+aboutObjects: "#14192, #14224, #14262, tools/read_wave_latency.py, tortoise/search_engine.py, docs/architecture/CYPHER-INVENTORY.md"
+---
+
 # #14192 — the read path's legs, measured
 
 Two artifacts, both from `tools/read_wave_latency.py` (added by this issue). They

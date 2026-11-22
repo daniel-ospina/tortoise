@@ -1120,7 +1120,22 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#: ⛔ RE-PINNED FROM `main`'s DRIFT (#14278 fixer) → `(11861, "f0647020531c078c")`, ATTRIBUTED
+#: ROW BY ROW because the count alone cannot say which shape arrived. The superseded pair
+#: `(11858, "a1552662bf07a10b")` is reproduced EXACTLY on `#14160`'s own head `0351fe8569` —
+#: `--repin` there prints it digit for digit — so that reading was taken on the BRANCH, and the
+#: squash `10e51693f166` that landed it already measures `11861`: the pin was STALE AT BIRTH, not
+#: moved by the merge. THE WHOLE DELTA IS ONE ROW — `proj.g.query` 3643 → 3646 (+3) — and exactly
+#: ONE commit in the range adds any of it: `94d75667dc76` (`#14224`) adds three `proj.g.query`
+#: call sites and re-pinned NOTHING, the failure mode this section already records twice. (The
+#: other commit naming that shape in the range, `5e83c2a2f697` (`#14246`), names it inside a `#`
+#: comment, which adds no row: this counter is an AST walk, not a grep.) The row is DECLARED
+#: rather than rewritten away: `proj.g.query` is an ordinary-word receiver on a FalkorDB `Graph`
+#: handle in `#14224`'s own measurement harness, the shape this sweep deliberately leaves alone,
+#: and `typed references still pointing at a public name` stays **0**. Measured on THIS tree and
+#: on `origin/main` `70fbd1a27dd5` (`#14257`), where the same pair prints — this PR's own diff is
+#: docstrings and comments, so it moves no residue row in either direction.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
