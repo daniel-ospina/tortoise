@@ -470,9 +470,14 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     ⛔ DECLARED RESIDUAL (issue #14125): an OWN-CODE import that genuinely needs an
     optional extra — `from tortoise.embeddings import …`, where numpy ships only in the
     `embeddings` extra — is legitimately dropped by `except ImportError:`, and this
-    predicate charges it. There is no allowance for it: the shape has 0 instances in the
-    tree, and a module-keyed allowance would be machinery for a population that does not
-    exist. Charging it is the fail-closed direction (a false red on a latent shape is
+    predicate charges it. There is no allowance for it: the EXTRA-GATED shape has 0 GRADED
+    instances, and a module-keyed allowance would be machinery for a population that does
+    not exist. (Ungraded own-code import fallbacks dropped by an `ImportError`-family arm DO
+    exist — measured 6 at `origin/main`: `tools/ask_recall_bench.py:454`,
+    `tools/ci_catch_history.py:167`, `tools/ci_manifest.py:152`, `tools/ci_selection.py:7729`,
+    `tools/kind_eval.py:294`, `tools/served_skills_parity.py:810` — none graded, because none
+    is admitted as a probe root. A future widening that admits them meets this rule, and
+    `tools/kind_eval.py:294` is the not-yet-built module the paragraph above predicts.) Charging it is the fail-closed direction (a false red on a latent shape is
     recoverable; a rename hidden behind an `ImportError` arm is not).
 
     ⛔ NEITHER REPAIR THE GATES PRINT APPLIES TO THIS SHAPE, and a lane must not read this
@@ -2351,7 +2356,11 @@ def test_a_probe_that_imports_inside_its_try_covers_the_import_seam():
             f"class 2, the import seam):\n{rendered}\n\n"
             "Add `ImportError` to the arm, or hoist the import above the `try`. "
             "(A third-party import is out of scope here: for an optional extra, "
-            "a skip is the correct outcome.)"
+            "a skip is the correct outcome.) ⛔ NEITHER REPAIR FITS AN EXTRA-GATED OWN "
+            "MODULE (`tortoise.embeddings`, numpy only in the `embeddings` extra) — see "
+            "the DECLARED RESIDUAL on `_swallows_everything`: re-raising turns the "
+            "legitimate skip into a collection error, and hoisting makes the module "
+            "unimportable when the extra is absent."
         )
 
 
@@ -4692,6 +4701,22 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a `ModuleNotFoundError` arm that DROPS the error swallows the module rename just as "
         "an `ImportError` arm does"
     )
+    #: `ImportError`'s OTHER 3.12 subclass, and the map listed it with no witness at all
+    #: (review of #14160, cycle 12, P1-1): deleting the entry was green while re-opening
+    #: BOTH fail-open directions — the drop stopped being charged, and a
+    #: `except ZipImportError: raise` arm below an `except ImportError:` arm started
+    #: crediting a name the earlier arm had already swallowed.
+    _zip_drop = [
+        node
+        for node in ast.walk(
+            ast.parse("try:\n    _probe = _make()\nexcept ZipImportError:\n    _probe = None\n")
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _swallows_everything(_zip_drop) is True, (
+        "a `ZipImportError` arm that DROPS swallows a zip-import seam exactly as "
+        "`ImportError` and `ModuleNotFoundError` do"
+    )
     _subclass_credit = [
         node
         for node in ast.walk(
@@ -4714,6 +4739,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #: cycle 11, P1-1). The mirror pair does the same for `NameError` / `UnboundLocalError`.
     for _parent, _child in (
         ("ImportError", "ModuleNotFoundError"),
+        ("ImportError", "ZipImportError"),
         ("NameError", "UnboundLocalError"),
     ):
         _alias_order = [
@@ -4751,6 +4777,14 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "child then parent",
             "except ModuleNotFoundError:\n    pass\nexcept ImportError:\n    raise\n",
             {"ImportError"},
+        ),
+        (
+            #: the EXACT-SPELLING half of `_masked_by`: two arms with the same alias-carrying
+            #: spelling — the second is unreachable and must credit nothing (review of
+            #: #14160, cycle 12, P2-1).
+            "same spelling twice",
+            "except ModuleNotFoundError:\n    pass\nexcept ModuleNotFoundError:\n    raise\n",
+            set(),
         ),
     ):
         _masking = [
