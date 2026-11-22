@@ -537,7 +537,15 @@ _BLOCKED_TAIL = (
 #: of this guard reds instead of quietly costing it.
 
 _EXISTENCE_HEAD = (
-    r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
+    # ⛔ AND THE QUANTIFIER LIST IS AN ENUMERATION, WHICH IS THE POINT (review, P3, measured —
+    # pre-existing, and fixed here because this block is being rewritten and the class is
+    # otherwise treated as closed): `somebody`, `everyone`, `everybody`, `nobody` and `nothing`
+    # are the SAME frame, and their absence left one spelling SILENT where its synonym reported —
+    # `has somebody reported the vendor has been deprecated` came back `population=None,
+    # signal=None` while `has someone reported …` reported `existence_unguarded`. Measured
+    # across 26 predications x 14 subjects x 19 auxiliaries.
+    r"\b(?:has|have|had)\s+(?:any|anything|anyone|someone|somebody|something|"
+    r"everything|everyone|everybody|nobody|nothing)\b"
 )
 _EXISTENCE_ADVERB = (
     r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet|"
@@ -1635,7 +1643,16 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # is a state cue; this arm is what breaks that silence. It is a SIGNAL arm, not a
         # shape, so it cannot route anything.
         + "|"
-        + r"\b(?:has|have|had|is|are|was|were)\s+[^?]{0,40}?['\u2019](?:s|ve|d)"
+        # ⛔ AND THE HEAD IS THE MODEL'S ONE CONTRACTED-AUXILIARY CLASS (review, P2, measured):
+        # the arm re-typed `has|have|had|is|are|was|were` with whitespace directly after it, so a
+        # CONTRACTED head could not reach its own notice and the refusal went SILENT — the
+        # module's worst direction. Measured over 60 pairs (5 heads x 3 subjects x 5 endings):
+        # 60 of 60 contracted spellings were silent while the uncontracted twin reported.
+        #   has the billing's been deprecated      -> existence_unguarded
+        #   hasn't the billing's been deprecated   -> NOTHING
+        # Same root as every other report arm this PR has de-duplicated: a hand-typed copy of a
+        # closed class drifts from its one home.
+        + rf"\b(?:{_CONTRACTED_AUX}|has|have|had|is|are|was|were)\s+[^?]{{0,40}}?['’](?:s|ve|d)"
         # ⛔ THE CLITIC AND `been` NEED NOT BE ADJACENT (round-31 review, P1/P2, measured):
         # this arm required `['’](?:s|ve|d)` then `\s+been`, so ONE word between them
         # blinded it and the row was refused with NOTHING reported — `has billing's JUST

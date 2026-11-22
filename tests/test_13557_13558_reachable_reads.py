@@ -1109,6 +1109,8 @@ NOT_SELECTED = [
     "is the export being often archived",
     "is the export becoming soon archived",
     "is the export being, in fact, archived",
+    "hasn't the billing's been deprecated",
+    "has somebody reported the vendor has been deprecated",
     # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (round-3 review, P3, measured): the
     # refusal lookahead allows `{0,6}` words before `_NONFINITE_COPULA` (`to be|to get|to
     # become|being|getting`, plus up to two modifiers — NOT the three-spelling literal an
@@ -1344,6 +1346,8 @@ NOTICE_ONLY = [
     "is the export being often archived",
     "is the export becoming soon archived",
     "is the export being, in fact, archived",
+    "hasn't the billing's been deprecated",
+    "has somebody reported the vendor has been deprecated",
     # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
     # that is now stated and machine-checked (review at `5b82bcdf03`, P2, measured) ──
     # The PREPOSITIONS `_BLOCKED_TAIL` names are REPORTED on this shape (see the
