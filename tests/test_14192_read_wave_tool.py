@@ -303,6 +303,23 @@ def _artifact_entries(run_def: ast.AST) -> dict[str, ast.AST]:
     return found[0]
 
 
+_NON_MUTATING = {"list", "tuple", "len", "sorted", "id", "str", "bool", "any", "all",
+                 "isinstance"}
+
+
+def _aliases_of(tree: ast.AST, predicate) -> set[str]:
+    """Names bound to a matching expression — `alias = results`, `env = os.environ`."""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Name) and predicate(node.value):
+            out.add(node.targets[0].id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
+                and node.value is not None and predicate(node.value):
+            out.add(node.target.id)
+    return out
+
+
 _MUTATORS = {"append", "clear", "extend", "insert", "pop", "remove", "reverse", "sort",
              "update", "__setitem__", "popitem", "setdefault"}
 
@@ -313,10 +330,14 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
 
     ⛔ In-place mutation is the other half of rebinding: `results.sort()` /
     `trace.clear()` / `per_query[-1]["order"].sort()` all leave a mutated collection
-    feeding the artifact while every rebinding check passes (measured). The scan is
-    scoped to `var` and to `per_query`, so an unrelated accumulation (`declared[key] = …`)
-    is not a false-red.
+    feeding the artifact while every rebinding check passes (measured). ⛔ AND AN ALIAS IS
+    THE SAME COLLECTION: `alias = results; alias.sort()` and `random.shuffle(results)` —
+    a call handed the list, which may sort it in place — defeated a receiver-name-exact
+    test (measured), so aliases are resolved and the collection may not be handed to a
+    call that is not a known non-mutator.
     """
+    aliases = _aliases_of(run_def, lambda v: isinstance(v, ast.Name) and v.id == var)
+    watched = {var} | aliases
     hits: list[int] = []
     for node in ast.walk(run_def):
         if getattr(node, "lineno", -1) <= lineno or node is artifact_append:
@@ -327,7 +348,12 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             receiver = _names_in(node.func.value)
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
             receiver = _names_in(node.value)
-        if var in receiver or "per_query" in receiver:
+        callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None) \
+            if isinstance(node, ast.Call) else None
+        handed = isinstance(node, ast.Call) and callee not in _NON_MUTATING and bool(
+            ({frozenset(_names_in(a)) for a in node.args}
+             | {frozenset(_names_in(k.value)) for k in node.keywords}) & {frozenset(watched)})
+        if receiver & watched or "per_query" in receiver or handed:
             hits.append(node.lineno)
     return hits
 
@@ -361,29 +387,31 @@ def _rebound_after(run_def: ast.AST, var: str, lineno: int) -> list[int]:
     return hits
 
 
-def _environ_mutations(tree: ast.AST) -> list[int]:
-    """Every line that can change `os.environ` — not just the shapes one might enumerate.
+def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
+    """Every line that can change `os.environ`.
 
-    ⛔ The earlier shape tested `os.environ[key] = …` plus three method names, and its
-    `update` branch was INERT (`dict.update`'s first positional is a mapping, so the
-    key test could never fire): measured GREEN with `os.environ.update({…})`,
-    `del os.environ[…]}`, `clear()`, `|=`, and a helper handed the mapping. This one
-    flags the RECEIVER instead of the key — the artifact records no env state at all,
-    so no reasoning about which key matters can make the write safe — and flags
-    `os.environ` passed as an ARGUMENT, which is the only reason to hand the mapping to
-    a helper. Residual, stated rather than implied: a helper that reaches the mapping
-    through `os.environ` inside its own body is not followed (the tool has none).
+    ⛔ The guard is on the RECEIVER, and the receiver is resolved through ALIASES
+    (`env = os.environ; env["TORTOISE_FUSED_RERANK"] = "1"` defeated a name-exact receiver
+    test — measured), plus the dunder entries `__setitem__` / `__delitem__`.
+    `os.environ` handed to any call (positional or keyword) is red too: the only reason to
+    hand the mapping over is to change it. Residual, stated rather than implied: a helper
+    that reaches `os.environ` inside its own body is not followed (the tool has none).
+
+    The only exemption is the module-level setup pops of the two API variables — the
+    harness removes them BEFORE building the SDK so it measures the embedded graph. The
+    exemption is scoped: the same `pop` inside `run()` is a mutation like any other.
     """
-    def _is_environ(node: ast.AST) -> bool:
-        return isinstance(node, ast.Attribute) and node.attr == "environ"
-
-    mutators = {"update", "clear", "pop", "popitem", "setdefault"}
-    # The harness's own module-level setup pops these two BEFORE the SDK is built, to
-    # guarantee it measures the embedded graph rather than a hosted endpoint. Nothing else
-    # at module scope may touch the environment: scanning only `run()` left
-    # `os.environ["TORTOISE_FUSED_RERANK"] = "1"` at import time GREEN (measured), which
-    # is this file's existing idiom.
+    mutators = {"clear", "pop", "popitem", "setdefault", "__delitem__", "__setitem__",
+                "update"}
     setup_pops = {"TORTOISE_API_URL", "TORTOISE_API_KEY"}
+    env_alias = _aliases_of(
+        tree, lambda v: isinstance(v, ast.Attribute) and v.attr == "environ")
+    env_alias |= _aliases_of(tree, lambda v: isinstance(v, ast.Name) and v.id in env_alias)
+
+    def _is_environ(node: ast.AST) -> bool:
+        return ((isinstance(node, ast.Attribute) and node.attr == "environ")
+                or (isinstance(node, ast.Name) and node.id in env_alias))
+
     hits: list[int] = []
     for node in ast.walk(tree):
         subscript = (isinstance(node, ast.Subscript)
@@ -397,10 +425,12 @@ def _environ_mutations(tree: ast.AST) -> list[int]:
             _is_environ(a) for a in list(node.args) + [k.value for k in node.keywords])
         if not (subscript or method or aug or handed):
             continue
-        if (getattr(node, "func", None) is not None
-                and getattr(node.func, "attr", None) == "pop"
-                and node.args and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value in setup_pops):
+        module_pop = (isinstance(node, ast.Call)
+                      and getattr(node.func, "attr", None) == "pop"
+                      and node.args and isinstance(node.args[0], ast.Constant)
+                      and node.args[0].value in setup_pops
+                      and _owner(node, parents) == "<module>")
+        if module_pop:
             continue
         hits.append(node.lineno)
     return hits
@@ -441,7 +471,9 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     mention with no call all left earlier shapes of this pin green while carrying a
     lever (each measured). Residual, stated rather than implied: a name COMPUTED at
     runtime (``"".join(…)``, a parameter) cannot be resolved statically, so this pin
-    bounds the static reaches. ⛔ The env-write half is one-sided on purpose: the
+    bounds the static reaches. Aliases ARE resolved on both halves (`alias = results;
+    alias.sort()`, `env = os.environ; env[…] = …`), and handing either collection to a call
+    that is not a known non-mutator is red. ⛔ The env-write half is one-sided on purpose: the
     harness does not RECORD which arm of `TORTOISE_FUSED_RERANK` was in force, so a
     baseline/after pair could straddle the gate and `compare()` would still call them
     comparable — tracked as #14289, not asserted here.
@@ -582,6 +614,20 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         assert _names_in(value.elt) & _names_in(gen.target), (
             f"the artifact's `{key}` does not derive its element from the loop target "
             f"`{ast.unparse(gen.target)}`: {ast.unparse(value.elt)}")
+        if key == "legs":
+            # `leg` IS the declared-legs key: a constant there folds every leg into one
+            # name, and `compare()` never reads `legs`, so nothing downstream notices.
+            leg_item = next((v for k, v in zip(value.elt.keys, value.elt.values, strict=True)
+                             if isinstance(k, ast.Constant) and k.value == "leg"), None)
+            assert (isinstance(leg_item, ast.Call)
+                    and getattr(leg_item.func, "attr", None) == "get"
+                    and len(leg_item.args) == 1 and not leg_item.keywords
+                    and isinstance(leg_item.args[0], ast.Constant)
+                    and leg_item.args[0].value == "leg"
+                    and _names_in(leg_item.func.value) & _names_in(gen.target)), (
+                f"the artifact's `legs` reports the leg id as "
+                f"{ast.unparse(leg_item) if leg_item is not None else 'nothing'} — it must be "
+                f"`{ast.unparse(gen.target)}.get(\"leg\")`, the trace entry's own id")
         rebinds = _rebound_after(run_defs[0], var, holder.lineno)
         assert not rebinds, (
             f"`{var}` is rebound at line(s) {rebinds} after the read — a sorted/emptied "
@@ -600,7 +646,7 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     # gates) was in force, so an armed or disarmed arm would still compare as
     # comparable — see #14289. The check is on the RECEIVER, because enumerating the
     # key shapes is how the previous version ended up with an inert `update` branch.
-    mutated = _environ_mutations(tree)
+    mutated = _environ_mutations(tree, parents)
     assert not mutated, (
         f"the harness mutates `os.environ` at line(s) {mutated} (only the module-level "
         "`TORTOISE_API_URL`/`TORTOISE_API_KEY` pops are allowed) — the artifact does not "
