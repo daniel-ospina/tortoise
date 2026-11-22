@@ -966,7 +966,7 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   (round-14 review, P3): the STRUCTURAL arms fold inline on every write at any
 #:   depth and move no counter at all — `live_write._submitted_to_worker` returns
 #:   `False` for `journal_skipped or record_sink is not None or not durable`
-#:   (`tortoise/live_write.py:334`) and for a `tenant is None` (`:335`) before any
+#:   (`tortoise/live_write.py:339`) and for a `tenant is None` (`:341`) before any
 #:   queue or counter is touched (measured: armed loop, durable journal, no carried
 #:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
 #:   declines, so an operator reconciling "inline folds" against this counter will
