@@ -1184,8 +1184,8 @@ _PIN_COMMIT = "ccb49741b2ec"
 #: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
 #:
 #: ⛔ THE SAME CLASS RECURRED ONE ROUND LATER, which is why membership is now DERIVED rather than trusted to
-#: this table: the `#14224` repair re-pointed §2.5's operator-expansion rows `:6837`/`:6891` → `:7170`/`:7201`,
-#: moving both pairs past the pin's 7,071-line `search_engine.py` — and NOTHING reddened, for the identical
+#: this table: this branch's re-point of §2.5's operator-expansion rows `:6837`/`:6891` → `:7170`/`:7201` moved
+#: both pairs past the pin's 7,071-line `search_engine.py` (that code moved under `#14224`/`#14262`) — and NOTHING reddened, for the identical
 #: reason the `#14246` finding names (`test_the_comparability_split_names_every_pair_past_the_pins_eof` buys
 #: its `expected_comparable` from THIS dict, so a table left untouched by the editing commit re-derives the
 #: stale split from itself). `test_the_split_membership_is_derived_from_the_pins_own_line_counts` closes the
@@ -1442,7 +1442,7 @@ def test_the_split_membership_is_derived_from_the_pins_own_line_counts() -> None
     table's `wc -l` values against the header's PROSE, which states the same numbers — so both sides of
     that comparison are hand-maintained literals, and a commit that re-points a cite across the boundary
     without editing the table re-derives the stale split from itself and stays green. That is not a
-    hypothesis: the `#14224` repair moved §2.5's `search_engine.py:6837`/`:6891` → `:7170`/`:7201`, both
+    hypothesis: this branch's re-point moved §2.5's `search_engine.py:6837`/`:6891` → `:7170`/`:7201`, both
     past the pin's 7,071-line copy, and the whole suite passed — the second occurrence of the class
     `#14246`'s review named ("nothing DERIVED it"). The header's own rule is a `wc -l` on the pin's blob,
     so this arm runs it: every resolved pair whose line exceeds that file's pin-side length must be in the
@@ -1502,7 +1502,7 @@ def test_the_split_membership_is_derived_from_the_pins_own_line_counts() -> None
     wrong = sorted(
         (pair, counts[pair[0]], stated)
         for pair, stated in _PIN_EOF_PAIRS.items()
-        if counts[pair[0]] != stated
+        if pair[0] in counts and counts[pair[0]] != stated
     )
     assert not wrong, (
         f"`_PIN_EOF_PAIRS` states the pin-side line count (pair, measured, stated) for {wrong}, and the "
