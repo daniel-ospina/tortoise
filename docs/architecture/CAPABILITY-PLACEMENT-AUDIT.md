@@ -568,7 +568,7 @@ session-detail read, which is a **pure point lookup** (`MATCH (s:Session {id:$si
 the statement at all** and still returns `machine_id`, `model`, `capture_ok`, `capture_extractor`,
 `client_captured_at`, `client_captured_at_source`, `capture_lane` **and** `turn_max_index`: a property's
 capability cannot turn on a walk that is not there, which is why `turn_max_index`'s `graph` verdict rests on the
-COMPOSED site (`hosted_api.py:45586-45598`) and not on this one. ⛔ Applied consistently below: the four sibling
+COMPOSED site (`hosted_api.py:45586-45611`) and not on this one. ⛔ Applied consistently below: the four sibling
 members of verdict row 7 move into row 7b, and **no label's verdict changes** — four *properties* change row,
 which is the whole point of a census that classifies properties rather than statements. ⚠️ The rule cuts inside a
 `graph` row too: `harness` is a sibling projection in BOTH session reads (`sdk.py:58317`, `hosted_api.py:25253`) and
@@ -591,7 +591,7 @@ property participates in a walk, not by which query happens to mention it.**
   capability is needed to read it (§2.4's sibling rule).
 
 **`turn_max_index` is `graph`**, by the composed rule and one query family over — but the justification is
-**single-site**, and an earlier draft of this paragraph claimed two. At `hosted_api.py:45586-45598` the
+**single-site**, and an earlier draft of this paragraph claimed two. At `hosted_api.py:45586-45611` the
 returned answer IS composed with the walk: `total = int(nodes or 0)` then `total = max(total, mark + 1)`,
 the anti-phantom prior count. At `sdk.py:4399-4406` the walk supplies a **sibling column** —
 `_prior_mark_index(_prior[0][0], _prior[0][1])` takes only `turn_max_index` and `turn_count`, and
@@ -1113,7 +1113,7 @@ What remains a placement question is the **remainder plus the four siblings** �
 
 ⚠️ `turn_max_index` is **NOT** in this remainder: it is `graph` (row 7). An earlier draft listed it here as
 `none` on the strength of the session-detail read (`sdk.py:52345`) alone, missing the reader whose ANSWER is
-the mark/count comparison over the `CONTAINS` walk (`hosted_api.py:45586-45598`) — row 7's rule applied to a
+the mark/count comparison over the `CONTAINS` walk (`hosted_api.py:45586-45611`) — row 7's rule applied to a
 property, the same sibling confusion `capture_lane` records above, one property later. (That justification is ONE
 site: `sdk.py:4399-4406` returns the mark but consumes it without the walk, and is cited in row 7 only for that
 contrast.)

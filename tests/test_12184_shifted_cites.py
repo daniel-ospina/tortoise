@@ -2159,6 +2159,123 @@ def test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter() ->
 _TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
 
 
+_HOSTED = "tortoise/hosted_api.py"
+
+#: ⛔ A RANGE CITE MUST CONTAIN THE CODE ITS OWN SENTENCE NAMES — measured at the head this arm
+#: was written at: the three paragraphs that carry `turn_max_index`'s `graph` verdict all cited
+#: `hosted_api.py:45586-45598`, which is the prior-turn-count reader's DOCSTRING ending at `try:`.
+#: Everything the sentences claim sits AFTER that range — the walk (`:45601`), the predicate
+#: (`:45602`) and the composition (`total = int(nodes or 0)` `:45608`, `total = max(total, mark +
+#: 1)` `:45611`) — so a reader who follows the cite lands on prose and a `try:` and cannot verify
+#: one word of the claim. That is the `+21`-class defect one indirection out: the range RESOLVES
+#: (it is neither blank nor past EOF), so every arm in this file was green on it; only reading the
+#: number's own sentence sees it. The fragment lines are RESOLVED BY CONTENT, never typed, so a
+#: `hosted_api.py` edit moves the expectation with the code instead of rotting the arm.
+_PRIOR_COUNT_CLAIMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # the sentence's own words                    the code span that sentence therefore claims
+    (
+        "COMPOSED site",
+        ("OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point) ", "total = max(total, mark + 1)"),
+    ),
+    (
+        "IS composed with the walk",
+        ("total = int(nodes or 0)", "total = max(total, mark + 1)"),
+    ),
+    (
+        "mark/count comparison over the",
+        ("WHERE t.is_episodic = true ", "total = max(total, mark + 1)"),
+    ),
+)
+
+#: The `hosted_api.py:START-END` spellings the audit document uses for that reader.
+_AUDIT_HOSTED_SPAN = re.compile(r"hosted_api\.py:(\d+)-(\d+)")
+
+
+def _prior_count_cite_problems(doc_text: str, src_lines: list[str]) -> tuple[list[str], int]:
+    """Wrong ranges among the prior-turn-count paragraphs, and how many were graded.
+
+    The graded population is counted so an EMPTY one cannot pass: a document that drops the
+    phrases would otherwise skip its way to green, which is the fail-open this population guard
+    exists to refuse.
+    """
+    problems: list[str] = []
+    graded = 0
+    paragraphs = doc_text.split("\n\n")
+    for phrase, fragments in _PRIOR_COUNT_CLAIMS:
+        naming = [para for para in paragraphs if phrase in para]
+        if not naming:
+            problems.append(
+                f"the audit document carries no paragraph containing {phrase!r} — this arm grades "
+                "the three that justify `turn_max_index`'s `graph` verdict; re-point the arm "
+                "rather than letting it pass on an empty population"
+            )
+            continue
+        for para in naming:
+            spans = [(int(a), int(b)) for a, b in _AUDIT_HOSTED_SPAN.findall(para)]
+            if not spans:
+                problems.append(
+                    f"the paragraph naming {phrase!r} cites no `hosted_api.py` range, so its "
+                    "claim rests on no address this arm can read"
+                )
+                continue
+            for fragment in fragments:
+                hits = [i for i, line in enumerate(src_lines, 1) if fragment in line]
+                if len(hits) != 1:
+                    problems.append(
+                        f"{_HOSTED}: {fragment!r} matches {len(hits)} lines ({hits}) — the "
+                        "witness must resolve to ONE line or this arm cannot bind it"
+                    )
+                    continue
+                target = hits[0]
+                if not any(first <= target <= last for first, last in spans):
+                    problems.append(
+                        f"the paragraph naming {phrase!r} cites {spans}, but its sentence names "
+                        f"{fragment!r}, which is at `{_HOSTED}:{target}` — OUTSIDE that range. "
+                        "A range that resolves onto the right FILE is not a verified cite: the "
+                        "reader lands on a docstring and cannot see the code the claim is about."
+                    )
+            graded += 1
+    return problems, graded
+
+
+def test_the_prior_turn_count_cites_contain_the_composition_their_sentences_name() -> None:
+    """The cite must cover the code its sentence names, not merely resolve into the file.
+
+    NON-VACUITY, MEASURED THREE WAYS on the shipped tree: (a) the pre-fix spelling shipped as the
+    negative control below reds this arm on all three paragraphs; (b) an END short of the
+    composition (`-45610`) reds it; (c) a doc that drops the phrases reds on the empty population
+    instead of passing unread.
+    """
+    doc_text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    src_lines = (REPO / _HOSTED).read_text(encoding="utf-8").splitlines()
+    problems, graded = _prior_count_cite_problems(doc_text, src_lines)
+    assert not problems, "\n".join(problems)
+    assert graded == len(_PRIOR_COUNT_CLAIMS), (
+        f"graded {graded} paragraph(s), expected one per claim in `_PRIOR_COUNT_CLAIMS` "
+        f"({len(_PRIOR_COUNT_CLAIMS)}) — a duplicate or dropped paragraph moves this arm's "
+        "population, so re-point it rather than letting the count drift"
+    )
+    # (a) the spelling that SHIPPED before the fix: every paragraph cited the docstring's tail.
+    pre_fix = doc_text.replace("hosted_api.py:45586-45611", "hosted_api.py:45586-45598")
+    assert pre_fix != doc_text, (
+        "the pre-fix control could not be built — this document no longer cites the repaired "
+        "range at all, so the negative control below would grade an unchanged document"
+    )
+    control, _ = _prior_count_cite_problems(pre_fix, src_lines)
+    assert control, "the pre-fix range still passed this arm — it is vacuous"
+    # (b) one END short: `-45610` still misses the `max(...)` line the sentences name.
+    short_end, _ = _prior_count_cite_problems(
+        doc_text.replace("hosted_api.py:45586-45611", "hosted_api.py:45586-45610"), src_lines
+    )
+    assert short_end, "a range ending one line short of the composition still passed"
+    # (c) empty population is REPORTED, never skipped.
+    empty, graded_empty = _prior_count_cite_problems("no claims here\n\nstill none", src_lines)
+    assert empty and graded_empty == 0, (
+        "a document carrying none of the claims was not reported — the arm would go green on "
+        "the phrases being deleted"
+    )
+
+
 def _token_spans(token: str) -> list[tuple[int, int]]:
     """EVERY address the *token* names, as `(first, last)` spans — empty when it names none.
 
