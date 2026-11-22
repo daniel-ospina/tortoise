@@ -172,7 +172,6 @@ def test_a_tool_only_diff_selects_this_pin():
 
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
 _HOSTED = _REPO_ROOT / "tortoise" / "hosted_api.py"
-_RERANK = _REPO_ROOT / "tortoise" / "rerank.py"
 _READ_NAMES = ("tortoise_fts_query", "_tortoise_fts_query")
 
 
@@ -226,8 +225,19 @@ def _door_read_contract() -> set[str]:
     assert {"_rerank_candidates", "_record_reads", "_valid_time_rerank",
             "include_terminal"} <= bool_levers, sorted(bool_levers)
 
-    door_calls = _read_calls(ast.parse(_HOSTED.read_text()))
-    assert door_calls, "hosted_api.py no longer calls the read — this contract is stale"
+    hosted_tree = ast.parse(_HOSTED.read_text())
+    hosted_parents: dict[int, ast.AST] = {}
+    for node in ast.walk(hosted_tree):
+        for child in ast.iter_child_nodes(node):
+            hosted_parents[id(child)] = node
+    door_calls = [c for c in _read_calls(hosted_tree)
+                  if _owner(c, hosted_parents) == "search"]
+    # ⛔ EXACTLY the `/v1/search` handler's call: a union over every read call in the file
+    # let an unrelated endpoint's `kind="statement"` widen the allow-list, after which the
+    # harness could name `kind` on the measured read and stay green (measured).
+    assert len(door_calls) == 1, (
+        f"`hosted_api.py::search` holds {len(door_calls)} read calls — this contract is "
+        "derived from exactly one")
     allowed: set[str] = set()
     for call in door_calls:
         allowed |= {k.arg for k in call.keywords if k.arg is not None}
@@ -241,20 +251,6 @@ def _door_read_contract() -> set[str]:
     # NOT a lever — nothing about which rows survive `limit` depends on it.
     allowed.add("leg_trace")
     return allowed
-
-
-def _rerank_env_names() -> set[str]:
-    """The env gates that change WHICH rows the read returns, read off `rerank.py`."""
-    tree = ast.parse(_RERANK.read_text())
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-                and node.value.value.startswith("TORTOISE_")):
-            names.add(node.value.value)
-    assert {"TORTOISE_FUSED_RERANK", "TORTOISE_FUSED_RERANK_POOL"} <= names, sorted(names)
-    return names
 
 
 def _enclosing(node: ast.AST, parents: dict[int, ast.AST]) -> ast.AST | None:
@@ -292,7 +288,7 @@ def _artifact_entries(run_def: ast.AST) -> dict[str, ast.AST]:
     "order": [], "legs": []})` placed before the real `per_query.append` satisfied every
     later assertion while the artifact itself held an empty page (measured).
     """
-    found: list[dict] = []
+    found: list[tuple[dict, ast.Call]] = []
     for node in ast.walk(run_def):
         if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "append"
                 and node.args and isinstance(node.args[0], ast.Dict)):
@@ -300,11 +296,40 @@ def _artifact_entries(run_def: ast.AST) -> dict[str, ast.AST]:
                 node.args[0].keys, node.args[0].values, strict=True)
                 if isinstance(k, ast.Constant) and isinstance(k.value, str)}
             if "legs" in pairs and "order" in pairs:
-                found.append(pairs)
+                found.append((pairs, node))
     assert len(found) == 1, (
         f"run() appends {len(found)} artifact dicts carrying BOTH `legs` and `order` — this "
         "pin cannot tell which one is the artifact")
     return found[0]
+
+
+_MUTATORS = {"append", "clear", "extend", "insert", "pop", "remove", "reverse", "sort",
+             "update", "__setitem__", "popitem", "setdefault"}
+
+
+def _mutated_after(run_def: ast.AST, var: str, lineno: int,
+                   artifact_append: ast.Call) -> list[int]:
+    """Lines after the read that mutate `var` (or the recorded rows) IN PLACE.
+
+    ⛔ In-place mutation is the other half of rebinding: `results.sort()` /
+    `trace.clear()` / `per_query[-1]["order"].sort()` all leave a mutated collection
+    feeding the artifact while every rebinding check passes (measured). The scan is
+    scoped to `var` and to `per_query`, so an unrelated accumulation (`declared[key] = …`)
+    is not a false-red.
+    """
+    hits: list[int] = []
+    for node in ast.walk(run_def):
+        if getattr(node, "lineno", -1) <= lineno or node is artifact_append:
+            continue
+        receiver: set[str] = set()
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in _MUTATORS:
+            receiver = _names_in(node.func.value)
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            receiver = _names_in(node.value)
+        if var in receiver or "per_query" in receiver:
+            hits.append(node.lineno)
+    return hits
 
 
 def _is_exactly(node: ast.AST, var: str) -> bool:
@@ -353,6 +378,12 @@ def _environ_mutations(tree: ast.AST) -> list[int]:
         return isinstance(node, ast.Attribute) and node.attr == "environ"
 
     mutators = {"update", "clear", "pop", "popitem", "setdefault"}
+    # The harness's own module-level setup pops these two BEFORE the SDK is built, to
+    # guarantee it measures the embedded graph rather than a hosted endpoint. Nothing else
+    # at module scope may touch the environment: scanning only `run()` left
+    # `os.environ["TORTOISE_FUSED_RERANK"] = "1"` at import time GREEN (measured), which
+    # is this file's existing idiom.
+    setup_pops = {"TORTOISE_API_URL", "TORTOISE_API_KEY"}
     hits: list[int] = []
     for node in ast.walk(tree):
         subscript = (isinstance(node, ast.Subscript)
@@ -362,9 +393,16 @@ def _environ_mutations(tree: ast.AST) -> list[int]:
                   and getattr(node.func, "attr", None) in mutators
                   and _is_environ(getattr(node.func, "value", None)))
         aug = isinstance(node, ast.AugAssign) and _is_environ(node.target)
-        handed = isinstance(node, ast.Call) and any(_is_environ(a) for a in node.args)
-        if subscript or method or aug or handed:
-            hits.append(node.lineno)
+        handed = isinstance(node, ast.Call) and any(
+            _is_environ(a) for a in list(node.args) + [k.value for k in node.keywords])
+        if not (subscript or method or aug or handed):
+            continue
+        if (getattr(node, "func", None) is not None
+                and getattr(node.func, "attr", None) == "pop"
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value in setup_pops):
+            continue
+        hits.append(node.lineno)
     return hits
 
 
@@ -388,11 +426,13 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     never rebound after the read), and no ``os.environ`` mutation may happen in ``run()``
     at all — which arm of the fused-rerank gate was in force is not recorded (#14289).
 
-    Accepted FALSE-RED: extracting the id mapping (``"order": _ids(results)``) or the leg
-    table into a helper reds too, because a helper call cannot be proven not to sort or
-    drop what it is handed. A red there costs an edit to this pin, which is the cheap
-    direction — the expensive direction is a sorted page reaching the verdict as
-    ``rank_identical: True`` (measured green against an earlier shape of this check).
+    Accepted FALSE-REDs, because the pin follows SHAPES and a shape shift costs an edit
+    here rather than a silent change there — collating the id mapping
+    (``"order": _ids(results)``) or the leg table into a helper, hoisting the artifact dict
+    to a local (``row = {…}; per_query.append(row)``), and ``per_query.extend([{…}])``.
+    A red there costs an edit to this pin, which is the cheap direction — the expensive
+    direction is a sorted page reaching the verdict as ``rank_identical: True`` (measured
+    green against earlier shapes of this check).
 
     ⛔ EVERY STATIC REACH IS CENSUSED, not just the two calls: a bound-method alias
     (``_read = sdk._tortoise_fts_query``), a string LITERAL naming the read
@@ -496,32 +536,73 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         f"{ast.unparse(lt.value) if lt else 'nothing'} — the pin cannot follow its trace "
         "into the artifact, so a discarded sink would pass")
     trace_var = lt.value.id
-    entries = _artifact_entries(run_defs[0])
+    entries, artifact_append = _artifact_entries(run_defs[0])
     for key, var, what in (("order", page_var, "page"), ("legs", trace_var, "trace")):
         value = entries[key]
+        assert isinstance(value, ast.ListComp), (
+            f"the artifact's `{key}` is {ast.unparse(value)} — this pin follows a "
+            f"comprehension over the measured {what}")
         # ⛔ The iterable must BE the variable. A name-PRESENCE test (`var in names(iter)`)
         # was measured GREEN with `for r in _stable(results)` — a helper that sorts the
         # page, which turns a genuine permutation into `rank_identical: True` — with
         # `_empty(results)`, and with `(results and _decoy)`. A false-red is the accepted
         # cost: `"order": _ids(results)` now reds too, because this pin cannot prove the
         # helper is the identity (the message says so).
-        assert any(isinstance(g.iter, (ast.Name, ast.Call)) and _is_exactly(g.iter, var)
-                   for g in value.generators), (
-            f"the artifact's `{key}` iterates {[ast.unparse(g.iter) for g in value.generators]}"
-            f", not `{var}` — the measured read's {what} must be iterated AS ITSELF (a "
-            f"helper call there cannot be proven not to sort/drop it): {ast.unparse(value)}")
+        assert len(value.generators) == 1, (
+            f"the artifact's `{key}` has {len(value.generators)} `for` clauses — the pin "
+            f"cannot follow which one carries the measured {what}: {ast.unparse(value)}")
+        gen = value.generators[0]
+        if key == "order":
+            # The verdict's input is the WHOLE page: a filter clause reports a subset while
+            # the pinned contract ("iterated AS ITSELF") reads satisfied (measured green).
+            assert not gen.ifs, (
+                f"the artifact's `order` FILTERS the measured page "
+                f"(`if {ast.unparse(gen.ifs[0])}`) — the rank-identity verdict would compare "
+                "a subset of the page")
+        else:
+            # The trace is filtered by the tool's own documented rule — "only rows that
+            # carry a `leg`" — and that rule is pinned as a SHAPE, so an added condition
+            # (`and not e.get("slow")`) cannot quietly drop rows from the table.
+            assert len(gen.ifs) == 1, (
+                f"the artifact's `legs` has {len(gen.ifs)} filter clauses — the tool's rule "
+                "is `if <entry>.get(\"leg\")` and nothing else")
+            cond = gen.ifs[0]
+            assert (isinstance(cond, ast.Call) and getattr(cond.func, "attr", None) == "get"
+                    and len(cond.args) == 1 and not cond.keywords
+                    and isinstance(cond.args[0], ast.Constant)
+                    and cond.args[0].value == "leg"
+                    and _names_in(cond.func.value) & _names_in(gen.target)), (
+                f"the artifact's `legs` filters on {ast.unparse(cond)} — the tool's rule is "
+                f"`{ast.unparse(gen.target)}.get(\"leg\")`, which drops exactly the trace "
+                "entries that record no leg")
+        assert _is_exactly(gen.iter, var), (
+            f"the artifact's `{key}` iterates {ast.unparse(gen.iter)}, not `{var}` — the "
+            f"measured read's {what} must be iterated AS ITSELF (a helper call there cannot "
+            f"be proven not to sort/drop it): {ast.unparse(value)}")
+        assert _names_in(value.elt) & _names_in(gen.target), (
+            f"the artifact's `{key}` does not derive its element from the loop target "
+            f"`{ast.unparse(gen.target)}`: {ast.unparse(value.elt)}")
         rebinds = _rebound_after(run_defs[0], var, holder.lineno)
         assert not rebinds, (
             f"`{var}` is rebound at line(s) {rebinds} after the read — a sorted/emptied "
             f"copy would reach the artifact while the measured {what} was discarded")
+        # ⛔ In-place mutation is the other half: `results.sort()` / `trace.clear()` /
+        # `per_query[-1]["order"].sort()` all leave a mutated collection feeding the
+        # artifact while every rebinding check passes (measured).
+        mutations = _mutated_after(run_defs[0], var, holder.lineno, artifact_append)
+        assert not mutations, (
+            f"line(s) {mutations} mutate a collection AFTER the measured read — an in-place "
+            f"sort/clear reaches the artifact while the measured {what} no longer matches it")
 
-    # ⛔ No `os.environ` mutation at all: `run()` reports `git_sha`/`db_uri`/`points`/
+    # ⛔ No `os.environ` mutation ANYWHERE (except the module-level setup pops): reports
+    # `git_sha`/`db_uri`/`points`/
     # `corpus_seed` but NOT which arm of `TORTOISE_FUSED_RERANK` (or its pool/model
     # gates) was in force, so an armed or disarmed arm would still compare as
     # comparable — see #14289. The check is on the RECEIVER, because enumerating the
     # key shapes is how the previous version ended up with an inert `update` branch.
-    mutated = _environ_mutations(run_defs[0])
+    mutated = _environ_mutations(tree)
     assert not mutated, (
-        f"`run()` mutates `os.environ` at line(s) {mutated} — the artifact does not record "
-        "which arm of the fused-rerank gate was in force, so a baseline/after pair could "
-        "straddle it and `compare()` would still call them comparable (#14289)")
+        f"the harness mutates `os.environ` at line(s) {mutated} (only the module-level "
+        "`TORTOISE_API_URL`/`TORTOISE_API_KEY` pops are allowed) — the artifact does not "
+        "record which arm of the fused-rerank gate was in force, so a baseline/after pair "
+        "could straddle it and `compare()` would still call them comparable (#14289)")
