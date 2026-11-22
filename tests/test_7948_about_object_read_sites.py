@@ -3673,6 +3673,35 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         "§13 classes these rows customer-callable without naming a door that "
         "exists AND reaches the row's own reader:\n  " + "\n  ".join(broken)
     )
+    # ⛔ EVERY EXCEPTION BUDGET IS EXACT, not a ceiling (`#14249` review P2-2).
+    # `distance <= hops` above is satisfiable by a budget that GROWS: measured on this
+    # head, raising `ranking.py::fetch_entity_signals`'s budget 4 -> 5 left every arm in
+    # this file green — including the 36-pair pin and the falsifiability arm — while one
+    # more hop of attribution silently widened row 24's reach. The budget's own text says
+    # it is "the measured distance", so assert THAT: the deepest door of each exception
+    # reader must need exactly its budget. (MAX over the reader's doors, not per door:
+    # `_preview_delete_edges` is a door at distance 2 for two live tools and 4 for the
+    # retired shim, and only the deepest one is what the budget was raised for.)
+    for exception_reader, (exception_budget, _why) in _DISTANCE_EXCEPTIONS.items():
+        exception_doors = [
+            door
+            for row in _rows()
+            if f"{row['module']}::{row['symbol']}" == exception_reader
+            for door in _doors(str(row["reach"]))
+        ]
+        assert exception_doors, (
+            f"`_DISTANCE_EXCEPTIONS` carries {exception_reader!r}, but no customer-callable "
+            "row names that reader — a budget for a row that no longer exists is debt"
+        )
+        deepest = max(
+            (_door_distance(door, exception_reader) or 0) for door in exception_doors
+        )
+        assert deepest == exception_budget, (
+            f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]` budgets {exception_budget} "
+            f"references, but its deepest door needs {deepest} — the entry must state the "
+            "MEASURED distance, or it hands every row that reader touches one extra hop "
+            "of unverified attribution"
+        )
 
 
 #: A stated door count: `SIXTEEN distinct doors`, `sixteen doors`, `SIXTEEN
