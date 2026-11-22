@@ -1483,7 +1483,16 @@ _WHICH_MODIFIED_NOUN = re.compile(
 #: like an honest empty answer). Arm B reports them: a report is advice on a refused
 #: cue, never a route, and the population served stays the relevance read.
 _COPULA_LONG_SUBJECT = re.compile(
-    rf"^(?:is|are|was|were)\s+"
+    # ⛔ THE REPORTER MUST SEE EVERY HEAD THE REFUSAL REFUSES (round-13 review, P2, measured).
+    # `_COPULA_PREFIX` accepts a CONTRACTED head — `(?:n[\'’]t)?`, fixed in round 4 — but this,
+    # the ONLY notice arm for the copula branch, was anchored `^(?:is|are|was|were)\s+`, so a
+    # contracted head could never report at all. A strong progressive cue then reached NO
+    # ANSWER and said NOTHING: measured at `3088fd8d6a`, `isn\'t the export being archived`
+    # answers `(None, None, None)` — refused, `signal=None`, no payload — and its adverb
+    # variants likewise, while `is the export being archived` reports `is_copula_long_subject`.
+    # One token (the contraction) decided whether the caller was told. This is #14033 itself on
+    # the head this PR adds, so the anchor must be the class, not a spelling of it.
+    rf"^(?:is|are|was|were)(?:n[\'’]t)?\s+"
     rf"(?:"
     # ARM A — the subject runs past the shape's four-word bound.
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
