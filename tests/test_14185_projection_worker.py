@@ -629,6 +629,28 @@ def test_the_RESET_ITSELF_replaces_prometheus_locks_not_a_publisher_behind_it(
                 lock.release()
 
 
+def test_a_fold_outcome_with_NO_READABLE_applied_is_NOT_counted_as_a_projection():
+    """⛔ Round-17 P3: `_classify_fold_outcome`'s default was `True`, so an object
+    with no readable `applied` fell through as a WRITTEN ROW — contradicting its own
+    docstring ("an outcome that could not be read … nothing was observed") and
+    `live_write`'s fail-closed `getattr(outcome, "applied", False)`.
+
+    The raising-PROPERTY shape was already covered by the caller's `try`; this is
+    the ABSENT-attribute shape, which no leg reached — a mutation swapping the
+    sentinel back to `True` left the suite green. Latent today (both production
+    doors answer `RecordWrite | None`), which is why it is pinned now: an
+    unreadable outcome must count as "nothing observed", never as a projection,
+    because a `projected` count is what makes an operator read "caught up".
+    """
+    assert projection_worker._classify_fold_outcome(object(), 1) == "record_no_outcome"
+    assert projection_worker._classify_fold_outcome(
+        types.SimpleNamespace(), 1) == "record_no_outcome"
+    # …and the readable arms keep their answers: a written row is still a projection.
+    assert projection_worker._classify_fold_outcome(
+        types.SimpleNamespace(applied=True, refusal=None), 1) is None
+    assert projection_worker._classify_fold_outcome(None, 1) == "record_no_outcome"
+
+
 def test_a_RENAMED_prometheus_lock_REDS_the_guard_instead_of_passing_vacuously():
     """The guard on the legs above must fire, and on a REAL object.
 
