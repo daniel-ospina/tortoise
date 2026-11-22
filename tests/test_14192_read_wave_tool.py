@@ -686,6 +686,36 @@ def _scalar_bound_names(tree: ast.AST) -> set[str]:
     return scalar_names
 
 
+def _cannot_carry(node: ast.AST, scalar_names: set[str]) -> bool:
+    """True when a stored value cannot CARRY the measured collection or one of its rows.
+
+    Used by the container-slot arm: a slot store propagates taint to the container
+    (aggregate/field propagation — the rule every production taint analyzer carries,
+    because a container is reached through its slots, not through its name), and this
+    predicate is what keeps that rule from tainting a container over a value that is a
+    COPY of nothing: a number, a formatted string, an arithmetic result, or a known pure
+    read (`len(results)`, `dict(os.environ)`).
+
+    ⛔ NO `Call` EXEMPTION BEYOND `_PURE_READS`: `_tally["v"] = stats(results)` may hand
+    the collection to a callee that keeps it, so the container is tainted — conservative
+    in the same direction as the rest of this pin (a false red on a container that is
+    later written but never mutated, against a GREEN permuted page).
+    """
+    if isinstance(node, (ast.Constant, ast.JoinedStr, ast.FormattedValue)):
+        return True
+    if isinstance(node, (ast.BinOp, ast.BoolOp, ast.UnaryOp, ast.Compare)):
+        return True
+    if isinstance(node, ast.IfExp):
+        return (_cannot_carry(node.body, scalar_names)
+                and _cannot_carry(node.orelse, scalar_names))
+    if isinstance(node, ast.Name):
+        return node.id in scalar_names
+    if isinstance(node, ast.Call):
+        callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        return callee in _PURE_READS
+    return False
+
+
 def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                    artifact_append: ast.Call) -> list[int]:
     """Lines after the read that mutate `var` (or the recorded rows) IN PLACE.
@@ -720,6 +750,37 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     the scan is not line-filtered, so `def _tidy(): results.sort()` above the read and
     `_tidy()` after it reds at `results.sort()`). Interprocedural reach is out of scope
     for an AST pin, and `tools/read_wave_latency.py` carries no such helper today.
+
+    ⛔ THE PIN'S THREAT SURFACE IS DECLARED HERE, NOT DISCOVERED BY THE NEXT REVIEWER
+    (agent-infra `proportional-gates` §"Adversarial domain" — the budget for a guard whose
+    correctness is "an attacker cannot make it fail open" is bounded by its DECLARED
+    threat surface, not by reviewer exhaustion; residuals are NAMED, not chased one
+    spelling per round).
+
+    **Covered (each with a test that reds when its arm is removed):** the collection
+    itself, a transitive alias, a walrus bind, EVERY target of an unpack, a `for` target,
+    a `lambda`/`def` default, an augmented assignment, a container or object SLOT store
+    (`_c[k] = results[0]`, `self._page = results[0]`) — and the same set one level down,
+    for the RECORDED ROWS — plus a bound mutator (`_s = results.sort`) reached directly or
+    through a container slot.
+
+    **NOT covered, by construction — every one of these is an indirection a static `ast`
+    walk cannot resolve, and adding a clause per spelling is how eleven rounds produced
+    eleven spellings:**
+
+      - a value COMPUTED at runtime from the collection and then mutated —
+        `next(iter(results)).clear()`, `[… for …][0].sort()`, a row returned by a callee;
+      - an alias created INSIDE a callee, or in a module-level helper called with no
+        argument (interprocedural reach, above);
+      - an element reached through a function RETURN, a generator, or a global;
+      - any shape whose value is a COPY (`dict(pq)`, `list(results)`, `_result_id(r)`):
+        those are correctly exempt, and a copy cannot mutate what it copied.
+
+    ⛔ THE DURABLE FIX IS NOT A THIRTEENTH CLAUSE — it is to make "the recorded page IS the
+    measured page" a RUNTIME property (record the page, assert its identity in
+    `compare()`), which cannot be evaded by a spelling at all. That direction was
+    recommended at #14281 review round 11 and belongs to the tool, not to this pin; this
+    pin is the static half, and the honest form of a static half is to say where it stops.
     """
     aliases = _aliases_of(run_def, _collection_alias_predicate(var), loops=True)
     watched = {var} | aliases
@@ -727,9 +788,9 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # `_row["order"] = _row["order"][:5]` truncated the page the verdict reads, with
     # every `"per_query" in receiver` clause passing (measured). Resolve names bound to
     # ANY expression mentioning `per_query`.
+    scalars = _scalar_bound_names(run_def)
     rows = ({"per_query"} | _aliases_of(
-        run_def, lambda v: "per_query" in _names_in(v), loops=True)) \
-        - _scalar_bound_names(run_def)
+        run_def, lambda v: "per_query" in _names_in(v), loops=True)) - scalars
     # ⛔ ITERATION TARGETS ARE THE SAME COLLECTION, TO A FIXPOINT — for the MEASURED
     # collections as well as the recorded rows (#14281 review P1, measured). A `for`
     # target binds nothing that `_aliases_of` resolves, so an element rewrite through one
@@ -770,10 +831,44 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 _targets = (list(_node.targets) if isinstance(_node, ast.Assign)
                             else [_node.target])
                 _iter = _node.value
-                _unpacked = [t for t in _targets if isinstance(t, (ast.Tuple, ast.List))]
-                if not _unpacked or not (_names_in(_iter) & muts):
+                if not (_names_in(_iter) & muts):
                     continue
-                _target = _unpacked[0]
+                _unpacked = [t for t in _targets if isinstance(t, (ast.Tuple, ast.List))]
+                if _unpacked:
+                    # ⛔ EVERY TARGET OF A CHAINED UNPACK, not only the first (#14281
+                    # review P2 at `06bdae1a7926`, measured GREEN): `(_a,) = (_b,) =
+                    # results` binds the SAME collection to BOTH names, and keying on
+                    # `_unpacked[0]` made the verdict depend on target ORDER — `_a |=
+                    # {"id": "REDACTED"}` was RED while `_b |= {"id": "REDACTED"}`,
+                    # the identical rewrite one name over, was GREEN (`compare()` then
+                    # calls a genuinely permuted pair `rank_identical: True`).
+                    _target = ast.Tuple(
+                        elts=[e for t in _unpacked for e in t.elts], ctx=ast.Load())
+                else:
+                    # ⛔ A CONTAINER THAT HOLDS THE COLLECTION IS THE COLLECTION (#14281
+                    # review P1 at `06bdae1a7926`, four shapes measured GREEN):
+                    #
+                    #     _slots = {};  _slots["k"] = results[0]; _slots["k"] |= {…}
+                    #     _box = [None]; _box[0] = results[0];   _box[0] |= {…}
+                    #     _d = {};      _d["k"] = results[0];    _d["k"].update({…})
+                    #     _d["k"]["order"].sort()
+                    #
+                    # `_slots` is bound to an EMPTY container, so `_aliases_of` resolves
+                    # no name (there is nothing to mention yet) and the ONLY bind that
+                    # makes the container reachable is the SLOT STORE — a target with no
+                    # `Name` at all, which no binding-form arm looked at. This is not a
+                    # twelfth spelling: it is the aggregate/field propagation rule every
+                    # production taint analyzer carries (a container is reached through
+                    # its slots), applied to the two target shapes that ARE slots — a
+                    # `Subscript` (`_slots[k]`, `_box[0]`) and an `Attribute`
+                    # (`self._page`). The container name joins `muts`; every existing arm
+                    # then sees it through `_names_in` on the receiver, exactly as it sees
+                    # `_box = [results]` today.
+                    _slots = [t for t in _targets
+                              if isinstance(t, (ast.Subscript, ast.Attribute))]
+                    if not _slots or _cannot_carry(_iter, scalars):
+                        continue
+                    _target = ast.Tuple(elts=_slots, ctx=ast.Load())
             elif isinstance(_node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef)):
                 # ⛔ A DEFAULT ARGUMENT BINDS THE COLLECTION INTO THE CALLEE (#14281
                 # review P1, measured GREEN): `_f = (lambda _l=results: _l.sort()); _f()`
@@ -922,10 +1017,11 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
     `or "per_query" in receiver` term was provably subsumed and has been deleted rather
     than left standing as a clause nothing can red.
 
-    Residual, stated rather than implied: a BOUND MUTATOR of an element is not followed —
-    `for _pq in per_query: _s = _pq["order"].sort; _s()` is GREEN. Same family as the
-    `environ` half's `_set = os.environ.__setitem__`, which IS handled there; here it is
-    not, and saying so is the difference between a residual and a hole.
+    ⛔ AND THE ONE THIS GUARD USED TO CARRY IS CLOSED: a BOUND MUTATOR of an element
+    (`for _pq in per_query: _s = _pq["order"].sort; _s()`) was GREEN here while the
+    sibling `_mutated_after` already carried the arm for the page — this residual list
+    contradicted the guard one function above it. The arm lives below now, and the shape
+    is a test.
     """
     element_names: set[str] = set()
     #: Nodes that BIND an element name. A bind is not a mutation (#14281 review F5,
@@ -940,32 +1036,47 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
         # element, and treating it as one false-reds ordinary report-building code —
         # measured: the first cut of this guard red the real tool at
         # `tools/read_wave_latency.py:328,332`, which build the artifact dict itself.
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target: ast.AST = node.targets[0]
+        if isinstance(node, ast.Assign):
+            targets: list[ast.AST] = list(node.targets)
             value: ast.AST = node.value
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-            target, value = node.target, node.value
+            targets, value = [node.target], node.value
         elif isinstance(node, (ast.For, ast.AsyncFor)):
-            target, value = node.target, node.iter
+            targets, value = [node.target], node.iter
         else:
             continue
         if "per_query" not in _names_in(value):
             continue
+        # ⛔ THE VALUE MAY BE THE COLLECTION ITSELF, not only a slice of it: `(_a,) =
+        # (_b,) = per_query` binds the FIRST ELEMENT to both names, and a bare `Name`
+        # value was rejected here (the guard accepted only a `Subscript`), so a chained
+        # unpack of the WHOLE list named no element and `_b["order"].sort()` mutated a
+        # recorded page invisibly — measured GREEN at `f44e79ed36ee` (#14281 review P2).
+        # A name DERIVED from the collection (`_rows = [x for x in per_query]`) is still
+        # rejected: only the collection and its own aliases are accepted.
         if not (isinstance(node, (ast.For, ast.AsyncFor))
-                or isinstance(value, ast.Subscript)):
+                or isinstance(value, ast.Subscript)
+                or (isinstance(value, ast.Name)
+                    and value.id in ({"per_query"} | _aliases_of(
+                        run_def, _collection_alias_predicate("per_query"), loops=True)))):
             continue
-        # ⛔ EVERY NAME THE TARGET BINDS, not only a bare `Name` — `for _i, _pq in
-        # enumerate(per_query):` and `(zed,) = per_query[-1:]` both name the ELEMENT and
-        # were measured GREEN while only `isinstance(target, ast.Name)` was accepted.
+        # ⛔ EVERY NAME EVERY TARGET BINDS, not only a bare `Name` and not only the FIRST
+        # target — `for _i, _pq in enumerate(per_query):`, `(zed,) = per_query[-1:]`, and
+        # the CHAINED `(_a,) = (_b,) = per_query` all name the ELEMENT. The last was
+        # GREEN (`_b["order"].sort()` mutated a recorded page invisibly) because this
+        # loop accepted only `len(node.targets) == 1`, so the second target of a chain was
+        # never walked — measured at `f44e79ed36ee` (#14281 review P2, target ORDER
+        # deciding the verdict).
         # ⛔ `_mutated_after` DOES cover them (measured with this guard neutered: all five
         # shapes stay RED) — the text here claimed its unpack branch needed a Tuple/List
         # VALUE of matching length, and it keys on the TARGET instead (#14281 review P2).
         # A tuple target over a CALL marks the index too (fail-closed: a false red on an
         # index that is never mutated, against a GREEN permuted page).
-        for bound in ast.walk(target):
-            if isinstance(bound, ast.Name):
-                element_names.add(bound.id)
-                defining.add(id(node))
+        for target in targets:
+            for bound in ast.walk(target):
+                if isinstance(bound, ast.Name):
+                    element_names.add(bound.id)
+                    defining.add(id(node))
     # ⛔ AN ALIAS OF AN ELEMENT'S INNER LIST IS THAT INNER LIST (#14281 review F3,
     # measured GREEN in BOTH guards):
     #
@@ -1019,6 +1130,29 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
                 changed = True
     if not derived:
         return []
+    # ⛔ A BOUND MUTATOR OF AN ELEMENT'S INNER LIST IS THAT MUTATOR (#14281 review P1,
+    # the shape `_mutated_after` closed for the PAGE, still GREEN here):
+    #
+    #     for _pq in per_query: _s = _pq["order"].sort; _s()
+    #
+    # The bind names a FUNCTION, so nothing in the fixpoint above resolves `_s`, and the
+    # call is a bare `Name` the receiver arms never saw — the page's own guard carries
+    # this arm and this one did not, which left the residual list here contradicting the
+    # sibling guard one function above. Conservative in the same direction as the rest:
+    # a bound mutator of a row is a mutation of the recorded page.
+    bound_mutator: set[str] = set()
+    for node in ast.walk(run_def):
+        if isinstance(node, ast.Assign):
+            _t: list[ast.AST] = list(node.targets)
+            _v: ast.AST = node.value
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            _t, _v = [node.target], node.value
+        else:
+            continue
+        if isinstance(_v, ast.Attribute) and _v.attr in _MUTATORS \
+                and _reaches_element(_v.value, derived):
+            bound_mutator |= {b.id for t in _t for b in ast.walk(t)
+                              if isinstance(b, ast.Name)}
     hits: list[int] = []
     for node in ast.walk(run_def):
         if getattr(node, "lineno", -1) <= after_lineno:
@@ -1029,6 +1163,9 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr in _MUTATORS:
             touched = bool(_names_in(node.func.value) & derived)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in bound_mutator:
+            touched = True
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
             touched = bool(_names_in(node.value) & derived)
         elif isinstance(node, ast.Assign):
@@ -1409,6 +1546,166 @@ def test_an_UNPACKED_alias_still_reaches_the_sort() -> None:
     assert sort.lineno in hits, (
         f"an UNPACKED alias is GREEN (aliases={sorted(aliases)}, hits={hits}) — the "
         "page is permuted in place before it is recorded")
+
+
+def _mutating_line(src: str, marker: str) -> int:
+    """The 1-based line of the ONE line carrying `marker` (asserts it is unique)."""
+    hits = [i for i, line in enumerate(src.splitlines(), start=1) if marker in line]
+    assert len(hits) == 1, f"{marker!r} must appear on exactly one line, got {hits}"
+    return hits[0]
+
+
+def test_a_CONTAINER_SLOT_holding_an_element_is_that_element() -> None:
+    """A container (or an object) that HOLDS the collection IS the collection.
+
+    ⛔ ALL FIVE SHAPES MEASURED GREEN at `06bdae1a7926` (#14281 review P1), each through
+    the full pin (16 passed) with `compare()` reporting `rank_identical: True` on a
+    genuinely permuted pair: the container is bound to an EMPTY literal, so
+    `_aliases_of` resolves nothing (there is no name to mention yet) and the ONLY bind
+    that makes the collection reachable is a SLOT STORE — a target carrying no `Name`,
+    which no binding-form arm looked at.
+
+    The arm is the aggregate/field propagation rule every production taint analyzer
+    carries (a container is reached through its SLOTS), so it is one rule for every
+    container spelling, not a clause per shape: `Subscript` and `Attribute` are the two
+    target shapes that are slots. The scalar control below is what keeps it from being a
+    blanket red — `_tally["n"] = len(results)` is a COPY of an int.
+    """
+    for label, src, marker in (
+        ("dict slot, augmented element rewrite",
+         "def run(sdk):\n"
+         "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+         "    _slots = {}\n"
+         "    _slots['k'] = results[0]\n"
+         "    _slots['k'] |= {'id': 'REDACTED'}\n",
+         "_slots['k'] |= "),
+        ("list slot, augmented element rewrite",
+         "def run(sdk):\n"
+         "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+         "    _box = [None]\n"
+         "    _box[0] = results[0]\n"
+         "    _box[0] |= {'id': 'REDACTED'}\n",
+         "_box[0] |= "),
+        ("dict slot, update() on the element",
+         "def run(sdk):\n"
+         "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+         "    _d = {}\n"
+         "    _d['k'] = results[0]\n"
+         "    _d['k'].update({'id': 'REDACTED'})\n",
+         "_d['k'].update("),
+        ("dict slot, sort() on the element's inner list",
+         "def run(sdk):\n"
+         "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+         "    _d = {}\n"
+         "    _d['k'] = results[0]\n"
+         "    _d['k']['order'].sort()\n",
+         "_d['k']['order'].sort()"),
+        ("object attribute slot",
+         "def run(sdk):\n"
+         "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+         "    self._page = results[0]\n"
+         "    self._page |= {'id': 'REDACTED'}\n",
+         "self._page |= "),
+    ):
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        line = _mutating_line(src, marker)
+        hits = _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+        assert line in hits, (
+            f"[{label}] a container that HOLDS a measured element is GREEN "
+            f"(hits={hits}, wanted {line}) — the page can be permuted through it while "
+            "`compare()` still calls the pair rank-identical")
+
+    # ⛔ THE SCALAR CONTROL: a container that holds a COPY of nothing is not tainted.
+    # `len(results)` cannot carry the page, and this assertion is what stops the arm
+    # above from redding every dict that merely mentions the read.
+    src = ("def run(sdk):\n"
+           "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+           "    _tally = {}\n"
+           "    _tally['n'] = len(results)\n"
+           "    _tally['n'] += 1\n")
+    run_def = ast.parse(src).body[0]
+    read = next(n for n in ast.walk(run_def)
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+    assert not _mutated_after(run_def, "results", read.lineno, artifact_append=None), (
+        "`_tally['n'] = len(results)` counts the page, it does not hold it — a counter "
+        "incremented afterwards is not a mutation of the measured page (false red)")
+
+
+def test_a_CHAINED_UNPACK_binds_EVERY_target() -> None:
+    """`(_a,) = (_b,) = results` binds the SAME collection to BOTH names.
+
+    ⛔ MEASURED GREEN for the SECOND target at `06bdae1a7926` (#14281 review P2): the
+    page guard tainted only `_unpacked[0]`, so `_a |= {"id": …}` was RED and the
+    identical rewrite through `_b` was GREEN — the verdict depended on target ORDER.
+    ⛔ AND THE RECORDED-ROWS GUARD MISSED THE WHOLE STATEMENT: it accepted only
+    `len(node.targets) == 1`, so `(_a,) = (_b,) = per_query; _b["order"].sort()`
+    canonicalised every page invisibly (measured GREEN at `f44e79ed36ee`).
+    """
+    # The measured page: BOTH targets of the chain are the collection.
+    src = ("def run(sdk):\n"
+           "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+           "    (_a,) = (_b,) = results\n"
+           "    _b |= {'id': 'REDACTED'}\n")
+    run_def = ast.parse(src).body[0]
+    read = next(n for n in ast.walk(run_def)
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+    line = _mutating_line(src, "_b |= ")
+    hits = _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+    assert line in hits, (
+        f"the SECOND target of a chained unpack is GREEN (hits={hits}) — the page is "
+        "rewritten through a name the guard never bound, so `compare()` sees the "
+        "REWRITTEN ids and calls a permuted pair rank-identical")
+
+    # The recorded rows: the same chain, one level down.
+    src = ("def run(sdk):\n"
+           "    per_query = []\n"
+           "    (_a,) = (_b,) = per_query\n"
+           "    _b['order'].sort()\n")
+    run_def = ast.parse(src).body[0]
+    line = _mutating_line(src, "_b['order'].sort()")
+    assert line in _per_query_element_mutations(run_def, 0), (
+        "`(_a,) = (_b,) = per_query` names the element through BOTH targets, and the "
+        "recorded-rows guard walked only a single-target `Assign` — a sorted recorded "
+        "page is exactly what `compare()` reads")
+
+    # ⛔ A DERIVED COLLECTION IS STILL NOT AN ELEMENT: `_rows = [x for x in per_query]`
+    # must not make `_rows[0]["order"].sort()` a row mutation (the guard's own
+    # false-red history at `tools/read_wave_latency.py:328,332`).
+    src = ("def run(sdk):\n"
+           "    per_query = []\n"
+           "    _rows = [dict(x) for x in per_query]\n"
+           "    _rows[0]['order'].sort()\n")
+    run_def = ast.parse(src).body[0]
+    assert not _per_query_element_mutations(run_def, 0), (
+        "a list COMPREHENSION over `per_query` builds new dicts — only the shallow copies "
+        "it holds are touched, and redding it would red the artifact-building code this "
+        "pin exists to protect (measured false red, #14281 review F5)")
+
+
+def test_a_BOUND_MUTATOR_of_a_recorded_row_is_red() -> None:
+    """`_s = _pq["order"].sort; _s()` is a mutation of the RECORDED page.
+
+    ⛔ MEASURED GREEN at `f44e79ed36ee` and DECLARED as a residual in this guard's own
+    docstring, while the sibling `_mutated_after` already carried the arm for the measured
+    page — the residual contradicted the guard one function above it. The bind names a
+    FUNCTION, so no alias fixpoint resolves it and the call is a bare `Name`.
+    """
+    src = ("def run(sdk):\n"
+           "    per_query = []\n"
+           "    for _pq in per_query:\n"
+           "        _s = _pq['order'].sort\n"
+           "        _s()\n")
+    run_def = ast.parse(src).body[0]
+    line = _mutating_line(src, "_s()")
+    hits = _per_query_element_mutations(run_def, 0)
+    assert line in hits, (
+        f"a bound mutator of a recorded row is GREEN (hits={hits}) — the recorded page is "
+        "sorted through a name bound to its `.sort`, which `compare()` reads as the order")
 
 
 def test_a_FALLBACK_expression_alias_still_reaches_the_sort() -> None:
