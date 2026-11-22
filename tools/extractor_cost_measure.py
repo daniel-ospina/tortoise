@@ -1136,6 +1136,45 @@ def render_verdict(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def report_from_rows(rows: list[dict]) -> dict:
+    """The report the ``report`` subcommand renders, from raw rows.
+
+    Factored out of ``main`` so the CLI and the reproducibility pin
+    (``tests/test_extractor_cost_measure.py``) build the report by the SAME
+    path: the evidence bundle claims to be regenerable from
+    ``measurements.jsonl``, and a pin that re-implemented this assembly could
+    pass while the CLI drifted.
+    """
+    report = build_report(rows)
+    report["rates_issue"] = ISSUE_RATES
+    report["rates_pricing_map"] = _pricing_map_rate()
+    report["costs"] = cost_table(report, ISSUE_RATES["peak"],
+                                 ISSUE_RATES["off_peak"])
+    report["measurement_cost"] = measurement_cost(
+        rows, ISSUE_RATES["peak"], ISSUE_RATES["off_peak"])
+    if report["costs"]:
+        report["allowances"] = allowance_table(
+            report["costs"], report["costs"]["tokens_per_median_doc"])
+    return report
+
+
+def report_markdown(report: dict) -> str:
+    """The whole document: the three sections, finalized for the linter.
+
+    ``finalize_markdown`` (the output boundary added for #14295's `docs` red)
+    is part of the render, not of ``main`` — otherwise this helper and the
+    committed bundle would disagree by the `\\$` escapes and the trailing
+    newline, and the reproducibility pins would fail on a correct artifact.
+    """
+    return finalize_markdown(
+        render(report) + render_cost(report) + render_verdict(report))
+
+
+def report_json(report: dict) -> str:
+    return json.dumps({k: v for k, v in report.items() if k != "_rows"},
+                      indent=1, sort_keys=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1187,24 +1226,12 @@ def main(argv: list[str] | None = None) -> int:
                                split_max_turns=args.split_max_turns,
                                split_only=args.split_only)
     rows = load_rows(args.out)
-    report = build_report(rows)
-    report["rates_issue"] = ISSUE_RATES
-    report["rates_pricing_map"] = _pricing_map_rate()
-    report["costs"] = cost_table(report, ISSUE_RATES["peak"],
-                                 ISSUE_RATES["off_peak"])
-    report["measurement_cost"] = measurement_cost(
-        rows, ISSUE_RATES["peak"], ISSUE_RATES["off_peak"])
-    if report["costs"]:
-        report["allowances"] = allowance_table(
-            report["costs"], report["costs"]["tokens_per_median_doc"])
-    text = finalize_markdown(
-        render(report) + render_cost(report) + render_verdict(report))
+    report = report_from_rows(rows)
+    text = report_markdown(report)
     if args.markdown_out:
         args.markdown_out.write_text(text, encoding="utf-8")
     if args.json_out:
-        args.json_out.write_text(
-            json.dumps({k: v for k, v in report.items() if k != "_rows"},
-                       indent=1, sort_keys=True), encoding="utf-8")
+        args.json_out.write_text(report_json(report), encoding="utf-8")
     sys.stdout.write(text)
     return 0
 

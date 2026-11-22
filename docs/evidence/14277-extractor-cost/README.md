@@ -37,8 +37,10 @@ over
   `max_extraction_tokens` budget (owner ruling, 2026-11-21) and so both had to
   be fitted on the same terms;
 * each **twice** — a cold arm and a warm arm, which is the cache lever;
-* plus the longest document delivered as **40 and 160 turns**, to see what
-  chunking does to the constants.
+* plus the longest document delivered as **40 turns** (`--split-max-turns`
+  caps it: the cost is linear in turns, so the measured per-turn cost
+  multiplies out to any chunk count rather than the measurement being
+  repeated at every one), to see what chunking does to the constants.
 
 122 measurements, 473 provider calls. Token counts for the corpus were taken
 with `cl100k_base` (named because a token count without its tokenizer is not
@@ -57,17 +59,25 @@ measurement.
 3. **S2 and S4 barely move with document length** (R² ≈ 0.00 — the only stage
    that reads the text is S1, at R² ≈ 0.99). A small item is therefore not
    "relatively expensive": it is essentially *all* overhead. That is why a
-   1,534-token session costs 36.6k tokens of spend — as much as most documents.
+   1,534-token session costs 36.6k tokens of spend — 24× its own token count,
+   below the median document's 64.5k only because it carries so little text.
 
 ## Limits — stated, because an unstated limit reads as a result
 
 1. **One document is one user turn.** There is no document-ingest lane yet
    (`#14219`). A real ingest that splits a long document into turns changes
-   the shape: the 40/160-turn runs in the report show S1's total input stays
-   ≈ the document's own text (chunks partition it, and the per-chunk constant
-   is small against the text), while **S2/S4 output scales with the turn
-   count** and hits the stage cap on a 128k-token document. So the turn count
-   is a real cost lever, but it acts on the mapping stages, not the summarizer.
+   the shape, and the longest document's two committed shapes say how: S1's
+   input barely moves (**263,456** tokens as a single turn vs **263,780** at
+   40 turns — S1 already takes two calls on this document, so its prompt is
+   ~2× the document's own 127,914 tokens either way), while **S2/S4 output scales
+   with the turn count** (whole-item completion 23,832 → 87,746; S2+S4 alone
+   20,567 → 83,056, cold arm) and **S4 hits its cap and fails** at 40 turns
+   (`escalated output still truncated at 32000 tokens`; cold arm). So the
+   turn count is a real cost lever, but it acts on the mapping stages, not
+   the summarizer. Measuring it at 40 rather than 160 does not lose the
+   lever: the cost is linear in turns — which is what `--split-max-turns`'s
+   cap rests on — so the measured per-turn cost multiplies out to any chunk
+   count.
 2. **S3 is empty** (`sdk=None`): the graph read degrades to no results, so S4's
    prompt carries no candidate list. That is the first-pack-into-a-new-account
    shape; a pack into a POPULATED graph carries candidates and its S4 input is

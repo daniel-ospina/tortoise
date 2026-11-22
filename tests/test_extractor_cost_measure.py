@@ -206,3 +206,49 @@ def test_the_shipped_report_carries_no_bare_dollar_outside_a_code_span():
         "the shipped report carries a bare `$` outside a code span — it was "
         "hand-edited, or regenerated with a stale tool; regenerate it with "
         "`uv run python tools/extractor_cost_measure.py report …`")
+
+_EVIDENCE = _REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
+
+
+def test_the_committed_bundle_is_reproducible_by_the_shipped_renderer():
+    """The README's claim, pinned: "nothing in ``report.md`` or ``report.json``
+    is hand-written, and both can be regenerated from the raw rows".
+
+    The committed pair was first written by an EARLIER revision of
+    ``render()``: its ``long_split`` block was a single sentence
+    ("long document split into 40 turns …") that this module no longer emits
+    anywhere, and it omitted the per-row ``calls`` and stage-output figures.
+    The numbers matched, so no claim was falsified — but a reader who re-ran
+    ``report`` to check the bundle got a file that differed from the one
+    committed, which is exactly the failure the README's sentence exists to
+    rule out. Re-running the documented command fixed the artifact; this pin
+    is what keeps the next revision of a renderer from silently doing it
+    again (``long_split`` is the one block no other test covers).
+    """
+    rows = m.load_rows(_EVIDENCE / "measurements.jsonl")
+    report = m.report_from_rows(rows)
+
+    assert (_EVIDENCE / "report.md").read_text(encoding="utf-8") == \
+        m.report_markdown(report)
+    assert (_EVIDENCE / "report.json").read_text(encoding="utf-8") == \
+        m.report_json(report)
+
+
+def test_the_documented_command_regenerates_the_committed_bundle(tmp_path):
+    """The pin above calls the render functions directly, so it cannot see
+    ``main()`` stop using them. The README documents the *command*, and the
+    drift that put the old bundle on disk was a renderer revision nobody
+    re-ran it against — so the command itself is what has to reproduce the
+    committed pair.
+    """
+    md = tmp_path / "report.md"
+    js = tmp_path / "report.json"
+    assert m.main(["report",
+                   "--out", str(_EVIDENCE / "measurements.jsonl"),
+                   "--json-out", str(js),
+                   "--markdown-out", str(md)]) == 0
+
+    assert md.read_text(encoding="utf-8") == \
+        (_EVIDENCE / "report.md").read_text(encoding="utf-8")
+    assert js.read_text(encoding="utf-8") == \
+        (_EVIDENCE / "report.json").read_text(encoding="utf-8")

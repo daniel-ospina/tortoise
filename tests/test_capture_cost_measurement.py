@@ -3854,6 +3854,57 @@ def test_the_cache_split_is_emitted_on_the_keys_the_pricing_reader_reads():
         assert lane["cache_discount_unpriced"] is False
 
 
+def test_a_wrapper_forwards_the_cache_hit_count_the_row_reads():
+    """#14277: the seam reads ``last_cache_hit_tokens`` off WHATEVER it was
+    handed — and production hands it a WRAPPER (``RoutingModel``
+    primary/fallback, ``RotatingModel`` pool), never a bare adapter.
+
+    So the two forwards in ``model_adapters`` (``RoutingModel._call`` and
+    ``RotatingModel``'s ``_attempt``) are load-bearing in the silent
+    direction: a dropped or mistyped one leaves the attribute present and
+    reading 0, so every row served through a fallback prices its cached input
+    at the full miss rate with nothing red. That is the #1987/#2906 shape,
+    which is why the wrapper carries these attrs at all.
+
+    Asserted through ``_call_once`` — the seam that BUILDS the row — at both
+    wrapper levels, and on the failover arm (the SERVING lane's value, not the
+    configured primary's): asserting ``wrapper.last_cache_hit_tokens`` alone
+    would pass for a wrapper nothing reads through.
+    """
+    from tortoise.model_adapters import RotatingModel, RoutingModel, _reset_failover_cooldown
+
+    def row_cache_hit(model) -> int:
+        stats: dict = {}
+        (_resp, _finish, _ptoks, _ctoks,
+         _cost, _cp, _cm, cache_hit) = v2._call_once(
+            model, "s", "u", deadline_s=5, max_tokens=None, stats=stats)
+        return cache_hit
+
+    _reset_failover_cooldown()
+    # level 1 — RoutingModel, primary serving
+    routed = RoutingModel(CacheReportingModel(prompt_tokens=1000,
+                                              cache_hit_tokens=640),
+                          CacheReportingModel(cache_hit_tokens=900),
+                          cooldown_s=0)
+    assert row_cache_hit(routed) == 640
+
+    class Boom(CacheReportingModel):
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            raise RuntimeError("transient upstream")  # no .response → failover
+
+    _reset_failover_cooldown()
+    failed_over = RoutingModel(Boom(cache_hit_tokens=0),
+                               CacheReportingModel(cache_hit_tokens=700),
+                               cooldown_s=0)
+    assert row_cache_hit(failed_over) == 700, (
+        "the forward must come from the lane that SERVED the call")
+
+    # level 2 — RotatingModel's ``_attempt`` forward
+    pool = RotatingModel([CacheReportingModel(cache_hit_tokens=512)],
+                         cooldown_s=0)
+    assert row_cache_hit(pool) == 512
+
+
 def test_a_route_with_no_cache_dimension_still_prices_at_the_miss_rate():
     """The absence must not become a discount: a model that reports no cache
     hit at all reads ``hit = 0``, which prices at the full input rate — the
