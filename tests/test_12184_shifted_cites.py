@@ -2187,8 +2187,19 @@ _PRIOR_COUNT_CLAIMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
-#: The `hosted_api.py:START-END` spellings the audit document uses for that reader.
-_AUDIT_HOSTED_SPAN = re.compile(r"hosted_api\.py:(\d+)-(\d+)")
+#: The `hosted_api.py:START-END` spellings the audit document uses for that reader, plus the
+#: one-line `hosted_api.py:NNNN` form. The one-line form is accepted because a repair that cites the
+#: SINGLE line carrying the composition is correct — it covers the code its sentence names — and an
+#: arm that refused it reported "cites no `hosted_api.py` range", i.e. a false red that reads as an
+#: absent address rather than as a form this arm does not parse (review finding, measured: feeding a
+#: one-line cite of the composition line — `total = max(total, mark + 1)` — yielded
+#: `graded=0, problems=3`).
+#: ⛔ NO LITERAL CITE IS SPELLED IN THIS COMMENT, and that is load-bearing: the census
+#: (`tools/hosted_api_cite_census.py`) `git grep`s EVERY tracked file, so a line number written
+#: here JOINS the population it measures and reds `--check` — measured on this very edit, which
+#: moved `distinct_targets` and `above_pivot` by one each and was caught by
+#: `test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure`.
+_AUDIT_HOSTED_SPAN = re.compile(r"hosted_api\.py:(\d+)(?:-(\d+))?")
 
 
 def _prior_count_cite_problems(doc_text: str, src_lines: list[str]) -> tuple[list[str], int]:
@@ -2211,11 +2222,13 @@ def _prior_count_cite_problems(doc_text: str, src_lines: list[str]) -> tuple[lis
             )
             continue
         for para in naming:
-            spans = [(int(a), int(b)) for a, b in _AUDIT_HOSTED_SPAN.findall(para)]
+            # A bare `hosted_api.py:NNNN` is a ONE-LINE span, not an unreadable cite.
+            spans = [(int(a), int(b) if b else int(a)) for a, b in _AUDIT_HOSTED_SPAN.findall(para)]
             if not spans:
                 problems.append(
-                    f"the paragraph naming {phrase!r} cites no `hosted_api.py` range, so its "
-                    "claim rests on no address this arm can read"
+                    f"the paragraph naming {phrase!r} cites no `hosted_api.py` address, so its "
+                    "claim rests on no address this arm can read (it parses `START-END` and "
+                    "`START`; any other spelling is an address it does not see)"
                 )
                 continue
             for fragment in fragments:
