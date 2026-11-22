@@ -422,17 +422,16 @@ def test_an_OLDER_snapshot_never_overwrites_a_newer_one(armed):
 def test_a_snapshot_from_BEFORE_a_fork_reset_cannot_undo_it(armed, monkeypatch):
     """⛔ #14222 review cycle 5, P2-1: the snapshot numbers are PROCESS-LOCAL.
 
-    The reset zeroes the sequence, so a snapshot captured before the reset compared
-    as NEWER and undid the reset, restoring the other process's gauges and freezing
-    them until the sequence climbed past the stale number. The epoch makes every
-    pre-reset number unmatchable.
+    The reset stamps its own snapshot, which makes the reset's number the SMALLEST
+    — so a snapshot captured before the reset compared as NEWER and undid the reset,
+    restoring the other process's gauges and freezing them until the sequence
+    climbed past the stale number. The epoch makes every pre-reset number
+    unmatchable.
 
-    ⛔ AND THE RESET NO LONGER PUBLISHES (round 9's P2). Reading
-    ``projection_worker_gauges()`` after the reset can no longer prove anything —
-    a read path does not reach the metrics backend at all — so this leg watches the
-    PUBLISH CALLS instead: after a reset, the stale snapshot must produce **none**.
-    That is sharper than the old value assertion, which would now pass for the
-    wrong reason (the gauge simply keeps the parent's value).
+    ⛔ THIS LEG READS THE PUBLISH CALLS, NOT THE GAUGE (#14222, round 10). A value
+    assertion cannot tell "the reset republished 0" from "the stale snapshot
+    overwrote it with 0", so the publish boundary is what is asserted: the reset
+    publishes ONCE (its own zeros), and the stale snapshot produces no second call.
     """
     slow = _SlowProjector()
     live_write.write({"type": "A"}, log=_Log(), project=slow, tenant=_TENANT)
@@ -448,10 +447,11 @@ def test_a_snapshot_from_BEFORE_a_fork_reset_cannot_undo_it(armed, monkeypatch):
     worker._cond_pid = os.getpid() + 1_000_000  # a fork is observed…
     calls.clear()
     worker.stats()                              # …and the reset runs
-    assert calls == [], (
-        "the reset PUBLISHED from a read path — that is a foreign call on a lock "
-        "no hook of ours replaces (round 9's P2)")
+    assert [(c["depth"], c["pending_positions"]) for c in calls] == [(0, 0)], (
+        "the reset must republish the CHILD's own empty queue (cycle 3's P2-2 — a "
+        f"preforked child may not advertise the parent's backlog): {calls}")
 
+    calls.clear()
     worker._publish(stale)                      # arrives late, from the old epoch
     assert calls == [], (
         "a pre-reset snapshot reached the metrics backend and restored the other "
@@ -460,6 +460,78 @@ def test_a_snapshot_from_BEFORE_a_fork_reset_cannot_undo_it(armed, monkeypatch):
     slow.gate.set()
     assert projection_worker.wait_for_drain(10) is True
     projection_worker.shutdown(drain=True, timeout=5)
+
+
+def _runs_within(seconds: float, fn) -> bool:
+    """Did *fn* return inside *seconds*? Runs it on a daemon thread so a BLOCKED
+    path fails the assertion instead of hanging the suite (a blocked lock is not
+    an exception — that is the whole point of the test below)."""
+    done = threading.Event()
+
+    def runner():
+        try:
+            fn()
+        finally:
+            done.set()
+
+    threading.Thread(target=runner, daemon=True).start()
+    return done.wait(seconds)
+
+
+def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed, monkeypatch):
+    """⛔ ROUND 10'S P2 + two P3s: the wedge is prometheus_client's OWN lock.
+
+    `prometheus_client` (0.26.0) gives every metric family a `_lock` and every
+    `MutexValue` its own plain `threading.Lock`. A child that forks while a PEER
+    THREAD holds one inherits a lock with no owner, so its next
+    `set`/`get`/`labels`/`collect` blocks FOREVER — and `contextlib.suppress`
+    cannot help, because a blocked lock is not an exception.
+
+    That is not fixable by moving the replay, and an earlier revision of this fix
+    tried: it dropped the publish from the reset (the READ path) and thereby moved
+    the wedge onto the WRITE path (`submit`'s ACK publish) and the COLLECT path
+    (`projection_worker_gauges()`, which is what `monitoring.metrics()` serves for a
+    health read). The reset now replaces those third-party locks instead — the same
+    reasoning it already applied to its own two.
+
+    This leg reproduces the fork EXACTLY: it HOLDS the prometheus locks across the
+    reset, then requires all three paths to return — a read, a health read, and a
+    write — instead of blocking. ⛔ If the replacement is removed, this test does
+    not fail slowly: those three calls never return, which is why each runs on a
+    daemon thread with a deadline.
+    """
+    worker = projection_worker.worker()
+    gauge = monitoring.PROJECTION_QUEUE_DEPTH
+    positions = monitoring.PROJECTION_PENDING_POSITIONS
+
+    held = []
+    for holder in (gauge, gauge._value, positions, positions._value):
+        lock = threading.Lock()
+        lock.acquire()               # the peer thread's lock, held at `fork()`
+        holder._lock = lock
+        held.append(lock)
+    assert all(lock.locked() for lock in held)
+
+    # A fork is now observed by BOTH readers of the pid.
+    worker._cond_pid = os.getpid() + 1_000_000
+    monkeypatch.setattr(monitoring, "_PROJECTION_METRICS_PID", os.getpid() + 1_000_000)
+    try:
+        assert _runs_within(10, worker.stats), (
+            "a READ path blocked on a prometheus lock inherited across fork — the "
+            "reset must replace it, not move the wedge onto another path")
+        assert _runs_within(10, monitoring.projection_worker_gauges), (
+            "the HEALTH read (monitoring.metrics() -> projection_worker_gauges) "
+            "blocked on an inherited prometheus lock")
+        assert _runs_within(10, lambda: monitoring.record_projection_queue_state(
+            depth=1, pending_positions=1)), (
+            "the PUBLISH blocked on an inherited prometheus lock")
+    finally:
+        for lock in held:
+            if lock.locked():
+                lock.release()
+
+    # …and the reset really did replace them: the gauges read the child's values.
+    assert monitoring.projection_worker_gauges()["queue_depth"] == 1
 
 
 def test_a_metrics_failure_never_escapes_into_the_loop(armed, monkeypatch):
@@ -1126,29 +1198,25 @@ def test_a_drain_predicate_is_exact_even_after_a_fork(armed):
         "the child's counters are its own — the parent's are not its work")
 
 
-def test_a_forked_childs_READ_never_publishes_and_its_FIRST_WRITE_republishes(
-        armed, monkeypatch):
-    """⛔ #14222 review cycle 3, P2-2 AND round 9's P2, held apart on purpose.
+def test_a_forked_child_REPUBLISHES_its_own_state_on_any_path(armed, monkeypatch):
+    """⛔ #14222 review cycle 3, P2-2: a child must not inherit the parent's LAG.
 
-    Two recorded findings pull in opposite directions here, and the resolution is
-    worth reading before changing either half:
+    The fork reset empties the queue and zeroes the counters — and the three GAUGES
+    are per-process readings too. Leaving them at the parent's last published value
+    made a preforked child advertise a PERMANENT backlog it does not have, while
+    `stats()` reported 0; the gauges and `stats()` disagreeing is exactly the
+    invariant cycle 1's P1-1 was about.
 
-    * cycle 3 (P2-2) — a forked child must not inherit the parent's lag. Leaving
-      the three GAUGES at the parent's last published value made a preforked child
-      advertise a PERMANENT backlog it does not have, while `stats()` reported 0.
-    * round 9 (P2) — the fix for the above published FROM THE RESET, and the reset
-      runs on every entry point including the read paths. The publish reaches
-      ``Gauge.set`` → ``prometheus_client``'s ``MutexValue.set``, which takes a
-      third lock (an inherited ``threading.Lock`` whose owner did not survive the
-      ``fork()``) that no hook of ours replaces — so a read in a forked child could
-      hang FOREVER and silently. A blocked lock is not an exception, so `_emit`'s
-      suppression cannot help.
+    ⛔ AN EARLIER REVISION OF THIS FIX BROKE THAT ON PURPOSE AND WAS WRONG (rounds
+    9/10). It stopped the reset publishing, on the theory that a READ path must not
+    reach the metrics backend — which is true, but the backend's lock is what had
+    to be FIXED (`test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang`
+    covers that), not avoided. Not publishing left a read-only child advertising the
+    parent's backlog AND, in the same `metrics()` dict, an age computed live as
+    `0.0` — a combination that cannot occur in any live process.
 
-    The resolution: **a read never publishes; the child's first WRITE does.** The
-    epoch bump still makes every pre-reset snapshot unmatchable, so the write's
-    publish lands and a parent's snapshot cannot override it. The declared cost is
-    a child that only reads — its gauges stay at the parent's values until its
-    first write, and ``stats()`` is the authoritative reading there.
+    So the child republishes from the reset, and the epoch keeps the parent's
+    snapshots from landing on top of it.
     """
     slow = _SlowProjector()
     log = _Log()
@@ -1157,10 +1225,6 @@ def test_a_forked_childs_READ_never_publishes_and_its_FIRST_WRITE_republishes(
                          tenant=_TENANT)
     assert slow.in_flight.wait(5)
     assert monitoring.projection_worker_gauges()["pending_positions"] == 3
-
-    calls = []
-    monkeypatch.setattr(monitoring, "record_projection_queue_state",
-                        lambda **kw: calls.append(kw))
 
     worker = projection_worker.worker()
     worker._cond_pid = os.getpid() + 1_000_000     # pretend this was inherited
@@ -1175,20 +1239,9 @@ def test_a_forked_childs_READ_never_publishes_and_its_FIRST_WRITE_republishes(
     assert stats.inline_fallbacks == 0, (
         "a child reports its OWN inline fallbacks — an inherited count is another "
         f"process's work claimed as its own: {stats.inline_fallbacks}")
-    assert calls == [], (
-        "the fork reset published from a READ path — the metrics backend's own "
-        "lock is inherited and cannot be replaced, so a scrape callback in a "
-        f"child can hang forever: {calls}")
-    assert monitoring.projection_worker_gauges()["pending_positions"] == 3, (
-        "this is the DECLARED residual, pinned so it stays declared: a child that "
-        "has not written yet still exports the parent's last values, and `stats()` "
-        "is the authoritative reading there")
-
-    # …and the child's FIRST deferred write republishes, from its own state.
-    assert worker.submit(_pending_item(1)) is True
-    assert any(c["pending_positions"] == 1 and c["depth"] == 1 for c in calls), (
-        "the child's own first write must publish the CHILD's queue, not leave the "
-        f"parent's reading in place: {calls}")
+    assert monitoring.projection_worker_gauges()["pending_positions"] == 0, (
+        "a child must not export the parent's phantom backlog — cycle 3's P2-2")
+    assert monitoring.projection_worker_gauges()["oldest_pending_seconds"] == 0.0
 
     slow.gate.set()
     assert projection_worker.wait_for_drain(10) is True
