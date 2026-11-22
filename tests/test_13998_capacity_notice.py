@@ -636,20 +636,31 @@ def test_a_raising_METER_answers_no_reading_through_the_real_seam(monkeypatch):
     documented as covering a meter fault: `allowance_gate.read_dimension` is a
     documented NON-RAISING seam ("it never refuses, never raises for a meter
     failure … a caller that must not guess gets ``None`` and says so"), so the
-    raise is converted to `None` one layer below this module. The status an
-    operator therefore sees is `no-reading` — the one `sweep_pass` reports as
-    "the gauge is not being written" — which is exactly the conflation the docs
-    now state instead of hiding.
+    raise is converted to `None` one layer below this module and the status an
+    operator sees is `no-reading` — the same status as "never measured".
+
+    ⛔ THIS PIN NEEDS A POSITIVE CONTROL, and an earlier cut of it lacked one: the
+    asserted value is what the NO-RAISE state also produces, so a patch that
+    silently stopped applying would leave the row green and vacuous. It therefore
+    records the meter's calls and asserts the patched meter RAN, and it patches
+    the dimension named by `cn.DIMENSION` (not a literal) so a rename there cannot
+    silently revert it to vacuity.
     """
+    calls = []
+
     def boom(org_id):
+        calls.append(org_id)
         raise RuntimeError("the meter read failed: HTTP 503")
 
     patched = tuple(
         dataclasses.replace(dim, meter=boom)
-        if dim.dimension == "graph_storage" else dim
+        if dim.dimension == cn.DIMENSION else dim
         for dim in ag.DIMENSIONS)
     monkeypatch.setattr(ag, "DIMENSIONS", patched)
     assert cn.evaluate(ORG_ID, limits=_limits(102)) == (None, "no-reading")
+    assert calls == [ORG_ID], (
+        "the patched meter was never consulted — this row would be vacuous"
+    )
 
 
 def test_evaluate_sends_nothing_without_an_armed_allowance():

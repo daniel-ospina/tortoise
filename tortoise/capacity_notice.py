@@ -620,20 +620,19 @@ def evaluate(org_id: str, *, limits: dict | None = None,
             reading = allowance_gate.read_dimension(DIMENSION, org_id)
         except Exception as exc:  # the meter half, at THIS seam only
             # ⛔ NOT A METER-FAULT GUARD — an earlier cut of this comment claimed it was,
-            # and that claim was wrong (measured: a meter patched to raise answers
+            # and the log line below still said "the meter … could not be read", which was
+            # the same false attribution (measured: a meter patched to raise answers
             # `no-reading`, never this status). `allowance_gate.read_dimension` is a
             # documented NON-RAISING seam: it catches the METER's own exception and
             # answers `None` ("NOT A GATING API … never raises for a meter failure"), so
-            # a meter outage reaches the `reading is None` branch BELOW as `no-reading`
-            # and cannot arrive here. What this guard does catch is `read_dimension`
-            # itself failing before it reaches the meter — an undeclared dimension
-            # (`declared[dimension]` raising `KeyError`) — a WIRING fault in this module,
-            # not a gauge fault. Naming an outage `unreadable-reading` from here is
-            # impossible; `sweep_pass`'s "no-reading dominates ⇒ the gauge is not being
-            # written" is the reading an outage actually produces.
+            # a meter outage reaches the `reading is None` branch BELOW and cannot arrive
+            # here. What this guard catches is `read_dimension` ITSELF failing before it
+            # reaches the meter — an undeclared dimension (`declared[dimension]` raising
+            # `KeyError`) — a WIRING fault in this module, not a gauge fault. Both the
+            # comment and the log line now name that seam fault, never a meter one.
             logger.warning(
-                "capacity notice: the meter for %s could not be read (%s) "
-                "— no email", org_id, _logged_reason(exc))
+                "capacity notice: the meter READER (read_dimension) for %s failed "
+                "before it could answer (%s) — no email", org_id, _logged_reason(exc))
             return None, "unreadable-reading"
     if reading is None:
         # ABSENT (never measured) or a METER FAULT — indistinguishable to a caller
@@ -1027,13 +1026,14 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     decides on — not the type alone, because `supabase_control` raises
     `RuntimeError` for BOTH a rejected column and a transport failure),
     ``unreadable-allowance`` and ``unreadable-reading`` (a gauge could not be
-    read: ``unreadable-allowance`` is the ALLOWANCE instrument raising, and
-    ``unreadable-reading`` is a reading that cannot be turned into a percentage
-    (or ``read_dimension`` itself failing). ⛔ A METER that raises is NOT this
-    status: `allowance_gate.read_dimension` is a documented non-raising seam that
-    catches the meter's exception and answers ``None``, so a meter outage reaches
-    this caller as ``no-reading`` — the status whose dominant count `sweep_pass`
-    reports as "the gauge is not being written"; returned verbatim, and listed
+    read: ``unreadable-allowance`` is the ALLOWANCE instrument raising OR its
+    figure being unusable (a non-number), and ``unreadable-reading`` is a reading
+    that cannot be turned into a percentage (or ``read_dimension`` itself
+    failing). ⛔ A METER that raises is NOT this status: `allowance_gate.read_dimension`
+    is a documented non-raising seam that catches the meter's exception and answers
+    ``None``, so a meter outage reaches this caller as ``no-reading`` — the same
+    status as "never measured", and this module does not claim to tell them apart;
+    returned verbatim, and listed
     here because the closed list below is what a caller aggregates on), ``below-threshold``/
     ``no-reading``/``no-allowance`` (the
     evaluate reasons are passed through verbatim so the caller can aggregate
