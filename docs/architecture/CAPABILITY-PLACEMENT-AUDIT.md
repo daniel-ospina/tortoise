@@ -108,15 +108,15 @@ text; **all 221 comparable ones resolve at BOTH heads** — every written path r
 exists at `ccb49741b2ec` — and **the thirteen that are NOT comparable are addresses written at a head past the pin's EOF** — twelve
 of them re-derived at such a head by this document's own re-points, the thirteenth moved past it by
 `main`'s `#14169` — each
-named at the address this document writes for it: `sdk.py:57972`, `:58120` (the `entity_type="event"` FTS call), `:58336`/`:58338` (the session-detail
+named at the address this document writes for it: `sdk.py:58119`, `:58120` (the `entity_type="event"` FTS call), `:58336`/`:58338` (the session-detail
 read's `proj.g.query(` call and its column list), `sdk.py:58987` (the `:Source` traversal), `:62020`/`:62040` (the `:Meta` read and
 its `_config_reset_state` delegate), `search_engine.py`'s `:7170`/`:7201` (the operator-expansion
 leg's preview and its COUNT) and `:7577`/`:7579`, `mcp_server.py`'s `:11590` (the `:Tag` traversal §2.5's row
-quotes — the ONE of the thirteen that `main` moved, not this branch), and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid`
+quotes — the ONE of the thirteen that `main` moved, not this branch), and `hosted_api.py`'s `:51493` (the `s.actor_user_id = $uid`
 condition) — every one of their written lines sits past the pin's copy of its file
 (`git show ccb49741b2ec:tortoise/sdk.py | wc -l` -> `56415`; `…/search_engine.py` -> `7071`; `…/mcp_server.py` -> `11466`; `…/hosted_api.py` -> `49851`), so all thirteen
 were re-derived at a head the pin predates. So the drift is **128 of the 221 comparable, plus eight of those thirteen pairs** (the
-five that do not exist at `main` either are `sdk.py`'s `:62020`/`:62040`, `hosted_api.py`'s `:50935` and
+five that do not exist at `main` either are `sdk.py`'s `:62020`/`:62040`, `hosted_api.py`'s `:51493` and
 `search_engine.py`'s `:7577`/`:7579`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
@@ -602,7 +602,7 @@ MIXED set, and precision here is the point — it is not one claim:
   the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:24790`) and in the
   session-detail endpoint's OWN point lookup, which has no `CONTAINS` walk either
   (`hosted_api.py:25148-25167`, `s.turn_count, s.actor_user_id, s.harness,` at `:25151`), a filter
-  in the **LIST** endpoint's own conditions (`hosted_api.py:50935`, `s.actor_user_id = $uid`) and carries its own `:Session` index
+  in the **LIST** endpoint's own conditions (`hosted_api.py:51493`, `s.actor_user_id = $uid`) and carries its own `:Session` index
   (`projection/__init__.py:21185`) — sibling, filter, index, and no walk, so `none` like its neighbours;
   `entity_links_attempted` is a sibling column of the entity-link walk
   (`session_schema.py:916-917`); `value_nodes_created` and `value_nodes_held` are BOTH named by the commit-path

@@ -1205,7 +1205,7 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
 #: consistent, and wrong — because nothing DERIVED it, and a self-consistent stale split cannot be caught
 #: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
 _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
-    ("tortoise/sdk.py", 57972): 56415,
+    ("tortoise/sdk.py", 58119): 56415,
     ("tortoise/sdk.py", 58120): 56415,
     ("tortoise/sdk.py", 58336): 56415,
     ("tortoise/sdk.py", 58338): 56415,
@@ -1216,8 +1216,42 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/search_engine.py", 7201): 7071,
     ("tortoise/search_engine.py", 7577): 7071,
     ("tortoise/search_engine.py", 7579): 7071,
-    ("tortoise/hosted_api.py", 50935): 49851,
+    ("tortoise/hosted_api.py", 51493): 49851,
     ("tortoise/mcp_server.py", 11590): 11466,
+}
+#: The FRAGMENT each non-comparable pair is written to name, at the line the document writes for it.
+#:
+#: WHY THIS EXISTS. Every arm above grades a pair's ADDRESS, never its CONTENT — and these thirteen are
+#: non-comparable precisely because no arm can compare their text against `main` (their files are past the
+#: pin's EOF there too). So for four review rounds the enumeration's promise — "each named at the address
+#: this document writes for it" — was prose. Measured, it was false TWICE on the same head: `hosted_api.py`'s
+#: `:50935` named a demand-dedupe comment while `s.actor_user_id = $uid` sat at `:51493` (stale by 558 lines),
+#: and `sdk.py`'s `:57972` named a docstring line while the `entity_type="event"` FTS call it is paired with
+#: opens at `:58119` — an address `#13994` had already written one file-length wrong as `57951`, which this
+#: branch then offset by `+21` without resolving, so the error survived a re-derivation that was supposed to
+#: catch it. Both shipped green: `_PIN_EOF_PAIRS` membership is a hand-written table, and a table cannot
+#: notice that the line it names holds something else.
+#:
+#: WHAT IT GRADES. (1) The table's key set IS `_PIN_EOF_PAIRS`'s — a pair that crosses the pin's EOF must
+#: arrive with the fragment a reader can check, so a new non-comparable pair REDS here instead of joining the
+#: population ungraded. (2) Each pair's line at this head CONTAINS its fragment. That is the arm that
+#: reddens when `main` inserts lines above any of these thirteen, which is how both defects arrived: the
+#: non-comparable half is exactly the population no text comparison can protect, so it needs the comparison
+#: its own head can make.
+_NONCOMPARABLE_FRAGMENTS: dict[tuple[str, int], str] = {
+    ("tortoise/sdk.py", 58119): "hybrid = self._tortoise_fts_query(",
+    ("tortoise/sdk.py", 58120): 'entity_type="event"',
+    ("tortoise/sdk.py", 58336): "proj.g.query(",
+    ("tortoise/sdk.py", 58338): "s.turn_count, s.actor_user_id, s.harness,",
+    ("tortoise/sdk.py", 58987): "MATCH (s:Source {url:$url})-[:references]->(n)",
+    ("tortoise/sdk.py", 62020): "MATCH (m:Meta {key:$key}) RETURN m.recordedAt",
+    ("tortoise/sdk.py", 62040): "def _config_reset_state(self)",
+    ("tortoise/search_engine.py", 7170): "CALL { WITH op MATCH (op)-[r2:IMPL|hasPart]-(other:Point)",
+    ("tortoise/search_engine.py", 7201): "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)",
+    ("tortoise/search_engine.py", 7577): "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c",
+    ("tortoise/search_engine.py", 7579): "MATCH (m:Event)-[r2:aboutSubject]->(:Subject) RETURN count(r2) AS c",
+    ("tortoise/mcp_server.py", 11590): "MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)",
+    ("tortoise/hosted_api.py", 51493): "s.actor_user_id = $uid",
 }
 #: The split's three published sentences. Each is matched on the header's emphasis-stripped body, like every
 #: other figure pattern in this file, and each group is graded as a NUMBER (`_as_int`), so an edition may
@@ -1356,6 +1390,63 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "but the header's pin-side `wc -l` parenthetical does not state it. Without that figure the "
             "five numerals above are unverifiable prose, which is how they shipped wrong."
         )
+
+
+def test_every_noncomparable_pair_lands_on_the_fragment_the_header_quotes() -> None:
+    """A non-comparable pair is outside every text comparison, so its own line is the only witness left.
+
+    The population `_PIN_EOF_PAIRS` names is defined by the pin's file lengths, not by content: at `main`
+    those files are shorter than the address, so nothing can compare the cite's text there. That is why
+    `:50935` (a dedupe comment) and `:57972` (the `subjectKind` docstring) both shipped inside a sentence
+    promising every one of them was "re-derived at a head the pin predates". This arm makes the pair name
+    the thing it is written to name, at its own head — the comparison the split's definition removes.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    body = _unbolded(text)
+
+    # (1) the table covers the population, by KEY SET — not by "every table entry is still a pair", which
+    # would let a newly non-comparable pair enter ungraded while the arm stayed green.
+    assert set(_NONCOMPARABLE_FRAGMENTS) == set(_PIN_EOF_PAIRS), (
+        "`_NONCOMPARABLE_FRAGMENTS` and `_PIN_EOF_PAIRS` describe different populations: "
+        f"only in the fragments table {sorted(set(_NONCOMPARABLE_FRAGMENTS) - set(_PIN_EOF_PAIRS))}, "
+        f"only in the split {sorted(set(_PIN_EOF_PAIRS) - set(_NONCOMPARABLE_FRAGMENTS))}. A pair that "
+        "crossed the pin's EOF is compared against nothing, so it must arrive with the fragment its line "
+        "is supposed to hold — add the entry, do not widen the exclusion."
+    )
+
+    # (2) each pair's line at this head holds its fragment, and the header names the pair (the two facts the
+    # enumeration's own sentence promises, checked together so a re-point cannot satisfy one by breaking the
+    # other).
+    start = body.find("that are NOT comparable")
+    end = body.find("past the pin's copy of its file")
+    assert start != -1 and end > start, (
+        "the header no longer publishes the non-comparable enumeration (`that are NOT comparable` at "
+        f"{start}, `past the pin's copy of its file` at {end}) — re-point this arm at how the split is "
+        "published now, do not delete it"
+    )
+    region = body[start:end]
+    problems: list[str] = []
+    for (path, line), fragment in sorted(_NONCOMPARABLE_FRAGMENTS.items()):
+        source = (REPO / path).read_text(encoding="utf-8").splitlines()
+        if line > len(source):
+            problems.append(f"{path}:{line} is past this head's file ({len(source)} lines)")
+            continue
+        if fragment not in source[line - 1]:
+            problems.append(
+                f"{path}:{line} is {source[line - 1].strip()[:70]!r}, not {fragment!r}"
+            )
+        if not any(
+            form in region
+            for form in (f"`{path}:{line}`", f"`{path.rsplit('/', 1)[-1]}:{line}`", f"`:{line}`")
+        ):
+            problems.append(f"{path}:{line} is not named in the non-comparable enumeration")
+    assert not problems, (
+        "the comparability split counts a pair as non-comparable — the one population no text comparison "
+        "reaches — and its address does not hold what the document says it holds:\n  "
+        + "\n  ".join(problems)
+        + "\nRe-derive the pair at this head by CONTENT (`grep -n -F '<fragment>' <path>`) and move the "
+        "header, this table and `_PIN_EOF_PAIRS` together."
+    )
 
 
 def test_a_carried_forward_figure_is_reported() -> None:
