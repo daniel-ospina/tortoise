@@ -208,6 +208,17 @@ _FENCED = {
     "list-indented (2 spaces, still a fence)": (
         "# t\n\n  ```\n  echo $HOME\n  ```\n\nafter $6\n",
         "  ```\n  echo $HOME\n  ```"),
+    # REGRESSION GUARD: a blockquote-fenced EXAMPLE inside a fence is content.
+    # Stripping `>` markers on the closer (rather than only to the opener's own
+    # depth) let `> ``` ` close the enclosing fence, after which every `$` in the
+    # rest of the document stayed bare — the silent direction. The closer must
+    # be tested at the OPENER's depth, which here is zero.
+    "quoted fence inside a fence": (
+        "# t\n\n```markdown\n> ```bash\n> echo $HOME\n> ```\n```\n$5 total\n",
+        "```markdown\n> ```bash\n> echo $HOME\n> ```\n```"),
+    "nested blockquote fence": (
+        "# t\n\na $1\n\n> > ```\n> > echo $HOME\n> > ```\n\nb $2\n",
+        "> > ```\n> > echo $HOME\n> > ```"),
     # An unclosed fence makes the REST of the document code — deliberate, and
     # stated in the docstring.
     "unclosed fence": ("# t\n\ntotal $5\n\n```\necho $HOME\nmore $7 code\n",
@@ -226,7 +237,8 @@ def test_a_fenced_block_is_never_escaped(case):
     # Every prose figure this case carries outside the fence must be escaped,
     # INCLUDING one after the fence — that is what proves the fence state was
     # left, rather than escaping being switched off for the rest of the doc.
-    for before, after in (("total $5", "total \\$5"), ("z $2", "z \\$2")):
+    for before, after in (("total $5", "total \\$5"), ("z $2", "z \\$2"),
+                          ("$5 total", "\\$5 total"), ("b $2", "b \\$2")):
         if before in doc:
             assert after in out, f"{case}: prose {before!r} must be escaped"
     if case != "unclosed fence" and "after $6" in doc:

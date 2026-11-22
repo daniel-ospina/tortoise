@@ -851,32 +851,49 @@ _BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
 _FENCE_OPEN = re.compile(r"^ {0,3}(?P<delim>`{3,}|~{3,})(?P<info>.*)$")
 
 
-def _unquote(line: str) -> str:
-    """Drop blockquote markers, so a fence inside a quote is recognised."""
-    while True:
+def _quote_depth(line: str) -> int:
+    """How many blockquote markers this line starts with."""
+    depth = 0
+    while _BLOCKQUOTE.match(line):
+        line = line[_BLOCKQUOTE.match(line).end():]
+        depth += 1
+    return depth
+
+
+def _strip_markers(line: str, depth: int) -> str:
+    """Drop AT MOST ``depth`` blockquote markers — never more than the opener had."""
+    for _ in range(depth):
         marker = _BLOCKQUOTE.match(line)
         if not marker:
-            return line
+            break
         line = line[marker.end():]
+    return line
 
 
-def _opens_fence(line: str) -> str:
-    """The opener's FULL delimiter run, or "" if this line opens no fence."""
-    match = _FENCE_OPEN.match(_unquote(line))
+def _opens_fence(line: str) -> tuple[str, int]:
+    """(the opener's FULL delimiter run, its blockquote depth) or ("", 0)."""
+    depth = _quote_depth(line)
+    match = _FENCE_OPEN.match(_strip_markers(line, depth))
     if not match:
-        return ""
+        return "", 0
     delim = match.group("delim")
     if delim[0] == "`" and "`" in match.group("info"):
         # CommonMark: a backtick fence's info string may not contain a backtick.
-        return ""
-    return delim
+        return "", 0
+    return delim, depth
 
 
-def _closes_fence(line: str, delim: str) -> bool:
-    """A closer is AT LEAST as long as its opener, and only spaces follow."""
+def _closes_fence(line: str, delim: str, depth: int) -> bool:
+    """A closer is AT LEAST as long as its opener, and only spaces follow.
+
+    ``depth`` is the OPENER's blockquote depth, and it is the whole point: a
+    ``>``-prefixed line INSIDE a fence is fence CONTENT, never a container
+    marker, so stripping markers the opener did not have would let a quoted
+    example close the block it is quoted inside.
+    """
     return re.fullmatch(
         r" {0,3}" + re.escape(delim[0]) + "{" + str(len(delim)) + r",}[ \t]*",
-        _unquote(line)) is not None
+        _strip_markers(line, depth)) is not None
 
 
 def escape_dollars_outside_code(markdown: str) -> str:
@@ -896,9 +913,11 @@ def escape_dollars_outside_code(markdown: str) -> str:
     so both kinds of it pass through untouched: inline spans, located by
     matching backtick RUNS (a double-backtick span is one unit), and fenced
     blocks, located by the CommonMark fence rules — at most three spaces of
-    indentation, blockquote markers ignored, the closer at least as long as its
-    opener with nothing but whitespace after it. Escaping a fenced ``$HOME``
-    would print a backslash the author never wrote.
+    indentation, the closer at least as long as its opener with nothing but
+    whitespace after it, and blockquote markers stripped only to the OPENER's
+    own depth (a ``>``-prefixed line inside a fence is content and closes
+    nothing). Escaping a fenced ``$HOME`` would print a backslash the author
+    never wrote.
 
     MD012 (a blank line at end of file) is NOT this function's cause; see
     ``finalize_markdown``.
@@ -907,10 +926,11 @@ def escape_dollars_outside_code(markdown: str) -> str:
 
     * An inline span that WRAPS a line is not tracked — the scan is line-local.
     * A line with an ODD number of backtick runs leaves that line's tail read as
-      code, so a bare ``$`` there stays bare. That direction is SILENT: the
-      ``docs`` gate reports it only when the ``$`` pairing happens to swallow an
-      emphasis or code delimiter on the same line — a line left bare this way
-      lints clean (measured), so the gate must not be relied on to catch it.
+      code, so a bare ``$`` there stays bare. Treat that direction as
+      UNMONITORED: whether the ``docs`` gate reports such a line depends on how
+      markdownlint happens to dislike the shape (measured — one such line lints
+      clean, another reds MD038 from the backtick pairing alone with no ``$``
+      involvement), so the gate cannot be relied on to catch it.
     * An UNCLOSED fence leaves the rest of the document unescaped. That one is
       deliberate: a fence that never closes really does make what follows code.
     * An INDENTED code block (4+ spaces, which CommonMark makes code) is not
@@ -924,16 +944,19 @@ def escape_dollars_outside_code(markdown: str) -> str:
     """
     out: list[str] = []
     fence: str = ""
+    fence_depth: int = 0
     for line in markdown.split("\n"):
         if fence:
             out.append(line)
             out.append("\n")
-            if _closes_fence(line, fence):
+            if _closes_fence(line, fence, fence_depth):
                 fence = ""
+                fence_depth = 0
             continue
-        opened = _opens_fence(line)
+        opened, depth = _opens_fence(line)
         if opened:
             fence = opened
+            fence_depth = depth
             out.append(line)
             out.append("\n")
             continue
