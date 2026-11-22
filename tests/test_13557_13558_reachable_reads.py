@@ -1371,9 +1371,29 @@ def test_every_preposition_the_module_declares_reports_the_qualifier_it_introduc
     from tortoise.state_intent import detect_state_question
 
     declared = state_intent._PREPOSITIONS
-    assert len(declared) >= 40, (
-        f"the declared preposition class collapsed to {len(declared)} members "
-        f"({declared!r}) — a list that short cannot be the class its prose names")
+    # ⛔ THE CLASS ITSELF IS PINNED, NOT JUST EACH MEMBER'S WIRING (round-26 review, P2,
+    # measured). The loop below drives every member the tuple CURRENTLY holds, so it is a
+    # self-reference: delete a member and the loop simply stops asking about it. Measured
+    # before this block existed — removing `above` left `signal=None` (exactly #14033's
+    # defect, restored) and this file stayed GREEN, because only the members that happen
+    # to have their own row elsewhere (`by|for|in|on|during|until|as|than`) were pinned by
+    # anything but their own presence. Narrowing the class is a DECISION; it must red
+    # here and be argued, never quietly un-cover a spelling. Widening is pinned by the
+    # same equality: a new member is new behaviour and needs its own review.
+    assert declared == (
+        "about", "above", "across", "against", "along", "alongside", "amid",
+        "amidst", "among", "amongst", "around", "as", "at", "behind", "below",
+        "beneath", "beside", "besides", "between", "beyond", "by", "concerning",
+        "despite", "during", "except", "for", "from", "in", "inside", "into",
+        "near", "notwithstanding", "of", "on", "onto", "outside", "over", "past",
+        "per", "regarding", "than", "through", "throughout", "till", "to",
+        "toward", "towards", "under", "underneath", "unlike", "until", "upon",
+        "via", "with", "within", "without",
+    ), (
+        f"the declared preposition class changed to {len(declared)} members "
+        f"({declared!r}). A member REMOVED un-covers the spelling it names and restores "
+        f"#14033's silent cue; a member ADDED is new behaviour. Both are decisions: "
+        f"change this tuple in the same commit and say why")
     assert len(set(declared)) == len(declared), (
         "a duplicated member is a copy-paste artefact, not a class")
 

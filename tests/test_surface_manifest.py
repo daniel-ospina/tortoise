@@ -1380,6 +1380,36 @@ def test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE(tmp_path, monkeyp
     assert doc.get("cut_at_commit"), doc.get("cut_at_commit")
 
 
+def test_the_duplicate_key_loader_DOES_still_accept_a_merge_key(tmp_path):
+    """The duplicate check must not refuse YAML the file is allowed to use (P3, r25).
+
+    Measured before the fix, in this worktree: the pre-scan walked `node.value` BEFORE
+    `flatten_mapping`, so a legitimate `<<: *anchor` reached `construct_object` as the
+    raw `tag:yaml.org,2002:merge` tag and died with *"could not determine a constructor
+    for the tag 'tag:yaml.org,2002:merge'"* — a refusal that names PyYAML rather than a
+    duplicate, on a file that has no duplicate at all. Merge keys are the natural way to
+    de-duplicate 39 near-identical rows, so the first lane to try it would be refused by
+    every gating reader for a reason that is not true.
+
+    ⛔ AND FLATTENING FIRST WOULD BE THE MIRROR FAULT, also measured: `flatten_mapping`
+    REPLACES `<<: *base` with the merged pairs, so the ordinary `<<: *base` plus an
+    explicit OVERRIDE of one key reads as a duplicate and is refused — the YAML spec says
+    the explicit key wins. So both halves are pinned here: the merge loads, the override
+    resolves the YAML way, and a real duplicate is still refused.
+    """
+    sm = _load_manifest_tool()
+    loader = sm._NoDuplicateKeyLoader
+
+    merged = yaml.load(
+        "base: &b {x: 1, y: 9}\ntop:\n  <<: *b\n  x: 2\n", Loader=loader)
+    assert merged["top"] == {"x": 2, "y": 9}, (
+        "a merge key was refused or the explicit override did not win — the check now "
+        f"rejects YAML the spec allows: {merged!r}")
+
+    with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'a'"):
+        yaml.load("a: 1\na: 2\n", Loader=loader)
+
+
 def test_the_check_refuses_when_the_ordering_table_is_missing(tmp_path, monkeypatch, capsys):
     sm = _load_manifest_tool()
     monkeypatch.setattr(sm, "ORDER_FILE", tmp_path / "no-order.yml")
