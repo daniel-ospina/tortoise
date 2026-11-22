@@ -965,9 +965,11 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   ⛔ **NOT EVERY INLINE FOLD IS COUNTED HERE, and the difference is the point**
 #:   (round-14 review, P3): the STRUCTURAL arms fold inline on every write at any
 #:   depth and move no counter at all — `live_write._submitted_to_worker` returns
-#:   `False` for `journal_skipped or record_sink is not None or not durable`
-#:   (`tortoise/live_write.py:334`) and for a `tenant is None` (`:335`) before any
-#:   queue or counter is touched (measured: armed loop, durable journal, no carried
+#:   `False` at the `journal_skipped or record_sink is not None or not durable`
+#:   gate and at the `tenant is None` gate, both BEFORE any queue or counter is
+#:   touched (⛔ cited by TEXT, not by `file:line`: three citations here were wrong
+#:   by five lines in round 14, and a gate's text does not rot when a docstring
+#:   above it grows) (measured: armed loop, durable journal, no carried
 #:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
 #:   declines, so an operator reconciling "inline folds" against this counter will
 #:   find the structural arms missing from it — which is the correct shape (they
@@ -8839,8 +8841,13 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # zero through a long lag. The lag is reported in POSITIONS (comparable
         # with `record_reconcile`'s `unprojected_journal`) and in SECONDS (the
         # only figure that distinguishes a fast burst from a wedged fold), plus
-        # the loop's own failures and the writes that fell back to folding inline
-        # because the queue was at its bound. ⚠️ `worker` reports whether an
+        # the loop's own failures and the writes that folded the record on their OWN
+        # thread, BY REASON (``queue_full`` / ``worker_stopping`` / ``uncopyable`` /
+        # ``queue_fault`` — the four the counter's HELP declares). ⛔ NOT "because the
+        # queue was at its bound": only ``queue_full`` is that, and an operator who
+        # reads the narrowed sentence sizes `TORTOISE_PROJECTION_QUEUE_MAX` up to fix
+        # a `uncopyable` record shape and a `queue_fault`'s thread exhaustion, which
+        # are not bound problems at all (round-15 review, P3). ⚠️ `worker` reports whether an
         # operator armed the loop at all: ``{"armed": false}`` means these
         # gauges are a leftover from a previous arming, not a live reading.
         "record_projection_worker": _projection_worker_metrics(),
