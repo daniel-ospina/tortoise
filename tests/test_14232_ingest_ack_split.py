@@ -2310,19 +2310,32 @@ def _criterion_drain(monkeypatch, tmp_path, *, ack=None, session=None,
 
 
 def test_a_REFUSAL_fails_the_run(monkeypatch, capsys, tmp_path):
-    """`ok_refusal` is an INPUT: a 504 must FAIL, not be counted and passed.
+    """`ok_refusal` is an INPUT to the DECISION, not merely to a printed line.
 
-    Mutant: `ok_refusal = True` → this row reds (before it, that mutant left every
-    row in the file GREEN — measured, round O).
+    ⛔ A MIXED POPULATION, and that is the whole point (review round P, P2): with
+    `--n 1` and a 504, `accepted == 0` makes `ok_terminal` and `ok_extract` False
+    too, so the run FAILs for three reasons and deleting `ok_refusal` from
+    `_verdict`'s conjunction changed NOTHING (measured: 27/27 rows green, and a
+    mixed population then printed `[FAIL] zero refusals` beside `VERDICT: PASS` at
+    rc 0 — round 5's F1 shape). Two sessions, one clean and one refused, leave
+    `ok_terminal` and `ok_extract` TRUE so the refusal is the ONLY False input.
+
+    Mutants: `ok_refusal = True` → this row reds; dropping `ok_refusal` from
+    `_verdict` → this row reds (PASS at rc 0 instead of FAIL at 1).
     """
     drain = _criterion_drain(
         monkeypatch, tmp_path,
-        ack=lambda _cap: _Resp504())
-    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+        ack=lambda cap: (_Resp504() if cap["session_id"].endswith("-001")
+                         else _Resp200({"status": "ok", "extracted": 1,
+                                        "extraction": None})))
+    rc = drain.main(["--n", "2", "--max-ack-p95", "3600"])
     out = capsys.readouterr().out
     assert rc == 1, f"a refusal is a criterion FAIL (exit 1): rc={rc}\n{out}"
     assert "[FAIL] zero refusals" in out, out
     assert "VERDICT: FAIL" in out, out
+    assert "[FAIL] terminal on its own" not in out, (
+        "the mixed population must leave the OTHER criteria TRUE, or this row "
+        f"cannot witness `ok_refusal` as the decision input: {out}")
 
 
 class _Resp504:
@@ -2340,10 +2353,19 @@ def test_a_STUCK_session_fails_the_run(monkeypatch, capsys, tmp_path):
     """
     drain = _criterion_drain(
         monkeypatch, tmp_path,
-        session=lambda _sid: _Resp200({"extracted": 1,
-                                       "extraction": {"outcome_known": False,
-                                                      "phase": "extracting"}}))
-    rc = drain.main(["--n", "1", "--max-ack-p95", "3600",
+        session=lambda sid: (
+            _Resp200({"extracted": 1,
+                      "extraction": {"status": "ok", "outcome_known": True}})
+            if sid.endswith("-000") else
+            _Resp200({"extracted": 1,
+                      "extraction": {"outcome_known": False,
+                                     "phase": "extracting"}})))
+    # ⛔ TWO SESSIONS (review round P, P2): with `--n 1` and a stuck session there
+    # are no terminals at all, so `ok_extract` is False too and the run FAILs for
+    # two reasons — deleting `ok_terminal` from `_verdict` left every row green.
+    # One terminal + one stuck leaves the extraction criterion TRUE, so
+    # `ok_terminal` is the only False input.
+    rc = drain.main(["--n", "2", "--max-ack-p95", "3600",
                      "--terminal-timeout", "0.2"])
     out = capsys.readouterr().out
     assert rc == 1, f"a stuck session is a criterion FAIL (exit 1): rc={rc}\n{out}"
@@ -2427,6 +2449,9 @@ def test_the_JSON_report_carries_the_UNREADABLE_ack_count(monkeypatch, capsys,
     report = json.loads(captured.out)
     assert report["deferred_at_ack"]["unreadable"] == 1, report["deferred_at_ack"]
     assert report["deferred_at_ack"]["n"] == 0
+    assert report["deferred_at_ack"]["measurable"] is False, (
+        "the machine report must not assert measurability it does not have — "
+        f"this key was unpinned (round P, P3): {report['deferred_at_ack']}")
     assert "NOT MEASURABLE" in captured.err, captured.err
 
 
@@ -2444,3 +2469,55 @@ def test_a_refusal_ONLY_run_does_not_claim_a_deferral_measurement(monkeypatch,
     out = capsys.readouterr().out
     assert "extraction finished inside the budget" not in out, out
     assert "NOT MEASURABLE" in out and "0/0" in out, out
+
+
+def test_a_READABLE_run_reports_the_deferral_as_MEASURABLE(monkeypatch, capsys,
+                                                            tmp_path):
+    """The other half of `measurable`: pinned so it cannot be hard-coded True.
+
+    Round P (P3) measured that forcing `"measurable": True` left every row green,
+    i.e. the machine report could assert measurability it does not have — the exact
+    lie the key exists to prevent. This row pins the readable direction.
+    """
+    drain = _criterion_drain(monkeypatch, tmp_path)
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, rc
+    report = json.loads(captured.out)
+    assert report["deferred_at_ack"]["measurable"] is True, report["deferred_at_ack"]
+    assert report["deferred_at_ack"]["unreadable"] == 0
+    # The grading threshold and the enforcement flag travel with the result: a
+    # consumer cannot read `criteria` without them (round P, pre-existing P3).
+    assert report["ack_p95_budget_ms"] == 3_600_000.0, report["ack_p95_budget_ms"]
+    assert report["require_entities"] is False
+
+
+def test_the_json_report_is_PARSEABLE_when_the_spool_has_junk(monkeypatch, capsys,
+                                                              tmp_path):
+    """`--json` must emit JSON and nothing else — even on the spool path.
+
+    Round P (pre-existing P2, but in the mode this commit's rows rely on):
+    `_spooled_corpus` printed `corpus: skipped N …` to STDOUT before the report, so
+    the documented acceptance mode exited 0 with output `json.loads` cannot parse —
+    on the one path that reads the real spool. The line now goes to stderr under
+    `--json`.
+    """
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    (spool / "a.json").write_text(json.dumps({
+        "session_id": "acc-spool-0",
+        "harness": "pi",
+        "conversation": [{"role": "user", "content": "spooled capture"},
+                         {"role": "assistant", "content": "noted"}],
+    }))
+    (spool / "b.json").write_text("{not json at all")
+
+    drain = _criterion_drain(monkeypatch, tmp_path)
+    rc = drain.main(["--sessions-dir", str(spool), "--n", "5",
+                     "--max-ack-p95", "3600", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, rc
+    report = json.loads(captured.out)  # raises if anything else hit stdout
+    assert report["n"] == 1, report["n"]
+    assert "spooled" in report["corpus"] or "spool" in report["corpus"], report["corpus"]
+    assert "skipped 1 unreadable/empty spool entries" in captured.err, captured.err

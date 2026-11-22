@@ -134,7 +134,7 @@ def _synthetic_corpus(n: int) -> list[dict]:
     return out
 
 
-def _spooled_corpus(spool_dir: Path, n: int) -> list[dict]:
+def _spooled_corpus(spool_dir: Path, n: int, stream=None) -> list[dict]:
     """The first `n` captures the spool holds, in spool order (oldest first).
 
     The spool is the source of truth for "what was parked": each entry is a JSON
@@ -162,7 +162,12 @@ def _spooled_corpus(spool_dir: Path, n: int) -> list[dict]:
         out.append({"session_id": sid, "harness": entry.get("harness") or "pi",
                     "source": "acceptance-14232", "conversation": conv})
     if skipped:
-        print(f"  corpus: skipped {skipped} unreadable/empty spool entries")
+        # ⛔ NOT stdout (review round P, pre-existing P2): under `--json` this line
+        # preceded the report on stdout, so the documented machine mode exited 0
+        # with output `json.loads` cannot parse — on the one path that reads the
+        # real spool. The caller decides the stream.
+        print(f"  corpus: skipped {skipped} unreadable/empty spool entries",
+              file=stream)
     return out
 
 
@@ -475,7 +480,8 @@ def run(args) -> int:
             print(f"error: --sessions-dir {spool} is not a directory",
                   file=sys.stderr)
             return 2
-        corpus = _spooled_corpus(spool, args.n)
+        corpus = _spooled_corpus(spool, args.n,
+                                 stream=sys.stderr if args.json else sys.stdout)
         corpus_label = f"spooled ({spool})"
     else:
         corpus = _synthetic_corpus(args.n)
@@ -715,6 +721,12 @@ def run(args) -> int:
         "cpu_count": os.cpu_count(),
         "corpus": corpus_label,
         "n": len(corpus),
+        # The GRADING THRESHOLD and the enforcement flag are part of the result: a
+        # machine consumer cannot interpret `ack_p95_within_budget` or
+        # `extraction_demonstrably_ran` without knowing what they were compared
+        # against (review round P, pre-existing P3).
+        "ack_p95_budget_ms": round(args.max_ack_p95 * 1000.0, 3),
+        "require_entities": bool(args.require_entities),
         "ack_ms": {"p50": round(p50 * 1000.0, 1),
                    "p95": round(p95 * 1000.0, 1),
                    "max": round((max(acks) if acks else 0.0) * 1000.0, 1)},
