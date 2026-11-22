@@ -554,8 +554,15 @@ def write(event: Mapping[str, Any], *,
 
     ``projection`` is the cache fold (``FalkorProjection``), or ``None`` for a
     door that does not fold here. It runs ONLY after the append committed
-    (the `#7951` ordering contract) and after the record attempt, because the
-    cache is the derived store and must never lead the truth.
+    (the `#7951` ordering contract) and after the record ATTEMPT — ⛔ the
+    ATTEMPT, not the ROW: with `TORTOISE_PROJECTION_WORKER` armed the record
+    write is QUEUED and applied by another thread, so this cache fold can LEAD
+    the record by the queue's lag, and under `TORTOISE_PROJECTION_QUEUE_MAX`'s
+    declared residual it can overwrite a predecessor position still queued for
+    the same tenant. What the ordering here guarantees is CALLER-THREAD order,
+    not store order; a deferred deployment accepts that trade because the cache
+    is what the read path serves today and the record is healed by a replay of
+    the journal (`docs/architecture/STORAGE-ARCHITECTURE.md` §3).
 
     ``fold=False`` lets the SDK's door keep its own fold decision while still
     getting the append→record ordering and the named outcome from here.
@@ -761,7 +768,11 @@ def write(event: Mapping[str, Any], *,
     if record_sink is not None:
         record_sink.append(outcome)
 
-    # ── 3. THE CACHE, last — derived never leads truth. ────────────────────
+    # ── 3. THE CACHE, last — after the record ATTEMPT, in CALLER-THREAD order.
+    # ⛔ NOT "derived never leads truth": with the worker armed the record write
+    # is QUEUED, so this fold can lead the record by the queue's lag (declared,
+    # and healed by a replay). See this module's `projection` docstring and
+    # `projection_worker`'s declared residual.
     folded = False
     denial = None
     if fold and projection is not None:

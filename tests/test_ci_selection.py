@@ -10638,8 +10638,9 @@ ROWED_BY_THIS_FOLD = (
     # file nobody listed has no `durations:` row and nothing reds (#14086 cycle-3 review, F1).
     "test_10893_capture_off_loop.py",
     "test_10893_pre_handler_parts.py",
-    # #14185 (PR #14222) — the record fold's OWN loop: the projection worker and the six
-    # conditions under which a write may be deferred. A file this fold ADDED and registered
+    # #14185 (PR #14222) — the record fold's OWN loop: the projection worker and the seven
+    # conditions under which a write may be deferred (four correctness arms, the
+    # unimportable loop, and the two switches). A file this fold ADDED and registered
     # on `core`, which is what puts it in `fast_pool()`; it shipped WITHOUT a `durations:`
     # row, and `--integrity` stayed green over the absence (it is a 0.90 RATIO check), so
     # only this tuple can make the ENTRY-RULE pin see the file at all — the #14222 review's

@@ -2043,7 +2043,7 @@ def test_a_queue_fault_folds_inline_instead_of_breaking_the_write(monkeypatch):
             types.SimpleNamespace(applied=True, refusal=None,
                                   outcome="applied"))[1])
     assert write.deferred is False
-    assert called == [1], "an unimportable loop must fold inline, not skip the fold"
+    assert called == [1], "a queue fault must fold inline, not skip the fold"
 
 
 # ── the SHUTDOWN path survives a failed start (#14222 review cycle 9) ──────

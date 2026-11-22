@@ -3788,7 +3788,10 @@ surfaces:
   # `inspect.getsource`. No DSN, no graph, no model.
   - test_13829_cache_cap_at_fold.py
   # #14185: the record's projection on its OWN loop — the projection worker, the
-  # six conditions under which a write may be deferred, and the lag metric.
+  # seven conditions under which a write may be deferred, and the lag metric.
+  # ⛔ SEVEN: four correctness arms, the unimportable loop, and the two switches
+  # (`live_write._submitted_to_worker`; an earlier cut said six and lost the
+  # unimportable arm).
   # `core` for the same MEASURED reason as the two rows above: the subjects
   # (`tortoise/projection_worker.py` — a new file — and `tortoise/live_write.py`)
   # have no `SOURCE_PATTERNS` entry, so `--changed-files
@@ -15429,7 +15432,7 @@ durations:
   # ROWED_BY_THIS_FOLD`, whose ENTRY-RULE pin iterates an EXPLICIT tuple and could
   # not see a file nobody listed). `tools/ci_timing.py --refresh-durations` replaces
   # this value from the first push-to-main junit sweep that includes the file. What
-  # the weight covers, hermetically: the worker's FIFO and its six deferral gates
+  # the weight covers, hermetically: the worker's FIFO and its seven deferral gates
   # driven against a CALLABLE in place of the fold, a stalled fold as a
   # `threading.Event` rather than a sleep, the gauge/publish protocol under its
   # sequence, and one `os.fork()` leg — no DSN, no graph, no model, no docker. ⛔ No
