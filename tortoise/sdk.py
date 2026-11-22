@@ -36139,6 +36139,39 @@ class TortoiseSDK:
                 dsts = _distinct_dsts
                 op_type = conn["operator"]
                 label = conn.get("label")
+                # ── (#14284 review round 2, F1) THE DEDUP KEY SPELLS WHAT THE
+                # WRITER SPELLS ──
+                # The connect doors resolve a re-spelled predicate to its
+                # DECLARED spelling (`_create_operator` / `_create_direct_edge`
+                # / `_create_edge`, review F3), so the graph stores `dependsOn`
+                # for an item that said `DEPENDSON`. `_find_operator`'s key
+                # matches the stored property EXACTLY (`o.label = $label`), so
+                # the probe was the one reader still comparing the caller's RAW
+                # token: pass 2 of an IDENTICAL bundle missed the operator pass
+                # 1 had written (measured — `deduped: false`) and fell through
+                # to `_create_operator`, which writes under the canonical
+                # spelling and therefore cannot be found by the raw one either.
+                # The closed-set guard does not stop that: it skips an existing
+                # operator of the SAME mechanism (`_mechanism_conflicts_for_
+                # pairs`, `if otype == mechanism: continue`), so the pair gains
+                # a SECOND operator instead of a refusal — the duplicate the
+                # direction leg of `_find_operator` records in its own words
+                # ("every retried ingest minted ANOTHER operator over the same
+                # pair").
+                #
+                # ⛔ TWO probes, not one, because the KEY has two legitimate
+                # spellings across a graph's history: a graph written before
+                # the doors started resolving (F3) holds the caller's token
+                # verbatim, and probing only the canonical one would turn a
+                # retry that USED to exact-hit into the same miss this fixes.
+                # Canonical first (what every door writes today), the caller's
+                # token second, and only when they differ.
+                #
+                # `None` means nothing is declared, so the caller's own spelling
+                # survives verbatim — the #1934 predicate leg must still report
+                # it as undeclared, and a gate never rewrites what it reports.
+                _canonical_label = self._canonical_relation_spelling(label)
+                _probe_label = _canonical_label or label
                 direction = conn.get("direction")
                 # §8 connection-routing (A3, #1053): a PLAIN IMPL/NAND
                 # connection (route 'direct' — no reify/mitigation) is
@@ -36273,7 +36306,14 @@ class TortoiseSDK:
                 # `inputs`, which keep the deliberate self-support slot.
                 existing = self._find_operator(
                     op_type, [src, *dsts],
-                    label=label, direction=direction)
+                    label=_probe_label, direction=direction)
+                if existing is None and _probe_label != label:
+                    # The legacy arm: an operator a pre-F3 build wrote under the
+                    # caller's raw spelling. Still an exact resubmission — just
+                    # keyed in the spelling that build used.
+                    existing = self._find_operator(
+                        op_type, [src, *dsts],
+                        label=label, direction=direction)
                 # The door result of THIS pass, when one was written (the
                 # `exact` / `partial` arms below are resubmissions that mint
                 # nothing, so there is no fresh judgement to carry — see

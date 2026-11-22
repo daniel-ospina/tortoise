@@ -353,6 +353,21 @@ class TestAXAdmission:
         assert w["relation_declaration"]["rule"] == payload["rule"]
         assert w["outcome"] == payload["outcome"]
 
+    def test_a_REVERSED_report_does_not_arrive_under_the_UNDECLARED_code(self):
+        """Round-2 review F2 — `code` must not flatten the two reported states.
+
+        `warning_shape` hardcoded one `code`, so a `reversed_pair` (the pack
+        DECLARES this predicate for the reverse pair) arrived as
+        `undeclared_relation_pair` for the one kind of consumer AX §2 names: the
+        one that reads only `warnings[].code`. `outcome` distinguished them, so
+        nothing FALSE was said — but the field such a consumer actually reads
+        said "no declared relation at all" about a declared one.
+        """
+        payload = relation_pair_verdict(
+            "dependsOn", "dev:database", "dev:api").payload
+        assert payload["outcome"] == REVERSED_PAIR
+        assert rg.warning_shape(payload)["code"] == "reversed_relation_pair"
+
 
 # ══ 4. the shipped packs, read as the guard reads them ═══════════════════
 
@@ -532,6 +547,20 @@ def _operator_label(sdk, operator_id):
     return rows[0][0] if rows else None
 
 
+def _implicit_operator_count(sdk, label):
+    """How many `IMPL` operator nodes carry ``label`` — the duplicate detector.
+
+    Read from the GRAPH, not from the reply's `deduped` flag: a reply can claim a
+    dedup while a second node exists, and the node is what a reader of the graph
+    (and every later `_find_operator`) actually sees.
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+        "WHERE o.label = $label RETURN count(o)",
+        params={"label": label}).result_set
+    return rows[0][0]
+
+
 # ══ 6. the 69a9fae6c8 review's findings, one class ═════════════════
 
 
@@ -680,6 +709,86 @@ class TestIngestCarriesTheReport:
         assert "relation_declarations" in out, (
             "the field is part of the STABLE key set — always present")
         assert out["relation_declarations"] == []
+
+
+class TestTheIngestDedupKeySpellsAsTheWriterDoes:
+    """Round-2 review F1 — a retried bundle must DEDUP, not mint a duplicate.
+
+    Review F3 made the connect doors write the DECLARED spelling of a re-spelled
+    predicate (`_canonical_relation_spelling`). The resubmission probe in
+    `_ingest` still handed `_find_operator` the caller's RAW token, and that
+    probe matches the stored property exactly (`o.label = $label`) — so pass 2
+    of an IDENTICAL bundle missed the operator pass 1 had written.
+
+    ⛔ MEASURED, because the review's stated consequence does not hold: pass 2
+    returns `deduped: false` and the key then falls through to
+    `_create_operator`, which does NOT refuse — the `#12067` closed-set guard
+    skips an existing operator of the SAME mechanism
+    (`_mechanism_conflicts_for_pairs`: `if otype == mechanism: continue`), so the
+    pair gains a SECOND operator (a duplicate, `#9750`'s class) rather than the
+    mid-bundle abort the review described. Before F3 the same retry exact-hit and
+    returned `deduped: true`, so this is still a regression on
+    `INGEST_CONTRACT.md` §15 — a retry that stops adopting its own run-1 write.
+    """
+
+    def test_a_retried_bundle_with_a_re_spelled_label_dedups(self, sdk):
+        bundle = _pair_bundle(reify=True, label="DEPENDSON")
+        first = sdk._ingest(bundle, granularity="granular")
+        first_conn = next(r for r in first["results"]
+                          if r["section"] == "connections")
+        assert first_conn["deduped"] is False
+        oid = first_conn["result"]["operator_id"]
+        assert _operator_label(sdk, oid) == "dependsOn", (
+            "the door writes the DECLARED spelling (review F3)")
+
+        second = sdk._ingest(bundle, granularity="granular")
+        second_conn = next(r for r in second["results"]
+                           if r["section"] == "connections")
+        assert second_conn["deduped"] is True, (
+            "an identical retry must hit its own run-1 operator — the dedup key "
+            "has to spell the predicate the way the writer does (pre-fix this "
+            "was False and a second operator was minted)")
+        assert second_conn["result"]["operator_id"] == oid, (
+            "the retry minted a DIFFERENT operator: two nodes for one relation")
+        assert _implicit_operator_count(sdk, "dependsOn") == 1, (
+            "the graph holds more than one operator for the same pair — the "
+            "duplicate `_find_operator` exists to prevent")
+
+    def test_a_LEGACY_operator_stored_under_the_raw_spelling_still_dedups(self, sdk):
+        """The FALLBACK probe: a graph written before the doors resolved (F3).
+
+        Such a graph holds the caller's token verbatim. Probing only the
+        canonical spelling would turn THIS retry — which exact-hit before the
+        fix — into the same miss, so the key tries the canonical spelling first
+        and the caller's own token second.
+        """
+        from tortoise.projection import _live_write_scope
+
+        bundle = _pair_bundle(reify=True, label="DEPENDSON")
+        first = sdk._ingest(bundle, granularity="granular")
+        oid = next(r for r in first["results"]
+                   if r["section"] == "connections")["result"]["operator_id"]
+        # Re-create the pre-F3 stored shape: the operator carries the RAW token.
+        with _live_write_scope("test-legacy-spelling-14263"):
+            sdk._get_proj().g.query(
+                "MATCH (o:Point {id:$id}) SET o.label = 'DEPENDSON'",
+                params={"id": oid})
+        assert _operator_label(sdk, oid) == "DEPENDSON"
+
+        second = sdk._ingest(bundle, granularity="granular")
+        conn = next(r for r in second["results"]
+                    if r["section"] == "connections")
+        assert conn["deduped"] is True, (
+            "a legacy operator keyed under the caller's spelling must still be "
+            "adopted — the retry used to exact-hit it")
+        assert conn["result"]["operator_id"] == oid
+
+    def test_an_UNDECLARED_re_spelled_label_is_still_written_verbatim(self, sdk):
+        """The other direction: nothing to canonicalise, nothing rewritten."""
+        bundle = _pair_bundle(reify=True, label="inventedVerb")
+        out = sdk._ingest(bundle, granularity="granular")
+        conn = next(r for r in out["results"] if r["section"] == "connections")
+        assert _operator_label(sdk, conn["result"]["operator_id"]) == "inventedVerb"
 
 
 class TestTheJudgedPairFollowsTheDeclaredDirection:
