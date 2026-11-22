@@ -609,7 +609,14 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: the caller's predicate dropped while the same adverbial BEFORE `been` was refused. The bound is
 #: 3 (a multi-word adverbial is 2 tokens, plus headroom), and it is REFUSAL-SIDE: it can only add a
 #: refusal, never a route.
-_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}"
+#: ⛔ THE BOUND IS NOT 3 (round-5 review, P2, measured): TWO multi-word adverbials in a row need
+#: FOUR tokens, and `{0,3}` refused at most three — so
+#: `have any reported it has been in fact only just deprecated and been withdrawn` ROUTED the whole
+#: ended population with the caller's predicate dropped and `signal=None` while its 3-token twin was
+#: refused, the same defect one token higher. The bound is now the `_EXISTENCE_HELPER` gap's own
+#: `{0,8}`: a count bound one short of the class it carries is a spelling this guard is blind to,
+#: and this is the fourth consecutive round that lesson has been paid for.
+_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,8}}"
 #: ⛔ A CONTRACTED AUXILIARY CARRIES ITS NEGATION INSIDE THE WORD (round-26 review, P1; round-28
 #: at `feb2c740bb`, P1, measured — the SAME class, one guard over). One home, THREE consumers:
 #: both `_EXISTENCE_GUARD` lookaheads and `_COPULA_SUBJECT`'s second-verb lookahead. The third
@@ -1309,8 +1316,19 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # definition of "strong" at `:317-322`. Its stated job is "fails only on the clause
     # guard", so it is the shape's tail that decides; every `NOTICE_ONLY` existence row
     # ends at `$` or punctuation and still reports.
+    # ⛔ THE NOTICE MUST SEE THE CLASS THE GUARD REFUSES ON (round-5 review, P3, measured): this
+    # row carried `_EXISTENCE_WINDOW`, whose slot is the NARROW recall set (`already|ever|recently`),
+    # while the guard itself refuses on the WHOLE `_EXISTENCE_ADVERB` class. So the same refused
+    # frame reported on one spelling and went SILENT on the next:
+    # `billing has been recently deprecated` → existence_unguarded, but
+    # `billing has been just deprecated` / `only deprecated` → refused, `signal=None` — and the
+    # §"refusal reports" pins only passed because a trailing `been <ending>` clause supplied their
+    # notice. A signal cannot affect routing (it is only computed when NO shape applies), so
+    # widening the slot here cannot create a route.
     ("existence_unguarded", re.compile(
-        _EXISTENCE_HEAD + _EXISTENCE_WINDOW + _BLOCKED_TAIL)),
+        _EXISTENCE_HEAD
+        + rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
     ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
 )

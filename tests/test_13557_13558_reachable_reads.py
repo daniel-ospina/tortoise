@@ -207,6 +207,15 @@ SELECTED = [
     # anchor refused `has anything the board has recently been briefed on been withdrawn`,
     # which routed before it. The anchor is the same one the pronoun branch uses.
     ("has anything the board has recently been briefed on been withdrawn", "ended", "existence"),
+    # ⛔ …AND A MODAL `do` IS NOT A REASON TO REFUSE (round-5 review, P3, measured, and it is the
+    # COVERAGE half of a round-26 fix): `do|does|did` were removed from the two lookaheads because
+    # they cannot precede `been` and their only effect was to let an ordinary verb fill the noun
+    # slot (`has anything we said we would do been cancelled` refused as `noun='would' aux='do'`).
+    # The removal was right and NOTHING PINNED IT: restoring `did|does|do` left the whole suite
+    # green while these six rows flipped to refused. Pinned here so the deletion is asserted, which
+    # is the same defect class the relativizer lookahead already has a dedicated row for.
+    ("has anything we said we would do been cancelled", "ended", "existence"),
+    ("have any of the things we said we would do been withdrawn", "ended", "existence"),
     ("what ended", "ended", "wh_whole_question"),
     ("what ended?", "ended", "wh_whole_question"),
     ("what has been withdrawn", "ended", "wh_whole_question"),
@@ -450,6 +459,22 @@ NOT_SELECTED = [
     "has anyone complained billing has been recently deprecated",
     "have any customers noticed they have been already cancelled",
     "have any users reported it has been already deprecated",
+    # ⛔ THE BOUND, NOT THE CLASS (round-5 review, P2, measured): the refusal slot carried the whole
+    # adverb class but was bounded to THREE tokens while every multi-word member (`in fact`,
+    # `just about`, `no longer`, `to date`) is TWO — so two of them in a row needed four and slipped
+    # through, routing the whole ended population with the caller's predicate dropped. Both rows
+    # below are the same sentence as the four above, only longer, and their 3-token twin
+    # (`only just very`) was already refused — the length was the only discriminator. They report
+    # through `existence_unguarded`, so they belong in BOTH lists.
+    "have any reported it has been in fact only just deprecated and been withdrawn",
+    "have any reported it has been in fact just about deprecated and been withdrawn",
+    # ⛔ AND THE NOTICE MUST SEE THE SAME CLASS THE GUARD REFUSES ON (round-5 review, P3,
+    # measured): `existence_unguarded` still matched the WINDOW's narrow recall slot, so the
+    # `recently` spelling reported while its `just`/`only` twins — refused by the SAME guard clause
+    # — were SILENT. The rows above did not catch it because a trailing `been <ending>` clause
+    # supplied their notice; these are the bare frames, and they red without this pin.
+    "has anyone complained billing has been just deprecated",
+    "has anyone complained billing has been only deprecated",
     # ⛔ THE `<preposition> the <noun>` QUALIFIER class on `is_copula`, GIVEN UP by the re-cut
     # review's P1 fix (measured): `as`/`than`/`during`/`until` also head a CLAUSE, so exempting
     # them from the second-NP refusal routed `is the report as the board archived` to the WHOLE
@@ -948,6 +973,13 @@ NOTICE_ONLY = [
     # guard, reported through `existence_unguarded`, never routed.
     "have any users reported it has been deprecated",
     "have any customers noticed they have been cancelled",
+    # …and the ROUND-5 pairs, added with their NOT_SELECTED rows: the 4-token adverbial run the
+    # slot's old `{0,3}` bound let through, and the bare `just`/`only` frames the notice was blind
+    # to. Reported, never routed — and each is asserted in BOTH lists, so deleting either half reds.
+    "have any reported it has been in fact only just deprecated and been withdrawn",
+    "have any reported it has been in fact just about deprecated and been withdrawn",
+    "has anyone complained billing has been just deprecated",
+    "has anyone complained billing has been only deprecated",
     # ⛔ …AND THEIR ADVERB TWINS (review of this fix, P1, measured): the adverb slot this lane adds
     # to the `been`-anchored window is matched by the SAME slot in the two lookaheads that decide
     # whether a `been` belongs to a second CLAUSE. Without that symmetry these three ROUTED the whole
@@ -959,7 +991,7 @@ NOTICE_ONLY = [
     "has anyone complained billing has been recently deprecated",
     # ⛔ THE REFUSAL-SIDE SLOT'S ROWS (round-3 review, P1, measured): the WINDOW's slot is the narrow
     # `already|ever|recently` (recall), while the two clause LOOKAHEADS are refusal-only and carry
-    # the WHOLE `_EXISTENCE_ADVERB` class (— including the multi-word adverbials, which need the
+    # the WHOLE `_EXISTENCE_ADVERB` class — including the multi-word adverbials, which need the
     # repetition the slot carries). Giving the lookaheads the narrow slot was a measured hole:
     # `just`/`only`/`no longer`/`to date` are class members but were not in it, so they blinded both
     # lookaheads and these ROUTED the whole ended population with the caller's predicate dropped and

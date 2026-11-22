@@ -356,6 +356,15 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
     # and grades it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16098-16103", "tortoise/sdk.py", 16098, "**JSONL event log (#548):** written when *point* is provided"),
+    # ⛔ THE BARE SPELLINGS OF THE SAME THREE (final review, P1/P2, measured): the paragraph that
+    # enumerates the nine re-derived addresses writes them as bare `:NNNN` siblings, and a bare token
+    # is a DIFFERENT key from the `sdk.py:NNNN` form — so each of these three was pinned through one
+    # spelling only and re-pointing the bare one left every arm green. Three of the nine had drifted
+    # that way (`:15787` was docstring prose, `:15958-15962` was another function's docstring,
+    # `:3777` an empty line). One row per SITE.
+    (_AUDIT, "`:15894`", _SDK, 15894, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
+    (_AUDIT, "`:16098-16103`", _SDK, 16098, "**JSONL event log (#548):** written when *point* is provided"),
+    (_AUDIT, "`:3801`", _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
     (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
 )
 
@@ -544,6 +553,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # #14043 review (finding 1): one site each in §6.3. Measured on this document:
     # `grep -o -F 'sdk.py:16098-16103' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16098-16103'): 1,
+    # measured on the document (`grep -o -F '`:15894`' <doc> | wc -l` -> 2, likewise the other two):
+    # the §6.3 row's own spelling plus this enumeration's bare sibling.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:15894`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:16098-16103`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3801`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3801'): 1,
 }
 
@@ -1183,11 +1197,11 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58435): 56415,
     ("tortoise/sdk.py", 58437): 56415,
     ("tortoise/sdk.py", 59086): 56415,
-    ("tortoise/sdk.py", 61999): 56415,
-    ("tortoise/sdk.py", 62019): 56415,
+    ("tortoise/sdk.py", 62119): 56415,
+    ("tortoise/sdk.py", 62139): 56415,
     ("tortoise/search_engine.py", 7577): 7071,
     ("tortoise/search_engine.py", 7579): 7071,
-    ("tortoise/hosted_api.py", 50935): 49851,
+    ("tortoise/hosted_api.py", 51523): 49851,
     ("tortoise/mcp_server.py", 11597): 11466,
 }
 #: The split's three published sentences. Each is matched on the header's emphasis-stripped body, like every
@@ -2166,7 +2180,13 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # and NOTHING read it — its `sdk.py:28602` sibling was pinned and the neighbour was not, so a
     # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
     # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
-    assert len(_PINS) == 83
+    # 83 -> 86 at the FINAL review of this lane (P1/P2, measured): the paragraph that enumerates the
+    # nine re-derived addresses writes them as BARE `:NNNN` siblings, and a bare token is a different
+    # key from the `sdk.py:NNNN` form — so `:15894`, `:16098-16103` and `:3801` were each pinned
+    # through ONE spelling only, and re-pointing the bare one left every arm green. Three of the nine
+    # had drifted exactly that way (`:15787` was docstring prose, `:15958-15962` another function's
+    # docstring, `:3777` an empty line). One ROW per SITE, the rule the `:Tag` siblings are held to.
+    assert len(_PINS) == 86
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
