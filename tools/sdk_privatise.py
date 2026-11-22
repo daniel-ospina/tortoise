@@ -1191,16 +1191,21 @@ SWEEP_NAMES = 66
 #: because resolving a conflict between two CORRECT records by deleting one is how a measured
 #: fact becomes folklore.
 #:
-#: ⛔ SUPERSEDED BY THE RE-CUT — the sentence that ENDS "`--check` exits 0 at this head on the SAME
-#: pair, so 11858 is re-measured" (the close of the `11858` paragraph, several paragraphs up; the
-#: `STALE AS OF THE RE-CUT` note immediately UNDER that sentence marks the same reading) did NOT
-#: survive the commits merged beside it: the census moved three rows before the pin commit itself
-#: landed. Read the re-cut, not that sentence. ⛔ NAMED BY ITS TEXT, NOT BY "the sentence above"
-#: and NOT BY "the re-cut below" (#14282, P3): `main` wrote BOTH positionally, correctly, and the
-#: merge that carried the note in inserted the `#14258` reconciliation paragraph between the note
-#: and the sentence, AND this branch's `(11858 …) → (11861 …)` re-cut between the note and the
-#: re-cut — so both addresses pointed one record off. That is the rot this block's own rule against
-#: positional addresses exists to prevent, demonstrated by the merge that imported one.
+#: ⛔ SUPERSEDED BY THE RE-CUT — the sentence that CLOSES "on the tree that carries them, not carried
+#: forward" (it closes the `11858` paragraph, several paragraphs up; the `STALE AS OF THE RE-CUT`
+#: note immediately UNDER that sentence marks the same reading) did NOT survive the commits merged
+#: beside it: the census moved three rows before the pin commit itself landed. Read the re-cut, not
+#: that sentence. ⛔ NAMED BY ITS CLOSING WORDS, NOT BY "the sentence above" and NOT BY "the re-cut
+#: below" (#14282, P3): `main` wrote BOTH positionally, correctly, and the merge that carried the
+#: note in inserted the `#14258` reconciliation paragraph between the note and the sentence, AND
+#: this branch's `(11858 …) → (11861 …)` re-cut between the note and the re-cut — so both addresses
+#: pointed one record off. That is the rot this block's own rule against positional addresses
+#: exists to prevent, demonstrated by the merge that imported one. ⛔ AND THE FIRST FORM OF THAT
+#: QUOTE WAS A PREFIX CALLED AN ENDING (#14282 fix lane, P3): `the sentence that ENDS "`--check`
+#: exits 0 at this head on the SAME pair, so 11858 is re-measured"` is FALSE of this text — the
+#: sentence runs on to `not carried forward` — so a reader sent to verify the ending finds no
+#: sentence that ends there. The closing words quoted first ARE the close, being that sentence's
+#: own last words.
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
 #: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
