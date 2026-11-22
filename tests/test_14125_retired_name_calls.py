@@ -5165,6 +5165,23 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             set(),
         ),
         (
+            #: ⛔ THE CONVERSE ABOVE, which the block comment claims and NO ROW exercised
+            #: (review of #14287, F1a — the ASYMMETRY term of `_masked_by` survived
+            #: replacement with every other row green; measured: the symmetric mutant PASSED
+            #: this whole test before this row existed). An earlier CHILD re-raise does not
+            #: mask a later PARENT re-raise: a plain `ImportError` still reaches the
+            #: four-name arm, so every one of the five spellings is credited. Symmetric
+            #: membership would drop `ImportError` from that arm's reach and take its credit
+            #: with it — the false RED on a correct repair (a probe that re-raises the module
+            #: rename first and then the four programming errors propagates everything, and
+            #: the gates' own repair message produces this shape) that the containment test
+            #: exists to prevent.
+            "child raised, then parent raised",
+            "except ModuleNotFoundError:\n    raise\n"
+            "except (AttributeError, NameError, TypeError, ImportError):\n    raise\n",
+            {"AttributeError", "ImportError", "ModuleNotFoundError", "NameError", "TypeError"},
+        ),
+        (
             #: a dropped child family is exactly what the seam gate looks for, so a later
             #: parent re-raise cannot credit it (review of #14287, P1-1; this row previously
             #: expected `{"ImportError"}`, which LOCKED the leak in).
