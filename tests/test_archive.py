@@ -3728,3 +3728,166 @@ def test_a_module_reappearing_as_a_PACKAGE_WITH_A_BODY_is_still_a_return(tree: P
     assert any("tortoise.y" in p and "REAPPEARED" in p for p in problems), (
         f"the package's `__init__.py` carries statements, so the module shipped again: {problems}"
     )
+
+
+# ── round-18 review: the shapes a fresh-context pass measured as still open ──────────────
+
+
+def test_emptying_the_PACKAGE_init_while_a_leftover_shim_exists_is_a_removal(tree: Path) -> None:
+    """P0: arm 1b asked ONE base carrier, and the map picks by PATH, not by CONTENT.
+
+    Measured before the fix: `base_paths_by_module` keeps the lexicographically first non-`.pyi`
+    path per dotted name, and `.` (46) sorts before `/` (47) — so a body-less leftover
+    `tortoise/x.py` beat the real `tortoise/x/__init__.py`. Arm 1b read the shim, called the BASE
+    "scaffolding", and `continue`d: emptying the `__init__.py` IN PLACE was GREEN in every arm
+    (`shrink_violations -> []`, `check -> OK`) with the body in no file under `archive/`. The repo
+    SHIPS this pairing (`tortoise/projection.py` beside `tortoise/projection/__init__.py`).
+
+    Mutation: gate arm 1b on the single preferred carrier again -> RED here (and NOTHING else in
+    this suite reds — measured: 158 rows green either way, so this row is the only pin).
+    """
+    (tree / "tortoise" / "x").mkdir(parents=True, exist_ok=True)
+    (tree / "tortoise" / "x.py").write_text('"""stale shim."""\n', encoding="utf-8")
+    (tree / "tortoise" / "x" / "__init__.py").write_text(
+        "def real():\n    return 1\n\ndef other():\n    return 2\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/x.py", "tortoise/x/__init__.py")
+    (tree / "tortoise" / "x" / "__init__.py").write_text('"""gone."""\n', encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.x:") and "REMOVED" in p for p in problems), (
+        "the base's code lived in tortoise/x/__init__.py; a body-less shim beside it must not "
+        f"cancel the removal: {problems}"
+    )
+
+
+def test_deleting_an_EMPTY_pyi_stub_is_not_a_removal(tree: Path) -> None:
+    """P2: a 0-byte or comment-only `.pyi` is not the module's code.
+
+    The carrier test was by SUFFIX (`if path.endswith(".pyi"): return True`), so an empty stub
+    counted as code: deleting it was `MODULE REMOVED`, the prescribed remedy froze an EMPTY block,
+    and `file_violations` then red that block for holding no code — a false block with no exit
+    (CI passes no waiver). A REAL stub is a `FunctionDef` and still counts.
+
+    Mutation: `return True` for any `.pyi` -> RED here.
+    """
+    (tree / "tortoise" / "b.pyi").write_text("", encoding="utf-8")
+    (tree / "tortoise" / "c.pyi").write_text("# annotations only, no declarations\n", encoding="utf-8")
+    _commit(tree, "tortoise/b.pyi", "tortoise/c.pyi")
+    _commit_drop(tree, "tortoise/b.pyi")
+    _commit_drop(tree, "tortoise/c.pyi")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~2") == [], (
+        "a `.pyi` that declares nothing carries nothing, so deleting it removes nothing"
+    )
+
+
+def test_a_package_stub_module_is_reported_AND_has_a_runnable_route(tree: Path) -> None:
+    """P2: `<dotted>/__init__.pyi` IS a carrier to the grading arms but was not to the writer.
+
+    Measured before the fix: the deletion was `MODULE REMOVED` (correct — a stub under the shipped
+    package is importable surface), and the remedy it printed, `archive module tortoise.pp`, was
+    REFUSED: "no stub at tortoise/pp.pyi — nothing to archive". The fourth spelling was missing
+    from the resolution chain, so the red had no route — the class rounds 7 and 15 each fixed one
+    suffix over.
+
+    Mutation: drop the package-stub fallback -> the archive raises instead of returning a row.
+    """
+    (tree / "tortoise" / "pp").mkdir(parents=True, exist_ok=True)
+    (tree / "tortoise" / "pp" / "__init__.pyi").write_text(
+        "def api() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/pp/__init__.pyi")
+    _commit_drop(tree, "tortoise/pp/__init__.pyi")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.pp:") and "REMOVED" in p for p in problems), problems
+    # …and the route the violation prints must actually run. The route's FIRST step is the
+    # documented one (restore the source from the base, archive it, delete it again in the same
+    # batch) — `archive_symbol` reads the working tree — so restore it here rather than pretending
+    # the writer can freeze a file that is gone.
+    (tree / "tortoise" / "pp").mkdir(parents=True, exist_ok=True)
+    (tree / "tortoise" / "pp" / "__init__.pyi").write_text(
+        "def api() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/pp/__init__.pyi")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.pp", "b1", "r", root=tree)
+    assert entry["archived_from"] == "tortoise/pp/__init__.pyi", entry
+
+
+@pytest.mark.parametrize("reason", ["\u200b", "\u200e", "\ufeff", "\u00a0", "", "   "])
+def test_an_INVISIBLE_character_is_not_a_stated_reason(tree: Path, reason: str) -> None:
+    """P2: `str.strip()` is not the question "does this say something a reader can read?".
+
+    Measured before the fix: ZWSP, LRM and BOM are not `isspace()`, so each was ACCEPTED as a
+    removal's WHY and rendered as nothing — a record that reads as "a departure somebody checked"
+    and says nothing. The docstring of this gate's own round-17 comment claimed the hole was
+    closed by `.strip()`; it was not.
+
+    Mutation: back to `reason.strip()` alone -> RED for the three zero-width cases.
+    """
+    (tree / "tortoise" / "x.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+
+    with pytest.raises(arch.ArchiveRefused, match="reason"):
+        arch.archive_symbol(arch.MODULE, "tortoise.x", "b1", reason, root=tree)
+
+
+def test_a_NON_TEXT_reason_is_a_REFUSAL_not_a_traceback(tree: Path) -> None:
+    """P2: a library caller must get this tool's refusal, not `AttributeError`.
+
+    Measured before the fix: `archive_symbol(..., reason=123)` raised
+    `AttributeError: 'int' object has no attribute 'strip'` — every other refusal in the function
+    is an `ArchiveRefused`, and `archive_symbol` is called by other tools.
+    """
+    (tree / "tortoise" / "x.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+
+    with pytest.raises(arch.ArchiveRefused, match="reason must be text"):
+        arch.archive_symbol(arch.MODULE, "tortoise.x", "b1", 123, root=tree)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("spelling", ['f"{register()}"', "[register(x) for x in y]"])
+def test_a_top_level_statement_that_CALLS_inside_an_expression_is_a_body(
+    tree: Path, spelling: str
+) -> None:
+    """P3: the no-op test graded the OUTERMOST node, so a nested call read as dead code.
+
+    Measured before the fix: `_init_carries_a_body('f"{register()}"')` and
+    `('[register(x) for x in y]')` both answered False — the predicate implemented "the outer node
+    is a Call", not the stated rule — so a module whose only statement was one of them had its
+    deletion CANCELLED as scaffolding while code with a side effect left the product. That is the
+    fail-open direction, and both this file's comment and `archive/README.md` claimed the opposite.
+
+    Mutation: `isinstance(node.value, _effectful)` (outermost only) -> RED here.
+    """
+    assert arch._init_carries_a_body(f"{spelling}\n"), (
+        f"`{spelling}` calls, so it is a statement a caller can reach"
+    )
+
+
+def test_resolve_base_answers_the_MERGE_BASE_not_the_tip(tree: Path) -> None:
+    """P3: the docstring says "the MERGE BASE of HEAD and that ref (not the tip)", unpinned.
+
+    Measured: a `resolve_base` that answered the base ref's TIP left 29 selected rows green, so
+    the documented semantics were ungraded. On a long-lived branch the tip reports OTHER PRs'
+    removals against this one, or misses this PR's against the fork point.
+
+    Mutation: return the ref's tip instead of `merge-base` -> RED here.
+    """
+    subprocess.run(["git", "switch", "-q", "-c", "side"], cwd=tree, check=True)
+    (tree / "tortoise" / "side_only.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/side_only.py")
+    tip = subprocess.run(
+        ["git", "rev-parse", "side"], cwd=tree, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "switch", "-q", "main"], cwd=tree, check=True)
+    (tree / "tortoise" / "main_only.py").write_text("Y = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/main_only.py")
+
+    sha, label = arch.resolve_base(tree, "side")
+    assert sha == subprocess.run(
+        ["git", "merge-base", "HEAD", "side"], cwd=tree, check=True, capture_output=True, text=True
+    ).stdout.strip(), f"resolve_base must answer the merge base, not the tip: {label}"
+    assert sha != tip, "the fixture must place the tip past the fork point, or this row is vacuous"
