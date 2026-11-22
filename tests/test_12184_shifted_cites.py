@@ -1959,8 +1959,10 @@ def test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter() ->
     """
     lines = (REPO / "tortoise/search_engine.py").read_text(encoding="utf-8").splitlines()
     start = next(i for i, line in enumerate(lines, 1) if "def subject_binding_available" in line)
-    end = next(i for i in range(start + 1, len(lines) + 1) if lines[i - 1].strip() == '"""')
-    assert end > start, (
+    end = next(
+        (i for i in range(start + 1, len(lines) + 1) if lines[i - 1].strip() == '"""'), None
+    )
+    assert end is not None, (
         f"`search_engine.py:{start}` has no closing delimiter after it, so this arm would grade "
         "nothing — re-point it at the docstring it is meant to cover."
     )

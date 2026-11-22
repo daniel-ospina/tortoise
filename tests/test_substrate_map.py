@@ -2139,7 +2139,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     point is a WIDENING rather than a retirement — and **#12434**'s `:Document`
     retirement prose in `tortoise/mcp_server.py:4477`, the seventh, whose point IS
     a retirement — and **#12915**'s (`#4282` Phase 2, lane B) `record_decision`
-    docstring at `tortoise/sdk.py:37547` and `_file_human_approval`'s `:37589`
+    docstring at `tortoise/sdk.py:37568` and `_file_human_approval`'s `:37610`
     (the `:4382` address both copies carried is DELETED, as are `:36687,36718` in the document's copy and `:36676,36718` here,
     re-measured: `mcp_server.py:4382` is the `# prop named "error"` comment (not blank), the prose is at `:4477`;
     the two `:Document` docstring lines are `:37568` / `:37610`), the eighth, whose `Args:` block for
