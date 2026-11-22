@@ -1020,6 +1020,15 @@ class _Collector:
         """Queue one query embed and block until its batch has answered."""
         ticket = _Ticket(text)
         with self._wakeup:
+            if self._stop and self._thread is not None and self._thread.is_alive():
+                # ⛔ A teardown is IN PROGRESS on this collector: it has been told
+                # to stop and is finishing an encode, so a ticket queued now would
+                # wait out its whole bound (a boot's worth, on ``worker``) for a
+                # thread that will exit without ever looking at it. Decline BY
+                # NAME instead. A collector whose thread has already exited is a
+                # different state and still restarts below — ``_ensure_thread_unlocked``
+                # clears the flag when it starts a fresh thread.
+                raise RuntimeError(_STOPPED_BEFORE_ENCODE)
             self._queue.append(ticket)
             self.submissions += 1
             self._ensure_thread_unlocked()
