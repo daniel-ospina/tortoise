@@ -238,7 +238,7 @@ agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence 
 §2.5 token, so a second one-token spelling would red it. Each was
 opened at this head, and ⛔ **none of them
 opens at the pin**: at `ccb49741b2ec` the four `sdk.py` numbers
-read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31551p;31533p;24513p;24857p'`),
+read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31572p;31554p;24534p;24878p'`),
 and the fifth has **no line there at all** — `git show ccb49741b2ec:tortoise/mcp_server.py | wc -l` -> `11466`, so
 `:11590` is past the pin's EOF, and the address that list carried at the pin was `:10730`, which IS that very
 traversal (`git show ccb49741b2ec:tortoise/mcp_server.py | sed -n '10730p'` -> `OPTIONAL MATCH (t)<-[:TAGGED]-(q)`),
