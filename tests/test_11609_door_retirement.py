@@ -1218,13 +1218,25 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         `test_the_verdict_does_not_depend_on_the_SPELLING`,
     #:         `test_a_semicolon_less_reference_is_LITERAL_in_markdown_text` and
     #:         `test_raw_HTML_is_decoded_the_way_a_browser_decodes_it`.
+    #:       * the judged UNITS are every leaf block **and the source between them**, so a
+    #:         retired name in a link-reference DEFINITION is reached in EVERY spelling. That
+    #:         text is in NO block (the parser consumes the definition), which is why R2 already
+    #:         reported a plain mention there as `NO BLOCK` (r9 review P1) — while the ENTITY
+    #:         spelling of it fell through every reader, because the entity reader walked the
+    #:         blocks (#14237 r15 review, measured: `[foo]: &#116;ortoise_list_graphs(x=1)`
+    #:         ACCEPTED, the plain spelling R1 on line 1). A gap has NO visible text, so it can
+    #:         never clear a mention — the plain spelling's verdict, not a new one. Pinned by
+    #:         the `ref-def-*` rows of `test_the_verdict_does_not_depend_on_the_SPELLING` and by
+    #:         `test_a_reference_definition_is_judged_OUTSIDE_the_block_model`.
     #:   (b) * a replacement that appears ONLY where a reader cannot see it — an HTML comment, a
     #:         link destination, a link-reference definition — does NOT count (#14237 r8/r9
     #:         reviews), because the body R2 reads is the block's VISIBLE text;
     #:       * a mention that falls in NO block at all (a link-reference definition, a
     #:         preamble) is REPORTED, not ignored — `test_a_mention_outside_every_block_is_reported`
     #:         pins it, and that row exists because "no block means clean" was measured as a
-    #:         mutant that left the whole suite green.
+    #:         mutant that left the whole suite green. ⚠️ That row pins the PLAIN spelling only;
+    #:         the ENTITY spelling of the same mention needed a judged unit that is not a block,
+    #:         and is pinned by the bullet above (#14237 r15).
     #:
     #: ⚠️ SCOPE: the documents whose every `tortoise_*` mention is a call, and ONE of
     #: them today. The rule is doc-agnostic, but applying it repo-wide would red on docs
@@ -1529,6 +1541,18 @@ class TestEveryReaderNamesTheLiveListingDoor:
         left open, and the class comment already promised the opposite, so it is closed here
         rather than declared.
 
+        ⛔ THE SOURCE BETWEEN BLOCKS IS A UNIT TOO (#14237 r15, measured fail-open). Walking
+        `blocks()` cannot reach text the parser places in NO leaf — and a link-REFERENCE
+        DEFINITION is exactly that: `[foo]: &#116;ortoise_list_graphs` produces no block, so
+        the ENTITY spelling of the mention had no reader that could see it and was ACCEPTED,
+        while the PLAIN spelling in the same definition is reported as "NO BLOCK" by R2 and
+        is an R1 call when it carries arguments. The verdict depended on the SPELLING again,
+        which is this reader's whole premise, and the class comment already promised that a
+        mention outside every block is REPORTED. The units are therefore every BLOCK and the
+        GAPS between them, decoded in source order; a gap carries no visible text (body ""),
+        so a mention there can never be cleared by anything — the same fail-closed verdict
+        the plain spelling already gets.
+
         Returns ``(name, block_start, body, call_end)`` where `call_end` is the end offset
         in the block's judged text of the first occurrence written in CALL form, or -1.
         Reporting the block's START line is deliberate — the source offset of a decoded
@@ -1536,11 +1560,17 @@ class TestEveryReaderNamesTheLiveListingDoor:
         """
         found: list[tuple[str, int, str, int]] = []
         raw_html = cls._raw_html_block_spans(text)
-        for begin, finish, body in cls.blocks(text):
+        # ONE ordered unit list: every leaf block, plus the source the parser placed in none
+        # of them. `sort` keeps the reports in SOURCE order, which is what makes the entity
+        # reader's output comparable, line for line, with the raw scan's.
+        units = list(cls.blocks(text))
+        units += [(start, stop, "") for start, stop in cls._unblocked_spans(text)]
+        units.sort(key=lambda unit: (unit[0], unit[1]))
+        for begin, finish, body in units:
             raw = text[begin:finish]
             if "&" not in raw:
                 continue
-            # WHAT THIS BLOCK'S MENTIONS ARE JUDGED ON: its DECODED SOURCE — every block,
+            # WHAT THIS UNIT'S MENTIONS ARE JUDGED ON: its DECODED SOURCE — every block,
             # visible body or not. `name_hits(raw)` already judges the WHOLE source,
             # including the containers `body` excludes, so this reader judges the decoded
             # form of that same text; anything narrower makes the verdict depend on the
@@ -1551,18 +1581,52 @@ class TestEveryReaderNamesTheLiveListingDoor:
             # `found` still carries `body`, never `shown`: R2's replacement credit reads the
             # VISIBLE text, so a replacement hidden in an HTML comment, a link destination or
             # a link title cannot clear a mention (the r11/r12 rule this change preserves).
-            raw_counts: dict[str, int] = {}
-            for name, _start, _end in cls.name_hits(raw):
-                raw_counts[name] = raw_counts.get(name, 0) + 1
-            ends_by_name: dict[str, list[int]] = {}
-            for name, _start, end in cls.name_hits(shown):
-                ends_by_name.setdefault(name, []).append(end)
-            for name, ends in ends_by_name.items():
-                if len(ends) <= raw_counts.get(name, 0):
-                    continue
-                call_end = next((e for e in ends if cls.is_call_form(shown, e)), -1)
+            for name, call_end in cls._excess_entity_mentions(raw, shown):
                 found.append((name, begin, body, call_end))
         return found
+
+    @classmethod
+    def _excess_entity_mentions(cls, raw: str, shown: str) -> list[tuple[str, int]]:
+        """Names the DECODED text carries MORE often than the raw one — i.e. entity-spelled.
+
+        A count, not `name in raw`: a unit may carry a plain mention AND an entity-spelled
+        occurrence of the same door, and the excess is order-independent. Whole-token on both
+        sides, so neither a preceding nor a following plain mention can hide the entity one.
+        Returns ``(name, call_end)``; `call_end` is the end offset of the first occurrence
+        written in CALL form within `shown`, or -1.
+        """
+        raw_counts: dict[str, int] = {}
+        for name, _start, _end in cls.name_hits(raw):
+            raw_counts[name] = raw_counts.get(name, 0) + 1
+        ends_by_name: dict[str, list[int]] = {}
+        for name, _start, end in cls.name_hits(shown):
+            ends_by_name.setdefault(name, []).append(end)
+        excess: list[tuple[str, int]] = []
+        for name, ends in ends_by_name.items():
+            if len(ends) <= raw_counts.get(name, 0):
+                continue
+            excess.append((name, next((e for e in ends if cls.is_call_form(shown, e)), -1)))
+        return excess
+
+    @classmethod
+    def _unblocked_spans(cls, text: str) -> list[tuple[int, int]]:
+        """`(start, end)` of the source OUTSIDE every leaf block, in source order.
+
+        A link-reference DEFINITION lives here: the CommonMark parser consumes it and emits no
+        leaf for it, which is why `notes_missing_replacement` reports a PLAIN mention there as
+        "NO BLOCK" (#14237 r9 review P1). The ENTITY spelling had no reader reaching it at
+        all, because the entity reader walked the blocks (#14237 r15, measured fail-open).
+        """
+        spans = sorted((start, stop) for start, stop, _body in cls.blocks(text) if stop > start)
+        gaps: list[tuple[int, int]] = []
+        cursor = 0
+        for start, stop in spans:
+            if start > cursor:
+                gaps.append((cursor, start))
+            cursor = max(cursor, stop)
+        if cursor < len(text):
+            gaps.append((cursor, len(text)))
+        return gaps
 
     @classmethod
     def retired_call_forms(cls, text: str) -> list[str]:
@@ -1609,7 +1673,15 @@ class TestEveryReaderNamesTheLiveListingDoor:
             if cls.replacements(name) & set(cls.REPLACEMENT_NAME.findall(body)):
                 continue
             line = text.count("\n", 0, begin) + 1
-            found.append(f"{name}:{line} -> {' '.join(body.split())[:120]}")
+            where = " ".join(body.split())[:120]
+            if not where and not any(b0 <= begin < b1 for b0, b1, _b in blocks):
+                # SAY WHICH KIND of unplaceable this is, in the one case where the plain
+                # spelling says the same thing: a mention in NO BLOCK at all (a link-reference
+                # definition) is outside the block model, exactly as R2 reports the plain
+                # spelling above. An OPAQUE block has its own empty rendering, unchanged, so
+                # the entity report matches the plain one line for line either way.
+                where = "NO BLOCK"
+            found.append(f"{name}:{line} -> {where}")
         return found
 
     def test_the_guard_names_the_doc_it_guards(self):
@@ -2446,17 +2518,33 @@ class TestEveryReaderNamesTheLiveListingDoor:
          '[docs](https://x.invalid "&#116;ortoise_list_graphs")'),
         ('[docs](tortoise_list_graphs)', '[docs](&#116;ortoise_list_graphs)'),
         ('![tortoise_list_graphs](x.png)', '![&#116;ortoise_list_graphs](x.png)'),
-    ], ids=["link-title", "link-destination", "image-alt"])
+        # ⛔ THE SHAPES WITH NO LEAF BLOCK AT ALL (#14237 r15 review, measured fail-open).
+        # A link-reference DEFINITION is consumed by the parser, so it is in NO block: the raw
+        # scan reports its PLAIN mention (`NO BLOCK` for a dead end, an R1 call when it carries
+        # arguments) and the entity reader never reached it, because it walked `blocks()`.
+        ('[foo]: tortoise_list_graphs\n\nSee [foo].',
+         '[foo]: &#116;ortoise_list_graphs\n\nSee [foo].'),
+        ('[tortoise_list_graphs]: https://x.invalid\n\nSee [tortoise_list_graphs].',
+         '[&#116;ortoise_list_graphs]: https://x.invalid\n\nSee [&#116;ortoise_list_graphs].'),
+        ('[foo]: tortoise_list_graphs(x=1)\n\nSee [foo].',
+         '[foo]: &#116;ortoise_list_graphs(x=1)\n\nSee [foo].'),
+    ], ids=["link-title", "link-destination", "image-alt",
+            "ref-def-destination", "ref-def-label", "ref-def-call"])
     def test_the_verdict_does_not_depend_on_the_SPELLING(self, plain, entity):
-        """⛔ MEASURED FAIL-OPEN (#14237 r14): the same mention, spelled two ways, judged two ways.
+        """⛔ MEASURED FAIL-OPEN (#14237 r14 and r15): the same mention, two spellings, two verdicts.
 
         `name_hits` scans the WHOLE source, so a PLAIN retired name in a link's title, a link's
-        destination or an image's alt text is reported — the reader of a printed document sees
-        all three. The entity reader judged `body`, and `body` is exactly what `blocks()`
-        strips those containers out of, so the ENTITY spelling of the very same mention was
-        invisible to all four readers and ACCEPTED. A guard whose verdict is a function of the
-        spelling is the defect this reader exists to close, so both spellings must agree —
-        here, on REPORT, the fail-closed direction the class comment declares.
+        destination, an image's alt text — or a link-reference DEFINITION, which is in no leaf
+        block at all — is reported. The entity reader judged `body`, and `body` is exactly what
+        `blocks()` strips those containers out of, so the ENTITY spelling of the very same
+        mention was invisible to all four readers and ACCEPTED. A guard whose verdict is a
+        function of the spelling is the defect this reader exists to close, so both spellings
+        must agree — here, on REPORT, the fail-closed direction the class comment declares.
+
+        ⛔ EXACT EQUALITY, not "both truthy": the reports' text is what a reader is handed, so
+        a disagreement in the PLACEMENT (`-> NO BLOCK` vs an empty body) is the same defect one
+        layer in. That is also what keeps the r15 rows honest: the ref-def rows cannot pass by
+        the definition happening to sit inside some block.
         """
         rules = (self.retired_call_forms, self.notes_missing_replacement)
         plain_hits = {rule.__name__: rule(plain + "\n") for rule in rules}
@@ -2467,6 +2555,39 @@ class TestEveryReaderNamesTheLiveListingDoor:
         assert entity_hits == plain_hits, (
             f"the verdict depends on the SPELLING of the same mention: {entity!r} gave "
             f"{entity_hits}, {plain!r} gave {plain_hits}")
+
+    def test_a_reference_definition_is_judged_OUTSIDE_the_block_model(self):
+        """The gap unit is STRUCTURAL, and this row pins it as structure (#14237 r15, measured).
+
+        ⛔ MEASURED FAIL-OPEN at `722ed8f0a`: `[foo]: &#116;ortoise_list_graphs(x=1)` was
+        ACCEPTED while `[foo]: tortoise_list_graphs(x=1)` red R1 on line 1 — the same
+        definition, the same reader-visible door, and a verdict that flipped on the spelling,
+        because `_entity_only_mentions` iterated `blocks()` and a link-reference definition
+        produces NO leaf. The parser consumes it, which is exactly why R2 already reports a
+        plain mention there as `NO BLOCK` (r9 review P1).
+
+        ⛔ WHY THE STRUCTURE IS ASSERTED AS WELL AS THE VERDICT (#14237 r10 review P2's rule):
+        the verdict half alone can be satisfied from another direction — a definition that
+        also sits in a paragraph would be reported by the ordinary block path — so this row
+        asserts the property the gap unit exists for: `blocks()` does NOT cover the definition
+        and `_unblocked_spans()` DOES. Deleting the gap unit reds the parametrized ref-def
+        rows above; moving the definition into a block reds this one.
+        """
+        text = "[foo]: &#116;ortoise_list_graphs(x=1)\n\nSee [foo].\n"
+        definition_at = text.index("[foo]:")
+        assert not any(b0 <= definition_at < b1 for b0, b1, _body in self.blocks(text)), (
+            f"the definition is inside a leaf block, so this row measures the block path: "
+            f"{self.blocks(text)}")
+        gaps = self._unblocked_spans(text)
+        assert any(b0 <= definition_at < b1 for b0, b1 in gaps), (
+            f"the source outside every block is not a judged unit: {gaps}")
+        assert self.retired_call_forms(text) == [
+            "tortoise_list_graphs:1"], (
+            "an entity-spelled CALL in a link-reference definition was accepted: "
+            f"{self.retired_call_forms(text)}")
+        assert not self.notes_missing_replacement(text), (
+            "a call form was graded a dead end as well: "
+            f"{self.notes_missing_replacement(text)}")
 
     def test_a_semicolon_less_reference_is_LITERAL_in_markdown_text(self):
         """The other direction: the permissive decode INVENTED a mention in markdown text.
