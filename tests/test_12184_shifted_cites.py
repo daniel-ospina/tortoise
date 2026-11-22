@@ -350,9 +350,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # unpinned, and the header's default resolves them to the PIN — where `sdk.py:16098` is unrelated
     # prose and `sdk.py:3801` is an EMPTY LINE. Both are one-token spellings already, so no figure
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
-    # ⛔ #14087 review: the span's END was one short — `:16081` is the paragraph's PENULTIMATE line and
-    # `:16082` (the line reading "turns list is that same requirement for the record-held lane.") is its
-    # last, with `:16083` blank. A span token pins only its START, so the short end was invisible to `_PINS`;
+    # ⛔ #14087 review: the span's END was one short — `:16102` is the paragraph's PENULTIMATE line and
+    # `:16103` (the line reading "turns list is that same requirement for the record-held lane.") is its
+    # last, with `:16104` blank. (Re-derived on THIS head; the numbers in this sentence moved with the
+    # span when a later merge inserted above it, which is why they are re-measured here rather than
+    # carried from the head the review wrote them at.) A span token pins only its START, so the short end was invisible to `_PINS`;
     # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
     # and grades it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16098-16103", "tortoise/sdk.py", 16098, "**JSONL event log (#548):** written when *point* is provided"),
@@ -1892,7 +1894,9 @@ def test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line() -> None:
     """A span cite must END on the last line of the paragraph it quotes, not one short.
 
     #14087: §6.3 item 1 cited `sdk.py:16098-16102` while the contract's paragraph runs through
-    `:16082`, with `:16083` blank. A `_PINS` row pins a span's START only, so the short END was
+    `:16103`, with `:16104` blank. (⛔ The terminator is head-relative like the span itself: it read
+    `:16082`/`:16083` at the head #14087 wrote it on, and a merge that inserted above the span moved
+    both — the same class this file exists to catch, in its own prose.) A `_PINS` row pins a span's START only, so the short END was
     green in every other test in this file — measured on a throwaway copy, moving the END back one
     line left the whole suite passing. Derived, not hardcoded: the START is the line carrying the
     quoted fragment, the END is the last line before the paragraph's blank terminator.
