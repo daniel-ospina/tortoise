@@ -3219,19 +3219,23 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
 
 - **Why it exists.** `#14277` measures the extractor's real token spend and adds the prompt-cache
   split to the cost envelope, which inserts lines in `tortoise/extractor_v2.py`: **`+5`** before the
-  first symbol this document cites and **`+73`** before the rest, so `:15239`→`:15244`,
-  `:15701`→`:15706`, `:17894`→`:17967` and so on. Every cite OUTSIDE §10 is a claim about the
+  first symbol this document cites and **`+76`** before the rest, so `:15239`→`:15244`,
+  `:15701`→`:15706`, `:17894`→`:17970` and so on. Every cite OUTSIDE §10 is a claim about the
   tree, and `tests/test_7949_capstone_measure.py` resolves them, so a live cite moves with the code or
   the suite reds. Inside §10 that holds only for the NEWEST entry: §10.1–§10.39 are frozen history, no
   pin reads them (§10.14), and none may be re-pointed — but §10.40 IS read, by
   `test_the_newest_change_control_entry_describes_the_shipped_tree`, which resolves this entry's two
   `if items:` gates, its two fail-open `except` arms and its `_run_vet_pass` calls. Only the ARROW
-  cites here (`:15239`→`:15244`, `:15701`→`:15706`, `:17894`→`:17967`) are hand-checked.
+  cites here (`:15239`→`:15244`, `:15701`→`:15706`, `:17894`→`:17970`) are hand-checked.
 - **What moved: cites and nothing that is a protocol value.** No metric, denominator, threshold,
   class set, corpus pin, split or salience pin is touched — §1–§9's criterion VALUES and the E4
   denominator are the ones this record froze. The two `if items:` gates it names are re-pointed
   (`:15244`/`:15397`), as are the two fail-open `except` arms (`:15257`/`:15408`) and the
-  `_run_vet_pass` calls (`:17968` for the S2 pass, `:15373` for the union pass).
+  `_run_vet_pass` calls (`:17971` for the S2 pass, `:15373` for the union pass).
+- **⛔ The upper-region shift is `+76`, not the `+73` this entry first stated** — the arrow it carried
+  (`:17894`→`:17967`) was three lines short, and `test_the_newest_change_control_entry_describes_the_
+  shipped_tree` is what caught it: `:17894` is `if vet_enabled and embed_list:` and the tree carries
+  that line at `:17970`. Corrected here rather than silently, because an arrow IS a claim.
 - **`document_sha256` is re-cut in this same commit**, per §8's rule for *any* edit to this file —
   the §10.38 precedent, not a new reading of it. ⛔ Re-cutting a digest is a mechanical consequence
   of an edit to a *cite*; it is not the owner's re-registration, which is what §10.5's "the owner's

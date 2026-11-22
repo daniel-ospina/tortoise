@@ -1844,7 +1844,7 @@ _IDLE_CITES: dict[str, str] = {
         "BEFORE the `if not edus:` early return that emits {'enabled': "
         "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:14788, the "
         "flag; :14792, the early return; :14823, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17967), "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17970), "
         "`if vet_enabled and complete_list:` (:15372) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
