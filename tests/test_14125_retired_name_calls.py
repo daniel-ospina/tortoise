@@ -2887,8 +2887,14 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     # ⛔ …and the GATE VERDICTS themselves are witnesses, not just the predicate: both gates
     #     must RED this block and stay green on the armed one. Without this pair the whole
     #     class had no red row anywhere, because every other self-test exercises `_covered`
-    #     / `_swallows_everything` directly and never a gate verdict (review of PR #14287,
-    #     F1's second half — the fix that closed the leak added predicate rows only).
+    #     / `_swallows_everything` directly, or a gate verdict over the REAL TREE's rows — never
+    #     one over a SYNTHETIC row population (review of PR #14287,
+    #     F1's second half — the fix that closed the leak added predicate rows only). ⛔ THIS
+    #     SENTENCE ONCE READ "and never a gate verdict", WHICH IS FALSE AS STATED: the two gate
+    #     tests DO call `_unarmed_probe_blocks()` / the seam gate, over the real tree's census
+    #     (review of #14287, round 3, P3). The distinction that made the split necessary is
+    #     SYNTHETIC versus real-tree rows, which is what `_unarmed_from_rows`'s own docstring
+    #     records.
     _witness = "tests/_14287_witness.py"
     assert _unarmed_from_rows(tuple((_witness, *row) for row in rename_dropped)) == (
         (_witness, 3),
@@ -5493,7 +5499,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #: `names & _BROAD`, is load-bearing in the FALSE-RED direction: with its return deleted, a
     #: block that propagates everything — `except Exception: raise` followed by an (unreachable)
     #: `except ImportError:` drop — reads as a swallow. Measured on this head: as-is `False`,
-    #: mutant `True`, and NO other row varies, so the guard could be deleted silently. The pair
+    #: mutant `True`. ⛔ "NO OTHER ROW VARIES, SO THE GUARD COULD BE DELETED SILENTLY" IS FALSE
+    #: AND THIS NOTE ONCE SAID IT (review of #14287, round 3, P1): deleting the early return reds
+    #: the PRE-EXISTING `_swallows_everything` table rows `("a bare arm", …)` and `("a broad
+    #: arm", …)` — both flip `True` → `False`, measured — and the `*_AVAILABLE` flag-spelling row,
+    #: so the guard is NOT deletable silently and the term itself was already covered. What this
+    #: pair adds is the COMPOSITION it names: a re-raising broad arm ABOVE an unreachable drop,
+    #: which no table row states. The pair
     #: below pins both halves: the broad arm that RE-RAISES charges nothing below it, and the
     #: broad arm that DROPS charges.
     #:
@@ -6118,7 +6130,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     Population unchanged by either cut (measured: census 70 rows / 58 files,
     #     `_unarmed_probe_blocks() == ()`, uncovered seam `()` at this head and at the parent),
     #     so the fix is LATENT-safe; these rows are what keep it charged.
-    #     The DROP side is `4j-undetriginta`, below, so the two arms cannot drift apart.
+    #     The DROP side is `4j-undetriginta`, ABOVE, so the two arms cannot drift apart.
     for _label, _statement, _want in (
         ("raise X from exc", "raise RuntimeError('boom') from exc", True),
         ("raise X from None", "raise RuntimeError('boom') from None", True),

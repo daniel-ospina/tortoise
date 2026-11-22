@@ -1248,7 +1248,14 @@ SWEEP_NAMES = 66
 #: pin is RE-DERIVED after every integration rather than carried forward: integrating
 #: `origin/main` (`0467ba329d`) re-measured `--repin` at `(11861, "f0647020531c078c")` — the SAME
 #: pair — and the base's later move to `47e28b549e76` re-measured that SAME pair again, with
-#: `--check` exiting 0 on each integrated tree, so no integration added an untyped receiver.
+#: `--check` exiting 0 on each. ⛔ "NO INTEGRATION ADDED A ROW" IS FALSE AS A GENERAL CLAIM AND
+#: THIS SENTENCE ONCE SAID IT (review of #14287, round 3, P2): an integration CAN add untyped
+#: receivers, and re-cutting the pin is exactly how that gets recorded — the block BELOW is one,
+#: where merging `10e51693` moved the pair to `(11864, …)`, "FOUR MORE than this branch's parent",
+#: and the four arrived with `main`'s commits. The SCOPED reading is the true one: THESE TWO
+#: integrations re-measured the same pair. ⛔ AND THE EVIDENCE IS `--repin`'s OUTPUT, NOT THE
+#: CHECK'S EXIT: `--check` exiting 0 says the observed pair equals the pin, which it reports just
+#: as readily on a tree whose pin was re-cut after the integration added rows.
 #: ⛔ NAMED BY ITS COMMITS, NOT BY "this branch's base": the base moves under every integration
 #: and a parenthetical reading `this branch's base` went stale at the very next merge (measured:
 #: written naming `0467ba329d`, false the moment `47e28b549e76` was merged).
