@@ -1202,6 +1202,22 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         and `test_the_declared_over_block_is_the_price_of_the_opacity_rule` pins each
     #:         spelling so the bound cannot be described more narrowly than it behaves
     #:         (**#14237 r12 review P2** — the class comment is the contract a reader trusts).
+    #:       * an ENTITY spelling is decoded by its block's own LANGUAGE, and it is reported
+    #:         exactly where the PLAIN spelling is: a well-formed (`;`-terminated) reference
+    #:         reds even in a link title, a link destination or image alt text, and a
+    #:         semicolon-less numeric reference is NOT a reference in markdown text (the
+    #:         renderer shows `&#116ortoise…` literally, so it is no mention and does not red)
+    #:         while inside a raw `html_block` it IS consumed, as a browser consumes it. ⛔ ONE
+    #:         decode for both was measured wrong in BOTH directions (#14237 r14): the
+    #:         permissive (HTML5) one false-red a literal sentence as soon as an unrelated
+    #:         `<br>` made its block opaque, and the visible-body one could not see a real
+    #:         entity spelling in the very containers the plain spelling reds in, so the
+    #:         verdict depended on the SPELLING. Discovery reads the block's decoded SOURCE;
+    #:         `body` still governs R2's replacement credit, so a hidden replacement still
+    #:         cannot clear a visible mention. Pinned by
+    #:         `test_the_verdict_does_not_depend_on_the_SPELLING`,
+    #:         `test_a_semicolon_less_reference_is_LITERAL_in_markdown_text` and
+    #:         `test_raw_HTML_is_decoded_the_way_a_browser_decodes_it`.
     #:   (b) * a replacement that appears ONLY where a reader cannot see it — an HTML comment, a
     #:         link destination, a link-reference definition — does NOT count (#14237 r8/r9
     #:         reviews), because the body R2 reads is the block's VISIBLE text;
@@ -1304,9 +1320,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
         ROW's line map; each cell's own source (`token.content`) is therefore located in the
         row text, in order, which is exact because the parser has already removed the pipes.
         """
-        starts = [0]
-        for line in text.splitlines(keepends=True):
-            starts.append(starts[-1] + len(line))
+        starts = cls._line_starts(text)
 
         def off(line_no: int) -> int:
             return starts[line_no] if line_no < len(starts) else len(text)
@@ -1377,6 +1391,61 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 found.append((off(token.map[0]), off(token.map[1]), shown))
         return found
 
+    @staticmethod
+    def _line_starts(text: str) -> list[int]:
+        """Character offset of every line start, plus the end of the document."""
+        starts = [0]
+        for line in text.splitlines(keepends=True):
+            starts.append(starts[-1] + len(line))
+        return starts
+
+    @classmethod
+    def _raw_html_block_spans(cls, text: str) -> set[tuple[int, int]]:
+        """`(start, end)` of every `html_block` — the blocks the renderer passes through RAW.
+
+        It is the only block kind whose source is HTML rather than markdown, so it is the only
+        one that needs a DIFFERENT decode (see `_decoded_source`). `blocks()` already
+        distinguishes it — it reports an opaque empty body for it — but the reason is not
+        recoverable from the body alone: an inline `<br>` also makes a block opaque.
+        """
+        starts = cls._line_starts(text)
+
+        def off(line_no: int) -> int:
+            return starts[line_no] if line_no < len(starts) else len(text)
+
+        spans: set[tuple[int, int]] = set()
+        for token in cls.MD.parse(text):
+            if token.type == "html_block" and token.map:
+                stop = token.map[1] if token.map[1] is not None else len(text)
+                spans.add((off(token.map[0]), off(stop)))
+        return spans
+
+    #: The CommonMark character-reference rule, and ONLY it: `&`, an optional `#`/`#x`, and a
+    #: TERMINATING `;`. ⛔ SEMICOLON-STRICT ON PURPOSE. `html.unescape` implements HTML5, which
+    #: also consumes a semicolon-less numeric reference — decoding MARKDOWN text with it
+    #: invents a mention the reader never sees: markdown-it renders
+    #: `&#116ortoise_list_graphs(x=1)` LITERALLY (`<p>Call &amp;#116ortoise_list_graphs…`), which
+    #: is why the guard accepts that shape. Measured (#14237 r14): the permissive decode made
+    #: the SAME literal sentence red as soon as an unrelated `<br>` made its block opaque.
+    CHARACTER_REFERENCE = re.compile(
+        r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+
+    @classmethod
+    def _decoded_source(cls, raw: str, *, permissive_html: bool) -> str:
+        """The block's SOURCE as the renderer its OWN language belongs to decodes it.
+
+        One question with two answers, because `blocks()` already separates the two
+        languages: markdown text is decoded by CommonMark's rule (`CHARACTER_REFERENCE`, `;`
+        required), while an `html_block` is passed through as RAW HTML and decoded by the
+        browser's HTML5 algorithm, which consumes a numeric reference with or without the
+        terminator. Using ONE decode for both is what produced both r14 findings — the
+        permissive one invented a mention in markdown text, and the visible-body one could
+        not see a real mention in a container the body excludes.
+        """
+        if permissive_html:
+            return html.unescape(raw)
+        return cls.CHARACTER_REFERENCE.sub(lambda m: html.unescape(m.group(0)), raw)
+
     @classmethod
     def _row_cell_spans(cls, text: str, row_start: int,
                         row_stop: int) -> list[tuple[int, int]]:
@@ -1422,11 +1491,24 @@ class TestEveryReaderNamesTheLiveListingDoor:
         `name_hits` scans the RAW source where the token reads `#116;ortoise_list_graphs`.
         That is a false PASS of the guard's own promise, not a cosmetic gap.
 
-        The decoded text is already computed: every block's `body` is the block's VISIBLE
-        text, whose entities markdown-it has resolved. A name whose decoded occurrence count
-        EXCEEDS its whole-token count in the block's raw source is therefore (partly)
-        entity-spelled — and only those are returned, so a plainly written mention stays the
-        raw scan's to judge and no existing verdict changes direction.
+        A name whose decoded occurrence count EXCEEDS its whole-token count in the block's
+        raw source is (partly) entity-spelled — and only those are returned, so a plainly
+        written mention stays the raw scan's to judge and no existing verdict changes
+        direction.
+
+        ⛔ THE JUDGED TEXT IS THE BLOCK'S DECODED SOURCE, IN EVERY BLOCK (#14237 r14 review,
+        measured fail-open). The first cut judged `body` whenever the block had visible text,
+        and `body` is exactly what `blocks()` strips the invisible containers out of — image
+        ALT text, a link's DESTINATION and TITLE, a link-reference label. A retired name
+        ENTITY-spelled in any of those places was therefore invisible to ALL FOUR readers and
+        ACCEPTED, while the PLAIN spelling in the very same place reds (the raw scan sees it):
+        `[docs](https://x.invalid "&#116;ortoise_list_graphs")` came back CLEAN and
+        `[docs](https://x.invalid "tortoise_list_graphs")` came back a dead end. The verdict
+        may not depend on the SPELLING — that is this reader's whole premise — so discovery
+        reads the decoded SOURCE, the exact counterpart of what `name_hits` already scans.
+        What `body` still governs is R2's REPLACEMENT credit, and that is what keeps the
+        r11/r12 exclusions (a hidden replacement does not count) intact: this is not their
+        reopening.
 
         ⛔ WHY A COUNT AND NOT `name in raw`, which was the first cut and was MEASURED
         insufficient: a block may carry a plain mention AND an entity-spelled CALL of the
@@ -1453,28 +1535,22 @@ class TestEveryReaderNamesTheLiveListingDoor:
         character does not exist.
         """
         found: list[tuple[str, int, str, int]] = []
+        raw_html = cls._raw_html_block_spans(text)
         for begin, finish, body in cls.blocks(text):
             raw = text[begin:finish]
             if "&" not in raw:
                 continue
-            # WHAT THIS BLOCK'S MENTIONS ARE JUDGED ON. When the block has visible text,
-            # `body` IS the decoded text and it is the one to use: `blocks()` already
-            # excluded what a reader cannot see (image alt text, link destinations and
-            # titles, link-reference labels, `html_inline`), and decoding the raw source
-            # instead would re-admit all four — the r11/r12 fail-open, not reopened here.
-            # An OPAQUE block reports `body == ""` on purpose, so its decoded SOURCE is the
-            # only text there is, and judging mentions on it errs to a REPORT: the
-            # fail-closed direction this guard has declared since round 1, and the one the
-            # class comment states ("every mention in such a block reds").
-            if body:
-                shown = body
-            elif "<" in raw:
-                shown = html.unescape(raw)
-            else:
-                continue
-            # `found` still carries `body`, never `shown`: for an opaque block that keeps
-            # R2 fail-closed (an empty body matches no replacement), which is the same
-            # verdict a PLAIN mention in an opaque block already gets from the raw scan.
+            # WHAT THIS BLOCK'S MENTIONS ARE JUDGED ON: its DECODED SOURCE — every block,
+            # visible body or not. `name_hits(raw)` already judges the WHOLE source,
+            # including the containers `body` excludes, so this reader judges the decoded
+            # form of that same text; anything narrower makes the verdict depend on the
+            # SPELLING (#14237 r14, measured). Decoding is the block's own language's rule
+            # (`_decoded_source`), never one permissive decode for both.
+            shown = cls._decoded_source(
+                raw, permissive_html=(begin, finish) in raw_html)
+            # `found` still carries `body`, never `shown`: R2's replacement credit reads the
+            # VISIBLE text, so a replacement hidden in an HTML comment, a link destination or
+            # a link title cannot clear a mention (the r11/r12 rule this change preserves).
             raw_counts: dict[str, int] = {}
             for name, _start, _end in cls.name_hits(raw):
                 raw_counts[name] = raw_counts.get(name, 0) + 1
@@ -2365,14 +2441,81 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "an entity-spelled dead end inside an OPAQUE block was accepted: "
             f"{text!r}")
 
+    @pytest.mark.parametrize("plain,entity", [
+        ('[docs](https://x.invalid "tortoise_list_graphs")',
+         '[docs](https://x.invalid "&#116;ortoise_list_graphs")'),
+        ('[docs](tortoise_list_graphs)', '[docs](&#116;ortoise_list_graphs)'),
+        ('![tortoise_list_graphs](x.png)', '![&#116;ortoise_list_graphs](x.png)'),
+    ], ids=["link-title", "link-destination", "image-alt"])
+    def test_the_verdict_does_not_depend_on_the_SPELLING(self, plain, entity):
+        """⛔ MEASURED FAIL-OPEN (#14237 r14): the same mention, spelled two ways, judged two ways.
+
+        `name_hits` scans the WHOLE source, so a PLAIN retired name in a link's title, a link's
+        destination or an image's alt text is reported — the reader of a printed document sees
+        all three. The entity reader judged `body`, and `body` is exactly what `blocks()`
+        strips those containers out of, so the ENTITY spelling of the very same mention was
+        invisible to all four readers and ACCEPTED. A guard whose verdict is a function of the
+        spelling is the defect this reader exists to close, so both spellings must agree —
+        here, on REPORT, the fail-closed direction the class comment declares.
+        """
+        rules = (self.retired_call_forms, self.notes_missing_replacement)
+        plain_hits = {rule.__name__: rule(plain + "\n") for rule in rules}
+        entity_hits = {rule.__name__: rule(entity + "\n") for rule in rules}
+        assert any(plain_hits.values()), (
+            "NEITHER rule reports the PLAIN spelling, so this row would prove nothing: "
+            f"{plain!r}")
+        assert entity_hits == plain_hits, (
+            f"the verdict depends on the SPELLING of the same mention: {entity!r} gave "
+            f"{entity_hits}, {plain!r} gave {plain_hits}")
+
+    def test_a_semicolon_less_reference_is_LITERAL_in_markdown_text(self):
+        """The other direction: the permissive decode INVENTED a mention in markdown text.
+
+        CommonMark requires the terminating `;`, and the renderer this repo pins agrees —
+        markdown-it emits `Call &amp;#116ortoise_list_graphs(x=1)`, i.e. the reader sees the
+        literal `&#116ortoise_list_graphs`, NOT the door. So `&#116ortoise…` is not a mention.
+        ⛔ MEASURED (#14237 r14): the opaque branch decoded with `html.unescape` (HTML5, which
+        consumes a semicolon-less numeric reference), so the SAME literal sentence red as soon
+        as an unrelated `<br>` made its block opaque — one reader-visible text, two answers, on
+        a difference the reader cannot see.
+        """
+        literal = "Call &#116ortoise_list_graphs(x=1) for names."
+        assert self.retired_call_forms(literal + "\n") == [], (
+            f"a literal `&#116ortoise…` was decoded into a mention: {literal!r}")
+        assert self.retired_call_forms(literal + " <br>\n") == [], (
+            "an unrelated `<br>` turned a literal `&#116ortoise…` into a mention — HTML5's "
+            "semicolon-optional decode applied to MARKDOWN text")
+        # …and the TERMINATED spelling in the identical position still reds, so the row above
+        # is not a guard that stopped looking.
+        assert self.retired_call_forms(
+            "Call &#116;ortoise_list_graphs(x=1) for names. <br>\n")
+
+    def test_raw_HTML_is_decoded_the_way_a_browser_decodes_it(self):
+        """An `html_block` is passed through as RAW HTML, so HTML5's rule is the reader's rule.
+
+        `_decoded_source` is one question with two answers because `blocks()` already splits the
+        two languages — and this row pins the half that must NOT become strict: a browser
+        consumes a semicolon-less numeric reference inside raw HTML, so the name IS shown there
+        and reds. Pinning it matters both ways: a later "simplify to one decode" would either
+        re-introduce the r14 false red above (permissive everywhere) or open this shape
+        (strict everywhere).
+        """
+        assert self.retired_call_forms(
+            '<div>Call &#116ortoise_list_graphs(x=1) for names.</div>\n'), (
+            "a semicolon-less reference inside RAW HTML is consumed by a browser, so the name "
+            "is displayed and must be reported")
+        assert self.retired_call_forms(
+            '<div>Call &#116;ortoise_list_graphs(x=1) for names.</div>\n')
+
     def test_closing_the_opaque_entity_gap_does_not_widen_the_entity_rule(self):
         """The controls: the fix reports the intersection and NOTHING ELSE.
 
-        `shown` is `body` whenever the block has visible text, so the r11/r12 exclusions
-        (image alt text, link destinations and titles, reference labels, `html_inline`) are
-        not re-admitted through the back door — a correct note stays clean, and an unrelated
-        `&amp;` in the same block still cannot manufacture a mention. The opaque branch is
-        reached only when the ONE opacity rule already fired.
+        Discovery reads the block's decoded SOURCE in every block (#14237 r14), which is what
+        makes the verdict spelling-independent — but REPLACEMENT credit still reads `body`, so
+        the r11/r12 exclusions hold where they were aimed: a replacement hidden in image alt
+        text, a link destination or title, a reference label or `html_inline` still cannot
+        clear a visible mention, and an unrelated `&amp;` in the same block still cannot
+        manufacture one.
 
         ⚠️ The last row is the DECLARED price, stated here as a bound rather than tuned
         away: in an opaque block the replacement credit is unreachable, so a note that DOES
