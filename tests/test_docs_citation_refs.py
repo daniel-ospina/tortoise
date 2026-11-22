@@ -8794,9 +8794,17 @@ _TYPED_RETAKEN_NUMSTAT = re.compile(
 #: figure — the one form §1/§7 type legitimately. The exemption is anchored at the pair, so it
 #: never excuses a bare figure: `the numstat printed `3 1`` has no fenced command in front of it
 #: and is still graded as a typed pair.
+#:
+#: ⛔ THE VERB CLASS MUST BE THE DETECTOR'S, NOT A SUBSET OF IT (#14249 review, P2). The first cut
+#: of this exemption listed six verbs against the detector's fifteen, so a CORRECT sentence naming
+#: a fenced command and then saying `shows` / `reported` was REFUSED — the same asymmetry as the
+#: P1 above, in the false-red direction. Measured: `` `git diff --numstat …` shows `3 1` `` and
+#: `… reported `381 379` ` both flagged before this widening, both allowed after it, while the
+#: three defect witnesses stay flagged and the live document still yields 0 hits.
 _TYPED_NUMSTAT_AS_COMMAND_RESULT = re.compile(
     r"`[^`]*\b(?:numstat\b|--stat\b|git diff\b)[^`]*`\s*"
-    r"(?:(?:->|\u2192|=>)|(?:prints?|printed|reads?|read|gives?|given|returns?))?\s*\*{0,2}$"
+    r"(?:(?:->|\u2192|=>)|(?:prints?|print|printed|reads?|read|returns?|returned"
+    r"|reports?|reported|shows?|shown|gives?|given|lists?|named?|names?))?\s*\*{0,2}$"
 )
 
 
@@ -8887,6 +8895,14 @@ def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
         # the bolded pair. Legitimate — the command is named beside the figure.
         "`git diff --numstat 70fbd1a27d 689d21b7e4c1 -- docs/architecture/CYPHER-INVENTORY.md` "
         "printed **`381 379`** at the head this paragraph was written for",
+        # ⛔ the two SYNONYM spellings the exemption refused before its verb class matched the
+        # detector's (#14249 review, P2). A fenced command whose result is the pair is exempt
+        # whatever verb conjugates it — refusing these was the false-red direction of the same
+        # asymmetry.
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "shows `3 1`)",
+        "`git diff --numstat 70fbd1a27d 689d21b7e4c1 -- docs/architecture/CYPHER-INVENTORY.md` "
+        "reported `381 379`",
     ):
         assert not _typed_retaken_numstat_pairs(_allowed), (
             f"the re-taken-numstat detector REFUSES {_allowed!r}, which types no current "
