@@ -5411,6 +5411,15 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         "the no-universe message claims the usage lists NO long options while interpolating a "
         f"count of 15 of them — it refutes itself: {short_message!r}. BSD grep publishes fewer "
         "long options than the floor, not none (#14327 review, P3)")
+    # ⛔ AND THE CONDITIONAL IS WITNESSED IN BOTH DIRECTIONS, NOT ONE (#14327 review round 4, P3 —
+    # MEASURED). The arm above forbids the "lists no long options" wording, which the ZERO branch no
+    # longer contains — so flipping `if documented:` to `if False:` left this cell GREEN while the
+    # count-15 render gained "This host published none at all" beside its interpolated 15. One
+    # direction pinned and the other not is how the original self-contradiction got in.
+    assert "published none at all" not in short_message, (
+        "the no-universe message says the host published NONE while interpolating a count of 15 — "
+        f"the same self-refutation at the other end of the range: {short_message!r} "
+        "(#14327 review round 4, P3)")
     # ⛔ AND THE CELL'S OWN TURNING OF THAT RAISE INTO A SKIP IS WITNESSED HERE (#14303 review round
     # 14, P2 — MEASURED). Every arm above pins the DERIVATION; none of them ran the call site that
     # converts "no universe published" into `pytest.skip`, so replacing that skip with a bare `raise`
@@ -5830,12 +5839,10 @@ def test_the_version_probe_answers_without_reading_stdin(monkeypatch):
     no `stdin=`, unlike every other COUNT/ALIAS run the discriminator drives (the count runs above
     and below, and `_d5_grade_alias_spelling`, all pass `input=`). The one other grep run that feeds
     neither is `_d5_documented_long_options`'s `grep --help` at the alias cell — harmless, because
-    `--help` never reads stdin, and named here rather than left as an unstated exception. The two
-    stubs this probe is driven with (`refuses`, `runs_but_fails`, `version_confused` — three, not
-    two: the last reaches it only through the third exit code. Counting them is not pedantry here,
-    it is the SAME count-vs-enumeration defect this branch fixed for the sibling cell, so it is
-    counted from the source rather than remembered) begin `cat >/dev/null`, so an
-    inherited fd 0 made both block until `timeout=60` and raise `TimeoutExpired`, which is NOT an
+    `--help` never reads stdin, and named here rather than left as an unstated exception. The THREE
+    stubs this probe is driven with (`refuses`, `runs_but_fails`, and `version_confused`, which
+    reaches it only through the third exit code) all begin `cat >/dev/null`, so an
+    inherited fd 0 made each block until `timeout=60` and raise `TimeoutExpired`, which is NOT an
     `AssertionError`: the cell ERRORS instead of asserting. pytest's DEFAULT `fd` capture points
     fd 0 at `/dev/null`, so the default run cannot expose it; the shape appears with
     `--capture=no` / `-s`, or outside pytest — which is why the reproduction carries `-s`.
