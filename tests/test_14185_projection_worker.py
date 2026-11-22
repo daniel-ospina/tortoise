@@ -169,7 +169,7 @@ def test_a_write_ack_excludes_the_projection_time(armed):
 
     The projector is wedged for the whole assertion, so the only way this can
     pass is if the ack never waited for it. The bound is generous (250 ms against
-    a 30 s stall) because this asserts an ORDER OF MAGNITUDE — "awn't waiting" —
+    a 30 s stall) because this asserts an ORDER OF MAGNITUDE — "ain't waiting" —
     not a latency budget that a loaded CI box could falsify.
     """
     slow = _SlowProjector()
@@ -1902,8 +1902,12 @@ def test_a_queue_fault_folds_inline_instead_of_breaking_the_write(monkeypatch):
     monkeypatch.setenv(projection_worker.ENV_WORKER, "1")
     # ⛔ BOTH GATES THAT PRECEDE `submit` (#14222 review cycle 5, ISSUE 2). Without
     # `tenant=` and without the record's own arming, `_submitted_to_worker`
-    # returned False at `:336` / `:338` and this row passed even with the `except`
-    # at `:349` deleted — the queue fault was never exercised.
+    # returned False at the `journal_skipped or record_sink is not None or not
+    # durable` gate and at the `tenant is None` gate, and this row passed even with
+    # the `except Exception` around the import deleted — the queue fault was never
+    # exercised. ⛔ Cited by GATE TEXT: the three `:line` numbers that used to sit
+    # here resolved to docstring prose and to a COMMENT (round-16, P2), which is
+    # how a reader deletes the wrong line.
     monkeypatch.setenv(record_writer.RECORD_DSN_ENV, _RECORD_DSN)
 
     def exploding_submit(**kwargs):

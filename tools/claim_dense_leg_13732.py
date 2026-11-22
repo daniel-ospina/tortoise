@@ -1435,6 +1435,7 @@ class SeedReport:
         "record_armed",
         "record_declined",
         "record_deferred",
+        "record_deferred_failures",
         "record_deferred_undrained",
         "record_dsn_fingerprint",
         "record_unprojected",
@@ -1458,6 +1459,7 @@ class SeedReport:
         record_declined: int = 0,
         record_dsn_fingerprint: str | None = None,
         record_deferred: int = 0,
+        record_deferred_failures: int = 0,
         record_deferred_undrained: int = 0,
     ) -> None:
         self.journal = journal
@@ -1473,6 +1475,7 @@ class SeedReport:
         self.last_seq = last_seq
         self.record_declined = record_declined
         self.record_deferred = record_deferred
+        self.record_deferred_failures = record_deferred_failures
         self.record_deferred_undrained = record_deferred_undrained
         self.record_dsn_fingerprint = record_dsn_fingerprint
 
@@ -1507,6 +1510,15 @@ class SeedReport:
             return True
         if self.record_deferred_undrained:
             return True
+        # ⛔ AND THE FOLDS THAT RAN AND LOST THE ROW (#14222 review round 16, P2).
+        # A drain that CONVERGED proves the queue reached every item; it proves
+        # nothing about whether the fold wrote. `circuit_open` — the named outage
+        # in this branch's own vocabulary — refuses every deferred fold, drains
+        # immediately, and used to report "no fold needed" for a record short by
+        # every queued row. The loop's own `failures` delta is the one reading that
+        # separates that from a healthy seed.
+        if self.record_deferred_failures:
+            return True
         return bool(self.positions_unproven) and self.record_armed is not False
 
     def _fold_note(self) -> str:
@@ -1528,6 +1540,12 @@ class SeedReport:
             causes.append(
                 f"{self.record_unprojected} write(s) came back unprojected — caught "
                 f"by the `record_dense` arm's id-scoped guard")
+        if self.record_deferred_failures:
+            causes.append(
+                f"{self.record_deferred_failures} deferred fold(s) RAN and did not "
+                f"write a row (the loop's own failure counter: `projection_raised`, "
+                f"`record_no_outcome` or `projection_refused`) — a converged drain "
+                f"is not a written record, so this needs the fold from the journal")
         if self.record_deferred_undrained:
             causes.append(
                 f"{self.record_deferred_undrained} queued position(s) were still "
@@ -1582,6 +1600,14 @@ class SeedReport:
             # provably had not reached — and a CONVERGED drain still reports 0 here,
             # which is what keeps a healthy armed seed from naming a repair.
             "record_deferred_undrained": self.record_deferred_undrained,
+            # ⛔ AND THE PART THE QUEUE REACHED AND LOST (#14222 review round 16,
+            # P2). The field above says "the loop did not get there"; this one says
+            # "the loop got there and no row came out" — the loop's own failure
+            # counter, differenced around this seed. A CONVERGED drain leaves the
+            # previous field 0 while every deferred fold was REFUSED
+            # (`circuit_open`), so without this the two runs were byte-identical
+            # here and both read as healthy.
+            "record_deferred_failures": self.record_deferred_failures,
             "positions_unproven": self.positions_unproven,
             "folded": self.folded,
             "first_seq": self.first_seq,
@@ -1813,6 +1839,24 @@ def _seed_population(
             exit_code=2,
         )
     log = EventLog(journal_path)
+    # ⛔ THE LOOP'S LOSS COUNTER, SNAPSHOTTED BEFORE THE FIRST WRITE (#14222 review
+    # round 16, P2). `ProjectionStats.failures` is PROCESS-CUMULATIVE, so it must be
+    # DIFFERENCED around this seed or an earlier run in the same process would
+    # attribute its losses here. Without it the artifact could not tell the two
+    # shapes apart that matter most: a converged drain of folds that WROTE, and a
+    # converged drain of folds that all FAILED (the `circuit_open` outage, where
+    # `_classify_fold_outcome` counts `projection_refused`). Both leave
+    # `deferred=N, applied=0, undrained=0`, so `_fold_needed()` answered "no fold
+    # needed" for a record that is short by every queued row — the silent-short
+    # class this file exists to make visible.
+    failures_before = 0
+    try:
+        from tortoise import projection_worker as _worker_for_baseline
+
+        if _worker_for_baseline.armed():
+            failures_before = int(_worker_for_baseline.stats().failures)
+    except Exception:      # noqa: BLE001, RUF100 — the worker is optional here
+        failures_before = 0
     applied = unprojected = unproven = declined = folded = deferred = 0
     armed_yes = armed_unmeasured = False
     first_seq = last_seq = None
@@ -1885,6 +1929,7 @@ def _seed_population(
     # a half-folded population. `wait_for_drain` is the one call that IS correct
     # here: this is an operator tool at the end of a bounded seed, not a read path.
     deferred_undrained = 0
+    deferred_failures = 0
     try:
         from tortoise import projection_worker as _worker
 
@@ -1908,6 +1953,18 @@ def _seed_population(
                 deferred_undrained = max(0, int(_worker.stats().pending_positions))
             except Exception:  # noqa: BLE001, RUF100
                 deferred_undrained = deferred
+        # ⛔ AND THE LOSSES, whether or not the drain converged (#14222 review round
+        # 16, P2): a DRAINED queue is not a WRITTEN record. `wait_for_drain` answers
+        # "the folds finished", and a fold that RAISED or was REFUSED finished too —
+        # so the delta of the loop's own failure counter is the only reading that
+        # separates "the record caught up" from "the loop dropped every row on the
+        # floor". Differenced against the pre-write snapshot because the counter is
+        # process-cumulative; read inside this try so an unreadable stats object
+        # leaves it at zero rather than failing the seed.
+        try:
+            deferred_failures = max(0, int(_worker.stats().failures) - failures_before)
+        except Exception:      # noqa: BLE001, RUF100
+            deferred_failures = 0
     except Exception:
         # The worker is OPTIONAL; the seed is not. An unimportable or failing loop
         # leaves the counts below exactly as the inline door reported them.
@@ -1936,6 +1993,7 @@ def _seed_population(
         record_declined=declined,
         record_dsn_fingerprint=dsn_fingerprint,
         record_deferred=deferred,
+        record_deferred_failures=deferred_failures,
         record_deferred_undrained=deferred_undrained,
     )
 
