@@ -1252,9 +1252,16 @@ class _Collector:
                 started = self._ensure_thread_unlocked()
                 self._wakeup.notify()
         if not started:
-            # ⛔ NOT a re-arm. A closed collector is terminal; answering here would
-            # restart the thread and construct a second backing behind the first
-            # (the 432 MB leak ``reset_seam`` promises not to leave).
+            # ⛔ NOT a re-arm, and this covers BOTH teardown windows the two
+            # reviews found. (a) A teardown is IN PROGRESS: the collector has been
+            # told to stop and is finishing an encode, so a ticket queued now would
+            # wait out its whole bound (a boot's worth, on ``worker``) for a thread
+            # that will exit without looking at it. (b) The thread has ALREADY
+            # exited: the pre-fix path cleared ``_stop`` and started a fresh thread
+            # on this collector, which ran a batch through a backing constructed
+            # after teardown — one nothing would ever close (the 432 MB leak
+            # ``reset_seam`` promises not to leave). ``stop()`` is TERMINAL; both
+            # windows decline by name instead.
             raise RuntimeError(_COLLECTOR_CLOSED)
         # ⛔ The wait is bounded by the collection window PLUS the budget of the
         # PHASE it is guarding — the start-up budget while a worker boot is in
