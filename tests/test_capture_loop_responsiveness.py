@@ -176,8 +176,20 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
     monkeypatch.setattr(TortoiseSDK, target, _fake_extract)
     r = client.post("/v1/sessions", json={"conversation": _CONV})
 
+    # ⛔ The receipt is served inside a BOUNDED join (#14232), so the extraction
+    # starting after the POST returned is correct behaviour, not a failure: on a
+    # cold process the first capture pays the model seam's init, the join expires
+    # and the ACK is `accepted` while the tail keeps working. Asserting at the
+    # POST would measure the join window, not the property under test — measured
+    # here as a deterministic red when this file runs FIRST in a fresh process
+    # (the model seam cold), green when it runs after another capture suite.
+    _deadline = time.monotonic() + 180.0
+    while "ran_on_loop" not in seen and time.monotonic() < _deadline:
+        time.sleep(0.05)
+
     assert "ran_on_loop" in seen, (
-        f"[{mode}] the extraction never ran ({r.status_code}: {r.text[:200]})")
+        f"[{mode}] the extraction never ran within 180 s of the receipt "
+        f"({r.status_code}: {r.text[:200]})")
     assert seen["ran_on_loop"] is False, (
         f"[{mode}] the capture extraction ran ON the event loop — a stalled "
         f"model call would freeze /health and take the whole service down "
