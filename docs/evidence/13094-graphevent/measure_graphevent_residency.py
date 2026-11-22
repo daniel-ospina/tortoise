@@ -261,7 +261,17 @@ def main(argv: list[str] | None = None) -> int:
         print("TORTOISE_DB_URI is not set — this measurement needs its own graph",
               file=sys.stderr)
         return 2
-    result = measure(uri, args.graph, args.sizes, args.keep, args.payload_bytes)
+    try:
+        result = measure(uri, args.graph, args.sizes, args.keep, args.payload_bytes)
+    except Exception as exc:  # every "could not run" is exit 2, never 1
+        # `1` is RESERVED for a produced verdict ("ran, and the answer is no"), so an
+        # unreachable server, a refused query or a server without `GRAPH.MEMORY` must
+        # not reach the shell as a bare traceback: Python's own uncaught-exception
+        # exit is 1, which would read as a measurement nobody made (#14183 review
+        # round 11, measured: `ConnectionError` -> EXIT=1).
+        print(f"could not run: {exc!r} — 2 is \"could not run\", never a measurement",
+              file=sys.stderr)
+        return 2
     print(json.dumps(result, indent=2))
     if not result["schema_complete"]:
         refused = [entry["statement"] for entry in result["schema"]

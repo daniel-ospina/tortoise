@@ -249,6 +249,23 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37568", "tortoise/sdk.py", 37568, "``:Document`` node)."),
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37610` in `_file_human_approval`", "tortoise/sdk.py", 37610, "``:Document`` node)."),
+    # ⛔ EVERY OTHER ADDRESS §5 STATES FOR THOSE TWO MOVES WAS ONE HALF-MOVED, AND NO ROW
+    # GRADED ANY OF THEM (#14183 review round 11, P1 — measured). The two rows above pinned
+    # the CORRECT pair, so the paragraph could say `:37568` in one clause and `:37547` — a
+    # BLANK line — in the next, name `:37589` and `:37610` as the same line, and stay green:
+    # `:37547` was blank, `:37527` was an unrelated comment, `:37491` was blank, and the
+    # `(opening :37567)` of `_file_human_approval` was that function's `:Source` line, not
+    # its `def`. The same rot had reached `mcp_server.py:4477` (now `:4543`), `:4382` (now
+    # `:4448`, the `# prop named "error"` comment), and `sdk.py:37026`/`:37002` (now
+    # `:37147`/`:37178`). One row per stated address, pinned by CONTENT, so the next
+    # half-move reds here instead of shipping a self-contradicting paragraph.
+    (_SUBSTRATE, "tortoise/mcp_server.py:4543", _MCP, 4543, "D10 retires :Document"),
+    (_SUBSTRATE, "mcp_server.py:4448", _MCP, 4448, 'prop named "error"'),
+    (_SUBSTRATE, "sdk.py:37147", _SDK, 37147, "`[a, b, b]` operator"),
+    (_SUBSTRATE, "`:37178`", _SDK, 37178, 'conds.append("o.label IS NULL")'),
+    (_SUBSTRATE, "(opening `:37548`", _SDK, 37548, "def record_decision("),
+    (_SUBSTRATE, "`:37567` is the `:Source` line", _SDK, 37567, "a document is a ``:Source``, not a"),
+    (_SUBSTRATE, "(opening `:37588`", _SDK, 37588, "def _file_human_approval("),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -485,6 +502,17 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37568'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37610` in `_file_human_approval`'): 1,
+    # #14183 review round 11 (P1): the seven addresses whose HALF-move shipped with the restored
+    # pair above. Each occurs exactly once in §5 (`grep -oF` at this head), so 1 is MEASURED, not a
+    # copy of the row above — a second site of any of them means §5 has grown a duplicate spelling
+    # and the pin no longer covers the one it was written for.
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/mcp_server.py:4543'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'mcp_server.py:4448'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'sdk.py:37147'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37178`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37548`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37567` is the `:Source` line'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37588`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2945'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2787'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:5074'): 1,
@@ -2175,7 +2203,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # and NOTHING read it — its `sdk.py:28581` sibling was pinned and the neighbour was not, so a
     # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
     # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
-    assert len(_PINS) == 83
+    assert len(_PINS) == 90
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
