@@ -4444,7 +4444,7 @@ operator who read the line above as "CI defends this" would never run it.
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
 >    `:1592` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
->    `:3272-3282` (the reader that runs on the deployed box);
+>    `:3649-3659` (the reader that runs on the deployed box);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
 >    read at `:432`.
 >
