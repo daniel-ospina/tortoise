@@ -465,7 +465,7 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
     # this arm nor the `_absent` arm above, so it fell through to the `return None`
     # below, i.e. COUNTED AS A WRITTEN ROW. `live_write` reads the same input the
     # other way on BOTH of its surfaces: `not getattr(outcome, "applied", False)`
-    # in `write_live_record`'s falsy branch, and `LiveWrite.applied`'s
+    # in `live_write.write`'s falsy branch, and `LiveWrite.applied`'s
     # `bool(getattr(self.record, "applied", False))` — truthiness, fail-closed (⛔
     # cited by SYMBOL and TEXT, not by `file:line`: the numbers that used to sit
     # here resolved to a COMMENT and to the `deferred` field declaration). A value
