@@ -488,11 +488,15 @@ def _aliases_of(tree: ast.AST, predicate) -> set[str]:
         if isinstance(target, ast.Name):
             if target.id in out:
                 return False
+            # ⛔ A MENTION, not only a bare `Name`: `_box = [results]` and
+            # `_row = per_query[-1]` are aliases of the collection inside them, and the
+            # bare-Name form left `_box[0].sort()` / `_row["order"] = …` green (measured).
             resolves = (
                 predicate(value)
-                or (isinstance(value, ast.Name) and value.id in out)
+                or bool(_names_in(value) & out)
                 or any(predicate(operand)
                        or (isinstance(operand, ast.Name) and operand.id in out)
+                       or bool(_names_in(operand) & out)
                        for operand in _collection_operands(value))
             )
             if resolves:
@@ -548,12 +552,24 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     `_helper(results[0])` was caught before too (measured) — the equality form failed on
     a name-set that was not exactly `watched`, never on the number of arguments.
     """
-    aliases = _aliases_of(run_def, lambda v: isinstance(v, ast.Name) and v.id == var)
+    aliases = _aliases_of(run_def, lambda v: bool(_names_in(v) & {var}))
     watched = {var} | aliases
+    # ⛔ THE RECORDED ROWS ARE A COLLECTION TOO: `_row = per_query[-1]` then
+    # `_row["order"] = _row["order"][:5]` truncated the page the verdict reads, with
+    # every `"per_query" in receiver` clause passing (measured). Resolve names bound to
+    # ANY expression mentioning `per_query`.
+    rows = {"per_query"} | _aliases_of(run_def, lambda v: "per_query" in _names_in(v))
     hits: list[int] = []
     for node in ast.walk(run_def):
-        if getattr(node, "lineno", -1) <= lineno or node is artifact_append:
+        if node is artifact_append:
             continue
+        # ⛔ NOT LINE-FILTERED. `def _tidy(): results.sort()` written ABOVE the read and
+        # `_tidy()` called after it is "after" in EXECUTION but not in LINE NUMBER, and a
+        # `lineno` filter cannot do scope work (measured: `functools.partial(
+        # random.shuffle, results)` bound above the read stayed green).
+        if isinstance(node, ast.Call) and (getattr(node.func, "attr", None) in _READ_NAMES
+                                          or getattr(node.func, "id", None) in _READ_NAMES):
+            continue  # the read itself COLLECTS into the trace; it is not a mutation of it
         receiver: set[str] = set()
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr in _MUTATORS:
@@ -565,7 +581,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         handed = isinstance(node, ast.Call) and callee not in _NON_MUTATING and any(
             _names_handed(arg) & watched
             for arg in list(node.args) + [k.value for k in node.keywords])
-        if receiver & watched or "per_query" in receiver or handed:
+        if receiver & (watched | rows) or "per_query" in receiver or handed:
             hits.append(node.lineno)
     return hits
 
@@ -616,13 +632,26 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     mutators = {"clear", "pop", "popitem", "setdefault", "__delitem__", "__setitem__",
                 "update"}
     setup_pops = {"TORTOISE_API_URL", "TORTOISE_API_KEY"}
+    def _mentions_mapping(value: ast.AST) -> bool:
+        return any(isinstance(n, ast.Attribute) and n.attr == "environ"
+                   for n in ast.walk(value))
+
+    # ⛔ To a FIXPOINT, and through CONTAINERS: `_envs = [os.environ]` then
+    # `_envs[0][...] = ...`, and `_e1 = os.environ; _e2 = _e1; _e3 = _e2` were both
+    # measured green against the one-hop, bare-Name form.
+    env_alias: set[str] = set()
     env_alias = _aliases_of(
-        tree, lambda v: isinstance(v, ast.Attribute) and v.attr == "environ")
-    env_alias |= _aliases_of(tree, lambda v: isinstance(v, ast.Name) and v.id in env_alias)
+        tree, lambda v: _mentions_mapping(v) or bool(_names_in(v) & env_alias))
 
     def _is_environ(node: ast.AST) -> bool:
         return ((isinstance(node, ast.Attribute) and node.attr == "environ")
                 or (isinstance(node, ast.Name) and node.id in env_alias))
+
+    # ⛔ A BOUND METHOD IS THE SAME POINTER: `_set = os.environ.__setitem__` then
+    # `_set(...)`, and `_pop = os.environ.pop` then `_pop(...)`, were both measured green.
+    bound = _aliases_of(
+        tree, lambda v: (isinstance(v, ast.Attribute) and v.attr in mutators
+                         and _mentions_mapping(v.value)))
 
     hits: list[int] = []
     for node in ast.walk(tree):
@@ -633,9 +662,15 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
                   and getattr(node.func, "attr", None) in mutators
                   and _is_environ(getattr(node.func, "value", None)))
         aug = isinstance(node, ast.AugAssign) and _is_environ(node.target)
+        bound_call = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                      and node.func.id in bound)
+        # ⛔ `os.environ = {…}` REPLACES the mapping: a rebinding, not a write.
+        rebound = (isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete))
+                   and any(_is_environ(t) for t in (
+                       getattr(node, "targets", None) or [getattr(node, "target", None)])))
         handed = isinstance(node, ast.Call) and any(
             _is_environ(a) for a in list(node.args) + [k.value for k in node.keywords])
-        if not (subscript or method or aug or handed):
+        if not (subscript or method or aug or bound_call or rebound or handed):
             continue
         module_pop = (isinstance(node, ast.Call)
                       and getattr(node.func, "attr", None) == "pop"
@@ -1018,7 +1053,12 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             f"the artifact's `{key}` iterates {ast.unparse(gen.iter)}, not `{var}` — the "
             f"measured read's {what} must be iterated AS ITSELF (a helper call there cannot "
             f"be proven not to sort/drop it): {ast.unparse(value)}")
-        assert _names_in(value.elt) & _names_in(gen.target), (
+        # ⛔ A MENTION IS NOT A USE: `_DUMMY if r else _DUMMY` names `r` and records a
+        # constant page (measured green). For a conditional element only the VALUE branch
+        # counts, so the target cannot sit purely in the condition.
+        _used = _names_in(value.elt.body) if isinstance(value.elt, ast.IfExp) \
+            else _names_in(value.elt)
+        assert _used & _names_in(gen.target), (
             f"the artifact's `{key}` does not derive its element from the loop target "
             f"`{ast.unparse(gen.target)}`: {ast.unparse(value.elt)}")
         if key == "legs":
