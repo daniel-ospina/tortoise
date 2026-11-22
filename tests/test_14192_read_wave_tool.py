@@ -776,12 +776,27 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
       - any shape whose value is a COPY (`dict(pq)`, `list(results)`, `_result_id(r)`):
         those are correctly exempt, and a copy cannot mutate what it copied.
 
+    ⛔ THREE SURVIVORS MEASURED AT THIS HEAD, named so the list above is evidence rather
+    than a category (each permutes the recorded page while `compare()` still reads
+    `rank_identical: True`):
+
+        globals()["results"].sort()        the page's NAME is computed at runtime
+        _m = [results][0]; _m.sort()       the container is a LITERAL, so nothing binds it
+        operator.iadd(results[0], {…})     a module-level mutator handed an ELEMENT, and
+                                           `_element_only()` must exempt subscripts (the
+                                           artifact builds `[_result_id(r) for r in
+                                           results]`)
+
+    ⛔ `list.sort(results)` and `getattr(results, "sort")()` are NOT survivors — measured
+    RED, because the receiver arm resolves the page through them.
+
     ⛔ THE DURABLE FIX IS NOT A THIRTEENTH CLAUSE — it is to make "the recorded page IS the
     measured page" a RUNTIME property (record the page, assert its identity in
     `compare()`), which cannot be evaded by a spelling at all. That direction was
     recommended at #14281 review round 11 and belongs to the tool, not to this pin; it is
-    filed as #14316 so the residual has a durable home. This pin is the static half, and
-    the honest form of a static half is to say where it stops.
+    filed as #14316 so the residual has a durable home (#14315 was a duplicate of the same
+    direction, filed from a parallel lane). This pin is the static half, and the honest
+    form of a static half is to say where it stops.
     """
     aliases = _aliases_of(run_def, _collection_alias_predicate(var), loops=True)
     watched = {var} | aliases
@@ -815,6 +830,21 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # keeps using `watched` — that is the COLLECTION itself, and passing it to a call may
     # sort it in place. Measured: the fixpoint leaves the real tool green.
     muts = watched | rows
+    # ⛔ A CONTAINER THAT HOLDS THE COLLECTION IS NOT THE COLLECTION — it is an INDEX into
+    # the same object graph, so it joins a SECOND set (`holders`), never `muts` (#14281
+    # review P1, measured). The distinction is load-bearing in both directions:
+    #
+    #     _box[0] = results[0]        a SLOT REPLACEMENT — a bind, mutates nothing
+    #     _box[0] |= {…}              a write INTO the held object — a page mutation
+    #     _box.append(None)           a container operation — mutates nothing the
+    #     _d.clear()                  artifact reads
+    #
+    # Folding holders into `muts` (the first form of this arm) reds the bind line and every
+    # container-only operation above — the bind-line over-fire this file has been cured of
+    # three times, and its contract is to state its false reds rather than add them.
+    # `_tainted()` below lets a holder through only where the expression REACHES THROUGH
+    # the slot (`_d["k"]`, `_o.a`, `self._page`).
+    holders: set[str] = set()
     changed = True
     while changed:
         changed = False
@@ -832,7 +862,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 _targets = (list(_node.targets) if isinstance(_node, ast.Assign)
                             else [_node.target])
                 _iter = _node.value
-                if not (_names_in(_iter) & muts):
+                if not (_names_in(_iter) & (muts | holders)):
                     continue
                 _unpacked = [t for t in _targets if isinstance(t, (ast.Tuple, ast.List))]
                 if _unpacked:
@@ -862,14 +892,21 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                     # production taint analyzer carries (a container is reached through
                     # its slots), applied to the two target shapes that ARE slots — a
                     # `Subscript` (`_slots[k]`, `_box[0]`) and an `Attribute`
-                    # (`self._page`). The container name joins `muts`; every existing arm
-                    # then sees it through `_names_in` on the receiver, exactly as it sees
-                    # `_box = [results]` today.
+                    # (`self._page`). The container name joins `holders`; every existing
+                    # arm then sees it through `_tainted()` on the receiver, exactly as it
+                    # sees `_box = [results]` today — but only when the receiver REACHES
+                    # THROUGH the slot, so the bind that makes the page reachable stays
+                    # GREEN.
                     _slots = [t for t in _targets
                               if isinstance(t, (ast.Subscript, ast.Attribute))]
                     if not _slots or _cannot_carry(_iter, scalars):
                         continue
-                    _target = ast.Tuple(elts=_slots, ctx=ast.Load())
+                    _fresh = set().union(
+                        *(_names_in(s.value) for s in _slots)) - holders
+                    if _fresh:
+                        holders |= _fresh
+                        changed = True
+                    continue
             elif isinstance(_node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef)):
                 # ⛔ A DEFAULT ARGUMENT BINDS THE COLLECTION INTO THE CALLEE (#14281
                 # review P1, measured GREEN): `_f = (lambda _l=results: _l.sort()); _f()`
@@ -905,10 +942,26 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # receiver arm below never fired; `_aliases_of` binds the NAME `_s` and the call is a
     # bare `Name`. `_environ_mutations` already carries this arm for `os.environ.pop`, and
     # `_per_query_element_mutations` calls the same shape a hole rather than a residual.
+    def _tainted(node: ast.AST) -> set[str]:
+        """The names on `node` that are the page — or a SLOT'S VALUE when it REACHES
+        THROUGH a container (`_d["k"]`, `_o.a`, `self._page`), never the container itself.
+
+        A bare holder name is the CONTAINER: `_box.clear()` / `_box.append(…)` reorder the
+        box the page was put in, and `_box[0] = results[0]` REPLACES a slot — none of them
+        mutates what the artifact reads. Reding those would be the bind-line over-fire this
+        file has been cured of three times, and its contract is to state its false reds
+        rather than add them (#14281 review P1). The distinction is the same one the
+        `Subscript` STORE arm needs: a slot that HOLDS the page vs. a write INTO it.
+        """
+        names = _names_in(node)
+        if isinstance(node, (ast.Subscript, ast.Attribute)):
+            return names & (muts | holders)
+        return names & muts
+
     bound_mutator = _aliases_of(
         run_def,
         lambda v: (isinstance(v, ast.Attribute) and v.attr in _MUTATORS
-                   and bool(_names_in(v.value) & muts)),
+                   and bool(_tainted(v.value))),
         loops=True)
     hits: list[int] = []
     for node in ast.walk(run_def):
@@ -924,12 +977,17 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         receiver: set[str] = set()
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr in _MUTATORS:
-            receiver = _names_in(node.func.value)
+            # A method called ON a slot's value (`_d["k"].update(…)`) mutates the held
+            # object, so a container the page was stored into counts here — but only when
+            # the receiver REACHES THROUGH it (`_tainted`).
+            receiver = _tainted(node.func.value)
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            receiver = _names_in(node.value)
+            # `results[0] = …` writes INTO the page → a mutation. `_box[0] = results[0]`
+            # REPLACES a slot of a container that only holds the page → a bind.
+            receiver = _tainted(node.value)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and node.func.id in bound_mutator:
-            receiver = _names_in(node.func)  # a bound mutator CALL is the mutation
+            receiver = {node.func.id}  # a bound mutator CALL is the mutation
         # ⛔ THE AUGMENTED SPELLING IS THE SAME MECHANISM (#14281 review P1, measured).
         # `dict |= other` is PEP 584's in-place merge — the exact semantics of `update`,
         # which `_MUTATORS` already carries — but an `AugAssign` whose target is a BARE
@@ -943,7 +1001,15 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         # Subscript arm above; this is only the bare-name target. The real `run()` holds
         # zero `AugAssign` nodes, so this cannot false-red the tool (measured).
         elif isinstance(node, ast.AugAssign):
-            receiver = _names_in(node.target)
+            # A bare-name target counts only when it IS the page/alias; a container is
+            # reachable through a slot too (`_slots["k"] |= …` merges into the held
+            # element), while `_slots |= …` on the container mutates nothing the artifact
+            # reads (#14281 review P1).
+            _t = node.target
+            if isinstance(_t, ast.Name):
+                receiver = {_t.id} if _t.id in muts else set()
+            else:
+                receiver = _tainted(_t)
         callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None) \
             if isinstance(node, ast.Call) else None
         def _element_only(arg: ast.AST) -> bool:
@@ -984,9 +1050,27 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
             _names_handed(arg) & watched and not _element_only(arg)
             for arg in list(node.args) + [k.value for k in node.keywords])
+        def _slot_ref(arg: ast.AST) -> bool:
+            """A slot's VALUE handed to a call is the object stored there (#14281 P1).
+
+            `_element_only()` exempts any `Subscript`, because `results[0]` is an element
+            of the page and the artifact itself hands ELEMENTS to `_result_id`. A container
+            that HOLDS the page is the other case: `random.shuffle(_d["k"])` permutes the
+            element the artifact records, invisibly. Only the REACHING form counts — `_d`
+            alone is the container, and shuffling it changes nothing the artifact reads.
+            """
+            return (isinstance(arg, (ast.Subscript, ast.Attribute))
+                    and bool(_names_in(arg) & holders))
+
         row_handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
             _row_ref(arg) for arg in list(node.args) + [k.value for k in node.keywords])
-        if receiver & muts or handed or row_handed:
+        slot_handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+            _slot_ref(arg) for arg in list(node.args) + [k.value for k in node.keywords])
+        # ⛔ EVERY `receiver` ARM ABOVE IS ALREADY RESOLVED AGAINST THE SET IT BELONGS TO
+        # (`muts`, or `muts | holders` for a container slot), so this is a truthiness
+        # test — re-intersecting with `muts` here is what kept a slot mutation GREEN after
+        # its arm existed, because a holder is never a tainted name (#14281 review P1).
+        if receiver or handed or row_handed or slot_handed:
             hits.append(node.lineno)
     return hits
 
@@ -1686,6 +1770,89 @@ def test_a_CHAINED_UNPACK_binds_EVERY_target() -> None:
         "a list COMPREHENSION over `per_query` builds new dicts — only the shallow copies "
         "it holds are touched, and redding it would red the artifact-building code this "
         "pin exists to protect (measured false red, #14281 review F5)")
+
+
+def test_a_CONTAINER_that_only_HOLDS_the_page_is_NOT_the_page() -> None:
+    """The slot rule is precise: HOLDING the page is not BEING the page.
+
+    ⛔ The first form of the container-slot arm folded the container into `muts`, which
+    reds every one of these INNOCENT lines with "line(s) [N] mutate a collection AFTER the
+    measured read" (measured at `a962da9cacc3`):
+
+        _box[0] = results[0]; _box[0] = None          a SLOT REPLACEMENT is a bind
+        _box[0] = results[0]; _box.append(None)       a container operation
+        _d["k"] = results[0]; _d.clear()              a container operation
+        _d["k"] = results[0]; _c = _d.clear; _c()     a BOUND container mutator
+        _d["k"] = results[0]; print(_d)               a pure read
+        (_a,) = (_b,) = results; print(_a, _b)        an unpack bind, no mutation
+
+    None of them can reorder the page, and the pin's own contract is to state its false
+    reds rather than add them — three review rounds were spent removing exactly this
+    class. So the container goes in a SECOND set (`holders`) and `_tainted()` lets it
+    through only where an expression REACHES THROUGH a slot; the RED cases below are the
+    other half of that same distinction, so the precision cannot be bought by going blind.
+    """
+    def _hits(src: str) -> list[int]:
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        return _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+
+    def _src(body: str) -> str:
+        return ("def run(sdk):\n"
+                "    results = sdk._tortoise_fts_query(query='q', limit=10)\n" + body)
+
+    # ⛔ MUST STAY GREEN: the bind line, and every container-only operation.
+    for label, body in {
+        "slot replacement is a bind": (
+            "    _box = [None]\n    _box[0] = results[0]\n    _box[0] = None\n"),
+        "container append": (
+            "    _box = [None]\n    _box[0] = results[0]\n    _box.append(None)\n"),
+        "container clear": (
+            "    _d = {}\n    _d['k'] = results[0]\n    _d.clear()\n"),
+        "bound CONTAINER mutator": (
+            "    _d = {}\n    _d['k'] = results[0]\n    _c = _d.clear\n    _c()\n"),
+        "pure read of the container": (
+            "    _d = {}\n    _d['k'] = results[0]\n    print(_d)\n"),
+        "unpack bind with no mutation": (
+            "    (_a,) = (_b,) = results\n    print(_a, _b)\n"),
+    }.items():
+        hits = _hits(_src(body))
+        assert not hits, (
+            f"[{label}] FALSE RED (hits={hits}) — a container that holds the page is not "
+            "the page, and replacing a slot (or appending/clearing the container) mutates "
+            "nothing the artifact reads; reding it costs the next lane an edit to a "
+            "2 400-line pin for an innocent one-liner and misdiagnoses itself")
+
+    # ⛔ AND MUST STILL BE RED: the same container, reached THROUGH the slot.
+    for label, body, marker in (
+        ("held element handed to a call",
+         "    _d = {}\n    _d['k'] = results[0]\n    random.shuffle(_d['k'])\n",
+         "random.shuffle(_d['k'])"),
+        ("bound mutator of the held element",
+         "    _d = {}\n    _d['k'] = results[0]\n    _s = _d['k'].sort\n    _s()\n",
+         "    _s()"),
+        ("method ON the held element",
+         "    _box = [None]\n    _box[0] = results[0]\n    _box[0].sort()\n",
+         "_box[0].sort()"),
+        ("write through the slot",
+         "    _d = {}\n    _d['k'] = results[0]\n    _d['k']['id'] = 'REDACTED'\n",
+         "_d['k']['id'] = "),
+        ("three-deep chained unpack, last target",
+         "    (_a,) = (_b,) = (_c,) = results\n    _c |= {'id': 'REDACTED'}\n",
+         "_c |= "),
+        ("chained unpack, first target",
+         "    (_a,) = (_b,) = results\n    _a |= {'id': 'REDACTED'}\n",
+         "_a |= "),
+    ):
+        src = _src(body)
+        line = _mutating_line(src, marker)
+        hits = _hits(src)
+        assert line in hits, (
+            f"[{label}] GREEN (hits={hits}, wanted {line}) — reaching THROUGH the slot is "
+            "the page being mutated, so tightening the bind controls on the other side of "
+            "this test must not blind the arm")
 
 
 def test_a_BOUND_MUTATOR_of_a_recorded_row_is_red() -> None:
