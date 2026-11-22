@@ -1,9 +1,9 @@
 ---
-title: "#14192 - the read path's legs, measured"
+title: "#14192 — the read path's legs, measured"
 type: evidence
 domain: platform
 doc_status: live
-created: 2026-11-22
+created: 2026-11-21
 subjects.team: epistemic-team
 aboutSubjects: Tortoise read path, read-wave latency, rank identity, p50/p95 delta
 aboutObjects: "#14192, tools/read_wave_latency.py, docs/evidence/14192-read-wave/ab-full-read.json, docs/evidence/14192-read-wave/ab-relationships.json"
