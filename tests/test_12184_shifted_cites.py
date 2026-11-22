@@ -1266,6 +1266,39 @@ _SPLIT_DRIFT = re.compile(r"the drift is (\d+) of the (\d+) comparable, plus (\w
 _SPLIT_ABSENT_AT_MAIN = re.compile(r"the\s+(\w+) that do not exist at `main` either")
 
 
+_NONCOMPARABLE_PATHS = ("sdk.py", "search_engine.py", "mcp_server.py", "hosted_api.py")
+
+
+def _names_pair(region: str, path: str, line: int) -> bool:
+    """Is `(path, line)` written at its address in `region`, with the PATH bound when it is bare?
+
+    ⛔ A BARE SIBLING NUMBER IS NOT A NAMING ON ITS OWN. The enumeration writes most pairs in the
+    sibling form (`` `search_engine.py`'s `:7170`/`:7201` ``), so a bare number inherits the path from
+    the nearest filename written BEFORE it — otherwise any pair can be "named" by a number belonging
+    to another file, and that shipped green: measured on the shipped document, re-attributing the
+    `:Tag` traversal's sibling number to the OTHER file left the whole suite green, while that number
+    in `hosted_api.py` is an unrelated bookkeeping comment (review cycle 9 — the same fail-open, one
+    level above the fragment check). ⛔ Never spell a concrete `hosted_api.py:<n>` cite in this file:
+    `tools/hosted_api_cite_census.py` greps every tracked file, so the literal JOINS the population
+    it measures and reds `--check`.
+    """
+    filename = path.rsplit("/", 1)[-1]
+    for form in (f"`{path}:{line}`", f"`{filename}:{line}`", f"{path}:{line}"):
+        if form in region:
+            return True
+    bare = f"`:{line}`"
+    start = 0
+    while True:
+        at = region.find(bare, start)
+        if at == -1:
+            return False
+        before = region[:at]
+        owners = [(before.rfind(name), name) for name in _NONCOMPARABLE_PATHS if name in before]
+        if owners and max(owners)[1] == filename:
+            return True
+        start = at + 1
+
+
 def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     """The `N comparable / M not` split is derived from the pin's own file lengths, not trusted as prose.
 
@@ -1318,16 +1351,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     )
     region = body[start:end]
     unnamed = sorted(
-        pair
-        for pair in _PIN_EOF_PAIRS
-        if not any(
-            form in region
-            for form in (
-                f"`{pair[0]}:{pair[1]}`",
-                f"`{pair[0].rsplit('/', 1)[-1]}:{pair[1]}`",
-                f"`:{pair[1]}`",
-            )
-        )
+        pair for pair in _PIN_EOF_PAIRS if not _names_pair(region, pair[0], pair[1])
     )
     assert not unnamed, (
         f"the comparability split counts {len(_PIN_EOF_PAIRS)} pairs as non-comparable but does not name "
@@ -1439,11 +1463,11 @@ def test_every_noncomparable_pair_lands_on_the_fragment_the_header_quotes() -> N
             problems.append(
                 f"{path}:{line} is {source[line - 1].strip()[:70]!r}, not {fragment!r}"
             )
-        if not any(
-            form in region
-            for form in (f"`{path}:{line}`", f"`{path.rsplit('/', 1)[-1]}:{line}`", f"`:{line}`")
-        ):
-            problems.append(f"{path}:{line} is not named in the non-comparable enumeration")
+        if not _names_pair(region, path, line):
+            problems.append(
+                f"{path}:{line} is not named in the non-comparable enumeration "
+                "(a bare `:NNNN` counts only behind its own path)"
+            )
     assert not problems, (
         "the comparability split counts a pair as non-comparable — the one population no text comparison "
         "reaches — and its address does not hold what the document says it holds:\n  "
