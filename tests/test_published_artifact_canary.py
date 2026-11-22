@@ -26,6 +26,18 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# ⛔ THE RUNNER'S SHELL FOR A `run:` BLOCK IS `bash -e {0}` — errexit ON — so a harness that
+# executes a block under plain `bash -c` is measuring a DIFFERENT program. MEASURED (review
+# cycle 9, P2) on the canary block under the cycle-1 regression this file documents (the
+# display moved above the `$GITHUB_OUTPUT` write with `|| true` removed): `bash -c` gives
+# rc=2 with `exit_code=2` already written — GREEN — while the real step aborts with rc=1 and
+# an EMPTY output sink. Two spellings of the same harness therefore disagreed about one
+# block, and the weaker one reported a green exit-code contract for a step the real shell
+# kills. This constant is the ONE spelling: every harness that executes a workflow `run:`
+# block takes its argv from here, so the flags cannot drift apart again. (A harness that
+# runs a SYNTHETIC script of its own, not a workflow block, is free to choose its own shell.)
+_RUNNER_SHELL = ("bash", "-e", "-c")
+
 
 def _load_tool():
     """Import `tools/published_artifact_canary.py` by path.
@@ -2450,6 +2462,15 @@ def test_the_tool_imports_only_the_STANDARD_LIBRARY():
 def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_path):
     """Runs the canary step's OWN shell, twice, with a stub interpreter.
 
+    ⛔ `OWN shell` IS LOAD-BEARING, and it was FALSE when this harness was first written:
+    it ran the block under plain `bash -c` while the runner runs `bash -e {0}` (review
+    cycle 9, P2, MEASURED). The difference is not cosmetic — under the cycle-1 regression
+    (the display moved above the `$GITHUB_OUTPUT` write, `|| true` removed) the lax shell
+    returned rc=2 having already written `exit_code=2`, while the real step aborted with
+    rc=1 and an EMPTY sink. The harness now takes its argv from `_RUNNER_SHELL`, which is
+    the runner's, so case (a) below actually measures "the step crash-lands on a
+    detector-fault path" instead of "a shell that cannot abort agreed with us".
+
     exit 1 is the irreversible instruction ("the published artifact is broken — cut a
     release"), and BOTH consumers act on it. An interpreter-level failure exits 1 too — a
     SyntaxError at import, an uncaught exception outside `main()`'s backstop, a
@@ -2498,7 +2519,8 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
             "GITHUB_STEP_SUMMARY": str(summary),
         }
         completed = subprocess.run(
-            ["bash", "-c", run], cwd=str(REPO_ROOT), env=env, capture_output=True, text=True
+            [*_RUNNER_SHELL, run], cwd=str(REPO_ROOT), env=env,
+            capture_output=True, text=True,
         )
         return completed.returncode, out.read_text()
 
@@ -2584,10 +2606,12 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         }
         # `bash -e`: the runner's shell is `/usr/bin/bash -e {0}` (read off the live run
         # 44995025534), so the block is exercised under errexit, not under a laxer shell
-        # than the one it ships to (review cycle 1, P2 — `bash -c` stayed green while the
-        # real step aborted).
+        # than the one it ships to (review cycle 1, P2 — `bash -c`
+        # stayed green while the real aborted). `_RUNNER_SHELL` is shared with the sibling
+        # harness so the two cannot diverge again (review cycle 9, P2).
         completed = subprocess.run(
-            ["bash", "-e", "-c", run], cwd=str(REPO_ROOT), env=env, capture_output=True, text=True
+            [*_RUNNER_SHELL, run], cwd=str(REPO_ROOT), env=env,
+            capture_output=True, text=True,
         )
         return completed.returncode, completed.stdout + completed.stderr, out.read_text()
 
@@ -2919,7 +2943,8 @@ def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
             "GITHUB_STEP_SUMMARY": str(summary),
         }
         completed = subprocess.run(
-            ["bash", "-e", "-c", run], cwd=str(REPO_ROOT), env=env, capture_output=True, text=True
+            [*_RUNNER_SHELL, run], cwd=str(REPO_ROOT), env=env,
+            capture_output=True, text=True,
         )
         return completed.returncode, completed.stderr, summary.read_text()
 
