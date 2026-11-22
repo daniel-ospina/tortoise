@@ -872,7 +872,7 @@ def _skip_call_read_names(fn: ast.AST) -> set[str]:
 #: NOTHING: no row, no root, `UNARMED == ()` reading green over it (`#14197`,
 #: found by the reviewer of `#14160`). The two kinds share `.handlers`,
 #: `.orelse` and `.finalbody`, and the handler predicates (`_covered`,
-#: `_swallows_everything`, `_reraise`s) read the HANDLERS, which both carry. The
+#: `_swallows_everything`, `_reraises`) read the HANDLERS, which both carry. The
 #: census's other kind read is `_imports_own_code`'s STOP — `ast.TryStar` is
 #: deliberately not in its descend set, so a nested `except*` is not charged to
 #: its parent (witnessed by `4e-bis` direction 4), which is why that helper
@@ -880,6 +880,11 @@ def _skip_call_read_names(fn: ast.AST) -> set[str]:
 #: Measured before the widening: the identical probe differing only in the
 #: handler keyword gave `()` for `except*` and `((3, (), True, True, True),)` for
 #: `except`; population elsewhere unchanged (70 rows / 62 roots / 58 files).
+#: THE CLASS IS LATENT — at this writing **no** tracked `*.py` file contains an
+#: executable `except*`: an AST scan of all 2545 of them finds `ast.TryStar` in
+#: none (10 files mention the TEXT, in comments and string literals), so the
+#: population changes by zero and the row below is the only thing that can red
+#: if this widening is ever reverted.
 _TRY_NODE_KINDS: tuple[type[ast.AST], ...] = (ast.Try, ast.TryStar)
 
 
