@@ -426,7 +426,7 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/domain_validators.py:105` (and the same property-join shape at `:174-182`, `:197-205`) | `MATCH (req) WHERE (req:Point OR req:Object) AND (req.pointKind IN $req_kinds OR req.objectKind IN $req_kinds)`, then `OPTIONAL MATCH (wp:Point {wf_id: req.enabled_workflow})` — **property-equality joins only**; no relationship appears in any pattern | **none** |
 | `tortoise/domain_validators.py:153-158` (`orphan_use_case`) | `OPTIONAL MATCH (uc)<-[:hasPart]-(op:Point {is_operator:true, op_type:'composedOf'})-[:hasPart]->(jtbd:Point)` — a **2-hop `hasPart` walk**, i.e. every parented use-case is found THROUGH the tree | **adjacency** |
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
-| **the whole-node accessor family** — `tortoise/sdk.py:27821`, `:28644`, `:30302`, `:30398`, `:30497` (`get_point`'s `_cache_answer`), `:44126`; `tortoise/record_serve.py:468` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
+| **the whole-node accessor family** — `tortoise/sdk.py:27821`, `:28720`, `:30378`, `:30474`, `:30573` (`get_point`'s `_cache_answer`), `:44202`; `tortoise/record_serve.py:468` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
 
 **Verdict: `graph`.** Eighteen reader rows — **thirteen capability-carrying**, **four deliberately `none`**
 (`none`: `search_engine.py:4878-4880`, a plain label scan; `domain_validators.py:105`, a property-equality
@@ -463,7 +463,7 @@ prevent — recorded rather than quietly edited.
 |---|---|---|
 | `tortoise/sdk.py:42386` | `MATCH (s:Source)-[:references]->(o:Source)` — source-to-source provenance | **traversal** |
 | `tortoise/sdk.py:58987` | `MATCH (s:Source {url:$url})-[:references]->(n)` | **traversal**. |
-| `tortoise/sdk.py:38207` (target side) | `(p:Point)-[:extractedFrom]->(s:Source)` — every claim must reach its source (§9.4 ①) | **traversal** |
+| `tortoise/sdk.py:38228` (target side) | `(p:Point)-[:extractedFrom]->(s:Source)` — every claim must reach its source (§9.4 ①) | **traversal** |
 | `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('<label>', $query)` — the index `:3129`'s note says is built on **`Source._searchText` for every Source** | **fulltext index** |
 | `tortoise/session_source_migration.py:432-434` | `SET new.provenance_spans = CASE WHEN coalesce(size(new.provenance_spans),0)=0 THEN $spans ELSE new.provenance_spans END` — a **`SET` that READS the node**, i.e. a reader by §2's rule | **none** |
 | `tortoise/session_source_prose_migration.py:218-223`, `:1263-1268`, `:274-281` | the episodic-Source **prose** reconciler, the same shape one file over: `_SOURCE_ROWS`/`_HITS_ROWS` are keyed `RETURN … s.summary …` reads, and `_REPAIR_PAIR`'s `AND coalesce(s.summary,'')=$old_sum … SET s.summary=$sum` is a **`SET` that READS the node**. Not test-only and not dead: `reconcile_after_replay` runs it on every replay engine's trailing sweep, and on the rebuild, backup-restore and consistency paths. Capability `none` — property projections, a prefix predicate and a keep-arm — so this row adds a reader without moving a verdict; row 13 (§3) carries the placement verdict for `Source.summary` itself, and ⚠️ this row is also why that row's absence claim was false before this revision | **none** |
@@ -889,8 +889,8 @@ reader is `public.session_narrative` (`record_text.serve_from_record`). The live
 
 ⚠️ **`story_arc` IS read — by whole-node reads, and an earlier draft's "zero Cypher readers" was false under this
 document's own rule.** Six product sites return the whole `:Point` node — `MATCH (n:Point {id:$id}) RETURN
-properties(n)` at `sdk.py:27821`, `:28644`, `:30302`, `:30398` (`:30497` inside `get_point`'s `_cache_answer`) and
-`:44126` — so a legacy point whose `props` tail carries the prose is returned WITH that key today, and the deny's
+properties(n)` at `sdk.py:27821`, `:28720`, `:30378`, `:30474` (`:30573` inside `get_point`'s `_cache_answer`) and
+`:44202` — so a legacy point whose `props` tail carries the prose is returned WITH that key today, and the deny's
 visible effect is **`get_point` ceasing to return it for legacy points**. This is the exact error class §2.4 and
 row 14 record twice for `capture_redactions` and `Point.mentions`: "unread" is false, "capability `none`" is the
 real reason the verdict is `record_only`. **The verdict does not change** — a whole-node read needs none of the
@@ -1154,7 +1154,7 @@ rules are arguable here.
   append" and concluded the move was "very likely" a feed re-pointing. It is not:
 
   1. **`_emit_event`'s own contract** (`sdk.py:16098-16103`, the paragraph's last line included —
-     `:16081` is its penultimate one): the JSONL half is written only *when* `point`,
+     `:16102` is its penultimate one): the JSONL half is written only *when* `point`,
      `id` or `turns` is provided — *"Events with NONE of the three are skipped (nothing meaningful to log)."*
   2. **`append_event`'s own contract** (`event_store.py:808`, and again in its module docstring at `:58`):
      *"a payload-only emit writes one with no JSONL record at all."*
