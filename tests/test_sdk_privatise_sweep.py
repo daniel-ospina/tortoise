@@ -400,6 +400,20 @@ _ARM_REFSPECS: dict[str, str] = {
     # checks it where it does — on the SOURCE.
     "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
     "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
+    # ⛔ FULL-SHA WANTS, because neither rev has an ADVERTISED ref: `27cd81d55ebd` sits in no ref at
+    # all and `8889f1140105`'s only ref is a local branch (`refs/pull/14086/head` contains neither),
+    # so `+<40-hex>:refs/pi/<rev>` is the only address that resolves — naming a branch would be the
+    # lie this map exists to forbid. ⛔ DURABILITY, not fetchability, is the caveat: an unadvertised
+    # sha is subject to the server's GC, so a re-arm can stop resolving; the pairs stay graded.
+    "8889f1140105": "+8889f1140105677add2c7c4dd60d0c8c5080ea26:refs/pi/8889f1140105",
+    "27cd81d55ebd": "+27cd81d55ebd42948c27051d821df970bbc0ba2f:refs/pi/27cd81d55ebd",
+    # `8889f1140105` is a MERGE on a deleted feature branch, so no depth-1 REF arms it — but a sha
+    # want does, measured from a clone holding neither object: `git fetch --dry-run --depth=1
+    # https://github.com/daniel-ospina/tortoise.git 8889f1140105677add2c7c4dd60d0c8c5080ea26` →
+    # `* branch … -> FETCH_HEAD`, while the same command with an invented sha prints
+    # `fatal: remote error: upload-pack: not our ref` (the negative control that makes the first
+    # line evidence rather than a coincidence). This map grades the FORM of the remedy; the
+    # want-ability behind it is what that pair of commands measures.
 }
 
 
@@ -1724,8 +1738,25 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # excluding it by PROVENANCE rather than by a measurement difference (review round 3, P2). ⛔ AND NOT `c5e84ad180f2`, where
     # `origin/fix/14125-census-p1s` stands today: it is a DESCENDANT of `0351fe856942`, pushed
     # after the squash, and its content never landed.
+    # `8889f1140105` is the merge that PINS 11835 and MEASURES 11843 — the block's example of the
+    # rule. Its pair is verified against the tree like every other entry
+    # (`git show 8889f1140105:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`), and its want-ability
+    # by full sha is measured in `_ARM_REFSPECS`'s comment. The CLAIM in the block must therefore
+    # keep `8889f1140105` as the nearest backticked token before the word `commits`: the digest
+    # `891187f5a4636487` is itself a backtick-hex candidate, so a reordering binds the pair to it.
     "10e51693f166": (11858, "a1552662bf07a10b"),
     "0351fe856942": (11858, "a1552662bf07a10b"),
+    # ⛔ THE RUN-5 ILLUSTRATION'S TWO REVS (review of PR 14183, P2). The `#:` block publishes the
+    # merge `8889f1140105` as committing `(11835, "891187f5a4636487")` while its own tree measures
+    # `11843`, and `27cd81d55ebd` as re-pinning to that measured pair. Both pairs are true
+    # (`git show <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`), so BOTH revs belong here:
+    # a merge of `origin/main` had dropped them from the graded spelling, which left the pairs
+    # ungraded and this arm's coverage quietly narrower than the block claims. ⛔ BOTH LANES added
+    # `8889f1140105` here independently while merging, so ONE entry is kept: a duplicate literal
+    # key in this dict is SILENT (last wins) and would make the pair look double graded when it is
+    # graded once. Measured: `(11835, "891187f5a4636487")` and `(11843, "6aed5368ffa10513")`.
+    "8889f1140105": (11835, "891187f5a4636487"),
+    "27cd81d55ebd": (11843, "6aed5368ffa10513"),
 }
 
 
