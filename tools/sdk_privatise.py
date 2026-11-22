@@ -1302,6 +1302,7 @@ SWEEP_NAMES = 66
 #: ⛔ EVERY BLOCK ABOVE IS KEPT, both sides', because each is a true measurement of the tree it
 #: NAMES — including both sides' final lines, which are two different trees and neither of which
 #: is this one.
+#:
 #: ⛔ RE-PINNED → (11861, "f0647020531c078c") BY MEASUREMENT, and the 11858 pair FALSIFIED AT ITS
 #: OWN COMMIT. `surface-guard` was RED on PR #14220 at `b7ce9f086c` with `observed: (11861,
 #: f0647020531c078c)` / `pinned: (11858, a1552662bf07a10b)`, and the pin's own base commit
@@ -1323,6 +1324,13 @@ SWEEP_NAMES = 66
 #: untyped receivers of its own, which is a measurement and not an inheritance. `--check` exits 0 on it with
 #: `typed references still pointing at a public name: 0`. ⛔ BOTH sides' blocks above are KEPT again,
 #: for the reason the note above already states.
+#:
+#: ⛔ RE-MERGED AT `#14220`'s NEW TIP (`6317eaf3eaa1`), which had itself merged `origin/main`
+#: (`10f56067d67f`) while this reconciliation was running — so the tree this pin is taken on is a
+#: FOURTH one, and the pin is `--repin`'s output on it rather than either parent's line. Its tip
+#: pins `(11861, "f0647020531c078c")`; this resolution pins `(11864, "2a6400518a87775c")`, unchanged
+#: across every merge in this branch, because none of the three parent tips adds an untyped
+#: receiver of its own. Arithmetic is a CROSS-CHECK here, never the evidence.
 SWEEP_RESIDUE = (11864, "2a6400518a87775c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

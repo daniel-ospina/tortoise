@@ -140,7 +140,7 @@ CAPABILITY_CONTROLS = (
     # Point/Subject/Object/Event), so this row pins the SHAPE the capability arms must catch, not a
     # placement claim. ⛔ Named by SECTION and row, never as a `:NNNN` address into that document:
     # the audit is a file this very PR grows, so a bare line number here went stale by this diff's
-    # own insertions (the EP-walk row is `:410` on `main` and `:431` here — re-measured by
+    # own insertions (the EP-walk row is `:410` on `main` and `:433` here — re-measured by
     # `grep -n 'ep.py:1620-1632'`, and the delta is this PR's own header rows; #14183 review
     # P3) and a lane re-deriving from it lands on a blank line. The document's own §2.1 anchors it.
     ("EP walk",

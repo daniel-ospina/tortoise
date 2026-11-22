@@ -28,8 +28,8 @@ the corrected reading:
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:14668``) calls
    ``_edus_from_conversation`` (S0, ``:14791``) and then ``_arm_extract`` — the
    S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
-   retry — and that one function drives ``run_s1`` (S1, ``:17882``), ``run_s2``
-   (S2.1, ``:17914``) and ``_run_vet_pass`` (S2.2, ``:17968``).
+   retry — and that one function drives ``run_s1`` (S1, ``:17885``), ``run_s2``
+   (S2.1, ``:17917``) and ``_run_vet_pass`` (S2.2, ``:17971``).
    ``extract_session_v2`` itself calls ``kind_classifier.classify_items`` (S2.3,
    ``:15245``), ``_apply_classify_kinds`` (S2.3, ``:15246``), ``search_graph``
    (S3, ``:15262``), ``run_s4`` (the gap filler, ``:15283``), and
