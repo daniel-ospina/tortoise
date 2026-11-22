@@ -10654,6 +10654,11 @@ ROWED_BY_THIS_FOLD = (
     # reading: the `durations` refresher samples push-to-main runs, so a file a PR ADDS
     # cannot have a junit figure yet (#3400/#4348).
     "test_14185_projection_worker.py",
+    # #14232 — the ingest ACK split's module, registered on `api` + `core` by this
+    # fold with its `durations:` row in the same commit. Listed here for the reason
+    # every entry above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
+    # file nobody listed has no `durations:` row and nothing reds.
+    "test_14232_ingest_ack_split.py",
 )
 
 

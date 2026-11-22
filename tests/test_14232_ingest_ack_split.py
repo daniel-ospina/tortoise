@@ -49,8 +49,9 @@ import time
 import pytest
 
 import tortoise.hosted_api as ha
-from tests.test_hosted_api import TEST_ORG_ID  # noqa: F401 — fixture side effects
-from tests.test_hosted_api import client as client  # noqa: F401 — the fixture
+from tests.test_hosted_api import TEST_ORG_ID  # fixture side effects
+from tests.test_hosted_api import client as client  # the `client` fixture
+
 
 @pytest.fixture(autouse=True)
 def _offline_extractor(monkeypatch):
@@ -76,12 +77,16 @@ _CONV = [
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
-#: The window the DEPLOYED handler uses (`hosted_api._CAPTURE_ACK_DEADLINE_S`).
-#: Named here as a literal on purpose: the suite's autouse fixture opens the
-#: module constant to 30 s (so no pre-existing assertion races a deadline), which
-#: means "the production value" is not readable from the module during a test —
-#: and a row that claims to exercise it must pin the number it claims to exercise.
-_PRODUCTION_ACK_DEADLINE_S = 0.5
+#: The window the DEPLOYED handler uses, READ FROM THE MODULE at import time.
+#: It has to be read here rather than in the row: the suite's autouse fixture opens
+#: `ha._CAPTURE_ACK_DEADLINE_S` to 30 s for the whole session (so no pre-existing
+#: assertion races a deadline), so by the time a test body runs the module attribute
+#: is no longer the deployed value. Reading it at import — before any fixture runs —
+#: is what makes the row's claim ("a value too tight would keep every suite green")
+#: about the REAL constant: a literal here would keep passing while
+#: `hosted_api._CAPTURE_ACK_DEADLINE_S` was changed to anything at all (measured by
+#: review round 5: `0.5 → 0.05` in `hosted_api.py` left this module green).
+_PRODUCTION_ACK_DEADLINE_S = ha._CAPTURE_ACK_DEADLINE_S
 
 
 def _force_ack(monkeypatch):
@@ -122,6 +127,28 @@ def _drain_tails(timeout: float = 30.0) -> None:
         time.sleep(0.01)
     assert not ha._CAPTURE_TAIL_TASKS, (
         f"capture completions did not finish: {ha._CAPTURE_TAIL_TASKS}")
+
+
+def _await_phase_gone(session_id: str, deadline_s: float = 20.0) -> list:
+    """Poll until the in-flight phase pair is gone (the retire is an OFF-LOOP write).
+
+    ⛔ `_drain_tails()` is NOT enough to observe it, and a review round measured the
+    cost of assuming it was: the marker/phase writes are submitted to
+    `_CAPTURE_MARKER_EXECUTOR` from the tail task's done-callback, and
+    `_CAPTURE_TAIL_TASKS` drops the task BEFORE that submit — so a single read after
+    the drain races a thread-pool write. A 50 ms delay inside `_clear_capture_phase`
+    (a slow graph write, not a wrong handler) turned both rows RED with the handler
+    CORRECT: a host event manufacturing a product verdict, the `#5049` rule-1 class
+    this module cites elsewhere. Every pre-existing row that observes this retire
+    polls for it; these two now do the same.
+    """
+    deadline = time.monotonic() + deadline_s
+    row = _session_row(session_id)
+    while (time.monotonic() < deadline and row
+           and (row[0][3] is not None or row[0][4] is not None)):
+        time.sleep(0.02)
+        row = _session_row(session_id)
+    return row
 
 
 def _proj():
@@ -319,6 +346,22 @@ def test_a_cancelled_completion_writes_the_abandoned_marker(
                 return True
 
         state = {"attempted": True, "finalized": False, "lane": "v2"}
+        # ⛔ THE CANCELLED ARM HAS ONE WRITER, and this records who it is
+        # (review, round 2 — measured: deleting the `not cancelled` guard from
+        # `_capture_tail_failed`'s retire arm left EVERY row green while a
+        # cancellation submitted `_clear_capture_phase` beside the marker, two
+        # graph writes where the two neighbouring docstrings say one). A pin on the
+        # SUBMISSIONS, not on the row: the row looks identical either way — the
+        # marker's own statement clears the phase pair, so only the submit
+        # distinguishes the contract from the accident.
+        cleared: list = []
+        _real_clear = ha._clear_capture_phase
+
+        def _recording_clear(proj, sid, *_a, **_k):
+            cleared.append(sid)
+            return _real_clear(proj, sid, *_a, **_k)
+
+        monkeypatch.setattr(ha, "_clear_capture_phase", _recording_clear)
         ha._capture_tail_failed(_Cancelled(), _proj(), session_id, state)
         # ⛔ ASSERT WHILE THE REAL EXTRACTION IS STILL PARKED. Releasing first
         # would let the genuine completion write `capture_ok=true` over the
@@ -347,6 +390,10 @@ def test_a_cancelled_completion_writes_the_abandoned_marker(
         assert set(block) == {"status", "extractor", "outcome_known"}, (
             f"a terminal row publishes no phase: {block}")
         assert block["outcome_known"] is True, block
+        assert cleared == [], (
+            "a CANCELLED tail must not submit the phase clear: the abandoned "
+            "marker is the terminal writer on that arm and clears the pair in its "
+            f"own statement (submitted: {cleared})")
         parked.release.set()
     _drain_tails()
 
@@ -590,24 +637,37 @@ def test_the_in_budget_receipt_survives_the_production_deadline(
 
     So this row MEASURES first and only then produces a verdict: the warm-up
     capture (which also pays the mock seam's import/first-call cost, a cost the
-    deadline is not a claim about) is timed end to end, and where that
-    measurement is not comfortably inside the production window the row reports
-    INCONCLUSIVE instead of red. On a host that can carry the claim, the
-    assertion is unchanged and the production constant is still what is
-    exercised.
+    deadline is not a claim about) is timed end to end, and it decides whether
+    the DEFAULT verdict is attributable. On a host that can carry the claim the
+    production deadline is asserted in full. On one that cannot, the row does
+    not SKIP — a skip observes nothing — and it does not claim the deadline
+    verdict either. It asserts what holds on BOTH arms: each body is one of the
+    two documented shapes and never a half-shape, and either way the capture
+    still reaches its terminal record with the in-flight phase cleared. That
+    last leg is what a regression would actually red, and it is load-independent
+    — which is why the row is worth running on every host rather than only on
+    an idle one.
     """
+    # ⛔ THE DEPLOYED VALUE IS READ AT IMPORT, not here: the suite's autouse
+    # fixture has already opened `ha._CAPTURE_ACK_DEADLINE_S` to 30 s by the time
+    # any test body runs (that is what keeps the other rows off a wall clock), so
+    # reading the live attribute would compare the fixture's value with itself.
+    # Review round 5 measured the consequence of getting this wrong: a literal
+    # here left this module GREEN while `hosted_api._CAPTURE_ACK_DEADLINE_S` was
+    # changed `0.5 → 0.05`, i.e. the row certified a constant it never read.
+    assert _PRODUCTION_ACK_DEADLINE_S == 0.5, (
+        "the deployed ack window moved. This row is written against 0.5 s; if the "
+        "constant is now a different number, re-derive the row rather than letting "
+        f"it certify a value nobody deploys: {_PRODUCTION_ACK_DEADLINE_S}")
     started = time.monotonic()
     warm = client.post("/v1/sessions", json={
         "conversation": _CONV, "session_id": "s-14232-prod-window-warm"})
     assert warm.status_code == 200, warm.text
     _drain_tails()
     warm_s = time.monotonic() - started
-    if warm_s > 0.25:  # half the production window: no room left to attribute a miss
-        pytest.skip(
-            "INCONCLUSIVE on this host: a whole offline mock capture measured "
-            f"{warm_s * 1000:.0f} ms against the production {_PRODUCTION_ACK_DEADLINE_S} s "
-            "window, so a missed join here would name the host's load rather than "
-            "the deadline (#5049 rule 1). Not a red, not a pass.")
+    # Half the production window: below this there is room to attribute a miss to
+    # the deadline, above it the miss would name the host.
+    attributable = warm_s <= 0.25
 
     _force_join(monkeypatch, _PRODUCTION_ACK_DEADLINE_S)
     ack_started = time.monotonic()
@@ -615,17 +675,47 @@ def test_the_in_budget_receipt_survives_the_production_deadline(
         "conversation": _CONV, "session_id": "s-14232-prod-window"})
     ack_s = time.monotonic() - ack_started
     assert r.status_code == 200, r.text
-    assert ack_s < _PRODUCTION_ACK_DEADLINE_S, (
-        f"the in-budget receipt must land INSIDE the window it is named for: "
-        f"ack took {ack_s * 1000:.0f} ms of {_PRODUCTION_ACK_DEADLINE_S} s "
-        f"(a warm capture on this host measured {warm_s * 1000:.0f} ms)")
     body = r.json()
-    assert "extraction" not in body, (
-        "the join missed the PRODUCTION 0.5 s deadline on an offline mock "
-        f"capture — that deadline is too tight: {sorted(body)}")
-    assert body["status"] in ("ok", "partial"), body
-    assert body["extracted"] >= 1, body
+    joined = "extraction" not in body
+    if attributable:
+        assert ack_s < _PRODUCTION_ACK_DEADLINE_S, (
+            f"the in-budget receipt must land INSIDE the window it is named for: "
+            f"ack took {ack_s * 1000:.0f} ms of {_PRODUCTION_ACK_DEADLINE_S} s "
+            f"(a warm capture on this host measured {warm_s * 1000:.0f} ms)")
+        assert joined, (
+            "the join missed the PRODUCTION 0.5 s deadline on an offline mock "
+            f"capture — that deadline is too tight: {sorted(body)}")
+    else:
+        # ⛔ NOT A SKIP, because the invariants below hold on BOTH arms and are
+        # worth observing on every host. A miss here cannot be attributed to the
+        # deadline (`#5049` rule 1), so the row does not CLAIM that verdict — but
+        # it still refuses a half-shape: `accepted` may not carry a real count,
+        # a receipt may not carry the ack's block, and the deferred arm must keep
+        # the client's unrecorded-outcome marker (`#12362`).
+        from tortoise.capture_spool import (
+            UNRECORDED_OUTCOME_KEY,
+            UNRECORDED_OUTCOME_VALUE,
+        )
+        if not joined:
+            assert body["status"] == "accepted", body
+            assert body["extracted"] == 0 and body["points"] == [], body
+            assert body["extraction_mode"] is None, body
+            assert body["extraction"]["outcome_known"] is False, body["extraction"]
+            assert body[UNRECORDED_OUTCOME_KEY] == UNRECORDED_OUTCOME_VALUE, body
+    if joined:
+        assert body["status"] in ("ok", "partial"), body
+        assert body["extracted"] >= 1, body
+
+    # ⛔ WHICHEVER ARM RAN, the production window bounds the ANSWER and never the
+    # work: the record must still reach its terminal state. This assertion is
+    # load-independent, and it is the one a regression would actually red.
     _drain_tails()
+    row = _session_row("s-14232-prod-window")
+    assert row and row[0][1] is True, (
+        f"the join deadline must never decide whether the capture COMPLETES — "
+        f"arm={'joined' if joined else 'deferred'}, record={row}")
+    assert row[0][3] is None and row[0][4] is None, (
+        f"the terminal record must clear the in-flight phase: {row}")
 
 
 # ── R4: the in-flight key outlives the tail ──────────────────────────────
@@ -681,7 +771,13 @@ def test_a_same_session_repost_during_the_REPORT_half_is_refused(
     So this row parks the REPORT half (`read_stages.mark` at the
     `STAGE_CAPTURE_TAIL` mark, the first thing `_report_capture` does after the
     model call) and holds the second POST in that exact window. Delete
-    `slot.tail_pending()` and this row gets a 200 replay instead of the 409.
+    `slot.tail_pending()` and the KEY IS GONE before the report half even starts
+    (`worker_done` runs when the extraction returns, and with no pending tail it
+    releases), so this row reds on its own precondition — "the session key must
+    still be held while the REPORT half runs" — rather than on the 409 below.
+    ⛔ The mechanism is the precondition firing, and that is the honest statement:
+    an earlier draft of this docstring said "you get a 200 replay", which round 5
+    measured to be false (the row fails earlier and for a clearer reason).
     """
     _force_ack(monkeypatch)
     session_id = "s-14232-report-window"
@@ -804,15 +900,42 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     # with `{'stage': 'capture_gates', 'stages_ms': {'pre_handler': 24.1}}`.
     # Stubbing the quota read to a constant leaves ONE thing able to cross the
     # bound: the deliberately slow write.
+    #
+    # ⛔ AND IT WAS STILL NOT ENOUGH (measured at the round-4 head, with the stubs
+    # above in place): the row reddened `stage=capture_gates` with
+    # `stages_ms={'pre_handler': 70.5}` — the pre-handler work finished in 70 ms
+    # and the request then sat for the rest of the 0.35 s BEFORE the endpoint
+    # marked `capture_gates`, so a 0.35 s bound is simply shorter than this box's
+    # cold start on a freshly-created graph. A wider margin makes the row
+    # attributable WITHOUT weakening it: the breach still lands inside the write,
+    # because the write is the only leg made to outlast the bound.
     monkeypatch.setattr(ha, "_session_extraction_estimate", lambda *_a, **_kw: 0)
     import tortoise.quota as _quota
     monkeypatch.setattr(_quota, "count_org_usage",
                         lambda *_a, **_kw: 0)
-    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.35)
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 3.0)
     real_write = ha._write_session_and_turns
 
+    # ⛔ RECORD the marks as well as slow the write down. The bound is a WALL CLOCK
+    # and the gates phase has SEVEN awaits in it (#5049 rule 1; review round 5
+    # measured this row red 1-in-6 at load ≈ cpus even with the quota read
+    # stubbed). The mark's EXISTENCE and its ORDER are properties of the code, so
+    # they are pinned deterministically by
+    # `test_the_write_mark_sits_between_the_gates_and_the_extraction` below. This
+    # row keeps the end-to-end half and reports INCONCLUSIVE when the payload says
+    # the breach did not land after the write mark — that outcome says nothing
+    # about the mark, whichever way the box was loaded.
+    marks: list[tuple[str, float]] = []
+    real_mark = ha._mark_capture_stage
+
+    def _recording_mark(stage, *args, **kwargs):
+        marks.append((stage, time.monotonic()))
+        return real_mark(stage, *args, **kwargs)
+
+    monkeypatch.setattr(ha, "_mark_capture_stage", _recording_mark)
+
     def _slow_write(*args, **kwargs):
-        time.sleep(0.8)
+        time.sleep(5.0)
         return real_write(*args, **kwargs)
 
     monkeypatch.setattr(ha, "_write_session_and_turns", _slow_write)
@@ -830,13 +953,75 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
             "conversation": _CONV, "session_id": "s-14232-slow"})
     assert r.status_code == 504, r.text
     body = r.json()
+    if body["stage"] != "capture_write":
+        # The gates phase spent the whole transport bound on this host, so the
+        # refusal names `capture_gates` — CORRECT behaviour, and no evidence about
+        # the write mark. INCONCLUSIVE, never a red that blames the code under
+        # test (#5049 rule 1); the mark itself is pinned deterministically below.
+        pytest.skip(
+            "INCONCLUSIVE on this host: the breach landed in "
+            f"stage={body['stage']!r} with stages_ms="
+            f"{body.get('stages_ms')} and marks={[s for s, _ in marks]} — the "
+            "gates phase spent the transport bound, so this refusal cannot be "
+            "attributed to the write mark (#5049 rule 1). Not a red, not a pass.")
     assert body["stage"] == "capture_write", (
         f"the breach must name the stage it landed in: {body}")
     assert body["stages_ms"].get("capture_gates") is not None, (
         f"the finished gate phase must be timed beside it: {body}")
+    # The recorder is LOAD-BEARING here, not decoration (review round 6, P2): a
+    # refusal that names `capture_write` can only have got there past the gates
+    # mark, so this assertion is implied by the one above and cannot red from
+    # load — while a deleted gates mark is caught by the row above
+    # (`test_the_write_mark_sits_between_the_gates_and_the_extraction`). On the
+    # skip arm the same list rides in the skip reason, which is the diagnostic a
+    # reader needs to see WHY the breach landed where it did.
+    assert "capture_gates" in [s for s, _ in marks], (
+        f"marks seen before the breach: {[s for s, _ in marks]}")
     # The bound's own envelope, not any 504: a refusal that lost its cause would
     # satisfy neither assertion below.
     assert "str(slow)" not in body.get("detail", ""), body
+
+
+def test_the_write_mark_sits_between_the_gates_and_the_extraction(
+        client, monkeypatch):
+    """Step 8's DETERMINISTIC half: the stage marks exist, and they are ORDERED.
+
+    `test_a_504_on_this_path_names_its_stage` can only be as attributable as the
+    wall clock allows, and review round 5 measured that its gates phase carries
+    seven awaits — on a loaded host the breach legitimately lands in
+    `capture_gates`, where the row must report INCONCLUSIVE. What is NOT a matter
+    of luck is the property production did not have: this path MARKS the stage it
+    is in, in order, so a refusal can name its cause instead of `unmarked`/`{}`.
+
+    This row asserts the order from the marks the handler emits on one ordinary
+    capture — `capture_gates` → `capture_write` → later stages — with no transport
+    bound, no sleep and no deadline in play. Delete
+    `_mark_capture_stage(STAGE_CAPTURE_WRITE)` and `capture_write` is absent: that
+    is the mutant the row above names and cannot always attribute.
+    """
+    _force_ack(monkeypatch)
+    seen: list[str] = []
+    real_mark = ha._mark_capture_stage
+
+    def _recording_mark(stage, *args, **kwargs):
+        seen.append(stage)
+        return real_mark(stage, *args, **kwargs)
+
+    monkeypatch.setattr(ha, "_mark_capture_stage", _recording_mark)
+    r = client.post("/v1/sessions", json={
+        "conversation": _CONV, "session_id": "s-14232-mark-order"})
+    assert r.status_code == 200, r.text
+    _drain_tails()
+
+    assert "capture_gates" in seen, f"the gates phase must be marked: {seen}"
+    assert "capture_write" in seen, (
+        "the write phase must be marked — without it a transport-bound refusal on "
+        f"this path falls back to naming the gates phase: {seen}")
+    assert seen.index("capture_gates") < seen.index("capture_write"), (
+        f"the write mark must come AFTER the gates mark: {seen}")
+    later = [s for s in seen if s not in ("capture_gates", "capture_write")]
+    assert later, (
+        f"the path must go on to mark its later stages too: {seen}")
 
 
 # ── R6: capacity always comes back ───────────────────────────────────────
@@ -856,7 +1041,7 @@ def test_capacity_returns_after_ack_and_completion(client, monkeypatch):
     assert r.status_code == 200, r.text
     _drain_tails()
 
-    assert ha._CAPTURE_IN_FLIGHT == before, (
+    assert before == ha._CAPTURE_IN_FLIGHT, (
         f"capture capacity leaked: was {before}, now {ha._CAPTURE_IN_FLIGHT}")
     assert not ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
 
@@ -889,13 +1074,73 @@ def test_a_completion_that_dies_before_submitting_still_returns_capacity(
     assert r.status_code == 200, r.text
     _drain_tails()
 
-    assert ha._CAPTURE_IN_FLIGHT == before, (
+    assert before == ha._CAPTURE_IN_FLIGHT, (
         f"capacity leaked on the no-dispatch arm: {before} -> {ha._CAPTURE_IN_FLIGHT}")
     assert not ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
     row = _session_row("s-14232-no-dispatch")
     assert row and row[0][1] is None, (
         "a dispatch FAILURE is not a cancellation and must not write the "
         f"abandoned marker (raise-shape contract): {row}")
+    # ⛔ THE PHASE RETIRE'S WIRING PIN. This is the only row that reaches
+    # `_capture_tail_failed` through the REAL task — the two window rows drive the
+    # callback by hand — so a mutant that stops a failed tail from ever reaching
+    # the clear left every row green while a real failed capture kept
+    # `phase: extracting` forever (measured: deleting the raise-arm submit reds
+    # this assertion plus the hand-driven row, nothing else). The `extracting`
+    # write lands before the dispatch, this dispatch raises, the tail dies.
+    row = _await_phase_gone("s-14232-no-dispatch")
+    assert row[0][3] is None and row[0][4] is None, (
+        "a tail that dies between its phase write and its terminal record must "
+        f"still retire the phase through the real callback wiring: {row}")
+
+
+def test_a_failed_terminal_write_still_retires_the_phase(client, monkeypatch):
+    """A terminal SET that RAISES must not leave the phase behind.
+
+    MEASURED GAP this closes: `state["finalized"]` was set unconditionally after
+    the terminal `capture_ok` write, INCLUDING the arm where that write raised.
+    `finalized` is what suppresses the callback's phase retire, so a failed
+    terminal write left `phase: extracting` beside a `capture_ok` that was never
+    written — permanently, and reverting either half of the fix reds this row.
+
+    Drives the REAL handler: the terminal statement is recognised by BOTH of its
+    own clauses (`s.capture_ok=$ok` AND the phase clear this PR adds, because the
+    first alone also matches the SDK's stamp), so this fails the outcome write and
+    nothing else — the
+    record write, the phase writes, the extraction and the reads all still run.
+    `capture_ok` must stay NULL (nothing was recorded, so the raise-shape/replay
+    contract decides what the next POST does) and the phase must be gone.
+    """
+    _force_ack(monkeypatch)
+    session_id = "s-14232-terminal-write-fails"
+    graph_cls = type(_proj().g)
+    real_query = graph_cls.query
+
+    def _query_failing_the_terminal_set(graph_self, statement, *a, **kw):
+        # ⛔ BOTH tokens: `s.capture_ok=$ok` alone also matches the SDK's
+        # `_stamp_capture_attempt_state` (tortoise/sdk.py), so a future route through
+        # that door would fail TWO statements and this row would still pass while its
+        # docstring silently became false. The phase-clear clause is this PR's own.
+        if ("s.capture_ok=$ok" in statement
+                and "s.capture_extraction_phase=NULL" in statement):
+            raise RuntimeError("terminal outcome write failed (simulated)")
+        return real_query(graph_self, statement, *a, **kw)
+
+    monkeypatch.setattr(graph_cls, "query", _query_failing_the_terminal_set)
+
+    r = client.post("/v1/sessions", json={
+        "conversation": _CONV, "session_id": session_id})
+    assert r.status_code == 200, r.text
+    _drain_tails()
+
+    row = _await_phase_gone(session_id)
+    assert row and row[0][1] is None, (
+        "the terminal write FAILED, so no outcome was recorded — `capture_ok` "
+        f"must stay NULL, got {row}")
+    assert row[0][3] is None and row[0][4] is None, (
+        "a failed terminal write must still retire the phase it left behind, or "
+        "the session reports `extracting` (and PENDING forever) beside an "
+        f"outcome that was never recorded: {row}")
 
 
 # ── review findings, now pinned ────────────────────────────────────────────
@@ -919,13 +1164,13 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
     """
     import asyncio
 
-    from tortoise.hosted_api import app
     # The shared async seam (#8582/#5049): a wait-bound refusal reaching THIS
     # client is a non-answer (INCONCLUSIVE), never an assertion about the code.
-    from tests.test_capture_loop_responsiveness import (  # noqa: PLC0415
+    from tests.test_capture_loop_responsiveness import (
         _verdict_async_client,
     )
-    from tests.test_hosted_api import TEST_TEAM  # noqa: PLC0415
+    from tests.test_hosted_api import TEST_TEAM
+    from tortoise.hosted_api import app
 
     before = ha._CAPTURE_IN_FLIGHT
     parked = threading.Event()          # the phase write is IN FLIGHT
@@ -969,10 +1214,10 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
                 await task
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001 — the request may surface it
+            except Exception:  # the request may surface it
                 pass
             for _ in range(400):  # the abandoned task's callback settles
-                if ha._CAPTURE_IN_FLIGHT == before and not ha._CAPTURE_SESSIONS:
+                if before == ha._CAPTURE_IN_FLIGHT and not ha._CAPTURE_SESSIONS:
                     break
                 await asyncio.sleep(0.02)
             return ha._CAPTURE_IN_FLIGHT, dict(ha._CAPTURE_SESSIONS)
@@ -991,6 +1236,65 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
         f"the in-flight session key was never released: {after_sessions} — that "
         f"session id 409s forever")
     assert TEST_TEAM  # the router auth override this client inherits
+
+
+def test_the_slot_guard_keeps_capacity_for_a_bound_WORKER(client):
+    """The OTHER direction of `_capture_slot_finished`'s guard (#3060's ceiling).
+
+    The row above proves the release fires when NO worker was bound — the silent
+    LEAK direction. This one proves the guard's load-bearing half: when a pool
+    thread owns the capture — `_run_capture_bounded` submitted it and bound
+    `worker_done` to that future — the completion coroutine ending must NOT
+    release the capacity out from under it. Releasing there frees a slot a parked
+    thread still occupies, so the ceiling silently admits more concurrent captures
+    than `_CAPTURE_MAX_IN_FLIGHT` allows.
+
+    ⛔ Measured on the shape this closes: dropping the `if not slot.worker_bound():`
+    guard (i.e. `slot.complete_tail(); slot.worker_done()` unconditionally) left
+    BOTH capacity rows green — one finishes the worker first, the other never
+    starts it — so the branch had no row that could red it.
+
+    ⛔ Asserted on the SLOT ACCOUNTING, deliberately not end-to-end: the same
+    property driven through a real POST + a parked extractor spends the record
+    phase's cold lazy init first (a first-capture embedding-model load, measured
+    >90 s in a fresh process on this box), which makes it a test of this machine's
+    model cache rather than of this branch.
+    """
+    before = ha._CAPTURE_IN_FLIGHT
+
+    # (i) a worker IS bound: capacity and the session key survive the tail ending.
+    bound_key = f"{TEST_ORG_ID}:unit:unit-worker-bound"
+    slot = ha._reserve_capture_slot(bound_key)
+    assert before + 1 == ha._CAPTURE_IN_FLIGHT, "the reservation must be held"
+    slot.hand_off()             # the request hands the capture to the worker…
+    slot.tail_pending()         # …the deferred lane holds the SESSION KEY…
+    slot.mark_worker_bound()    # …and `_run_capture_bounded` submitted it
+    slot.release()              # the request's own teardown, at the early ACK
+    ha._capture_slot_finished(slot)   # the completion coroutine ends
+    assert before + 1 == ha._CAPTURE_IN_FLIGHT, (
+        "the completion coroutine must NOT release capacity a parked pool thread "
+        f"still occupies (#3060): {before} -> {ha._CAPTURE_IN_FLIGHT}")
+    assert bound_key in ha._CAPTURE_SESSIONS, (
+        "the session key must outlive the tail too — a same-session retry "
+        f"admitted now would replay over it: {dict(ha._CAPTURE_SESSIONS)}")
+
+    # …and when the worker really reports, everything comes back.
+    slot.worker_done()
+    assert before == ha._CAPTURE_IN_FLIGHT, ha._CAPTURE_IN_FLIGHT
+    assert bound_key not in ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
+
+    # (ii) NO worker was bound: the completion must release both, or the leak is
+    # the silent one (capacity ratchets to the ceiling, the id 409s forever).
+    free_key = f"{TEST_ORG_ID}:unit:unit-no-worker"
+    slot = ha._reserve_capture_slot(free_key)
+    slot.hand_off()
+    slot.tail_pending()
+    slot.release()
+    ha._capture_slot_finished(slot)
+    assert before == ha._CAPTURE_IN_FLIGHT, (
+        f"an unbound completion must release the reservation: {before} -> "
+        f"{ha._CAPTURE_IN_FLIGHT}")
+    assert free_key not in ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
 
 
 def test_a_retry_in_flight_says_so_on_the_ack_AND_on_the_status_url(

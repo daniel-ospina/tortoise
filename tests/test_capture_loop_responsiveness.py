@@ -176,8 +176,20 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
     monkeypatch.setattr(TortoiseSDK, target, _fake_extract)
     r = client.post("/v1/sessions", json={"conversation": _CONV})
 
+    # ⛔ The receipt is served inside a BOUNDED join (#14232), so the extraction
+    # starting after the POST returned is correct behaviour, not a failure: on a
+    # cold process the first capture pays the model seam's init, the join expires
+    # and the ACK is `accepted` while the tail keeps working. Asserting at the
+    # POST would measure the join window, not the property under test — measured
+    # here as a deterministic red when this file runs FIRST in a fresh process
+    # (the model seam cold), green when it runs after another capture suite.
+    _deadline = time.monotonic() + 180.0
+    while "ran_on_loop" not in seen and time.monotonic() < _deadline:
+        time.sleep(0.05)
+
     assert "ran_on_loop" in seen, (
-        f"[{mode}] the extraction never ran ({r.status_code}: {r.text[:200]})")
+        f"[{mode}] the extraction never ran within 180 s of the receipt "
+        f"({r.status_code}: {r.text[:200]})")
     assert seen["ran_on_loop"] is False, (
         f"[{mode}] the capture extraction ran ON the event loop — a stalled "
         f"model call would freeze /health and take the whole service down "
@@ -512,6 +524,21 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             # must still be OPEN. No clocks compared.
             health_served_in_stall = not exited_evt.is_set()
             cap = await capture
+            # ⛔ #14232 — `await capture` IS THE ACK, NOT THE EXTRACTION. The
+            # receipt is served inside a bounded join, so on this lane the POST
+            # returns WHILE the fake is still sleeping in its stall; the row's
+            # own window (`entered < t < exited`) then reads `state["exited"]`
+            # before it exists — measured as a hard `KeyError: 'exited'` on a
+            # COLD solo run, green only when another capture suite warmed the
+            # seam first. So the stall is waited out explicitly and on its own
+            # clock (`to_thread`, never on the loop), bounded well above
+            # `STALL_S`; the tick collection keeps running for exactly the window
+            # the assertions below are about.
+            await asyncio.to_thread(exited_evt.wait, STALL_S * 3 + 10)
+            assert exited_evt.is_set(), (
+                "the stalling extraction never finished after the ACK — the tail "
+                "did not run, so the tick window below measures nothing "
+                f"(#14232): {capture.exception() if capture.done() else 'pending'}")
             stop["done"] = True
             await tick
         return ticks, health, health_served_in_stall, cap
