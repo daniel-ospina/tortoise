@@ -1,3 +1,15 @@
+---
+title: "#14192 — the read path's legs, measured"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-21
+updated: 2026-11-22
+subjects.team: epistemic-team
+aboutSubjects: Tortoise read path, the post-fusion read wave, read latency and rank identity
+aboutObjects: "#14192, #14224, #14262, tools/read_wave_latency.py, ab-full-read.json, ab-relationships.json"
+---
+
 # #14192 — the read path's legs, measured
 
 Two artifacts, both from `tools/read_wave_latency.py` (added by this issue). They
