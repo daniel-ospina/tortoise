@@ -695,8 +695,13 @@ def _raises_a_skip(exc: ast.expr) -> bool:
     ⛔ DECLARED RESIDUAL: a skip exception aliased to a bare name
     (`_SKIP = pytest.skip.Exception; raise _SKIP(...)`) carries no such part and is therefore
     CREDITED — a false open in the un-recognised direction. Measured on this tree: **0**
-    handlers of that shape in `tests/`+`tools/` (`4j-undetriginta` carries the measurement),
-    so an alias table is deferred until the first live instance, not built ahead of it.
+    handlers of that shape in `tests/`+`tools/`, re-derivable without a pointer: walk every
+    `ast.ExceptHandler` whose last statement is a `Raise`, and check whether the raised name is a
+    bare `Name` rather than a dotted skip path — 0 at this head, so an alias table is deferred
+    until the first live instance, not built ahead of it. ⛔ THE SECTION THAT USED TO BE NAMED
+    HERE DOES NOT CARRY THIS MEASUREMENT: `4j-undetriginta` grades the pytest-skip conversion over
+    four inline sources and states no population at all, so the citation sent a reader to a section
+    that could not confirm the figure it was quoted for (review of #14287, P3).
     """
     node: ast.expr = exc
     if isinstance(node, ast.Call):
@@ -780,18 +785,26 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
         #
         # ⛔ AND THE RULE IS NOT "the raised object must be the caught one", which was the
         # first cut of this fix and is TOO STRICT: it charges `raise RuntimeError(...) from
-        # exc`, a handler that fails LOUDLY. 345 such handlers exist in `tests/`+`tools/`
-        # (measured over the AST, not by grep), 0 of them graded today — so it would not red
+        # exc`, a handler that fails LOUDLY. 345 such handlers exist in `tests/`+`tools/` whose
+        # LAST statement raises an object that is not the caught name AND whose chain it leaves
+        # un-suppressed — no `from None` (measured over the AST, not by grep; on the PLAIN reading
+        # without that exclusion the count is 409, 396 of which carry a cause clause at all — so
+        # the three figures are nested subsets and any of them is re-derivable), 0 of them graded
+        # today — so it would not red
         # now, but it would red the first widened probe and it false-reds the CORRECT
         # shape this file's own docstring promises never to charge. Only a conversion into a
         # SKIP hides the failure.
         if _last.exc is None:
             return True
         return not _raises_a_skip(_last.exc)
+    # A handler whose last statement is not a `Raise` re-raises nothing at all.
+    # ⛔ THE OLD TAIL IS DELETED, NOT KEPT BESIDE THIS (review of #14287, P3): it read
+    # `return bool(handler.body) and (isinstance(handler.body[-1], ast.Raise) and
+    # handler.body[-1].exc is None)` — the BARE-`raise` arm — and `if _last.exc is None: return
+    # True` above now answers exactly that case, so the tail became UNREACHABLE. Nothing caught
+    # it: `ruff check` passes, and in a module graded by AST predicates a stale trailing `return`
+    # reads to the next maintainer as a live rule rather than as dead code.
     return False
-    return bool(handler.body) and (
-        isinstance(handler.body[-1], ast.Raise) and handler.body[-1].exc is None
-    )
 
 
 def _availability_targets(stmt: ast.stmt) -> list[ast.expr]:
