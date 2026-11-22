@@ -472,12 +472,19 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     `embeddings` extra — is legitimately dropped by `except ImportError:`, and this
     predicate charges it. There is no allowance for it: the EXTRA-GATED shape has 0 GRADED
     instances, and a module-keyed allowance would be machinery for a population that does
-    not exist. (Ungraded own-code import fallbacks dropped by an `ImportError`-family arm DO
-    exist — measured 6 at `origin/main`: `tools/ask_recall_bench.py:454`,
-    `tools/ci_catch_history.py:167`, `tools/ci_manifest.py:152`, `tools/ci_selection.py:7729`,
-    `tools/kind_eval.py:294`, `tools/served_skills_parity.py:810` — none graded, because none
-    is admitted as a probe root. A future widening that admits them meets this rule, and
-    `tools/kind_eval.py:294` is the not-yet-built module the paragraph above predicts.) Charging it is the fail-closed direction (a false red on a latent shape is
+    not exist.
+
+    ⛔ BUT UNGRADED INSTANCES OF THE FAMILY DO EXIST, and a lane must measure rather than
+    trust a count (two successive drafts of this paragraph undercounted them and one cited
+    a line number from the wrong tree — review of #14160, cycles 12-13). The shape is: a
+    module-level `try:` whose body imports OWN code and whose `ImportError`-family arm
+    drops. At the time of writing there are ten across `tests/` + `tools/` (six in scripts
+    under `tools/`, four in `tests/conftest.py` around the `tortoise.abuse` tracker
+    imports), and NONE is admitted as a probe root, which is why the census is silent about
+    them. Re-derive the population with this function's own inputs — `_imports_own_code(block)`
+    and a handler for which `_swallows_everything` is true — before quoting a number or
+    adding the first allowance; a future widening that admits module-body own-code `try`s
+    meets this rule first. Charging it is the fail-closed direction (a false red on a latent shape is
     recoverable; a rename hidden behind an `ImportError` arm is not).
 
     ⛔ NEITHER REPAIR THE GATES PRINT APPLIES TO THIS SHAPE, and a lane must not read this
@@ -4779,9 +4786,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             {"ImportError"},
         ),
         (
-            #: the EXACT-SPELLING half of `_masked_by`: two arms with the same alias-carrying
-            #: spelling — the second is unreachable and must credit nothing (review of
-            #: #14160, cycle 12, P2-1).
+            #: The EXACT-SPELLING half of `_masked_by` — already pinned by
+            #: `_unreachable_credit` (same term, different shape), and restated here in the
+            #: same-spelling shape so the two halves of the predicate each have a row a
+            #: reader can find without reading the other's fixture (review of #14160,
+            #: cycle 13, P2-2: the earlier comment claimed this row was the ONLY witness).
             "same spelling twice",
             "except ModuleNotFoundError:\n    pass\nexcept ModuleNotFoundError:\n    raise\n",
             set(),
