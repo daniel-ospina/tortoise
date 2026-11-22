@@ -504,3 +504,23 @@ def test_a_warm_only_bundle_renders_and_says_it_is_the_warm_arm():
     assert "(cold arm)" not in text
     # and the fits it quotes are that arm's own
     assert f"{report['arms']['warm']['input_fit']['intercept']:,.0f} + " in text
+
+
+def test_a_warm_only_render_does_not_name_one_arm_twice():
+    """#14295 review, P4: the share line prints the ROW arm's figure and then the
+    WARM arm's, which are the same measurement when the rows came from the warm
+    arm — so a `--arms warm` bundle rendered `**75.0%** (warm arm) · 75.0% (warm
+    arm)`, reading as if two arms had been measured. The second clause is the
+    cross-arm comparison and belongs only where there are two arms to compare.
+    """
+    rows = [_row(arm="warm", prompt_tokens=90_000, completion_tokens=40_000,
+                 cache_hit_tokens=67_500, cache_miss_tokens=22_500)
+            for _ in range(3)]
+    text = m.report_markdown(m.report_from_rows(rows))
+    share_lines = [ln for ln in text.splitlines()
+                   if "Measured cache-hit share" in ln]
+    assert len(share_lines) == 1, share_lines
+    assert share_lines[0].count("(warm arm)") == 1, (
+        f"one arm was measured, so its share is named once; got {share_lines[0]}")
+    assert share_lines[0].count("%") == 1, (
+        f"the same measurement must not be quoted twice; got {share_lines[0]}")

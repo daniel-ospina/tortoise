@@ -1187,9 +1187,16 @@ def render_cost(report: dict) -> str:
     add = lines.append
     add("## Cost: modelled vs measured")
     add("")
+    # ⛔ The second clause is the WARM arm's figure, so it is printed only when the
+    # rows were NOT read from the warm arm: on a `--arms warm` bundle the two
+    # figures are the same measurement, and printing it twice read as if two arms
+    # had been measured (`75.0% (warm arm) · 75.0% (warm arm)`).
+    row_arm = cost.get("arm", "cold")
+    share = f"**{cost['hit_ratio']:.1%}** ({row_arm} arm)"
+    if row_arm != "warm":
+        share += f" · {cost['warm_hit_ratio']:.1%} (warm arm)"
     add(f"Measured cache-hit share of prompt tokens: "
-        f"**{cost['hit_ratio']:.1%}** ({cost.get('arm', 'cold')} arm) · "
-        f"{cost['warm_hit_ratio']:.1%} (warm arm). "
+        f"{share}. "
         "`measured-cold` prices every prompt token at the full input rate — "
         "the conservative end `#14275` says it is quoting; `measured-cached` "
         "prices at the measured share.")
