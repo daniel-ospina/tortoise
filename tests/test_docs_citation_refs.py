@@ -5308,10 +5308,13 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         comparison below. `_d5_pinned_universe` calls `_d5_documented_long_options`, so a
         `pytest.skip`/`pytest.xfail` anywhere in that chain reaches the FLOOR-40 arm FIRST — every
         other arm, including the call-site pins this cell exists for, then never runs. MEASURED at
-        `6f1c9a5bb3` with `_d5_documented_long_options` replaced by `lambda c: pytest.skip(...)`:
-        `1 skipped in 0.03s`, **exit 0**; with `lambda c: pytest.xfail(...)`: `1 xfailed`, **exit
-        0**. So the invariant is load-bearing, not decorative: a new bare call anywhere in this
-        cell re-opens the exact hole the cell closes.
+        `6f1c9a5bb3` on THIS cell alone (`-k documented_universe_floor`) with
+        `_d5_documented_long_options` replaced by `lambda c: pytest.skip(...)`: `1 skipped in 0.03s`,
+        **exit 0**; with `lambda c: pytest.xfail(...)`: `1 xfailed`, **exit 0**. The WHOLE FILE reads
+        `35 passed, 2 skipped` / `35 passed, 2 xfailed` for the same mutants, because the
+        count-reader cell's own `_d5_pinned_universe(completed)` skips with it — that bare call must
+        STAY, since a BSD box has to be able to skip that cell. So the invariant is load-bearing, not
+        decorative: a new bare call anywhere in THIS cell re-opens the exact hole the cell closes.
         """
         try:
             return fn(*args)
@@ -5357,8 +5360,11 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         # the propagation the removed `pytest.raises(pytest.skip.Exception)` arm gave. It had not:
         # `pytest.exit()` raises `_pytest.outcomes.Exit`, which subclasses `Exception` and NOT
         # `SystemExit`, so it was still swallowed into an `AssertionError` claiming the platform branch
-        # misbehaved. MEASURED: that run reported `AssertionError: Exit` and CONTINUED to the next cell
-        # at exit 1, against exit 7 from the pre-fix shape. Enumerating the three outcomes this cell
+        # misbehaved. MEASURED with the mutant `pytest.exit("MUTANT-exit", returncode=7)`: that run
+        # reported `AssertionError: Exit` and CONTINUED to the next cell at exit 1, where the pre-fix
+        # `pytest.raises` shape aborted with the caller's exit code — 7 for that mutant, and 2 for a
+        # bare `pytest.exit("…")`, which is what a `returncode=None` becomes; it aborts either way.
+        # Enumerating the three outcomes this cell
         # can legitimately see removes both the hole and the tuple: Ctrl-C, `SystemExit`, `pytest.exit`
         # and a genuine bug in the helper all propagate untouched, and there is no re-raise arm for the
         # next editor to keep in sync.
