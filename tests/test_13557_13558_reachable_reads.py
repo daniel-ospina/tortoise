@@ -3192,11 +3192,25 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     # list AND silence it: the served text named no silencer at all, and a caller
     # passing `include_terminal=True` was told a cue report had fired that the
     # guard had already suppressed).
-    for _silencer in ("include_terminal=True", "ended_scope="):
+    for _silencer in ("include_terminal=True",):
         assert _re.search(_re.escape(_silencer), _doc_flat), (
             f"the SERVED description does not name `{_silencer}`, which sits outside "
             "`_retrieval_knobs()` and suppresses the notice in the guard — a caller "
             "then believes the cue report fires when it does not")
+    # ⛔ AND `ended_scope=` IS NOT A SILENCER — IT IS A REFUSAL (#14140 review, P2,
+    # measured): the guard reads `query is not None and not ended_scope and not
+    # include_terminal and not [knobs]`, but reachable calls make the ended-scope half
+    # moot — `ended_scope=False` does NOT suppress the notice (measured: it fires, just
+    # as with no argument) and `ended_scope=True` beside a query RAISES (sdk.py's
+    # "ended_scope is a STATE enumeration, not a relevance read", #13558). The served
+    # text named both as silencers, which sent a caller to an argument that either does
+    # nothing or errors; it now says the refusal out loud.
+    assert _re.search(r"ended_scope=` IS NOT A SECOND ONE", _doc_flat), (
+        "the SERVED description lost the `ended_scope=` correction — naming it as a "
+        "second silencer is false twice over (no-op when False, ValueError when True)")
+    assert _re.search(r"beside a question it is REFUSED", _doc_flat), (
+        "the SERVED description no longer says `ended_scope=` is REFUSED beside a "
+        "question, which is the measured behaviour (#13558)")
     for _name in ("kind", "entity_type", "limit"):
         assert _re.search(rf"`{_name}`", _doc_flat), (
             f"the carve-out no longer names `{_name}`, so a caller who narrowed by it "

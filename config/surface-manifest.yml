@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 1b0db0489408e1e817688f83cef0d7c1ee33be5d
+cut_at_commit: 0467ba329d7320f38e8caa9d4e428f1f470f7c3e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1638,10 +1638,13 @@ rows:
     `min_confidence=0`, `order_by="relevance"` — is not a filter and does not silence it.) ⛔ THE CLOSED LIST IS
     THE AUTHORITY, NOT THIS SENTENCE: `_retrieval_knobs` in `tortoise/sdk.py`, and a name given here — a non-default
     `threshold`, `min_confidence`, `order_by`, `relationship_filter`, `traversal_path`, `pool_size`, `time_aware`
-    — is an EXAMPLE of it, never the set. Only THREE parameters sit OUTSIDE it: they change WHICH rows a read returns
+    — is an EXAMPLE of it, never the set. Three arguments sit outside it and they change WHICH rows a read returns
     rather than asking for a filtered read, because the POPULATION applies them — `kind`, `entity_type`, `limit`
-    — so none silences the notice. The filter and the population are different answers: send the question ALONE
-    to get the population or the report. (The hosted `GET /v1/search` route below takes only the question and `limit`,
+    — so none silences the notice. ⛔ AND ONE ARGUMENT SITS OUTSIDE THE LIST AND DOES SILENCE IT: `include_terminal=True`
+    picks a scope the caller has already chosen, so the cue is not seen-and-unapplied and no notice is owed. ⛔ `ended_scope=`
+    IS NOT A SECOND ONE: beside a question it is REFUSED with a ValueError (#13558), so it cannot suppress the report
+    — it declines the call. The filter and the population are different answers: send the question ALONE to get
+    the population or the report. (The hosted `GET /v1/search` route below takes only the question and `limit`,
     neither of which is a routing argument, so it is not silenced.) ⛔ THIS TOOL CANNOT REPORT the cue it saw and
     could not apply — its reply is the row list and it takes no sink — so an MCP caller who needs that report must
     use the HOSTED deployment''s `GET /v1/search` route, whose response body carries `state_question` (`{routed:
