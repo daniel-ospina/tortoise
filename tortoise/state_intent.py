@@ -577,6 +577,26 @@ _EXISTENCE_HELPER = (
     # from swallowing a whole clause; it does not grade English.
     rf"(?:[,\s]*(?:not|have|{_EXISTENCE_ADVERB})\b[,\s]+){{0,8}}been\b"
 )
+# ⛔ THE PASSIVE PERFECT WITH AN ADVERB (re-cut review, P1, measured): the window required
+# `been` ADJACENT to the participle, so `have any claims been already retracted`,
+# `has anything been already withdrawn`, `have any of our bookings been already cancelled` and
+# `have any claims been ever retracted` came back `population=None, signal=None` while `main`
+# routes every one of them to `ended` — #14033's own defect (an unrouted state question that
+# is indistinguishable from "nothing has ended") reintroduced by a guard fixing a different
+# spelling. The slot is ONE adverbial (the fixed set below, not the whole `_EXISTENCE_ADVERB`
+# class: those are the ones a customer writes between the auxiliary and the participle, and a
+# wider slot here would swallow a second clause). `have any reports already archived` — where
+# `already` is the AUXILIARY and `archived` stays ATTRIBUTIVE — is `main`'s behaviour traded
+# away deliberately and is pinned in NOT_SELECTED.
+#: ⛔ ONE SLOT, THREE CONSUMERS (review of this fix, P1, measured): the adverb slot is declared
+#: ONCE and used by the window AND by the two lookaheads that decide whether a `been` belongs to a
+#: SECOND CLAUSE. Widening only the window is what re-opened the asyndetic hijack: with the slot on
+#: the window and `been` still adjacent in the lookaheads,
+#: `have any users reported it has been already deprecated` went from `None` (refused) to
+#: `ended / signal=None` — the whole ended population served with the caller's own predicate
+#: (`reported`) DROPPED and no notice, which is the direction the module rates worst. The same
+#: spelling with an adverb is now refused exactly like the spelling without one.
+_EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -603,7 +623,7 @@ _EXISTENCE_GUARD = (
     # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
     # after. The anchor is the same one the pronoun branch below already uses: the
     # lookahead fires only when the second clause's passive ends an ENDING participle.
-    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -621,21 +641,11 @@ _EXISTENCE_GUARD = (
     # question's).
     rf"(?![^?]{{0,60}}?\b(?:it|they|he|she|we|you)\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
 )
-# ⛔ THE PASSIVE PERFECT WITH AN ADVERB (re-cut review, P1, measured): the window required
-# `been` ADJACENT to the participle, so `have any claims been already retracted`,
-# `has anything been already withdrawn`, `have any of our bookings been already cancelled` and
-# `have any claims been ever retracted` came back `population=None, signal=None` while `main`
-# routes every one of them to `ended` — #14033's own defect (an unrouted state question that
-# is indistinguishable from "nothing has ended") reintroduced by a guard fixing a different
-# spelling. The slot is ONE adverbial (the fixed set below, not the whole `_EXISTENCE_ADVERB`
-# class: those are the ones a customer writes between the auxiliary and the participle, and a
-# wider slot here would swallow a second clause). `have any reports already archived` — where
-# `already` is the AUXILIARY and `archived` stays ATTRIBUTIVE — is `main`'s behaviour traded
-# away deliberately and is pinned in NOT_SELECTED.
+
 _EXISTENCE_WINDOW = (
-    rf"[^?]{{0,60}}?\bbeen\s+(?:(?:already|ever|recently)\s+)?(?:{_ENDING_WORDS})\b"
+    rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
 )
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
 

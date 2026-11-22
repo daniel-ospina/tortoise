@@ -896,6 +896,15 @@ NOTICE_ONLY = [
     # guard, reported through `existence_unguarded`, never routed.
     "have any users reported it has been deprecated",
     "have any customers noticed they have been cancelled",
+    # ⛔ …AND THEIR ADVERB TWINS (review of this fix, P1, measured): the adverb slot this lane adds
+    # to the `been`-anchored window is matched by the SAME slot in the two lookaheads that decide
+    # whether a `been` belongs to a second CLAUSE. Without that symmetry these three ROUTED the whole
+    # ended population with the caller's own predicate (`reported`, `noticed`, `complained`) dropped
+    # and `signal=None`. They are refused and REPORTED exactly like the two rows above them, and are
+    # pinned so a one-sided widening reds instead of shipping.
+    "have any users reported it has been already deprecated",
+    "have any customers noticed they have been already cancelled",
+    "has anyone complained billing has been recently deprecated",
     "have any users said it will have been deprecated",
     "is the SOC2 audit and its evidence package archived",
     "is the onboarding flow and its partner variants retired",
@@ -1424,6 +1433,21 @@ def test_every_preposition_the_module_declares_reports_the_qualifier_it_introduc
         f"change this tuple in the same commit and say why")
     assert len(set(declared)) == len(declared), (
         "a duplicated member is a copy-paste artefact, not a class")
+    # ⛔ AND THE ROLE LIST ITSELF IS PINNED EXACTLY, in BOTH directions (review of this fix, P2,
+    # measured). The block below asserts SILENCE for every member of
+    # `_CLAUSE_HEADING_PREPOSITIONS`, which is exactly what a WRONG WIDENING produces — so a
+    # member added to it traded a real notice for a silence with the whole file green (measured:
+    # adding `along` kept this suite at 279 passed / 19 skipped while
+    # `is the export archived along the migration` went from `is_copula` to `None`). The tuple
+    # equality is what makes an addition a decision instead of an edit, the same rule
+    # `_PREPOSITIONS` is held to above.
+    assert tuple(_CLAUSE_HEADING_PREPOSITIONS) == ("as", "during", "than", "until"), (
+        f"the clause-heading role list changed to {tuple(_CLAUSE_HEADING_PREPOSITIONS)!r}. A member "
+        f"ADDED moves a preposition out of the qualifier exemption — its `<prep> the <noun>` "
+        f"spelling stops being REPORTED as `is_copula` and becomes a silence, which is #14033's own "
+        f"defect (measured: `along` did exactly that with this suite green). A member REMOVED "
+        f"re-opens the clause route this pin exists to close. Both are decisions: change this "
+        f"tuple in the same commit and say why")
 
     # ⛔ THE EXEMPTION CLASS IS THE DECLARED CLASS MINUS THE MEMBERS THAT CAN HEAD A CLAUSE
     # (re-cut review, P1, measured): `as`, `during`, `than` and `until` introduce a second CLAUSE
