@@ -1140,11 +1140,28 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: that was actually shipped; R1 catches the copyable spelling R2 cannot see.
     #:
     #: A BLOCK is a markdown unit and it is deterministic: a fenced code block, a table
-    #: row, a heading, a list item, or a blank-line-delimited paragraph. Two consequences
-    #: are deliberate and pinned below — a fence is its OWN block (a code sample cannot
-    #: borrow the replacement named in the note above it), and a hard-wrapped prose line
-    #: is NOT a boundary (this doc wraps at ~80 columns, so a bare newline inside a
-    #: paragraph must not split it).
+    #: row's CELLS, a heading (including a `---`/`===` setext underline), a blockquote
+    #: line, a list item with its indented continuation, or a blank-line-delimited
+    #: paragraph. Three consequences are deliberate and pinned below — a fence is its OWN
+    #: block (a code sample cannot borrow the replacement named in the note above it); a
+    #: hard-wrapped prose line is NOT a boundary (this doc wraps at ~80 columns, so a bare
+    #: newline inside a paragraph must not split it); and a table row is scoped to its
+    #: CELLS, not the row, because a row has no sentence terminator and a note in one cell
+    #: would otherwise clear an instruction in the next.
+    #:
+    #: ⚠️ DECLARED RESIDUALS — the bounds of the rule, named so the next reader learns them
+    #: from here rather than from a regex (#14237 r7 review P2: this comment used to promise
+    #: "a table row" while the code split cells, and to name two residuals where there are
+    #: three). The nested-sub-item over-allow that round 6 declared here is NO LONGER one:
+    #: an indented line carrying a list marker is its own block
+    #: (`test_a_nested_list_item_is_its_own_block`), so only a marker-less indented line
+    #: continues the item:
+    #:   * a retired name followed by an inline delimiter run and a bracket IS a call, so a
+    #:     NOTE spelled `name (retired)` also reds R1 — the safe (fail-closed) direction, and
+    #:     the price of catching `` `name`(args) ``, which RENDERS as a call;
+    #:   * a PROSE line containing a `|` is read as a table row and split into cells;
+    #:   * a retired name followed by a NEWLINE then `(` is not a call (horizontal rule);
+    #:     a call split across a line break is therefore accepted.
     #:
     #: ⚠️ SCOPE: the documents whose every `tortoise_*` mention is a call, and ONE of
     #: them today. The rule is doc-agnostic, but applying it repo-wide would red on docs
@@ -1157,12 +1174,16 @@ class TestEveryReaderNamesTheLiveListingDoor:
     REPLACEMENT_NAME = re.compile(r"tortoise_[a-z0-9_]+")
 
     #: A retired name in call form: the name followed by an OPENING BRACKET, optionally
-    #: after HORIZONTAL space. `name(args)` and `name (args)` are the same spelling to a
-    #: reader and Python accepts both, so testing one character of adjacency made
-    #: `tortoise_list_graphs (graph_id=x)` — a copyable call — invisible to R1 while the
-    #: declared residual claimed R1 rejected the copyable spelling (#14237 r6 review P2).
-    #: Horizontal only: a newline is never a call.
-    CALL_FORM = re.compile(r"[ \t]*\(")
+    #: after HORIZONTAL space and/or an inline-markdown delimiter RUN (backtick, `*`, `_`,
+    #: `~`). `name(args)`, `name (args)` and `` `name`(args) `` all RENDER as a call a
+    #: reader can copy, and the last one defeated an earlier form of this rule outright
+    #: (#14237 r7 review P1, measured: `` `tortoise_list_graphs`(id=x) ``,
+    #: `**`tortoise_list_graphs`**(id=x)` and `_`tortoise_list_graphs`_(id=x)` were all
+    #: ACCEPTED while the same call with the paren inside the code span was caught).
+    #:
+    #: HORIZONTAL only — a newline is never a call — and the cost is named in the class
+    #: comment: a NOTE spelled `name (retired)` now also reds R1.
+    CALL_FORM = re.compile(r"(?:[ \t]*[`*_~]+)*[ \t]*\(")
 
     @classmethod
     def is_call_form(cls, text: str, at: int) -> bool:
@@ -1261,6 +1282,18 @@ class TestEveryReaderNamesTheLiveListingDoor:
                     if index < len(cells) - 1:
                         cursor += 1  # the `|` separator itself
                     blocks.append((cell_start, min(cursor, ends), cell))
+                offset = ends
+                continue
+            # A BLOCKQUOTE and a SETEXT UNDERLINE are markdown block boundaries too, and
+            # without them the unit merged across one: an instruction inside a `>` line, or
+            # under a `---`/`===` heading underline, inherited the note above it and both
+            # rules accepted it (#14237 r7 review P2, measured with markdown-it: two blocks
+            # rendered, one block returned, ACCEPTED).
+            if stripped.startswith(">") or re.fullmatch(r"[=-]{2,}", stripped):
+                flush(paragraph, paragraph_start, offset)
+                paragraph = []
+                flush_item()
+                blocks.append((offset, ends, line))
                 offset = ends
                 continue
             # An INDENTED line after a list item is that item's CONTINUATION: markdown
@@ -1476,6 +1509,58 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "a hard-wrapped note was refused — a bare newline inside a paragraph is not a "
             "block boundary")
 
+    def test_a_blank_line_ends_a_list_item(self):
+        """The blank-line boundary, pinned — deleting it stayed GREEN before this row.
+
+        ⛔ MEASURED (#14237 r7 review P2): dropping the `flush_item()` on the blank-line
+        branch left all 27 rows green while turning this shape from REJECTED (2 blocks) into
+        ACCEPTED (1 block) — an indented code sample under a parent item's note would then
+        borrow that note's replacement. This is the boundary that keeps the r5 fence
+        fail-open closed, so it gets a row that names it.
+        """
+        text = (
+            "- Parent note: the live door is `tortoise_graph_overview(section=\"graphs\")`.\n"
+            "\n"
+            "    tortoise_list_graphs\n"
+        )
+        assert len(self.blocks(text)) == 2, self.blocks(text)
+        assert self.notes_missing_replacement(text), (
+            "an indented line after a BLANK line was absorbed into the item above it, so "
+            "it inherited that note's replacement — a blank line ends the item")
+
+    def test_a_newline_is_never_a_call_form(self):
+        """`CALL_FORM`'s "horizontal only" claim, pinned (#14237 r7 review P2).
+
+        A `\\s*` widening of `CALL_FORM` stayed GREEN before this row, so the comment's
+        claim was a promise no test could see. A name broken across a line break is a
+        WRAPPED PROSE mention, not a call — declaring that keeps R1 from silently swallowing
+        the wrapped-note shape the rest of this class exists to accept.
+        """
+        text = "the MCP tool `tortoise_list_graphs`\n(graph_id=x selects one graph)\n"
+        assert not self.retired_call_forms(text), (
+            "a name followed by a newline was read as a call — CALL_FORM must allow "
+            "horizontal space and inline delimiters only")
+
+    @pytest.mark.parametrize("kind,text", [
+        ("setext-underline",
+         "note: the MCP tool `tortoise_list_graphs` retired forward into `tortoise_graph_overview(section=\"graphs\")`\n"
+         "---\n"
+         "Call `tortoise_list_graphs` for names.\n"),
+        ("blockquote",
+         "The live door is `tortoise_graph_overview(section=\"graphs\")`.\n"
+         "> Call `tortoise_list_graphs` for names.\n"),
+    ], ids=["setext-underline", "blockquote"])
+    def test_a_setext_underline_and_a_blockquote_are_block_boundaries(self, kind, text):
+        """#14237 r7 review P2 — measured with markdown-it: rendered as 2, returned as 1.
+
+        A `---`/`===` underline and a `>` line both START a new markdown block, so an
+        instruction in that block is not cleared by the note above it.
+        """
+        assert len(self.blocks(text)) >= 2, self.blocks(text)
+        assert self.notes_missing_replacement(text), (
+            f"the {kind} did not start a block, so an instruction inside it inherited the "
+            "replacement from the note above")
+
     def test_a_table_cell_is_its_own_block(self):
         """A row has no terminator, so cell scoping keeps a note from clearing an instruction.
 
@@ -1564,32 +1649,54 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "the shipped repair names the live door in the same block as the note, so it "
             "must pass — a guard that reds its own repair is an over-block")
 
-    @pytest.mark.parametrize("text", [
-        "Call `tortoise_list_graphs` for the names.\n",
-        "Call `tortoise_list_graphs` — it is not retired.\n",
-        "Call `tortoise_list_graphs` (now retired).\n",
-        "Call `tortoise_list_graphs` the way `tortoise_delete` did before it retired.\n",
-        "Call `tortoise_list_graphs` for names, even though OTHER doors retired.\n",
-        "Call `tortoise_list_graphs` for now — the door retires in the next SDK wave.\n",
-        "Do not call `tortoise_list_graphs`; it retired forward into it.\n",
-        "Do not call `tortoise_list_graphs` — it retired forward into it.\n",
-    ])
-    def test_an_instruction_cannot_be_talked_back_in(self, text):
-        """Every shape rounds 2-5 recorded as a fail-open, at once (#14237 r4/r5 reviews).
+    @pytest.mark.parametrize("text,arm", [
+        ("Call `tortoise_list_graphs` for the names.\n", "R2"),
+        ("Call `tortoise_list_graphs` — it is not retired.\n", "R2"),
+        # R1, not R2: the name is followed by a delimiter run and a bracket, so it RENDERS
+        # as a call (#14237 r7 review P1) and R2 treats that shape as a call form.
+        ("Call `tortoise_list_graphs` (now retired).\n", "R1"),
+        ("Call `tortoise_list_graphs` the way `tortoise_delete` did before it retired.\n", "R2"),
+        ("Call `tortoise_list_graphs` for names, even though OTHER doors retired.\n", "R2"),
+        ("Call `tortoise_list_graphs` for now — the door retires in the next SDK wave.\n", "R2"),
+        ("Do not call `tortoise_list_graphs`; it retired forward into it.\n", "R2"),
+        ("Do not call `tortoise_list_graphs` — it retired forward into it.\n", "R2"),
+    ], ids=["bare", "negated", "parenthetical", "past-form", "other-doors", "promise",
+            "semicolon", "em-dash"])
+    def test_an_instruction_cannot_be_talked_back_in(self, text, arm):
+        """Every shape rounds 2-7 recorded as a fail-open, at once (#14237 r4-r7 reviews).
 
         The label word is gone, so none of these has anything to hide behind: an
         instruction does not name the replacement, and the negated/parenthetical/promise
         forms ("not retired", "(now retired)", "retires in the next wave") are irrelevant
         to a rule that reads structure.
+
+        ⛔ EACH ROW NAMES THE ARM THAT MUST CATCH IT — not the union of the two. Most of
+        these are instructions that name no replacement, so R2 is the arm (an instruction is
+        a note with a dead end). The parenthetical one is R1: a retired name followed by an
+        inline delimiter run and a bracket RENDERS as a call (#14237 r7 review P1), and R2
+        deliberately skips call forms. Naming the arm keeps every row able to FAIL on its own
+        arm's revert; a union would stay green if either arm alone regressed, which is how a
+        row stops being coverage.
         """
-        assert self.notes_missing_replacement(text), (
-            f"an instruction was accepted as a note: {text!r}")
+        if arm == "R1":
+            assert self.retired_call_forms(text), (
+                f"the instruction was not caught as a copyable CALL: {text!r}")
+        else:
+            assert self.notes_missing_replacement(text), (
+                f"an instruction was accepted as a note: {text!r}")
 
     @pytest.mark.parametrize("text", [
         "Call `tortoise_list_graphs(graph_id=x)` to read one graph.\n",
         "Call `tortoise_list_graphs(section=...)` and then `tortoise_graph_overview`.\n",
         "Call `tortoise_list_graphs (graph_id=x)` to read one graph.\n",
         "Call `tortoise_list_graphs  (graph_id=x)` to read one graph.\n",
+        # #14237 r7 review P1: one markdown delimiter between name and bracket restored
+        # the defect on the PR's OWN guarded document, with the whole suite green.
+        "Call `tortoise_list_graphs`(graph_id=x) to read one graph.\n",
+        "Call **`tortoise_list_graphs`**(graph_id=x) to read one graph.\n",
+        "Call _`tortoise_list_graphs`_(graph_id=x) to read one graph.\n",
+        "Call *`tortoise_list_graphs`*(graph_id=x) to read one graph.\n",
+        "Call `tortoise_list_graphs` (graph_id=x) to read one graph.\n",
         "```python\ngraph = tortoise_list_graphs(graph_id='x')\n```\n",
     ])
     def test_a_copyable_call_is_rejected_even_beside_the_replacement(self, text):

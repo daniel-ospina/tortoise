@@ -767,12 +767,13 @@ class TestThePreviewReceiptIsNotWiderThanTheDefect:
         receipt". **Half of that is falsified by primary source**: calling
         `tortoise_delete_knowledge("p1")` with no `confirmation` takes the preview branch
         (`mcp_server.py:7144`), that branch DOES build the payload with
-        `_deletion.receipt(...)` (`:7156`), and returns that very dict after overlaying
-        the preview's fields (`:7157-7166`) — so the payload IS the receipt body
+        `_deletion.receipt(...)` (`:7155`), and returns that very dict after overlaying
+        the preview's fields (`:7161-7167`) — so the payload IS the receipt body
         (`preview is True`, `deleted is False`, a `confirmation` token). What IS true is
-        the sharper half: `:7157-7166` copies `target`/`found`/`nodes_removed`/
-        `edges_removed`/`nodes`/`edges` and **never `tool`**, so no preview literal can
-        reach this row — an assertion here could not fail under the revert it names.
+        the sharper half: `:7161-7167` stamps `dry_run` and copies `found`/`target`/
+        `nodes_removed`/`edges_removed`/`nodes`/`edges`, and **never `tool`**, so no
+        preview literal can reach this row — an assertion here could not fail under the
+        revert it names.
         That is a FORWARD GUARD (the day a consumer starts forwarding `tool`, the receipt
         must name the live door), not coverage of this diff, and it is written as such
         below rather than left to read as a second pin. Driven on the preview path on
@@ -794,9 +795,9 @@ class TestThePreviewReceiptIsNotWiderThanTheDefect:
                 f"the {surface} a caller receives names the retired {named} — the value "
                 "a caller re-calls must be one `tools/list` advertises")
         # The receipt row above is the forward guard, and THIS is its falsifier: the
-        # overlay copies six preview fields and never `tool`, which is why no retired
-        # literal can reach a caller (`:7157-7166`). The day that changes, this reds and
-        # the loop entry becomes real coverage of whatever it starts forwarding.
+        # overlay stamps `dry_run` and copies six preview fields, never `tool`, which is why
+        # no retired literal can reach a caller (`mcp_server.py:7161-7167`). The day that
+        # changes, this reds and the loop entry becomes real coverage of what it forwards.
         assert receipt.get("preview") is True and receipt.get("deleted") is False, (
             f"the `receipt` row no longer inspects a receipt body: {receipt}")
         assert "tool" not in receipt, (
