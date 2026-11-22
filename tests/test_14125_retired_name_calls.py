@@ -5033,6 +5033,28 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "an arm below a re-raising arm that already catches its whole family can never run, "
         "so it drops nothing"
     )
+    #: ⛔ THE EXACT-SPELLING HALF OF `_masked_by`, on the CHARGE side — no row pinned it
+    #: (review of PR #14287, F3). `_dead_drop` above only pins the FAMILY term: with the
+    #: exact term deleted, `_RAISED_ALIAS.get("ModuleNotFoundError") == "ImportError"` is
+    #: still in `caught_earlier`, so its unreachable drop stays uncharged either way. A
+    #: SAME-SPELLING duplicate is the shape the exact term alone covers, and with it gone
+    #: the second arm reads reachable and this predicate flips to a FALSE CHARGE on a block
+    #: that propagates everything. The masking-table row labelled "same spelling twice"
+    #: cannot see this: it reaches `set()` through `dropped_family` under both versions.
+    _exact_dead_drop = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                "try:\n    _probe = _make()\nexcept ImportError:\n    raise\n"
+                "except ImportError:\n    _probe = None\n"
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _swallows_everything(_exact_dead_drop) is False, (
+        "an arm that repeats an earlier arm's EXACT spelling can never run, so it drops "
+        "nothing — charging it is a false red on a block that propagates everything"
+    )
 
     #: `ImportError`'s OTHER 3.12 subclass, and the map listed it with no witness at all
     #: (review of #14160, cycle 12, P1-1): deleting the entry was green while re-opening
@@ -5103,6 +5125,32 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             f"{_covered(_alias_order)}"
         )
 
+    #: ⛔ `_covered`'s MASKING FILTER itself, which no row could red (review of PR #14287,
+    #: F4). Every other masking row reaches its expectation through `dropped_family`
+    #: (an earlier arm that DROPS), so deleting `reachable = {name for name in names if
+    #: not _masked_by(...)}` left them all green. The ONLY shape whose answer changes is
+    #: parent-then-child with BOTH arms re-raising: nothing is dropped, so `dropped_family`
+    #: is empty and the earlier parent arm's containment is the whole guard. It cannot
+    #: change a gate verdict (a child spelling satisfies neither `_required_names` nor the
+    #: seam check) — it is pinned because the docstring presents it as load-bearing, and a
+    #: term presented as load-bearing with no row that reds when it goes tells the next
+    #: reader the guard is covered when it is not.
+    _parent_then_child_raise = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                "try:\n    _probe = _make()\nexcept ImportError:\n    raise\n"
+                "except ModuleNotFoundError:\n    raise\n"
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _covered(_parent_then_child_raise) == {"ImportError"}, (
+        "the earlier `except ImportError:` catches every ModuleNotFoundError, so the later "
+        "re-raising `except ModuleNotFoundError:` is unreachable and credits nothing — "
+        f"credit is {_covered(_parent_then_child_raise)}, expected {{'ImportError'}}"
+    )
+
     # 4j-septenvicesimus-bis. THE MASKING IS CONTAINMENT, NOT EQUALITY, and the direction
     #     matters both ways: an earlier PARENT arm masks a later CHILD arm (Python catches
     #     every subclass), but an earlier CHILD arm does NOT mask a later PARENT one — a
@@ -5143,11 +5191,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             {"TypeError"},
         ),
         (
-            #: The EXACT-SPELLING half of `_masked_by` — already pinned by
-            #: `_unreachable_credit` (same term, different shape), and restated here in the
-            #: same-spelling shape so the two halves of the predicate each have a row a
-            #: reader can find without reading the other's fixture (review of #14160,
-            #: cycle 13, P2-2: the earlier comment claimed this row was the ONLY witness).
+            #: ⛔ WHAT THIS ROW DOES *NOT* PIN (review of PR #14287, F3). It asserts `set()`,
+            #: and it reaches it through `dropped_family`: arm 1 drops the family, so arm 2's
+            #: credit is withheld at the family-close whether or not `_masked_by`'s
+            #: EXACT-SPELLING term exists. Deleting that term leaves this row green. The term
+            #: is pinned on the CHARGE side, by `_exact_dead_drop` above (same-spelling
+            #: duplicate below a re-raise). This comment previously claimed the row pinned the
+            #: exact term; it does not, and neither does `_unreachable_credit`.
             "same spelling twice",
             "except ModuleNotFoundError:\n    pass\nexcept ModuleNotFoundError:\n    raise\n",
             set(),
