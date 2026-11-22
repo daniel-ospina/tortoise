@@ -1015,10 +1015,13 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     # read `"detail" not in body`) was measurably wrong: applied, it reds on a 504
     # that is behaving exactly as shipped. The falsifiable property is the
     # sentence's IDENTITY — the refusal names the BOUND, never the caller's
-    # exception text and never generic prose. Mutants that red it: fold `detail`
-    # from the raised exception, or swap the constant for new wording. The old
-    # line (`"str(slow)" not in body.get("detail", "")`) could not vary under ANY
-    # mutation and advertised a check that did not exist.
+    # exception text and never generic prose. The mutant that reds it is folding
+    # `detail` from the raised exception. ⛔ "or swap the constant for new wording"
+    # used to be advertised here and was FALSE (review round 8, P2): the assertion
+    # reads the SAME constant the refusal emits, so rewording it moves both sides
+    # and stayed green — a second advertised-but-absent check, in the comment of
+    # the row that replaced the first one. The identity is what it pins; if the
+    # wording must be pinned too, pin a literal fragment beside this line.
     assert body.get("detail") == ha._mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE, (
         "a stage refusal must carry the transport bound's own sentence beside its "
         f"stage envelope, not a caller-specific or generic message: {body}")
@@ -1564,3 +1567,117 @@ def test_the_acceptance_verdict_cannot_fail_open(host_independent_ok, ack_graded
     assert drain._exit_code(verdict) == (1 if expected == "FAIL" else 0), (
         f"verdict {verdict} must exit {1 if expected == 'FAIL' else 0}, not "
         f"{drain._exit_code(verdict)} — a FAIL that exits 0 is the fail-open")
+
+
+def test_the_deployment_transport_MEASURES_extraction_from_the_detail_body():
+    """A successful detail read IS criterion 4's measurement (review round 8, P1).
+
+    The arm hard-coded `{"measured": False}` with "no graph read over HTTP" as the
+    reason, which made `ok_extract` unsatisfiable BY CONSTRUCTION: a deployment run
+    could never PASS, and a reviewer measured exactly that — a stub deployment that
+    answered every criterion correctly still printed `[FAIL] extraction demonstrably
+    ran` and exited 1, while the PR body and `_verdict`'s docstring both claimed the
+    deployment arm grades the same criteria.
+
+    What the HTTP surface cannot answer is entities/edges, and those stay
+    unmeasured — governed by `--require-entities`. The point count IS in the body.
+    """
+    drain = _drain_tool()
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"points": [{"id": "p1"}], "extraction": {"status": "ok"}}
+
+    class _Transport(drain._HttpTransport):
+        def __init__(self):  # no server, no auth — the READ is what is under test
+            pass
+
+        def get_session(self, _sid):
+            return _Resp()
+
+    ev = _Transport().extraction_evidence("s-1")
+    assert ev["measured"] is True, (
+        "a 200 detail read must count as MEASURED, or no deployment run can ever "
+        f"reach PASS: {ev}")
+    assert ev["points"] == 1, ev
+
+
+def test_run_emits_THE_DECISION_POINTS_verdict_and_exit(monkeypatch, capsys,
+                                                       tmp_path):
+    """The routing pin: `run()` must not restate the conjunction (review round 8, P2).
+
+    The row above pins `_verdict`/`_exit_code` in isolation, which is exactly the
+    hole a reviewer measured: reverting the CALL SITE to the pre-fix expression
+    (`"FAIL" if not all(...) else "PASS" if (ack_graded and ok_ack) else
+    "INCONCLUSIVE"`) left all 8 parametrisations green, because nothing observed
+    whether `run()` still goes through the one decision point. A later edit could
+    therefore reinstate the `[FAIL] ack p95` + exit-0 fail-open with a green tree.
+
+    Driven end to end with a stub transport and a SENTINEL verdict: whatever
+    `_verdict` returns must be what the report carries and what the exit code is
+    computed from — so a call site that decides for itself reds here.
+    """
+    import json as _json
+
+    drain = _drain_tool()
+
+    class _Resp:
+        def __init__(self, code, body):
+            self.status_code = code
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class _Stub:
+        """Every criterion met, so the run reaches the verdict with no host in it."""
+
+        label = "stub"
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            pass
+
+        def post_capture(self, _cap):
+            return _Resp(200, {"status": "ok", "extracted": 1,
+                               "points": [{"id": "p1"}], "extraction": None})
+
+        def get_session(self, _sid):
+            return _Resp(200, {"points": [{"id": "p1"}],
+                               "extraction": {"status": "ok",
+                                              "outcome_known": True}})
+
+        def extraction_evidence(self, _sid):
+            return {"measured": True, "points": 1}
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # The corpus comes from the spool when it exists (`~/.tortoise/capture-spool`
+    # on a capture box — present but empty on this one, which would end the run at
+    # "nothing to drain" before any verdict). Pin the synthetic corpus instead so
+    # this row is about the VERDICT ROUTING and nothing else.
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+    monkeypatch.setattr(drain, "_verdict", lambda **_kw: "SENTINEL-FROM-_verdict")
+    exits: list = []
+    monkeypatch.setattr(drain, "_exit_code",
+                        lambda v: (exits.append(v), 0)[1])
+
+    rc = drain.main(["--json", "--n", "2"])
+    assert rc == 0
+    report = _json.loads(capsys.readouterr().out)
+    assert report["verdict"] == "SENTINEL-FROM-_verdict", (
+        "run() must emit the verdict `_verdict` returned, not one it computed "
+        f"itself: {report['verdict']}")
+    assert exits == ["SENTINEL-FROM-_verdict"], (
+        "the exit code must be derived from that same verdict: "
+        f"{exits}")
+

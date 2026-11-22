@@ -195,9 +195,20 @@ class _HttpTransport:
         if r.status_code != 200:
             return {"measured": False, "why": f"detail read {r.status_code}"}
         body = r.json()
+        # ⛔ A SUCCESSFUL DETAIL READ **IS** THE MEASUREMENT (review round 8, P1).
+        # This arm used to hard-code `"measured": False` with the note below as the
+        # reason — which made `ok_extract` unsatisfiable by construction, so a
+        # DEPLOYMENT run could never PASS: a perfect deployment (200 ACK inside the
+        # window, terminal on its own, one extracted point) still printed
+        # `[FAIL] extraction demonstrably ran` and exited 1. The docstring's own
+        # claim ("the detail body carries the extraction block and the point count
+        # it is derived from") is exactly the evidence criterion 4 needs; what the
+        # HTTP surface genuinely cannot answer is entities/edges, and those stay
+        # unmeasured and stay governed by `--require-entities`.
         return {
-            "measured": False,
-            "why": "detail surface only (no graph read over HTTP)",
+            "measured": True,
+            "why": "served detail surface (points from the body; entities/edges "
+                   "are NOT measured over HTTP)",
             "points": len(body.get("points") or []),
             "extraction": body.get("extraction"),
         }
