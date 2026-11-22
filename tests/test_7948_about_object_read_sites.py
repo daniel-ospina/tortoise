@@ -2633,8 +2633,8 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     sentence still read 63/340 = 18.5 % after the table grew.
 #     Depth still trades both ways — at a UNIFORM 2 hops nine legitimate rows
 #     false-red (seven if the `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e.
-#     only the global budget is lowered) — and the only two true attributions
-#     beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
+#     only the global budget is lowered) — and every true attribution beyond 3
+#     belongs to a reader named in `_DISTANCE_EXCEPTIONS`, with the code fact
 #     that earns each. ⚠️ This is why the bound is pinned on BOTH sides: the
 #     acceptance count is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
@@ -2667,14 +2667,13 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: column this note carried before the scope fix (2026-10-24 at `d07c9e99e`) was
 #: `24/34/43/52` — SUPERSEDED, quoted only so an older figure met elsewhere reads
 #: as superseded rather than as a contradiction of this one. The SHIPPED predicate
-#: — the two exceptions in
-#: `_DISTANCE_EXCEPTIONS` added — accepts 36, i.e. the exceptions are worth exactly
-#: the 34 -> 36 above, stated separately so neither figure hides the other. Every
-#: one of the 31 true attributions is within 3 hops except the two named in
-#: `_DISTANCE_EXCEPTIONS`. (Counts, not percentages, on purpose: this file's own
-#: rule is that a rate restated against a fixed denominator rots on the next table
-#: growth — a sentence two screens up still read `63/340 = 18.5 %` after the table
-#: grew. The denominator is 19 rows x 22 doors at this head.)
+#: — the `_DISTANCE_EXCEPTIONS` budgets applied — accepts 36, i.e. the exceptions
+#: are worth exactly the 34 -> 36 above, stated separately so neither figure hides
+#: the other. Every one of the 31 true attributions is within 3 hops except the
+#: readers named in `_DISTANCE_EXCEPTIONS`. (Counts, not percentages, on purpose:
+#: this file's own rule is that a rate restated against a fixed denominator rots
+#: on the next table growth — a sentence two screens up still read `63/340 =
+#: 18.5 %` after the table grew. The denominator is 19 rows x 22 doors here.)
 #: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
 #: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
 #: and justified the tighter number with three substitutions it said stayed green
@@ -2756,8 +2755,8 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
     ),
 }
 
-#: How far the search itself may walk. Above every BUDGET in play (3, plus the
-#: two exceptions whose budgets are 4 and 5) — which is NOT the same as above
+#: How far the search itself may walk. Above every BUDGET in play (3, plus every
+#: `_DISTANCE_EXCEPTIONS` budget) — which is NOT the same as above
 #: every CHAIN, and the difference is measured, not assumed: at this head
 #: `MCP tortoise_search` reaches `hosted_backup.py::_independent_counts` and
 #: `_DUMP_EDGE_PAGE_QUERY` in 15 hops and `_COUNT_ALL_EDGES_QUERY` in 16, so
