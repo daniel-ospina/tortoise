@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1053 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1048 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair), AND THE ARMS GRADE
     ALL OF IT
@@ -1741,24 +1741,32 @@ def _exit0_pair_claims(flow: str) -> list[str]:
             if not _refuted(flow, m.start())]
 
 
-def test_an_exit_0_claim_bound_to_a_pair_is_only_ever_quoted_as_falsified():
+def test_an_exit_0_claim_bound_to_a_pair_is_never_left_unrefuted():
     """PR #14268 review P2: a measurably-false `--check` exit-0 claim, standing in situ.
 
-    Measured on the PRE-FIX block: the sentence was present and `_refuted` was False, i.e. this
-    arm is RED before the fix and green after — it grades the defect, not the fix's own wording.
+    ⛔ MEASURED, NOT TAKEN FROM THE REVIEW, and the sentence has since been REPLACED rather than
+    marked: the block now reads "`--check` exits 1 at this head against that 11858 pin", which is
+    what a run prints. So this arm is the REGRESSION guard for the shape (an exit-0 verdict bound
+    to a pair) — if a lane restores the old sentence, or writes a new one of the same shape, it
+    reds here instead of shipping.
+
+    ⛔ NON-VACUITY IS THE MUTATION, because the block no longer carries the defect: the pre-fix
+    wording — `10e51693f1`'s own, per `git log -S` — is handed to the SAME detector below and must
+    be CHARGED. Measured on the pre-fix block: 1 hit, `_refuted` False, i.e. this arm was RED
+    before the fix and is green after it.
     """
     block = _residue_block()
-    hits = list(_EXIT0_BOUND_TO_PAIR.finditer(block))
-    assert hits, (
-        "non-vacuity: the block still RECORDS the falsified exit-0 claim it replaced — deleting "
-        "the sentence instead of marking it would make this arm grade nothing")
     assert not _exit0_pair_claims(block), (
         "an UNREFUTED `--check` exits-0 claim bound to a pair is the P2 this arm was added for: "
         f"the tree that wrote it exits 1 on it: {_exit0_pair_claims(block)[0]!r}")
-    # ⛔ THE MUTATION: the exact pre-fix wording (`10e51693f1`'s, per `git log -S`), handed to the
-    # detector directly so the arm is seen to CHARGE it whatever the current prose says.
+    # ⛔ THE MUTATION: the exact pre-fix wording (`10e51693f1`'s, per `git log -S`).
     pre_fix = ("`--check`\n#: exits 0 at this head on the SAME pair, so 11858 is re-measured on "
                "the tree that carries them,\n#: not carried forward.")
     assert _exit0_pair_claims(pre_fix), (
         "the pre-fix sentence must be CHARGED — a detector that cannot see the defect it was "
         "written for is vacuous")
+    # …and its refuted spelling is NOT charged, so the arm cannot be satisfied by reddening every
+    # mention of an exit-0 verdict.
+    assert not _exit0_pair_claims(
+        "`--check` was believed to exit 0 at this head on the SAME pair — measured FALSE, exit 1"), (
+        "a claim the block itself marks FALSE is honest prose and must not be charged")
