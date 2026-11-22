@@ -36139,6 +36139,29 @@ class TortoiseSDK:
                 dsts = _distinct_dsts
                 op_type = conn["operator"]
                 label = conn.get("label")
+                # ── #14263 (review F1): the dedup KEY reads the token the
+                # writers STORE ─────────────────────────────────────────────
+                # The three connect doors resolve a declared re-spelling before
+                # they WRITE it (`_create_operator`, `_create_direct_edge`,
+                # `_create_edge`), but the resubmission probe below was handed
+                # the caller's RAW label, so the key asked the graph for a
+                # spelling the write had already normalised away. A retry of
+                # `label="DEPENDSON"` therefore MISSED the operator pass 1 wrote
+                # and minted a SECOND one over the same pair with the SAME
+                # canonical label — two live `IMPL` factors on one belief, the
+                # #9750 double-count class `_find_operator`'s own comment says
+                # this key exists to prevent (measured on a reified IMPL pair:
+                # raw spelling -> 2 operators, canonical -> 1, the only
+                # difference being the spelling). Resolving HERE, once, is the
+                # layer that makes key and writers agree: `_find_operator` has
+                # exactly one caller, this line's route, and the doors below
+                # canonicalise idempotently, so they receive the same token they
+                # would have resolved themselves. Unchanged when the predicate is
+                # not a declared relation under any spelling — the `#1934`
+                # predicate leg must still warn about THAT spelling.
+                _declared_label = self._canonical_relation_spelling(label)
+                if _declared_label:
+                    label = _declared_label
                 direction = conn.get("direction")
                 # §8 connection-routing (A3, #1053): a PLAIN IMPL/NAND
                 # connection (route 'direct' — no reify/mitigation) is

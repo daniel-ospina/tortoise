@@ -682,6 +682,73 @@ class TestIngestCarriesTheReport:
         assert out["relation_declarations"] == []
 
 
+class TestAResubmissionOfAReSpellingDedupes:
+    """Review F1 — the dedup KEY read the caller's spelling; the writers STORE the declared one.
+
+    MEASURED at the head this review left (`86590a4e86`), on this exact fixture
+    and an embedded graph, before the fix: bundle #1 with `label="DEPENDSON"`
+    wrote ONE operator labelled `dependsOn`; the IDENTICAL bundle #2 minted a
+    SECOND operator carrying the SAME canonical label — two live `IMPL` factors
+    over one pair, EP pricing the belief twice. That is the `#9750` double-count
+    class `_find_operator`'s own comment says this key exists to prevent, and
+    the part/whole route reached it too (`composedOf` is outside
+    `CORE_PREDICATES`, so the `#12067` guard does not even raise first). The
+    control run with `label="dependsOn"` deduped onto ONE operator and returned
+    the same id, so the spelling is the only variable.
+
+    Why the tests are here rather than in a docstring: the door tests above pin
+    what a write REPORTS, and this pins what a RETRY finds — the property that
+    makes ingest idempotent (`INGEST_CONTRACT` §15's `ids` equality across a
+    resubmission).
+    """
+
+    @staticmethod
+    def _operator_labels(sdk, op_type):
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Point {is_operator:true, op_type:$t}) RETURN o.id, o.label",
+            params={"t": op_type}).result_set
+        return [(row[0], row[1]) for row in rows]
+
+    def test_the_operator_route_dedupes_a_re_spelled_resubmission(self, sdk):
+        bundle = _pair_bundle(reify=True, label="DEPENDSON")
+        first = sdk._ingest(bundle)
+        second = sdk._ingest(bundle)
+        assert second["ids"]["connections"] == first["ids"]["connections"], (
+            "a resubmission of the SAME bundle must return the operator it "
+            f"already wrote; got {second['ids']['connections']} then "
+            f"{first['ids']['connections']}")
+        assert second["deduped"]["connections"] == 1
+        assert second["created"]["connections"] == 0
+        operators = self._operator_labels(sdk, "IMPL")
+        assert len(operators) == 1, (
+            "one pair must never carry two live mechanisms (#9750): "
+            f"{operators}")
+        # the KEY agreeing with the writer is the whole point: pass 1 stored the
+        # DECLARED spelling, so pass 2 had to ask for that same token
+        assert operators[0][1] == "dependsOn"
+
+    def test_the_part_whole_route_does_not_mint_a_second_operator(self, sdk):
+        """The route where a key miss MINTS instead of hitting the #12067 guard."""
+        bundle = _pair_bundle(reify=True, label="CONTAINS", operator="composedOf")
+        first = sdk._ingest(bundle)
+        second = sdk._ingest(bundle)
+        operators = self._operator_labels(sdk, "composedOf")
+        assert len(operators) == 1, (
+            "the resubmission minted a duplicate part/whole operator: "
+            f"{operators}")
+        assert second["ids"]["connections"] == first["ids"]["connections"]
+        assert operators[0][1] == "contains"
+
+    def test_the_control_a_canonical_label_already_deduped(self, sdk):
+        """The property the re-spelling lost — green BEFORE the fix, so the two
+        above are red for the spelling and for nothing else.\n        """
+        bundle = _pair_bundle(reify=True, label="dependsOn")
+        first = sdk._ingest(bundle)
+        second = sdk._ingest(bundle)
+        assert second["ids"]["connections"] == first["ids"]["connections"]
+        assert len(self._operator_labels(sdk, "IMPL")) == 1
+
+
 class TestTheJudgedPairFollowsTheDeclaredDirection:
     """A reversed DECLARATION must not be read as a reversed WRITE.
 
@@ -722,17 +789,19 @@ class TestTheJudgedPairFollowsTheDeclaredDirection:
         assert out["relation_declaration"]["outcome"] == REVERSED_PAIR
 
 
-def _pair_bundle(*, reify: bool, label: str) -> dict:
+def _pair_bundle(*, reify: bool, label: str, operator: str = "IMPL") -> dict:
     """Two Object endpoints of DECLARED kinds, and one connection by label.
 
     `dev:api` / `dev:database` occur in the declared vocabulary (as
     `dependsOn`'s pair) but NOT as `contains`'s, so the pair leg reaches a
     verdict instead of abstaining on an unknown scope. `reify` picks the route:
     without it an Object->Object `IMPL` is an operator-less DIRECT edge, with it
-    the operator route — so the two tests drive both writers.
+    the operator route — so the two tests drive both writers. `operator` selects
+    the mechanism, so a resubmission test can drive a NON-mechanism op_type (the
+    case where a key miss MINTS rather than raising, #9750).
     """
     conn = {"ref": "c1", "from": "oA", "to": "oB",
-            "operator": "IMPL", "label": label}
+            "operator": operator, "label": label}
     if reify:
         conn["reify"] = True
     return {
