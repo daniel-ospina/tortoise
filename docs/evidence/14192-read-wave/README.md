@@ -23,7 +23,8 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 >
 > - the `159 ms` / `231 ms` / `167 ms` bullet pair under "Result —
 >   `ab-full-read.json`" (NOT under "What the first measurement found", whose
->   bullets are artifact cells) is the FIRST measurement's, and says so there.
+>   bullets are artifact cells apart from its `≤120-row` pool constant, which is
+>   one of the code constants below) is the FIRST measurement's, and says so there.
 > - `5000` operator edges (corpus row) is a harness INPUT — `grep -c 5000` over
 >   both JSONs is `0`.
 > - the `26,463` / `14,732` character counts are **git** artifacts, not JSON
@@ -43,7 +44,8 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 > - **code constants** are read out of the code they name, not out of a JSON:
 >   `VARIANCE_SUM_MIN` `1e-154` / `VARIANCE_SUM_MAX` `1e102`
 >   (`tortoise/search_engine.py:5792-5793`), the `5.24`–`5.26` band that `_grid()`
->   constructs in the test file, and the `≤120-row` fusion pool.
+>   constructs in the test file, and the `≤120-row` fusion pool
+>   (`tortoise/retrieval.py:128`, `DEFAULT_POOL_SIZE = 120`).
 >
 > ⚠️ Earlier cuts of this note twice claimed a stronger form — that every number
 > was an artifact cell, then that no other *performance* figure was outside the
@@ -152,7 +154,7 @@ artifact's own figures for the same function are
   72.3 %`). Its movement on the current head is
   `verdict.member_delta.post_relationships` in `ab-full-read.json`.
 
-⚠️ **An earlier cut of the table below disagreed with its own JSON** — it carried
+⚠️ **An earlier cut of the table above disagreed with its own JSON** — it carried
 `160.7 → 79.7 / −81.0` for `retrieval` and `148.2` for the
 `post_relationships` baseline, copied from a harness run made BEFORE the
 metering fix. A `−81.0 ms` retrieval delta cannot coexist with the `−68.6 ms`
@@ -162,13 +164,14 @@ edit changes one it must change the other.**
 
 ⛔ **THE JSONs describe `5c9cfe5407`, NOT THIS HEAD.** That commit re-measured
 both artifacts, and **two later commits then changed the code they measure
-without regenerating them**: `7d276aa07a` removed the duplicated predicate from
-the Q2-crit query (26,463 chars → 14,732, `$contested_threshold` twice → once),
-and `6ec51de9ec` added the `_InlineMember` inline fallback. ⚠️ **WHICH WAY THAT
+without regenerating them**, in this chronological order: `6ec51de9ec` added the
+`_InlineMember` inline fallback, then `7d276aa07a` removed the duplicated
+predicate from the Q2-crit query (26,463 chars → 14,732,
+`$contested_threshold` twice → once). ⚠️ **WHICH WAY THAT
 BIASES THE NUMBER IS NOT ASSERTED HERE, and an earlier cut of this paragraph got
 it backwards:** the after-arm is priced on code that (for the crit query) was
 HEAVIER than this head's, which makes the reported win too SMALL rather than too
-large — while the later inline fallback could push the net the other way. With
+large — while the inline fallback could push the net the other way. With
 two commits of opposite sign the direction is not derivable from the char count
 alone, so the operative statement is the direction-free one: **the after-arm
 prices code this head no longer runs.** Re-measure before quoting any after-arm
@@ -195,7 +198,9 @@ The changed function in isolation, 9 alternating rounds on the same 12 ids:
 ⚠️ **The tail moved the WRONG WAY and that is stated here rather than left in
 the JSON.** `n=9` aggregated rounds: the new arm's worst round is **502.6 ms**
 against the old arm's **273.0 ms** (its own p50 × 4.3). p50 improves 38.6 % and
-the mean only 12.8 %, which is the signature of **one outlier round**, and the
+the mean only 12.8 % — both are arithmetic on `ab-relationships.json`'s cells
+(`73.72 / 191.245` and `26.32 / 205.888`) — which is the signature of **one
+outlier round**, and the
 artifact stores aggregates with no per-round series — so it cannot be attributed
 here. It is either first-round pool warm-up or a real tail on per-call pool
 creation, and **nobody knows which**, which is exactly why the figure is
@@ -271,6 +276,6 @@ uv run python tools/read_wave_latency.py --points 2000 \
   *chain*, not of the legs: the sequentiality was **after** the legs — in the
   decoration reads.
 - **`fusion` is not the problem either** (0.0 ms p50): `rrf_fusion` is pure CPU
-  over a ≤120-row pool.
+  over a ≤120-row pool (`retrieval.DEFAULT_POOL_SIZE = 120`, a code constant).
 - The remaining in-scope cost is a chain of **post-fusion graph reads**, which is
   what this change re-schedules and makes cheap.

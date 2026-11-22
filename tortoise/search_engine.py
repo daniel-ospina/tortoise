@@ -5814,8 +5814,9 @@ def beta_variance_sum_bound(threshold: float) -> float:
     always going to be rejected. ⛔ NO MILLISECOND FIGURE AND NO ROW COUNT IS
     QUOTED HERE. The shipped artifacts measure the WHOLE function and its
     isolated A/B (``docs/evidence/14192-read-wave/``), never this query alone,
-    and this directory's own rule is "if a number is not in a JSON here, it is
-    not claimed here". An earlier cut of this docstring said "~160 ms to ~58 ms
+    and the rule that directory now carries is per-figure, not global: a figure
+    that is not a cell of one of its JSONs says at the point it appears where it
+    came from. An earlier cut of this docstring said "~160 ms to ~58 ms
     with the row set BYTE-IDENTICAL (79 rows both ways)"; neither number nor
     that row count appears in any committed artifact, so both are WITHDRAWN
     rather than restated. The property that IS pinned is the one that makes the
@@ -7050,7 +7051,14 @@ def get_relationships_bounded(
         # 162.3 -> 118.8 ms whole read (``verdict.member_delta.post_relationships``
         # and ``verdict.baseline_total``/``verdict.after_total`` in
         # ``docs/evidence/14192-read-wave/ab-full-read.json``), and three of the
-        # members walk the same operator fan-out independently.
+        # members walk the same operator fan-out independently. ⚠️ Both
+        # artifacts were measured at ``5c9cfe5407``, and TWO later commits
+        # (``6ec51de9ec``'s ``_InlineMember`` inline fallback, then
+        # ``7d276aa07a``'s de-duplicated predicate) changed the code they price
+        # without re-running them — so the
+        # 101.2 / 118.8 after cells price code THIS head no longer runs. The
+        # artifact is the authority for what was measured, NOT for what this
+        # head's numbers are; re-measure before quoting the after arm.
         #
         # ⛔ Q1a is deliberately NOT in this wave: its rows are what ``op_ids``
         # IS, so the three operator reads cannot be named before it answers.
