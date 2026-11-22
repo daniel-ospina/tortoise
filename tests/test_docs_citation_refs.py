@@ -3296,6 +3296,23 @@ def _d5_grep_verdict(ran: subprocess.CompletedProcess, name: str, grep: str = "g
     if ran.returncode in (0, 1):
         return True
     if ran.returncode == 2:
+        # ⛔ rc 2 IS A REFUSAL ONLY IF THE SPELLING IS OTHERWISE RECOGNIZED (#14303 review round 15,
+        # P2 — MEASURED, and the fail-open this file's own residual used to RECORD rather than
+        # close). A grep that RUNS the alias but fails that one invocation for an unrelated reason
+        # also exits 2, and reading it as "refused" empties the allowance with nothing red. grep
+        # PARSES OPTIONS BEFORE IT HANDLES `--version`, so the version pairing separates the two
+        # shapes by exit code alone, with no reliance on grep's (translated) message: recognized
+        # spelling -> `--version` answers 0 -> the count failure is a NON-ANSWER and must RAISE;
+        # refused spelling -> `--version` answers 2 as well -> a genuine refusal.
+        recognized = subprocess.run([grep, name, "--version"], capture_output=True, text=True,
+                                    timeout=60)
+        if recognized.returncode == 0:
+            raise AssertionError(
+                f"`{grep} -c {name} '^[+-]$'` exited 2, but `{grep} {name} --version` exited 0 — "
+                "grep parses options before it handles `--version`, so this spelling IS RECOGNIZED "
+                "and the count invocation failed for another reason. That is a NON-ANSWER, not a "
+                "refusal: reading it as 'refused' empties the allowance silently (#14138, #14303 "
+                "review round 15)")
         return False
     raise AssertionError(
         f"`{grep} -c {name} '^[+-]$'` exited {ran.returncode}, which is neither a count (0/1) nor "
@@ -3324,18 +3341,27 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
     concluded from the second run. Discriminating this way is locale-proof, unlike matching grep's
     translated `unrecognized option` text.
 
-    ⛔ STATED RESIDUAL — THE CONTROL PROVES grep ANSWERS, NOT THAT rc 2 ON THE SPELLING UNDER TEST IS
-    A REFUSAL (#14303 review, P2 — MEASURED). A grep that RUNS the alias but fails that one
-    invocation for an unrelated reason is read as "refused", the allowance empties, and NO CELL
-    REDS: the alias cell's `runs == (grep_probe(…).returncode in (0, 1))` compares this helper
-    against the same raw exit code, so the two agree on the wrong answer. Measured on a `PATH`
-    `grep` that delegates every other spelling (the control answers `2`, rc 0) and exits 2 for
-    `--unix-byte-offsets` and its four prefixes: this file stays GREEN (37 passed at head
-    `f61447b0b09`), which is the same shape GNU grep 3.12 presents LEGITIMATELY — so there is no
-    exit-code discriminator to close it with, and grep's own message is translated (which is why
-    matching text is refused above). Recorded rather than papered over: the gap is real, it is the
-    same fail-open direction the control narrows, and the control narrows it to "grep answered
-    `--count` and refused this" instead of "grep is broken".
+    ⛔ THE CONTROL PROVES grep ANSWERS — IT DID NOT, ON ITS OWN, PROVE rc 2 ON THE SPELLING UNDER
+    TEST IS A REFUSAL (#14303 review round 15, P2 — MEASURED, then CLOSED). A grep that RUNS the
+    alias but fails that one invocation for an unrelated reason exits 2, was read as "refused", and
+    emptied the allowance with NO CELL RED: the alias cell's `runs == (grep_probe(…).returncode in
+    (0, 1))` compared this helper against the same raw exit code, so the two agreed on the wrong
+    answer. MEASURED at head `f61447b0b09` on a `PATH` grep that delegates every other spelling (the
+    control answers `2`, rc 0) and exits 2 only for `-c` plus the alias: `37 passed` — the fail-open
+    is silent by construction.
+
+    ⛔ AND AN EXIT-CODE DISCRIMINATOR DOES EXIST FOR THAT SHAPE — `--version` (#14303 review round
+    15, P2 — an earlier revision of this paragraph said there was none, which was false for the case
+    the paragraph itself describes, and which suppressed the fix). grep PARSES OPTIONS BEFORE IT
+    HANDLES `--version`, so `grep <spelling> --version` answers `0` exactly when the spelling is
+    RECOGNIZED. The two shapes are therefore separable by exit code alone, with no reliance on
+    grep's translated message: a grep that refuses the spelling in every position answers `2` to
+    both probes (a genuine refusal, GNU 3.12's shape), and a grep that recognizes the spelling but
+    failed the count answers `2` then `0` (a NON-ANSWER, and now an AssertionError rather than an
+    emptied allowance). MEASURED over all five spellings — `3.11 -> 0`, `3.12 shim -> 2`, and the
+    runs-but-fails stub -> `0` — so the discriminator keeps GNU 3.12 a legitimate refusal while it
+    closes the fail-open. The control above is still needed: it catches a grep that is broken
+    outright, which the `--version` pairing cannot distinguish from a refusal.
 
     ⛔ A THIRD EXIT CODE IS AN ERROR, NOT A REFUSAL: reading it as "refused" would silently empty
     the allowance, so a real prescription in the alias spelling would go unread.
@@ -3544,9 +3570,10 @@ def _d5_documented_long_options(completed: subprocess.CompletedProcess) -> set[s
     if completed.returncode != 0:
         raise _D5NoDocumentedUniverse(
             f"`grep --help` published only {len(documented)} long options and exited "
-            f"{completed.returncode} — this grep answers its usage on another stream or not at "
-            "all (BSD grep 2.6.0-FreeBSD writes usage to stderr and exits 2), so this host has no "
-            "documented universe to pin the option set against (#14303 review, P2)")
+            f"{completed.returncode} — its usage lists no long options, so this host has no "
+            "documented universe to pin the option set against (BSD grep 2.6.0-FreeBSD prints a "
+            "SHORT-flag-only `usage:` line on stderr and exits 2, which is read above — the "
+            "stream is not the problem; the list is) (#14303 review round 15, P3)")
     raise AssertionError(
         f"only {len(documented)} long options were parsed out of a `grep --help` that exited 0 — "
         "the derivation is broken, and a broken derivation must not be able to certify anything "
@@ -5569,11 +5596,13 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     ⛔ THE FAIL-OPEN ARM (#14138). The allowance is what keeps a prescription in the alias spelling
     visible, so a probe that answered `False` whenever it was confused would EMPTY it — a second
     blank-class prescription goes unread and nothing reds. grep exits 2 for an invalid option and
-    0/1 for a real count, so this cell drives SEVEN stub greps: one that COUNTS, one that REFUSES
+    0/1 for a real count, so this cell drives EIGHT stub greps: one that COUNTS, one that REFUSES
     the alias (and answers `--count` normally), one that answers a THIRD code, one that is BROKEN
     for every spelling, one that answers `--count` with rc 0 and NO OUTPUT, one that PRINTS the
-    count but still fails the run (rc 2 with stdout `2`), and one that answers a REAL count and
-    exits 1 — grep RAN the spelling and selected nothing, which is an ANSWER, not a refusal.
+    count but still fails the run (rc 2 with stdout `2`), one that answers a REAL count and
+    exits 1 — grep RAN the spelling and selected nothing, which is an ANSWER, not a refusal — and
+    one that RUNS the alias but fails THOSE invocations while answering `--version`, which is a
+    NON-ANSWER and must not be read as a refusal either.
     The `broken`, `silent` and `counts_then_fails` stubs must raise on the CONTROL run — a bare
     rc 2 is grep's generic error code, a wrapper that swallows stdin prints nothing, and a wrapper
     that counts and then fails is not a refusal either — because reading any of them as "refused"
@@ -5671,6 +5700,19 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     # a grep that reports a count and then fails is not a grep that refused the spelling.
     with pytest.raises(AssertionError, match="control probe"):
         _d5_grep_runs_long_option("--unix-byte-offsets", counts_then_fails)
+    #: ⛔ rc 2 IS A REFUSAL ONLY IF THE SPELLING IS OTHERWISE RECOGNIZED (#14303 review round 15,
+    #: P2 — MEASURED, and this arm makes the closure of that fail-open a WITNESSED behaviour rather
+    #: than a claim in a docstring). This stub answers the control, answers `--version` with rc 0 —
+    #: so grep DOES recognize `--unix-byte-offsets` — and exits 2 for that one invocation anyway.
+    #: Before the `--version` pairing the allowance EMPTIED silently here (the whole fail-open live,
+    #: suite GREEN); now it must RAISE, because a recognized spelling whose count failed is a
+    #: NON-ANSWER. Removing the pairing reds this arm, which is the point of pinning it.
+    runs_but_fails = stub("grep-runs-but-fails", "cat >/dev/null; " + answers_count
+                          + 'if [ "$2" = "--version" ]; then exit 0; fi\nexit 2')
+    with pytest.raises(AssertionError, match="NON-ANSWER"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", runs_but_fails)
+    # …and the GENUINE refusal still answers False above (`refuses`), because a grep that refuses
+    # the spelling answers 2 to the `--version` probe as well — GNU 3.12's shape, unchanged.
     # …and a binary that is not there at all is a NON-ANSWER too, which is why it is pinned rather
     # than left to `subprocess` to raise something nobody counted on: the allowance must never be
     # emptied by a probe that could not run (#14138 review, P3).
