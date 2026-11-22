@@ -290,14 +290,15 @@ because the pack as a whole moved to `720.0` (720.0 × 2.0 / 60 = 24.00, which `
 ceils to **24**; 720.6 lands at 24.02, which ceils to **25**). ⛔ An earlier cut of this sentence claimed
 the subtraction had stopped separating the pair and withdrew the `24 m` arm on that basis — that
 reading does NOT reproduce at the head it named and is itself withdrawn here. ⛔ **AND THE PAIR STOPS
-SEPARATING AFTER THE MERGE WITH `main` `b4da1f5c01`, WHICH IS THE FINDING WORTH KEEPING**: the pool now
-reads **25 m** at **720.7**, and with the same three removed it STILL reads **25 m** at **720.2** —
-because the 24/25 boundary is EXACTLY `est_seconds` 720.0 (`shard_watchdog_minutes` is
-`ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and 720.2 → 24.0067 → **25**), and `main`'s pack moved
-the three-removed arm 0.2 s above that cliff. Two lanes measured this same pair opposite ways within
-an hour for exactly that reason, so the durable fact is NOT which minute a given tree emits: it is
-that these three suites move the ceiling by ~0.5 s around a 720.0 s cliff (`720.7 − 720.2` at the
-merged tree; their declared 6.0 s over the 11 shards is ~0.55 s/shard), so any conclusion quoted
+SEPARATING — RE-MEASURED ON THE TREE REBASED ONTO `origin/main` `0467ba329d73`, WHERE IT NO LONGER
+SEPARATES AT ALL**: that pool reads **25 m** at **721.3**, and with the same three `core` suites
+removed it reads **25 m** at **721.3** — the SAME `est_seconds` on the SAME binding shard, so at this
+head those three rows are not on the shard that sets the ceiling. (The 24/25 boundary is EXACTLY
+`est_seconds` 720.0: `shard_watchdog_minutes` is `ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and
+720.2 → 24.0067 → **25**.) Two lanes measured this same pair opposite ways within an hour at an
+earlier head for exactly that reason, so the durable fact is NOT which minute a given tree emits: it
+is that these three suites sit near a 720.0 s cliff — at the `b4da1f5c01` merge the arms differed by
+0.5 s (`720.7` with, `720.2` without), at this head by nothing — so any conclusion quoted
 here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
 LOWER A WEIGHT: the three enter at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
@@ -306,8 +307,9 @@ all three `durations:` rows still emits 720.4) — what moves it is three more f
 +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is applied. ⛔ **THIS
 RE-CUT THEN MERGED THE TWO SIDES, WHICH IS A THIRD TREE, SO THE TERM IS READ OFF IT RATHER THAN
 INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on THIS manifest emits **25 m on all eleven
-shards**, the worst at `est_seconds` **720.7** (`ceil(720.7/60 x 2)` = 25, re-read after the
-`origin/main` `b4da1f5c` merge — it emitted 720.6 on the previous tree), and the pool it packs now
+shards**, the worst at `est_seconds` **721.3** (`ceil(721.3/60 x 2)` = 25, re-read with
+`--emit-push-matrix` on THIS tree — the rebase onto `origin/main` `0467ba329d73`; it emitted 720.7 at
+the `b4da1f5c01` merge and 720.6 on the pre-merge tree, both now HISTORY), and the pool it packs now
 holds BOTH parents' added suites — `#14012`'s three (shards `d`, `e`, `i` — `test_14012_resident_cli`,
 `test_14012_resident_pin`, `test_14012_outside_view`) and `#14015`'s M5 `test_miss_rate_m5.py` (shard
 `d`, beside `resident_cli`) — so no arithmetic on the two parents' figures would have

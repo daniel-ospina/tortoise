@@ -3231,9 +3231,15 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   class set, corpus pin, split or salience pin is touched — §1–§9's criterion VALUES and the E4
   denominator are the ones this record froze. The two `if items:` gates it names are re-pointed
   (`:15244`/`:15397`), as are the two fail-open `except` arms (`:15257`/`:15408`) and the
-  `_run_vet_pass` calls (`:17968` for the S2 pass, `:15373` for the union pass).
+  `_run_vet_pass` calls (`:17971` for the S2 pass, `:15373` for the union pass).
 - **`document_sha256` is re-cut in this same commit**, per §8's rule for *any* edit to this file —
-  the §10.38 precedent, not a new reading of it. ⛔ Re-cutting a digest is a mechanical consequence
+  the §10.38 precedent, not a new reading of it. ⛔ Re-cut AGAIN on the rebase onto `origin/main`
+  `0467ba329d73`: that base moved this file's LIVE `_run_vet_pass` cite once more (`:17968` →
+  `:17971`, re-derived by content — `if vet_enabled and embed_list:` is `:17970` and
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` is `:17971`), so the record's bytes
+  changed and the digest was re-cut with them. ⛔ The new value is NOT restated here: naming a
+  digest inside the file whose hash it is makes the sentence self-falsifying on the next byte —
+  the live value is the one `preregistration.json` pins, re-cut in this same commit. ⛔ Re-cutting a digest is a mechanical consequence
   of an edit to a *cite*; it is not the owner's re-registration, which is what §10.5's "the owner's
   call" covers (a threshold or a control-arm definition changing).
 - **This entry is LIVE for this tree** — it has no successor, so it must not carry a supersede

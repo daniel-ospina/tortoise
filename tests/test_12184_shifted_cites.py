@@ -476,12 +476,15 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5250`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11590`'): 1,
-    # 3: the header's BARE spelling of the same address, plus the two BARE sites the #13991 branch
-    # itself adds (§2.5's five-address enumeration and its `:11280` -> `:11281` provenance sentence) —
-    # see the row's own comment for the three line numbers. Measured on the merged document, and again
-    # after `#14169` re-keyed the address:
-    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 3.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 3,
+    # 5: the header's BARE spelling of the same address, plus FOUR more BARE sites this document
+    # carries at this head — measured on THIS document, not carried: the #13991 branch's §2.5
+    # five-address enumeration and its `:11281` provenance sentence, the §2.5 `:Tag` table row, and
+    # the two sentences `#14169`'s `+309` move is recorded in (the pin-EOF declaration and the
+    # re-derivation provenance). ⛔ The count is the MEASUREMENT, re-derived after the rebase, not a
+    # delta on an earlier edition — this document's cite set is what the rule counts, so any edit
+    # that adds, moves or drops a spelling changes it:
+    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 5.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 5,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5720`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8515`'): 2,
     # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —

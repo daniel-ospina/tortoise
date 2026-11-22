@@ -1283,7 +1283,7 @@ SWEEP_NAMES = 66
 #: then drew the wrong conclusion from it. The `(11835, "891187f5a4636487")` PAIR is committed at
 #: `2c0d66e2ec` and that tree does measure it — both true, and both beside the point: the
 #: illustration's claim is that a tree can PIN 11835 and MEASURE 11843, and the tree that does is
-#: the MERGE `8889f1140105` (the base before `27cd81d55ebd` re-pinned it): it commits
+#: the MERGE `8889f1140105` (the base before `27cd81d55ebd` re-pinned it): it PINNED
 #: `(11835, "891187f5a4636487")` — inherited from `main` — and `--repin` ON THAT TREE prints
 #: `(11843, "6aed5368ffa10513")`. So the example is a REAL instance of the rule, not "the wrong
 #: EXAMPLE"; what was wrong was reading its pair against `2c0d66e2ec`, where pin and tree agree.
@@ -1306,7 +1306,21 @@ SWEEP_NAMES = 66
 #: `(11860, "267dce26b4191743")` — unchanged from the pre-restoration pin, because every restored
 #: line is `#:`-prose and `edits_for` walks the AST and cannot see a comment. `--check` exits 0
 #: here with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11860, "267dce26b4191743")
+#: ⛔ REBASED ONTO `origin/main` `0467ba329d73` — a further tree, so the pair below is `--repin`'s
+#: output ON IT and no earlier block's line is inherited. Measured on `origin/main` `0467ba329d73`
+#: itself with `--repin`: `(11861, "f0647020531c078c")`. Measured here: `(11864, "2a6400518a87775c")`,
+#: and `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
+#: ⛔ THE +3 IS THIS BRANCH'S, AND IT IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic:
+#: `--report --base 28ca66878d --top 5000` was run in a detached worktree at `origin/main`
+#: `0467ba329d73` AND on this tree, both row sets sorted and diffed — the row SHAPE set is identical
+#: (856 rows) with EXACTLY TWO rows differing, `g.query` 1499 → 1501 (+2) and `super().query`
+#: 75 → 76 (+1). All three are the change-feed walk's END-PROOF, which is the point of the change:
+#: the two `g.query(…)` in `tools/graphevent_home.py` (the NULL-`seq` count and the total count that
+#: make "reached the end" distinguishable from "the read stopped early") and the one
+#: `super().query(…)` stub in `tests/test_13094_graphevent_home.py` that stands in for a FalkorDB
+#: connection. They are the ordinary-word receivers this counter exists to REPORT, not typed SDK
+#: call sites. `11861 + 3 = 11864` is a CROSS-CHECK of the two measurements, never their evidence.
+SWEEP_RESIDUE = (11864, "2a6400518a87775c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
