@@ -1293,7 +1293,21 @@ def _names_pair(region: str, path: str, line: int) -> bool:
         if at == -1:
             return False
         before = region[:at]
-        owners = [(before.rfind(name), name) for name in _NONCOMPARABLE_PATHS if name in before]
+        # ⛔ A BOUNDARY, NOT A SUBSTRING. A bare `name in before` / `rfind` also matches a LONGER
+        # filename that merely ENDS with the basename — `tests/test_mcp_server.py` bound the sibling
+        # number to `mcp_server.py` and left both arms green (measured; files of that shape exist in
+        # this tree, so the mutant is reachable prose, not a fabricated path).
+        # ⛔ AND IT MUST BE THE WHOLE CODE SPAN: the document writes an owner as `` `sdk.py` ``'s, so
+        # the basename has to sit between backticks. A left-only boundary still let `tests/mcp_server.py`
+        # (a different directory, same basename) stand in for it, and a trailing-boundary-free pattern
+        # let `mcp_server.py.bak` through — both measured green before this.
+        owners = [
+            (m.start(), name)
+            for name in _NONCOMPARABLE_PATHS
+            # the owner opens a code span and then either closes it (`` `sdk.py` ``'s) or carries the
+            # cite (`` `sdk.py:57972` ``) — so `:`/`` ` ``/`'` ends the name, and nothing else may
+            for m in re.finditer(rf"(?<=`){re.escape(name)}(?=[`':])", before)
+        ]
         if owners and max(owners)[1] == filename:
             return True
         start = at + 1
