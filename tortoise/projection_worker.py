@@ -96,15 +96,25 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    unarmed loop and an unarmed record), which also move no counter. ⛔ The
    unimportable arm is easy to lose because it is an ``except`` rather than an
    ``if``, and it was the one this paragraph omitted, so a reader told "three
-   families" would not have looked for it. ⛔ IT IS THE ONE STRUCTURAL ARM THAT
-   CANNOT REACH THE ORDERING RESIDUAL BELOW (#14222 round-17 review, P3-4: an
-   earlier cut said it "recurses into the same residual — an inline fold can
-   overtake an earlier queued position", which is false for THIS arm): an import
-   that raises in ``live_write._submitted_to_worker`` means no
-   ``projection_worker`` module object exists in this process (``sys.modules`` IS
-   the import cache, and a failed load REMOVES the failing module — Python
-   reference §5.3.1/§5.4), so there is no worker and no queue for an inline fold
-   to overtake. Its cost is the inline fold itself, which is why it belongs in the
+   families" would not have looked for it. ⛔ IT IS THE STRUCTURAL ARM THAT
+   CANNOT REACH THE ORDERING RESIDUAL BELOW — ON THE PATH IT EXISTS FOR (#14222
+   round-17 review, P3-4: an earlier cut said it "recurses into the same residual —
+   an inline fold can overtake an earlier queued position", which is FALSE for a
+   load that genuinely FAILS: a failed load REMOVES the failing module from
+   ``sys.modules`` and never produced a module object — Python reference
+   §5.3.1/§5.4 — so no worker and no queue exist for an inline fold to overtake).
+   ⛔ BUT THE ``except`` IS BROADER THAN A FAILED LOAD, so the exclusion is not
+   universal and must not be stated as one: it also answers a HALTED import — a
+   ``sys.modules`` entry of ``None``, which raises ``ModuleNotFoundError`` while a
+   PREVIOUSLY imported module object, its worker thread and its queue are all
+   still alive. There the arm folds inline with an earlier position still queued,
+   the later write's row lands first, and its predecessor overwrites it — the
+   residual itself. That state is reachable (this PR's own test builds it by
+   assigning ``None`` into ``sys.modules``) but is not PRODUCED by this tree:
+   nothing in ``tortoise/`` assigns ``None`` there. So the arm is charged with the
+   INLINE FOLD and not with the residual, and the residual's exclusion from this
+   arm is a fact about the failed-load path — not a guarantee at every raise. Its
+   cost is the inline fold itself, which is why it belongs in the
    STRUCTURAL family (five conditions, none of which moves a counter) and not in
    the ordering one. The PR's own test counts
    the same seven conditions as five GATE STATEMENTS (the fused one covers three

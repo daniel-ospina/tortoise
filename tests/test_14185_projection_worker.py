@@ -1976,10 +1976,16 @@ def test_an_UNIMPORTABLE_loop_folds_inline_instead_of_breaking_the_write(
     assert write.deferred is False
     assert called == [1], "an unimportable loop must fold inline, not skip the fold"
     # ⛔ THE ARM MOVES NO COUNTER, and the rest of its cost is the inline fold
-    # itself (#14222 round-17 review, P3-4). An unimportable loop means NO worker
-    # exists in this process, so this fold has no queued position it could
-    # overtake: it is a STRUCTURAL arm, not an ordering one. What is mechanically
-    # checkable here is the counter half of that sentence — moving
+    # itself (#14222 round-17 review, P3-4). ⛔ The reason it is not charged with
+    # the ORDERING residual is narrower than "no worker exists": that holds for a
+    # load that genuinely FAILS (a failed load removes the module from
+    # `sys.modules` and never produced one). It does NOT hold for the state this
+    # test builds — `None` in `sys.modules` raises while a previously imported
+    # module, its worker thread and its queue are still alive, so there an inline
+    # fold CAN overtake an earlier queued position. Nothing in `tortoise/`
+    # assigns `None` there, which is why the arm is classified structural; the
+    # classification rests on that, not on the raise alone. What is mechanically
+    # checkable here is the counter half — moving
     # `tortoise_record_projection_inline_fallbacks_total` would make an operator
     # reconciling it against "inline folds" read this arm as a queue decline.
     assert monitoring.projection_inline_fallback_counts() == fallbacks_before, (
