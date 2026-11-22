@@ -583,12 +583,13 @@ def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
 @pytest.mark.parametrize("exc", [
     # The TRANSPORT class: the PostgREST read failed.
     RuntimeError("the allowance read failed: HTTP 500"),
-    # The OTHER class the guard exists for, and the one production actually
-    # raises here: `resolve_org_limits` raises `OrgNotFoundError` (a
-    # `QuotaCheckError`) when the org row is missing (`tortoise/quota.py:803`),
-    # which is NOT a `RuntimeError`. Pinned because a guard narrowed to
-    # `except RuntimeError` leaves every OTHER row in this file green while it
-    # regresses exactly this path (#14038 review cycle 10, P3).
+    # The OTHER class the guard exists for, and one production really does raise
+    # here: `resolve_org_limits` raises `OrgNotFoundError` (a `QuotaCheckError`)
+    # when the org row is missing (`tortoise/quota.py:803`), which is NOT a
+    # `RuntimeError`. ⛔ It is not the ONLY production class — see the docstring —
+    # so this pair pins BREADTH, not "the realistic one". Pinned because a guard
+    # narrowed to `except RuntimeError` leaves every OTHER row in this file green
+    # while it regresses exactly this path (#14038 review cycle 10, P3).
     quota.OrgNotFoundError("Team 'team-solo-001' not found in control plane"),
 ], ids=["transport", "org-not-found"])
 def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
@@ -605,10 +606,14 @@ def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
     MEASURED before the guard existed: the RuntimeError below escaped
     `evaluate`, which is why this row is the pin and not a restatement.
 
-    ⛔ TWO EXCEPTION CLASSES, because the guard's BREADTH is what is pinned: the
-    realistic raise from `resolve_org_limits` is `OrgNotFoundError`, not a
-    `RuntimeError`, so a single-class row could not tell `except Exception` from
-    `except RuntimeError`.
+    ⛔ TWO EXCEPTION CLASSES, because the guard's BREADTH is what is pinned, and
+    BOTH are live paths in production — an earlier cut of this paragraph called
+    `OrgNotFoundError` "the realistic raise … not a `RuntimeError`", which is false
+    as an exclusive: a missing org row raises `OrgNotFoundError`, while a transport
+    failure or a non-2xx answer raises `RuntimeError` from `query_with_total` and
+    `resolve_org_limits` lets it PROPAGATE (`tortoise/quota.py`'s ladder docstring:
+    "if even the base-only select fails, the error PROPAGATES (fail-closed)"). So a
+    single-class row could not tell `except Exception` from `except RuntimeError`,
     """
     def raise_on_read(org_id):
         raise exc

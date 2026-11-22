@@ -1926,10 +1926,12 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "`origin/main` file lengths, the absent-at-main count, the provenance pair and the "
             "write measurement. The doc-TEXT arms (the ownership clause, the drift decomposition "
             "and the twelve-pair enumeration) still graded the sentence.",
-            # ⛔ NO `stacklevel=2` (#14038 review cycle 10, P3): from inside a
-            # test that attributes the warning to pytest's own frame
-            # (`_pytest/python.py:167`), which is precisely the file:line this
-            # line exists to surface. Default `stacklevel=1` names THIS file.
+            # ⛔ NO `stacklevel=2` (#14038 review cycle 10, P3; corrected in cycle 13):
+            # from inside a test it attributes the warning to pytest's own frame
+            # (`_pytest/python.py:167`) — NOT the file:line this line exists to
+            # surface, and the opposite of what the commit that added it meant
+            # ("stop the warning pointing at pytest"). Default `stacklevel=1`
+            # names THIS file, which is the attribution an operator wants.
             # It is spelled out because `ruff`'s B028 requires an EXPLICIT
             # stacklevel — the value is the default, so nothing changes but the
             # lint red (`ruff check .` is a required job and a new violation in
