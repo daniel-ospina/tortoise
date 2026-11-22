@@ -322,7 +322,12 @@ rather than inheriting either parent's:** `--emit-push-matrix` on the reconciled
 (shards `a`–`e`, `g`, `i`–`k` at 721.8; `f` and `h` at 721.7) — still 25 m, and 0.7 s above the 721.1
 this paragraph quotes for the `10e51693` tree, which is exactly the point: the minute is stable across
 these merges while the `est_seconds` is not, and every line above that names one names the tree it came
-from. The three hand-added figures below are unchanged by it (the arm-2 SUM is a different arm), and
+from. ⛔ **THE MERGE WITH `origin/main` `0467ba329d7` (and the peer fold beside it) IS YET A FURTHER
+TREE, so the 721.8 above is history too:** `--emit-push-matrix` there emits **25 m on all eleven
+shards** at a worst `est_seconds` of **722.0** (seven shards `a`–`e`, `i`, `j` at 722.0; `f`, `g`, `h`,
+`k` at 721.9) — still 25 m, 0.9 s above the 721.1 this paragraph quotes for `10e51693`. The 0.2 s of
+drift is the point rather than a nuisance: the figure moved with main's pool and the header block in
+`config/ci-surfaces.yml` had carried the earlier one, which is why that block now cites THIS reading. The three hand-added figures below are unchanged by it (the arm-2 SUM is a different arm), and
 `tests/test_ci_selection.py`'s arm-2 invariant is the guard that says so. The three
 hand-added figures are re-added from the emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row
 above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 56.64 m,

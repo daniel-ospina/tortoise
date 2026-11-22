@@ -44,22 +44,26 @@ version: 1
 # 6.6 m of headroom), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and at THIS head it is re-measured, not
-# carried: `--emit-push-matrix` at THIS head packs nine shards at 721.8 s (a–e, g, i–k) and two at
-# 721.7 s (f, h), so
-# `ceil(721.8/60 x 2)` = 25 m governs (a shard's job-level
+# carried: `--emit-push-matrix` at THIS head packs seven shards at 722.0 s (a–e, i, j) and four at
+# 721.9 s (f–h, k), so
+# `ceil(722.0/60 x 2)` = 25 m governs (a shard's job-level
 # wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 25`, so
-# the two agree by construction rather than by a hand re-read. The 0.7 s over `main`'s own
+# the two agree by construction rather than by a hand re-read. The 0.9 s over `main`'s own
 # emission at `10e51693f1` (721.1 s, quoted in `docs/ops/ci-wall-clock.md` §2 — 720.7 s there is
 # the EARLIER `b4da1f5c` merge tree, which that paragraph marks as history) is the union of both
 # parents' registrations plus this branch's
 # `tests/test_13998_capacity_notice.py` at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only
-# because it sits a fraction of a second from rounding the OTHER way: two
+# because it sits 2.0 s above the 720.0 s cliff that would round the OTHER way: two
 # intermediate folds of this branch emitted 24 m before main's next fold re-packed the pool down
 # to 720.0 s, and this head is one main fold away from that again. Re-run
 # `--emit-push-matrix`; never carry the last revision's minute. Those numerals are a
 # SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head — re-derive them with
 # that verb rather than trusting them, but a restatement is fine when it cites the emission
-# it came from.) ⛔ The cap was NOT
+# it came from. ⛔ And the promise is GRADED, not just stated:
+# `tests/test_ci_selection.py::test_the_fast_shards_header_block_states_the_measured_emission`
+# compares this sentence against the live emission (and its own `ceil(...)` against the emitted
+# watchdog), so a carried figure reds a required leg instead of shipping — which is how the
+# figures above reached this head 0.2 s stale, the third time this block went uncarried.) ⛔ The cap was NOT
 # moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
 # re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
 # from the pre-suite terms (those are measurements and file facts).

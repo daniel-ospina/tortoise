@@ -13476,7 +13476,147 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
     assert _durations_rows_with_a_stale_head_total(fresh_period, tmp_path) == []
 
 
-#: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
+#: The `fast_shards` header block is the ONE place in the manifest that restates
+#: `--emit-push-matrix`'s own numbers for THIS tree. It promises, in its own words, that
+#: they are "a SNAPSHOT of `tools/ci_selection.py --emit-push-matrix` at this head —
+#: re-derive them with that verb rather than trusting them", and the same block had
+#: already gone stale twice before that promise was written (#11298 review cycle 5,
+#: #14015). A promise in prose is not a guard, so the sentence is graded against the
+#: live emission here instead.
+#:
+#: Shard names are read in BOTH spellings this map uses — an explicit list (`f, h`)
+#: and a range (`a–e`) — and the count may be a word (`nine`) as the surrounding prose
+#: prefers. A guard that only reads one spelling turns the other into an unread claim,
+#: which is how the sibling head-total guard above became inert three times.
+_EMISSION_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+_EMISSION_CLAUSE_RE = re.compile(
+    r"(?P<n>\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"(?: shards?)? at (?P<est>\d+\.\d) s \((?P<names>[a-z][a-z,\s\u2013\u2014-]*)\)")
+_EMISSION_CEIL_RE = re.compile(r"`ceil\((?P<est>\d+\.\d)/60 x 2\)` = (?P<minutes>\d+) m")
+_EMISSION_RANGE_RE = re.compile(r"(?P<lo>[a-z])\s*[\u2013\u2014-]\s*(?P<hi>[a-z])")
+
+
+def _emission_names(phrase: str) -> set[str]:
+    """Expand a shard-name phrase: `a–e, i, j` -> {a,b,c,d,e,i,j}."""
+    names: set[str] = set()
+    for part in phrase.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        span = _EMISSION_RANGE_RE.fullmatch(part)
+        if span:
+            names |= {chr(c) for c in range(
+                ord(span.group("lo")), ord(span.group("hi")) + 1)}
+        else:
+            names.add(part)
+    return names
+
+
+def _emission_block_claims(
+        manifest_text: str) -> tuple[dict[float, set[str]], float, int] | None:
+    """Read the `fast_shards` header block's stated emission.
+
+    Returns `{est_seconds -> shard names}`, the `ceil(...)` operand and the minutes it
+    states; `None` when the block (the text above the `fast_shards:` key) states none.
+    The subject is bounded to that header so a shard-count sentence elsewhere in the
+    1.18 MB map cannot be mistaken for this block's claim.
+    """
+    header = manifest_text.split("\nfast_shards:", 1)[0]
+    # Comment line breaks are PRESENTATION — a sentence wraps at will — so join the block
+    # into one string before reading it; otherwise a figure that happens to land on the
+    # next line makes a claim unread, which is the no-op-gate class this guard's own
+    # message names.
+    header = re.sub(r"\n\s*#\s?", " ", header)
+    groups: dict[float, set[str]] = {}
+    for m in _EMISSION_CLAUSE_RE.finditer(header):
+        names = _emission_names(m.group("names"))
+        raw_n = m.group("n")
+        stated_n = int(raw_n) if raw_n.isdigit() else _EMISSION_COUNT_WORDS[raw_n]
+        if stated_n != len(names):
+            # The COUNT and the SET are two statements of one fact. A sentence that
+            # disagrees with itself is graded as claiming a set it does not name, so
+            # the caller reds rather than silently believing one side.
+            names = names | {f"<count says {stated_n}>"}
+        est = float(m.group("est"))
+        # `|` rather than `set.update`: a `.update(` on a receiver this sweep cannot
+        # type is one more member of the `tools/sdk_privatise.py` residue pin, and a
+        # test is not a reason to move a pinned count.
+        groups[est] = groups.get(est, set()) | names
+    ceil_match = _EMISSION_CEIL_RE.search(header)
+    if not groups or ceil_match is None:
+        return None
+    return groups, float(ceil_match.group("est")), int(ceil_match.group("minutes"))
+
+
+def _live_fast_shard_emission() -> tuple[dict[float, set[str]], int]:
+    """The emission the block claims to quote: `{est_seconds -> names}` and the
+    watchdog the emitted shards carry."""
+    legs = cs.push_legs(cs.load_manifest())
+    groups: dict[float, set[str]] = {}
+    for shard in legs["shards"]:
+        groups.setdefault(float(shard["est_seconds"]), set()).add(shard["name"])
+    return groups, max(s["watchdog_minutes"] for s in legs["shards"])
+
+
+def test_the_fast_shards_header_block_states_the_measured_emission():
+    """#14296: the block restates the emission and must BE the emission.
+
+    Measured at the pre-fix head: the block stated nine shards at 721.8 s (`a`–`e`,
+    `g`, `i`–`k`) and two at 721.7 s (`f`, `h`), while `push_legs` packed **seven** at
+    **722.0** (`a`–`e`, `i`, `j`) and **four** at **721.9** (`f`, `g`, `h`, `k`) — the
+    `origin/main` merge moved the pool and the sentence was carried instead of
+    re-emitted, which is the third time this block went stale. The watchdog is
+    unaffected (25 m either way), so arithmetic on the minute could not catch it: only
+    the `est_seconds` figures can.
+    """
+    claims = _emission_block_claims(cs.MANIFEST.read_text(encoding="utf-8"))
+    assert claims is not None, (
+        "the `fast_shards` header block states no emission the guard can read — this "
+        "is a no-op gate over an empty subject set, not a clean map. Re-point "
+        "`_EMISSION_CLAUSE_RE` / `_EMISSION_CEIL_RE` at the sentence the block "
+        "actually uses, or retire this guard rather than leaving it reading nothing.")
+    groups, ceil_est, ceil_minutes = claims
+    live_groups, live_minutes = _live_fast_shard_emission()
+    assert groups == live_groups, (
+        "the `fast_shards` header block quotes a `--emit-push-matrix` this tree does "
+        f"not emit — stated {groups}, emitted {live_groups}. Re-run the verb and paste "
+        "its figures; a carried emission is the class this block exists to warn "
+        "about (and that it has now gone stale on three times).")
+    assert (ceil_est, ceil_minutes) == (max(live_groups), live_minutes), (
+        "the block's watchdog derivation disagrees with the emission — stated "
+        f"`ceil({ceil_est}/60 x 2)` = {ceil_minutes} m, emitted worst "
+        f"{max(live_groups)} s at {live_minutes} m. The block claims the two agree "
+        "by construction rather than by a hand re-read; this is that check.")
+
+
+def test_the_emission_block_guard_is_not_vacuous():
+    """The guard must bite on a carried emission and stay quiet on this tree's.
+
+    The stale sentence is the block's own pre-fix text (721.8/721.7, nine/two), kept
+    here as the measured instrument: it must NOT read as this tree's emission. If a
+    future edit widens a pattern until it matches anything, this arm stops redding
+    and the sibling guard above becomes decoration.
+    """
+    stale = (
+        "# carried: `--emit-push-matrix` at THIS head packs 9 shards at 721.8 s "
+        "(a, b, c, d, e, g, i, j, k) and 2 shards at 721.7 s (f, h), so\n"
+        "# `ceil(721.8/60 x 2)` = 25 m governs\n"
+        "\nfast_shards: 11\n")
+    stale_claims = _emission_block_claims(stale)
+    live_groups, live_minutes = _live_fast_shard_emission()
+    assert stale_claims is not None
+    assert (stale_claims[0], stale_claims[1], stale_claims[2]) != (
+        live_groups, max(live_groups), live_minutes), (
+        "the pre-fix sentence reads as this tree's emission — the guard cannot "
+        "distinguish a carried figure from a re-measured one")
+    # A sentence is bounded to the header: a shard-count line BELOW `fast_shards:`
+    # (the carve-out / slow-leg comments quote their own shard counts) is not this
+    # block's claim and must not be joined into it.
+    assert _emission_block_claims(
+        "fast_shards: 11\n# packs 2 shards at 700.0 s (a, b)\n") is None
 _WATCHDOG_FLOOR_CLAIM_RE = re.compile(r"`WATCHDOG_FLOOR_MIN`\s*\((?P<minutes>\d+) min\)")
 
 
