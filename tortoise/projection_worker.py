@@ -732,12 +732,18 @@ class ProjectionWorker:
           import as an ``os.register_at_fork(after_in_child=...)`` hook — so they
           are already fresh before this child runs any of our code, and the SAME
           reasoning as the two locks above applies to the lock nobody here owns.
-          ⛔ THIS METHOD DOES NOT CALL THAT FUNCTION (review round 11, P3-2): an
-          earlier revision of this bullet said it did, so a reader could have
-          deleted the repair from a publish path believing this reset had already
-          run it. The repair is the HOOK's job and it has happened before we get
-          here; every publish path also asks again, which is free (the function is
-          idempotent by pid). ⛔ This is what makes the publish below safe, and it
+          ⛔ THIS METHOD ALSO CALLS IT (review cycle 3, ISSUE 1): an earlier
+          revision of this bullet said it did NOT, because the HOOK's registration
+          is what covers every child before our code runs — and the merge that
+          produced this tree brought that sentence and this call into the same
+          method, 29 lines apart, contradicting each other. Both are true, and they
+          are DIFFERENT mechanisms: the hook repairs the locks in every child,
+          including the paths no helper here reaches; this call is the BELT to that
+          suspender, so the reset's own guarantee holds even where the hook is not
+          registered (a platform without ``os.register_at_fork``, a hook someone
+          unregisters). ``_emit`` swallows every failure, the replacement is
+          lock-free, and it is idempotent by pid, so the belt costs one
+          ``getpid()``. ⛔ This is what makes the publish below safe, and it
           is the part an earlier revision of this fix left out: dropping the
           publish from the read path only moved the wedge onto the write and the
           collect paths (measured: the child blocked in ``MutexValue.set`` from
@@ -752,6 +758,13 @@ class ProjectionWorker:
           advertise the parent's permanent backlog), so it is NOT deferred to the
           first write.
         """
+        # ⛔ THIS CALL IS PART OF THE RESET, not a courtesy (#14222 review cycle 3,
+        # ISSUE 1). The HOOK is the primary mechanism and the docstring above says
+        # so; this is the belt to it, so the reset does not depend on the hook being
+        # registered at all. `_emit` swallows every failure (a metrics problem must
+        # never break the fold), the replacement is lock-free, and it is idempotent
+        # by pid — so on the ordinary path this is one `getpid()`.
+        _emit("ensure_projection_metrics_fork_safe")
         self._cond = threading.Condition()
         self._cond_pid = os.getpid()
         self._publish_lock = threading.Lock()
