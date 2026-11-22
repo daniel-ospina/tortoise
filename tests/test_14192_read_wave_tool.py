@@ -1462,16 +1462,41 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return False
 
         def _derived(arg: ast.AST) -> bool:
-            """A comprehension BUILDS A NEW collection, so it cannot mutate its source.
+            """A comprehension BUILDS A NEW collection, so ITERATING a source mutates nothing.
 
             ⛔ Measured RED without this (#14281 review P2): `", ".join(e.get("leg") or ""
             for e in trace)` and `statistics.fmean(len(r) for r in results)` were reported
             as "an in-place sort/clear" by the `handed` arm, decided by the CALLEE's name
             rather than by any mutation. `_row_ref` already documented the same shape over
             `per_query` as a measured false red.
+
+            ⛔ BUT THE EXEMPTION IS THE COMPREHENSION, NOT ITS BODY (#14326 review P2,
+            measured GREEN here with the recorded page permuted and `rank_identical: True`):
+
+                def _scrub(_e): _e["id"] = "REDACTED"
+                _j = ", ".join(_scrub(r) for r in results)
+
+            The collection the OUTER callee receives is fresh, so that callee cannot mutate
+            the page — but the comprehension's BODY runs on the page's elements, and `handed`
+            was the only arm looking at them. `<results.sort() for …>` and `<results.clear()
+            for …>` were caught by the mutator arm; an ELEMENT write through a helper was
+            not. So the body is graded by the rule the argument is: every call inside the
+            comprehension must be a known non-mutator, or NOTHING is exempted. Every
+            comprehension in the real tool passes (`e.get(…)`, `len(r)`, `_result_id(r)`).
             """
-            return isinstance(arg, (ast.ListComp, ast.GeneratorExp, ast.SetComp,
-                                    ast.DictComp))
+            if not isinstance(arg, (ast.ListComp, ast.GeneratorExp, ast.SetComp,
+                                    ast.DictComp)):
+                return False
+            for inner in ast.walk(arg):
+                if not isinstance(inner, ast.Call):
+                    continue
+                inner_callee = (getattr(inner.func, "id", None)
+                                or getattr(inner.func, "attr", None))
+                if (inner_callee not in _PURE_READS
+                        and inner_callee not in _PURE_METHODS
+                        and inner_callee not in _ID_MAPPERS):
+                    return False
+            return True
 
         handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
             _names_handed(arg) & watched and not _element_only(arg) and not _derived(arg)
