@@ -2966,7 +2966,6 @@ surfaces:
   # (DUAL-registered: matrix + job). ONE row only: this file is `merge=union` in `.gitattributes`,
   # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
   - test_14002_record_only_journal.py
-  - test_extractor_cost_measure.py
   # #14186: the `core` arm of the TRIPLE registration (core/api/eval), and the
   # one `--register` mints by default. It is LOAD-BEARING, not a rider on the
   # other two: `tortoise/embed_seam.py` and `tortoise/embed_worker.py` are the
@@ -2976,6 +2975,7 @@ surfaces:
   # row. The `api` arm (hosted_api.py) and the `eval` arm (embeddings.py) are
   # stated at their own entries.
   - test_14186_embedder_seam_batching.py
+  - test_extractor_cost_measure.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
   # added with its own rationale. This branch registered it here first; the

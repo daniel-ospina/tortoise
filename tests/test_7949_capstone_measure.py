@@ -6735,8 +6735,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("17967", "if vet_enabled and embed_list:"),
-            ("17968", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("17970", "if vet_enabled and embed_list:"),
+            ("17971", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
             ("15372", "if vet_enabled and complete_list:"),
             ("15373", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
@@ -7024,7 +7024,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             # qualifier insert above the call, so the number is re-derived from
             # the tree each time rather than carried from the round that added
             # the row (the row's INTENT is unchanged: pin the CALL).
-            ("17882", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            ("17885", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
         # ⛔ THE FIVE REMAINING BARE STEP CITES ON THE SAME FIVE-LINE CLAIM, and
         # the reason `test (f)` went red on this branch (#11517 review round 5,
@@ -7044,8 +7044,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sentence takes three rows rather than one — the same reason the
         # `README.md` "i.e. BEFORE the" claim above takes two.
         ("probes/capstone_run.py", "(S2.1,", (
-            ("17914", "embed_list = run_s2(model, story, master,"),
-            ("17968", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("17917", "embed_list = run_s2(model, story, master,"),
+            ("17971", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
         )),
         ("probes/capstone_run.py", "_apply_classify_kinds`` (S2.3,", (
             ("15245", "out = kind_classifier.classify_items(items)"),
@@ -7809,7 +7809,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # (the range START); `:15638` is the blank line before `return OrgInfoResponse(` at
         # `:15639`. Both numbers were read off the tree, never nudged by `+4`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
-            ("15449", "point_count = await asyncio.to_thread("),
+            ("15561", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
         # ⛔ `:1186` IS NOT PINNED BY A ROW *ALONE*, and the reason is measured rather than
         # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
