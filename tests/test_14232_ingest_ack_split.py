@@ -901,10 +901,16 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     Measured on the deployment: `transport wait bound (10s) exceeded … (stage=
     unmarked spent_ms={})`. The refusal body is FLAT (`stage`, `stages_ms`), and
     `stages_ms` carries only stages that FINISHED, so a breach INSIDE the record
-    phase must appear in `stage`. Deleting the `capture_write` mark falls back to
-    `capture_gates` and reds this.
+    phase must appear in `stage`.
+
+    ⛔ WHAT THIS ROW DOES **NOT** DO (review round 7, P2 — the docstring used to
+    claim it): deleting the `capture_write` mark is NOT caught here. It falls back
+    to `capture_gates`, which this row reports as INCONCLUSIVE by design (see the
+    skip arm), so the mutant is caught by
+    `test_the_write_mark_sits_between_the_gates_and_the_extraction`. This row
+    pins the WIRE SHAPE of a genuine refusal — flat body, a named stage, a timed
+    gate phase, and the bound's own error text — which is what a client reads.
     """
-    from tortoise.session_projection import SESSION_EXTRACTION_PHASES  # noqa: F401
 
     # ⛔ THE GATES PHASE MUST BE CHEAP FOR THIS ROW TO BE ATTRIBUTABLE (#5049
     # rule 1, `tests/conftest.py`'s own fixture docstring). The bound below is
