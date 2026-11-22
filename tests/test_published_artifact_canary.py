@@ -2823,6 +2823,15 @@ def _strip_shell_comments(script: str) -> str:
       * `)` is left out because a top-level `)` is a syntax error before the `#` matters, so its
         status is UNOBSERVABLE in isolation — an unmeasured member is not evidence.
 
+    ⛔ AND NOT INSIDE AN EXPANSION EITHER (review cycle 17, P2, MEASURED — the next
+    false-NEGATIVE this rule had, found independently of the metacharacter list above).
+    "Outside any quote" is not the whole rule: inside an unquoted `${ … }` a `#` is a WORD
+    character, and inside `(( … ))` the arithmetic evaluator sees it too, so everything after
+    it is still CODE. Both were stripped as comments, and a substitution after them RAN while
+    this function returned `[]` — the silent pass this file calls worse than no pin. `${`/`((`
+    nesting is now tracked and suppresses comment detection while open (pinned, with an
+    executed marker, by
+    `test_the_prose_pin_does_not_read_a_hash_inside_an_EXPANSION_as_a_comment`).
     ⛔ THE SAME RULE BREAKS DOWN IN A HEREDOC BODY, WHICH IS WHY IT IS LEXED SEPARATELY
     (review cycle 8b). A heredoc body is COPIED into the command, not parsed as shell: a
     `#`-leading body line is NOT a comment, and an unquoted delimiter still EXPANDS. So
@@ -2864,6 +2873,8 @@ def _strip_shell_comments(script: str) -> str:
     quote: str | None = None  # None | "'" | '"'
     at_word_start = True
     arith = 0  # >0 while inside a `$(( … ))`; an integer count of the OPEN paren depth
+    brace = 0  # >0 while inside an unquoted `${ … }` parameter expansion
+    cmd_arith = 0  # >0 while inside an unquoted `(( … ))` arithmetic COMMAND
     heredocs: list[tuple[str, bool]] = []  # (delimiter, terminator ignores leading tabs)
     i = 0
     while i < len(script):
@@ -2898,7 +2909,47 @@ def _strip_shell_comments(script: str) -> str:
             at_word_start = False
             i += 2
             continue
-        if ch == "#" and at_word_start:
+        # ⛔ `#` IS NOT A COMMENT INSIDE `${ … }` OR `(( … ))` (review cycle 17, P2, MEASURED).
+        # bash treats the inside of a parameter expansion as a WORD, so a `#` there is LITERAL
+        # and everything after it is still CODE — including a substitution that RUNS. Treating
+        # it as a comment dropped the rest of the line, so the pin reported `[]` over an
+        # executing line: the silent pass this file calls worse than no pin at all. Measured,
+        # each with a marker file created by the `$( )`:
+        #
+        #   $ bash -e -c 'echo ${y:-a # $(touch /tmp/lexran)}'    → 'a #', marker CREATED
+        #   $ bash -e -c 'echo ${y:-a # `touch /tmp/lexran`}'     → 'a #', marker CREATED
+        #   $ bash -e -c '(( x = 1 # $(touch /tmp/lexran) ))'     → arithmetic error, marker CREATED
+        #
+        # …and `_executable_prose_lines` returned `[]` for all three. The expansion is read as
+        # a WORD here (verbatim, so a `$( )` inside it is still scanned), and the comment test
+        # below is suppressed while any of these nestings is open.
+        if ch == "$" and script.startswith("${", i):
+            out.append("${")
+            brace, at_word_start, i = brace + 1, False, i + 2
+            continue
+        if brace:
+            out.append(ch)
+            if ch == "}":
+                brace -= 1
+            i += 1
+            continue
+        if (
+            ch == "("
+            and script.startswith("((", i)
+            and not (i > 0 and script[i - 1] == "$")  # `$((` is handled below
+        ):
+            out.append("((")
+            cmd_arith, at_word_start, i = 2, False, i + 2
+            continue
+        if cmd_arith:
+            out.append(ch)
+            if ch == "(":
+                cmd_arith += 1
+            elif ch == ")":
+                cmd_arith -= 1
+            i += 1
+            continue
+        if ch == "#" and at_word_start and not arith:
             newline = script.find("\n", i)
             if newline == -1:
                 break
@@ -3466,6 +3517,50 @@ def test_the_prose_pin_sees_a_heredoc_operator_SPLICED_by_a_backslash_newline():
     # THE FIX: the body line is scanned even though the operator spans the splice.
     with pytest.raises(AssertionError, match="command substitution"):
         _assert_no_executable_prose(script)
+
+
+def test_the_prose_pin_does_not_read_a_hash_inside_an_EXPANSION_as_a_comment(tmp_path):
+    """A `#` INSIDE `${ … }` / `(( … ))` is a WORD character, not a comment — measured.
+
+    This is the fail-open reached through the COMMENT model (review cycle 17, P2). bash treats
+    the inside of a parameter expansion as a word, so a `#` there is literal and everything
+    after it is still CODE. The lexer tested `at_word_start` only, stripped the line's tail as
+    a comment, and `_executable_prose_lines` returned `[]` over a substitution that RAN:
+
+        $ bash -e -c 'echo ${y:-a # $(touch /tmp/lexran)}'      → 'a #', marker CREATED
+        $ bash -e -c '(( x = 1 # $(touch /tmp/lexran) ))'        → arithmetic error, marker CREATED
+
+    Each case below proves EXECUTION with a marker file the substitution creates, so a false
+    pass cannot come from a failed substitution looking quiet, and the real-comment control
+    stays stripped — this fix narrows comment stripping, it does not remove it.
+    """
+    scripts = {
+        "parameter expansion": "echo ${y:-a # $(touch %s)}",
+        "nested expansion": "echo ${a:-${b:-x # $(touch %s)}}",
+        "backtick in expansion": "echo ${y:-a # `touch %s`}",
+        "arithmetic command": "(( x = 1 # $(touch %s) ))",
+    }
+    for label, template in scripts.items():
+        marker = tmp_path / f"marker-{label.replace(' ', '-')}"
+        script = template % marker + "\n"
+        ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
+        assert marker.exists(), (
+            f"the {label} did not execute its substitution, so this premise is gone "
+            f"(rc={ran.returncode}, stderr={ran.stderr!r}) — the hole this pins is not the "
+            "one reproduced here"
+        )
+        assert _executable_prose_lines(script), (
+            f"the {label} EXECUTES a command and the pin reported nothing — the silent pass "
+            "this pin exists to close"
+        )
+        with pytest.raises(AssertionError, match="command substitution"):
+            _assert_no_executable_prose(script)
+
+    # ⛔ A REAL COMMENT IS STILL A COMMENT — the fix narrows stripping, it does not disable it.
+    assert (
+        _executable_prose_lines("echo ok  # a real comment naming `some-tool` and $(cmd)\n") == []
+    )
+    assert _executable_prose_lines("# a whole-line comment: `tick` $(cmd)\n") == []
 
     # ⛔ AND THE NON-SPLICED SHAPES ARE UNAFFECTED — this fix must not turn `<<<` into a
     # heredoc, nor stop a plain heredoc or a plain escaped `\"` from being read as before.
