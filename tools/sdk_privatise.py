@@ -1129,11 +1129,12 @@ SWEEP_NAMES = 66
 #:     re-measured in a DETACHED worktree prints THE SAME pair and `--check` exits 1 THERE, against
 #:     its own 11858 pin. So 11858 did not reproduce at its own commit: this re-cut absorbs rows that
 #:     predate every commit the PR adds, which is why `main` derives them too;
-#:   * putting `origin/main`'s version of this PR's census file
-#:     (`tests/test_14125_retired_name_calls.py`) back into THIS tree leaves the pair byte-identical
-#:     — 0 rows — so that file, the subject of this PR, contributes nothing to the pin. The two rows
-#:     that moved are the ones the block below attributes (`out.update`, `proj.g.query`), both on
-#:     `main`.
+#:   * this PR's tracked source changes are THREE files — `tests/test_14125_retired_name_calls.py`,
+#:     `tests/test_sdk_privatise_sweep.py` and this one's prose — and putting `origin/main`'s version
+#:     of ALL THREE back leaves the pair byte-identical — 0 rows. So this PR's own contribution to
+#:     this pin is ZERO, measured over the whole diff, not assumed from a file list and not scoped
+#:     to the one file whose rows could move. The two rows that moved are the ones the block below
+#:     attributes (`out.update`, `proj.g.query`), both on `main`.
 #: The row NAMES are unchanged (856 rows) on every tree measured above, but two of their COUNTS
 #: moved, so the DIGEST necessarily moved too (`f0647020531c078c` vs the pinned `a1552662bf07a10b`) —
 #: that is what reds `--check`, and it is why a count-only attribution is unsafe here: a bare
