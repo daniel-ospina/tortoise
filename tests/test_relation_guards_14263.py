@@ -710,6 +710,67 @@ class TestIngestCarriesTheReport:
         assert out["relation_declarations"]
         assert out["relation_declarations"][0]["outcome"] == UNDECLARED_PAIR
 
+    def test_the_absorb_arm_reports_the_edges_it_wires(self, sdk):
+        """Round-5 review P1 — the resubmission that GROWS the graph went silent.
+
+        The operator route's `partial` (absorb) arm completes an existing
+        operator's input set with one bare-MERGE edge per target it did not
+        already hold, so a second submission that adds `oC` WRITES the pair
+        (oA, oC). `door_result` stayed `None` on that arm, so
+        `_carry_relation_declaration` never ran and the caller was told
+        nothing — while §3.3 justified the silence with "the partial-absorb arm
+        write[s] no edge", which is false. MEASURED before the fix on this
+        fixture: the reply said `created.connections == 0`,
+        `deduped.connections == 1`, `relation_declarations == []`, and the graph
+        held the third `:IMPL` edge — the fail-silent class this PR exists to
+        close, on the surface that mints edges in bulk.
+        """
+        first = sdk._ingest(_pair_bundle(reify=True, label="contains"),
+                            granularity="granular")
+        held = first["ids"]["refs"]["oB"]
+        assert first["relation_declarations"], (
+            "precondition: pass 1 must report, or pass 2 cannot be told apart "
+            "from a leg that never reports at all")
+        grow = _pair_bundle(reify=True, label="contains")
+        grow["entities"].append(
+            {"ref": "oC", "type": "object", "name": "The migration",
+             "objectKind": "dev:issue"})
+        grow["connections"][0]["to"] = ["oB", "oC"]
+        second = sdk._ingest(grow, granularity="granular")
+        # preconditions: this really is the ABSORB arm (nothing created, one
+        # dedup hit) — otherwise the row would be about the mint path
+        assert second["created"]["connections"] == 0, second["created"]
+        assert second["deduped"]["connections"] == 1, second["deduped"]
+        fresh = second["ids"]["refs"]["oC"]
+        assert second["relation_declarations"], (
+            "the absorb arm WIRED a new pair and reported nothing: "
+            f"{second['relation_declarations']}")
+        reported = [e.get("target") for e in second["relation_declarations"]]
+        assert reported == [fresh], (
+            "only the newly wired target is a write this pass made — a target "
+            f"the operator already held was not re-written; got {reported}")
+        entry = second["relation_declarations"][0]
+        assert entry["outcome"] == UNDECLARED_PAIR
+        assert entry["connection"] == "c1"
+        assert held not in reported
+        # the granular per-connection view agrees with the rollup
+        result = next(r for r in second["results"]
+                      if r["section"] == "connections")["result"]
+        assert result["relation_declaration"]["target"] == fresh
+        codes = [w.get("code") for w in result.get("warnings") or []
+                 if isinstance(w, dict)]
+        assert "undeclared_relation_pair" in codes, (
+            "the per-connection warnings must carry the pair entry under the "
+            f"`code` §3.3 publishes; got {codes}")
+        # and the edge really landed — this reports a write, not a no-op
+        ends = sdk._get_proj().g.query(
+            "MATCH (o:Point {is_operator:true})-[r:IMPL]->(n) "
+            "WHERE o.id = $oid AND n.id IN $ids "
+            "RETURN count(DISTINCT n.id)",
+            params={"oid": second["ids"]["connections"][0],
+                    "ids": [held, fresh]}).result_set
+        assert ends and ends[0][0] == 2, ends
+
     def test_a_declared_pair_reports_nothing_and_the_key_is_still_there(self, sdk):
         out = sdk._ingest(_pair_bundle(reify=False, label="dependsOn"))
         assert "relation_declarations" in out, (

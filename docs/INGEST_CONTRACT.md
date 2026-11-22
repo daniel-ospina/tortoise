@@ -262,6 +262,22 @@ Granular `results[].result` shapes per connection route:
 | Direct-edge route (operator-less — **no `:Point` endpoint**) | `{"direct_edge": "IMPL", "from": "<pid>", "to": "<pid>", "deduped": bool}` |
 | Relation route | `{"relation": "<pred>", "from": "<id>", "to": "<id>", "deduped": bool}` |
 
+Every row above may also carry two OPTIONAL keys, and they answer DIFFERENT
+questions — a client validating an exact key set must allow them, not require
+them:
+
+- **`relation_declaration`** — the pair judgement for this write (§3.3). Present
+  ONLY when the relation-PAIR leg reported one; absent when it accepted the pair
+  or had nothing to judge ("Absent judgements are silent by design", §3.3).
+- **`warnings`** — the door's warnings for this connection. When the pair leg
+  reports, its per-target entries live here (`undeclared_relation_pair` /
+  `reversed_relation_pair`, §3.3 — `relation_declaration` is only the FIRST of
+  them), but ⛔ the list is NOT pair-only: the `#1934` predicate leg
+  (`undeclared_relation`) and the mechanism leg (`mechanism_mismatch`) append to
+  the same list, so `warnings` can be present with **no**
+  `relation_declaration` beside it. It is absent only when the door warned about
+  nothing at all.
+
 ### 2.4 Both policies
 
 `promotion_policy` is orthogonal to granularity (both modes honor the same
@@ -435,9 +451,15 @@ That judgement is `out["relation_declarations"]`.
   (`bidirectional`/`unidirectional`) and that value is deliberately NOT published
   (round-5 review, F1; corrected by round-4 review, F3, which found the earlier
   wording describing a payload the code no longer emits).
-- **A resubmission that mints nothing reports nothing.** The operator route's
-  exact-dedup and partial-absorb arms write no edge, so they carry no fresh
-  judgement — the same reason `ids["connections"]` is stable across a retry.
+- **A resubmission that mints nothing reports nothing — and the ABSORB arm is
+  not that case.** The operator route's exact-dedup arm writes no edge, so it
+  carries no fresh judgement — the same reason `ids["connections"]` is stable
+  across a retry. ⛔ The **partial-absorb** arm DOES write: it completes an
+  existing operator's input set with one edge per target it did not already
+  hold, so it judges exactly those newly wired targets and reports them like any
+  other write (round-5 review, P1 — this bullet previously claimed the arm
+  "writes no edge", which was false and left a caller growing an operator
+  uninformed about the pair it had just created).
 - **`warnings[].code` keeps the REVERSED and UNDECLARED states DISTINCT.**
   A per-connection warning carries `code: "reversed_relation_pair"` when the
   packs declare this predicate for the REVERSE pair, and

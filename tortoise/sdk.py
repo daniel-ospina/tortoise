@@ -29132,8 +29132,13 @@ class TortoiseSDK:
         # ── #14263 (review F3): ONE spelling resolution, on this door too ────
         # A re-spelling of a DECLARED predicate (`HASPART`, `ASSIGNEDTO`,
         # `grounded_in`) is `docs/ax/ax-principles.md` §1 Rule 1 class 1 —
-        # format variance, not a claim — so it is applied SILENTLY, exactly as
-        # `_create_edge` has always applied it. Resolving it HERE, before the
+        # format variance, not a claim — so it is applied SILENTLY, as
+        # `_create_edge` applies it. ⛔ "as it has always applied it" would be
+        # FALSE (round-5 review, P3): NO door resolved the spelling before this
+        # PR — `projection/edges.py` raised `Unknown predicate` on a re-spelled
+        # declared verb — so `create_edge("HASPART", …)` accepting hasPart is a
+        # widening THIS change introduces, and §3.3 is where it is recorded.
+        # Resolving it HERE, before the
         # `#1934` membership leg, is what makes one spelling reach all of them:
         # the declaredness test, the direction/semantics resolution, the stored
         # `label` property and the journal. Before this, THIS door and
@@ -36316,10 +36321,12 @@ class TortoiseSDK:
                     existing = self._find_operator(
                         op_type, [src, *dsts],
                         label=_raw_label, direction=direction)
-                # The door result of THIS pass, when one was written (the
-                # `exact` / `partial` arms below are resubmissions that mint
-                # nothing, so there is no fresh judgement to carry — see
-                # `_carry_relation_declaration`'s docstring for that residual).
+                # The door result of THIS pass, when one was written. The
+                # `exact` arm is a resubmission that mints nothing, so it has no
+                # fresh judgement to carry. ⛔ The `partial` (absorb) arm is NOT
+                # that case: it wires the targets the operator did not already
+                # hold, so it writes pairs and builds its own door result from
+                # their notes (round-5 review of PR #14284, P1 — see below).
                 door_result = None
                 if existing is not None and existing.get("kind") == "exact":
                     oid = existing["id"]
@@ -36436,6 +36443,33 @@ class TortoiseSDK:
                     conn_result = {"operator_id": oid, "deduped": True}
                     self._append_warning(
                         f"operator_absorb_completed:{oid}:{completed}")
+                    # ── #14263 (round-5 review, P1): the arm that GROWS the
+                    # graph must report the pairs it grew. The completion loop
+                    # above is one bare-MERGE edge per input this operator did
+                    # not hold, so a resubmission that adds a target WRITES the
+                    # pair (source, target) — while `door_result` stayed None
+                    # here and `_carry_relation_declaration` never ran. §3.3 used
+                    # to justify that silence with "the partial-absorb arm
+                    # writes no edge", which is false, and the caller refining an
+                    # existing operator was never told the pair it had just
+                    # written was undeclared. Only the targets actually wired
+                    # are judged: a target the operator already held was not
+                    # written again, so re-reporting it would report a write
+                    # that did not happen.
+                    _absorbed_targets = list(dict.fromkeys(
+                        t for t in dsts if t not in written))
+                    _absorbed_notes = self._relation_pair_notes(
+                        predicate=label, source_id=src,
+                        target_ids=_absorbed_targets,
+                        direction=direction)
+                    if _absorbed_notes:
+                        from tortoise.relation_guards import warning_shape
+
+                        door_result = {
+                            "relation_declaration": _absorbed_notes[0],
+                            "warnings": [warning_shape(note)
+                                         for note in _absorbed_notes],
+                        }
                 elif existing is not None and existing.get("kind") == "decline":
                     # TWO+ candidates → decline + partial_operator_residue
                     # warning; the retry creates a fresh complete operator.
@@ -37653,11 +37687,14 @@ class TortoiseSDK:
         landed (`#1934`) and this is reporting, not gating.
 
         ⚠️ **Residual, stated rather than hidden.** The operator route's
-        ``exact`` (dedup hit) and ``partial`` (absorb) arms mint nothing and call
-        no door, so they carry no judgement here. That is the same reason
-        ``ids["connections"]`` is stable across a resubmission: the edge landed
-        and was reported when it was WRITTEN, and a resubmission that writes
-        nothing has no new state to report.
+        ``exact`` (dedup hit) arm mints nothing and calls no door, so it carries
+        no judgement here — the same reason ``ids["connections"]`` is stable
+        across a resubmission: a resubmission that writes nothing has no new
+        state to report. ⛔ The ``partial`` (absorb) arm is NOT covered by that
+        residual and must not be moved back under it (round-5 review, P1): it
+        completes the input set with one bare-MERGE edge per target the operator
+        did not hold, so it DOES write, and it hands this helper a result built
+        from ``_relation_pair_notes`` for exactly the targets it wired.
         """
         entries = list(door_result.get("warnings") or ())
         if not entries:
