@@ -2832,9 +2832,16 @@ class TestEveryReaderNamesTheLiveListingDoor:
         wrapped bracket would have become a call and this correct paragraph would have gone
         red. That is why `_inline_text` takes `breaks` and R1 passes `"\\n"`. Reverting it to
         the default reds exactly this row.
+
+        ⛔ THE STRAY `&` IS THE POINT, NOT NOISE. `_entity_only_mentions` walks only the
+        units whose source carries `&` or `\\` (the only ways a spelling can differ from what
+        a reader sees), so without it this paragraph would never reach the rendered arm and
+        the row would pass for the wrong reason — measured: with the `&` removed, the
+        `breaks=" "` mutant survives the whole class. An `&` that is not a reference is
+        left alone by the decode, so it changes nothing else.
         """
         text = ("Call tortoise_list_graphs\n(x=1) for names. "
-                'Use tortoise_graph_overview(section="graphs") instead.\n')
+                'Use tortoise_graph_overview(section="graphs") instead — mind the & sign.\n')
         assert self.retired_call_forms(text) == [], (
             "a HARD-WRAPPED bracket was read as a call: "
             f"{self.retired_call_forms(text)}")
