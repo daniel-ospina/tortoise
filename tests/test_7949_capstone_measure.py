@@ -18227,20 +18227,22 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ RE-MEASURED AT THIS HEAD (measured, never carried): `main`'s `#13854` (issue `#13826`,
     # `ae26adf963`) re-derived `04-plan.md`'s own row from `sdk.py:28718` to `sdk.py:28935`,
     # and `main`'s `#13971` (`e0accb8fe6`) then moved both the file and that row to
-    # `sdk.py:29121` — so at this head the row AGREES with `main` and the file is NOT in the
-    # diff (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). An earlier
+    # `sdk.py:29121` — and THIS pass re-points that row to `sdk.py:29142` (the value the file
+    # carries at this head and at `origin/main`, so `main`'s own ROW was the stale half), which
+    # puts `04-plan.md` IN the diff again
+    # (`git diff origin/main...HEAD -- …/04-plan.md` prints that one line). An earlier
     # cut of this block stated the opposite in both halves (once "NOT in this diff at all", once
     # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
     # arm has been wrong in both directions on.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
     # "CARRIES". Both ends are still pinned so the row cannot drift back to the base's value,
     # which is what a re-derivation-by-offset produces — and `sdk.py:28935` is NOT
-    # `declared = declared_relation_predicates()` at this head (`:29121` is), so a row that kept
+    # `declared = declared_relation_predicates()` at this head (`:29142` is), so a row that kept
     # the base's value would name a line that does not carry the statement.
-    for _provenance in ("its own row now reads `sdk.py:29121`", "the base read `sdk.py:28935`"):
+    for _provenance in ("its own row now reads `sdk.py:29142`", "the base read `sdk.py:28935`"):
         assert _provenance in text, (
             f"D5 no longer states {_provenance!r} about `04-plan.md`. The row carries "
-            "`sdk.py:29121` at this head (`declared = declared_relation_predicates()`) and "
+            "`sdk.py:29142` at this head (`declared = declared_relation_predicates()`) and "
             "the base carried `sdk.py:28935` — pinning "
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-measured at this head)")
@@ -18282,8 +18284,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "halves come from two DIFFERENT heads: `main` made that move, so both read "
         "identically there — the chimera D5 exists to forbid (#13879 review, cycle 3; "
         "re-measured at #14269, where THIS diff's pair is `:15346-15423`→`:15449-15526`)")
-    assert "sdk.py:29121" in text, (
-        "D5 no longer names `sdk.py:29121`, the value `04-plan.md`'s own row carries at "
+    assert "sdk.py:29142" in text, (
+        "D5 no longer names `sdk.py:29142`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
         "address; do not drop it")
