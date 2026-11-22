@@ -1326,10 +1326,10 @@ def _seam_opaque_values(node):
     and hand it somewhere this walk does not follow: an augmented assignment, a
     value escaping its function (``return``/``yield``), a parameter default or a
     decorator, a class base/keyword, a ``match`` subject or pattern expression, an
-    ``except`` clause's exception TYPE (Python CALLS it to match), and a ``type``
-    statement's value. When the mention reaches one of these the walk cannot say
-    what happens to it — so "no call found" is NOT deadness and the caller must
-    fail closed.
+    ``except`` clause's exception TYPE (Python EVALUATES it and matches by class —
+    it is not a call), and a ``type`` statement's value. When the mention reaches
+    one of these the walk cannot say what happens to it — so "no call found" is
+    NOT deadness and the caller must fail closed.
 
     ⛔ This is an enumeration, not a proof about future syntax: it is every binder
     kind in the Language Reference's list ("Naming and binding", §4.2.1) that this
@@ -1612,8 +1612,10 @@ def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
         "escaped into a binding shape the walk cannot follow, so their reads "
         "CANNOT be counted — an unresolvable mention may be a read, and this "
         f"row may not report a tree where {expected} call sites are visible but "
-        "another read may be hiding. Re-derive the comment in "
-        "`intentional_keep`, or opt the new read out, which needs no grant.")
+        "another read may be hiding. ⛔ OPTING OUT DOES NOT CLEAR THIS: the "
+        "opt-out is only consulted for a mention the walk ATTRIBUTED, so the "
+        "remedy is to re-derive the comment in `intentional_keep` or to spell "
+        "the read in a binding the walk follows — not to opt it out.")
     assert len(read_sites) == expected, (
         f"{len(read_sites)} seam CALL SITE(s) of `tortoise_fts_query` "
         f"in {where}, reached from {len(live)} mention(s) "
@@ -1736,14 +1738,18 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     and the arm stayed green on three reads (round-9 review). Graded in both
     directions so neither "skip it as dead" nor "call everything dead" can pass.
 
-    ⛔ FIVE ROWS EXIST SO THE PIN CANNOT PASS WITHOUT THE MECHANISM IT CLAIMS:
+    ⛔ THESE ROWS EXIST SO THE PIN CANNOT PASS WITHOUT THE MECHANISM IT CLAIMS
+    (named by role, not counted — a numeral here is the same rotted claim this
+    block exists to stop, and it already drifted once):
     `class-attr` needs the attribute carrier (a class body IS the class's
     attribute dict — round-10 P2 read it as dead); `two-hop` is written in REVERSE
     textual order so a single pass cannot resolve it (without it, deleting the
     `while grown` fixpoint left every row green); `except-as` needs the ``except``
-    clause's exception TYPE treated as an escape, because Python CALLS it; and
-    `type-alias`, `match-subject`, `type-param` and `class-dead` grade the
-    enumerations and the class-body admission ADDED for round 10.
+    clause's exception TYPE treated as an escape, because Python EVALUATES it and
+    matches the raised exception by class/mro (§8.4.1 — a non-class raises
+    `TypeError`, so it is not a call); and `type-alias`, `match-subject`,
+    `type-param` and `class-dead` grade the enumerations and the class-body
+    admission ADDED for round 10.
 
     ⛔ AND EVERY BRANCH OF THE TWO ENUMERATIONS HAS A ROW, because a pin cannot be
     a tripwire for a binding kind it never exercises: measured at `93178a6495`,
@@ -1875,7 +1881,7 @@ def matchvalue(sdk):
         (0, False, []),                 # the dead binding: provably no call
         (0, False, []),                 # `method-local`: a class METHOD's local
         (0, True, []),                  # `return SEAM`: NOT provably dead
-        (0, True, []),                  # `except SEAM as e`: Python CALLS it
+        (0, True, []),                  # `except SEAM as e`: Python EVALUATES it
         (0, True, []),                  # `type _T = SEAM`
         (0, True, []),                  # `match SEAM:` subject
         (0, True, []),                  # dead name bound in a CLASS body
@@ -1889,7 +1895,7 @@ def matchvalue(sdk):
         (0, True, []),                  # `@SEAM` on a def: Python CALLS it
         (0, True, []),                  # `@SEAM` on a class
         (0, True, []),                  # `class _K2(metaclass=SEAM)`
-        (0, True, []),                  # `case SEAM:` value pattern
+        (0, True, []),                  # `case SEAM.attr:` VALUE pattern
         (1, False, ["ann"]),            # `_ann: object = SEAM; _ann(…)`
         (1, False, ["comprehension"]),  # `for _c in [SEAM]: _c(…)`
         (1, False, ["container"]),      # `_reads = [SEAM]; _reads[0](…)`
