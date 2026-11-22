@@ -402,6 +402,55 @@ def _artifact_entries(run_def: ast.AST) -> tuple[dict[str, ast.AST], ast.Call]:
 #: The tool's own id mapping — the ONE wrapper the `order` element check blesses.
 _ID_MAPPERS = {"_result_id"}
 
+
+def _extra_bindings(tree: ast.AST, names: set[str]) -> list[str]:
+    """Binding sites for `names` other than the ONE module-level `def` of each.
+
+    ⛔ THE ELEMENT CHECK BLESSES A NAME, AND A NAME CAN BE RE-BOUND (#14281 review P1,
+    measured GREEN with every `order` a list of constants and `compare()` reporting
+    `rank_identical: True` over a permuted page). One line inside `run()`:
+
+        _result_id = lambda _r: "X"
+
+    shadowed the mapper the check blesses — a rename-preserving refactor
+    (`_result_id = _id_of`) reaches the same place by accident. The tool defines it once,
+    at module level, so any second site is a finding.
+    """
+    out: list[str] = []
+
+    def _flag(name: str, node: ast.AST) -> None:
+        out.append(f"{name}@{getattr(node, 'lineno', '?')}")
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
+            if node not in getattr(tree, "body", []):
+                _flag(node.name, node)
+            continue
+        if isinstance(node, ast.ClassDef) and node.name in names:
+            _flag(node.name, node)
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr,
+                             ast.Delete)):
+            targets = list(getattr(node, "targets", None)
+                           or [getattr(node, "target", None)])
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            targets = [getattr(node, "target", None)]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [i.optional_vars for i in node.items if i.optional_vars is not None]
+        elif isinstance(node, ast.arguments):
+            targets = [ast.Name(id=a.arg) for a in
+                       list(node.posonlyargs) + list(node.args) + list(node.kwonlyargs)
+                       + [node.vararg, node.kwarg] if a is not None]
+        else:
+            continue
+        for target in targets:
+            if target is None:
+                continue
+            for inner in ast.walk(target):
+                if isinstance(inner, ast.Name) and inner.id in names:
+                    _flag(inner.id, node)
+    return out
+
 _NON_MUTATING = {"list", "tuple", "len", "sorted", "id", "str", "bool", "any", "all",
                  "isinstance"}
 
@@ -590,6 +639,50 @@ def _collection_alias_predicate(var: str):
     return _predicate
 
 
+def _scalar_bound_names(tree: ast.AST) -> set[str]:
+    """Names whose EVERY binding is a scalar — an f-string, a literal, arithmetic on them.
+
+    ⛔ AN ALIAS IS NOT A COLLECTION (#14281 review P1, measured false RED at line 340 of
+    the real tool). `_aliases_of(…, loops=True)` resolves a `for`-bound element, so
+
+        for pq in per_query:
+            for leg in pq["legs"]:
+                key = f"{leg['leg']}:{leg['reason'] or 'ok'}"
+                declared[key] = declared.get(key, 0) + 1
+
+    made `key` an alias of `leg` — it MENTIONS one — and handing that STRING to `.get()`
+    was then reported as "mutates a collection AFTER the measured read". A `str` cannot be
+    sorted back into the measured page, so a name bound only to scalars is not a
+    collection.
+    """
+
+    def _scalar(node: ast.AST) -> bool:
+        if isinstance(node, (ast.Constant, ast.JoinedStr, ast.FormattedValue)):
+            return True
+        if isinstance(node, (ast.BinOp, ast.BoolOp, ast.UnaryOp, ast.Compare)):
+            return True
+        if isinstance(node, ast.IfExp):
+            return _scalar(node.body) and _scalar(node.orelse)
+        if isinstance(node, ast.Name):
+            return node.id in scalar_names  # a chain of scalar binds
+        return False
+
+    scalar_names: set[str] = set()
+    seen: dict[str, list[bool]] = {}
+    for _pass in range(3):  # tiny fixpoint: `a = f"{b}"; b = str(c)`
+        for node in ast.walk(tree):
+            pairs: list[tuple[ast.AST, ast.AST]] = []
+            if isinstance(node, ast.Assign):
+                pairs = [(t, node.value) for t in node.targets]
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                pairs = [(node.target, node.value)]
+            for target, value in pairs:
+                for name in _names_in(target):
+                    seen.setdefault(name, []).append(_scalar(value))
+        scalar_names = {n for n, flags in seen.items() if flags and all(flags)}
+    return scalar_names
+
+
 def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                    artifact_append: ast.Call) -> list[int]:
     """Lines after the read that mutate `var` (or the recorded rows) IN PLACE.
@@ -631,8 +724,9 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # `_row["order"] = _row["order"][:5]` truncated the page the verdict reads, with
     # every `"per_query" in receiver` clause passing (measured). Resolve names bound to
     # ANY expression mentioning `per_query`.
-    rows = {"per_query"} | _aliases_of(
-        run_def, lambda v: "per_query" in _names_in(v), loops=True)
+    rows = ({"per_query"} | _aliases_of(
+        run_def, lambda v: "per_query" in _names_in(v), loops=True)) \
+        - _scalar_bound_names(run_def)
     # ⛔ ITERATION TARGETS ARE THE SAME COLLECTION, TO A FIXPOINT — for the MEASURED
     # collections as well as the recorded rows (#14281 review P1, measured). A `for`
     # target binds nothing that `_aliases_of` resolves, so an element rewrite through one
@@ -726,10 +820,37 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                     _element_only(a) for a in arg.args)
             return isinstance(arg, ast.JoinedStr)  # an f-string mutates nothing it interpolates
 
+        def _row_ref(arg: ast.AST) -> bool:
+            """`per_query[-1]` and `per_query[-1]["order"]` are RECORDED OBJECTS.
+
+            ⛔ `handed` tests `watched` — the measured PAGE and TRACE. The recorded rows
+            are a SECOND collection, and handing one of them to a call sorts what
+            `compare()` reads (#14281 review P1, measured GREEN with the recorded page
+            permuted, `rank_identical: True`):
+
+                def _scrub(row): row["order"].sort()
+                _scrub(per_query[-1])          # and `_flip(per_query[-1])`
+                def _scrub3(rows): rows.sort(key=str)
+                _scrub3(per_query)
+
+            `_element_only()` cannot decide this one: it exempts ANY subscript (right for
+            `results[0]`), and `per_query[-1]` is a dict carrying the order.
+            """
+            if isinstance(arg, ast.Name):
+                return arg.id in rows
+            if isinstance(arg, ast.Subscript):
+                return _row_ref(arg.value)
+            # ⛔ NOT `_names_handed(arg) & rows`: `stats([pq["stages"].get(…) for pq in
+            # per_query])` builds a NEW list of floats (measured false RED on the real
+            # tool at lines 329/333), and the rows it iterates never reach the callee.
+            return False
+
         handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
             _names_handed(arg) & watched and not _element_only(arg)
             for arg in list(node.args) + [k.value for k in node.keywords])
-        if receiver & muts or handed:
+        row_handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+            _row_ref(arg) for arg in list(node.args) + [k.value for k in node.keywords])
+        if receiver & muts or handed or row_handed:
             hits.append(node.lineno)
     return hits
 
@@ -923,8 +1044,12 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     ⛔ The guard is on the RECEIVER, and the receiver is resolved through ALIASES
     (`env = os.environ; env["TORTOISE_FUSED_RERANK"] = "1"` defeated a name-exact receiver
     test — measured), plus the dunder entries `__setitem__` / `__delitem__`.
-    `os.environ` handed to any call (positional or keyword) is red too: the only reason to
-    hand the mapping over is to change it. Residual, stated rather than implied: a helper
+    `os.environ` handed to an UNKNOWN call (positional or keyword) is red too: handing the
+    mapping to a callee this file cannot see into is how it gets changed. ⛔ The callee has
+    to be unknown — `dict(os.environ)` and `len(os.environ)` take a COPY or a count and
+    cannot write back, and the blanket form reported both as "mutates `os.environ`"
+    (#14281 review P2, measured GREEN after the exemption). Residual, stated rather than
+    implied: a helper
     that reaches `os.environ` inside its own body is not followed. The scan is over the
     WHOLE FILE, so a module-level helper that mutates `os.environ` IS caught — the hole is
     the statically dead reach, not the file's scope.
@@ -984,6 +1109,7 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
                        and n.args[1].value == "environ")
                    for n in ast.walk(value))
 
+
     # ⛔ To a FIXPOINT, and through CONTAINERS: `_envs = [os.environ]` then
     # `_envs[0][...] = ...`, `_envs = [environ]` after an import, and
     # `_e1 = os.environ; _e2 = _e1; _e3 = _e2` were all measured green against the
@@ -996,6 +1122,13 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
             return node.attr == "environ"
         if isinstance(node, ast.Name):
             return node.id in env_alias
+        if isinstance(node, ast.Subscript):
+            # ⛔ `_envs[0]` IS THE MAPPING when `_envs` is a container of it (the seed
+            # accepts containers). Without this clause `_envs = [environ];
+            # _envs[0][k] = v` was caught only by `rebound` firing on the ALIAS
+            # ASSIGNMENT one line above — a false red on a harmless line, carrying a real
+            # class by accident (#14281 review P2: narrowing `rebound` exposed it).
+            return _is_environ(node.value)
         return (isinstance(node, ast.Call)
                 and getattr(node.func, "id", None) == "getattr"
                 and len(node.args) >= 2
@@ -1089,8 +1222,15 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
         rebound = (isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete))
                    and any(_is_mapping_itself(t) for t in (
                        getattr(node, "targets", None) or [getattr(node, "target", None)])))
-        handed = isinstance(node, ast.Call) and any(
-            _reaches_mapping(a) for a in list(node.args) + [k.value for k in node.keywords])
+        # ⛔ A PURE READ TAKES A COPY, NOT THE MAPPING (#14281 review P2, measured RED):
+        # `_snap = dict(os.environ)` is the natural way to record the gate state #14289
+        # asks for, and `len(os.environ)` reads it. Same exemption, same reason, as the
+        # page guard's `_PURE_READS`: a `dict(...)`/`len(...)` receiver cannot write back.
+        _env_callee = (getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                       if isinstance(node, ast.Call) else None)
+        handed = (isinstance(node, ast.Call) and _env_callee not in _PURE_READS
+                  and any(_reaches_mapping(a)
+                          for a in list(node.args) + [k.value for k in node.keywords]))
         if not (subscript or method or aug or bound_call or rebound or handed
                 or setattr_environ or vars_environ):
             continue
@@ -1382,10 +1522,12 @@ def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
 
     ⛔ `os.environ`, `from os import environ` (incl. `as`), `getattr(os, "environ")`, and
     ANY alias/container/bound-mutator chain over those, to a fixpoint (#14281 review F1).
-    Residual, stated rather than implied: `vars(os)["environ"]`, `os.__dict__["environ"]`
-    and a name COMPUTED at runtime are not recognised, and a helper that reaches
+    `vars(os)["environ"]` and `os.__dict__["environ"]` ARE recognised (measured RED), so
+    they are deliberately NOT listed as residuals — this docstring said they were not
+    recognised while the code caught both (#14281 review P2). Residual, stated rather than
+    implied: a name COMPUTED at runtime is not recognised, and a helper that reaches
     `os.environ` inside its own body is not followed — `tools/read_wave_latency.py`
-    carries none of these.
+    carries neither.
 
     ⛔ MEASURED GREEN before this fix, each against a genuinely flipped
     `TORTOISE_FUSED_RERANK` gate — which the artifact does not record (#14289), so a
@@ -1656,7 +1798,16 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             return True
         if isinstance(node, ast.Name) and _resolved(node) in _READ_NAMES:
             return True
-        return isinstance(node, ast.Constant) and node.value in _READ_NAMES
+        # ⛔ A STRING LITERAL MATTERS ONLY WHERE IT CAN BE EXECUTED. The census counts
+        # mentions because a bare name can be handed to `getattr`; a `Constant` in
+        # dict-value position is INERT — and recording provenance is the direction #14289
+        # asks for. Measured RED before this narrowing, on both of:
+        #     "read": "_tortoise_fts_query",
+        #     "measured_by": f"{'_tortoise_fts_query'}",
+        # which the message called "an alias, a string reference or a getattr" — for a
+        # string that could not reach the read. A `Constant` inside a call is kept.
+        return (isinstance(node, ast.Constant) and node.value in _READ_NAMES
+                and isinstance(parents.get(id(node)), ast.Call))
 
     # ⛔ ⛔ `indirect` IS EVALUATED *BEFORE* THE MENTIONS CENSUS (#14281 review F3). It used
     # to sit after it, where it was DEAD: every node satisfying `indirect` is also
@@ -1735,6 +1886,14 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     run_defs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and n.name == "run"]
     assert len(run_defs) == 1, f"tools/read_wave_latency.py defines `run` {len(run_defs)}×"
+    # ⛔ THE BLESSED MAPPER IS A NAME, SO IT CAN BE SHADOWED (#14281 review P1, measured
+    # GREEN): `_result_id = lambda _r: "X"` inside `run()` made every `order` a list of
+    # constants while the element check — which blesses the NAME — stayed satisfied.
+    assert not _extra_bindings(tree, _ID_MAPPERS), (
+        f"tools/read_wave_latency.py re-binds the blessed id mapper at "
+        f"{_extra_bindings(tree, _ID_MAPPERS)} — the `order` element check blesses the "
+        "name, so a shadow inside `run()` records a constant page and `compare()` reports "
+        "`rank_identical: True` for ever")
     holder = parents.get(id(measured))
     while holder is not None and not isinstance(holder, ast.Assign):
         holder = parents.get(id(holder))
