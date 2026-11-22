@@ -1120,7 +1120,31 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#:
+#: ⛔ RE-CUT AGAIN → (11861, "f0647020531c078c"). The 11858 pair does NOT reproduce on the tree
+#: that commits it: `--check` on a detached worktree of `10e51693f1` reports 11861 against its own
+#: 11858, so `main` has been red on `surface-guard` since that commit landed and every PR cut from
+#: it inherits the red. Whatever reading produced 11858, it was not a reading of THIS tree.
+#: THE THREE ROWS, ATTRIBUTED BY MEASUREMENT, one commit: `--check` on `94d75667dc^` exits 0 and
+#: on `94d75667dc` reports (11860, "57e0960ca6f20f5a") — so `94d75667dc` (#14224, the read-wave
+#: harness) is where the drift starts, and a whole-tree row-set diff `e74cf1d13d → 13b6b49fe9`
+#: (the tool's own `edits_for`, rows compared, not arithmetic) names the shape: `proj.g.query`
+#: 3643 → 3646, exactly three, with no other row moving in either direction.
+#: WHERE THEY ARE: all three in `tools/read_wave_latency.py`, the file that commit ADDS — the
+#: two `MATCH (n:Point) RETURN count(n)` census reads at `:238` and `:245`, and the
+#: ab-relationships ids read at `:439` (`ids = [r[0] for r in proj.g.query(`) — a raw `Graph`
+#: handle on an untyped receiver. (`tests/test_relationships_bounded.py` carries one
+#: `proj.g.query` too, but it is pre-existing and byte-identical on both sides of that commit, so
+#: it is not part of this delta — the per-file split is what a COUNT cannot show.)
+#: DECLARED, not rewritten: that is the ordinary-word receiver this sweep deliberately leaves
+#: alone, neither an SDK handle nor a typed reference to a public name — `typed references still
+#: pointing at a public name` is 0 at this head, which is the number the retirement owes.
+#: ⛔ WHAT TO TAKE FROM THE DRIFT RATHER THAN THE NUMBER: `04afeb811d` recorded a "zero-row
+#: delta" that was true of ITS OWN commit while the tree it read was already three rows over, and
+#: the 11858 pin was then set from the PREVIOUS PAIR (the `11858 − out.update` reading quoted
+#: above) rather than from `--repin` on the tree that would commit it. A re-pin is a READING of
+#: that tree — one command — and a row-by-row diff explains a delta, it never replaces the read.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
