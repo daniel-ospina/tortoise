@@ -604,8 +604,11 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     # the declared residual.
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         _left, _right = _possible_strings(node.left, consts), _possible_strings(node.right, consts)
-        if not _left or not _right:
-            return frozenset()  # an operand is not statically resolvable — the residual
+        # ⛔ NO EXPLICIT EMPTY-OPERAND GUARD (#14326 round 11, measured: deleting it leaves 27
+        # passed and all eight shape verdicts identical). The product below already yields the
+        # empty set when either side is unresolvable — that is what keeps the residual
+        # (`_N + "_x"` with a parameter `_N`) out of the census, and a guard that restates it
+        # is a clause no mutant can red.
         # ⛔ THE PRODUCT, NOT A UNION (#14326 round 10, MEASURED BOTH WAYS): a UNION was wrong
         # in both directions on the fallback — it emitted strings that are not concatenations
         # (`("x" if queries else "_tortoise_") + "fts_query"` passed the pin, `m=2 c=2 i=0`,
