@@ -174,7 +174,10 @@ No measurement is taken "to see". Each exists to gate a phase or size a decision
 ## 8. Open decisions (owner)
 
 1. **The ~40 session-writes/min source** — wanted traffic during beta, or a runaway loop to stop?
-2. **The capture backlog** — **1,852** spool entries on this box (dormant since `2026-11-17T02:25:31Z`, which is both `status.json`'s
-   `updated_at` and the directory's own mtime; re-measured 2026-11-21) plus the day-file series: drain into the graph (demo
-   prerequisite) or discard as stale and start clean?
+2. **The capture backlog** — the spool holds **1,852** entries on the box that first measured it (host not recorded in this doc;
+   dormant since `2026-11-17T02:25:31Z`) and **5,604** on host `cmux`, the box this review ran on (dormant since
+   `2026-11-13T03:21:21Z`); both were counted the same way (`ls ~/.tortoise/capture-spool/entries/*.meta.json | wc -l`), the
+   5,604 on `2026-11-21` and the 1,852 on a date this doc does not record, so the count is **per box** — quote the box, and
+   the date, with the number.
+   Plus the day-file series: drain into the graph (demo prerequisite) or discard as stale and start clean?
 3. **`#1677` guards** — pull S4 forward now (free, unblocks the cores we pay for) or leave it in Track S order?
