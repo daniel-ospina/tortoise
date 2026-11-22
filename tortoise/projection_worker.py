@@ -745,8 +745,10 @@ class ProjectionWorker:
           gives every ``MutexValue`` a ``_lock``, and a LABELLED metric family one of
           its own — ⛔ the discriminator is ``labelnames``, NOT the metric type
           (``_is_parent()`` is ``self._labelnames and not self._labelvalues``, so a
-          labelled ``Gauge``/``Counter``/``Histogram`` all carry one and an
-          unlabelled family of any type carries none),
+          labelled ``Gauge``/``Counter``/``Histogram``/``Summary`` carries one and an
+          unlabelled one of those carries none; ``Info``/``Enum`` are the exception,
+          setting ``self._lock`` unconditionally in their own ``_metric_init`` and
+          this module defines neither),
           plain ``threading.Lock``s a child inherits from a peer that did not
           survive the ``fork()``. ``set``, ``inc``, ``get``, ``labels`` and
           ``collect`` all take one, and a blocked lock is not an exception, so the
