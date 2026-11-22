@@ -1848,3 +1848,91 @@ def test_a_LAST_HOP_window_holding_BOTH_pin_states_names_the_UNANSWERABLE_one():
         "at the last hop the PIN was named over the unanswerable one, so the operator is "
         f"sent to `unpin` for nodes nothing established as pinned. reason={report.reason!r}"
     )
+
+
+def test_a_SATURATED_window_that_stops_at_the_DELETE_statement_names_the_UNANSWERABLE_pin():
+    """The BREAK arm's precedence — the exit only a SATURATED window reaches.
+
+    ⛔ THE THIRD EXIT HAD NO ROW, and it is the one that ENDS the loop. Swapping the
+    ternary at `cache_evictor.py:1315` — the arm a pass takes when `window >= after_nodes`
+    AND nothing was left unasked — left the whole suite green: a saturated window then
+    reported "N node(s) are PINNED … unpin some of them" for a window whose binding hold
+    was a predicate that RAISED, i.e. exactly the remedy this file says cannot clear it.
+    The two rows above grade the WIDEN exit and the PLAN-emits-nothing exit; neither of
+    them executes this one, which is why a mutation there survives them.
+
+    ⛔ REACHING IT TAKES A CANDIDATE LIST THAT DRAINS, and that is the reason this row
+    did not exist. The plan loop adds every planned node to `settled` even when the last
+    hop then holds it back, so a selector that re-offers the same head (the usual
+    "coldest first" shape) makes `len(local)` fall BELOW `len(offered)` on every pass
+    after the first and the pass WIDENS instead of breaking. The break is reached when
+    the selector's pool is consumed as nodes are decided: the probe below pops a key as
+    gate 3 asks for it, so the pool reaches its LAST page a pass after the window
+    saturates. Measured shape: 8 nodes, `max_nodes=4`, `batch_size=2`, so the window
+    walks 2 → 6 → 8. Pass 3 is the first with `window >= after_nodes` (8 >= 8) and it
+    still offers 4 nodes, so it widens; pass 4 offers the final 2 — the first pass where
+    `window >= after_nodes` AND `len(local) == len(offered)` agree.
+
+    ⛔ AND `max_passes=6` IS DELIBERATE: the loop has to leave through the BREAK, not by
+    running out of passes — a pass-budget exit takes the carried diagnosis instead and
+    grades the site the row above already covers, so it would pass without the ternary
+    under test. `passes == 4` is what proves the break fired — it is a fact about this
+    scenario's window arithmetic (`cache_evictor.py:1021` growth, `:998` budget), so a
+    change to the window policy must RE-MEASURE it, never delete the assertion.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(8)])
+    pool = {f"p{i}" for i in range(8)}
+
+    def selector(graph: _FakeGraph, limit: int, population: str) -> list[Candidate]:
+        return [Candidate(node_id=g.id_of(key), key=key, population=population)
+                for key in sorted(pool)[:limit]]
+
+    def probe_pops_the_pool(candidate: Candidate) -> bool:
+        # A candidate is spent as it is decided, so the pool is the UNSETTLED set and
+        # the window saturates while a page is still unoffered.
+        pool.discard(candidate.key)
+        return True
+
+    asks: dict[int, int] = {}
+
+    def answers_at_the_delete(candidate: Candidate) -> bool:
+        # Each candidate is asked EXACTLY TWICE — gate 6 at plan time, then the last
+        # hop before the DELETE — so parity is the seam that makes it unpinned while it
+        # is being planned and pinned (or unanswerable) at the statement.
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        if asks[candidate.node_id] % 2 == 1:
+            return False                      # planned, so it reaches the last hop
+        if candidate.key in ("p0", "p2", "p4", "p6"):
+            return True                       # answered at the statement: a real pin
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=8), _FakeClient(), g,
+        population=POPULATION,
+        selector=selector, record_probe=probe_pops_the_pool,
+        pinned=answers_at_the_delete,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=4, batch_size=2, max_passes=6),
+    )
+
+    assert report.deleted == (), "a wholly held-back window deleted something"
+    assert report.passes == 4, (
+        "this row grades the BREAK arm, so the loop must leave through it rather than "
+        f"by exhausting its passes; measured passes={report.passes} of max_passes=6"
+    )
+    assert report.budget_exhausted is False, (
+        "the break named the pass budget, so the operator is told to re-run a sweep that "
+        "stops in the same place: re-running cannot converge"
+    )
+    assert len(report.skipped_pinned) >= 1 and len(report.skipped_pin_unanswerable) >= 1, (
+        "both hold-backs must be present at the break or the precedence cannot be read: "
+        f"pinned={report.skipped_pinned!r} unanswerable={report.skipped_pin_unanswerable!r}"
+    )
+    assert "could not answer" in report.reason, (
+        "the BREAK arm named the answered PIN over the unanswerable one, so the operator "
+        f"is sent to `unpin` for nodes nothing established as pinned. reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "the saturated-window stop offered the pin remedy for a window whose binding "
+        f"hold was unanswerable. reason={report.reason!r}"
+    )
