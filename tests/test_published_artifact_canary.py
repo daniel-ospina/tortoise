@@ -3065,8 +3065,11 @@ def _assert_no_executable_prose(script: str) -> None:
     assert not offending, (
         "this run: block's ECHOED text now contains a backtick or a command substitution: "
         "inside double-quoted echoes those EXECUTE and corrupt the output silently, which is "
-        "the #12660 defect. Prose names must be plain text. Offending line(s):\n"
-        + "\n".join(offending)
+        "the #12660 defect. ⛔ INSIDE A SINGLE-QUOTED SPAN an unescaped token is INERT — this "
+        "gate is deliberately conservative there (`_strip_shell_comments`, DELIBERATE "
+        "CONSERVATIVE EDGE), so a red on a single-quoted spelling asks you to REWORD the "
+        "line; it does not report a corruption. Prose names must be plain text. "
+        "Offending line(s):\n" + "\n".join(offending)
     )
 
 
