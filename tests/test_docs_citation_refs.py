@@ -8271,13 +8271,25 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
 
 
 #: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
-#: docs/00_index.md` prints NOTHING at this head, so a document that types what it printed
-#: is refuted by the command it quotes beside the figure. The pre-fix document did exactly
+#: docs/00_index.md` prints NOTHING at `origin/main` and `2 2` at this branch's head — the
+#: answer moves with the head, which is what makes a document that types it refuted by the
+#: command it quotes beside the figure (#14269 review, P2: the clause here said "at this
+#: head", and THIS branch's own re-point of that file makes it false at the head you read). The pre-fix document did exactly
 #: that at four clauses (#13802 review, finding 1 — the D5 row and the file-table section),
 #: so the pattern below is the armed detector for that defect class.
 _TYPED_INDEX_NUMSTAT = re.compile(
+    # ⛔ THE ALTERNATION IS GROUPED SO THE STAMP EXEMPTION GOVERNS ALL OF IT (#14269
+    # review, P2 — MEASURED). The exemption is stated ONCE, after the group, because a
+    # lookahead sitting beside ONE alternative only exempts that alternative: measured,
+    # "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `2 2` at
+    # `a577d0e25c`" was still REFUSED by the hard-coded literals above while the
+    # span-anchored one let the identical stamped form through — a false red on the
+    # archaeology, open in one spelling and closed in another, which is the split this
+    # exemption exists to end. Every branch here ends in a typed pair, so one trailing
+    # lookahead covers them all.
+    r"(?:"
     r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
-    r"\s*(?:->|prints)\s*`\d+\s+\d+`"
+    r"\s*(?:->|\u2192|prints)\s*`\d+\s+\d+`"
     # ⛔ THE SHORT FORM TOO (#13802 review, P2). The document's own spelling of this
     # clause is "…and its `--numstat` form both print NOTHING", and a regex that knows
     # only the long form walks straight past the figure that replaces `NOTHING` there —
@@ -8295,6 +8307,28 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # each measured GREEN at depth 1 (#13802 review, round 6)
     r"|numstat[^`]{0,160}?(?:prints?|print|returns?|reports?|shows?|gives?|lists?|"
     r"names?|->|\u2192)\s*`\d+\s+\d+`"
+    # ⛔ AND THE COMMAND'S OWN CODE SPAN, WHATEVER PATH IT NAMES (#14269 review, P1 — MEASURED
+    # IN BOTH DIRECTIONS). Every alternative above that reaches a figure by way of the WORD
+    # `numstat` has a window of `[^`]{0,160}?`, which cannot cross the backtick that CLOSES the
+    # command's code span. So "`git diff --numstat` prints `3 3` at this head" — the most
+    # natural spelling of all — was invisible, AND so was the long form for any path but the
+    # one `docs/00_index.md` literal hard-coded above; `05-verify.md`'s D5 row carried BOTH of
+    # those spellings and both walked green (`finditer` over the file returned `[]`).
+    # This alternative anchors on the code span INSTEAD of the word, so neither of those two
+    # spellings can defeat it, and it stays in the numstat family: no `--numstat` in the span,
+    # no match. ⛔ **THE ARROW IS DELIBERATELY UNREAD HERE, and that is a DECLARED narrowing,
+    # not a completeness claim (#14269 review — MEASURED, twice: the first cut of this comment
+    # overstated the siblings, the second was refuted by the widening 31 lines above)**: four
+    # carry both `->` and `\u2192` (the long `docs/00_index.md` literal, the `--numstat` form,
+    # the `numstat` WORD, `--name-only`); `both print` and the deictic pair carry neither; this
+    # branch carries neither, so an arrow spelling of the span form walks GREEN.
+    # Reading the arrow here is refused on measurement: it swallows three HISTORICAL two-sha
+    # quotes in `05-verify.md` (`numstat <sha> <sha> -- …` → `10 2`, ``--numstat`` -> `287 1`,
+    # and the 13-pair `9e934efad…ca217d067cbd` list) that the document's own rule ALLOWS to
+    # type a figure. What this branch reads is the VERB spellings; a present-tense arrow figure
+    # is caught by the four alternatives that do carry the arrow.
+    r"|`[^`]*--numstat[^`]*`\s*(?:prints?|print|returns?|reports?|shows?|gives?|lists?|names?)"
+    r"\s*`\d+\s+\d+`"
     # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
     # document's `both print NOTHING` clauses state the CURRENT reading without repeating
     # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
@@ -8326,15 +8360,18 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # the pair, so no alternative above sees it. The shape is specific on purpose — the
     # numstat pair is TWO NUMBERS and `docs/00_index.md` followed by such a pair is a typed
     # numstat reading by construction, not an English coincidence.
-    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`")
+    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`"
+    r")(?!(?:\s*(?:at|@)\s*`?[0-9a-f]{7,40}`?))")
 
 
 def test_the_document_types_no_numstat_figure_for_the_index_residual():
     """⛔ The D5 row and the file-table rows typed `1 1` — refuted by their own command.
 
-    `git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING at this
-    head, so a document that states what it `prints` is contradicted by the command it
-    quotes in the same clause. That is precisely the defect class this file exists to
+    `git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING at
+    `origin/main` and `2 2` at this branch's head — ⛔ **the answer is HEAD-BOUND, so this
+    docstring names the head it read** (#14269 review, P2: it said "at this head", which this
+    branch's own `docs/00_index.md` re-point falsifies). A document that states what the
+    command `prints` is contradicted by the very command it quotes in the same clause. That is precisely the defect class this file exists to
     catch — a typed head-bound figure — applied to the figure's own command, and it
     survived the earlier rounds because each guard spelled its own phrase list instead
     of recognizing the shape (#13802 review, finding 1).
@@ -8367,8 +8404,8 @@ def test_the_document_types_no_numstat_figure_for_the_index_residual():
     assert not typed, (
         "05-verify.md TYPES the figure that `git diff --numstat origin/main...HEAD -- "
         f"docs/00_index.md` printed ({typed[0]!r}). A numstat is a head-bound figure — "
-        "it is EMPTY at this head, so the clause is refuted by the very command quoted "
-        "beside it. State the command and let the reader re-derive the set "
+        "EMPTY at `origin/main`, `2 2` here — so a clause that types it is refuted by the "
+        "very command quoted beside it as soon as the head moves. State the command and let the reader re-derive the set "
         "(#13802 review, finding 1)")
 
 
@@ -8390,6 +8427,19 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
         "and the numstat shows `1 1` here",
         "and the numstat returns `3 3` here",
         "and the numstat -> `1 1` here",
+        # ⛔ AND THE LONG LITERAL'S U+2192, PINNED (#14269 review, P2 — MEASURED): the widening
+        # at the top of this pattern was unpinned, so reverting it left every test green. This
+        # witness reds on that revert.
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` \u2192 `2 2`",
+        # the backtick-closed short form that shipped green in `05-verify.md` (measured: the
+        # window alternatives could not span the closing backtick of `` `git diff --numstat` ``)
+        "`git diff --numstat` prints `3 3` at this head",
+        "`git diff --numstat` returns `3 3` here",
+        # ⛔ AND THE LONG FORM FOR A PATH NO LITERAL ABOVE NAMES (#14269 review, P1 — the
+        # SECOND figure the same row carried, and it walked green too: the only long spelling
+        # the earlier alternatives see is the `docs/00_index.md` one)
+        "`git diff --numstat origin/main...HEAD -- docs/epics/2026-11-04-7949-extractor-v4-"
+        "capstone/04-plan.md` prints `4 4`",
         # the spelling the merge-round reviewer found GREEN (#13802 merge-round review, P2):
         # the pair is typed after the `--name-only` command, not after `--numstat`.
         "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints "
@@ -8407,6 +8457,18 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
     for _allowed in (
         "its numstat printing `1 1` at a head of its own",
         "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING",
+        # ⛔ AND THE HEAD-STAMPED FORM, IN THE NATURAL SPELLING (#14269 review, P2). The rule in
+        # `05-verify.md` lets the archaeology type a figure; the span-anchored alternative read
+        # one as a present-tense claim and refused it — a FALSE RED on a permitted form. The
+        # stamp is what distinguishes them, so the stamp must be honoured, not the verb.
+        "`git diff --numstat` prints `10 2` at `a577d0e25c`",
+        "`git diff --numstat` -> `10 2` at `ef443ea968`",
+        # ⛔ AND THE SAME EXEMPTION FOR THE LITERAL ALTERNATIVES (#14269 review, P2 — MEASURED).
+        # The exemption was first written beside ONE branch, so the identical stamped form was
+        # allowed after the span-anchored spelling and REFUSED after the `docs/00_index.md`
+        # literals — one false red closed, its twin left open. These two pin the hoisted form.
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `2 2` at `a577d0e25c`",
+        "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints `1 1` at `a577d0e25c`",
         # a HISTORICAL quote of a past head's pair, sitting a few characters after the
         # command — must stay allowed without a present-tense verb to bind it
         # (#13802 merge-round review, P2: the unbounded cut of this alternative refused it).
