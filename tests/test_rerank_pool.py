@@ -3009,7 +3009,16 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
 
 
 def test_the_repeat_grader_counts_a_COMPREHENSION_and_not_its_outer_iterable():
-    """``_seam_enclosing_repeat``, graded on every shape it must classify.
+    """``_seam_enclosing_repeat``, graded on every branch the fixture exercises.
+
+    ⛔ NOT "every shape it could classify": the function's isinstance tuples also
+    carry ``SetComp`` and ``AsyncFor``, and the fixture below grades neither, so
+    deleting either member would leave this row green (round-27 review, measured).
+    They are NAMED here as ungraded rather than claimed covered — the same
+    treatment ``_seam_opaque_values`` gives its own residuals one function away,
+    and for the same reason: a coverage sentence one word wider than the fixture
+    is this PR's defect class. The branches it does grade are ``ListComp``,
+    ``GeneratorExp``, ``DictComp``, ``For`` and ``While``.
 
     The `1 + N` row reads a repeat off the REAL tool, so it can only ever exercise
     the shapes that tool happens to contain — and ``tools/read_wave_latency.py``
