@@ -1945,7 +1945,11 @@ def test_a_missed_cue_names_words_it_saw_whole():
     trailing context INSIDE the match (`\s+[a-z]`), so `group(0)` stopped on the
     first letter of the following noun. Every other signal ends on a `\b`.
     """
-    from tortoise.state_intent import detect_state_question, missed_route_payload
+    from tortoise.state_intent import (
+        _APOSTROPHES,
+        detect_state_question,
+        missed_route_payload,
+    )
 
     # The rows the review measured through the module's own functions.
     measured = {
@@ -1969,7 +1973,15 @@ def test_a_missed_cue_names_words_it_saw_whole():
         # the detector lower-cases and collapses whitespace before it matches, so
         # the cue is a prefix of the NORMALISED query (a `SOC2` in the caller's
         # spelling arrives as `soc2`).
+        # ⛔ AND IT IS NORMALISED ALL THE WAY, APOSTROPHES INCLUDED (round-28 review, P3,
+        # measured): the detector translates the apostrophe inventory to ASCII before it
+        # matches, so the cue for `hasn’t been deprecated` is `hasn't been deprecated` and
+        # a bare `lower()+split()` comparison fails on a CORRECT cue — it passed only
+        # because no pinned row carried a non-ASCII apostrophe. Compare through the
+        # module's own table so a new row cannot slip past on the same technicality.
         normalised = " ".join(query.lower().split())
+        for apostrophe in _APOSTROPHES:
+            normalised = normalised.replace(apostrophe, "'")
         assert normalised.startswith(cue), (query, cue)
         rest = normalised[len(cue):]
         assert not rest or not (rest[0].isalnum() or rest[0] == "_"), (
@@ -3809,3 +3821,67 @@ def test_the_relativizer_lookahead_is_the_only_refusal_for_its_own_row():
     assert got.population is None and got.signal == "existence_unguarded", (
         f"the relativizer lookahead stopped refusing its own row: {got.population!r}, "
         f"{got.signal!r} — either restore it or delete it and this pin together")
+
+
+def test_the_apostrophe_table_mirrors_the_extractors_inventory():
+    """The apostrophe table is the EXTRACTOR'S inventory, not a re-derivation.
+
+    ⛔ THE FIRST CUT TRANSLATED SEVEN SPELLINGS AND EIGHTEEN ROUTED (round-28 review, P2,
+    measured): `extractor_v2._APOSTROPHES` normalises twenty-five codepoints before it
+    tokenises, because the product actually receives them; this module is the other
+    consumer that sees raw caller text, and it translated seven. `hasn‚t been deprecated`
+    (U+201A) and `hasn‛t been deprecated` (U+201B) routed the whole ended population with
+    the caller's predicate dropped and `signal=None` — spellings the module's own note
+    claimed were covered.
+    ⛔ NOT IMPORTED AT IMPORT TIME on purpose: `state_intent` is the hot read path and
+    `extractor_v2` is a heavy module, so the two tables are kept equal by this assertion
+    rather than by one importing the other.
+    """
+    from tortoise.extractor_v2 import _APOSTROPHES as _EXTRACTOR_APOSTROPHES
+    from tortoise.state_intent import _APOSTROPHES as _STATE_INTENT_APOSTROPHES
+
+    ours = {ord(c) for c in _STATE_INTENT_APOSTROPHES}
+    # the extractor's table is a dict keyed by codepoint
+    theirs = set(_EXTRACTOR_APOSTROPHES)
+    assert ours == theirs, (
+        f"the apostrophe inventories drifted apart. Only in `state_intent`: "
+        f"{sorted(hex(c) for c in ours - theirs)} — only in `extractor_v2`: "
+        f"{sorted(hex(c) for c in theirs - ours)}. A codepoint the extractor normalises "
+        f"and this module does not is a spelling the asyndetic guard is blind to, which is "
+        f"the hijack #14033 exists to refuse; add it to `_APOSTROPHES` rather "
+        f"than trimming this assertion")
+
+
+def test_a_bare_noun_clitic_reports_instead_of_being_served_by_the_copula_shape():
+    """The copula shape must not swallow a subject that carries the auxiliary clitic.
+
+    ⛔ ONE ARTICLE APART, OPPOSITE VERDICTS (round-28 review, P1, measured):
+    `_COPULA_SUBJECT`'s word class admits `'`, so it ate `billing's` whole and the copula
+    shape matched the FULL string on the first pass — `have any users reported billing's
+    been deprecated` returned the ended population with the caller's predicate dropped and
+    `signal=None`, while `have any users reported the billing's been deprecated` was
+    refused with the notice. The guard could not help: the copula shape is matched BEFORE
+    it and never consults it. Measured over a 2,400-row cross-product (5 heads x 8 bare
+    nouns x 5 participles x 6 clitic spellings x det/non-det): 1,200 routed, ALL of them
+    the bare-noun half.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    for query in (
+        "have any users reported billing's been deprecated",
+        "have any users said v3's been deprecated",
+        "have any users reported the search index's been deprecated",
+        "has anyone complained billing's been withdrawn",
+        "have any users reported billing’s been deprecated",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} ROUTED (population={got.population!r}, shape={got.shape!r}, "
+            f"signal={got.signal!r}) — its determiner twin is refused, so the pair "
+            f"disagreeing is the defect, not the spelling")
+        assert missed_route_payload(got) is not None, (
+            f"{query!r} is refused silently — a cue that reaches no answer must say so")
+    # …and the plain copula questions this exclusion could have broken still route.
+    for query in ("is the export archived", "is all the data archived",
+                  "is it archived", "is the export no longer archived"):
+        assert detect_state_question(query).population == "ended", query

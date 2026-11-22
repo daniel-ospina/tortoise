@@ -535,6 +535,7 @@ _BLOCKED_TAIL = (
 #: quantifier's own relativizer, directly adjacent with no preceding word inside this
 #: span, still routes. That row is pinned in the routing table, so a blanket widening
 #: of this guard reds instead of quietly costing it.
+
 _EXISTENCE_HEAD = (
     r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
@@ -1167,8 +1168,19 @@ _COPULA_SUBJECT = (
     r"(?:"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,5}"
     r"(?:i|you|he|she|it|we|they|there)(?![-/])\b)"
+    # ⛔ A SUBJECT WORD MAY NOT CARRY AN AUXILIARY CLITIC (round-28 review, P1, measured):
+    # the word class below admits `'`, so it swallowed `billing's` whole and the copula
+    # shape matched the FULL string on the first pass — `have any users reported billing's
+    # been deprecated` returned the ended population with the caller's predicate dropped
+    # and `signal=None`, while its DETERMINER twin (`the billing's been deprecated`) was
+    # refused with the notice. One article apart, opposite verdicts: the guard in the
+    # branch above could not help, because this shape is matched BEFORE it and never
+    # consults it. Excluding the clitic here lets the row fall through to
+    # `_ENDING_SIGNALS`, where the clitic alternative refuses it and reports.
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
-    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+[a-z0-9][a-z0-9'’._/-]*){0,3}"
+    r"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*){0,3}"
     r"|(?:i|you|he|she|it|we|they|there)(?![-/])"
     r")"
 )
@@ -1645,6 +1657,12 @@ class StateQuestion:
     byte). ``shape``: the cue-table row that matched, for diagnostics and for
     the routing test's table; ``None`` with a ``None`` population.
     ``cue``: the matched text, so a caller can say WHICH words selected the
+    shape. ⛔ IT IS THE MATCHED TEXT **AFTER NORMALISATION**, not the caller's own
+    spelling: the detector lower-cases, collapses whitespace, and translates the
+    apostrophe inventory to ASCII before it matches, so a caller who typed `hasn’t`
+    is shown `hasn't`. That is deliberate — the cue is what the PATTERN saw — but a
+    caller comparing it against their own string will not find it, so the contract
+    says so here rather than leaving the difference to be discovered.
     population instead of asserting one.
     """
     population: str | None = None
