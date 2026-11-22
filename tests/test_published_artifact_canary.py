@@ -2751,7 +2751,12 @@ def _strip_shell_comments(script: str) -> str:
     `$(` and an UNESCAPED backtick inside a SINGLE-quoted span are inert at runtime but still
     flagged, because this filter does not model single-quote spans as removable. That
     direction is a false POSITIVE on a line a human can see and reword — never a silent pass.
-    No line in the workflow's blocks uses single quotes today.
+    ⛔ NOT "no line here uses single quotes" (review cycle 14, P3, MEASURED): the `canary`
+    step's block DOES carry one — `python -c 'import json,sys; …'` at the workflow's line 145 —
+    and that is exactly the construct this edge would fire on, so a reader told "no single
+    quotes" would not anticipate the message. The measurable claim, checked by running
+    `_executable_prose_lines` over every `run:` block in the file (five, all empty at this
+    head), is: no line puts a backtick or a `$(` inside a single-quoted span.
 
     ⛔ AN ESCAPED TOKEN IS NOT AN EDGE — IT IS NOT REPORTED (review cycle 12, P2). The scan
     consumes escape PAIRS, so `\\`` and `\\$(` are inert and pass, in a single-quoted span or
