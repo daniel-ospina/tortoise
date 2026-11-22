@@ -8783,11 +8783,16 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
 #: the residual is a paraphrase whose noun or verb is outside both lists, or a pair whose
 #: fenced command sits further than the window (160 chars). Narrow, and it does not describe
 #: itself as complete.
+#:
+#: ⛔ THE PAIR IS READ WITH **OR WITHOUT** BACKTICKS (#14249 review, round 5). Requiring them
+#: missed the shape a hurried sentence actually takes — `the same range re-taken here reads 403
+#: 401` walked through GREEN, an undisclosed false pass in a merge gate. `pair` is a NAMED group
+#: so the exemption anchor below does not have to guess where the pair starts.
 _TYPED_RETAKEN_NUMSTAT = re.compile(
     r"(?:\brange\b|\bnumstat\b).{0,160}?"
     r"(?:reads?|read|prints?|print|printed|returns?|returned|reports?|reported"
     r"|shows?|shown|gives?|given|lists?|named?|names?|->|\u2192|=>)"
-    r"\s*[:=]?\s*\*{0,2}`\d+\s+\d+`"
+    r"\s*[:=]?\s*\*{0,2}(?P<pair>`?\d+\s+\d+`?)"
 )
 
 #: A pair that is the PRINTED RESULT OF A FENCED COMMAND is a claim about a diff, not a carried
@@ -8795,16 +8800,18 @@ _TYPED_RETAKEN_NUMSTAT = re.compile(
 #: never excuses a bare figure: `the numstat printed `3 1`` has no fenced command in front of it
 #: and is still graded as a typed pair.
 #:
-#: ⛔ THE VERB CLASS MUST BE THE DETECTOR'S, NOT A SUBSET OF IT (#14249 review, P2). The first cut
-#: of this exemption listed seven verbs against the detector's sixteen, so a CORRECT sentence naming
-#: a fenced command and then saying `shows` / `reported` was REFUSED — the same asymmetry as the
-#: P1 above, in the false-red direction. Measured: `` `git diff --numstat …` shows `3 1` `` and
-#: `… reported `381 379` ` both flagged before this widening, both allowed after it, while EVERY
-#: defect witness in this arm's `for _typed in (…)` tuple stays flagged and the live document still
-#: yields 0 hits. ⛔ The counts above are the ones the two alternations actually carry (count them
-#: with `grep -n -A3 '_TYPED_RETAKEN_NUMSTAT = re\.compile'`), and the witness side is deliberately
-#: stated WITHOUT a number: a count in a comment about a tuple that grows is the head-bound figure
-#: this file forbids, and this very clause read "three" while the tuple carried eight.
+#: ⛔ THE VERB CLASS MUST BE THE DETECTOR'S, NOT A SUBSET OF IT (#14249 review, P2). The FIRST
+#: CUT of this exemption listed seven verbs while the detector carried sixteen, so a CORRECT
+#: sentence naming a fenced command and then saying `shows` / `reported` was REFUSED — the same
+#: asymmetry as the P1 above, in the false-red direction. Measured: `` `git diff --numstat …`
+#: shows `3 1` `` and `… reported `381 379` ` both flagged before this widening, both allowed
+#: after it, while EVERY defect witness in this arm's `for _typed in (…)` tuple stays flagged and
+#: the live document still yields 0 hits. Both alternations now carry the same sixteen verbs —
+#: count them with `grep -n -A4 '_TYPED_RETAKEN_NUMSTAT = re\.compile'` and the same for this
+#: pattern — and the witness side is deliberately stated WITHOUT a number: a count in a comment
+#: about a tuple that grows is the head-bound figure this file forbids, and an earlier revision of
+#: this clause read "three" while the tuple carried eight, then "seven" as if a current
+#: alternation carried it when neither did.
 _TYPED_NUMSTAT_AS_COMMAND_RESULT = re.compile(
     r"`[^`]*\b(?:numstat\b|--stat\b|git diff\b)[^`]*`\s*"
     r"(?:(?:->|\u2192|=>)|(?:prints?|print|printed|reads?|read|returns?|returned"
@@ -8820,10 +8827,11 @@ def _typed_retaken_numstat_pairs(text: str) -> list[str]:
     """
     bad: list[str] = []
     for match in _TYPED_RETAKEN_NUMSTAT.finditer(text):
-        body = match.group(0)
-        if _TYPED_NUMSTAT_AS_COMMAND_RESULT.search(text[:match.start() + body.rfind("`", 0, len(body) - 1)]):
+        # The pair's own start is a NAMED group: the pair may be written with or without
+        # backticks, so it cannot be located by rfind("`").
+        if _TYPED_NUMSTAT_AS_COMMAND_RESULT.search(text[: match.start("pair")]):
             continue
-        bad.append(body)
+        bad.append(match.group(0))
     return bad
 
 
@@ -8881,6 +8889,10 @@ def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
         # 4): the noun, the verb and the pair are all graded ones, and only `\s*` sat between them.
         "the same range re-taken here reads: `403 401`",
         "the same range re-taken here reads = `403 401`",
+        # ⛔ and the pair with NO backticks at all — the shape a hurried sentence takes, missed
+        # until round 5 (#14249 review, P2).
+        "the same range re-taken here reads 403 401",
+        "the numstat printed **403 401**",
     ):
         assert _typed_retaken_numstat_pairs(_typed), (
             f"the re-taken-numstat detector does not see {_typed!r} — that spelling of a "
