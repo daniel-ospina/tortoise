@@ -1714,7 +1714,7 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
 _SPLIT_COMPARABLE = re.compile(r"all (\d+) comparable ones resolve at BOTH heads")
 _SPLIT_NONCOMPARABLE = re.compile(r"the (\w+) that are NOT comparable")
 _SPLIT_DRIFT = re.compile(r"the drift is (\d+) of the (\d+) comparable, plus (\w+) of those (\w+) pairs")
-_SPLIT_ABSENT_AT_MAIN = re.compile(r"the\s+(\w+) that do not exist at `main` either")
+_SPLIT_ABSENT_AT_MAIN = re.compile(r"the\s+(\w+) that (?:do|does) not exist at `main` either")
 
 
 def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:

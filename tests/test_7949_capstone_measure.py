@@ -18254,7 +18254,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "(#13750 review, cycle 3; re-measured at this head)")
     assert "is the pair `04-plan.md` carries at this head" not in text, (
         "D5 has gone back to claiming `04-plan.md` carries a re-point PAIR of its own ROW at "
-        "this head, while that row reads ONE address (`sdk.py:29121`). Whether the FILE is in "
+        "this head, while that row reads ONE address (`sdk.py:29142`). Whether the FILE is in "
         "the diff is a different question and a measured one — `git diff --numstat "
         "origin/main...HEAD -- …/04-plan.md` prints `1 1` here, for the I7 row's range — so it "
         "is graded by the command below, not by this message. That sentence was deleted for "
