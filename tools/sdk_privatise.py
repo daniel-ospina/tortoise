@@ -1393,7 +1393,32 @@ SWEEP_NAMES = 66
 #: brought their own across this merge, so the dead one was deleted with its prose KEPT (a second
 #: assignment is what `tests/test_sdk_privatise_sweep.py`'s one-assignment arm exists to refuse,
 #: because Python binds the LAST while a first-anchored walk grades only the prose above the FIRST).
-SWEEP_RESIDUE = (11860, "6051234d8dab29c8")
+#: ⛔ THE PAIR THE PARAGRAPH ABOVE RECORDS WAS NEVER TRUE OF ITS OWN TREE — MEASURED, NOT ARGUED. It
+#: states that `--repin` printed **(11860, '6051234d8dab29c8')** on the ninth tree and that `--check`
+#: exits 0 on it. Re-measured AT THAT COMMIT (`c3d33f9e1a39`), `--check` prints observed
+#: `(11870, '6da40999bb5162fa')` against that committed pair and exits **1** — so the pair was not
+#: derived on the tree it was committed to, and the required `surface-guard` job (an `` `needs:` ``
+#: arm of `python-ci-gate`) graded RED under it. The same observed pair is printed at
+#: `840c201272a08d2a085cf8995a3585a42b81132e`, and
+#: `git diff c3d33f9e1a39..840c201272a0 -- '*.py'` adds no receiver at all (its single added match is
+#: a `proj.g.query(` INSIDE A COMMENT, in `tests/test_12184_shifted_cites.py`, which an AST census
+#: does not read) — so no head in that range graded green either, and the merge, not the three
+#: commits after it, is where the pin went wrong. The paragraph above is KEPT as the record of what
+#: was recorded; this one is the re-measurement that refutes its figure, and the constant below is
+#: `--repin`'s output rather than either side's numeral.
+#: ⛔ RE-CUT → **(11870, '6da40999bb5162fa')**. The +9 over `main` is attributed by a ROW-SET DIFF,
+#: never by arithmetic: `--report --base 28ca66878d7c617a2f28a8025ddaa40352adfcb2 --top 5000` was
+#: run on THIS tree and in a detached worktree at `origin/main` `0467ba329d` (whose own pin is
+#: `(11861, "f0647020531c078c")` and whose `--check` exits 0, so `main` is NOT the red one here), and
+#: the two sorted row sets differ in EXACTLY three rows out of an otherwise identical 856-shape set:
+#: `cp.query` **263 → 270** (+7), `row.update` **59 → 60** (+1), and **one row that exists only
+#: here**: `self.plane.query` **1** — the capacity-notice seam and its fake, which the block above
+#: already DECLARES. No row was absorbed in the other direction, so nothing left by the fold went
+#: uncounted, and the direction this pin exists to catch — a NEW row SHAPE that no record declares —
+#: did not happen: the one new shape is the declared one. A plain `cp` handle and a `set[str]`-style
+#: `.update` are the ordinary-word receivers this sweep deliberately leaves alone; `typed references
+#: still pointing at a public name` is **0** on this tree.
+SWEEP_RESIDUE = (11870, "6da40999bb5162fa")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
