@@ -297,8 +297,11 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     offset 2163 at depth ``1 → 2``; the emitted predicate measures 2136 at
     ``1 → 3``. The assertion reads the offsets rather than the prose, so nothing
     depended on the stale pair — but nothing recomputed it either. The ``CASE
-    WHEN`` numeral the module docstring quotes IS recomputed, in this test, since
-    round-17 review P2 3.)
+    WHEN`` numerals quoted in ``beta_variance_sum_bound``'s docstring ARE
+    recomputed in this test, and this module's own copy of them is graded too
+    (round-17 review P2 3, round-20 review — the sentence used to name "the
+    module docstring" while grading the FUNCTION docstring, and the module
+    docstring's copy was ungraded.)
     """
     graph, _ = _decorate_under_capture()
     crits = [(c, kw) for c, kw in graph.calls
@@ -386,6 +389,27 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     assert int(doc_spared.group(1)) == spared, (
         f"the docstring says {doc_spared.group(1)} `CASE WHEN` are spared, but "
         f"THIS predicate measures {spared} — the prose has rotted off the emission")
+    # ⛔ AND THIS FILE'S OWN MODULE DOCSTRING, which quotes the same two numerals
+    # and WAS ungraded (round-20 review). A copy that nothing reads is the same
+    # ungraded-figure class as the totals above, one level out: the sentence that
+    # justified this block named "the module docstring" while reading the
+    # FUNCTION docstring, so the module's copy could rot and every row stay green.
+    # Read from the module object rather than the source text, so the letter of
+    # how the docstring is spelled does not matter — only the numerals do.
+    module_doc = " ".join((__doc__ or "").split())
+    module_numerals = re.search(
+        r"(\d+) coercion ``CASE WHEN`` before ``\$contested_sum_bound`` "
+        r"against (\d+) between it and", module_doc)
+    assert module_numerals, (
+        "this module's docstring no longer states the two ``CASE WHEN`` numerals "
+        "in the graded form — restore the wording or re-point this test, but do "
+        "not leave the copy ungraded")
+    assert (int(module_numerals.group(1)), int(module_numerals.group(2))) == (
+        crit[:guard].count("CASE WHEN"), spared), (
+        f"this module's docstring quotes ({module_numerals.group(1)}, "
+        f"{module_numerals.group(2)}) for the guard and the spared slice, but "
+        f"THIS predicate measures ({crit[:guard].count('CASE WHEN')}, {spared}) "
+        "— the module's copy has rotted off the emission")
     # ⛔ AND THE SPLIT THE DOCSTRING DERIVES THREE MORE NUMERALS FROM. The rows
     # above grade the two TOTALS — the emission against literals, and the prose
     # against the emission — and NEITHER grades their split. The caveat quotes
@@ -410,15 +434,21 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
         "share as `72 coercion + the division's own selector` — exactly one. "
         "With a different split the quoted 72 / 80 / 64 are all wrong while "
         "the 8 and the 73 above stay green: re-derive the share")
-    assert coercions == 72, (
-        f"{coercions} coercion `CASE WHEN` sit in the spared slice, but the "
-        "docstring derives its share from 72 (\"72 of the predicate's 80 "
-        "coercion `CASE WHEN`\", \"90% of the coercion\", \"still skips 64\") "
-        "— re-derive all three against THIS predicate")
-    assert crit[:guard].count("CASE WHEN") + coercions == 80, (
-        "the docstring quotes the predicate's coercion total as 80 — the 8 the "
-        "guard pays plus the 72 it skips — but this predicate carries "
-        f"{crit[:guard].count('CASE WHEN') + coercions}; re-derive the share")
+    # ⛔ AND THE TWO FIGURES DERIVED FROM THAT SPLIT ARE NOT ASSERTED, ON PURPOSE.
+    # `coercions == 72` is `spared - 1` and `8 + coercions == 80` is `8 + 72`:
+    # both follow from rows asserted above, so asserting them would be an
+    # assertion NO MUTANT CAN REDDEN — dead weight by the standard this repo
+    # already applies (`tests/test_rerank_pool.py`, agent-infra#3442 rule 3). An
+    # earlier cut of this block carried both rows; they were removed rather than
+    # kept for the look of coverage (round-20 review). The claim they were meant
+    # to pin — that the SHARE rests on the split, not on the totals — is pinned
+    # by the row above, which is the one a re-split actually reds.
+    assert 11_000 < len(crit[guard:division]) < 12_500, (
+        "the docstring calls the spared span a ~11.7k-char coercion `CASE` and "
+        f"THIS predicate measures {len(crit[guard:division])} chars — a "
+        "magnitude guard, not a byte pin: it can only red if that expression "
+        "collapsed or grew by an order of magnitude, which is what the "
+        "paragraph's claim would stop being true about")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 

@@ -1354,6 +1354,17 @@ def _seam_opaque_values(node):
     ``calls=0, opaque=False``, read as PROVABLY DEAD — the exact direction this
     function exists to forbid (round-18 review).
 
+    ⛔ THE BULLETS ABOVE ARE FOR A MODULE WITHOUT ``from __future__ import
+    annotations``, and BOTH files in this arm's blast radius opt IN
+    (``tools/read_wave_latency.py:46``, and this test module at ``:27``): under
+    PEP 563 no annotation is evaluated at all (measured: ``z: 1/0`` and
+    ``def f(_x: 1/0)`` raise without the future import and do not raise with it;
+    the values land in ``__annotations__`` as STRINGS). The escape still
+    fail-closes there — a string annotation names no call, which is exactly the
+    negative this walk must not call dead — so the behaviour is right either way;
+    only the rationale needs the scope clause, or the next reader corrects it
+    back to the inverted claim (round-20 review).
+
     ⛔ KNOWN RESIDUALS, named rather than claimed closed: ``raise SEAM`` and
     ``await SEAM`` are value positions that evaluate the mention (``await`` even
     calls ``__await__``) and are still read as dead. Neither can hide a real seam
