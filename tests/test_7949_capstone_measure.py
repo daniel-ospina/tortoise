@@ -18072,6 +18072,44 @@ _D5_TRIPLE_RE = re.compile(
     r"`(?P<fa>[^`]+)`, `(?P<fb>[^`]+)` and `(?P<fc>[^`]+)` respectively")
 
 
+def _d5_membership_verdict(
+    *, numstat: str, base_has: bool, diff_carries_target: bool
+) -> str:
+    """What D5's `04-plan.md` membership actually rested on — the ONE decider.
+
+    D5 states that the file "IS in this diff at the head this was read at (`<sha>`), by
+    its PAIR", and both halves of this read ask the same question of two different
+    measurements, so they are decided in one place (the `_pin_row_failures` rule: two
+    copies of a resolution rule are two contracts, and the one that drifts is the one
+    that stops being true). The verdicts, and why each is not the others:
+
+      * ``"landed"`` — the base's own copy already carries the I7 target and this diff
+        does not add it. That is every branch above the merge, AND every lane that
+        re-points a DIFFERENT cite in the same document: the membership is PROVENANCE,
+        still true, and nothing in this branch can make it truer.
+      * ``"repointed"`` — this diff's own `^[+-]` lines carry the target while the base's
+        copy does not, so the pair genuinely enters with this change.
+      * ``"double"`` — the diff adds the target AND the base already carries it: a claim
+        that this is "this diff's" re-point while the base agrees is contradicted by the
+        base, so it stays RED.
+      * ``"dropped"`` — neither this diff nor the base carries it: the sentence names a
+        re-point that exists in neither tree.
+
+    ⛔ ``numstat`` EMPTINESS IS NOT THE QUESTION (#14260 fix lane). It cannot be: a
+    `--numstat` reports HOW MANY lines changed, never WHICH, so reading membership off
+    it answers "does this diff touch the file at all". Measured on PR #14249's head
+    `bf32970447` — `--numstat` = ``2 2``, the base carries `hosted_api.py:15449-15526`,
+    and the diff's own `^[+-]` lines carry it ZERO times — that reading hard-failed a
+    lane which re-pointed a different cite, i.e. the same latent main-red the EMPTY half
+    was fixed for, one branch up.
+    """
+    if not numstat.strip():
+        return "landed" if base_has else "dropped"
+    if diff_carries_target:
+        return "double" if base_has else "repointed"
+    return "landed" if base_has else "dropped"
+
+
 def test_the_D5_current_head_anchors_are_the_lines_they_name():
     """D5 asserts numbers as CURRENT, and until this pin NOTHING read them (#13602).
 
@@ -18376,40 +18414,67 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
             _base_has = (
                 _base_copy.returncode == 0 and _I7_TARGET in _base_copy.stdout)
-            if not _numstat.stdout.strip():
-                # ⛔ THE LANDED STATE, MEASURED — NOT A SKIP AND NOT A FAILURE (#14290).
-                # An EMPTY membership here has TWO causes and the arm must tell them
-                # apart, because they are opposite verdicts:
-                #   (a) the re-point already LANDED on the base — every branch above the
-                #       merge has this shape, so #14290's own sentence ("IS in this diff
-                #       at the head this was read at") stays true as PROVENANCE while this
-                #       head carries none of it. Before this reading the arm was red on
-                #       EVERY such branch — a latent main-red that could not be satisfied
-                #       by any commit, because the only way to make the numstat non-empty
-                #       was to re-point a document the base already agrees with;
-                #   (b) the re-point was DROPPED — the base does not carry it either, and
-                #       nothing in this branch put it back. That stays RED.
-                # Reading the base's own copy is what distinguishes them, and it is the
-                # same read the non-empty half already does — so this ADDS a graded
-                # outcome, it does not relax one.
-                if _base_has:
-                    _measured.append(
-                        f"the landed state (`{_base}` already carries {_I7_TARGET})")
-                else:
-                    failures.append(
-                        f"D5 says `04-plan.md` IS in this diff by its PAIR, but "
-                        f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY AND "
-                        f"`{_base}`'s own copy does not carry {_I7_TARGET} either — so the "
-                        f"re-point is not in this diff and it did not land on the base. "
-                        f"It was dropped. Re-derive the membership (#14260 fix lane, "
-                        f"finding 3)")
+            # ⛔ "IN THIS DIFF" IS A QUESTION ABOUT THE DIFF'S OWN LINES, NOT ITS SIZE
+            # (#14260 fix lane, the review at `5fc547aa7e`). `--numstat` says HOW MANY
+            # lines changed; it cannot say WHICH — so a lane that re-points a DIFFERENT
+            # cite in `04-plan.md` has a non-empty numstat while the I7 pair sits exactly
+            # where the base put it. Measured on PR #14249's head `bf32970447`:
+            # `--numstat` = `2 2`, the base carries the target, the diff's `^[+-]` lines
+            # carry it ZERO times — reading membership off non-emptiness hard-failed that
+            # whole class and no commit could satisfy it. The `-U0` read below is the only
+            # one that answers the sentence's actual question.
+            _diff = _git("diff", "-U0", f"{_base}...HEAD", "--", _MEMBER_DOC)
+            if _diff.returncode != 0:
+                pass  # unreadable diff is UNMEASURED, never a pass (see the guard below)
             else:
-                if _base_has:
+                _diff_carries_target = any(
+                    line[:1] in "+-" and _I7_TARGET in line
+                    for line in _diff.stdout.splitlines()
+                    if not line.startswith(("+++", "---")))
+                _verdict = _d5_membership_verdict(
+                    numstat=_numstat.stdout,
+                    base_has=_base_has,
+                    diff_carries_target=_diff_carries_target)
+                # ⛔ THE LANDED STATE, MEASURED — NOT A SKIP AND NOT A FAILURE (#14290).
+                # It has TWO shapes and both are the same fact, which is why ONE decider
+                # rules on them (`_d5_membership_verdict`):
+                #   (a) the membership is EMPTY because the re-point already LANDED on the
+                #       base — every branch above the merge has this shape, so #14290's
+                #       own sentence ("IS in this diff at the head this was read at")
+                #       stays true as PROVENANCE while this head carries none of it.
+                #       Before this reading the arm was red on EVERY such branch — a
+                #       latent main-red that could not be satisfied by any commit;
+                #   (b) the membership is NON-EMPTY but the changed lines do not carry the
+                #       pair, because this lane re-points a different cite in the same
+                #       document — the same latent red one branch over, and the review at
+                #       `5fc547aa7e` measured it redding an open PR (#14249).
+                # A DROPPED re-point is the opposite verdict and still REDes in both
+                # shapes: the base does not carry it either, and nothing here put it back.
+                if _verdict == "landed":
+                    _measured.append(
+                        f"the landed state (`{_base}` already carries {_I7_TARGET}"
+                        + ("; this diff's `^[+-]` lines do not re-point it"
+                           if _numstat.stdout.strip() else ")"))
+                elif _verdict == "repointed":
+                    _measured.append(
+                        f"this diff's own `^[+-]` lines carry {_I7_TARGET}")
+                elif _verdict == "double":
                     failures.append(
                         f"D5 calls the I7 range a re-point of THIS diff, but `{_base}`'s "
-                        f"own `{_MEMBER_DOC}` already carries {_I7_TARGET} — so the range "
-                        f"is not this diff's, and the membership names a base that already "
-                        f"agrees with it (#14260 fix lane, finding 3)")
+                        f"own `{_MEMBER_DOC}` already carries {_I7_TARGET} — and this "
+                        f"diff's own `^[+-]` lines carry it again. The range is not this "
+                        f"diff's, and the membership names a base that already agrees "
+                        f"with it (#14260 fix lane, finding 3)")
+                else:
+                    failures.append(
+                        "D5 says `04-plan.md` IS in this diff by its PAIR, but "
+                        + (f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY "
+                           if not _numstat.stdout.strip() else
+                           "this diff's own `^[+-]` lines for that file do not carry it ")
+                        + f"AND `{_base}`'s own copy does not carry {_I7_TARGET} either — "
+                        f"so the re-point is not in this diff and it did not land on the "
+                        f"base. It was dropped. Re-derive the membership (#14260 fix "
+                        f"lane, finding 3)")
     # ⛔ NOTHING MEASURED IS NOT A PASS (#14260 fix lane, finding 3). The fabrication hole this
     # closes was MEASURED: `deadbeefcafe` took the old `pass` branch, so any hex string satisfied
     # the arm. The one exemption is a `--depth 1` clone, where the base ref and every older head
@@ -18456,6 +18521,42 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "D5's present-tense anchors are not the lines they name "
         "(the class #13602 review findings 1 and 2 measured):\n  - "
         + "\n  - ".join(failures))
+
+
+def test_the_D5_membership_decider_separates_a_landed_file_from_a_re_point():
+    """The `_d5_membership_verdict` table, graded by INPUT (#14260 fix lane).
+
+    ⛔ WHY THIS ARM EXISTS. The review at `5fc547aa7e` found the NON-empty half of the
+    D5 membership read still equated "this diff touches `04-plan.md`" with "this diff
+    re-points the I7 pair", so it hard-failed every lane that re-points a DIFFERENT cite
+    in that document — MEASURED red on an open PR (#14249, head `bf32970447`: `--numstat`
+    = ``2 2``, the base carries the target, the diff's `^[+-]` lines carry it 0 times).
+    That class cannot be reproduced from THIS branch's own git state (its numstat for the
+    document is EMPTY, so it takes the landed branch), which is exactly why the table is
+    graded here by input instead of by a second clone — the same reason
+    `_pin_row_failures` is a function with its own callers.
+    """
+    _DOC = "2\t2\tdoc"
+    _cases = [
+        ("", True, False, "landed", "the merged/landed state"),
+        ("", False, False, "dropped", "EMPTY and the base lacks it: dropped"),
+        (_DOC, True, False, "landed",
+         "#14249's measured shape: a DIFFERENT cite re-pointed, the base already agrees"),
+        (_DOC, False, False, "dropped", "this diff touches the doc but carries no I7 pair"),
+        (_DOC, False, True, "repointed", "the pair enters with this diff"),
+        (_DOC, True, True, "double", "the diff adds a target the base already carries"),
+    ]
+    for _numstat, _base_has, _carries, _expected, _why in _cases:
+        assert _d5_membership_verdict(
+            numstat=_numstat, base_has=_base_has,
+            diff_carries_target=_carries) == _expected, (
+            f"`_d5_membership_verdict(numstat={_numstat!r}, base_has={_base_has}, "
+            f"diff_carries_target={_carries})` is not {_expected!r} ({_why}) — the arm "
+            "decided D5's membership off something other than what the base and this "
+            "diff's own changed lines carry (#14260 fix lane)")
+    # The class is CLOSED: a fourth value would be a state nothing rules on, which is how
+    # an unread verdict gets mistaken for coverage.
+    assert {c[3] for c in _cases} == {"landed", "repointed", "double", "dropped"}
 
 
 #: The D5 clause that states a `the ONLY …` population of TWO numbers:
