@@ -927,7 +927,7 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #: way an ACK went); the FIFTH, ``PROJECTION_WORKER_FAILURE_COUNT``, is the
 #: FAILURE channel and is described separately below, because it answers "did a
 #: deferred fold lose its row?" rather than "how far behind is the record?".
-#: ⛔ An earlier header said FOUR, and this file said FIVE 290 lines later — the
+#: ⛔ An earlier header said FOUR, and this file said FIVE further down — the
 #: count is a claim like any other, so it is enumerated here rather than asserted.
 #:
 #: * ``PROJECTION_QUEUE_DEPTH`` — items the loop still OWES: queued PLUS the one
@@ -956,8 +956,8 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   ⛔ NOTHING IS DROPPED on any of the four — a dropped item would be a
 #:   silently short record — so the visible cost is a slower ACK, and this counter
 #:   is what makes it attributable rather than an unexplained latency.
-#:   ``reason`` is a closed vocabulary of FOUR, one per way the QUEUE declined to
-#:   take the item: ``queue_full`` (the bound in
+#:   ``reason`` is a closed vocabulary of FOUR, one per way a write FAILS TO REACH
+#:   the queue: ``queue_full`` (the bound in
 #:   ``projection_worker.ENV_QUEUE_MAX`` was reached), ``worker_stopping`` (the
 #:   loop was being shut down, or a wedged consumer kept it from restarting —
 #:   `stop()` does not clear its thread after a timed-out join), ``uncopyable``

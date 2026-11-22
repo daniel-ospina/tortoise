@@ -2097,8 +2097,15 @@ class TestTheDeferredWrite:
         The sibling legs cover "the queue did not reach it" (`record_deferred_
         undrained`) and "a healthy deferred seed" (`_fold_needed()` False). The
         shape between them was invisible: the loop RAN every fold and each one
-        FAILED — `circuit_open`, the outage this branch's own vocabulary names,
-        where `_classify_fold_outcome` counts `projection_refused`. The queue then
+        FAILED — `circuit_open`, the outage this branch's own vocabulary names.
+        ⛔ THIS LEG INDUCES A **RAISING** FOLD: the seam raises, so the loop's own
+        `except` mints ``projection_raised`` — NOT `_classify_fold_outcome`, which
+        only runs on the RETURN path and never sees a raise (its own docstring
+        says the raise arm's ``projection_raised`` "is minted by the caller") — and
+        NOT ``projection_refused``. The REFUSAL arm (a store that answers "no row"
+        rather than raising) is pinned by its own leg,
+        `test_an_ARMED_REFUSAL_is_a_failure_not_a_projection`, not here — say so
+        rather than implying this leg covers it (round 17). The queue then
         drains immediately, so `undrained` is 0, `applied` is 0 and `deferred` is N
         — byte-identical to a healthy seed — and the report answered "no fold
         needed" for a record short by every queued row, while
@@ -2108,9 +2115,16 @@ class TestTheDeferredWrite:
         ⛔ THE COUNTER IS THE WORKER'S OWN, NOT A PATCHED NUMBER: the queued item is
         real (the REAL chokepoint defers it — carried tenancy, journal line, armed
         DSN) and the fold really raises inside the loop, so `stats().failures` moves
-        the way it moves in production. Drop the `record_deferred_failures` term
-        from `_fold_needed()`, stop publishing it, or stop differencing the counter,
-        and this reds.
+        the way it moves in production.
+
+        ⛔ WHAT THIS LEG PINS, AND WHAT IT DOES **NOT** (round 17): deleting the
+        `record_deferred_failures` term from `_fold_needed()` reds the
+        `_fold_needed() is True` assertion, deleting it from `_fold_note()` reds the
+        note assertion, and dropping the key from `as_dict()` reds the payload
+        assertion below. ⛔ The DIFFERENCING (`failures - failures_before`) is NOT
+        discriminated here — a cumulative read passes this leg too, because a fresh
+        worker holds no prior loss to mis-attribute. That is a stated residual, not
+        a pin this test does not have.
         """
         from tortoise import projection_worker, record_writer
 
@@ -2143,6 +2157,9 @@ class TestTheDeferredWrite:
             "the loop reported a failed fold and the report did not read it: "
             f"{payload}"
         )
+        # ⛔ AND THE ARTIFACT PUBLISHES IT (round 17): the attribute above can be
+        # right while `as_dict()` drops the key, and the operator reads the dict.
+        assert payload["record_deferred_failures"] >= 1, payload
         assert seed._fold_needed() is True, payload
         assert "fold" in payload, payload
         assert "did not write a row" in payload["note"], payload["note"]

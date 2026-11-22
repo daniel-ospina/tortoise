@@ -1351,13 +1351,23 @@ def test_the_seams_healthy_decline_is_not_counted_as_a_loss(armed):
 
 
 def test_a_drain_predicate_is_exact_even_after_a_fork(armed):
-    """⛔ #14222 review cycle 2, NEW-3: an inherited high-water mark is not work.
+    """⛔ #14222 review cycle 2, NEW-3: a high-water mark is not work.
 
-    The counter form (`projected + failures >= submitted`) was an approximation a
-    forked child can never satisfy — it inherits the parent's counters with an
-    EMPTY queue, so a drained worker reported undrained and every child's exit
-    drain burned the full timeout. `empty AND nothing in flight` is exact, because
-    the loop pops and clears the in-flight item under this same lock.
+    `empty AND nothing in flight` is the queue's OWN state, and it is exact
+    because the loop pops and clears the in-flight item under this same lock.
+    The counter form (`projected + failures >= submitted`) is a DERIVED reading
+    of two counters instead, so a stale value of either decides a drain.
+    ⛔ THE REASON ORIGINALLY GIVEN HERE IS WITHDRAWN (round 17), because it is
+    false at this head: it said the counter form is one a forked child could
+    never satisfy, since the child inherits the parent's high-water marks —
+    `_reset_for_fork_locked` ZEROES `_submitted`, `_projected` and `_failures`,
+    so `0 + 0 >= 0` holds and no inherited mark survives to spoil it.
+    ⛔ SO THIS LEG PINS THE RESET, NOT THE PREDICATE: it also sets a foreign
+    `_cond_pid`, so the first `_ensure_not_inherited()` inside `wait_for_drain`
+    resets and zeroes the counters BEFORE the drain predicate is ever evaluated —
+    no mark is left to evaluate under — and restoring the counter form leaves this
+    leg green (measured). Read it as evidence that the child's counters are its
+    own, never as evidence that a mutation of the comparison would red.
     """
     worker = projection_worker.worker()
     worker._submitted, worker._projected = 9, 1   # an inherited high-water mark
