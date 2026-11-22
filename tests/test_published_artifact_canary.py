@@ -2800,10 +2800,14 @@ def _strip_shell_comments(script: str) -> str:
     pin passed while the substitution ran (measured; pinned by
     `test_the_prose_pin_catches_a_substitution_on_a_COMMENT_LOOKING_continuation`).
 
-    So comments are lexed the way the shell lexes them: a `#` starts a comment only at
-    the start of a word and outside any quote, and a backslash escapes the next byte
-    outside single quotes. Everything else is returned verbatim, including `#` inside an
-    echo (`See #12363`) and `${EXIT_CODE:-…}`.
+    So comments are lexed the way the shell lexes them in the WHITESPACE case: a `#` starts a
+    comment only at the start of a whitespace-delimited word and outside any quote, and a
+    backslash escapes the next byte outside single quotes. ⛔ NOT EXACTLY the way the shell
+    lexes them — bash also opens a comment after an unquoted metacharacter (`;`, `&`, `|`,
+    `(`, `)`, `{`, `}`), and this lexer does not (fresh-context review, P3, MEASURED:
+    `bash -e -c 'echo ok;# see `tool`'` is INERT, and `_executable_prose_lines` reports it).
+    That divergence is listed as a conservative edge below. Everything else is returned
+    verbatim, including `#` inside an echo (`See #12363`) and `${EXIT_CODE:-…}`.
 
     ⛔ THE SAME RULE BREAKS DOWN IN A HEREDOC BODY, WHICH IS WHY IT IS LEXED SEPARATELY
     (review cycle 8b). A heredoc body is COPIED into the command, not parsed as shell: a
@@ -2820,6 +2824,13 @@ def _strip_shell_comments(script: str) -> str:
     `$(` and an UNESCAPED backtick inside a SINGLE-quoted span are inert at runtime but still
     flagged, because this filter does not model single-quote spans as removable. That
     direction is a false POSITIVE on a line a human can see and reword — never a silent pass.
+    ⛔ AND THE SAME EDGE IN THE COMMENT LEXER (fresh-context review, P3, MEASURED): a `#`
+    after an unquoted metacharacter DOES start a comment in bash (`echo ok;# see `tool`` is
+    inert, rc 0, nothing executed), but `at_word_start` is only set by whitespace, so this
+    filter reports that trailing text as CODE. The message then routes the author to the
+    "IN CODE this gate refuses the construct OUTRIGHT" branch for a line that is a correct,
+    inert comment — over-block again, never a silent pass, remedy is again REWORD (or move
+    the `#` off the command with a space).
     ⛔ NOT "no line here uses single quotes" (review cycle 14, P3, MEASURED): the `canary`
     step's block DOES carry one — `python -c 'import json,sys; …'` at the workflow's line 145 —
     and that is exactly the construct this edge would fire on, so a reader told "no single
