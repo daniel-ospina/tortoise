@@ -1117,14 +1117,21 @@ def test_a_pinned_node_held_by_a_reader_is_reported_pinned_not_leased():
     )
 
 
-def test_a_pin_declared_between_planning_and_the_delete_still_wins():
-    """Gate 6's second half — the same window the lease already re-checks.
+def test_the_last_hop_re_asks_the_pin_predicate_before_the_delete():
+    """Gate 6's second half — the SEAM is at the last hop; the SCOPE is the snapshot.
 
     ⛔ `final` re-asks `leases.held()` immediately before `_delete_nodes` because "a read can
-    start between planning and the statement". The pin is the STRONGER promise ("a pinned
-    node is NEVER deleted, whatever the selector offered") and had no equivalent re-ask, so
-    a declaration written in that window let the nodes be deleted AND reported in `deleted`
-    — the report could not even show that it happened.
+    start between planning and the statement". Gate 6 gets the same re-ask, so a caller
+    whose predicate is LIVE is consulted immediately before the DELETE rather than only at
+    plan time.
+
+    ⛔ BUT THAT IS ALL IT BUYS, and the row used to claim more. `tools/cache_evict.py`
+    wires `pinned=read(...).gate()`, a lambda over the frozenset ONE read computed, so
+    re-asking it returns the same answer: a `pin` issued mid-sweep is NOT seen, and the
+    header's "NEVER deleted" was a promise the code could not keep (corrected there; the
+    live re-ask costs a declaration query per candidate and is filed as #14214, not improvised).
+    The stateful fake below is exactly the LIVE-predicate case the interface permits —
+    which is what this row is entitled to assert.
     """
     g = _FakeGraph(["p0", "p1"])
 
@@ -1159,4 +1166,773 @@ def test_a_pin_declared_between_planning_and_the_delete_still_wins():
     assert {c.key for c in report.skipped_pinned} == {"p0"}, (
         "the node was held but not reported as pinned, so the operator cannot see that a "
         "declaration written mid-sweep is what kept it"
+    )
+
+
+def test_a_window_held_back_late_does_not_abandon_the_remaining_passes():
+    """A pin visible only at the delete statement must not cost the whole sweep.
+
+    ⛔ The `if not final:` arm exists to hold nodes back, not to end the run: the window is
+    recomputed from the held sets on the NEXT pass, so breaking there means the widening
+    never applies in the case it was written for. Measured shape: a declaration seen at plan
+    time still lets the sweep take two nodes; the SAME declaration landing one ask later
+    took zero — the sweep returned `deleted: []` over a graph it was two nodes over budget,
+    and both remedies the reason named (`unpin`, raise the pin budget) were wrong.
+    """
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+    asks: dict[int, int] = {}
+
+    def pin_appears_late(candidate: Candidate) -> bool:
+        if candidate.key != "p0":
+            return False
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=2), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_appears_late,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=4),
+    )
+
+    assert "p0" in g.node_keys(), "the node pinned mid-sweep was deleted"
+    assert len(report.deleted) == 2, (
+        "a window held back at the last hop ended the sweep — the remaining passes never "
+        "ran, so the cache stays over budget and the report blames the population"
+    )
+    assert report.metric()["passes"] > 1, (
+        "the sweep stopped on its first pass; the widening rule for a fully held-back "
+        "window is not applied here"
+    )
+
+
+def test_a_node_pinned_and_leased_at_the_delete_statement_is_reported_pinned():
+    """The last-hop re-check must ask the PIN before the LEASE, as gate 6 itself does.
+
+    ⛔ The buckets exist to route the operator to the remedy that clears the state, and only
+    `unpin` clears a pin. Asked in the other order, a node that became pinned AND was taken
+    by a reader in the same plan→statement window is reported `skipped_leased`, so the
+    reason tells the operator to wait for a read that is not what keeps it resident.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph(["p0", "p1"])
+    leases = ReadLeases()
+    asks: dict[int, int] = {}
+
+    def pinned_late(candidate: Candidate) -> bool:
+        if candidate.key != "p0":
+            return False
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    def record_probe_and_lease_starts(candidate: Candidate) -> bool:
+        # ⛔ The reader must start AFTER the plan-time gates and BEFORE the delete, or the
+        # plan-time lease gate holds the node and the last hop is never reached. The record
+        # probe is exactly that seam: it runs at plan time, after gate 6 and gate 4.
+        if candidate.key == "p0":
+            leases.acquire(candidate.node_id)
+        return True
+
+    report = evict(
+        _assessment(nodes=1), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=record_probe_and_lease_starts,
+        pinned=pinned_late,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=10, max_passes=2),
+    )
+
+    assert "p0" in g.node_keys()
+    assert {c.key for c in report.skipped_pinned} == {"p0"}, (
+        "a node that is pinned AND leased at the delete statement was not reported as "
+        "pinned — the last hop asks the lease first, so the operator is sent to wait for "
+        "a reader instead of unpinning"
+    )
+    assert report.skipped_leased == (), (
+        "the last-hop re-check asks the LEASE before the PIN, inverting gate 6's ordering"
+    )
+
+
+def test_a_held_back_pass_cannot_refund_more_licence_than_it_spent():
+    """The refund must be exactly what was debited — an over-credit deletes unproven nodes.
+
+    ⛔ The refund exists so a pass that takes nothing does not starve the next one to
+    `budget=0`. But the licence is the CENSUS's proof of how many nodes may be evicted at
+    all, so refunding MORE than the pass was charged lets a later pass delete a node nothing
+    proved — the exact over-deletion shape the licence exists to prevent, on the one line
+    where the refund now happens. Nothing pinned the amount: mutating the refund to
+    `+= len(local) * 2` left this file, `test_14012_outside_view.py`,
+    `test_14012_resident_cli.py` and `test_cache_evict_cli.py` all green.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(6)])
+    asks: dict[int, int] = {}
+
+    def pin_appears_late(candidate: Candidate) -> bool:
+        if candidate.key != "p0":
+            return False
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=2), _FakeClient(), g,          # the census proves 2, not 4
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_appears_late,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=6),
+    )
+
+    assert asks.get(g.id_of("p0")), "the held-back pass never happened — this row grades nothing"
+    assert len(report.deleted) <= 2, (
+        f"the sweep evicted {len(report.deleted)} node(s) on a census that proved 2 — a "
+        f"held-back pass refunded more licence than it spent, so a node nothing proved was "
+        f"deleted"
+    )
+
+
+def test_running_out_of_passes_after_a_held_back_pass_names_the_pin_not_a_rerun():
+    """The stop reason must carry the hold diagnosis out of the loop.
+
+    ⛔ A pass whose whole window is held back at the DELETE STATEMENT does not end the loop —
+    it widens and tries again. So when `max_passes` then runs out, `stop_reason` is still its
+    `"pass_budget"` initial value, and that arm tells the operator to RE-RUN. That cannot
+    converge: the window does not survive the call and the selector is deterministic, so the
+    same nodes are held at the same asks — while the answer that works ("unpin these") sits
+    in the arm this path never reaches. Measured at this shape: `PARTIAL`, `deleted=0`,
+    `budget_exhausted=True`, reason "…re-run to continue…", for a sweep that was stopped by
+    a pin the user can clear in one command.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(8)])
+    asks: dict[int, int] = {}
+
+    def pin_appears_at_every_delete(candidate: Candidate) -> bool:
+        # Each node is planned once (ask 1) and held at the delete statement (ask 2).
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=8), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_appears_at_every_delete,
+        dry_run=False,
+        # max_passes=3 keeps `reach` (1 x 2^2 = 4) ABOVE the 3 nodes the passes hold, so
+        # this lands on the branch that used to say "re-run to continue".
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=3),
+    )
+
+    assert report.deleted == ()
+    assert "re-run to continue" not in report.reason, (
+        "the report told the operator to re-run a sweep that was stopped by a pin — that "
+        "instruction cannot converge, because the next call holds the same nodes at the "
+        f"same asks. reason={report.reason!r}"
+    )
+    assert "PINNED" in report.reason or "unpin" in report.reason, (
+        "the reason did not name the pin as what stopped the sweep, so the one working "
+        f"remedy is unreachable from it. reason={report.reason!r}"
+    )
+    assert report.metric()["pass_budget_exhausted"] is False, (
+        "the binding constraint was the pin, not the pass budget"
+    )
+
+
+def test_a_window_held_back_by_a_late_reader_does_not_abandon_the_remaining_passes():
+    """The LEASE arm of the same rule, which the pin fix left ungraded.
+
+    ⛔ The `if not final:` arm asks TWO hold-backs — a pin declared mid-sweep and a reader
+    that started between planning and the statement. The sibling row above grades the pin
+    half; the lease half had the identical shape (`break`) and no row at all, so moving
+    only the pin arm back to a `break` would leave this suite green. A reader holding the
+    head of the cold set is the more common case of the two, so it is the one that must
+    not be able to cost the whole sweep.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+    leases = ReadLeases()
+
+    def record_probe_and_lease_starts(candidate: Candidate) -> bool:
+        # ⛔ The reader must start AFTER the plan-time lease gate and BEFORE the delete, or
+        # `p0` is held at plan time and the last hop is never reached. The record probe is
+        # exactly that seam: it runs at plan time, after the pin gate and the lease gate.
+        if candidate.key == "p0":
+            leases.acquire(candidate.node_id)
+        return True
+
+    report = evict(
+        _assessment(nodes=2), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=record_probe_and_lease_starts,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=4),
+    )
+
+    assert "p0" in g.node_keys(), "the node a reader held was deleted"
+    assert len(report.deleted) == 2, (
+        "a window held back by a READER at the last hop ended the sweep — the remaining "
+        "passes never ran, so the cache stays over budget while the report blames the "
+        "population or the licence instead of the read that held one node"
+    )
+    assert report.metric()["passes"] > 1, (
+        "the sweep stopped on its first pass; the widening rule for a fully held-back "
+        "window is not applied to the lease arm"
+    )
+    assert {c.key for c in report.skipped_leased} == {"p0"}, (
+        "the held node is not reported as leased, so the operator cannot see which read "
+        "is what kept it"
+    )
+    assert report.skipped_pinned == (), (
+        "a lease-only hold-back was reported as a pin, sending the operator to `unpin` "
+        "a declaration that does not exist"
+    )
+
+
+def test_a_window_held_back_by_a_reader_names_the_READ_not_a_pin():
+    """The `leased` branch of the carried-out diagnosis.
+
+    ⛔ Mutating this branch to `"pinned"` left all 203 related tests green while the report
+    said "0 node(s) are PINNED … unpin some of them, or raise TORTOISE_PIN_MAX_NODES" for a
+    window a READER was holding — a remedy for a pin that does not exist, and a hold count
+    of zero. A reader cannot be cleared by `unpin`.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph([f"p{i}" for i in range(12)])
+    leases = ReadLeases()
+
+    def probe_starts_a_reader(candidate: Candidate) -> bool:
+        # ⛔ The seam matters: the record probe runs AFTER the plan-time lease gate, so the
+        # node is planned and then held at the LAST hop — which is the arm under test.
+        leases.acquire(candidate.node_id)
+        return True
+
+    report = evict(
+        _assessment(nodes=12), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=probe_starts_a_reader,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=2),
+    )
+
+    assert report.deleted == ()
+    assert "in-flight READ" in report.reason, (
+        "the reason did not name the reader that stopped the sweep: "
+        f"reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "a LEASE-held window was reported as a pin — the operator is offered `unpin` for a "
+        f"pin that does not exist. reason={report.reason!r}"
+    )
+    assert report.metric()["pass_budget_exhausted"] is False
+
+
+def test_a_window_held_back_by_a_raising_predicate_is_not_reported_as_a_pin():
+    """The `pin-unanswerable` branch, which collapsing into `"pinned"` would hide.
+
+    ⛔ Folding an unanswerable predicate into `"pinned"` leaves the report offering `unpin`
+    for nodes that were never shown to be pinned — advice the file's own
+    `pin-unanswerable` arm says cannot be followed, because nothing was established about
+    them. Measured: that mutation left all 203 related tests green.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(8)])
+    asks: dict[int, int] = {}
+
+    def pin_raises_after_the_plan(candidate: Candidate) -> bool:
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        if asks[candidate.node_id] == 1:
+            return False                      # planned, so it reaches the last hop
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=8), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_raises_after_the_plan,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=2),
+    )
+
+    assert report.deleted == ()
+    assert "could not answer" in report.reason, (
+        f"the reason did not say the predicate could not answer: reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "nodes whose predicate RAISED were reported as pinned, so the report offers `unpin` "
+        f"for a state nothing established. reason={report.reason!r}"
+    )
+
+
+def test_a_pass_budget_exhausted_AFTER_a_deleting_pass_keeps_its_own_reason():
+    """The `hold_reason = None` reset — what makes the carry-out mapping load-bearing.
+
+    ⛔ Without the reset, an earlier pass's hold is still in scope when a LATER pass deletes
+    and the budget then runs out, so the report claims the sweep was stopped by a pin while
+    it actually stopped on the pass budget after evicting nodes. Measured: removing the
+    reset left all 203 related tests green, and turned an honest
+    `PARTIAL / budget_exhausted=True / "… re-run to continue"` into
+    `budget_exhausted=False` plus "2 node(s) are PINNED … unpin some of them".
+    """
+    g = _FakeGraph([f"p{i}" for i in range(6)])
+    asks: dict[int, int] = {}
+
+    def pinned_at_the_delete(candidate: Candidate) -> bool:
+        # p0/p1 are held at the delete statement (2nd ask), then held at plan time after.
+        if candidate.key not in {"p0", "p1"}:
+            return False
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=6), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pinned_at_the_delete,
+        dry_run=False,
+        # pass 1 is fully held back (p0/p1); pass 2 DELETES p2/p3; the budget then runs out
+        # with `after_nodes` still over `max_nodes`.
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=2),
+    )
+
+    assert len(report.deleted) == 2, "the deleting pass did not run — this row grades nothing"
+    assert "re-run to continue" in report.reason, (
+        "the reason carried an EARLIER pass's pin hold into a stop that the pass budget "
+        f"caused after it had already evicted nodes. reason={report.reason!r}"
+    )
+    assert report.metric()["pass_budget_exhausted"] is True, (
+        "the binding constraint was the pass budget, not the pin"
+    )
+
+
+def test_a_saturated_window_that_is_still_UNASKED_does_not_end_the_sweep():
+    """`window >= after_nodes` is not "nothing left to ask" — the FIRST cut of this fix
+    shipped that reading and a fresh review measured it as #14161's defect, narrower.
+
+    ⛔ `window` grows MULTIPLICATIVELY, so it saturates at `after_nodes` long before the
+    plan has looked at the population: `local` is capped at `budget` = min(batch_size,
+    remaining_plan, licence_remaining), so every candidate ranked beyond that cap was
+    never asked — and the NEXT pass asks them, because the ones just held are skipped
+    (a lease is in `held_leased_ids`; a pin is re-asked and held at PLAN time, so it
+    never re-enters `local`).
+
+    Measured at this shape with `and len(local) >= len(offered)` DELETED from the arm
+    (everything else byte-identical): `deleted=15`, `passes=4`, `remaining=25` — the
+    identical run with the guard in place reaches the budget at `passes=8`,
+    `deleted=32`, `remaining=8`. So 6 of 10 passes and 17 evictions were lost to a window
+    that had merely finished GROWING, and the reason offered the operator a remedy that
+    clears 5 nodes out of 17.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    leaked = {f"p{i:02d}" for i in range(15, 20)}      # readers start on these
+    g = _FakeGraph([f"p{i:02d}" for i in range(40)])
+    leases = ReadLeases()
+
+    def probe_and_start_a_reader(candidate: Candidate) -> bool:
+        # The record probe is the seam AFTER the plan-time lease gate, so these nodes are
+        # planned and then held at the LAST hop — the arm under test.
+        if candidate.key in leaked:
+            leases.acquire(candidate.node_id)
+        return True
+
+    report = evict(
+        _assessment(nodes=40), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=probe_and_start_a_reader,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=8, batch_size=5, max_passes=10),
+    )
+
+    assert len(g.node_keys()) == 8, (
+        f"the sweep stopped with {len(g.node_keys())} node(s) resident against a budget of "
+        f"8 — the window had saturated at `after_nodes` while the plan was still capped at "
+        f"`batch_size`, so the candidates ranked beyond it were never asked. "
+        f"deleted={len(report.deleted)} passes={report.passes} reason={report.reason!r}"
+    )
+    assert report.passes > 5, (
+        "the sweep broke as soon as `window` reached the whole graph, which is the "
+        f"condition this row exists to separate from 'nothing left to ask'. "
+        f"passes={report.passes}"
+    )
+    assert "in-flight READ" in report.reason or report.verdict == "EVICTED", (
+        "the report neither reached the budget nor named the read that is holding the "
+        f"rest. reason={report.reason!r}"
+    )
+
+
+def test_a_later_RECORD_hold_does_not_report_an_EARLIER_pass_lease():
+    """The widen path must carry ITS OWN diagnosis, and must not turn a record hold into
+    an actionable one.
+
+    ⛔ `hold_reason` was set only by the LAST-HOP arm, so the `if not local:` widen path
+    left an earlier pass's value in place: pass 1 discovers a READER on `p0` (carried as
+    `"leased"`), pass 2 finds the rest of the window unservable by the RECORD, widens, and
+    the loop then runs out of passes. The report named the in-flight READ — a hold the
+    operator cannot clear (`re-run when those reads finish`), which is not what stopped the
+    next sweep: `skipped_record_cannot_serve` held `p1`/`p2` and was never mentioned.
+
+    ⛔ AND THE RECORD HOLD IS CARRIED AS *NOTHING*, deliberately: the carry-out exists to
+    replace `pass_budget` with an ACTIONABLE hold, and a record that cannot serve has no
+    such remedy — converting it into a stop reason would also hide the binding constraint
+    (`window` does not survive a call), which is the pass budget.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph([f"p{i}" for i in range(6)])
+    leases = ReadLeases()
+
+    def probe(candidate: Candidate) -> bool:
+        if candidate.key == "p0":
+            leases.acquire(candidate.node_id)   # a reader starts AFTER the plan-time gate
+            return True
+        return False                            # everything else: the record cannot serve it
+
+    report = evict(
+        _assessment(nodes=6), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=probe,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=2),
+    )
+
+    assert report.deleted == ()
+    assert {c.key for c in report.skipped_record_cannot_serve} == {"p1", "p2"}, (
+        "this row grades nothing unless the record hold is what the last pass met"
+    )
+    assert "in-flight READ" not in report.reason, (
+        "the reason carried an EARLIER pass's lease into a stop the RECORD caused — the "
+        "operator is told to wait for a read that is not what keeps these nodes resident, "
+        f"and `skipped_record_cannot_serve` is never mentioned. reason={report.reason!r}"
+    )
+    assert "unservable" in report.reason, (
+        "the reason did not name the unservable head at all: "
+        f"reason={report.reason!r}"
+    )
+    assert "re-running will not converge" in report.reason, (
+        "the stop was the pass budget, and `window` does not survive a call — telling the "
+        f"operator to re-run here is an instruction that cannot converge. "
+        f"reason={report.reason!r}"
+    )
+
+
+def test_a_window_wholly_held_at_plan_time_names_the_PIN_not_the_read():
+    """The plan-time `not local` stop-reason arm honours the same pin-before-lease order.
+
+    ⛔ The last-hop arm and this one exist for the same reason — the buckets route the
+    operator to the remedy that CLEARS the state — but only the last-hop arm was graded:
+    swapping the order here left 52/52 in this file (and 170 passed across that commit's own
+    five-file set) while the report said "2 node(s) are held by an in-flight READ … re-run
+    when those reads finish" for a window that was half PINNED. That remedy does not
+    converge: a re-run re-asks the same pin at the same budget and stops in the same place.
+    The comment at `cache_evictor.py:1160` claims this arm "cannot disagree" with the
+    last-hop one, which is exactly what this row pins.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+    leases = ReadLeases()
+
+    # ⛔ PLAN TIME, not the last hop: the predicate answers True on the FIRST ask, so gate 6
+    # holds these before anything is planned...
+    pinned_keys = {"p0", "p3"}
+
+    def pinned(candidate: Candidate) -> bool:
+        return candidate.key in pinned_keys
+
+    # ...and the other two are already held by readers when the sweep starts.
+    for key in ("p1", "p2"):
+        leases.acquire(g.id_of(key))
+
+    report = evict(
+        # a budget below the live population, so `over` > 0 and the sweep starts; the
+        # WINDOW is then saturated by its own size, and the nodes it takes are all held.
+        _assessment(nodes=4), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pinned,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=2),
+    )
+
+    assert report.deleted == (), "a wholly held-back window deleted something"
+    assert "are PINNED" in report.reason, (
+        "a window holding BOTH a pin and a reader did not name the pin, so the operator is "
+        f"offered a re-run for a pin it cannot clear. reason={report.reason!r}"
+    )
+    assert "in-flight READ" not in report.reason, (
+        f"the lease was reported as the binding hold over the pin. reason={report.reason!r}"
+    )
+    assert report.metric()["pass_budget_exhausted"] is False
+
+def test_a_DRY_RUN_pass_that_plans_clears_an_earlier_pin_hold():
+    """The `hold_reason` reset must sit ABOVE `if dry_run:`, not next to the delete.
+
+    ⛔ It used to sit just before `_delete_nodes`, so a DRY RUN — the CLI's DEFAULT mode
+    (`dry_run=not args.execute`) — never reached it, and a later planning pass inherited an
+    earlier pass's hold: measured at 20 nodes with three pinned at the cold head,
+    `dry_run=True`, `max_nodes=2, batch_size=1, max_passes=4`, the report flipped
+    `pass_budget_exhausted` True→False and replaced "this pass budget could plan no more"
+    with "3 node(s) are PINNED (skipped_pinned) — … unpin some of them", i.e. an earlier
+    pass's hold reported for a stop the pass budget caused. `metric()` is emitted by the
+    CLI, so the wrong boolean and the wrong remedy both reach a consumer that deleted
+    nothing.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(20)])
+    cold_head = {"p0", "p1", "p2"}
+
+    report = evict(
+        _assessment(nodes=20), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=lambda candidate: candidate.key in cold_head,
+        dry_run=True,
+        # pass 1 is fully held back by the pin; the pass budget then runs out, so the
+        # binding constraint is the budget, and the pin no longer explains the stop.
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=4),
+    )
+
+    assert report.metric()["pass_budget_exhausted"] is True, (
+        "a dry run that PLANNED on its last pass reported a pass budget that was not "
+        f"exhausted, because an earlier pass's pin hold was carried into it. "
+        f"reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "an EARLIER pass's pin hold was applied to a stop the pass budget caused, so the "
+        f"report offers `unpin` for a hold that is not what ended the sweep. "
+        f"reason={report.reason!r}"
+    )
+    # ⛔ `g.node_keys()` only reddens when a dry run empties the graph — measured: deleting
+    # the `continue` in the `if dry_run:` arm made the run fall through to `_delete_nodes`
+    # (18 of 20 nodes left, `deleted=2`, `planned=2`, `verdict=DRY_RUN`) and THIS row still
+    # passed. `report.deleted` is the field that says it, and the sibling row in
+    # `test_cache_eviction_evictor_pins.py` (which does redden under that mutant) covers the
+    # class; this row states the same claim in the terms a reader expects.
+    assert report.deleted == (), (
+        f"a dry run deleted {len(report.deleted)} node(s) — a plan may not execute"
+    )
+
+
+def test_a_window_wholly_unanswerable_at_plan_time_names_the_UNANSWERABLE_pin():
+    """The plan-time `pin-unanswerable` arm — the last branch of the carry-out with no row.
+
+    ⛔ One word at `cache_evictor.py:1170` (`"pin-unanswerable"` -> `"pinned"`) left all 211
+    tests in the five covering files GREEN while the shipped report said "0 node(s) are
+    PINNED … unpin some of them" for a window whose predicate RAISED for every node: the
+    `unpin` remedy both `pin-unanswerable` message arms exist to withhold, on the CLI's own
+    default path (`dry_run=not args.execute`). The count in that sentence was 0 as well,
+    because no node in the window was ever established as pinned.
+    """
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+
+    def pin_cannot_answer(candidate: Candidate) -> bool:
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=4), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_cannot_answer,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=3),
+    )
+
+    assert report.deleted == (), "a wholly unanswerable window deleted something"
+    assert len(report.skipped_pinned) == 0, (
+        "a node whose predicate RAISED was counted as PINNED, so the remedy reported for it "
+        "is the one this file says cannot clear it"
+    )
+    assert len(report.skipped_pin_unanswerable) > 0, (
+        "the raised asks did not land in their own bucket"
+    )
+    assert "could not answer" in report.reason, (
+        "the plan-time arm did not name the unanswerable predicate, so the report routes the "
+        f"operator to `unpin`. reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "the plan-time arm reported an UNANSWERABLE hold as a pin. reason="
+        f"{report.reason!r}"
+    )
+
+
+def test_a_plan_time_window_holding_BOTH_pin_states_names_the_UNANSWERABLE_one():
+    """The plan-time precedence, when a window holds a pinned node AND an unanswerable one.
+
+    ⛔ Swapping the two arms at `cache_evictor.py:1170` (asking `pinned` before
+    `pin-unanswerable`) left all 211 tests green, while the report offered `unpin` for the
+    nodes nothing established as pinned. ⛔ THE ARM ORDER IS OBSERVABLE WITH UNANSWERABLE
+    HOLDS ALONE, which is why that same swap also reds the wholly-unanswerable row beside
+    this one: the plan-time gate adds every held id to `held_pinned_ids` whichever bucket it
+    lands in (`cache_evictor.py:1079-1083`), so that set is the ANY-HOLD set, not the
+    answered-pin set. What THIS row adds is the state where both hold-backs are on offer in
+    one pass and the two buckets must stay APART in the report — the case a convention
+    cannot be trusted for, because the file already reads the other way round in the `reach`
+    block, which is exactly how a silent inversion is possible.
+    """
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+
+    def one_pinned_one_unanswerable(candidate: Candidate) -> bool:
+        if candidate.key == "p0":
+            return True                       # answered: a real pin
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=4), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=one_pinned_one_unanswerable,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=3),
+    )
+
+    assert report.deleted == ()
+    assert len(report.skipped_pinned) >= 1 and len(report.skipped_pin_unanswerable) >= 1, (
+        "this row grades the precedence, so BOTH hold-backs must be present in the pass: "
+        f"pinned={report.skipped_pinned!r} unanswerable={report.skipped_pin_unanswerable!r}"
+    )
+    assert "could not answer" in report.reason, (
+        "with both hold-backs present the plan-time arm named the PIN, so the operator is "
+        "sent to `unpin` for nodes whose predicate raised. reason="
+        f"{report.reason!r}"
+    )
+
+
+def test_a_LAST_HOP_window_holding_BOTH_pin_states_names_the_UNANSWERABLE_one():
+    """The last-hop precedence, when one node answers and another RAISES at the statement.
+
+    ⛔ Swapping the carry ternary at `cache_evictor.py:1325` (the arm a widened pass takes
+    when it is the last the budget allows) left all 211 tests green. The last hop is the
+    second site where the operator's remedy is chosen, so the same both-holds condition has
+    to be graded there too: a pin that answers and a pin that raises are different facts,
+    and `unpin` clears only the first.
+
+    ⛔ THE SCENARIO IS BUILT SO THE PLAN-TIME ARM CANNOT ANSWER INSTEAD. `max_passes=1`
+    makes THIS pass the only one, so the sweep ends on the last hop's carried diagnosis —
+    the first cut of this row used `max_passes=2` and exited through pass 2's PLAN-TIME
+    arm instead, which graded the other site and stayed green when the last-hop ternary was
+    swapped (measured: nothing killed that mutant).
+    """
+    g = _FakeGraph([f"p{i}" for i in range(8)])
+    asks: dict[int, int] = {}
+
+    def answers_at_the_delete(candidate: Candidate) -> bool:
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        if asks[candidate.node_id] == 1:
+            return False                      # planned, so it reaches the last hop
+        if candidate.key == "p0":
+            return True                       # answered at the statement: a real pin
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=8), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=answers_at_the_delete,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=1),
+    )
+
+    assert report.deleted == ()
+    assert len(report.skipped_pinned) >= 1 and len(report.skipped_pin_unanswerable) >= 1, (
+        "this row grades the last-hop precedence, so BOTH hold-backs must be present: "
+        f"pinned={report.skipped_pinned!r} unanswerable={report.skipped_pin_unanswerable!r}"
+    )
+    assert "could not answer" in report.reason, (
+        "at the last hop the PIN was named over the unanswerable one, so the operator is "
+        f"sent to `unpin` for nodes nothing established as pinned. reason={report.reason!r}"
+    )
+
+
+def test_a_SATURATED_window_that_stops_at_the_DELETE_statement_names_the_UNANSWERABLE_pin():
+    """The BREAK arm's precedence — the exit only a SATURATED window reaches.
+
+    ⛔ THE THIRD EXIT HAD NO ROW, and it is the one that ENDS the loop. Swapping the
+    ternary at `cache_evictor.py:1315` — the arm a pass takes when `window >= after_nodes`
+    AND nothing was left unasked — left the whole suite green: a saturated window then
+    reported "N node(s) are PINNED … unpin some of them" for a window whose binding hold
+    was a predicate that RAISED, i.e. exactly the remedy this file says cannot clear it.
+    The two rows above grade the WIDEN exit and the PLAN-emits-nothing exit; neither of
+    them executes this one, which is why a mutation there survives them.
+
+    ⛔ REACHING IT TAKES A CANDIDATE LIST THAT DRAINS, and that is the reason this row
+    did not exist. The plan loop adds every planned node to `settled` even when the last
+    hop then holds it back, so a selector that re-offers the same head (the usual
+    "coldest first" shape) makes `len(local)` fall BELOW `len(offered)` on every pass
+    after the first and the pass WIDENS instead of breaking. The break is reached when
+    the selector's pool is consumed as nodes are decided: the probe below pops a key as
+    gate 3 asks for it, so the pool reaches its LAST page a pass after the window
+    saturates. Measured shape: 8 nodes, `max_nodes=4`, `batch_size=2`, so the window
+    walks 2 → 6 → 8. Pass 3 is the first with `window >= after_nodes` (8 >= 8) and it
+    still offers 4 nodes, so it widens; pass 4 offers the final 2 — the first pass where
+    `window >= after_nodes` AND `len(local) == len(offered)` agree.
+
+    ⛔ AND `max_passes=6` IS DELIBERATE: the loop has to leave through the BREAK, not by
+    running out of passes — a pass-budget exit takes the carried diagnosis instead and
+    grades the site the row above already covers, so it would pass without the ternary
+    under test. `passes == 4` is what proves the break fired — it is a fact about this
+    scenario's window arithmetic (`cache_evictor.py:1021` growth, `:998` budget), so a
+    change to the window policy must RE-MEASURE it, never delete the assertion.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(8)])
+    pool = {f"p{i}" for i in range(8)}
+
+    def selector(graph: _FakeGraph, limit: int, population: str) -> list[Candidate]:
+        return [Candidate(node_id=g.id_of(key), key=key, population=population)
+                for key in sorted(pool)[:limit]]
+
+    def probe_pops_the_pool(candidate: Candidate) -> bool:
+        # A candidate is spent as it is decided, so the pool is the UNSETTLED set and
+        # the window saturates while a page is still unoffered.
+        pool.discard(candidate.key)
+        return True
+
+    asks: dict[int, int] = {}
+
+    def answers_at_the_delete(candidate: Candidate) -> bool:
+        # Each candidate is asked EXACTLY TWICE — gate 6 at plan time, then the last
+        # hop before the DELETE — so parity is the seam that makes it unpinned while it
+        # is being planned and pinned (or unanswerable) at the statement.
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        if asks[candidate.node_id] % 2 == 1:
+            return False                      # planned, so it reaches the last hop
+        if candidate.key in ("p0", "p2", "p4", "p6"):
+            return True                       # answered at the statement: a real pin
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=8), _FakeClient(), g,
+        population=POPULATION,
+        selector=selector, record_probe=probe_pops_the_pool,
+        pinned=answers_at_the_delete,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=4, batch_size=2, max_passes=6),
+    )
+
+    assert report.deleted == (), "a wholly held-back window deleted something"
+    assert report.passes == 4, (
+        "this row grades the BREAK arm, so the loop must leave through it rather than "
+        f"by exhausting its passes; measured passes={report.passes} of max_passes=6"
+    )
+    assert report.budget_exhausted is False, (
+        "the break named the pass budget, so the operator is told to re-run a sweep that "
+        "stops in the same place: re-running cannot converge"
+    )
+    assert len(report.skipped_pinned) >= 1 and len(report.skipped_pin_unanswerable) >= 1, (
+        "both hold-backs must be present at the break or the precedence cannot be read: "
+        f"pinned={report.skipped_pinned!r} unanswerable={report.skipped_pin_unanswerable!r}"
+    )
+    assert "could not answer" in report.reason, (
+        "the BREAK arm named the answered PIN over the unanswerable one, so the operator "
+        f"is sent to `unpin` for nodes nothing established as pinned. reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "the saturated-window stop offered the pin remedy for a window whose binding "
+        f"hold was unanswerable. reason={report.reason!r}"
     )
