@@ -8796,11 +8796,15 @@ _TYPED_RETAKEN_NUMSTAT = re.compile(
 #: and is still graded as a typed pair.
 #:
 #: ⛔ THE VERB CLASS MUST BE THE DETECTOR'S, NOT A SUBSET OF IT (#14249 review, P2). The first cut
-#: of this exemption listed six verbs against the detector's fifteen, so a CORRECT sentence naming
+#: of this exemption listed seven verbs against the detector's sixteen, so a CORRECT sentence naming
 #: a fenced command and then saying `shows` / `reported` was REFUSED — the same asymmetry as the
 #: P1 above, in the false-red direction. Measured: `` `git diff --numstat …` shows `3 1` `` and
-#: `… reported `381 379` ` both flagged before this widening, both allowed after it, while the
-#: three defect witnesses stay flagged and the live document still yields 0 hits.
+#: `… reported `381 379` ` both flagged before this widening, both allowed after it, while EVERY
+#: defect witness in this arm's `for _typed in (…)` tuple stays flagged and the live document still
+#: yields 0 hits. ⛔ The counts above are the ones the two alternations actually carry (count them
+#: with `grep -n -A3 '_TYPED_RETAKEN_NUMSTAT = re\.compile'`), and the witness side is deliberately
+#: stated WITHOUT a number: a count in a comment about a tuple that grows is the head-bound figure
+#: this file forbids, and this very clause read "three" while the tuple carried eight.
 _TYPED_NUMSTAT_AS_COMMAND_RESULT = re.compile(
     r"`[^`]*\b(?:numstat\b|--stat\b|git diff\b)[^`]*`\s*"
     r"(?:(?:->|\u2192|=>)|(?:prints?|print|printed|reads?|read|returns?|returned"
