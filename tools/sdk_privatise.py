@@ -1120,7 +1120,7 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward. ⛔ THAT CLAUSE IS FALSIFIED AND KEPT ONLY AS THE CLAIM THE RE-CUT BELOW
-#: REPLACES: `11858` was never a reading of THIS tree. WHERE THE PAIR CAME FROM is measured too —
+#: REPLACES: `11858` was never a reading of THIS tree. WHERE THE PAIR REPRODUCES is measured too —
 #: `--repin` on `917ae19efd` (a branch commit, NOT an ancestor of this head) prints it exactly:
 #: that tree carries the `out.update` row and NONE of `94d75667dc`'s three `proj.g.query` rows,
 #: because it is not rebased over that commit (`--check` reads 11857 at `94d75667dc^` and 11860 at
@@ -1156,15 +1156,12 @@ SWEEP_NAMES = 66
 #: DECLARED, not rewritten: that is the ordinary-word receiver this sweep deliberately leaves
 #: alone, neither an SDK handle nor a typed reference to a public name — `typed references still
 #: pointing at a public name` is 0 at this head, which is the number the retirement owes.
-#: ⛔ WHAT TO TAKE FROM THE DRIFT RATHER THAN THE NUMBER: the 11858 pin was a READING of a tree
-#: that was NOT the one that committed it — `11858 − out.update` held for the pre-`94d75667dc`
-#: merge base and not for `10e51693f1`'s tree — so an error three rows old was CARRIED FORWARD at
-#: the one place that exists to correct it. ⛔ THAT IS THE ONLY ORIGIN THIS BLOCK ASSERTS, and it
-#: SUPERSEDES the `--repin` sentence above rather than agreeing with it: `--repin` printing the
-#: same pair ACROSS `9f83a63bfa`'s merge is not evidence the pair was read FROM the committing
-#: tree, and "derived over the whole tree" and "set from the previous pair" are two different
-#: origins for one number, not one story told twice. What was measured is the reading; which
-#: command produced the stale value was not, and is not claimed.
+#: ⛔ WHAT TO TAKE FROM THE DRIFT RATHER THAN THE NUMBER: the reading that REPRODUCES the pair is
+#: `917ae19efd`'s — a tree that never merged `94d75667dc` — and it is not the tree that committed
+#: the pin: `10e51693f1` commits the same pair while measuring 11861 against it, so an error three
+#: rows old was CARRIED FORWARD at the one place that exists to correct it. Whether the pin's author
+#: ran that command on that tree is NOT measured and is not claimed; what IS measured is that the
+#: pair reproduces there, and on no `main` tree in that span.
 #: A re-pin is a READING of the tree that will commit it — one command — and a row-by-row diff
 #: explains a delta, it never replaces the read.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
