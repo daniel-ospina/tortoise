@@ -317,6 +317,40 @@ def _preload_encoder() -> bool:
         return False
 
 
+#: The kernel's ``sun_path`` limit is 108 bytes including the NUL on Linux, minus
+#: the bytes a name needs to be useful; anything past this is refused by ``bind``.
+_MAX_UNIX_PATH_BYTES = 100
+
+
+def _bind_ready_path(socket_path: str) -> str:
+    """A sibling path to bind, so the REAL one only ever names a LISTENING socket.
+
+    ⛔ WHY THIS EXISTS (review F2 at ``76e58a21bb``). READINESS IS THE PATH'S
+    EXISTENCE — the client polls for the file — but ``bind()`` CREATES that file
+    one statement before ``listen()`` makes it connectable. A client that won the
+    20 ms poll could therefore ``connect()`` to a bound-but-not-listening socket
+    and get ``ECONNREFUSED`` (``unix(7)``: the target pathname is not a listening
+    socket), declining a batch on a perfectly healthy worker and recording it in
+    ``last_decline``. The existence poll below cannot close the gap — ``bind``
+    already made the path exist, so the loop is a no-op.
+
+    Binding beside it and renaming after ``listen()`` closes it structurally:
+    ``rename(2)`` is atomic within a filesystem and does not care that the inode is
+    a socket, so the real path only ever appears naming a listening socket. This
+    is the idiom recommended for exactly this race (python-trio#279), and the same
+    reason a preload daemon binds its socket only once it can serve.
+
+    Returns ``""`` when no sibling name fits beside an operator-supplied
+    ``TORTOISE_EMBED_WORKER_SOCKET`` — the caller then binds in place, and the
+    client's bounded ``ECONNREFUSED`` retry is the belt for that shape.
+    """
+    directory, base = os.path.split(socket_path)
+    candidate = os.path.join(directory, f".{base}.{os.getpid()}.tmp")
+    if len(os.fsencode(candidate)) > _MAX_UNIX_PATH_BYTES:
+        return ""
+    return candidate
+
+
 def serve(socket_path: str, *, parent_pid: int,
           peer_allowed=_peer_allowed,
           stop: threading.Event | None = None) -> None:
@@ -357,16 +391,14 @@ def serve(socket_path: str, *, parent_pid: int,
             _logger.warning("embed worker: could not clear %s: %s", socket_path, exc)
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    ready_path = _bind_ready_path(socket_path)
     try:
-        server.bind(socket_path)
+        # Bind at the sibling (if there is room), LISTEN, then move it onto the
+        # real name — see `_bind_ready_path` for the race this closes.
+        server.bind(ready_path or socket_path)
         server.listen(16)
-        # Create the path BEFORE announcing: the client polls for the file, and
-        # an existence check that wins the race against a bind would look like a
-        # healthy socket that refuses connections.
-        for _attempt in range(500):
-            if os.path.exists(socket_path):
-                break
-            time.sleep(0.01)
+        if ready_path:
+            os.rename(ready_path, socket_path)
         _logger.info(
             "embed worker: listening on %s (parent pid %s)", socket_path, parent_pid)
         while not stop.is_set():
@@ -388,8 +420,9 @@ def serve(socket_path: str, *, parent_pid: int,
                 _logger.warning("embed worker: connection failed", exc_info=True)
     finally:
         server.close()
-        with contextlib.suppress(OSError):
-            os.unlink(socket_path)
+        for path in (ready_path, socket_path) if ready_path else (socket_path,):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
 
 
 def main(argv: list[str] | None = None) -> int:

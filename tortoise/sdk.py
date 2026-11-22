@@ -15530,9 +15530,26 @@ class TortoiseSDK:
             # EmbeddingModel.status() (``retrieval_legs()`` declared it too
             # until #4282 deleted that method); the cooldown
             # itself is unchanged (never sticky-off).
+            #
+            # ⛔ NOT WHEN THE ENCODER LIVES ELSEWHERE (#14186 review F5). With the
+            # seam's backing on ``worker``/``external`` this process runs no forward
+            # pass, so an eager in-process load is a 432 MB copy nothing consults —
+            # the RSS the ``worker`` backing exists to remove (#13674). This is the
+            # engine-init kick (thread ``tortoise-embedder-warmup``);
+            # ``hosted_api``'s lifespan pre-warm is gated the same way, and between
+            # them they were the two copies the documented migration left resident
+            # (``docs/infra-runbook.md`` §4.1.1e).
+            #
+            # ⛔ THE GATE IS HERE, NOT INSIDE ``start_warm_up``: the write/read
+            # readiness paths read that call's return value as "is a load in
+            # flight", so a skip there would turn a healthy LOCAL load into a
+            # decline on a deployment that still uses the in-process encoder for a
+            # residual path.
             try:
+                from .embed_seam import encodes_in_process
                 from .embeddings import EmbeddingModel
-                EmbeddingModel.start_warm_up()
+                if encodes_in_process():
+                    EmbeddingModel.start_warm_up()
             except Exception:  # noqa: BLE001, RUF100 — warm-up is never fatal
                 pass
         return self._proj

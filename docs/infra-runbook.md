@@ -1295,6 +1295,7 @@ The body carries
                            "wait_ms":   {"n": 0, "window": 0, "p50": null, "p95": null, "max": null},
                            "encode_ms": {"n": 0, "window": 0, "p50": null, "p95": null, "max": null},
                            "batch_size":{"n": 0, "window": 0, "p50": null, "p95": null, "max": null}},
+               "latency_stale": false,
                "backings": {"inprocess": {"max_wait_ms": 0.0,  "selected": true,  "latency": null},
                             "worker":    {"max_wait_ms": 20.0, "selected": false, "latency": null},
                             "external":  {"max_wait_ms": 20.0, "selected": false, "latency": null}}}
@@ -1321,7 +1322,7 @@ the block arrives with the SAME key set, every value `null`, plus `error`, and `
 | variable | default | what it does |
 |---|---|---|
 | `TORTOISE_EMBED_BACKING` | `inprocess` | `inprocess` · `worker` · `external`. Unset ⇒ `inprocess`, the pre-#14186 path. |
-| `TORTOISE_EMBED_MAX_WAIT_MS` | per backing (below) | The query-batching collection window, in ms. |
+| `TORTOISE_EMBED_MAX_WAIT_MS` | per backing (below) | The query-batching collection window, in ms. ⛔ Refused unless FINITE and ≤ 60000: an `inf`/`1e9` window makes the collector's deadline infinite and the ticket's valve unbounded (`inf >= 0` passed the old guard). |
 | `TORTOISE_EMBED_MAX_BATCH` | `32` | A batch fires early when it reaches this. |
 | `TORTOISE_EMBED_QUERY_TIMEOUT_S` | `30` | The bound on ONE fired request (worker / external round trip). |
 | `TORTOISE_EMBED_WORKER_SOCKET` | a `0700` directory this process mints (`$TMPDIR/tortoise-embed-worker-<pid>-*/embed.sock`) | Where the worker listens. The private directory is not decoration: readiness is the path's EXISTENCE, and a shared directory would let any local user create it first. An explicit path here is honoured verbatim — and the CLIENT then verifies the answering peer's uid (`SO_PEERCRED`) after `connect`, so an operator-pointed shared path cannot be hijacked by a foreign process either. |
@@ -1349,6 +1350,27 @@ deployed machine means rolling it (see "Rollback is one variable" below).
 ```bash
 fly secrets set TORTOISE_EMBED_BACKING=inprocess    # or `fly secrets unset` it — same thing
 ```
+
+⛔ **AND A NON-`inprocess` BACKING DISABLES THE IN-PROCESS WARM-UPS BY ITSELF.** Both eager loads
+that put the encoder in the SERVING process are gated on the seam's backing, so choosing `worker` or
+`external` removes the copies rather than adding to them (#14186 review F5):
+
+- the **lifespan pre-warm** (`hosted_api`, thread `embedding-prewarm`) is skipped and logs one line
+  naming the backing;
+- the **engine-init kick** (`TortoiseSDK._get_proj` → `EmbeddingModel.start_warm_up`, thread
+  `tortoise-embedder-warmup`) is skipped too.
+
+Both existed only to make the *in-process* forward pass warm; with the encode elsewhere they are
+432 MB resident that nothing consults (3.66 GB with two overlapping loads, #13674). No lever has to
+be set: the gate is `embed_seam.encodes_in_process()`, read from the `TORTOISE_EMBED_BACKING`
+value. ⛔ The gate is on those two KICKS, deliberately not inside `start_warm_up` itself — the
+read/write readiness paths read that call's return value as "a load is in flight", so a skip there
+would turn a healthy local load into a decline on a deployment that still uses the in-process
+encoder for a residual path (`fallback_snapshot`, the TF-IDF fallback).
+
+The **boot page-cache warm** (`entrypoint.sh`, a throwaway process before `exec`) is deliberately NOT
+gated: it is not resident, and under `worker` it still helps — the worker loads the same model from
+the same interpreter and reads those pages warm.
 
 The next encode returns to the pre-#14186 path: the same `EmbeddingModel.get()` +
 `ensure_embed_threads()` + `model.encode(list)` call, the same thread pin, the same decline
@@ -1383,6 +1405,13 @@ curl -sS https://api.premiselabs.co/health \
   caller felt, and `collect_ms` as the part the window is responsible for. (Measured on the 0 ms
   default: `coalesced` rises while `collect_ms` stays ~0 — the coalescing is queue-behind-encode,
   which adds no admission wait — review F5.)
+- **`latency_stale` says whether the two blocks above are the CONFIGURED backing's.**
+  `backing` is always the configured choice; `backing_state.backing` names the backing the state and
+  the distributions actually describe. Between a lever flip and the next encode those are two
+different backings, and `latency_stale: true` marks it — the next encode pays the switch (a boot,
+  for `worker`). Read `latency_stale: true` as "this is what the OLD backing was doing", which is
+  exactly the read a rollout verification makes; a `null` distribution on a `backings[*]` entry means
+  that backing has never run in this process, which is not the same as "it cost nothing".
 - **`coalesced` counts the tickets that rode a batch they did not open.** A large `submissions`
   with `coalesced: 0` is a process with no concurrency — expected on a single interactive user,
   and *not* evidence the seam is broken.
