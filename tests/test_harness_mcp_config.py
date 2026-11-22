@@ -1156,19 +1156,23 @@ class TestDocsPageAndSkillConfig:
         # exists for (#9660's plan-dependent write-tool finding), so naming a
         # write/admin tool would prescribe a call that cannot be made.
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert "tortoise_list_graphs" in row, (
-            "the row must name the graph-discovery tool — a connector carries no "
-            "graph of its own, so the user has to see what exists before writing")
         active = {t.name: t for t in TOOL_REGISTRY}
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert "tortoise_list_graphs" in active, (
-            "the row names tortoise_list_graphs, so it must stay in tools/list")
-        assert "tortoise_list_graphs" not in retired, (
-            "the row must not name a RETIRED tool (#3883 class) — a tool-grant "
-            "client cannot call one")
-        assert active["tortoise_list_graphs"].risk == "read", (
-            "graph discovery must be a read-risk tool — write tools are the ones "
-            "a plan can withhold")
+        # ⛔ `tortoise_list_graphs` was RETIRED onto the container (#14169, #11609 lane
+        # P7) and `website/docs.html` was updated to name only the surviving door — the
+        # row is right and this test was asserting the surface shape the retirement
+        # removes. Asserting the OLD name here is the #3883 class the next assertion
+        # exists for (a tool-grant client cannot call a retired door), so the pin is
+        # inverted rather than dropped: the row must NOT prescribe it, and the door it
+        # retires ONTO must be the one the row teaches (asserted just below).
+        assert "tortoise_list_graphs" not in row, (
+            "the row must not name the RETIRED door `tortoise_list_graphs` — #14169 "
+            "retired it onto `tortoise_graph_overview(section=\"graphs\")`, and a "
+            "tool-grant client cannot call a retired tool (#3883 class)")
+        assert "tortoise_list_graphs" in retired, (
+            "`tortoise_list_graphs` must stay RETIRED — if it were re-activated the "
+            "row above would be prescribing an unadvertised door, and the retirement "
+            "record this row relies on would be gone")
         # The advertised (consolidated) form is named too, and the section it
         # teaches must be one the tool really accepts: a card that names an
         # `overview(section=…)` value the handler rejects sends the agent into a
@@ -1186,7 +1190,7 @@ class TestDocsPageAndSkillConfig:
         # agent call these, so an http-exposure flip (the #3883 class this suite
         # already guards for other tools) must fail here rather than silently
         # hiding the tool from a tool-grant client.
-        for name in ("tortoise_list_graphs", "tortoise_graph_overview"):
+        for name in ("tortoise_graph_overview",):
             assert active[name].http_policy is True, (
                 f"step 8 asks the agent to call {name}; it must stay "
                 "http-exposed or a ChatGPT connector cannot make the call "
