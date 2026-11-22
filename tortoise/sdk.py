@@ -46202,7 +46202,16 @@ class TortoiseSDK:
         # exception, by construction rather than by omission: the ended population
         # is already the terminal one, so the flag can neither add nor remove a
         # row here — refusing it would refuse a caller for asking for what they
-        # are getting. ``limit``, ``entity_type`` and ``kind`` scope and bound the
+        # are getting. ⛔ AND THE LIST IS THE PUBLIC RETRIEVAL VOCABULARY, NOT
+        # EVERY KEYWORD OUTSIDE IT: two PRIVATE order-ownership flags —
+        # ``_valid_time_rerank`` and ``_rerank_candidates``, passed as ``False``
+        # by the internal call sites that own a pool's ORDER, their leading
+        # underscore being the contract that they are not caller vocabulary — are
+        # outside it, so the state-question router still fires where the user's
+        # own question arrives through those seams. They re-order rows a caller
+        # has already scoped rather than scoping the read, and admitting them
+        # would suppress the route at exactly the call sites this feature exists
+        # to serve (#14140 re-cut review, P2). ``limit``, ``entity_type`` and ``kind`` scope and bound the
         # read and stay served; the sink/plumbing keywords (``leg_trace``,
         # ``read_status_out``, ``_truncation_out``, ``_state_route_out``,
         # ``_elevated_timeout_ms``) are

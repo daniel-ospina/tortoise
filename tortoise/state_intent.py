@@ -1999,8 +1999,10 @@ them — `kind`, `entity_type`, `limit` — so none silences the notice. ⛔ AND
 ARGUMENT SITS OUTSIDE THE LIST AND DOES SILENCE IT — ⚠️ ON THE PRIVATE
 `TortoiseSDK._tortoise_fts_query` ONLY, because THIS tool takes neither of the
 two names below, so passing one here is a TypeError and not a choice you have:
-`include_terminal=True` picks a scope the caller has already chosen, so the cue
-is not seen-and-unapplied and no notice is owed. ⛔ `ended_scope=` IS NOT A
+`include_terminal=True`, the currency toggle: it asks for the same read without
+the currency filter, so the cue is not applied beside it and no notice is
+emitted — the read goes to relevance, which is the same silence a filtered read
+produces. ⛔ `ended_scope=` IS NOT A
 SECOND ONE: beside a question it is REFUSED with a ValueError (#13558), so it
 cannot suppress the report — it declines the call.
 The
