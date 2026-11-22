@@ -258,9 +258,10 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_SUBSTRATE, "(opening `:37527`", _SDK, 37527, "def record_decision"),
     (_SUBSTRATE, "`:37546` is the `:Source` line", _SDK, 37546, "D10: a document is a ``:Source``, not a"),
     (_SUBSTRATE, "(opening `:37567`)**)", _SDK, 37567, "def _file_human_approval"),
-    # ⛔ And the §"capability placement" heal pair: the two `hosted_api.py` addresses were re-pointed by
+    # ⛔ And the capability-placement heal pair: the two `hosted_api.py` addresses were re-pointed by
     # DELTA in the merge (+114) onto the operator-stamp statement and a comment line, while the fragment
-    # the row quotes (`coalesce(n.is_episodic,false) <> true`) lives 37 lines lower. Pinned by content.
+    # the row quotes (`coalesce(n.is_episodic,false) <> true`) lives 37 lines lower. Pinned by content —
+    # §2.4's prose AND row 2b's own copy, which is why each token occurs twice.
     (_AUDIT, "hosted_api.py:21451-21453", "tortoise/hosted_api.py", 21453, "coalesce(n.is_episodic,false) <> true"),
     (_AUDIT, "hosted_api.py:21458", "tortoise/hosted_api.py", 21458, "_stamp_capture_provenance("),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
@@ -350,6 +351,19 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_INDEX, '`entity_verdict.py:43`', _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
     (_EVIDENCE, '(`sdk.py:28581`), so any non-NULL', _SDK, 28581, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, 'called at `sdk.py:28945`', _SDK, 28945, 'result = apply_entity_merge('),
+    # --- row 2d's `:Meta` pair was the last `+21`-class cite in this document, and NOTHING pinned it.
+    # The `#14038` re-cut wrote `sdk.py:62020`/`:62040` at `c5ca268aa96`, where `:62020` WAS the
+    # `MATCH (m:Meta {key:$key}) RETURN m.recordedAt` statement and `:62040` WAS
+    # `def _config_reset_state(`. A later fold took 21 lines out of `sdk.py` above both, so at this
+    # head `:62020` is a DOCSTRING line and `:62040` is the `# #4282 Phase 2` banner — two cites that
+    # read as re-derived and open on prose. Measured, not inferred:
+    # `sed -n '61999p;62019p' tortoise/sdk.py` prints the read and the `def`. Both rows pin the CONTENT
+    # the row's prose claims, because the population arms (`_PIN_EOF_PAIRS`, the census triple) are
+    # INVARIANT under a re-point — they hold every number this pair can be moved to — and the drift
+    # numerator cannot see them either (both sit past the pin's `sdk.py`, so they are non-comparable).
+    # That is the whole uncovered-claim class: only opening the line catches it, so the line is pinned.
+    (_AUDIT, '`sdk.py:61999` (reads)', _SDK, 61999, '"MATCH (m:Meta {key:$key}) RETURN m.recordedAt"'),
+    (_AUDIT, '`sdk.py:62019` (`_config_reset_state`)', _SDK, 62019, 'def _config_reset_state(self) -> dict | None:'),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
     # ⛔ The branch's `+147` to `hosted_backup.py` moved `def _index_has_is_operator()` from
     # `origin/main`'s `:2519` to `:2666` (`:2684` is that def's DOCSTRING line, so the `+4` that
@@ -656,6 +670,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:15873`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:16077-16082`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3801`'): 1,
+    # row 2d's `:Meta` pair — one SITE each, written once as a one-token spelling (the two-span forms
+    # at `:135`/`:149` are different spellings and cannot satisfy these counts).
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:61999` (reads)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:62019` (`_config_reset_state`)'): 1,
 }
 
 
@@ -779,6 +797,11 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         "167 of this document's 227",
         "dedupes the **345** as-written spellings to 227 — **118**",
         "345 written spellings → 227 pairs → 118 collisions → 167 drifters of the 227",
+        # ⛔ The ARROW chain and the PROSE form are one claim: the cycle-3 re-cut
+        # (`01a3c7072a`) restored the arrow rendering after the population
+        # de-duplicated back to 227 pairs, so BOTH are asserted — a doc that
+        # publishes one and not the other has lost a site, not just a phrase.
+        "**The drift is 167 of those 227.**",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1727,8 +1750,8 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58315): 56415,
     ("tortoise/sdk.py", 58317): 56415,
     ("tortoise/sdk.py", 58966): 56415,
-    ("tortoise/sdk.py", 62020): 56415,
-    ("tortoise/sdk.py", 62040): 56415,
+    ("tortoise/sdk.py", 61999): 56415,
+    ("tortoise/sdk.py", 62019): 56415,
     ("tortoise/search_engine.py", 7170): 7071,
     ("tortoise/search_engine.py", 7201): 7071,
     ("tortoise/search_engine.py", 7577): 7071,
@@ -3127,12 +3150,18 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # (`entity_verdict.py:43`), and NOTHING read it — its `sdk.py:28581` sibling was pinned and the
     # neighbour was not, so a rotation of `entity_verdict.py` under that cite would have moved it
     # silently. Same shape as the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
-    # 107 at the #14038 review (cycle 2, P2 ×2): five addresses that NOTHING read — the audit's
-    # heal scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`, re-pointed by DELTA onto the
-    # operator-stamp statement and a comment line, 37 lines off) and the SUBSTRATE sentence's three
+    # 107 at the #14038 review (cycle 2, P2 ×2), RESTORED after the `69898b2866` re-cut silently
+    # dropped these five rows while keeping their occurrence counts (measured: the merge's own conflict
+    # resolution took the older side of this file): five addresses that NOTHING read — the audit's heal
+    # scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`) and the SUBSTRATE sentence's three
     # OPENING values (`:37527`, `:37546`, `:37567`), which a forward merge had resurrected at +21 while
-    # the two graded headlines stayed right. Same shape as every row above: green pins, wrong sentence.
-    assert len(_PINS) == 107
+    # the two graded headlines stayed right.
+    # 107 -> 109 at the `#14038` fix lane's row-2d pass: the `:Meta` pair (`sdk.py:62020`/`:62040`) was
+    # the LAST `+21`-class cite in this document, and it was unobservable to EVERY population arm —
+    # `_figure_problems` is invariant under a re-point (345/229/116/169 hold at any address this pair
+    # takes), and the drift numerator cannot see it because both addresses sit past the pin's `sdk.py`
+    # and are therefore non-comparable. Only opening the line catches this class, so the line is pinned.
+    assert len(_PINS) == 109
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
