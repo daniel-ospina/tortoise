@@ -1102,6 +1102,9 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:
     #:   R1  a retired name written as a CALL — the name immediately followed by `(` — is
     #:       a copyable command, so it may not appear at all. No prose talks it back in.
+    #:       The name is judged in the block's DECODED text as well as its source, because an
+    #:       entity-spelled name (`&#116;ortoise_list_graphs`) renders as the name and is the
+    #:       same door to the reader (measured fail-open, closed in the same round).
     #:   R2  every other mention is a NOTE, and a note must name the recorded REPLACEMENT
     #:       (`RETIRED_USE_INSTEAD[name]`) inside the same markdown BLOCK. A note that
     #:       gives the reader only the old name is a dead end; an instruction does not
@@ -1398,6 +1401,53 @@ class TestEveryReaderNamesTheLiveListingDoor:
         return set(cls.REPLACEMENT_NAME.findall(RETIRED_USE_INSTEAD[name]))
 
     @classmethod
+    def _entity_only_mentions(cls, text: str) -> list[tuple[str, int, str, int]]:
+        """Mentions a reader SEES that the raw scan cannot: the name is ENTITY-SPELLED.
+
+        ⛔ MEASURED (this fix round, same class as the r10/r11/r12 findings):
+        ``Call &#116;ortoise_list_graphs(x=1) for names.`` renders — to the reader, and to
+        a browser — as a call to the retired door, and BOTH rules passed it, because
+        `name_hits` scans the RAW source where the token reads `#116;ortoise_list_graphs`.
+        That is a false PASS of the guard's own promise, not a cosmetic gap.
+
+        The decoded text is already computed: every block's `body` is the block's VISIBLE
+        text, whose entities markdown-it has resolved. A name whose decoded occurrence count
+        EXCEEDS its whole-token count in the block's raw source is therefore (partly)
+        entity-spelled — and only those are returned, so a plainly written mention stays the
+        raw scan's to judge and no existing verdict changes direction.
+
+        ⛔ WHY A COUNT AND NOT `name in raw`, which was the first cut and was MEASURED
+        insufficient: a block may carry a plain mention AND an entity-spelled CALL of the
+        same door, e.g. ``The door tortoise_list_graphs is retired; use
+        tortoise_graph_overview. Also call &#116;ortoise_list_graphs(x=1).`` — `name in raw`
+        is True there, so the call was skipped, and R2 passes because the block does name the
+        successor. The excess count is order-independent, so neither a preceding nor a
+        following plain mention can hide the entity occurrence.
+
+        Returns ``(name, block_start, body, call_end)`` where `call_end` is the end offset
+        in `body` of the first entity-spelled occurrence written in CALL form, or -1.
+        Reporting the block's START line is deliberate — the source offset of a decoded
+        character does not exist.
+        """
+        found: list[tuple[str, int, str, int]] = []
+        for begin, finish, body in cls.blocks(text):
+            raw = text[begin:finish]
+            if "&" not in raw or not body:
+                continue
+            raw_counts: dict[str, int] = {}
+            for name, _start, _end in cls.name_hits(raw):
+                raw_counts[name] = raw_counts.get(name, 0) + 1
+            ends_by_name: dict[str, list[int]] = {}
+            for name, _start, end in cls.name_hits(body):
+                ends_by_name.setdefault(name, []).append(end)
+            for name, ends in ends_by_name.items():
+                if len(ends) <= raw_counts.get(name, 0):
+                    continue
+                call_end = next((e for e in ends if cls.is_call_form(body, e)), -1)
+                found.append((name, begin, body, call_end))
+        return found
+
+    @classmethod
     def retired_call_forms(cls, text: str) -> list[str]:
         """R1 — every retired name written as a call, as ``name:line`` (empty is clean)."""
         found: list[str] = []
@@ -1406,6 +1456,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 continue
             line = text.count("\n", 0, _start) + 1
             found.append(f"{name}:{line}")
+        for name, begin, _body, call_end in cls._entity_only_mentions(text):
+            if call_end < 0:
+                continue
+            found.append(f"{name}:{text.count(chr(10), 0, begin) + 1}")
         return found
 
     @classmethod
@@ -1432,6 +1486,13 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 line = text.count("\n", 0, start) + 1
                 where = "NO BLOCK" if body is None else " ".join(body.split())[:120]
                 found.append(f"{name}:{line} -> {where}")
+        for name, begin, body, call_end in cls._entity_only_mentions(text):
+            if call_end >= 0:
+                continue
+            if cls.replacements(name) & set(cls.REPLACEMENT_NAME.findall(body)):
+                continue
+            line = text.count("\n", 0, begin) + 1
+            found.append(f"{name}:{line} -> {' '.join(body.split())[:120]}")
         return found
 
     def test_the_guard_names_the_doc_it_guards(self):
@@ -2149,6 +2210,76 @@ class TestEveryReaderNamesTheLiveListingDoor:
             f"an indented code block is not its own block: {bodies}")
         assert self.notes_missing_replacement(indented), (
             "an indented code sample borrowed the note's replacement")
+
+    @pytest.mark.parametrize("spelling", [
+        "Call &#116;ortoise_list_graphs(x=1) for names.",
+        "Call tortoise&#95;list&#95;graphs(x=1) for names.",
+    ], ids=["whole-name-entity", "underscore-entities"])
+    def test_an_ENTITY_spelled_call_is_still_a_call(self, spelling):
+        """MEASURED fail-open of the same class as r10/r11/r12 — the name is DECODED.
+
+        An entity-spelled name renders as the name: a reader sees the retired door and can
+        copy the call. Both rules read the RAW source, where the token is `#116;ortoise_…`,
+        so before this row the guard returned a clean verdict on:
+
+            Call &#116;ortoise_list_graphs(x=1) for names.
+            -> R1 []  R2 []      ACCEPTED (a browser shows the retired door)
+
+        This is the mirror of the r10-r12 findings: those hid a REPLACEMENT the reader never
+        sees, this hid the MENTION the reader does see. Both are a false PASS of the guard's
+        own promise, so both are closed — via the block's decoded body, which `blocks()`
+        already computes for R2.
+
+        ⛔ NOT a code span, and that is measured rather than assumed: `blocks()` reports
+        ``Call `&#116;ortoise_list_graphs`(x=1).`` with its body still holding the ENTITY,
+        because markdown-it gives `code_inline` the literal source and the renderer escapes
+        it — a reader sees the entity text there, so there is nothing to decode and no row.
+        """
+        assert self.retired_call_forms(spelling + "\n"), (
+            f"an entity-spelled call was accepted as a note: {self.blocks(spelling + chr(10))}")
+
+    @pytest.mark.parametrize("spelling", [
+        "The MCP tool &#116;ortoise_list_graphs lists graph names.",
+        "The MCP tool tortoise&#95;list_graphs lists graph names.",
+    ], ids=["bare-entity-mention", "bare-underscore-entity"])
+    def test_an_ENTITY_spelled_dead_end_is_reported(self, spelling):
+        """The R2 half: a bare entity-spelled mention with NO successor is a dead end.
+
+        Measured before this row: ``R1 []  R2 []`` — ACCEPTED, although the paragraph the
+        reader sees names only the retired door. The decoded body is what R2 already matches
+        replacements against, so the same decode answers whether the mention is there.
+        """
+        assert self.notes_missing_replacement(spelling + "\n"), (
+            f"an entity-spelled dead end was accepted: {self.blocks(spelling + chr(10))}")
+
+    def test_an_ENTITY_spelling_is_judged_ONCE_and_a_named_successor_still_clears_it(self):
+        """The two controls: no double-report, and no false red on a correct note.
+
+        `_entity_only_mentions` returns a name only when it is ABSENT from the block's own
+        raw source, so a plainly written mention is still the raw scan's to judge — otherwise
+        every mention in a block containing an unrelated `&` (an `&` in prose, an `&amp;`)
+        would be reported twice. And an entity-spelled mention whose block DOES name the live
+        door is a correct note, so it must stay accepted: the fix may not become an
+        over-block that reds the repair it asks for.
+        """
+        plain = "The door `tortoise_list_graphs` retired; use `tortoise_graph_overview`.\n"
+        assert self.retired_call_forms(plain) == [], self.retired_call_forms(plain)
+        assert self.notes_missing_replacement(plain) == [], self.notes_missing_replacement(plain)
+        amp = "Tom &amp; Jerry: the door `tortoise_list_graphs` retired; use `tortoise_graph_overview`.\n"
+        assert self.retired_call_forms(amp) == [], self.retired_call_forms(amp)
+        assert self.notes_missing_replacement(amp) == [], self.notes_missing_replacement(amp)
+        repaired = "The door &#116;ortoise_list_graphs retired; use `tortoise_graph_overview`.\n"
+        assert self.retired_call_forms(repaired) == [], self.retired_call_forms(repaired)
+        assert self.notes_missing_replacement(repaired) == [], self.notes_missing_replacement(repaired)
+        calls = self.retired_call_forms("Call &#116;ortoise_list_graphs(x=1).\n")
+        assert len(calls) == 1, f"an entity-spelled call is reported once, not twice: {calls}"
+        mixed = (
+            "The door `tortoise_list_graphs` retired; use `tortoise_graph_overview`."
+            " Also call &#116;ortoise_list_graphs(x=1).\n"
+        )
+        assert self.retired_call_forms(mixed), (
+            "a PLAIN mention in the same block hid an entity-spelled call — the first cut"
+            f" of this fix gated on `name in raw` and measured exactly this miss: {mixed!r}")
 
     def test_declared_residual_a_block_may_name_both_and_still_instruct(self):
         """⚠️ DECLARED RESIDUAL — stated, not tuned (#14237 r5 review).
