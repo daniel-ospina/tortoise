@@ -1106,6 +1106,20 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:       gives the reader only the old name is a dead end; an instruction does not
     #:       name the successor, so it reds here without reading a word of English.
     #:
+    #: **OVERRIDES:** sentence segmentation's industry default does NOT split at `;` (NLTK
+    #: Punkt's `sentbreak` is `.`/`?`/`!` only) — and this guard now does not split at `;`
+    #: either, because it does not read SENTENCES at all. The unit is the markdown BLOCK (and
+    #: within a table, the CELL) that a reader acts on: five review rounds measured that every
+    #: sentence-level unit — the `SENTENCE_BREAK` table, the closer run, the label word — could
+    #: be defeated by a form of English the table had not enumerated. ⛔ THE EARLIER `;`-CLAUSE
+    #: OVERRIDE ON THIS SAME GUARD IS SUPERSEDED, not narrowed: with no splitter there is no
+    #: `;` boundary left to defend, and the property it protected (a note in one clause must
+    #: not clear an instruction in the next) is met structurally by the block/cell unit. The
+    #: departure from the standard that REMAINS is this one — a structural unit wins over the
+    #: linguistic one — and it is recorded here rather than in the deleted comment, so the next
+    #: reader holding a sentence-segmentation library's documentation finds the ruling instead
+    #: of an accident.
+    #:
     #: ⛔ R1 ALONE WOULD BE VACUOUS, AND THAT IS MEASURED, NOT FEARED. The defect this
     #: guard exists for — commit b4da1f5c01: "or from the MCP tool
     #: **`tortoise_list_graphs`**, which answers a metadata summary", and the table row
@@ -1182,6 +1196,25 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 or stripped.startswith("#")
                 or re.match(r"[-*+] |\d+\. ", stripped) is not None
             )
+            if stripped.startswith("|"):
+                # ⛔ A TABLE CELL IS ITS OWN BLOCK, not the row (#14237 round-2 review's
+                # property, kept when the rule moved off sentences). A markdown row has no
+                # sentence terminator, so with the ROW as the unit a migration note in one
+                # cell clears an instruction in the next — the exact fail-open the cell
+                # scoping was added for. `|` is the cell separator and not a character this
+                # doc uses in prose.
+                flush(paragraph, paragraph_start, offset)
+                paragraph = []
+                cursor = offset
+                cells = line.split("|")
+                for index, cell in enumerate(cells):
+                    cell_start = cursor
+                    cursor += len(cell)
+                    if index < len(cells) - 1:
+                        cursor += 1  # the `|` separator itself
+                    blocks.append((cell_start, min(cursor, ends), cell))
+                offset = ends
+                continue
             if structural:
                 flush(paragraph, paragraph_start, offset)
                 paragraph = []
@@ -1275,13 +1308,47 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "~~~\n"
         )
         blocks = [body for _start, _end, body in self.blocks(text)]
-        assert len(blocks) == 7, blocks
+        # The table row is now FOUR blocks (three cells plus the empty leading cell), and
+        # that is the point: `| a | b |` splits to ['', ' a ', ' b ', '\n'], so a note in one
+        # cell can never clear an instruction in the next (`test_a_table_cell_is_its_own_block`).
+        assert len(blocks) == 10, blocks
         assert blocks[0] == "Wrapped prose line one\nand the same paragraph.\n"
-        assert blocks[4] == "```\ncall()\n```\n"
-        assert blocks[5] == "Prose directly under the fence, with no blank line.\n", (
+        assert blocks[1:5] == ["", " a ", " b ", "\n"], blocks[1:5]
+        assert blocks[5] == "# a heading\n"
+        assert blocks[6] == "- a list item\n"
+        assert blocks[7] == "```\ncall()\n```\n"
+        assert blocks[8] == "Prose directly under the fence, with no blank line.\n", (
             "prose and the fence below it were merged into one block — a code sample then "
             "borrows the replacement a note in the prose names")
-        assert blocks[6] == "~~~\ncode()\n~~~\n"
+        assert blocks[9] == "~~~\ncode()\n~~~\n"
+
+    def test_a_table_cell_is_its_own_block(self):
+        """A row has no terminator, so cell scoping keeps a note from clearing an instruction.
+
+        ⛔ THE PROPERTY IS KEPT FROM THE SENTENCE-ERA TEST, RE-EXPRESSED AGAINST THE RULE THAT
+        SHIPPED (#14237 round-2 review, measured; merged from the peer's
+        `test_a_table_cell_is_its_own_sentence`). It is the row-unit fail-open: a migration
+        note in one cell and an INSTRUCTION in the next share a markdown row, so a ROW-unit R2
+        would clear the instruction on its neighbour's replacement. Measured below on both
+        halves — the instruction cell alone reds, the note cell alone passes.
+        """
+        row = ("|| `GRAPH_LISTING` | call `tortoise_list_graphs` for names "
+               "| (`tortoise_list_graphs` retired forward into "
+               "`tortoise_graph_overview(section=\"graphs\")`) |\n")
+        assert not self.retired_call_forms(row), (
+            "the fixture must be a BARE mention, not a call form — otherwise R1, not the "
+            "cell split, is what reds it and this row grades nothing")
+        instruction = row.index("call `tortoise_list_graphs")
+        cells = [body for start, end, body in self.blocks(row) if start <= instruction < end]
+        assert len(cells) == 1, cells
+        assert "tortoise_graph_overview" not in cells[0], (
+            "the instruction inherited the NEXT cell's replacement, so a row-unit block "
+            "clears an instruction written beside a note — the round-2 fail-open")
+        note = row.rindex("`tortoise_list_graphs`")
+        note_cell = [body for start, end, body in self.blocks(row) if start <= note < end]
+        assert len(note_cell) == 1 and "tortoise_graph_overview" in note_cell[0], (
+            "the migration note's own cell must name the replacement and must be its own "
+            "block")
 
     def test_the_PRE_FIX_text_is_a_violation(self):
         """R2 catches the defect this guard exists for — measured from commit b4da1f5c01.
