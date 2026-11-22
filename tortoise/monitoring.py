@@ -942,7 +942,8 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #: * ``PROJECTION_OLDEST_PENDING_SECONDS`` — the lag in TIME: how old the item at
 #:   the head is. Positions alone cannot distinguish a burst of 500 fast folds
 #:   from 500 records stuck behind one wedged statement; this is the number that
-#:   can. ⛔ It is a CALLBACK gauge (``set_function``, bottom of this module), not
+#:   can. ⛔ It is a CALLBACK gauge (``set_function``, registered immediately below
+#:   this family's definition — `monitoring.py:1077`, NOT the bottom of the file), not
 #:   an event-published one: it is recomputed on collect, because the value drifts
 #:   with the clock and the loop that would push it is the thread a wedge blocks
 #:   (#14222 review cycle 5, ISSUE 1).
@@ -3273,8 +3274,8 @@ def record_projection_queue_state(*, depth: int, pending_positions: int) -> None
     ISSUE 1). ``PROJECTION_OLDEST_PENDING_SECONDS`` is a function of the CLOCK, so
     a pushed value is only as fresh as its last publish — and the loop publishes
     at exactly the two moments a wedge rules out (it is inside ``project``, with
-    nothing else waking it). It is registered with ``Gauge.set_function`` at the
-    bottom of this module and recomputed on COLLECT instead: the gauge then
+    nothing else waking it). It is registered with ``Gauge.set_function``
+    immediately below its own family definition and recomputed on COLLECT instead: the gauge then
     represents current state, which is what a Prometheus gauge is for and what
     makes an ``oldest_pending_seconds > N`` alert able to fire on a quiescent
     wedge. Depths and positions stay event-published because they do not drift
@@ -8847,8 +8848,8 @@ def metrics(sdk=None, setup_timeout=None, graph_size_timeout=None) -> dict:
         # queue was at its bound": only ``queue_full`` is that, and an operator who
         # reads the narrowed sentence sizes `TORTOISE_PROJECTION_QUEUE_MAX` up to fix
         # a `uncopyable` record shape and a `queue_fault`'s thread exhaustion, which
-        # are not bound problems at all (round-15 review, P3). ⚠️ `worker` reports whether an
-        # operator armed the loop at all: ``{"armed": false}`` means these
+        # are not bound problems at all (round-15 review, P3). ⚠️ The ``armed`` key
+        # reports whether an operator armed the loop at all: ``{"armed": false}`` means these
         # gauges are a leftover from a previous arming, not a live reading.
         "record_projection_worker": _projection_worker_metrics(),
         # #13417: the DERIVED-entity vector's own channel. #13229 made a cold

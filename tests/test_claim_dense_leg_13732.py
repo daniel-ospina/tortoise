@@ -2089,6 +2089,64 @@ class TestTheDeferredWrite:
             f"the note still opens with the other arms' zeroes: {payload['note']}"
         )
 
+    def test_a_DRAINED_deferral_whose_FOLDS_ALL_FAILED_still_names_a_repair(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """#14222 review round 16, P2 — a CONVERGED drain is not a WRITTEN record.
+
+        The sibling legs cover "the queue did not reach it" (`record_deferred_
+        undrained`) and "a healthy deferred seed" (`_fold_needed()` False). The
+        shape between them was invisible: the loop RAN every fold and each one
+        FAILED — `circuit_open`, the outage this branch's own vocabulary names,
+        where `_classify_fold_outcome` counts `projection_refused`. The queue then
+        drains immediately, so `undrained` is 0, `applied` is 0 and `deferred` is N
+        — byte-identical to a healthy seed — and the report answered "no fold
+        needed" for a record short by every queued row, while
+        `require_population_in_record` told the operator to read a `seed.fold` that
+        did not exist.
+
+        ⛔ THE COUNTER IS THE WORKER'S OWN, NOT A PATCHED NUMBER: the queued item is
+        real (the REAL chokepoint defers it — carried tenancy, journal line, armed
+        DSN) and the fold really raises inside the loop, so `stats().failures` moves
+        the way it moves in production. Drop the `record_deferred_failures` term
+        from `_fold_needed()`, stop publishing it, or stop differencing the counter,
+        and this reds.
+        """
+        from tortoise import projection_worker, record_writer
+
+        def _exploding_write(record, **_kw):
+            raise RuntimeError("record unavailable (circuit_open)")
+
+        _journal_double(monkeypatch)
+        monkeypatch.setattr(record_writer, "write_live_record", _exploding_write)
+        monkeypatch.setenv(projection_worker.ENV_WORKER, "1")
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+        projection_worker.shutdown(drain=False)
+        try:
+            seed = tool_mod._seed_population(
+                _FoldDouble(),
+                [{"id": "pt-12186000002", "content": "gamma"}],
+                journal_path=tmp_path / "j.jsonl",
+                tenant=("org-1", "graph-1"),
+                encode_many=lambda texts: [[0.5] for _ in texts],
+            )
+        finally:
+            projection_worker.shutdown(drain=True, timeout=10)
+
+        payload = seed.as_dict()
+        assert seed.record_deferred == 1, payload
+        assert seed.record_deferred_undrained == 0, (
+            "the drain converges on a FAILED fold — that is the whole point of this "
+            f"leg: {payload}"
+        )
+        assert seed.record_deferred_failures >= 1, (
+            "the loop reported a failed fold and the report did not read it: "
+            f"{payload}"
+        )
+        assert seed._fold_needed() is True, payload
+        assert "fold" in payload, payload
+        assert "did not write a row" in payload["note"], payload["note"]
+
     def test_a_DEFERRED_report_names_NO_repair_and_no_loss(self, tool_mod):
         """The report side of the same fact, pinned without a store.
 
