@@ -1211,6 +1211,31 @@ class TestDriftAndStaleness:
         assert out["notified"] == 100
         assert send.calls == []
 
+    def test_a_SAME_threshold_stamp_is_the_duplicate_the_re_read_exists_for(self):
+        """The EQUALITY case — the one a duplicate notice actually comes from.
+
+        A peer stamped THIS threshold between this pass's row read and its send:
+        the account row says ``None``, the ledger says ``80``, and this pass is
+        about to send ``80``. ``<=`` suppresses it; ``<`` sends a SECOND 80 %
+        notice, which is the defect the pre-send re-read exists to prevent.
+
+        ⛔ Added because the sibling row above pins only ``fresh > threshold``
+        (mark 100 / notice 80), so inverting the comparison to ``<`` left the
+        whole file GREEN — measured, 134 passed (#14038 mutation pass). A guard
+        that stays green under the inversion it claims to protect is not a
+        guard; this row is what makes the equality reachable.
+        """
+        cp = _fake_cp(storage_notice_pct=80)       # stamped AT this threshold
+        send = _Sender()
+        account = cn.Account(org_id=ORG_ID, email="dana@acme.example",
+                             name="Acme", notice_pct=None)  # …read stale
+        out = asyncio.run(cn.notify_account(
+            ORG_ID, cp=cp, account=account, send=send,
+            limits=_limits(102), reading=_Reading(90.0)))
+        assert out["status"] == "already-notified", out
+        assert out["notified"] == 80
+        assert send.calls == []
+
     def test_a_fully_notified_account_costs_no_gauge_read(self):
         """The top mark is the whole ledger: skip the two sync gauge reads."""
         cp = _fake_cp(storage_notice_pct=100)
