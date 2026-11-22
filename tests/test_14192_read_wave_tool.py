@@ -622,8 +622,55 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False) -> set[str]:
     return out
 
 
+#: The mutator names a reader is LIKELY to write. ⛔ NOT THE GATE — see
+#: `_is_mutator_method` below, which is fail-CLOSED: this set is documentation and the
+#: anchor the recorded-rows test uses to find "the mutating line", and a name it omits
+#: (``__init__``, ``__delitem__``, ``__iadd__``, ``__ior__`` …) no longer reads GREEN.
 _MUTATORS = {"append", "clear", "extend", "insert", "pop", "remove", "reverse", "sort",
              "update", "__setitem__", "popitem", "setdefault"}
+
+#: Methods whose WHOLE contract is to observe the receiver — the READ side of the
+#: collection protocol. Everything else is a mutation.
+#:
+#: ⛔ THE DEFAULT IS INVERTED, AND THAT IS THE FIX. The mutator test used to be
+#: ``name in _MUTATORS`` — a closed ALLOW-list — so every mutator it did not name was
+#: GREEN, and Python's data model carries more of them than any list a reader writes.
+#: FOUR measured GREEN at `3e6e5e61de1b` through the full pin (each permutes or rewrites
+#: the recorded page while ``compare()`` still reports ``rank_identical: True``, because
+#: the mutation is in the HARNESS and erases the difference the verdict exists to see):
+#:
+#:     results.__init__(sorted(results, key=_result_id, reverse=True))   replaced in place
+#:     results.__delitem__(slice(None))                                  emptied
+#:     results.__iadd__([{"id": "REDACTED"}])                           appended
+#:     results[0].__init__({"id": "REDACTED"})                          row replaced
+#:
+#: ``list.__init__`` re-initialises the SAME list object, so the artifact records the
+#: canonicalised page — the exact false PASS this pin exists to prevent, reached without
+#: a single binding-form indirection. That is why this is a NAME-LIST polarity fix and
+#: not a fifteenth arm: an unknown method name is now a mutation, and a false red costs
+#: an edit here while a false green costs the verdict.
+_PURE_METHODS = frozenset({
+    # container observation
+    "count", "index", "copy", "get", "keys", "values", "items", "__len__",
+    "__getitem__", "__iter__", "__contains__",
+    # identity / display / comparison
+    "__eq__", "__ne__", "__hash__", "__str__", "__repr__", "__format__",
+    # str reads (a tainted for-target is not always a collection)
+    "startswith", "endswith", "find", "rfind", "isdigit", "isalpha",
+})
+
+
+def _is_mutator_method(name: str | None) -> bool:
+    """True when ``<receiver>.<name>(…)`` may MUTATE the receiver.
+
+    Fail-closed on purpose: an unknown name is a mutation, because the alternative is a
+    closed allow-list of mutators that any unlisted dunder walks around (see
+    ``_PURE_METHODS``). ``None`` (a call whose callee is not an attribute at all) is not a
+    method call, so it is not a mutation.
+    """
+    if name is None:
+        return False
+    return name not in _PURE_METHODS
 
 
 def _collection_alias_predicate(var: str):
@@ -782,6 +829,17 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     (`_c[k] = results[0]`, `self._page = results[0]`) — and the same set one level down,
     for the RECORDED ROWS — plus a bound mutator (`_s = results.sort`) reached directly or
     through a container slot.
+    ⛔ A METHOD NAME IS NOT ENUMERATED, IT IS DEFAULTED (#14281 review round 14, four
+    shapes measured GREEN at `3e6e5e61de1b`): the mutator test is `_is_mutator_method`,
+    which is FAIL-CLOSED — `_PURE_METHODS` names the read side of the collection protocol
+    (`count`, `index`, `copy`, `get`, `__len__`, …) and every other name, including one
+    Python adds later, is a mutation. It used to be `name in _MUTATORS`, so
+    `results.__init__(sorted(results, …))` / `results.__delitem__(slice(None))` /
+    `results.__iadd__([…])` / `results[0].__init__({…})` all read GREEN while each one
+    replaced the page the artifact records — the same closed-list fail-open the environ arm
+    carried for `os.environ.__init__`. This one is NOT a binding-form indirection and it
+    does not grow a clause per spelling: it is a polarity, and the two are different
+    things. The residual list below is therefore about REACH, not about names.
 
     **NOT covered, by construction — every one of these is an indirection a static `ast`
     walk cannot resolve, and adding a clause per spelling is how eleven rounds produced
@@ -1034,7 +1092,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         mutations` closed for `{"p": os.environ.pop}`.
         """
         if isinstance(v, ast.Attribute):
-            return v.attr in _MUTATORS and bool(_tainted(v.value))
+            return _is_mutator_method(v.attr) and bool(_tainted(v.value))
         if isinstance(v, ast.Dict):
             return any(e is not None and _bound_mutator_expr(e) for e in v.values)
         if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
@@ -1069,7 +1127,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             continue  # the read itself COLLECTS into the trace; it is not a mutation of it
         receiver: set[str] = set()
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and node.func.attr in _MUTATORS:
+                and _is_mutator_method(node.func.attr):
             # A method called ON a slot's value (`_d["k"].update(…)`) mutates the held
             # object, so a container the page was stored into counts here — but only when
             # the receiver REACHES THROUGH it (`_tainted`).
@@ -1354,7 +1412,7 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
             _t, _v = [node.target], node.value
         else:
             continue
-        if isinstance(_v, ast.Attribute) and _v.attr in _MUTATORS \
+        if isinstance(_v, ast.Attribute) and _is_mutator_method(_v.attr) \
                 and _reaches_element(_v.value, derived):
             bound_mutator |= {b.id for t in _t for b in ast.walk(t)
                               if isinstance(b, ast.Name)}
@@ -1366,7 +1424,7 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
             continue  # naming an element (or a slice of it) is not mutating it
         touched = False
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and node.func.attr in _MUTATORS:
+                and _is_mutator_method(node.func.attr):
             touched = bool(_names_in(node.func.value) & derived)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and node.func.id in bound_mutator:
@@ -1462,8 +1520,13 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     harness removes them BEFORE building the SDK so it measures the embedded graph. The
     exemption is scoped: the same `pop` inside `run()` is a mutation like any other.
     """
-    mutators = {"clear", "pop", "popitem", "setdefault", "__delitem__", "__setitem__",
-                "update"}
+    # ⛔ FAIL-CLOSED HERE TOO (#14281, the same polarity fix as the page guard's
+    # `_PURE_METHODS`): this was a closed allow-list `{clear, pop, popitem, setdefault,
+    # __delitem__, __setitem__, update}`, so `os.environ.__init__({…})` — which
+    # RE-INITIALISES the same mapping in place — and `os.environ.__ior__(…)` were GREEN
+    # while the `os.environ.update(…)` one word over was RED. An unknown method on the
+    # mapping is now a mutation; the module-level setup pops stay exempt through
+    # `module_pop` below, which tests the NAME, not the set.
     setup_pops = {"TORTOISE_API_URL", "TORTOISE_API_KEY"}
     # ⛔ THE OTHER STATIC SPELLING IS A SEED, NOT A TERMINAL NAME (#14281 review).
     # `from os import environ` / `... as env` binds the name with NO `Assign` node, so
@@ -1584,7 +1647,7 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     # function back to the container.
     def _bound_mutator_expr(v: ast.AST) -> bool:
         if isinstance(v, ast.Attribute):
-            return v.attr in mutators and _reaches_mapping(v.value)
+            return _is_mutator_method(v.attr) and _reaches_mapping(v.value)
         if isinstance(v, ast.Dict):
             return any(e is not None and _bound_mutator_expr(e) for e in v.values)
         if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
@@ -1599,7 +1662,7 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
                      and isinstance(node.ctx, (ast.Store, ast.Del))
                      and _reaches_mapping(node.value))
         method = (isinstance(node, ast.Call)
-                  and getattr(node.func, "attr", None) in mutators
+                  and _is_mutator_method(getattr(node.func, "attr", None))
                   and _is_environ(getattr(node.func, "value", None)))
         aug = isinstance(node, ast.AugAssign) and _is_environ(node.target)
         bound_call = (isinstance(node, ast.Call) and (
@@ -1843,6 +1906,121 @@ def test_a_CONTAINER_SLOT_holding_an_element_is_that_element() -> None:
     assert not _mutated_after(run_def, "results", read.lineno, artifact_append=None), (
         "`_tally['n'] = len(results)` counts the page, it does not hold it — a counter "
         "incremented afterwards is not a mutation of the measured page (false red)")
+
+
+def test_an_UNLISTED_METHOD_on_the_page_is_a_MUTATION_not_a_pass() -> None:
+    """The mutator test is FAIL-CLOSED: an unknown method name is a mutation.
+
+    ⛔ FOUR SHAPES MEASURED GREEN at `3e6e5e61de1b` through the FULL pin (21 passed), each
+    with the page genuinely replaced, and `compare()` reporting `rank_identical: True`:
+
+        results.__init__(sorted(results, key=_result_id, reverse=True))   -> GREEN
+        results.__delitem__(slice(None))                                 -> GREEN
+        results.__iadd__([{"id": "REDACTED"}])                           -> GREEN
+        results[0].__init__({"id": "REDACTED"})                          -> GREEN
+
+    The test was `name in _MUTATORS` — a closed ALLOW-list — so every mutator it did not
+    name was GREEN. `list.__init__` RE-INITIALISES the same list object, so the artifact
+    records the canonicalised page and the harness erases exactly the difference the
+    verdict exists to see. ⛔ This is NOT a binding-form indirection (the class the file
+    declares it cannot enumerate): it is a name-list POLARITY bug, so the default is now
+    inverted — `_PURE_METHODS` is the read side, and everything else is a mutation.
+
+    The measured REDs below are asserted at the MUTATING line (a bind-line over-fire is
+    what let the environ table stay green with half its clauses deleted), and the
+    controls are what stop the inverted default from being a blanket red.
+    """
+    cases = {
+        "list.__init__ replaces the page in place": (
+            "    results.__init__(sorted(results, key=_result_id, reverse=True))\n",
+            "results.__init__("),
+        "list.__delitem__ empties the page": (
+            "    results.__delitem__(slice(None))\n",
+            "results.__delitem__("),
+        "list.__iadd__ appends to the page in place": (
+            "    results.__iadd__([{'id': 'REDACTED'}])\n",
+            "results.__iadd__("),
+        "dict.__init__ on the recorded row": (
+            "    results[0].__init__({'id': 'REDACTED'})\n",
+            "results[0].__init__("),
+    }
+    for label, (line_src, marker) in cases.items():
+        src = ("def run(sdk):\n"
+               "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+               + line_src)
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        line = _mutating_line(src, marker)
+        hits = _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+        assert line in hits, (
+            f"[{label}] an UNLISTED method on the measured page is GREEN (hits={hits}, "
+            f"wanted {line}) — `__init__`/`__delitem__`/`__iadd__` mutate the SAME object "
+            "the artifact records, so `compare()` calls a canonicalised page "
+            "`rank_identical: True`")
+
+    # ⛔ THE CONTROLS, so the inverted default is not a blanket red: the READ side of the
+    # collection protocol must stay GREEN, or the pin reds the tool it exists to protect.
+    for label, line_src in {
+        "count() observes the page": "    _n = results.count('x')\n",
+        "index() observes the page": "    _i = results.index('x')\n",
+        "copy() takes a copy": "    _c = results.copy()\n",
+        "an element's get() observes it": "    _v = results[0].get('id')\n",
+        "len() counts the page": "    _l = len(results)\n",
+    }.items():
+        src = ("def run(sdk):\n"
+               "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+               + line_src)
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        assert not _mutated_after(run_def, "results", read.lineno,
+                                  artifact_append=None), (
+            f"[{label}] is a pure READ of the page, not a mutation — the fail-closed "
+            "default must name its read side, or every diagnostic in `run()` reds")
+
+    # The RECORDED ROWS carry the same closed list, one level down.
+    src = ("def run():\n"
+           "    per_query = []\n"
+           "    for _pq in per_query:\n"
+           "        _pq['order'].__init__([1, 2, 3])\n")
+    run_def = ast.parse(src).body[0]
+    line = _mutating_line(src, "_pq['order'].__init__(")
+    assert line in _per_query_element_mutations(run_def, 0), (
+        "`_pq['order'].__init__([…])` RE-INITIALISES the recorded page in place "
+        "— the recorded-rows guard carried the same closed mutator list, so it was GREEN "
+        "while the `…['order'].sort()` one word away was RED")
+
+    # ⛔ AND THE ENVIRON ARM, which had its own closed list (`{clear, pop, __setitem__, …}`)
+    # so `os.environ.__init__({…})` — `dict.__init__`, in place — was GREEN while
+    # `os.environ.update({…})` was RED. The module-level setup pops stay exempt.
+    src = ("def run():\n"
+           "    os.environ.__init__({'TORTOISE_FUSED_RERANK': '1'})\n")
+    tree = ast.parse(src)
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    line = _mutating_line(src, "os.environ.__init__(")
+    hits = _environ_mutations(tree, parents)
+    assert line in hits, (
+        f"`os.environ.__init__({{…}})` replaces the gate mapping in place (hits={hits}) "
+        "— the environ guard's closed mutator list did not name it")
+
+    # …and the exempt module-level setup pop is still exempt (it is not part of `run()`).
+    setup = ("import os\n"
+             "os.environ.pop('TORTOISE_API_URL', None)\n"
+             "os.environ.pop('TORTOISE_API_KEY', None)\n")
+    tree = ast.parse(setup)
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    assert _environ_mutations(tree, parents) == [], (
+        "the harness's own module-level API-variable pops are the ONE documented "
+        "exemption — redding them would red the tool this pin protects")
 
 
 def test_a_CHAINED_UNPACK_binds_EVERY_target() -> None:
