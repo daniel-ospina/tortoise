@@ -2758,8 +2758,28 @@ def _strip_shell_comments(script: str) -> str:
             continue
         # `<<` opens a heredoc (`<<<` is a here-STRING — no body — so it must not match).
         # Read the operator and its delimiter as CODE, and queue the body for the newline.
-        if ch == "<" and script.startswith("<<", i) and not script.startswith("<<<", i):
-            j = i + 2
+        # ⛔ THE OPERATOR CAN BE SPLICED (review cycle 10, P1, MEASURED). A `\`+newline pair
+        # is DELETED before the shell tokenizes, so `cat <\`⏎`<EOF` IS `cat <<EOF` and starts
+        # a real heredoc whose body expands: measured, bash prints the body's `$( )`. Reading
+        # the operator as the literal bytes `<<` missed it, the body was then lexed as CODE,
+        # and its `#`-leading line was dropped as a comment — `_executable_prose_lines`
+        # returned `[]` over an EXECUTING line, i.e. the fail-open this whole lexer exists to
+        # close, reached through the ESCAPE model instead of the comment or quote model.
+        splice = i + 1
+        while script.startswith("\\\n", splice):
+            splice += 2
+        # ⛔ AND NOT FROM INSIDE A LONGER RUN OF `<` (review cycle 10, P1 found by the new pin):
+        # without this, the SECOND `<` of a here-string read as `<<` + delimiter `"x"`, queued a
+        # body that never terminates, and swallowed the rest of the block verbatim — a
+        # false-positive flood, not a silent pass, but it reds lines a human wrote as comments.
+        if (
+            ch == "<"
+            and not (i > 0 and script[i - 1] == "<")
+            and splice < len(script)
+            and script[splice] == "<"
+            and not (splice + 1 < len(script) and script[splice + 1] == "<")
+        ):
+            j = splice + 1
             strip_tabs = script.startswith("-", j)
             j += 1 if strip_tabs else 0
             while j < len(script) and script[j] in " \t":
@@ -3002,6 +3022,43 @@ def test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body():
         "a `<<-` heredoc must end on a tab-indented terminator: "
         f"{_executable_prose_lines(tabbed)!r}"
     )
+
+
+def test_the_prose_pin_sees_a_heredoc_operator_SPLICED_by_a_backslash_newline():
+    """A backslash+newline pair is DELETED before tokenizing, so the operator can be SPLIT.
+
+    `cat <` + backslash + newline + `<EOF` is `cat <<EOF` to the shell: the operator's two `<`
+    land on different physical lines and are joined during lexing, so the body IS a heredoc and
+    expands. A lexer that reads the operator as the literal bytes `<<` sees `<` + `E`, queues
+    nothing, then lexes the body as CODE — where its `#`-leading line is dropped as a comment.
+    Measured (P1, review cycle 10):
+
+        $ printf 'cat <\\\n<EOF\n# $(printf SPLICED)\nEOF\n' > /tmp/s; bash -e /tmp/s
+        # SPLICED                    rc 0
+
+    …while `_executable_prose_lines` returned `[]`. That is the residual-R1 fail-open reached
+    through the ESCAPE model instead of the comment or quote model, so it is pinned here.
+    """
+    script = "cat <\\\n<EOF\n# $(printf HIDDEN_BY_SPLICE)\nEOF\n"
+
+    # PREMISE, executed rather than claimed.
+    ran = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True)
+    assert ran.returncode == 0, ran.stderr
+    assert "HIDDEN_BY_SPLICE" in ran.stdout, (
+        "the spliced operator did NOT start a heredoc, so this test no longer reproduces the "
+        f"hole it guards: stdout={ran.stdout!r}"
+    )
+
+    # THE FIX: the body line is scanned even though the operator spans the splice.
+    with pytest.raises(AssertionError, match="command substitution"):
+        _assert_no_executable_prose(script)
+
+    # ⛔ AND THE NON-SPLICED SHAPES ARE UNAFFECTED — this fix must not turn `<<<` into a
+    # heredoc, nor stop a plain heredoc or a plain escaped `\"` from being read as before.
+    assert _executable_prose_lines('cat <<<"x"\necho ok  # `tick`\n') == []
+    assert _executable_prose_lines("cat <<EOF\n# $(printf PLAIN)\nEOF\n") == [
+        "# $(printf PLAIN)"
+    ]
 
 
 def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):
