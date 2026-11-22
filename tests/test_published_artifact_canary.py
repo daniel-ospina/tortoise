@@ -2747,11 +2747,15 @@ def _strip_shell_comments(script: str) -> str:
     with leading tabs stripped, and quoting the delimiter is not modelled — a quoted
     delimiter's body is inert at runtime but is still scanned).
 
-    ⛔ DELIBERATE CONSERVATIVE EDGE, stated so it is not read as completeness: `$(` and a
-    backtick inside a SINGLE-quoted span are inert at runtime but still flagged, because
-    this filter does not model single-quote spans as removable. That direction is a false
-    POSITIVE on a line a human can see and reword — never a silent pass. No line in the
-    alarm block uses single quotes today.
+    ⛔ DELIBERATE CONSERVATIVE EDGE, stated so it is not read as completeness: an UNESCAPED
+    `$(` and an UNESCAPED backtick inside a SINGLE-quoted span are inert at runtime but still
+    flagged, because this filter does not model single-quote spans as removable. That
+    direction is a false POSITIVE on a line a human can see and reword — never a silent pass.
+    No line in the workflow's blocks uses single quotes today.
+
+    ⛔ AN ESCAPED TOKEN IS NOT AN EDGE — IT IS NOT REPORTED (review cycle 12, P2). The scan
+    consumes escape PAIRS, so `\\`` and `\\$(` are inert and pass, in a single-quoted span or
+    not: the conservatism above covers unescaped tokens only.
     """
     out: list[str] = []
     quote: str | None = None  # None | "'" | '"'
@@ -2769,11 +2773,14 @@ def _strip_shell_comments(script: str) -> str:
             continue
         if quote == '"':
             # A backslash escapes the next byte inside double quotes, so `\"` must not
-            # close the quote. The PAIR is kept verbatim, so an escaped backtick — inert at
-            # runtime (bash prints it literally) — IS still reported: a deliberate false
-            # POSITIVE on an inert byte, never a silent pass. Stated because this comment
-            # previously claimed the opposite of what the code does, in code whose whole
-            # purpose is not claiming more than it can see.
+            # close the quote. The PAIR is kept verbatim here; this lexer does not judge
+            # whether it executes — the escape-aware scan in `_executable_prose_lines` does,
+            # and it treats an escape pair as INERT (`\`` passes, `\$(` passes), so what a
+            # future reader assumes from this comment must be that one. ⛔ An earlier version
+            # of this comment claimed an escaped backtick "IS still reported: a deliberate
+            # false POSITIVE" — that was true before review cycle 12 and is NOT true now;
+            # kept corrected here because this file's purpose is not claiming more than it
+            # can see.
             if ch == "\\" and i + 1 < len(script):
                 out.append(script[i : i + 2])
                 i += 2
@@ -2930,6 +2937,24 @@ def _executable_prose_lines(script: str) -> list[str]:
     `tag -> \\SUBSTITUTED`. A `(?<!\\)` lookbehind would let that through, i.e. a fail-open in
     the pin that exists to stop exactly this, which is why the scan consumes escape pairs
     instead of looking one character back.
+
+    ⛔ AND A SPLICE IS A PARITY TOO — THE JOIN HAD TO LEARN IT (review cycle 13, P2, MEASURED).
+    The join above deleted ANY backslash+newline, but bash deletes one only when that
+    backslash is not itself escaped: with an EVEN run of backslashes before the newline the
+    newline is not quoted away and the next line's `$(` runs. Measured on the three shapes
+    below (`bash -e`):
+
+        $ echo "prose ending in a literal backslash \\\\
+$(printf HID)DEN continues"
+        prose ending in a literal backslash \\
+HIDDEN continues                       rc 0
+
+    …so the two lines are LIVE, `$(` included. Deleting that pair anyway left the surviving
+    backslash glued to `$`, and the escape-pair skip above then consumed both — `[]`, a SILENT PASS. That is the
+    same fail-open this docstring rejects a lookbehind for, reached through the join instead
+    of the scan: the pair is deleted only when its backslash is UNESCAPED (an even count of
+    backslashes BEFORE it). Pinned from both directions, with the executed premises, in
+    `test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not`.
     """
     stripped = _strip_shell_comments(script)
     physical = stripped.splitlines()
@@ -2939,9 +2964,16 @@ def _executable_prose_lines(script: str) -> list[str]:
     i = 0
     while i < len(stripped):
         if stripped.startswith("\\\n", i):
-            i += 2
-            line_no += 1
-            continue
+            # bash deletes a backslash+newline only when the backslash is UNESCAPED.
+            preceding = 0
+            j = i - 1
+            while j >= 0 and stripped[j] == "\\":
+                preceding += 1
+                j -= 1
+            if preceding % 2 == 0:
+                i += 2
+                line_no += 1
+                continue
         joined.append(stripped[i])
         owners.append(line_no)
         if stripped[i] == "\n":
@@ -3312,6 +3344,35 @@ def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
 
     # An escaped `$(` is inert for the same reason, and costs no special case.
     assert _executable_prose_lines('echo "(tag -> \\$(printf X))"\n') == []
+
+    # ⛔ AND THE SPLICE IS A PARITY (review cycle 13, P2, MEASURED — a fail-open the escape-pair
+    # skip opened above, closed here). bash deletes a backslash+newline only when that backslash
+    # is UNESCAPED, so with an EVEN run of backslashes before the newline the next line's `$(`
+    # RUNS. The join deleted the pair regardless, leaving `\` glued to `$`, which the skip then
+    # ate as an escape pair — `[]`, a silent pass on a live substitution. Measured premises:
+    even_run = 'echo "prose ending in a literal backslash \\\\\n$(printf HIDDEN_BY_RUN)DEN"\n'
+    odd_run = 'echo "prose \\\\\\\n$(printf HIDDEN_ODD)DEN"\n'
+    body = "cat <<EOF\n# prose \\\\\n$(printf HIDDEN_BODY)DEN\nEOF\n"
+    for label, script, want in (
+        ("even-run splice (double quotes)", even_run, "HIDDEN_BY_RUN"),
+        ("odd-run splice (double quotes)", odd_run, "HIDDEN_ODD"),
+        ("even-run splice (heredoc body)", body, "HIDDEN_BODY"),
+    ):
+        ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
+        assert ran.returncode == 0, (label, ran.stderr)
+        assert want in ran.stdout, (
+            f"the {label} shape did not substitute, so this premise is gone: stdout={ran.stdout!r}"
+        )
+        assert _executable_prose_lines(script), (
+            f"the {label} shape EXECUTES a `$(` and the pin reported nothing — a silent pass "
+            "in the pin that exists to stop one"
+        )
+
+    # The one-backslash shape is a REAL continuation (bash deletes it), and stays caught: the
+    # parity must not be read as "never splice".
+    assert _executable_prose_lines('echo "prose $\\\n(printf QQ)MARK"\n'), (
+        "a genuine backslash+newline continuation joins `$` to `(`, which still substitutes"
+    )
 
     # ⛔ AND ARITHMETIC `<<` IS NOT AN OPERATOR (review cycle 10, P2, MEASURED). `$(( 1 << 2 ))`
     # matched the heredoc branch with delimiter `2`, queued a body that never terminates, and
