@@ -1958,7 +1958,25 @@ def test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter() ->
     after it whose stripped text is the bare closing delimiter.
     """
     lines = (REPO / "tortoise/search_engine.py").read_text(encoding="utf-8").splitlines()
-    start = next(i for i, line in enumerate(lines, 1) if "def subject_binding_available" in line)
+    # ⛔ NOT a substring test, and not a bare `next` for the START either. An `in` test is not a
+    # symbol binding: a sibling named `def subject_binding_available_x(` satisfies it, so the arm
+    # would derive a DIFFERENT function's docstring and then report the TARGET's span (measured at
+    # `#14269`: that mutant stayed GREEN). And a `next(...)` with no default raises `StopIteration`
+    # with no message the moment the anchor is gone, pre-empting this arm's own reporting — the
+    # rule this repo records at `tests/test_7949_capstone_measure.py:8025-8029` (agent-infra#3442
+    # rule 2). Both are message-producing asserts now, so every mutant is attributable.
+    defs = [
+        i
+        for i, line in enumerate(lines, 1)
+        if line.lstrip().startswith("def subject_binding_available(")
+    ]
+    assert len(defs) == 1, (
+        "`tortoise/search_engine.py` must carry exactly one `def subject_binding_available(` at "
+        f"its start of line — found {len(defs)} at {defs} — because that line is the START of the "
+        "span this arm grades. A rename or an overload means this arm must be re-pointed, not "
+        "silently graded against whatever matched."
+    )
+    start = defs[0]
     end = next(
         (i for i in range(start + 1, len(lines) + 1) if lines[i - 1].strip() == '"""'), None
     )
@@ -2241,6 +2259,23 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     assert len(_PINS) == 87, (
         f"_PINS carries {len(_PINS)} rows, not 87 — a re-pointed cite was added or dropped without "
         "this count. Every re-point this branch writes must carry a content pin (review cycle 2)."
+    )
+
+
+def test_the_redefined_13854_table_length_is_the_figure_the_document_publishes() -> None:
+    """`_REDEFINED_13854`'s row count is a PUBLISHED figure, so it gets an arm (#14269 review).
+
+    `CAPABILITY-PLACEMENT-AUDIT.md` said the table "now pins all **34** by content" while the
+    table held 33 — a typed figure with no arm beside it, in the one paragraph whose whole
+    subject is figures nothing grades. Measured at `#14269`: mutating any of that paragraph's
+    enumerated addresses left this file at 32 passed. The count is asserted here so it cannot
+    drift from the document again; the document states the table's length, not the population
+    above it, because a range address is one row.
+    """
+    assert len(_REDEFINED_13854) == 33, (
+        f"`_REDEFINED_13854` carries {len(_REDEFINED_13854)} rows, not the 33 the audit document "
+        "publishes — update the document's figure in the same change, and re-derive every new "
+        "row by content rather than by a delta."
     )
 
 
