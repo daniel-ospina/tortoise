@@ -205,9 +205,13 @@ def test_f822_and_ruf022_still_fire_for_every_other_module() -> None:
 
 SERVED_SKILLS_PARITY = "tools/served_skills_parity.py"
 THIS_MODULE = "tests/test_lint_config.py"
+#: The capture seam's home — the file PR #14296's own hunks put six findings in. `main` is
+#: green here, so every finding in this path is authored by the diff under review; pinning it
+#: locally is what turns "the tree-wide pass will notice" into a red in the PR that caused it.
+HOSTED_API = "tortoise/hosted_api.py"
 #: Prose in this module is linted too, so the module that explains a dead noqa can warn about
 #: one of its own.
-LINT_CLEAN_PATHS = (SERVED_SKILLS_PARITY, THIS_MODULE)
+LINT_CLEAN_PATHS = (SERVED_SKILLS_PARITY, THIS_MODULE, HOSTED_API)
 
 
 @pytest.mark.parametrize("path", LINT_CLEAN_PATHS)
@@ -222,6 +226,14 @@ def test_the_paths_pinned_here_are_clean_under_the_repo_lint(path: str) -> None:
     The stderr half fails on `920fd7c64`, whose comment spelled the directive form: ruff
     warned `Invalid `# noqa` directive on tests/test_lint_config.py:179` on every run while
     the exit status stayed 0.
+
+    `tortoise/hosted_api.py` was added for #14296, whose own hunks carried six findings
+    (`I001` ×2 on the capture seam's mid-module import block, `RUF100` ×3 on directives
+    naming rules `select` does not enable — `BLE001` + `ANN202` ×2 — and `UP041` on a
+    `(TimeoutError, asyncio.TimeoutError)` pair). Measured, not assumed: with `main`'s
+    `hosted_api.py` swapped into this tree, `ruff check .` was CLEAN, so all six were the
+    branch's. `agent-infra-ci / lint` is NOT a required context, so nothing blocked on them;
+    this pin is the local signal that the tree-wide pass does raise.
     """
     proc = subprocess.run(
         [_ruff(), "check", "--no-cache", path],

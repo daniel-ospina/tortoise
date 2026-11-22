@@ -428,7 +428,7 @@ else:  # pragma: no cover — Python < 3.9
 # The wait-bound refusal's log line and its analytics prop both read ONE closed
 # vocabulary (`read_stages`), so the capture path marks into THAT timeline
 # rather than growing a second instrument that could not publish at all.
-from tortoise.write_verb import (  # noqa: E402 — the ACK's envelope
+from tortoise.write_verb import (  # noqa: E402, I001 — the ACK's envelope. `I001` is suppressed, NOT dodged: isort wants `read_stages` first plus one statement per ALIASED name (four where `main` carries two), and on this branch that line count is load-bearing — `hosted_api.py`'s line numbers are cited ~900 times in `docs/` (graded by `tests/test_12184_shifted_cites.py`), so an added line here re-points every cite below it. The rule stays ACTIVE everywhere else (pyproject's recorded per-line baseline).
     STATUS_ACCEPTED as _STATUS_ACCEPTED,
     build_write_verb as _build_write_verb,
 )
@@ -713,7 +713,7 @@ async def _mark_capture_extraction_phase(proj, session_id: str, phase: str,
         await _run_off_loop(_CAPTURE_EXECUTOR, _write_capture_phase,
                             proj, session_id, phase, now)
         return True
-    except Exception:  # noqa: BLE001 — bookkeeping on a committed record
+    except Exception:  # bookkeeping on a committed record — never a crash
         _logger.debug("capture phase write failed (session %s)", session_id,
                       exc_info=True)
         return False
@@ -21657,7 +21657,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # reading of the record (review F5).
     _capture_phase_view: dict = {"phase": None, "armed": False}
 
-    async def _extract_capture() -> dict:  # noqa: ANN202 — the extraction lane
+    async def _extract_capture() -> dict:  # the extraction lane
         """The post-record half of a capture: extract, then report what happened.
 
         Runs INLINE on the lanes that do not extract (today's behaviour, today's
@@ -21895,7 +21895,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         return {"extracted": extracted, "meta": meta,
                 "tenant_vocab_warning": tenant_vocab_warning}
 
-    async def _report_capture(_lane_result: dict) -> dict:  # noqa: ANN202
+    async def _report_capture(_lane_result: dict) -> dict:  # the reportable tail
         """Everything the extraction makes reportable, and the receipt (#14232).
 
         Split from `_extract_capture` so the ACK's join window covers ONLY the
@@ -23383,7 +23383,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # would be the one thing worse than answering late (the #2988
                 # doctrine — the bound abandons the AWAIT, never the worker).
                 _joined = await asyncio.wait_for(asyncio.shield(task), _grace)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:  # `asyncio.TimeoutError` IS this builtin (3.11+)
                 _joined = _NO_JOIN
             except asyncio.CancelledError:
                 # The REQUEST went away mid-join. Today that abandoned the
@@ -23445,7 +23445,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # still be running" sentence and writes NO priced deferral, instead of
     # reading a zero as "nothing was extracted" (#12362's defect, and the reason
     # that marker exists).
-    from tortoise.capture_spool import (
+    from tortoise.capture_spool import (  # noqa: I001 — one statement per ALIASED name is the only structural fix; same load-bearing line-shape reason as `E402` above
         UNRECORDED_OUTCOME_KEY as _UNRECORDED_KEY,
         UNRECORDED_OUTCOME_VALUE as _UNRECORDED_VALUE,
     )
