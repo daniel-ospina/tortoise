@@ -574,7 +574,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45700-45712'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45700-45717'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51607'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51607`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51607`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7167` inside the same function'): 1,
@@ -1738,8 +1738,9 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
 
     WHAT IT GRADES. (1) Every pair in `_PIN_EOF_PAIRS` is still a census pair — a dropped or re-pointed cite
     must re-derive this table rather than leave it describing a population the document no longer has.
-    (2) The header NAMES each of them at the address it writes, inside the non-comparable enumeration ("each
-    named at the address this document writes for it" is the clause that promised it). (3) The published
+    (2) The header NAMES each of them at the address it writes, inside the non-comparable enumeration (the
+    header's own prose is the only place the twelve are listed, so the guarantee is structural:
+    a re-pointed cite that leaves the sentence unchanged reds arm 2). (3) The published
     counts agree with the table: comparable + non-comparable == the pairs the file measures, and the four
     pinned `wc -l` values are the ones the header states for those files.
 
@@ -1943,6 +1944,41 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
         f"hosted_api.py's non-comparable pair at {_pin_hosted_lines} — the sentence must move THAT "
         "statement. An unpinned address is the one thing the same-statement and arithmetic arms above "
         "cannot catch, because a whole block of them moves together.")
+    # ⛔ WHO OWNS THE TWELVE, GRADED (#14038 review cycle 15, P2). The header said "the twelve that are
+    # NOT comparable are this branch's own" — FALSE for eleven of them: this branch writes into
+    # `tortoise/hosted_api.py` and nowhere else among the four files, so it cannot own addresses in
+    # `sdk.py`, `mcp_server.py` or `search_engine.py`. `main`'s copy of the sentence DID qualify the
+    # attribution ("ten of them this branch's own, the eleventh moved past the pin by `main`'s #14169"),
+    # and the rewrite dropped the qualification — the paragraph that exists to repair carried figures
+    # carried an unqualified claim instead. No arm read this clause, which is why it stayed green.
+    _owning = re.search(
+        r"the (\w+) that are NOT comparable are addresses past the pin's copy of their own file, of "
+        r"which exactly (\w+) is this branch's own write", body)
+    assert _owning is not None, (
+        "the split no longer states, in the graded form, that the non-comparable addresses are past the "
+        "pin's copy of their own file and that exactly ONE of them is this branch's own write. The "
+        "unqualified form ('the twelve ... are this branch's own') is false: this branch's diff touches "
+        "`tortoise/hosted_api.py` only. Keep the qualification, or re-word this arm."
+    )
+    assert _as_int(_owning.group(1)) == len(_PIN_EOF_PAIRS), (
+        f"the ownership clause names {_owning.group(1)} non-comparable pairs while the split counts "
+        f"{len(_PIN_EOF_PAIRS)}"
+    )
+    assert _as_int(_owning.group(2)) == 1, (
+        f"the ownership clause says {_owning.group(2)} of the {len(_PIN_EOF_PAIRS)} is this branch's own "
+        "write; exactly one of them can be, because the branch's diff is `tortoise/hosted_api.py` only."
+    )
+    if _main_readable:
+        # MEASURED, not asserted from the sentence: the branch writes into none of the other three files.
+        _numstat = subprocess.run(
+            ["git", "diff", "--numstat", "origin/main...HEAD", "--", "tortoise/sdk.py",
+             "tortoise/mcp_server.py", "tortoise/search_engine.py"],
+            cwd=REPO, capture_output=True, text=True, check=False)
+        if _numstat.returncode == 0:
+            assert _numstat.stdout.strip() == "", (
+                "the split says the eleven non-comparable addresses outside `hosted_api.py` are `main`'s "
+                f"own drift, but this branch's diff writes into them:\n{_numstat.stdout}"
+            )
     assert _as_int(drift.group(4)) == len(_PIN_EOF_PAIRS), (
         f"the drift sentence names `of those {drift.group(4)} pairs` while the split counts "
         f"{len(_PIN_EOF_PAIRS)} non-comparable pairs"

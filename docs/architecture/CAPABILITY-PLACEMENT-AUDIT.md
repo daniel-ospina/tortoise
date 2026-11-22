@@ -130,7 +130,7 @@ naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files 
 was itself measured false; a range cite counts once, by its **start** line), which dedupes the **345** as-written spellings to 227 — **118**
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
 text; **all 215 comparable ones resolve at BOTH heads** — every written path resolves to a module that
-exists at `ccb49741b2ec` — and **the twelve that are NOT comparable are this branch's own**: `sdk.py:58120`, whose
+exists at `ccb49741b2ec` — and **the twelve that are NOT comparable are addresses past the pin's copy of their own file, of which exactly **one** is this branch's own write** — `hosted_api.py`'s `:51607`, which this branch moves `+114` past `main`'s copy as well — while the other eleven sit INSIDE `main`'s copy, and this branch's diff touches no `sdk.py`, `mcp_server.py` or `search_engine.py` at all (`git diff --numstat origin/main...HEAD -- tortoise/sdk.py tortoise/mcp_server.py tortoise/search_engine.py` prints nothing), so those eleven are `main`'s own drift, re-pointed here: `sdk.py:58120`, whose
 written line sits past the pin's `sdk.py` (56,415 lines there; `git show ccb49741b2ec:tortoise/sdk.py
 | wc -l`), `sdk.py` `:62020`/`:62040` (the `:Meta` read and its `_config_reset_state` delegate, likewise
 past it — written as two code spans so they are resolved but not counted twice), `sdk.py:58987`,
