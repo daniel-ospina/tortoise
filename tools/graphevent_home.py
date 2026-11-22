@@ -839,9 +839,27 @@ GRAPH_CAPABILITY_CYPHER = (
     "*]",                 # a TYPED variable-length pattern, `-[r:NEXT*]->`
     "*1..", "*..",        # a bounded / open hop count
     "-[",                  # a fixed-length relationship pattern (adjacency)
-    "]->", "<-", "--",    # a directed / undirected hop, including `(n)--()`
+    "]->", "<-",           # a TYPED hop (`-[r:T]->`), the type side written
+    # ⛔ AN UNTYPED HOP IS ANCHORED ON ITS NODES, NOT ON `--`. `--` alone over-matched
+    # in the FALSE-BLOCK direction once the snippet is whitespace-stripped (#14183
+    # round-13 review, P3): `$after - -1` becomes `--1` (a unary minus, no walk at
+    # all) and `` n.`a--b` `` unwraps to `a--b` (a property NAME containing two
+    # hyphens, no walk either) — and a row misfiled as capability-bearing publishes
+    # the opposite verdict and reds the census's own "no reader needs a graph
+    # capability" pin over a reader that walks nothing. Cypher always parenthesises
+    # a node, so anchoring on the node's closing paren keeps every real spelling
+    # (`(n)--()`, `(a)-->(b)`, property maps and labels included) and drops both
+    # false shapes. ⚠️ There is no `)<--(` arm on purpose: `<-` is ordered BEFORE
+    # this line and matches every inbound hop, so such an arm could never decide —
+    # the same "arm that can never decide" defect that removed `size((` just below.
+    ")--(", ")-->",          # an UNDIRECTED / directed node-to-node hop
     "exists {",           # a pattern-existence predicate over an edge
-    "size((",             # an adjacency aggregate
+    # ⛔ `size((` WAS AN ARM AND IS GONE (#14183 round-13 review, P3): it contributed
+    # ZERO detection — every real adjacency aggregate carries a relationship inside
+    # it, so `-[` or the hop arms decide first — while `RETURN size((collect(n)))`
+    # (a legitimate grouping paren, no relationship anywhere) was misfiled as an
+    # adjacency aggregate. This file's own `ARMS_NO_SNIPPET_CAN_DECIDE` note said as
+    # much, and an arm that only ever false-positives is not an arm.
     "shortestpath",       # path search
     "call algo", "apoc.",  # a graph algorithm / path procedure
     "call db.idx.fulltext", "db.idx.fulltext",
