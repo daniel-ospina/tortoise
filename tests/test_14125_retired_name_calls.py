@@ -414,8 +414,13 @@ _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 #: of PR #14287, P2; "the gate reds a correct repair" is the reading that argues for
 #: weakening the gate this census exists to keep). Not crediting the parent is deliberate:
 #: the arm naming the subclass does not re-raise the plain `ImportError` that a renamed NAME
-#: raises inside an own-code import. The map's live effects are the charge and the masking
-#: (`_masked_by`), where a parent arm really does mask a child one (review of #14287, P2-2).
+#: raises inside an own-code import. The map's live effects are the CHARGE side, the
+#: masking account (`_masked_by`) — where a parent arm really does mask a child one — and
+#: the family-close in `_covered`'s credit set, which is what stops a dropped family being
+#: credited back by a later arm (review of #14287, P2-2; the three-effect list corrected in
+#: review cycle 4, whose measurement showed the family-close is `_RAISED_ALIAS`-dependent:
+#: un-canonicalising BOTH of its sides re-opens the `ModuleNotFoundError: pass` leak and
+#: reds `rename_dropped`).
 _RAISED_ALIAS = {
     "ModuleNotFoundError": "ImportError",
     "ZipImportError": "ImportError",
@@ -2452,10 +2457,14 @@ def test_a_probe_that_imports_inside_its_try_covers_the_import_seam():
             "⛔ CHECK THE ACCOUNTING BEFORE EITHER: if the arm ALREADY names "
             "`ImportError` but an EARLIER narrow arm drops the same family (e.g. "
             "`except ModuleNotFoundError: FLAG = False` above it), the name is absent "
-            "from the covered set because the earlier arm handled it — not because "
-            "the spelling is missing. Adding the name again to that arm changes nothing, and "
-            "a re-raise arm inserted BELOW the earlier dropper is unreachable for it, so it "
-            "changes nothing there either; HOISTING the "
+            "from the covered set because an EARLIER arm DROPPED the family and credit is "
+            "family-closed against what was already dropped (`_covered`) — not because "
+            "the spelling is missing. Adding the name again to that arm changes nothing, "
+            "and a re-raise arm inserted BELOW the earlier dropper does not restore the "
+            "credit either — but it is NOT dead code: that arm is REACHABLE for a plain "
+            "`ImportError` (only a PARENT arm masks a child one, and "
+            "`ModuleNotFoundError` is the CHILD), so deleting it because it looks "
+            "unreachable removes coverage you still need. HOISTING the "
             "import DOES clear this red, but for a DIFFERENT reason than the missing "
             "spelling — the block stops importing own code inside the `try`, so the seam "
             "gate drops out — so it clears the red without the earlier dropper being the "
