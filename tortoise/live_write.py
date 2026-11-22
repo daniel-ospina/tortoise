@@ -317,12 +317,17 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
        would have MOVED every write on such a box from "nothing claimed it,
        nothing lost" to a permanent false alarm in
        :attr:`LiveWrite.unprojected` — read by `tools/claim_dense_leg_13732.py`
-       as an unprojected position. Asking the record's own arming first keeps
-       that deployment byte-identical: it folds inline and reports exactly what
-       it reported before.
+       as an unprojected position. Asking the record's own arming as a CONDITION
+       keeps that deployment byte-identical: it folds inline and reports exactly
+       what it reported before.
     6. **An operator armed the loop and the queue accepted the item.** Unset or
        typo'd reads OFF (:func:`tortoise.env_truthy.env_flag`), which keeps every
-       unarmed deployment byte-identical to the pre-#14185 inline fold.
+       unarmed deployment byte-identical to the pre-#14185 inline fold. The flag
+       is asked HERE as well as in :func:`projection_worker.submit` because it is
+       the CHEAPEST test of the six — a bare env read — so asking it before
+       condition 5 stops the default (loop off) deployment paying an uncached
+       `record_writer.record_dsn()` parse per write for a fold it was never going
+       to defer (#14222 review, finding 8). The conjunction is unchanged.
 
     ⛔ EVERY FAILURE ANSWERS ``False`` (fold inline). The journal has already
     committed by the time this is called, so a raise here would hand the producer
@@ -335,11 +340,22 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
         return False
     if tenant is None:
         return False
-    if not _record_armed():
-        return False
     try:
         from . import projection_worker
     except Exception:  # noqa: BLE001, RUF100 — an unimportable loop is not a fault
+        return False
+    # ⛔ ASK THE FREE SWITCH FIRST (#14222 review, finding 8, and P1 of the round
+    # that read this hunk before it was committed — the check was added in the
+    # WRONG PLACE first, BELOW `_record_armed()`). `record_writer.record_dsn()` is
+    # UNCACHED — an env read, a scheme check and the host rule — so the default
+    # deployment (loop OFF, record armed) paid that parse on every ACK before the
+    # gate could decline, which is the ACK path this worker exists to keep short.
+    # `projection_worker.armed()` is a bare `env_flag` read, `submit` asks it again,
+    # and the conjunction is the same one — only its cheapest test moved in front
+    # of its most expensive.
+    if not projection_worker.armed():
+        return False
+    if not _record_armed():
         return False
     try:
         return projection_worker.submit(
@@ -369,16 +385,22 @@ class LiveWrite:
     an unprojected line). The door's WARNING and `record_write_failures` are what
     an operator sees for it.
 
-    ``record`` is ``None`` on THREE arms, and they are NOT the same fact
-    (#13345 review P3-1/P3-3): the UNARMED deployment (no DSN) — the one case
-    `write_live_record` returns ``None`` for; the ``projection_raised`` arm,
-    where the seam never ANSWERED at all (it raised, or could not be imported),
-    so whether this deployment is armed is UNMEASURED there and
-    :attr:`LiveWrite.armed` answers ``None``; and a door that supplies its own
-    ``project=`` whose callable returns ``None`` (the SDK's
+    ``record`` is ``None`` on FOUR arms, and they are NOT the same fact
+    (#13345 review P3-1/P3-3; the fourth is #14222 review, finding 2): the
+    UNARMED deployment (no DSN) — the one case `write_live_record` returns
+    ``None`` for, and the arm :attr:`armed` answers ``False`` on; the
+    ``projection_raised`` arm, where the seam never ANSWERED at all (it raised,
+    or could not be imported), so whether this deployment is armed is UNMEASURED
+    there and :attr:`LiveWrite.armed` answers ``None``; a door that supplies its
+    own ``project=`` whose callable returns ``None`` (the SDK's
     ``seam_unimportable`` arm is the live one), where :attr:`armed` answers
     ``False`` — because from this module's position the record was never asked,
-    which is a different fact from "nothing was armed". ⛔ Never infer
+    which is a different fact from "nothing was armed"; and the DEFERRED arm
+    (``deferred=True``, #14185), where the fold is QUEUED and nothing has
+    ANSWERED **yet** — no ``RecordWrite`` exists because the worker has not run,
+    but the record IS armed (route 2 of :attr:`armed`, established by
+    ``_record_armed()`` before the item was queued) and ``applied`` stays
+    ``False`` until the queue reaches it. ⛔ Never infer
     "unarmed" from ``record is None``: read :attr:`armed`, which is the
     three-state answer for this module's own path and is ``False`` — never
     ``None`` — on a door's ``None``-returning project. A DECLINE is a

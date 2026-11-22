@@ -64,6 +64,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import types
 from pathlib import Path
 from typing import ClassVar
@@ -2013,6 +2014,80 @@ class TestTheDeferredWrite:
             "the deferral gate requires a JOURNAL LINE (`not journal_skipped`), so "
             "this leg only means anything if the append actually happened — it "
             f"did not: {log.positions}")
+
+    def test_an_UNDRAINED_deferral_DOES_name_a_repair(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """#14222 review, finding 6 — a drain that did NOT finish is a fold OWED.
+
+        `record_deferred` counts writes whose fold was QUEUED, so on its own it
+        says nothing about whether the queue reached them: the seed drains before
+        reporting, and a run whose drain returned ``False`` reported
+        ``record_deferred: 1, record_unprojected: 0`` and then answered "no fold
+        needed" — a report that says the record is whole about positions the loop
+        had provably not taken. The predicate must read the REMAINDER, so the
+        leg makes a drain fail over a queue that still holds its item and asserts
+        the repair is named.
+
+        ⛔ ONLY THE DRAIN'S VERDICT IS SIMULATED. The item is real (the REAL
+        chokepoint queues it), the record fold really does not complete (a blocking
+        `write_live_record` keeps it in flight), and `record_deferred_undrained`
+        comes from the worker's own `stats().pending_positions` — so the reading
+        this leg asserts is the one an operator would get, not a patched number.
+        Drop the `record_deferred_undrained` term from `_fold_needed()`, or stop
+        publishing the count, and this reds.
+        """
+        from tortoise import projection_worker, record_writer
+
+        applied = types.SimpleNamespace(applied=True, refusal=None, outcome="applied")
+        _journal_double(monkeypatch)
+
+        release = threading.Event()
+
+        def _slow_write(record, **_kw):
+            # ⛔ THE WORKER'S OWN FOLD, not the caller's: a deferred write never
+            # reaches this on the caller's thread, so blocking HERE keeps the queued
+            # position IN FLIGHT while the report is built — the worker's
+            # `pending_positions` is then a REAL reading of a record the loop has not
+            # reached, not a patched number.
+            release.wait(timeout=30)
+            return applied
+
+        monkeypatch.setattr(record_writer, "write_live_record", _slow_write)
+        monkeypatch.setenv(projection_worker.ENV_WORKER, "1")
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+
+        monkeypatch.setattr(projection_worker, "wait_for_drain", lambda timeout=None: False)
+        projection_worker.shutdown(drain=False)
+        try:
+            seed = tool_mod._seed_population(
+                _FoldDouble(),
+                [{"id": "pt-12186000001", "content": "beta"}],
+                journal_path=tmp_path / "j.jsonl",
+                # Carried tenancy is deferral gate 4 — see the sibling leg above.
+                tenant=("org-1", "graph-1"),
+                encode_many=lambda texts: [[0.5] for _ in texts],
+            )
+        finally:
+            release.set()
+            projection_worker.shutdown(drain=True, timeout=10)
+
+        payload = seed.as_dict()
+        assert seed.record_deferred == 1, payload
+        assert seed.record_deferred_undrained >= 1, (
+            "the drain returned False with a position still queued, so the report"
+            f" must publish the remainder it left behind: {payload}"
+        )
+        assert seed._fold_needed() is True, payload
+        assert "fold" in payload, payload
+        assert payload["record_deferred_undrained"] >= 1, payload
+        # ⛔ THE NOTE MUST NAME THE CAUSE (reviewer, P2). The repair's own sentence
+        # used to print the OTHER two triggers' zero counts and no reason at all on
+        # this arm, so a reader was handed a fold and told nothing about why.
+        assert "undrained" in payload["note"], payload["note"]
+        assert "0 write(s) came back unprojected and 0 append(s)" not in payload["note"], (
+            f"the note still opens with the other arms' zeroes: {payload['note']}"
+        )
 
     def test_a_DEFERRED_report_names_NO_repair_and_no_loss(self, tool_mod):
         """The report side of the same fact, pinned without a store.

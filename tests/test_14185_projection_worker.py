@@ -832,6 +832,66 @@ def test_an_unarmed_deployment_folds_inline_exactly_as_before(unarmed):
     assert projection_worker.armed() is False
 
 
+def test_the_gate_does_not_parse_the_record_DSN_when_the_loop_is_OFF(monkeypatch):
+    """(#14222 review, finding 8) The CHEAPEST switch is asked first.
+
+    `record_writer.record_dsn()` is UNCACHED — it reads the environment, checks
+    the scheme and applies the host rule — while the loop's own arming is a bare
+    `env_flag` read. The chokepoint asked the expensive one first, so the DEFAULT
+    deployment (loop off, record armed) paid a DSN parse on every ACK for a fold it
+    was never going to defer. The conjunction is unchanged; only its cheapest test
+    moved in front.
+
+    ⛔ THIS LEG EXISTS BECAUSE THE FIRST CUT OF THE FIX WAS IN THE WRONG PLACE —
+    the `armed()` check was added BELOW `_record_armed()` and the whole suite
+    stayed green, because nothing pinned the ORDER. Spying on `record_dsn` here is
+    what makes the order a control rather than a comment.
+    """
+    monkeypatch.delenv(projection_worker.ENV_WORKER, raising=False)
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    parses = []
+    real = record_writer.record_dsn
+    monkeypatch.setattr(
+        record_writer, "record_dsn",
+        lambda *a, **kw: (parses.append(1), real(*a, **kw))[1])
+
+    deferred = live_write._submitted_to_worker(
+        event={"type": "PointAdded"}, seq=1, project=_fast_projector(),
+        durable=True, journal_skipped=False, tenant=_TENANT, record_sink=None)
+
+    assert deferred is False, "the loop is off — nothing to defer to"
+    assert parses == [], (
+        "the loop's flag is off, so the gate declined before asking anything —"
+        " an uncached `record_dsn()` parse here is the per-ACK cost this reorder"
+        f" removes (parses={len(parses)})"
+    )
+
+
+def test_the_gate_still_asks_the_record_when_the_loop_is_ON(armed, monkeypatch):
+    """...and the DSN IS consulted once the loop is armed (#14222 finding 8).
+
+    The reorder must not have turned the record's arming into an unreachable
+    condition: with the loop on, the same call reaches `_record_armed()` — so the
+    two-switch conjunction is proven from the spy's side, not only from the
+    outcome.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    parses = []
+    real = record_writer.record_dsn
+    monkeypatch.setattr(
+        record_writer, "record_dsn",
+        lambda *a, **kw: (parses.append(1), real(*a, **kw))[1])
+
+    live_write._submitted_to_worker(
+        event={"type": "PointAdded"}, seq=1, project=_fast_projector(),
+        durable=True, journal_skipped=False, tenant=_TENANT, record_sink=None)
+
+    assert parses == [1], (
+        "with the loop armed the gate must still ask whether the RECORD is armed —"
+        f" exactly once (parses={len(parses)})"
+    )
+
+
 def test_the_queue_bound_falls_back_to_inline_and_counts_it(armed, monkeypatch):
     """A FULL queue never drops a record and never blocks forever.
 

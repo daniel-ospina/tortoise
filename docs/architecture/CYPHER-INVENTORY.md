@@ -144,7 +144,7 @@ concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is pro
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,094, and `-i` without the exclusion 2,435 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 306
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 307
 `.py` files the same two predicates read **2,091** and **2,363**; with `-t py` and the test-module
 exclusion dropped they read **2,093** and **2,366**. The 69-occurrence 2,366→2,435 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,

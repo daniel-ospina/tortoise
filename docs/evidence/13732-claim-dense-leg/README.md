@@ -303,9 +303,17 @@ silent fold into a store nobody measured.
 ⛔ **If a write comes back unprojected, the artifact says so and names the repair.** `seed` in the
 artifact carries `record_armed` (three-state: `true`/`false`/`null`, so `record_applied: 0` on an
 unarmed deployment is not read as a refusal), `record_applied`, `record_unprojected`,
-`record_declined` and `positions_unproven`; when a fold is needed it also carries `seed.fold` — the
-record's own fold over the journal this run wrote, as the TWO commands `record_runner` actually
-requires:
+`record_declined`, `record_deferred` and `record_deferred_undrained`, plus `positions_unproven`; when
+a fold is needed it also carries `seed.fold` — the record's own fold over the journal this run wrote,
+as the TWO commands `record_runner` actually requires:
+
+⛔ **A DRAIN THAT DID NOT FINISH ALSO NAMES THE FOLD** (#14222 review, finding 6). `record_deferred`
+counts writes whose fold was QUEUED, so on its own it says nothing about whether the queue reached
+them — a converged drain leaves it non-zero and correctly emits NO `seed.fold`. What does emit one is
+`record_deferred_undrained`: the positions the worker still held when its drain timed out, read from
+the loop's own `pending_positions` (`deferred` is the fallback when that read fails, which can only
+over-count). The note names that cause, so a repair is never emitted with two zero counts and no
+reason.
 
 ⛔ **`record_declined` IS THE FOURTH ANSWER, AND IT IS NOT A FOLD** (#13839 review). A write the seam
 DECLINED (`live_write`'s `no_durable_journal`: it answered, refused and never attempted the row)

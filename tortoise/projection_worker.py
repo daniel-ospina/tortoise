@@ -41,8 +41,8 @@ WHAT THIS MODULE IS NOT
   cache is what the read path actually serves from today, so moving it behind a
   loop is a **retrieval-freshness** change with its own evidence, not this
   issue's. The boundary is stated here so it cannot be mistaken for an oversight.
-* **Not on a read path, ever.** No reader may call :func:`drain` or
-  :meth:`ProjectionWorker.wait_for_drain`; that would re-create exactly the
+* **Not on a read path, ever.** No reader may call :meth:`ProjectionWorker.wait_for_drain`
+  (nor its module-level twin :func:`wait_for_drain`); that would re-create exactly the
   coupling this module removes.
 
 THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
@@ -91,7 +91,7 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
 
 BACKPRESSURE — NEVER DROP, NEVER BLOCK FOREVER
 ==============================================
-When the queue is at :data:`QUEUE_MAX_ENV`'s bound (default
+When the queue is at :data:`ENV_QUEUE_MAX`'s bound (default
 :data:`DEFAULT_QUEUE_MAX`), :func:`submit` DECLINES and the caller folds
 **inline**, on its own thread. Two reasons that is the right shape and not a
 compromise:
