@@ -2914,12 +2914,16 @@ _LIST_SESSIONS_ROW_BINDS: tuple[tuple[str, str, int, str, int], ...] = (
 def test_the_list_sessions_row_binds_every_address_it_names() -> None:
     """§2.4's `list_sessions` row is content-bound, not just declared (#14269 review, cycle 14).
 
-    The declaration said five rows were re-pointed at this head; the fifth had no reader, so
-    measured on a throwaway copy a rotation of `tortoise/hosted_api.py` above the handler
-    re-points all seven addresses onto comment lines while the whole gate stays green — the false
+    The declaration said five rows were re-pointed at this head; the fifth had no reader.
+    Measured on a throwaway copy at the parent commit: re-pointing ONE document address of that
+    row (`:25264` to its pre-fix `:24801`, or `:25254` to a comment line at `:25100`) left every
+    pre-existing arm green and both censuses at exit 0 — a single-address re-point was the false
     PASS this PR exists to refuse, left open on the one row the declaration itself had just
-    admitted. Each row pins the token's occurrence count in the document AND the verbatim
-    fragment at the line the token names, so a re-point either way reds.
+    admitted. ⛔ A ROTATION of `tortoise/hosted_api.py` is a DIFFERENT mutant and was already
+    caught, by the generic landing arms and the census; what had no reader was the row's own
+    addresses, so this arm is the reader for them. Each row pins the token's occurrence count in
+    the document AND the verbatim fragment at the line the token names, so either a document
+    re-point or a rotation now reds — the rotation here specifically, not only generically.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for token, path, line, fragment, expected in _LIST_SESSIONS_ROW_BINDS:
