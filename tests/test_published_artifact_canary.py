@@ -2803,11 +2803,25 @@ def _strip_shell_comments(script: str) -> str:
     So comments are lexed the way the shell lexes them in the WHITESPACE case: a `#` starts a
     comment only at the start of a whitespace-delimited word and outside any quote, and a
     backslash escapes the next byte outside single quotes. ⛔ NOT EXACTLY the way the shell
-    lexes them — bash also opens a comment after an unquoted metacharacter (`;`, `&`, `|`,
-    `(`, `)`, `{`, `}`), and this lexer does not (fresh-context review, P3, MEASURED:
-    `bash -e -c 'echo ok;# see `tool`'` is INERT, and `_executable_prose_lines` reports it).
-    That divergence is listed as a conservative edge below. Everything else is returned
-    verbatim, including `#` inside an echo (`See #12363`) and `${EXIT_CODE:-…}`.
+    lexes them — bash also opens a comment after an unquoted metacharacter, and this lexer
+    does not (fresh-context review, P3, MEASURED: `bash -e -c 'echo ok;# see `tool`'` is
+    INERT, and `_executable_prose_lines` reports it). That divergence is listed as a
+    conservative edge below. Everything else is returned verbatim, including `#` inside an
+    echo (`See #12363`) and `${EXIT_CODE:-…}`.
+
+    ⛔ THE METACHARACTER SET IS NOT ASSUMED, AND AN EARLIER ENUMERATION HERE WAS WRONG IN THE
+    FAIL-OPEN DIRECTION (MEASURED, each with a substitution that `touch`es a path unless bash
+    drops the rest of the line):
+      * `;` `&` `|` `(` `>` `<` DO open a comment — nothing executed in any of the six, and the
+        `|`/`(`/`>`/`<` spellings then syntax-error because the operator lost its operand;
+      * `{` and `}` DO NOT — `echo ok;{# `touch P`'` reports `{#: command not found` and P IS
+        CREATED, so the `#` there is a WORD, not a comment. An earlier version of this
+        docstring listed `{`/`}` as comment openers; had the lexer implemented that list, the
+        text after `{#` would have been STRIPPED and a live substitution would have shipped
+        unpinned (fail-open), which is the one direction this filter must never take. Pinned by
+        `test_a_hash_after_a_BRACE_is_NOT_a_comment_and_stripping_it_would_hide_execution`;
+      * `)` is left out because a top-level `)` is a syntax error before the `#` matters, so its
+        status is UNOBSERVABLE in isolation — an unmeasured member is not evidence.
 
     ⛔ THE SAME RULE BREAKS DOWN IN A HEREDOC BODY, WHICH IS WHY IT IS LEXED SEPARATELY
     (review cycle 8b). A heredoc body is COPIED into the command, not parsed as shell: a
@@ -2831,6 +2845,10 @@ def _strip_shell_comments(script: str) -> str:
     "IN CODE this gate refuses the construct OUTRIGHT" branch for a line that is a correct,
     inert comment — over-block again, never a silent pass, remedy is again REWORD (or move
     the `#` off the command with a space).
+    ⛔ WHAT WOULD BE THE OPPOSITE ERROR IS NOT THE FIX (MEASURED): adding `{`/`}` to
+    `at_word_start` because they look like metacharacters turns this over-block into a
+    FAIL-OPEN — `{#`/`}#` are WORDS and the substitution inside them EXECUTES. The measured
+    opener set is in this function's docstring, and only that set may ever be added.
     ⛔ NOT "no line here uses single quotes" (review cycle 14, P3, MEASURED): the `canary`
     step's block DOES carry one — `python -c 'import json,sys; …'` at the workflow's line 145 —
     and that is exactly the construct this edge would fire on, so a reader told "no single
@@ -3280,6 +3298,47 @@ def test_the_prose_pin_catches_a_substitution_on_a_COMMENT_LOOKING_continuation(
     # ⛔ AND THE FIX SEES IT: the continuation is quoted text, so it is scanned, not dropped.
     with pytest.raises(AssertionError, match="command substitution"):
         _assert_no_executable_prose(injected)
+
+
+def test_a_hash_after_a_BRACE_is_NOT_a_comment_and_stripping_it_would_hide_execution(tmp_path):
+    """`{# …` is a WORD, not a comment — measured, and it is the FAIL-OPEN direction.
+
+    `_strip_shell_comments` documents the metacharacters after which bash DOES open a
+    comment. An earlier enumeration listed `{` and `}` among them. That is false, and it is
+    false in the direction that ships a silent pass: if the lexer were ever taught that set,
+    the text after `{#` would be stripped before the backtick scan, and a substitution that
+    bash really runs would go unpinned. Measured here, both halves executed:
+
+        $ bash -e -c 'echo ok;{# `touch P`'
+        ok
+        bash: line 1: {#: command not found
+        $ ls P            # P EXISTS — the substitution ran
+
+    So this pin is non-vacuous from both sides: the PREMISE is executed (bash runs it), and
+    the CURRENT lexer refuses the line (it is reported). Adding `{` or `}` to
+    `at_word_start` reddens this test, which is the mutant it exists to catch.
+    """
+    marker = tmp_path / "executed-by-brace"
+    # f-string: `{{` renders one literal `{`, so bash sees `echo ok;{# `<touch>``.
+    script = f"echo ok;{{# `touch {marker}`"
+    completed = subprocess.run(
+        [*_RUNNER_SHELL, script], cwd=str(tmp_path), capture_output=True, text=True
+    )
+    assert marker.exists(), (
+        "the premise this pin rests on no longer holds: bash did NOT execute the "
+        f"substitution after `{{#` (rc={completed.returncode}, stdout={completed.stdout!r}, "
+        f"stderr={completed.stderr!r}) — re-measure before trusting the metacharacter set "
+        "in `_strip_shell_comments`"
+    )
+
+    reported = _executable_prose_lines(script + "\n")
+    assert reported, (
+        "a `#` after an unquoted `{` was treated as a COMMENT and the line stripped: bash "
+        f"EXECUTES the substitution there (measured — {marker.name} was created), so the "
+        "gate now passes a line the shell really runs. `{`/`}` are WORDS, not comment "
+        "openers; only the measured set in `_strip_shell_comments` may be stripped."
+    )
+    assert "`" in reported[0], (reported,)
 
 
 def test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body():
