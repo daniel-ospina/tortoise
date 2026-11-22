@@ -49,6 +49,7 @@ import functools
 import re
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -1909,17 +1910,21 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "render — a defect in this arm. The only excused state remains an ABSENT `origin/main` "
             "(a `fetch-depth: 1` checkout), never green over an unmeasured claim."
         )
-        # ⛔ THE EXCUSED RUN SAYS SO, to the operator rather than only to the code (#14038 review cycle
-        # 8, P3). The excuse above turns a silent skip into a NAMED one, but a green run still printed
-        # the same thing whether eight arms measured or four of them were skipped — so a reader of a
-        # depth-1 log could not tell "the main-side claims hold" from "the main-side claims were never
-        # read". One line, no assertion change, and it is what makes a depth-1 green honest.
-        print(
-            "  [14038] `origin/main` is ABSENT in this checkout (a `fetch-depth: 1` clone), so the "
+        # ⛔ THE EXCUSED RUN SAYS SO, and it says so in a channel pytest does not swallow (#14038
+        # review cycle 9, P1). A green run printed the same thing whether eight arms measured or four
+        # were skipped — so a reader of a depth-1 log could not tell "the main-side claims hold" from
+        # "the main-side claims were never read". ⛔ `print` does NOT fix that here: capture attaches a
+        # passing test's stdout to the call report only, and every CI leg runs `-r fEs` with default
+        # capture and no `-s`, so the line never reaches `$PYTEST_LOG` — the trap this repo has already
+        # measured twice (`tests/conftest.py` #1103 and #7735, and `tests/_tmpdir_hygiene.py`'s answer:
+        # a warning IS visible under those flags). So: `warnings.warn`, no assertion change.
+        warnings.warn(
+            "[14038] `origin/main` is ABSENT in this checkout (a `fetch-depth: 1` clone), so the "
             "four main-side arms in this function were SKIPPED rather than satisfied: the "
             "`origin/main` file lengths, the absent-at-main count, the provenance pair and the "
             "write measurement. The doc-TEXT arms (the ownership clause, the drift decomposition "
-            "and the twelve-pair enumeration) still graded the sentence."
+            "and the twelve-pair enumeration) still graded the sentence.",
+            stacklevel=2,
         )
     if _main_readable:
         _measured_absent = sum(1 for _path, _line in _PIN_EOF_PAIRS if _line > _main_sizes[_path])
