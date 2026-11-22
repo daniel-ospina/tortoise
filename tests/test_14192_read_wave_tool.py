@@ -170,6 +170,50 @@ def test_a_tool_only_diff_selects_this_pin():
     )
 
 
+def test_a_door_diff_selects_this_pin():
+    """The other half of the same guard: the door's own diff must select this pin.
+
+    `_door_read_contract()` takes its ENTIRE right-hand side from
+    `tortoise/hosted_api.py::search` — `_HOSTED` above, the `door_calls` walk, and the
+    `assert len(door_calls) == 1` that says `hosted_api.py::search holds 1 read call`.
+    So this file makes a statement about `hosted_api.py`, and a `hosted_api.py`-only
+    diff is the one diff class able to red it.
+
+    ⛔ MEASURED before this row existed (#14281 review F1) — a `hosted_api.py`-only
+    diff ran the pin NOWHERE:
+
+        select(['tortoise/hosted_api.py'], 'pull_request', m)
+            -> surfaces ['api', 'onboarding'], test_14192_read_wave_tool.py ABSENT
+
+    `tortoise/hosted_api.py` is the first `api` SOURCE_PATTERNS entry, and a
+    named-surface match REPLACES the `core` fallback in `select()`, so the `core`
+    registration alone is asleep on exactly the diff that can break the contract. It is
+    not a `SHARED_MODULES` member either (that carries `tortoise/sdk.py`, the OTHER half
+    of the same contract, which is why the `sdk` half was already covered).
+
+    The concrete shape this leaves open: hoisting the door's own `lambda` into a nested
+    `_do_search()` inside `search` changes what `_owner()` answers, reds
+    `assert len(door_calls) == 1`, and — without this row — merges green with the pin
+    unrun, so `main` goes red on the next unrelated PR. That is #14279's recurrence
+    shape, one layer out.
+    """
+    from tools import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    selection = ci_selection.select(
+        ["tortoise/hosted_api.py"], "pull_request", manifest
+    )
+    assert "api" in (selection.get("surfaces") or []), selection.get("surfaces")
+    files = selection.get("test_files")
+    if files == "ALL":
+        return
+    assert "test_14192_read_wave_tool.py" in files, (
+        "a diff to tortoise/hosted_api.py no longer selects the pin that asserts on "
+        "the door's own read contract — the `api` row in config/ci-surfaces.yml was "
+        "dropped, or hosted_api.py stopped resolving to the `api` surface"
+    )
+
+
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
 _HOSTED = _REPO_ROOT / "tortoise" / "hosted_api.py"
 _READ_NAMES = ("tortoise_fts_query", "_tortoise_fts_query")
@@ -335,6 +379,17 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     a call handed the list, which may sort it in place — defeated a receiver-name-exact
     test (measured), so aliases are resolved and the collection may not be handed to a
     call that is not a known non-mutator.
+
+    ⛔ THE "HANDED" TEST IS AN INTERSECTION, NEVER SET-EQUALITY (#14281 review F2).
+    It used to compare each argument's name-set against the WHOLE `watched` set for
+    exact equality, which made the branch INERT the moment one alias existed: with
+    `page_alias = results`, `watched = {"results", "page_alias"}`, so the argument of
+    `random.shuffle(results)` was `frozenset({"results"})` and the intersection was
+    empty for every single-name argument, forever. The alias resolution above is what
+    DISABLED the check it was added to serve — a guard that happened to work only
+    because the tool carries no alias. Measured mutant that was GREEN before this fix
+    and reds now: `page_alias = results` + `random.shuffle(results)`. The intersection
+    also catches `_helper(results[0])`, which the equality form missed on arity alone.
     """
     aliases = _aliases_of(run_def, lambda v: isinstance(v, ast.Name) and v.id == var)
     watched = {var} | aliases
@@ -350,9 +405,9 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             receiver = _names_in(node.value)
         callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None) \
             if isinstance(node, ast.Call) else None
-        handed = isinstance(node, ast.Call) and callee not in _NON_MUTATING and bool(
-            ({frozenset(_names_in(a)) for a in node.args}
-             | {frozenset(_names_in(k.value)) for k in node.keywords}) & {frozenset(watched)})
+        handed = isinstance(node, ast.Call) and callee not in _NON_MUTATING and any(
+            _names_in(arg) & watched
+            for arg in list(node.args) + [k.value for k in node.keywords])
         if receiver & watched or "per_query" in receiver or handed:
             hits.append(node.lineno)
     return hits
@@ -434,6 +489,47 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
             continue
         hits.append(node.lineno)
     return hits
+
+
+def test_handing_an_ALIASED_page_to_a_call_is_red() -> None:
+    """The alias widening must not disable the "handed to a call" branch (#14281 F2).
+
+    ⛔ THE DEFECT, measured on the previous form: `_mutated_after` compared each
+    argument's name-set to the WHOLE `watched` set for EXACT equality. With no alias,
+    `watched == {"results"}` and a bare `results` argument hit; with ONE alias,
+    `watched == {"results", "page_alias"}` and every single-name argument missed — so
+    the branch was inert for every shape, forever. That means the round-7 alias
+    resolution DISABLED the check it was added to serve, and it read green only because
+    `tools/read_wave_latency.py` happens to carry no alias: a guard right by accident.
+
+    This pins the intersection form directly (synthetic source, no repo state), so a
+    later widening of `watched` cannot silently re-break it.
+    """
+    src = (
+        "def run(sdk):\n"
+        "    results = sdk._tortoise_fts_query(query='q', limit=10)\n"
+        "    page_alias = results\n"
+        "    random.shuffle(results)\n"
+    )
+    run_def = ast.parse(src).body[0]
+    read = next(n for n in ast.walk(run_def)
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+    shuffle = next(n for n in ast.walk(run_def)
+                   if isinstance(n, ast.Call)
+                   and getattr(n.func, "attr", None) == "shuffle")
+    assert _aliases_of(run_def, lambda v: isinstance(v, ast.Name) and v.id == "results"), (
+        "the fixture no longer carries an alias, so it cannot exercise the branch")
+    hits = _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+    # ⛔ The shuffle LINE, not merely "something was found": the receiver half and the
+    # `per_query` guard both sit in the same loop, so a bare `assert hits` is satisfied by
+    # a shape that does not involve aliases at all (measured — the first cut of this test
+    # passed against the pre-fix set-equality form and was therefore vacuous).
+    assert shuffle.lineno in hits, (
+        f"`page_alias = results` + `random.shuffle(results)` is GREEN (hits={hits}) — the "
+        "'handed to a call' branch is comparing each argument against the whole watched "
+        "set instead of intersecting with it, so one alias disables it"
+    )
 
 
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():

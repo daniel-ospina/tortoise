@@ -196,6 +196,20 @@ surfaces:
   # Pinned by
   # tests/test_ci_selection.py::test_the_github_prober_paths_fail_closed_to_the_full_matrix.
   - test_10892_served_liveness.py
+  # #14281 review F1: the door-read contract pin. `tests/test_14192_read_wave_tool.py`
+  # derives its ENTIRE right-hand side from `tortoise/hosted_api.py::search`
+  # (`_door_read_contract()` → `assert len(door_calls) == 1`), so the diff class able to
+  # red it is a `hosted_api.py`-only change. MEASURED before this row
+  # (`select(['tortoise/hosted_api.py'], 'pull_request', m)`): surfaces
+  # `['api','onboarding']`, this file ABSENT from `test_files` — the guard was asleep on
+  # the only diff that can break it, which is #14279's own recurrence shape one layer out
+  # (a door refactor reds the pin on an unrelated PR's head instead).
+  # The `api` row is the half that covers a hosted_api.py-only diff; the existing `core`
+  # row (near the end of the `core:` block) is the other half — a `tests/`-only diff.
+  # NOT a `CORE_ALSO` candidate: that would put the whole `core` member set on every
+  # `hosted_api.py` diff. Pinned by
+  # `tests/test_14192_read_wave_tool.py::test_a_door_diff_selects_this_pin`.
+  - test_14192_read_wave_tool.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside
   # `core`: `_OrgSeedSurface` in `tortoise/hosted_api.py` — an EXACT `api`
