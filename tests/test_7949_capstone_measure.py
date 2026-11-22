@@ -18221,8 +18221,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ RE-MEASURED AT THIS HEAD (measured, never carried): `main`'s `#13854` (issue `#13826`,
     # `ae26adf963`) re-derived `04-plan.md`'s own row from `sdk.py:28718` to `sdk.py:28935`,
     # and `main`'s `#13971` (`e0accb8fe6`) then moved both the file and that row to
-    # `sdk.py:29142` — so at this head the row AGREES with `main` and the file is NOT in the
-    # diff (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). An earlier
+    # `sdk.py:29142` — and the MERGE also re-pointed the row's I7 range, so the file IS in
+    # the diff at this head (measured in the block below). An earlier
     # cut of this block stated the opposite in both halves (once "NOT in this diff at all", once
     # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
     # arm has been wrong in both directions on.
@@ -18263,11 +18263,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # backtick the target, so a literal caught ONE spelling and let three through — green
     # exactly where this arm is supposed to be red. Measured by mutating a /tmp copy: the
     # exact old spelling fired, and all three variants stayed green under the literal.
-    assert re.search(r":15346-15423`?\s*(?:→|->)\s*`?:?15449-15526", text), (
-        "D5 names the I7 range as one of THIS diff's re-points. It is not one: "
-        "`:15346-15423` reads identically on `origin/main` and at this head, because "
-        "`main` made that move — a pair whose two halves come from two different heads "
-        "is the chimera D5 exists to forbid (#13879 review, cycle 3)")
+    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`:15346-15423", text) is None, (
+        "D5 names the CHIMERA `:15262-15339 -> `:15346-15423` as one of this diff's "
+        "re-points. `main` made that move, so both ends read identically at `origin/main` and "
+        "here - the head's real pair is `:15346-15423` -> `:15449-15526`, which the assert "
+        "above pins positively (#13879 review, cycle 3; restored at #14183)")
     assert "sdk.py:29142" in text, (
         "D5 no longer names `sdk.py:29142`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
