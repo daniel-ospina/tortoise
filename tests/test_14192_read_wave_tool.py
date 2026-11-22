@@ -558,6 +558,14 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     hits now. ⛔ That is NOT an arity claim: the comparison was always per ARGUMENT, so
     `_helper(results[0])` was caught before too (measured) — the equality form failed on
     a name-set that was not exactly `watched`, never on the number of arguments.
+
+    RESIDUAL, stated rather than implied: the walk is over `run()`'s OWN body. A helper
+    defined OUTSIDE `run()` and called with NO argument (`_tidy()` closing over a module
+    global) is not followed — passing the collection (`_tidy(results)`) IS caught, and so
+    is a helper nested inside `run()` even when it is defined above the read (measured:
+    the scan is not line-filtered, so `def _tidy(): results.sort()` above the read and
+    `_tidy()` after it reds at `results.sort()`). Interprocedural reach is out of scope
+    for an AST pin, and `tools/read_wave_latency.py` carries no such helper today.
     """
     aliases = _aliases_of(run_def, lambda v: bool(_names_in(v) & {var}))
     watched = {var} | aliases
@@ -705,7 +713,15 @@ def _is_exactly(node: ast.AST, var: str) -> bool:
 
 
 def _rebound_after(run_def: ast.AST, var: str, lineno: int) -> list[int]:
-    """Line numbers where `var` is rebound after the read — a sorted/emptied page lies."""
+    """Line numbers where `var` is rebound after the read — a sorted/emptied page lies.
+
+    ⛔ A TRANSPARENT COPY IS NOT A REBINDING (#14281 review P2, measured). `_is_exactly`
+    already accepts `list(var)` / `tuple(var)` as the collection itself where it ITERATES,
+    so the same expression as a defensive snapshot — `results = list(results)` after the
+    read, which cannot alter anything — must not red either. Before this, it reported
+    "a sorted/emptied copy would reach the artifact", which misdiagnoses a no-op; that is
+    an unstated false red in a file whose contract is to state its false reds.
+    """
     hits: list[int] = []
     for node in ast.walk(run_def):
         if getattr(node, "lineno", -1) <= lineno:
@@ -720,6 +736,10 @@ def _rebound_after(run_def: ast.AST, var: str, lineno: int) -> list[int]:
         else:
             continue
         if any(var in _names_in(t) for t in targets):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == var and _is_exactly(node.value, var)):
+                continue  # `var = list(var)` is a transparent snapshot, not a rebinding
             hits.append(node.lineno)
     return hits
 
@@ -1394,6 +1414,37 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         f"`per_query` is rebound at line(s) {per_query_rebinds} after the measured read — "
         "a re-sorted/reversed copy would reach the returned report while every page the "
         "pin inspected was the measured one")
+    # ⛔ AND THE RETURNED DICT ITSELF (#14281 review P1, measured). Everything above
+    # inspects the dict that `per_query.append(...)` builds and the `per_query` NAME; but
+    # `run()` RETURNS `{"per_query": <value>}`, and a re-derivation placed THERE is neither
+    # a rebinding of the name nor a mutation of a recorded element:
+    #
+    #     "per_query": [dict(_pq, order=sorted(_pq["order"], key=str)) for _pq in per_query],
+    #
+    # MEASURED GREEN at cac5a1a5fa (16 passed) — and end-to-end that mutant turns a
+    # genuinely permuted page into this module's own worst outcome: `compare()` returns
+    # `rank_identical: True, rank_divergent_queries: []` and `main()` prints "fused order:
+    # RANK-IDENTICAL on every query". That is exactly the false-PASS class the file exists
+    # for, and the shape is statically visible, so it is not the declared "a name COMPUTED
+    # at runtime" residual. `per_query[:-1]`, `list(reversed(per_query))` and
+    # `_reordered(per_query)` are green the same way.
+    returns = [n for n in ast.walk(run_defs[0]) if isinstance(n, ast.Return)]
+    assert len(returns) == 1, (
+        f"`run()` has {len(returns)} `return` statements — this pin follows the ONE dict "
+        "that carries the report")
+    report = returns[0].value
+    assert isinstance(report, ast.Dict), (
+        f"`run()` returns {ast.unparse(report)} — this pin follows the report dict")
+    reported = {k.value: v for k, v in zip(report.keys, report.values, strict=True)
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    assert "per_query" in reported, (
+        "`run()`'s report dict no longer carries `per_query` — the verdict has lost its "
+        "subject, so this pin must be re-derived rather than left passing on nothing")
+    assert _is_exactly(reported["per_query"], "per_query"), (
+        f"`run()` returns `per_query` as {ast.unparse(reported['per_query'])} — it must be "
+        "the collected list ITSELF. A re-derivation here (a sorted or truncated copy, a "
+        "helper call) re-orders the pages `compare()` reads while every check above still "
+        "passes: measured GREEN with `rank_identical: True` on a genuinely permuted page")
     element_mutations = _per_query_element_mutations(run_defs[0], holder.lineno)
     assert not element_mutations, (
         f"line(s) {element_mutations} mutate a RECORDED entry through an alias of a "
