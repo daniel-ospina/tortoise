@@ -3296,6 +3296,35 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '        getattr(sdk, _N)(query=queries[0]["query"], limit=10, '
             'kind="statement")\n'
             '    _f()\n'),
+        # ⛔ EVERY OTHER SUB-CLAUSE OF THE DEFAULT ARM GETS ITS OWN ROW (#14326 review F1).
+        # The row above is POSITIONAL only, and each of the three clauses below was MEASURED
+        # deletable with the whole file still **25 passed** while the shape it guards went
+        # fail-open: delete the `kw_defaults` loop -> `def _f(*, _N="…")` reaches the read
+        # with the pin GREEN; drop `ast.Lambda` from the tuple -> the `lambda` default
+        # GREEN; drop `posonlyargs` from the alignment -> `def _f(_N="…", /)` raises
+        # `IndexError` out of `_str_constants` instead of resolving. A clause no row can red
+        # is not a guard — the same finding `28598400` deleted `_splat_operands`' expansion
+        # for, in the two arms added one commit later.
+        "KW-ONLY parameter default": (
+            '    def _f(*, _N="_tortoise_fts_query"):\n'
+            f'        {reach.format(name="_N")}\n'
+            '    _f()\n'),
+        "LAMBDA parameter default": (
+            '    (_f := lambda _N="_tortoise_fts_query": '
+            f'{reach.format(name="_N")})()\n'),
+        "POS-ONLY parameter default": (
+            '    def _f(_N="_tortoise_fts_query", /):\n'
+            f'        {reach.format(name="_N")}\n'
+            '    _f()\n'),
+        # ⛔ …AND THE MATCH ARM'S `rest=` HALF (#14326 review F1): `case {**rest}` binds the
+        # remaining KEYS through `MatchMapping.rest`, which is an `identifier?` and NOT an
+        # `identifier`-named capture, so `getattr(capture, "name")` alone never sees it.
+        # Dropping the `rest` fallback left all 25 tests green and this shape GREEN.
+        "match MAPPING REST capture": (
+            '    _m = {"a": 1, "_tortoise_fts_query": 2}\n'
+            '    match _m:\n'
+            '        case {"a": 1, **rest}:\n'
+            f'            {reach.format(name="rest")}\n'),
         # ⛔ A TRUE LITERAL splat (#14326 review P3): the row above is labelled "literal"
         # while binding a NAME, so nothing red the literal carrier itself.
         "LITERAL carried into a splat": ('    getattr(*[sdk, "_tortoise_fts_query"])'
@@ -3463,6 +3492,19 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     # control is removed. A row that can never be the failing row reads to the next lane as
     # an independent check and is not one; this file deletes those rather than keeping them
     # `_name_reaching_operands`' literal-splat expansion was deleted for the same reason.
+
+    # ⛔ THE SEVENTH CONTROL: a literal unpack PAIRS ELEMENT-WISE, so a target that is not the
+    # read name's position can never hold it (#14326 review F2, measured). `_pair` is the
+    # FIRST element of a two-element literal and can only ever hold `"a"`; crediting the
+    # whole container's values to it is a FALSE RED. Removing `_bind`'s pairing arm left all
+    # 25 tests green AND turned this shape RED — a PRECISION guard no row could see, in the
+    # one direction this file calls expensive.
+    paired_unpack = ('    _pair, _x = ("a", "_tortoise_fts_query")\n'
+                     f'    {reach.format(name="_pair")}\n')
+    assert not _pin_refuses(_pin_source(paired_unpack)), (
+        "a literal unpack pairs ELEMENT-WISE — `_pair` is the FIRST element and can only "
+        "hold `\"a\"`, so binding it the container's whole value set is a FALSE RED")
+
 
 
 def test_the_READ_side_of_str_is_NOT_a_MUTATION() -> None:
