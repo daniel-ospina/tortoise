@@ -7324,16 +7324,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to one
         # FILE and the consume pair was re-pointed in one document while the definition
-        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`), and a later `origin/main` merge a further `+32` (`12136`/`12189` -> `12168`/`12221`) and a further `+59` (`12168`/`12221` -> `12227`/`12280`, which is what the rows below carry) — each re-read by content at the head that moved it.
+        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`), and a later `origin/main` merge a further `+32` (`12136`/`12189` -> `12168`/`12221`, which is what the rows below carry) — each re-read by content at the head that moved it. ⛔ AND `#14278` added +23 lines above the definition (`7582` -> `7605`) by expanding `beta_variance_sum_bound`'s docstring at `search_engine.py:5810`, which is why both DEFINITION rows below carry `7605` and both documents' prose carries the `+23` hop: the `sdk.py` pair is below no such insert and keeps `12206`/`12259`.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
-            ("7582", "def subject_binding_available(graph) -> bool:"),
+            ("7605", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
             ("12206", "subject_binding_available,"),
             ("12259", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("7582", "def subject_binding_available(graph) -> bool:"),
+            ("7605", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
