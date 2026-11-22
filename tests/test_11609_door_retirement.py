@@ -1233,6 +1233,19 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: tests/test_blog_authoring_doc.py), so the guard asks it instead of guessing.
     MD = MarkdownIt("commonmark").enable("table")
 
+    #: One opaque INLINE-HTML span: a comment, or a tag whose quoted attribute values may
+    #: themselves contain `>`.
+    #: ⛔ NOT `<[^>]*>` (#14237 r10 review P1, measured at r12). `[^>]*` ends the "tag" at the
+    #: FIRST `>`, so a `>` inside a quoted attribute value — or inside a comment — truncated
+    #: the span and the REMAINDER was emitted as a VISIBLE block: an inline
+    #: `See below. <!-- a > Call X for names. Use tortoise_graph_overview. -->` and an
+    #: `<a title="x > Call X … Use tortoise_graph_overview.">` were both ACCEPTED, i.e. the
+    #: same fail-OPEN the block-level opacity closed, re-entered through the inline splitter.
+    #: A comment is matched whole (`[\s\S]*?`, so it spans newlines); a tag is matched with
+    #: its quoted values consumed as a unit, so a `>` inside quotes cannot end it.
+    TAG_SPAN = re.compile(
+        r"<!--[\s\S]*?-->|<[^>\"']*(?:\"[^\"]*\"|'[^']*'|[^>\"'])*>")
+
     #: A retired name in call form: the name followed by an OPENING BRACKET, optionally
     #: after HORIZONTAL space, an inline-markdown delimiter RUN (backtick, `*`, `_`, `~`),
     #: and/or an inline HTML TAG (`<code>`, `</code>`, `<kbd>`, `<br>`). `name(args)`,
@@ -1348,7 +1361,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
                     # around it is its own block: the successor must be named in the SAME
                     # segment, which is the fail-closed direction and is declared.
                     cursor = 0
-                    for tag in re.finditer(r"<[^>]*>", source):
+                    for tag in cls.TAG_SPAN.finditer(source):
                         if tag.start() > cursor:
                             seg = source[cursor:tag.start()]
                             found.append((begin + cursor, begin + tag.start(),
@@ -1976,6 +1989,30 @@ class TestEveryReaderNamesTheLiveListingDoor:
         text = f"Call `tortoise_list_graphs` for names. {hidden}\n"
         assert self.notes_missing_replacement(text), (
             f"an inline HTML construct satisfied R2 invisibly: {hidden}")
+
+    @pytest.mark.parametrize("hidden", [
+        # a `>` INSIDE the comment truncated the span, so the rest of the comment was
+        # emitted as a VISIBLE block holding both the mention and the replacement.
+        "See below. <!-- a > Call tortoise_list_graphs for names. Use "
+        "tortoise_graph_overview. -->",
+        # a `>` INSIDE a quoted attribute value did the same to a tag span.
+        '<a title="x > Call tortoise_list_graphs for names. Use '
+        'tortoise_graph_overview.">link</a>',
+        '<a title="x > y">Call tortoise_list_graphs for names.</a>',
+    ], ids=["comment-with-gt", "attribute-with-gt", "attribute-with-gt-then-mention"])
+    def test_an_inline_html_span_cannot_hide_a_replacement_behind_a_gt(self, hidden):
+        """A inline HTML span is matched WHOLE, so a `>` inside it cannot truncate it.
+
+        ⛔ MEASURED (#14237 r10 review P1, re-found at r12): the inline splitter used
+        `<[^>]*>`, which ends the span at the FIRST `>` — so a `>` inside a quoted attribute
+        value or inside a comment left the REMAINDER as a visible block, and both shapes
+        below were ACCEPTED: a bare instruction whose only "replacement" is text a browser
+        never displays. That is the same fail-OPEN the block-level opacity closed, re-entered
+        through the inline path, and `test_an_HTML_block_is_opaque` did not cover it because
+        it exercises the block path only.
+        """
+        assert self.notes_missing_replacement(hidden + "\n"), (
+            f"an inline HTML span held a hidden replacement behind a `>`: {hidden}")
 
     def test_a_fences_INFO_STRING_is_not_a_replacement(self):
         """#14237 r11 review P2 — a fence body is the CODE, not its language tag.
