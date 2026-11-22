@@ -5815,7 +5815,10 @@ def beta_variance_sum_bound(threshold: float) -> float:
     ``_beta_variance``'s band, on the rows that were always going to be rejected.
     ⛔ BUT THE GUARD IS NOT FREE, AND IT DOES NOT SPARE ALL OF THE COERCION. Its
     operands are the SAME ``numeric_operand_cypher`` expressions the division
-    uses, so coercion is evaluated on every candidate row INSIDE the guard.
+    uses, so coercion is evaluated INSIDE the guard too, on every candidate row
+    that REACHES it — not on every candidate row: the guard is the third ``AND``ed
+    conjunct inside the contested ``OR`` arm, so a row failing the presence checks
+    ahead of it, or matched by the NAND/terminal alternatives, never evaluates it.
     Measured on the emitted predicate: **8** coercion ``CASE WHEN`` before
     ``$contested_sum_bound`` against **73** between it and
     ``$contested_threshold`` (72 coercion + the division's own selector) — a

@@ -7,7 +7,10 @@ change targeted. #14192 put a NECESSARY precondition in front of it, so that the
 division and the band checks are skipped on the rows that were always going to be
 rejected. ⛔ **BUT NOT ALL OF THE COERCION, AND THE GUARD IS NOT FREE** — the
 bound is built from the same ``numeric_operand_cypher`` expressions the division
-uses, so coercion ALSO runs on every candidate row INSIDE the guard itself. On
+uses, so coercion ALSO runs INSIDE the guard itself, on every row that reaches
+it — not on every candidate row: the guard is the third ``AND``ed conjunct
+inside the contested ``OR`` arm, so a row failing the presence checks ahead of
+it, or matched by the NAND/terminal alternatives, never evaluates it. On
 the emitted predicate: 8 coercion ``CASE WHEN`` before ``$contested_sum_bound``
 against 73 between it and ``$contested_threshold`` (72 coercion + the division's
 own selector), so a rejected row pays 8 coercion cases to skip 72.
@@ -445,8 +448,8 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     # kept for the look of coverage (round-20 review). The claim they were meant
     # to pin — that the SHARE rests on the split, not on the totals — is pinned
     # by the row above, which is the one a re-split actually reds.
-    # ⛔ AND THE SHARE ITSELF, IN EVERY COPY — not just the four headline
-    # numerals. Arithmetic cannot rot on its own but PROSE still does: measured at
+    # ⛔ AND THE SHARE ITSELF, IN THE COPIES LISTED BELOW — not just the four
+    # headline numerals. Arithmetic cannot rot on its own but PROSE still does: measured at
     # `de4cab96`, inverting any of `72 of 80` / `90%` / `99%` / `64` left every
     # row green, and at `21f9da1a` the DERIVATION copies were still ungraded —
     # `(72 coercion + the division's own selector)`, `pays 8 coercion ``CASE``s to
