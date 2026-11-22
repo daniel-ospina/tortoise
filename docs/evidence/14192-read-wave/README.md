@@ -1,3 +1,14 @@
+---
+title: "Evidence — #14192, the read path's legs measured"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-21
+subjects.team: epistemic-team
+aboutSubjects: Tortoise hybrid retrieval read path
+aboutObjects: "#14192, #14262, tools/read_wave_latency.py, docs/evidence/14192-read-wave"
+---
+
 # #14192 — the read path's legs, measured
 
 Two artifacts, both from `tools/read_wave_latency.py` (added by this issue). They
