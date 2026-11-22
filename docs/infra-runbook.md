@@ -4676,7 +4676,8 @@ operator who read the line above as "CI defends this" would never run it.
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
 >    `:1625` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
->    `:3272-3282` (the reader that runs on the deployed box);
+>    `:3302-3306` (the reader that runs on the deployed box — the `elif` that CALLS the flag and
+>    the thread it starts; the import and the comment above it are not the reader);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
 >    read at `:432`.
 >
@@ -4685,8 +4686,11 @@ operator who read the line above as "CI defends this" would never run it.
 > pair. The **function names** are the invariant — the line numbers are a convenience and they move
 > whenever `embeddings.py` grows, so re-pin them on a merge. ⛔ **This copy is the only line-citing
 > one left, and it is pinned:** `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
-> resolves each cite above by NAME↔NUMBER, so a merge that moves the code reds instead of rotting it
-> silently. The manifest used to carry a sibling copy and its own pin; **this change** deletes the
+> resolves each cite above by NAME↔NUMBER **and requires the cited span to CALL the reader** — an
+> import or a comment that spells the identifier is not a flag read (entry 4 above cited exactly such
+> a span while the real gate had moved below it, and every other check passed) — so a merge that
+> moves the code reds instead of rotting it silently. The manifest used to carry a sibling copy and
+> its own pin; **this change** deletes the
 > `fly-only:#13674` block that carried it (#13926 had already taken the name to route (b), and that
 > block landed on top of it seven minutes later — which is what produced the duplicate), so there is
 > no second copy to keep in step: do not reintroduce one without its own arm.
