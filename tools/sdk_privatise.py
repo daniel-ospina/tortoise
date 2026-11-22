@@ -1094,9 +1094,12 @@ SWEEP_NAMES = 66
 #: NAMES, NOT A STANDING PROPERTY OF THIS BRANCH: an unpinned `git diff origin/main --
 #: tests/test_sdk_privatise_sweep.py | wc -l` prints 0 only while `origin/main` happens to be
 #: `70fbd1a27dd`, and 156 once `main` moves past it — which is why the base is NAMED in the command
-#: above, for the same reason the rest of this block names one. The trap is the "the FILE changed,
-#: the ROW did not" one this block warns about below, in its mirror form. It differs from `main`
-#: again NOW, by the `OWN_PINS` row and
+#: above, for the same reason the rest of this block names one. The trap is the one this block
+#: states below — "The ROW is what is pinned; the per-file split is what a COUNT cannot show" — in
+#: its mirror form. ⛔ QUOTED BY ITS OWN TEXT: an earlier cut of this sentence put a DIFFERENT
+#: phrasing in quotation marks and attributed it to this block, and the block never said it — a
+#: quotation is copied from the text it cites, never rebuilt from a recollection of it. It differs
+#: from `main` again NOW, by the `OWN_PINS` row and
 #: its refspec that GRADE the `fa4d1c8065` pin below: test DATA, not one executable line of the tool
 #: either way. What the ONE file adds that is not prose is the `SWEEP_RESIDUE` pin itself — the
 #: constant below, `-`/`+` — so what moves on this branch is the PIN and never a ROW. The conclusion
