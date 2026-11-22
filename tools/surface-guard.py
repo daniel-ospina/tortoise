@@ -649,8 +649,25 @@ def main(argv: list[str]) -> int:
                 # ordinary `<<: *base` plus an explicit override as a duplicate, which
                 # YAML says it is not. The parent constructor flattens for itself.
                 seen: set = set()
+                merge_seen = False
                 for key_node, _value_node in node.value:
                     if key_node.tag == "tag:yaml.org,2002:merge":
+                        # ⛔ SKIPPED FROM THE SCAN, NOT FROM THE COUNT (round-28 review,
+                        # P2, measured) — the same rule as the sibling copy: a mapping may
+                        # carry at most ONE merge key, and a second `<<:` is silently
+                        # overwritten by whatever it merges, so skipping it entirely would
+                        # leave this gate grading a value the file contradicts (the very
+                        # false PASS the loader exists to refuse).
+                        if merge_seen:
+                            raise yaml.constructor.ConstructorError(
+                                None, None,
+                                f"duplicate merge key '<<' (line "
+                                f"{key_node.start_mark.line + 1}): a mapping may carry at "
+                                f"most ONE merge key, and a second one is silently "
+                                f"overwritten by whatever it merges — delete one of them",
+                                key_node.start_mark,
+                            )
+                        merge_seen = True
                         continue
                     try:
                         key = self.construct_object(key_node, deep=deep)

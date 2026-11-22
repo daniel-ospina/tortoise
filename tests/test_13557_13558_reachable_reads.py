@@ -880,6 +880,21 @@ NOT_SELECTED = [
     "is the claim being withdrawn",
     "is the export to be archived by the vendor",
     "is the export to be archived in Q3",
+    # ── …and the REST OF THE CLASS the literal spellings missed (round-28 review, P1) ──
+    # A role, not two spellings: `getting` is the colloquial progressive, ONE adverb splits
+    # `to be`, and `to get`/`to become` are the same scheduled-state frame. Every one of
+    # these ROUTED the whole ended population with the qualifier dropped and `signal=None`
+    # before the guard was re-bound to `_NONFINITE_COPULA`.
+    "is the export getting archived",
+    "is the export to eventually be archived",
+    "is the export to get archived",
+    "is the export to become archived",
+    # ── …and the CONTRACTED asyndetic twin this shape swallowed (round-28 review, P1) ──
+    # `has anyone reported v3 hasn't been deprecated` ROUTED through the perfect branch and
+    # dropped the caller's own verb (`reported`) with `signal=None`, while its UN-contracted
+    # twin was refused. Refused now, and reported through `existence_unguarded`.
+    "has anyone reported v3 hasn't been deprecated",
+    "has anyone complained billing hasn't been deprecated",
 ]
 
 
@@ -1018,6 +1033,15 @@ NOTICE_ONLY = [
     "is the claim being withdrawn",
     "is the export to be archived by the vendor",
     "is the export to be archived in Q3",
+    # …the rest of that class, measured in round 28: the non-finite VERB PHRASE is a role
+    # (`getting`, `to <adverb> be`, `to get`, `to become`), and the contracted auxiliary is
+    # the same second-verb class as `has`.
+    "is the export getting archived",
+    "is the export to eventually be archived",
+    "is the export to get archived",
+    "is the export to become archived",
+    "has anyone reported v3 hasn't been deprecated",
+    "has anyone complained billing hasn't been deprecated",
     # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
     # that is now stated and machine-checked (review at `5b82bcdf03`, P2, measured) ──
     # The PREPOSITIONS `_BLOCKED_TAIL` names are REPORTED on this shape (see the
@@ -1367,23 +1391,59 @@ def _the_two_guards():
     from tortoise import state_intent
 
     pattern = state_intent._COPULA_SUBJECT
-    subordinators = re.search(
-        r"\(\?!\(\?:\[a-z0-9\]\[a-z0-9[^)]*\)\{1,5\}\("
-        # ⛔ THE MEMBER CLASS IS NOT `[a-z|]+` ANY MORE (review P1 at `42e0c1a662`): the
-        # second-verb list now also refuses the INFINITIVE (`to\s+be`) and progressive
-        # (`being`) copula, so a single member carries a regex escape. Widening the
-        # capture rather than moving the member out of the list keeps ONE home for the
-        # class — the drift between two copies of a closed list is the failure this
-        # branch has already paid for twice on the preposition class.
-        r"(?:\?:)?([a-z|\\s+]+)\)", pattern)
+    # ⛔ READ BY POSITION, NOT BY A CHARACTER CLASS (re-derived twice, and this is why):
+    # the member class has stopped being a flat `[a-z|]+` list twice over — first the
+    # INFINITIVE / PROGRESSIVE member carried a regex escape (review P1 at `42e0c1a662`),
+    # then the CONTRACTED-AUXILIARY class arrived as its own nested group AND the
+    # non-finite member grew a SECOND level of nesting (`to\s+(?:[a-z]+\s+){0,2}…`), which
+    # no `\(\?:[^()]*\)` capture can span. So the reader slices the group out between its
+    # own delimiters and splits it with a paren-DEPTH-AWARE splitter, which keeps ONE home
+    # for the class: the drift between copies of this closed list is the failure this
+    # branch has already paid for three times.
+    head = pattern.index("{1,5}(?:") + len("{1,5}(?:")
+    tail = pattern.index(")(?![-/])", head)
+    subordinators = _split_alternation(pattern[head:tail])
     second_np = re.search(r"\{0,4\}\(\?!\(\?:([a-z|]+)\)", pattern)
     assert subordinators and second_np, (
         "`_COPULA_SUBJECT` no longer parses into its two alternations — re-derive this "
         "test AND the note it checks against the new pattern, rather than deleting the "
         "check: the note is a claim about exactly these two lists")
     # `to\s+be` is read back as `to be` so the set holds what a reader would write.
-    return (frozenset(tok.replace("\\s+", " ") for tok in subordinators.group(1).split("|")),
+    return (frozenset(tok.replace("\\s+", " ") for tok in subordinators),
             frozenset(second_np.group(1).split("|")))
+
+
+def _split_alternation(inner: str) -> list[str]:
+    """Split a regex alternation on the `|`s at DEPTH 0, flattening `(?:…)` groups.
+
+    A nested group can itself be an alternation of words (`(?:hasn't|…|shouldn't)`), so its
+    members are flattened into the same list — that is what makes the resulting set the
+    CLASS the guard actually refuses rather than the spelling the pattern happens to use.
+    """
+    tokens: list[str] = []
+    depth = 0
+    current = ""
+    for ch in inner:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "|" and depth == 0:
+            tokens.append(current)
+            current = ""
+        else:
+            current += ch
+    tokens.append(current)
+    out: list[str] = []
+    for tok in tokens:
+        tok = tok.strip()
+        if not tok:
+            continue
+        if tok.startswith("(?:") and tok.endswith(")"):
+            out.extend(_split_alternation(tok[len("(?:"):-1]))
+        else:
+            out.append(tok)
+    return out
 
 
 def _blocked_tail_members():

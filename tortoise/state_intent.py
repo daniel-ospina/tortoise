@@ -610,6 +610,45 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: 3 (a multi-word adverbial is 2 tokens, plus headroom), and it is REFUSAL-SIDE: it can only add a
 #: refusal, never a route.
 _EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}"
+#: ⛔ A CONTRACTED AUXILIARY CARRIES ITS NEGATION INSIDE THE WORD (round-26 review, P1; round-28
+#: at `feb2c740bb`, P1, measured — the SAME class, one guard over). One home, THREE consumers:
+#: both `_EXISTENCE_GUARD` lookaheads and `_COPULA_SUBJECT`'s second-verb lookahead. The third
+#: copy was missing entirely, and that is what the round-28 review measured: the contracted
+#: asyndetic twins ROUTED through the shape `detect_state_question` evaluates FIRST
+#: (`_ENDING_SHAPES` before `_ENDING_SIGNALS`), with the caller's own verb dropped and
+#: `signal=None` —
+#:
+#:   `has anyone reported v3 hasn't been deprecated`   <- routed, signal None
+#:   `has anyone complained billing hasn't been deprecated`
+#:
+#: Both are refused now. Measured: 80 of 150 templated `<head> <subject> <contraction> been
+#: <ending>` probes routed before this constant was interpolated here, 0 after, and 0 pinned
+#: rows move. ⛔ AND THE APOSTROPHE IS TWO CHARACTERS, not one: `hasn't` and `hasn’t` are the
+#: same word, and a spelling that accepted only ASCII would keep the class open for every
+#: phone keyboard that types the typographic quote.
+_CONTRACTED_AUX = (
+    r"hasn['’]t|hadn['’]t|haven['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|"
+    r"doesn['’]t|didn['’]t|don['’]t|won['’]t|wouldn['’]t|can['’]t|couldn['’]t|"
+    r"mightn['’]t|mustn['’]t|shouldn['’]t"
+)
+#: ⛔ THE NON-FINITE VERB PHRASE IS A SECOND VERB, AND THE CLASS IS A ROLE, NOT TWO SPELLINGS
+#: (round-28 review, P1, measured). Listing literally `to be|being` closed the two spellings the
+#: previous round measured and left the rest of the class open — every one of these still ROUTED
+#: the whole ended population with the qualifier dropped and `signal=None`:
+#:
+#:   `is the export getting archived`            <- colloquial progressive
+#:   `is the export to eventually be archived`   <- ONE adverb splits `to be`
+#:   `is the export to get archived` / `… to become archived`
+#:
+#: One home, two consumers (`_COPULA_SUBJECT`'s refusal lookahead and `_COPULA_LONG_SUBJECT`'s
+#: arm B), because fixing the refusal without widening the report trades a wrong route for a
+#: silent drop — measured: with only the refusal side widened, `is the export getting archived`
+#: came back `signal=None`.
+#: ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: the `to <adverb> <verb>` window is bounded
+#: to TWO adverbs (a third puts the phrase outside the subject's own word bound anyway), and a
+#: non-finite verb this list does not name (`to wind up archived`) still routes — a closed list is
+#: the mechanism this module uses everywhere and the residual it always carries.
+_NONFINITE_COPULA = r"(?:to\s+(?:[a-z]+\s+){0,2}(?:be|get|become|became)|being|getting)"
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -635,8 +674,7 @@ _EXISTENCE_GUARD = (
     # hasn't been deprecated` — routed the whole ended population with the caller's
     # predicate dropped and `signal=None`, while every UN-contracted twin was refused.
     # This is a CLOSED set, unlike the open adverbial class: one alternation closes it.
-    r"(?:hasn't|hadn't|haven't|isn't|aren't|wasn't|weren't|doesn't|didn't|don't|"
-    r"won't|wouldn't|can't|couldn't|mightn't|mustn't|shouldn't|"
+    rf"(?:{_CONTRACTED_AUX}|"
     # ⛔ AND `do|does|did` ARE NOT HERE (round-26 review, P2, measured): none of them can
     # precede `been`, so they add NO detection power to a guard whose window requires
     # `been` — their only effect was to let an ordinary verb fill the noun slot and the
@@ -675,8 +713,7 @@ _EXISTENCE_GUARD = (
     # hasn't been deprecated` — routed the whole ended population with the caller's
     # predicate dropped and `signal=None`, while every UN-contracted twin was refused.
     # This is a CLOSED set, unlike the open adverbial class: one alternation closes it.
-    r"(?:hasn't|hadn't|haven't|isn't|aren't|wasn't|weren't|doesn't|didn't|don't|"
-    r"won't|wouldn't|can't|couldn't|mightn't|mustn't|shouldn't|"
+    rf"(?:{_CONTRACTED_AUX}|"
     # ⛔ AND `do|does|did` ARE NOT HERE (round-26 review, P2, measured): none of them can
     # precede `been`, so they add NO detection power to a guard whose window requires
     # `been` — their only effect was to let an ordinary verb fill the noun slot and the
@@ -954,8 +991,17 @@ _COPULA_SUBJECT = (
     # guards: this row still routed, and every routing row in the suite still routes with
     # the tokens below (`is the data all archived`, `has the onboarding flow been
     # retired`, `is the v3 export deprecated`).
-    r"where|whereas|after|before|now|what|how|why|has|have|had|is|are|was|were|will|"
-    r"would|can|could|may|might|must|should|do|does|did|"
+    # ⛔ AND A CONTRACTED AUXILIARY BELONGS TO THE SAME CLASS (round-28 review, P1,
+    # measured). This lookahead is the THIRD copy of the second-verb class and the one
+    # that had no contractions at all, so the perfect branch below swallowed an asyndetic
+    # second clause whose own auxiliary was contracted: `has anyone reported v3 hasn\'t
+    # been deprecated` and `has anyone complained billing hasn\'t been deprecated` ROUTED
+    # the whole ended population with the caller\'s predicate dropped and `signal=None`,
+    # while every UN-contracted twin was refused. The class is now interpolated from
+    # :data:`_CONTRACTED_AUX` — one home, three consumers, so the fourth copy cannot go
+    # missing the way this one did.
+    rf"where|whereas|after|before|now|what|how|why|{_CONTRACTED_AUX}|"
+    r"has|have|had|is|are|was|were|will|would|can|could|may|might|must|should|do|does|did|"
     # ⛔ AND AN INFINITIVE OR PROGRESSIVE COPULA IS A SECOND VERB TOO (review P1 at
     # `42e0c1a662`, measured). `to be` and `being` were the ONE second-verb form this
     # lookahead did not name, so the subject swallowed them as noun-phrase words and the
@@ -973,7 +1019,7 @@ _COPULA_SUBJECT = (
     # <ending>` probes routed with no signal, and 0 of the pinned routing rows change
     # under this exclusion (a `to` that is a PREPOSITION rather than an infinitive —
     # `is the export to Europe archived` — carries no `be`, so it still routes).
-    r"to\s+be|being)(?![-/])\b)"
+    rf"{_NONFINITE_COPULA})(?![-/])\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
     # ⛔ A PREPOSITION IS NOT A SECOND NOUN PHRASE (review P1, measured). `of` was
     # already excluded here — a genitive (`the export of the vendor`) is ONE noun
@@ -1215,7 +1261,7 @@ _COPULA_LONG_SUBJECT = re.compile(
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     rf"(?!.*\b(?:because|that|given|since|when|while|if|unless|which|who|whom|"
     rf"whose|where)\b)"
-    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{1,5}}(?:to\s+be|being)\s+"
+    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{1,5}}{_NONFINITE_COPULA}\s+"
     rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
     rf")"
     rf"{_BLOCKED_TAIL}"
