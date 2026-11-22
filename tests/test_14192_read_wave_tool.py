@@ -5408,14 +5408,34 @@ def _generator_filter_findings(key: str, gen: ast.comprehension) -> list[str]:
         return [f"the artifact's `legs` has {len(gen.ifs)} filter clauses — the tool's rule "
                 'is `if <entry>.get("leg")` and nothing else']
     cond = gen.ifs[0]
-    if (isinstance(cond, ast.Call) and getattr(cond.func, "attr", None) == "get"
-            and len(cond.args) == 1 and not cond.keywords
-            and isinstance(cond.args[0], ast.Constant) and cond.args[0].value == "leg"
-            and _names_in(cond.func.value) & _names_in(gen.target)):
-        return []
-    return [f"the artifact's `legs` filters on {ast.unparse(cond)} — the tool's rule is "
-            f"`{ast.unparse(gen.target)}.get(\"leg\")`, which drops exactly the trace entries "
-            "that record no leg"]
+    target = ast.unparse(gen.target)
+    # ⛔ ONE MESSAGE PER SUB-CLAUSE (#14326 review P1, measured at `4ed436353f`): the five
+    # conjuncts below were written as ONE combined message, and deleting any four of them
+    # (`attr == "get"`, `len(cond.args) == 1`, `not cond.keywords`, the
+    # `_names_in(...) & _names_in(gen.target)` intersection) left **31 passed** — a row can
+    # only red the clause whose message it asserts, so a combined verdict is one row wide.
+    # Each refused shape now names ITS OWN clause, and `test_the_artifact_generator_filter_
+    # clauses_red` carries one row that asserts exactly that clause's message.
+    if not (isinstance(cond, ast.Call) and getattr(cond.func, "attr", None) == "get"):
+        return [f"the artifact's `legs` filters on {ast.unparse(cond)}, not a `.get(...)` "
+                f"CALL — the tool's rule is `{target}.get(\"leg\")`, which drops exactly the "
+                "trace entries that record no leg"]
+    if cond.keywords:
+        return [f"the artifact's `legs` calls `.get(...)` with the keyword argument(s) "
+                f"{sorted(k.arg or '**' for k in cond.keywords)} — the tool's rule names the "
+                'key `"leg"` positionally and nothing else']
+    if len(cond.args) != 1:
+        return [f"the artifact's `legs` calls `.get(...)` with {len(cond.args)} positional "
+                'argument(s) — the tool\'s rule is exactly `.get("leg")`']
+    if not (isinstance(cond.args[0], ast.Constant) and cond.args[0].value == "leg"):
+        return [f"the artifact's `legs` filters on {ast.unparse(cond)} — the tool's rule "
+                f"is `{target}.get(\"leg\")`, which drops exactly the trace entries "
+                "that record no leg"]
+    if not _names_in(cond.func.value) & _names_in(gen.target):
+        return [f"the artifact's `legs` filters on {ast.unparse(cond)}, whose `.get(\"leg\")` "
+                f"is not read off the iterated entry (`{target}`) — a filter over a different "
+                "object reports a table that is not the measured page's"]
+    return []
 
 
 def _findings_of_run(source: str, predicate) -> list[str]:
@@ -5479,6 +5499,18 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                                "    sdk = TortoiseSDK()\n    sdk = _FastMirror(sdk)\n", 1)
     got = _findings_of_run(wrapper, _receiver_findings)
     assert got and "bound 2 time(s)" in got[0], got
+
+    # ⛔ TWO receivers, EACH bound once to `TortoiseSDK()` (#14326 review P1, measured at
+    # `4ed436353f`): deleting the `len(receivers) > 1` clause left **31 passed**, because
+    # every other row reaches the read through exactly one name and so reds a different
+    # clause first. Two SDK objects are indistinguishable from a mirror by shape alone —
+    # the pin proves the measured read is off THE object `run()` constructs, and it can
+    # only prove that while there is one.
+    two_receivers = faithful.replace(
+        "    results = sdk._tortoise_fts_query(",
+        "    other = TortoiseSDK()\n    results = other._tortoise_fts_query(", 1)
+    got = _findings_of_run(two_receivers, _receiver_findings)
+    assert got and "more than one receiver" in got[0], got
 
     foreign = faithful.replace("    sdk = TortoiseSDK()\n", "    sdk = get_sdk()\n", 1)
     got = _findings_of_run(foreign, _receiver_findings)
@@ -5570,7 +5602,22 @@ def test_the_artifact_generator_filter_clauses_red() -> None:
     assert got and "0 filter clauses" in got[0], got
 
     got = findings("legs", '[e for e in trace if e.get("leg") and True]')
-    assert got and "filters on" in got[0], got
+    assert got and "not a `.get(...)` CALL" in got[0], got
 
     got = findings("legs", '[e for e in trace if e.get("kind")]')
     assert got and "filters on" in got[0], got
+
+    # The `legs` SHAPE is four further sub-clauses, each measured UN-RED by any row at
+    # `4ed436353f` (replacing it with `True` left **31 passed**). Each row below asserts the
+    # message of ITS OWN clause, so deleting that clause makes exactly this row fail.
+    got = findings("legs", "[e for e in trace if e.legs(\"leg\")]")
+    assert got and "not a `.get(...)` CALL" in got[0], got
+
+    got = findings("legs", '[e for e in trace if e.get("leg", default=0)]')
+    assert got and "keyword argument(s)" in got[0], got
+
+    got = findings("legs", '[e for e in trace if e.get("leg", 0)]')
+    assert got and "positional argument(s)" in got[0], got
+
+    got = findings("legs", '[e for e in trace if probe.get("leg")]')
+    assert got and "not read off the iterated entry" in got[0], got
