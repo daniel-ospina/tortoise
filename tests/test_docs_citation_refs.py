@@ -5277,7 +5277,7 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
             f"  --opt-{'a' * n} <x>" for n in range(1, count + 1))
 
     def not_a_skip(fn, *args):
-        """Call `fn`, turning a `pytest.skip` into a FAILURE.
+        """Call `fn`, turning a `pytest.skip`/`pytest.xfail` into a FAILURE.
 
         ⛔ THE SKIP IS THE LAUNDERING HOLE (#14303 review round 5, P2 — MEASURED). `pytest.skip`
         raises `Skipped`, which is NOT an `AssertionError`, so it escapes every `pytest.raises`
@@ -5287,13 +5287,21 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         `36 passed, 1 skipped` (exit 0) against a baseline of `37 passed`. `pytest.fail` raises
         `Failed`, which is not an `AssertionError` either, so it escapes the `pytest.raises` and
         reds the cell.
+
+        ⛔ AND THE IMPERATIVE `pytest.xfail` IS THE SAME HOLE WITH A DIFFERENT REPORT (#14328 review,
+        P3 — MEASURED, pre-existing). `XFailed` subclasses `Failed`, so it is neither `Skipped` nor
+        `AssertionError`: it escapes this arm AND the `pytest.raises(pytest.skip.Exception)` witness
+        below, and the cell is merely reported `xfailed` — exit 0. MEASURED at `16e6afbf`: the
+        helper's body replaced by `pytest.xfail(...)` left `35 passed, 2 xfailed` at exit 0, the
+        same deletion-the-fix signature as the skip. Both are caught here; `pytest.xfail()` is never
+        how a platform fact is declared, and `MARK.xfail` (a decorator, not a raise) is unaffected.
         """
         try:
             return fn(*args)
-        except pytest.skip.Exception as exc:  # the shape under test
+        except (pytest.skip.Exception, pytest.xfail.Exception) as exc:  # the shapes under test
             pytest.fail(
-                "the derivation SKIPPED where it must RAISE — a skip makes every assertion below "
-                f"it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
+                "the derivation SKIPPED/XFAILED where it must RAISE — a skip makes every assertion "
+                f"below it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
 
     assert len(_d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
         _D5_LONG_OPTION_FLOOR), (
@@ -5317,10 +5325,18 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     # converts "no universe published" into `pytest.skip`, so replacing that skip with a bare `raise`
     # left this file at `37 passed` and only a BSD-grep box would ever have noticed. That is the same
     # P2-whose-fix-has-no-call-site-witness shape this PR catalogues, so it is pinned in both
-    # directions: a silent grep SKIPS, a real universe is RETURNED.
-    with pytest.raises(pytest.skip.Exception):
+    # directions: a silent grep SKIPS, a real universe is RETURNED — and the exception KIND is the
+    # datum, so an `XFailed` cannot pass for a `Skipped` here (#14328 review, P3 — MEASURED).
+    try:
         _d5_pinned_universe(reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    except BaseException as outcome:  # the exception KIND is what this arm pins
+        assert type(outcome) is pytest.skip.Exception, (
+            f"the platform-fact branch must SKIP with `Skipped`, not raise "
+            f"{type(outcome).__name__} — a `pytest.xfail()` is reported as xfailed and exits 0, so "
+            "it launders this cell exactly like a skip does (#14328)")
+    else:
+        pytest.fail("a silent grep must SKIP the cell, and it returned instead")
     full_help = reported(0, usage(_D5_LONG_OPTION_FLOOR))
     # ⛔ BOTH ARMS NOW RUN THROUGH THE CALL SITE, NOT ONLY THE DERIVATION (#14324, P2 — MEASURED).
     # The returning arm used to read `assert _d5_pinned_universe(full_help) == …`, and `pytest.skip`
