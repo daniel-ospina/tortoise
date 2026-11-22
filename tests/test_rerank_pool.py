@@ -2133,6 +2133,16 @@ def subscriptname(sdk):
 def yieldescape(sdk):
     yield sdk._tortoise_fts_query
 
+def yieldfromescape(sdk):
+    yield from sdk._tortoise_fts_query
+
+def func_kwonly(sdk):
+    def _g(*, _x=sdk._tortoise_fts_query):
+        return _x
+
+def lambda_kwonly(sdk):
+    _lam2 = lambda *, _x=sdk._tortoise_fts_query: _x
+
 def resultplumbing(sdk):
     _r = sdk._tortoise_fts_query(query="plumbing", limit=10)
     _r(query="result-plumbing", limit=10)
@@ -2182,6 +2192,9 @@ def retann(sdk) -> sdk._tortoise_fts_query:
         (0, True, []),                  # `_Obj.attr = SEAM` — ATTRIBUTE target
         (0, True, []),                  # `_bag7[_fn2] = 1` — SUBSCRIPT target indexed by a carrier NAME
         (0, True, []),                  # `yield SEAM` — a value escaping as a generator result
+        (0, True, []),                  # `yield from SEAM` — the ``YieldFrom`` member
+        (0, True, []),                  # `def _g(*, _x=SEAM)` — a KEYWORD-ONLY default
+        (0, True, []),                  # `lambda *, _x=SEAM` — its lambda counterpart
         (0, True, []),                  # MODULE-scope `_bare_module: SEAM` — evaluated + stored
         (0, True, []),                  # `_bare: SEAM` annotation, no value (func-local: over-block)
         (0, True, []),                  # `def _g(_x: SEAM)` parameter annotation
