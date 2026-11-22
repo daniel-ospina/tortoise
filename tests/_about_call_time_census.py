@@ -388,7 +388,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
         "of an `aboutObject` on `Point`, and this walk DOES traverse it (measured)",
         (
             "OPTIONAL MATCH (n)--(m:{label})",
-            'collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",',
+            'RETURN k, collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",',
         ),
         1,
     ),
@@ -404,7 +404,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
         "ends `Point`, and the walk traverses that `aboutObject` edge)",
         (
             "OPTIONAL MATCH (n)--(m:{label})",
-            'collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",',
+            'RETURN k, collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",',
         ),
         1,
 
