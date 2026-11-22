@@ -159,3 +159,51 @@ def test_the_corpus_is_deterministic_and_carries_the_length_spread():
         "constant's leverage on long documents is the thing being measured")
     assert sizes[0] < 2_000, "the small end of the spread must be present"
     assert max(sizes) > 10 * sizes[0], "the spread must span an order of magnitude"
+
+
+def test_a_literal_dollar_is_escaped_outside_code_spans_only():
+    """MD037/MD038 came from bare `$` figures, not from the sentence they
+    landed on (#14295).
+
+    markdownlint resolves `$…$` spans, which re-pairs the surrounding
+    delimiters — so the findings MOVED when unrelated prose on the line
+    changed, and hand-editing the generated report could not keep them fixed.
+    The fix is to emit `\\$` in prose (renders as `$`). Inside a code span a
+    backslash is literal, so `$` there must be left alone — escaping it would
+    print `\\$` to the reader.
+    """
+    line = ("- a `$0.0057` figure → **$0.0265** and a lone `$` span; "
+            "also ``$x`` stays")
+    out = m.escape_dollars_outside_code(line)
+    assert "`$0.0057`" in out, "a code span's `$` must survive unescaped"
+    assert "`$`" in out, "the lone `$` code span must survive unescaped"
+    assert "``$x``" in out, "a double-backtick span must survive unescaped"
+    assert "**\\$0.0265**" in out, "prose `$` must be escaped"
+    assert "`` \\$" not in out
+    # …and the else-branch really is reachable: the prose `$` count is what the
+    # linter pairs, so every one of them outside a code span has to be escaped.
+    assert out.count("\\$") == 1
+
+
+def test_finalize_markdown_leaves_exactly_one_trailing_newline():
+    """Each renderer ends with a blank-line element so consecutive sections
+    separate; the LAST one then ends the file on a blank line, which is
+    MD012 "multiple consecutive blank lines" (#14295)."""
+    assert m.finalize_markdown("## a\n\nbody\n\n") == "## a\n\nbody\n"
+    assert m.finalize_markdown("## a\n\nbody") == "## a\n\nbody\n"
+    assert m.finalize_markdown("## a\n\n\n\n") == "## a\n"
+
+
+def test_the_shipped_report_carries_no_bare_dollar_outside_a_code_span():
+    """The artifact, not just the helper: `docs/evidence/14277-extractor-cost/
+    report.md` is committed and linted by the required `docs` check, so the
+    invariant is pinned on the file that ships."""
+    report = (_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
+              / "report.md").read_text(encoding="utf-8")
+    assert report.endswith("\n") and not report.endswith("\n\n"), (
+        "the report must not end on a blank line (MD012)")
+    bare = m.escape_dollars_outside_code(report)
+    assert bare == report, (
+        "the shipped report carries a bare `$` outside a code span — it was "
+        "hand-edited, or regenerated with a stale tool; regenerate it with "
+        "`uv run python tools/extractor_cost_measure.py report …`")

@@ -69,6 +69,7 @@ import argparse
 import json
 import os
 import random
+import re
 import statistics
 import subprocess
 import sys
@@ -841,6 +842,57 @@ def _mean_item_tokens(arm_rep: dict) -> float:
     return float(item.get("median") or 0)
 
 
+def escape_dollars_outside_code(markdown: str) -> str:
+    """Backslash-escape every literal ``$`` that is not inside a code span.
+
+    A bare ``$`` beside a figure is ambiguous to Markdown's inline parser, and
+    the repo's linter (markdownlint 0.41, micromark-based) resolves the
+    ambiguity by pairing ``$…$`` spans — which silently re-pairs the
+    surrounding ``**emphasis**`` and code-span delimiters too. That produced
+    three findings (MD037 twice, MD038 once) in this report whose POSITION
+    MOVED when unrelated prose changed, so no hand-edit of the generated text
+    could keep them fixed: the defect is the emission, not the sentence it
+    landed on (#14295).
+
+    ``\\$`` renders as ``$`` (it is a normal punctuation escape), so the
+    rendered report is unchanged while its inline structure no longer depends
+    on how many figures a sentence carries. Inside a code span a backslash is
+    literal, so code spans — located by matching backtick RUNS, so a
+    double-backtick span is handled too — pass through untouched.
+    """
+    out: list[str] = []
+    for line in markdown.split("\n"):
+        parts = re.split(r"(`+)", line)
+        in_code = False
+        for part in parts:
+            if part.startswith("`"):
+                in_code = not in_code
+                out.append(part)
+            else:
+                # `(?<!\\)` keeps this idempotent: an already-escaped `\$`
+                # must not become `\\$` if a caller finalizes twice.
+                out.append(
+                    part if in_code
+                    else re.sub(r"(?<!\\)\$", r"\\$", part))
+        out.append("\n")
+    return "".join(out[:-1])
+
+
+def finalize_markdown(markdown: str) -> str:
+    """Make the rendered sections a lint-clean document.
+
+    Two output-boundary repairs, applied once to the concatenated sections so
+    every renderer (present and future) is covered:
+
+    * ``escape_dollars_outside_code`` — see its docstring (#14295).
+    * exactly one trailing newline. Each ``render_*`` ends with a blank-line
+      element so consecutive sections separate correctly, which left the LAST
+      section ending in a blank line — MD012 "multiple consecutive blank
+      lines" at end of file.
+    """
+    return escape_dollars_outside_code(markdown).rstrip("\n") + "\n"
+
+
 def render(report: dict) -> str:
     lines: list[str] = []
     add = lines.append
@@ -1144,7 +1196,8 @@ def main(argv: list[str] | None = None) -> int:
     if report["costs"]:
         report["allowances"] = allowance_table(
             report["costs"], report["costs"]["tokens_per_median_doc"])
-    text = render(report) + render_cost(report) + render_verdict(report)
+    text = finalize_markdown(
+        render(report) + render_cost(report) + render_verdict(report))
     if args.markdown_out:
         args.markdown_out.write_text(text, encoding="utf-8")
     if args.json_out:

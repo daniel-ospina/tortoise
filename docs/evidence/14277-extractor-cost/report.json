@@ -113,18 +113,33 @@
     "r2": 0.7146859633310165,
     "slope": 2.15887548860774
    },
-   "long_split": {
-    "id": "docs/architecture/STORAGE-ARCHITECTURE.md",
-    "item_tokens": 127914,
-    "stages": {
-     "s1": 263780,
-     "s2": 25754,
-     "s4": 76158
-    },
-    "tokens_in": 365692,
-    "tokens_out": 87746,
-    "turns": 40
-   },
+   "long_split": [
+    {
+     "calls": 6,
+     "id": "docs/architecture/STORAGE-ARCHITECTURE.md",
+     "item_tokens": 127914,
+     "stages": {
+      "s1": {
+       "calls": 2,
+       "in": 263780,
+       "out": 4690
+      },
+      "s2": {
+       "calls": 2,
+       "in": 25754,
+       "out": 35056
+      },
+      "s4": {
+       "calls": 2,
+       "in": 76158,
+       "out": 48000
+      }
+     },
+     "tokens_in": 365692,
+     "tokens_out": 87746,
+     "turns": 40
+    }
+   ],
    "output_fit": {
     "intercept": 22801.985690921192,
     "max_abs_resid": 66403.2828604531,
@@ -298,18 +313,33 @@
     "r2": 0.7907069378931433,
     "slope": 2.12757549336268
    },
-   "long_split": {
-    "id": "docs/architecture/STORAGE-ARCHITECTURE.md",
-    "item_tokens": 127914,
-    "stages": {
-     "s1": 263780,
-     "s2": 11540,
-     "s4": 27745
-    },
-    "tokens_in": 303065,
-    "tokens_out": 21158,
-    "turns": 40
-   },
+   "long_split": [
+    {
+     "calls": 4,
+     "id": "docs/architecture/STORAGE-ARCHITECTURE.md",
+     "item_tokens": 127914,
+     "stages": {
+      "s1": {
+       "calls": 2,
+       "in": 263780,
+       "out": 3363
+      },
+      "s2": {
+       "calls": 1,
+       "in": 11540,
+       "out": 14282
+      },
+      "s4": {
+       "calls": 1,
+       "in": 27745,
+       "out": 3513
+      }
+     },
+     "tokens_in": 303065,
+     "tokens_out": 21158,
+     "turns": 40
+    }
+   ],
    "output_fit": {
     "intercept": 19736.20331181898,
     "max_abs_resid": 39850.59349185127,
