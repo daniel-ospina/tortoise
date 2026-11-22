@@ -483,6 +483,13 @@ SELECTED = [
     ("is the clients' contract archived", "ended", "is_copula"),
     ("has the client's contract been archived", "ended", "is_copula"),
     ("has the vendor's invoice been retired", "ended", "is_copula"),
+    # !! THE CLITIC ANCHOR'S HYPHEN TRAP (round-10 review, P3, measured): the exclusion is
+    # anchored on `been\b`, and `\b` matches BEFORE a hyphen -- so a genuine possessive
+    # followed by a `been-...` compound was refused with NO notice, while its plain twin
+    # routed. The module's own idiom for a token that must END its word is `(?![-/])\b`,
+    # used by `_EXISTENCE_GUARD` for exactly this reason. These two route.
+    ("is the vendor's been-signed contract archived", "ended", "is_copula"),
+    ("is the client's been-archived contract archived", "ended", "is_copula"),
 ]
 
 
@@ -1012,6 +1019,14 @@ NOT_SELECTED = [
     "is the export to eventually be archived",
     "is the export to get archived",
     "is the export to become archived",
+    "is the export becoming archived",
+    "is the export becoming deprecated",
+    "is the report staying archived",
+    "is the export ending up archived",
+    "is the export winding up archived",
+    "is the claim turning out archived",
+    "is the export remaining archived",
+    "is the export keeping archived",
     # ── …and the FOUR PHRASAL / RESULTATIVE verbs the class was missing (fresh review,
     # P2, measured). `to wind up`, `to end up`, `to turn out` and `to stay` are the same
     # scheduled or continuing frame as `to be`, and each ROUTED the whole ended population
@@ -1212,6 +1227,23 @@ NOTICE_ONLY = [
     "is the export to eventually be archived",
     "is the export to get archived",
     "is the export to become archived",
+    # -- THE `-ing` PROGRESSIVE FRAME, EVERY SPELLING (round-10 review, P1, measured) --
+    # !! THE CLASS SHIPPED WITH `being|getting` ONLY, so `is the export becoming archived`
+    # ROUTED the whole ended population with the caller's qualifier dropped and
+    # `signal=None` -- fail-open, the direction #14033 exists to close -- while its `being`
+    # twin refused correctly. One spelling over, the same frame: measured at `cdfc3b1957`,
+    # 20/20 rows routed for EACH of these, and `main` (`70fbd1a27d`) REFUSED them, so this
+    # was introduced by this PR, not inherited. Each `-ing` form is now pinned beside its
+    # `to <verb>` twin so a widening of one cannot leave the other behind. These rows FAIL
+    # on `cdfc3b1957` (all route) and are refused AND reported here.
+    "is the export becoming archived",
+    "is the export becoming deprecated",
+    "is the report staying archived",
+    "is the export ending up archived",
+    "is the export winding up archived",
+    "is the claim turning out archived",
+    "is the export remaining archived",
+    "is the export keeping archived",
     "has anyone reported v3 hasn't been deprecated",
     "has anyone complained billing hasn't been deprecated",
     # …and the ADVERB between the non-finite verb and the participle (round-4 review, P2,
@@ -1364,12 +1396,25 @@ def test_an_INFINITIVE_or_PROGRESSIVE_subject_is_REFUSED_and_REPORTED():
     # OUTSIDE it still routes, which the constant's own note says. Pinning one keeps that
     # claim falsifiable: a later widening that swallows them reds here, and a reader can
     # see the size of what is left rather than inferring zero from silence.
+    # ⛔ THE PROXY MOVED, THE PROPERTY DID NOT (round-10 review, P1). This pin used to name
+    # `to remain` / `to keep` as verbs OUTSIDE the closed list — and they were, until that
+    # round measured `remaining`/`keeping` ROUTING the whole ended population while
+    # `being` refused, one spelling over: the same progressive frame. Both pairs are in
+    # `_NONFINITE_COPULA` now, so they refuse AND report, and the residual is re-pinned on
+    # verbs that are still genuinely outside it. The claim being kept falsifiable is the
+    # SAME one: a non-finite verb the list does not name still routes, and a widening that
+    # swallows the residual reds here rather than silently overstating the class covered.
     for query in ("is the export to remain archived", "is the export to keep archived"):
         got = detect_state_question(query)
+        assert got.population is None and got.signal == "is_copula_long_subject", (
+            f"{query!r} went to {got!r} — `remain`/`keep` are IN the class as of the round "
+            f"that closed the `-ing` progressive frame, so this row must refuse and report")
+    for query in ("is the export to appear archived", "is the export to seem archived"):
+        got = detect_state_question(query)
         assert got.population == "ended" and got.signal is None, (
-            f"{query!r} moved to {got!r} — `remain`/`keep` are NAMED as the non-finite "
-            f"verbs this closed list does not carry, so a change here means the note on "
-            f"`_NONFINITE_COPULA` now understates the class it covers")
+            f"{query!r} moved to {got!r} — `appear`/`seem` are the residual the note on "
+            f"`_NONFINITE_COPULA` declares outside the closed list, so a change here means "
+            f"that note now understates what the class carries")
 
     # ⛔ THE TWO SILENCES THIS FIX LEAVES, STATED AND PINNED (a report that claimed the
     # class closed would be the drift this branch has already paid for twice):

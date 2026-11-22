@@ -700,14 +700,23 @@ _CONTRACTED_AUX = (
 #: refusing without reporting is the other half of #14033, and it is why both consumers move
 #: together (a refusal-side-only widening was measured doing exactly that in the previous round).
 #: The PREPOSITIONAL `to` is untouched: `is the export to Europe archived` still routes, pinned.
+#: ⛔ THE `-ing` ALTERNATIVES ARE THE SAME FRAME, ONE SPELLING OVER (round-10 review, P1,
+#: measured). The class shipped with `being|getting` only, so `is the export becoming archived`
+#: ROUTED the whole ended population with the caller's qualifier dropped and `signal=None` —
+#: fail-open, the direction this issue exists to close — while `is the export being archived`
+#: refused correctly. Every `-ing` alternative now mirrors its `to <verb>` twin exactly, so a
+#: widening of one cannot leave the other behind: `becoming`, `staying`, `remaining`, `keeping`,
+#: `ending up`, `winding up`, `turning out`. `to remain`/`to keep` move in with them for the same
+#: reason (they were named a residual and are the same progressive frame).
 #: ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: the `to <word> <word> <verb>` window is
 #: bounded to TWO preceding words (a third puts the phrase outside the subject's own word bound
-#: anyway), and a non-finite verb this list does not name (`to remain archived`, `to keep
-#: archived`) still routes — a closed list is the mechanism this module uses everywhere and the
-#: residual it always carries.
+#: anyway), and a non-finite verb outside this list still routes — a closed list is the mechanism
+#: this module uses everywhere and the residual it always carries.
 _NONFINITE_COPULA = (
     r"(?:to\s+(?:[a-z]+\s+){0,2}"
-    r"(?:be|get|become|became|wind up|end up|turn out|stay)|being|getting)"
+    r"(?:be|get|become|became|wind up|end up|turn out|stay|remain|keep)"
+    r"|being|getting|becoming|staying|remaining|keeping"
+    r"|ending\s+up|winding\s+up|turning\s+out)"
 )
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
@@ -1222,7 +1231,7 @@ _COPULA_SUBJECT = (
     # ⚠️ A "guard only the last word" rewrite (`(?:word\s+){0,3}(?!clitic)word`) LEAKS: the
     # regex backtracks the clitic word into the leading group and `is billing's been
     # deprecated` routes again (48 of 96 measured).
-    # ⛔ AND THE ANCHOR CANNOT BE ADJACENT (round-30 review, P1, measured): `\s+been\b`
+    # ⛔ AND THE ANCHOR CANNOT BE ADJACENT (round-30 review, P1, measured): `\s+been(?![-/])\b`
     # was defeated by ONE ADVERB — `has billing's just been deprecated`,
     # `has the vendor's recently been deprecated`, `is the board's very recently been
     # deprecated` all served the ended population with the caller's predicate dropped and
@@ -1241,10 +1250,16 @@ _COPULA_SUBJECT = (
     # does not have, so the gap is `_EXISTENCE_ADVERB` — the same closed table the asyndetic
     # guard already uses. RESIDUAL: an adverb outside that table re-opens the hijack for
     # this one spelling; it is the same boundary stated at `_EXISTENCE_ADVERB` itself.
-    rf"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+(?:{_EXISTENCE_ADVERB})){{0,3}}[,\s]+been\b)"
-    r"(?!been\b)[a-z0-9][a-z0-9'’._/-]*"
-    rf"(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+(?:{_EXISTENCE_ADVERB})){{0,3}}[,\s]+been\b)"
-    r"(?!been\b)[a-z0-9][a-z0-9'’._/-]*){0,3}"
+    # ⛔ AND `been\b` IS NOT ENOUGH ON ITS OWN (round-10 review, P3, measured): `\b` matches
+    # BEFORE a hyphen, so a POSSESSIVE followed by a `been-…` compound — `is the vendor's
+    # been-signed contract archived` — was refused with NO notice while its plain twin routed.
+    # The module's own idiom for a token that must END its word is `(?![-/])\b`, which
+    # `_EXISTENCE_GUARD` already uses for exactly this reason; it is applied to every
+    # `been` site below. Its hyphenated twin is pinned as a ROUTE in `SELECTED`.
+    rf"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+(?:{_EXISTENCE_ADVERB})){{0,3}}[,\s]+been(?![-/])\b)"
+    r"(?!been(?![-/])\b)[a-z0-9][a-z0-9'’._/-]*"
+    rf"(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+(?:{_EXISTENCE_ADVERB})){{0,3}}[,\s]+been(?![-/])\b)"
+    r"(?!been(?![-/])\b)[a-z0-9][a-z0-9'’._/-]*){0,3}"
     r"|(?:i|you|he|she|it|we|they|there)(?![-/])"
     r")"
 )
@@ -1462,7 +1477,7 @@ _COPULA_LONG_SUBJECT = re.compile(
     # the base of the commit that fixed it was ALREADY silent (re-measured, all four rows):
     #   at `0e52593c91` (before `_COPULA_INFINITIVE_REFUSAL` landed)      -> ended / is_copula
     #   at `d8295ea8b2` (the refusal landed, arm B still `{1,5}`)          -> None / None / no payload
-    #   at this commit (the refusal + arm B `{0,5}`)                       -> None / is_copula_long_subject
+    #   at `cdfc3b1957` (the refusal + arm B `{0,5}`)                       -> None / is_copula_long_subject
     #   `is being archived` / `is to be archived` / `is getting archived` / `was being retired`
     # Enumerated class 4 auxiliaries x 6 non-finite forms x 5 endings = 120 rows. ⛔ ALL 120
     # gain `is_copula_long_subject` — an earlier cut of this note said "56 rows gain" one line
