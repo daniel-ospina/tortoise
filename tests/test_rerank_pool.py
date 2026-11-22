@@ -1627,10 +1627,13 @@ def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
         "escaped into a binding shape the walk cannot follow, so their reads "
         "CANNOT be counted — an unresolvable mention may be a read, and this "
         f"row may not report a tree where {expected} call sites are visible but "
-        "another read may be hiding. ⛔ OPTING OUT DOES NOT CLEAR THIS: the "
-        "opt-out is only consulted for a mention the walk ATTRIBUTED, so the "
-        "remedy is to re-derive the comment in `intentional_keep` or to spell "
-        "the read in a binding the walk follows — not to opt it out.")
+        "another read may be hiding. ⛔ THIS RED HAS EXACTLY ONE FIX: the read "
+        "must be SPELLED so the walk can follow it (a name binding, a loop or "
+        "comprehension target, a `with … as`, a walrus). Opting out does not "
+        "clear it — the opt-out is only consulted for a mention the walk "
+        "ATTRIBUTED — and neither does re-deriving `intentional_keep`: this "
+        "assert never reads `expected` or that comment, so no value of either "
+        "can turn it green (round-15 review, P3).")
     assert len(read_sites) == expected, (
         f"{len(read_sites)} seam CALL SITE(s) of `tortoise_fts_query` "
         f"in {where}, reached from {len(live)} mention(s) "
