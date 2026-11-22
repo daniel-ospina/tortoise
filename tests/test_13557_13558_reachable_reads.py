@@ -927,20 +927,20 @@ NOTICE_ONLY = [
     # clause), which is why this is a stated class rather than a longer word list.
     # (`test_every_preposition_the_module_declares_reports_the_qualifier_it_introduces`
     # pins the same three as a deliberate omission from `_PREPOSITIONS`.)
-    "is the export archived after the migration",
-    "is the export archived before the merger",
-    "is the export archived since the merger",
     # …and the CONJUNCTIONS are silent for a DIFFERENT reason: the second-NP test reads a
     # coordination as one, and none of these five is in the subordinator lookahead, so
     # this is a LIST decision rather than that guard's participle bound. Excluding them
     # WOULD report them (measured: 5 probes flip, 0 pinned rows move) — a recall widening
     # with its own review, deliberately not made inside a claim correction.
-    "is the export archived and the migration closed",
-    "is the export archived or the backup",
-    "is the export archived but the backup is live",
-    "is the export archived so the team moved on",
-    "is the export archived yet the team still uses it",
 ]
+
+assert set(NOTICE_ONLY) <= set(NOT_SELECTED), (
+    f"`NOTICE_ONLY` rows are only ever READ through the `NOT_SELECTED` parametrization, "
+    f"so a row here that is not also there is asserted by NOTHING — measured: 8 such "
+    f"orphans accumulated, and they encoded the OPPOSITE of the implemented behaviour "
+    f"(`signal is None`), so promoting one into `NOT_SELECTED` would have reddened the "
+    f"suite on a correct answer. Difference: {sorted(set(NOTICE_ONLY) - set(NOT_SELECTED))}"
+)
 
 
 @pytest.mark.parametrize("query", NOT_SELECTED)
@@ -1150,9 +1150,6 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
             f"a content search")
 
 
-#: `_BLOCKED_TAIL`'s CONJUNCTION members — the SECOND of the two silent groups the
-#: guard's note names, and the one whose cause is that guard itself rather than the
-#: subordinator lookahead. Named here so the class is a class, not a set difference.
     # …and a routed question reports nothing, because it WAS applied.
     for routed in ("what ended", "has anything been withdrawn"):
         got = detect_state_question(routed)
@@ -1170,6 +1167,9 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
                              reason="invented")
 
 
+#: `_BLOCKED_TAIL`'s CONJUNCTION members — the SECOND of the two silent groups the
+#: guard's note names, and the one whose cause is that guard itself rather than the
+#: subordinator lookahead. Named here so the class is a class, not a set difference.
 _CONJUNCTION_TAIL_MEMBERS = frozenset(("and", "or", "but", "so", "yet"))
 
 #: `_BLOCKED_TAIL`'s TIME ADVERBS and DETERMINERS — the members whose `<member> the
@@ -3197,3 +3197,123 @@ def test_the_ended_scope_still_refuses_an_explicit_query(sdk):
         sdk._tortoise_fts_query("anything withdrawn", entity_type="point",
                                ended_scope=True)
     assert "ended_scope" in str(err.value)
+
+
+#: The CONTRACTIONS that must defeat the asyndetic guard, one per member.
+#: ⛔ THIS CLASS IS CLOSED AND ITS CLOSURE WAS MEASURED (round-26 review, P1): every
+#: member below routed the whole ended population with the caller's predicate dropped
+#: and `signal=None` — `have any users reported the vendor hasn't been deprecated` —
+#: because the negation slot accepts a `not` TOKEN and a contraction carries its
+#: negation INSIDE the auxiliary. All 17 un-contracted twins were already refused, so
+#: the two spellings of one sentence disagreed.
+_CONTRACTED_AUXILIARIES = (
+    "hasn't", "hadn't", "haven't", "isn't", "aren't", "wasn't", "weren't",
+    "doesn't", "didn't", "don't", "won't", "wouldn't", "can't", "couldn't",
+    "mightn't", "mustn't", "shouldn't",
+)
+
+#: The adverbials round-24/round-25 measured, one per spelling. Kept as a LIST so the
+#: set-equality pin below is a statement about the module's own table, not about these
+#: rows: a token deleted from `_EXISTENCE_ADVERB` reds the pin even if some other
+#: alternative happens to catch the row.
+_MEASURED_ADVERBIALS = (
+    "very recently", "quite recently", "almost", "just about", "in fact", "only just",
+    "very", "too", "much", "all",
+    "often", "always", "sometimes", "seldom", "rarely", "soon", "again", "twice", "then",
+    "longer", "no longer", "to date", "of late", "at last",
+)
+
+
+def _existence_adverb_tokens():
+    """`_EXISTENCE_ADVERB`'s alternatives, out of the regex fragment that defines it.
+
+    ⛔ A WIDENING WHOSE ONLY JUSTIFICATION IS A COMMENT IS A RULE NOTHING HOLDS
+    (round-26 review, P2, measured): the module's note says twelve spellings were
+    "measured" and were added, but removing the round-25 tokens flipped only TWO pinned
+    rows, so ten of the twelve could have been deleted silently. This returns the table
+    itself so the assertion below is about the CLASS.
+    """
+    import re
+
+    from tortoise import state_intent
+
+    fragment = state_intent._EXISTENCE_ADVERB
+    assert fragment.startswith("(?:") and fragment.endswith(")"), (
+        f"`_EXISTENCE_ADVERB` no longer exposes itself as one alternation — re-derive "
+        f"this test rather than deleting it: {fragment[:60]!r}")
+    return frozenset(fragment[3:-1].split("|"))
+
+
+def test_every_measured_adverbial_is_a_member_of_the_table_and_cannot_be_dropped():
+    """The adverbial table is pinned as a CLASS, not as prose in a comment."""
+    tokens = _existence_adverb_tokens()
+    # The `-ly` pattern is the ONE member that is not a spelling; everything else is a
+    # literal token, so the table can be compared exactly.
+    expected_literals = {
+        "just", "already", "only", "still", "even", "also", "never", "ever", "now", "yet",
+        "very", "quite", "rather", "almost", "nearly", "too", "much", "all", "as", "so",
+        "about", "in", "fact", "practice", "effect", "good", "long", "since", "far",
+        "often", "always", "sometimes", "seldom", "rarely", "soon", "again", "twice",
+        "then", "longer", "date", "late", "last", "first", "no", "to", "of", "at",
+    }
+    assert tokens - {"[a-z]+ly"} == expected_literals, (
+        f"the adverbial table moved. Added: {sorted(tokens - {'[a-z]+ly'} - expected_literals)}"
+        f" — Removed: {sorted(expected_literals - tokens)}. A token that leaves this set "
+        f"is a spelling the guard goes blind to, which is the defect this table exists to "
+        f"refuse; a token that joins it must come with the row that measured it.")
+    assert "[a-z]+ly" in tokens, (
+        "the `-ly` pattern left the table — every `-ly` adverbial (`quietly`, "
+        "`officially`, `hitherto` is NOT one) would then need its own literal")
+
+
+def test_the_asyndetic_gap_is_blind_to_neither_a_contraction_nor_a_measured_adverbial():
+    """One row per spelled member, both classes, in the hijack frame.
+
+    The frame matters: the caller's OWN predicate (`reported`) is what gets dropped when
+    this guard fails, so every row here is a question whose answer would silently be the
+    whole ended population.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    for member in _CONTRACTED_AUXILIARIES:
+        query = f"have any users reported the vendor {member} been deprecated"
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} ROUTED the whole ended population with the caller's predicate "
+            f"dropped (population={got.population!r}, signal={got.signal!r}) — a "
+            f"contraction carries its negation inside the auxiliary, so it is invisible "
+            f"to a gap that looks for the `not` TOKEN")
+        assert missed_route_payload(got) is not None, (
+            f"{query!r} is refused but reports nothing — a silent drop is the same defect "
+            f"one layer down")
+    for member in _MEASURED_ADVERBIALS:
+        query = f"have any users reported the vendor has {member} been deprecated"
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} ROUTED (population={got.population!r}, signal={got.signal!r}) — "
+            f"this spelling was measured and added to the table, so it must stay closed")
+
+
+def test_the_relativizer_lookahead_is_the_only_refusal_for_its_own_row():
+    """The SECOND top-level lookahead, pinned by a row only IT can refuse.
+
+    ⛔ A RULE NOTHING HOLDS IS NOT A RULE (round-26 review, P3, measured): deleting this
+    lookahead flipped ZERO verdicts across the pinned corpus, because the asyndetic
+    lookahead happens to cover every relativized row the corpus carried. The row below
+    is the counter-example that gives it a job: its clause verb (`withdrew`) cannot be
+    read as `<aux> … been`, so lookahead #3 cannot see it.
+
+    ⚠️ STATED RESIDUAL, not a claim of correctness: this lookahead refuses on the
+    PRESENCE of a relativizer in the window, so a relativized head —
+    `have any users reported the vendor that has been deprecated` — is refused too,
+    though its ending belongs to the relative clause and the question is legitimate.
+    That over-refusal is pre-existing, silent and measured; closing it means telling a
+    restrictive from a non-restrictive relative clause, which needs the lexicon this
+    detector does not have.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question("has anyone asked that the vendor withdrew been archived")
+    assert got.population is None and got.signal == "existence_unguarded", (
+        f"the relativizer lookahead stopped refusing its own row: {got.population!r}, "
+        f"{got.signal!r} — either restore it or delete it and this pin together")

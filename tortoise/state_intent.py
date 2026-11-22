@@ -575,7 +575,22 @@ _EXISTENCE_GUARD = (
     # lookahead below, which owns that boundary).
     r"that)\s+)?(?!it\b|they\b|he\b|she\b|we\b|you\b|i\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
-    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
+    # ⛔ A CONTRACTION IS NOT A `not` TOKEN (round-26 review, P1, measured): the negation
+    # slot accepts `not` anywhere in the gap, but `hasn't` carries its negation INSIDE
+    # the auxiliary, so an anchor spelled `has` followed by space/punctuation never
+    # matched it, and all 18 contracted twins — `have any users reported the vendor
+    # hasn't been deprecated` — routed the whole ended population with the caller's
+    # predicate dropped and `signal=None`, while every UN-contracted twin was refused.
+    # This is a CLOSED set, unlike the open adverbial class: one alternation closes it.
+    r"(?:hasn't|hadn't|haven't|isn't|aren't|wasn't|weren't|doesn't|didn't|don't|"
+    r"won't|wouldn't|can't|couldn't|mightn't|mustn't|shouldn't|"
+    # ⛔ AND `do|does|did` ARE NOT HERE (round-26 review, P2, measured): none of them can
+    # precede `been`, so they add NO detection power to a guard whose window requires
+    # `been` — their only effect was to let an ordinary verb fill the noun slot and the
+    # next verb fill the auxiliary: `has anything we said we would do been cancelled`
+    # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
+    # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
+    r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
     # ⛔ AND THE CLAUSE'S OWN PARTICIPLE ANCHORS IT (round-24 review, P2, measured):
     # without the `been <ENDING>` anchor the widened adverb slot refused a RELATIVE
     # clause whose own verb is `<aux> <adverb> been <other participle>`, which is the
@@ -600,7 +615,22 @@ _EXISTENCE_GUARD = (
     # relative clause's) from `we have been tracking` (relative: the ending is still the
     # question's).
     rf"(?![^?]{{0,60}}?\b(?:it|they|he|she|we|you)\s+"
-    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
+    # ⛔ A CONTRACTION IS NOT A `not` TOKEN (round-26 review, P1, measured): the negation
+    # slot accepts `not` anywhere in the gap, but `hasn't` carries its negation INSIDE
+    # the auxiliary, so an anchor spelled `has` followed by space/punctuation never
+    # matched it, and all 18 contracted twins — `have any users reported the vendor
+    # hasn't been deprecated` — routed the whole ended population with the caller's
+    # predicate dropped and `signal=None`, while every UN-contracted twin was refused.
+    # This is a CLOSED set, unlike the open adverbial class: one alternation closes it.
+    r"(?:hasn't|hadn't|haven't|isn't|aren't|wasn't|weren't|doesn't|didn't|don't|"
+    r"won't|wouldn't|can't|couldn't|mightn't|mustn't|shouldn't|"
+    # ⛔ AND `do|does|did` ARE NOT HERE (round-26 review, P2, measured): none of them can
+    # precede `been`, so they add NO detection power to a guard whose window requires
+    # `been` — their only effect was to let an ordinary verb fill the noun slot and the
+    # next verb fill the auxiliary: `has anything we said we would do been cancelled`
+    # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
+    # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
+    r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
     rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
 )
 _EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
