@@ -2582,8 +2582,12 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     #     for this shape ("Adding it again, or hoisting, changes nothing"). Measured, it is
     #     not: hoisting the import above the `try` leaves no seam (`own_code_import` False),
     #     so BOTH gates clear — the verdict CHANGES, by removing the seam rather than covering
-    #     it. The prose is corrected at the seam gate's message; this pair is what grades the
-    #     correction, so the claim cannot drift back to "changes nothing" unreddened.
+    #     it. The prose is corrected at the seam gate's message; this pair grades the SEAM
+    #     VERDICT (hoisting leaves `own_code_import` False and clears both gates), not the
+    #     MESSAGE TEXT — no test reads a `pytest.fail` string, so that sentence can still be
+    #     reverted word-for-word with all rows green. Said plainly rather than claiming a
+    #     protection this pair does not give (measured: restoring the old wording leaves
+    #     8 passed).
     hoisted = rows(
         """
         from tortoise.sdk import TortoiseSDK as _ProbeSDK
