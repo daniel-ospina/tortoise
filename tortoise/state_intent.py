@@ -475,10 +475,15 @@ _BLOCKED_TAIL = (
 #: (:data:`_EXISTENCE_WINDOW` needs the literal `been`): as narrowed then, the class
 #: it protected was exactly `<det> <noun> has|have|had been`, the asyndetic hijack
 #: `have any users reported the vendor has been deprecated`. ⛔ THE CLASS IS WIDER
-#: NOW, by the follow-up note below: the guard protects any FINITE VERB from a closed
-#: list followed by an optional `not`/`have` and then `been` (18 spellings, incl. the
-#: modal passive `will have been`), because bounding it to `has|have|had been` left
-#: that class open. Both classes are pinned, and each in the direction it belongs.
+#: NOW, by the follow-up note below: the guard protects any FINITE VERB from the closed
+#: alternation `_EXISTENCE_GUARD` itself enumerates, followed by an optional `not`/`have`
+#: and then `been` (the modal passive `will have been` is a member), because bounding it
+#: to `has|have|had been` left that class open. Both classes are pinned, and each in the
+#: direction it belongs. ⛔ NO COUNT HERE (review P2, measured): an earlier cut of this line
+#: said "18 spellings" and the same file says, three hundred lines below, that the "18" was
+#: a count nobody held — the alternation it points at is `_CONTRACTED_AUX` plus a hand-typed
+#: list, and only the constant can decide how many. A count restated in prose is the defect
+#: this module pins its OWN docstring against, one level down.
 #:
 #: ⛔ RESIDUAL, STATED RATHER THAN LEFT TO BE DISCOVERED: a RELATIVE clause whose head
 #: is preceded by a determiner and whose own verb is `has|have|had been` — `has
@@ -676,8 +681,19 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: `have any reported it has been in fact only just deprecated and been withdrawn` ROUTED the whole
 #: ended population with the caller's predicate dropped and `signal=None` while its 3-token twin was
 #: refused, the same defect one token higher. The bound is now the `_EXISTENCE_HELPER` gap's own
-#: `{0,8}`: a count bound one short of the class it carries is a spelling this guard is blind to,
+#: `{0,10}`: a count bound one short of the class it carries is a spelling this guard is blind to,
 #: and this is the fourth consecutive round that lesson has been paid for.
+#: ⛔ AND IT IS `{0,10}`, NOT `{0,8}` (fresh review, P2, measured): the prose above named the
+#: helper's bound while the slot was spelled EIGHT, so the sentence was true of nothing — and the
+#: two-token gap was observable from the REPORT side, not the route side: with `{0,8}` a question
+#: carrying SIX or SEVEN adverbials before the ending word (`have any it has been <6 adverbs>
+#: deprecated and been withdrawn`) came back `population=None, signal=None`, i.e. a refused cue with
+#: no notice — duty (b) again, in the very class this bound exists for. At `{0,10}` both report.
+#: Measured over 78 probes (adverb runs 0-12 across six sentence shapes, incl. the relative-clause
+#: and `we have been tracking` twins): 10 diffs, ALL silence -> `existence_unguarded`,
+#: **0 population/shape moves** — the widening is refusal-side and cannot route. Beyond eight
+#: adverbials the 60-character window dominates and both bounds answer identically, which is the
+#: same end-to-end caveat the helper's own note states.
 #: ⛔ AND THE WIDENING IT PAID FOR OVER-REFUSED THE SAME SPELLING INSIDE A RELATIVE CLAUSE
 #: (round-6 review, P2, measured — this lane's own regression, caught by a fresh reviewer): with
 #: `{0,8}` a RELATIVE clause whose own participle is an ENDING word was refused instead of routed,
@@ -717,7 +733,7 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: and can never create a route, so the round-7 refusal is untouched — though it can change
 #: WHICH notice a compound question gets, because the signal rows are ordered (see ARM C).
 _ALREADY_EVER_AUX = r"(?:already|ever)"
-_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,8}}"
+_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,10}}"
 #: ⛔ A CONTRACTED AUXILIARY CARRIES ITS NEGATION INSIDE THE WORD (round-26 review, P1; round-28
 #: at `feb2c740bb`, P1, measured — the SAME class, one guard over). One home, THREE consumers:
 #: both `_EXISTENCE_GUARD` lookaheads and `_COPULA_SUBJECT`'s second-verb lookahead. The third

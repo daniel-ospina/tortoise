@@ -1754,6 +1754,26 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
             f"{query!r} reports {got.signal!r}, not {expected!r} — the `{0,60}` window bound in "
             f"ARM C is unpinned again")
 
+    # ⛔ THE REFUSAL SLOT'S BOUND IS `{0,10}`, NOT `{0,8}` (fresh review, P2, measured): the prose
+    # claimed the slot WAS the helper's `{0,10}` while the code spelled eight, and the gap was
+    # observable from the REPORT side — six and seven adverbials before the ending word were
+    # `population=None, signal=None` (a refused cue with no notice, duty (b)). Both report now, and
+    # the widening is refusal-side: measured over 78 probes (runs 0-12 x six sentence shapes),
+    # 10 diffs, all silence -> `existence_unguarded`, 0 population/shape moves. At eight and beyond
+    # the 60-character window dominates and both bounds answer identically — pinned below, because
+    # "the window dominates" is the reason the bound cannot be measured there and a reader should
+    # not infer coverage from it.
+    for query in (
+        "have any it has been just only already no longer in fact very recently deprecated and "
+        "been withdrawn",
+        "have any it has been just only already no longer in fact very recently still "
+        "deprecated and been withdrawn",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal == "existence_unguarded", (
+            f"{query!r} reports {got.signal!r} — a six- or seven-adverbial refusal must REPORT; if "
+            f"this went silent, the refusal-side slot is back inside the bound the prose claims")
+
     # ⛔ THE ARM IS NOT PURELY ADDITIVE, AND THE DIRECTION IT IS NOT IS A NAMING ONE (fresh
     # review, P2, measured). The signal rows are ordered and this one sits before
     # `which_modified_noun`, so a COMPOUND question reports the existence notice instead:
