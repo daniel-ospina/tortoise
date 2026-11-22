@@ -360,11 +360,20 @@ _ARM_REFSPECS: dict[str, str] = {
     #   * `0351fe856942` IS `refs/pull/14160/head`'s tip, so a depth-1 fetch of that ref arms it —
     #     the same convention `RESIDUE_PR_HEAD` already uses for `refs/pull/14108/head`.
     #   * `10e51693f166` is #14160's SQUASH and lives 8 commits back in `main`'s history, so NO
-    #     depth-1 fetch can arm it. Mapping it to a plain `main` refspec would print a remedy that
-    #     leaves the rev ABSENT — the inert re-arm this map exists to forbid — so it carries the
-    #     `--deepen` that actually reaches it.
+    #     depth-1 refspec can arm it. The obvious remedy — `--deepen=N +refs/heads/main:…` — WORKS
+    #     ONLY WHILE `main` HAS MOVED FEWER THAN N COMMITS since this was written: `--deepen` reaches
+    #     `N+1` from the tip, `main` moves ~62 commits/day here (`git rev-list --count --since='7 days
+    #     ago' origin/main` → 435), so a deepen would make this message inert again in ~3 days with
+    #     NOTHING reddening (the guard grades syntax and destination, never reachability). So it
+    #     names the commit by FULL SHA: git can `want` a 40-character sha, GitHub answers it
+    #     (measured from a `fetch-depth: 1` clone — `git fetch origin
+    #     "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166"` → `* [new ref]`, exit 0,
+    #     `cat-file -e` then succeeds), and a sha-want does not expire and fetches one commit's trees
+    #     rather than 200 commits of `main`. ⛔ 40 hex characters is deliberately OUTSIDE the
+    #     7–39-character range the guard rejects, because that range is what distinguishes an
+    #     abbreviation git cannot `want` from a full sha it can.
     "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
-    "10e51693f166": "--deepen=200 +refs/heads/main:refs/remotes/origin/main",
+    "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
 }
 
 
@@ -1528,13 +1537,6 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
             f"{rev} is mapped to a SOURCE-ONLY refspec: git records it in `FETCH_HEAD` and "
             "creates no local ref, so a skip printing it re-arms the object DB and leaves the "
             "ADDRESS assertion UNCHECKED — the round-13 inert remedy")
-        # A `--deepen=<n>` FLAG is allowed as a leading token (a rev deep in `main`'s history is
-        # unreachable by any depth-1 refspec), but it must be well-formed and must not swallow the
-        # refspec: the destination assertion above still has to find a `source:destination`.
-        for token in _ARM_REFSPECS[rev].split():
-            if token.startswith("--"):
-                assert re.fullmatch(r"--deepen=\d+", token), (
-                    f"{rev} is mapped with the flag {token!r}; only `--deepen=<n>` is expected")
     assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
         "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
     assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
