@@ -325,7 +325,7 @@ def _names_in(node: ast.AST) -> set[str]:
     return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
 
-def _artifact_entries(run_def: ast.AST) -> dict[str, ast.AST]:
+def _artifact_entries(run_def: ast.AST) -> tuple[dict[str, ast.AST], ast.Call]:
     """The `"key": value` pairs of the ONE per-query artifact dict `run()` appends.
 
     ⛔ `EXACTLY ONE`: a first-match lookup validated a decoy — a `_debug_rows.append({
@@ -352,15 +352,39 @@ _NON_MUTATING = {"list", "tuple", "len", "sorted", "id", "str", "bool", "any", "
 
 
 def _aliases_of(tree: ast.AST, predicate) -> set[str]:
-    """Names bound to a matching expression — `alias = results`, `env = os.environ`."""
-    out: set[str] = set()
+    """Names bound to a matching expression, TRANSITIVELY — `a = results`, `b = a`,
+    `(c := results)`, `env = os.environ`, `env2 = env`.
+
+    ⛔ TRANSITIVE AND WALRUS-AWARE (#14281 review P2, measured). A one-hop `=` walk was
+    GREEN on BOTH of these against a genuinely permuted page:
+
+        a1 = results; a2 = a1; a2.sort()      -> 7 passed, rank_identical: True
+        (r2 := results); r2.sort()            -> 7 passed, rank_identical: True
+
+    The one-hop walk widened `watched` with `a1` but never with `a2`, so `a2.sort()`
+    missed the receiver **and** the "handed to a call" branch; the walrus target was
+    never an alias at all. Both names are STATICALLY VISIBLE, so neither is the pin's
+    declared "computed at runtime" residual — this is the same false-PASS class the F2
+    fix closed, one hop further out.
+    """
+    binds: list[tuple[str, ast.AST]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 \
-                and isinstance(node.targets[0], ast.Name) and predicate(node.value):
-            out.add(node.targets[0].id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
-                and node.value is not None and predicate(node.value):
-            out.add(node.target.id)
+                and isinstance(node.targets[0], ast.Name):
+            binds.append((node.targets[0].id, node.value))
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) \
+                and isinstance(node.target, ast.Name) and node.value is not None:
+            binds.append((node.target.id, node.value))
+    out: set[str] = set()
+    changed = True
+    while changed:  # fixed point: a chain of any length resolves in one call
+        changed = False
+        for name, value in binds:
+            if name not in out and (predicate(value)
+                                    or (isinstance(value, ast.Name)
+                                        and value.id in out)):
+                out.add(name)
+                changed = True
     return out
 
 
@@ -532,16 +556,61 @@ def test_handing_an_ALIASED_page_to_a_call_is_red() -> None:
     )
 
 
+def test_a_TWO_HOP_or_WALRUS_alias_still_reaches_the_sort() -> None:
+    """Alias resolution is TRANSITIVE and WALRUS-AWARE (#14281 review P2).
+
+    ⛔ MEASURED on the one-hop, `=`-only form: both of these read GREEN (7 passed) with
+    the page genuinely permuted, so `compare()` reported `rank_identical: True` on a page
+    the pin was supposed to prove untouched:
+
+        a1 = results; a2 = a1; a2.sort()
+        (r2 := results); r2.sort()
+
+    The one-hop walk widened `watched` to `{results, a1}` and then looked for `a2`, which
+    matched neither the receiver half nor the "handed" half; the walrus target never
+    entered `binds` at all. Both names are statically visible, so neither is the pin's
+    declared "computed at runtime" residual.
+    """
+    for label, body in (
+        ("two-hop", "    a1 = results\n    a2 = a1\n    a2.sort()\n"),
+        ("walrus", "    (r2 := results)\n    r2.sort()\n"),
+    ):
+        src = ("def run(sdk):\n"
+               "    results = sdk._tortoise_fts_query(query='q', limit=10)\n" + body)
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        sort = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "sort")
+        aliases = _aliases_of(run_def, lambda v: isinstance(v, ast.Name) and v.id == "results")
+        assert aliases, f"{label}: the fixture carries no alias — it cannot exercise the walk"
+        hits = _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+        assert sort.lineno in hits, (
+            f"{label} alias is GREEN (aliases={sorted(aliases)}, hits={hits}) — alias "
+            "resolution is not transitive / walrus-aware, so a sorted page reaches the "
+            "artifact while the pin reads the measured page")
+
+
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     """The harness must time the read the PRODUCT runs — with the door's own arguments.
 
     `tests/test_rerank_pool.py`'s census refuses an un-opted-out site in `tools/`
     unless it is on its `intentional_keep` list, and this file is granted on the
     ground that it is a MIRROR of the shipped door: it measures
-    ``TortoiseSDK._tortoise_fts_query`` — what ``/v1/search`` and the MCP
-    ``tortoise_search`` call — and its verdict is the ORDERED id list, so a
-    rerank-free reader would time a door the product never opens and would hide the
-    very page permutation the rank-identity check exists to catch.
+    ``TortoiseSDK._tortoise_fts_query`` — the read ``/v1/search`` makes — and its
+    verdict is the ORDERED id list, so a rerank-free reader would time a door the
+    product never opens and would hide the very page permutation the rank-identity
+    check exists to catch.
+
+    ⛔ `/v1/search` ONLY, and deliberately so: the MCP ``tortoise_search`` tool calls
+    the SAME read with a SUPERSET of arguments (``kind``, ``threshold``,
+    ``entity_type``, ``min_confidence``, ``order_by``, ``relationship_filter``,
+    ``traversal_path`` — ``tortoise/mcp_server.py``), several of which select a
+    materially different read. The allow-list below is derived from the
+    ``/v1/search`` door alone, so it does NOT describe the MCP arm; a harness that
+    mirrors THAT arm needs its own contract, not a widened one here.
 
     A grant can only say "this file MAY run the lever", so the mirror is asserted here
     instead of assumed, against the door's OWN call site (``_door_read_contract``):
