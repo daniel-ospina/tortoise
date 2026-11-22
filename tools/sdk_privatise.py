@@ -545,7 +545,7 @@ SWEEP_NAMES = 66
 #: its limits are stated at that sentence rather than re-derived here.
 #: ⛔ THE "GATE IS RED HERE" NARRATION IS SCOPED, NOT PRESENT-TENSE. That paragraph described
 #: `ad79129cb5`, where the pin read 11825 while that tree derived 11833 — `--check` red. It is NOT
-#: the state of `main` at `2fe01fc775e`, which pins `(11839, "0a7e60fa05aa31b9")` — exactly what
+#: the state of `main` at `2fe01fc775e`, which COMMITS `(11839, "0a7e60fa05aa31b9")` — exactly what
 #: `--repin` derives there, so `--check` exits 0 on that tree and on this head. `main`'s tree at
 #: `e022fc935b` (the `origin/main` this was written against) re-cut to `(11838, "de5664dc98549d56")`
 #: on `1b82cc7063`'s tree, which made that re-cut — and `main`'s pin has moved again since, so the
@@ -790,8 +790,8 @@ SWEEP_NAMES = 66
 #:
 #: RE-MEASURED ON THE REBASED TREE (#14086 rebased onto `main` `e0accb8fe6`, then the review-round-3
 #: commit `41672df4f9` landed on top): `--repin` on THAT tree printed **11846**. ⛔ NEITHER block
-#: above was that tree's answer and neither was carried: `main` (`e0accb8fe6`) pinned
-#: `(11844, "70d6cfdcd8b769e4")` and the FIFTH merge tree measured 11839 — three different trees,
+#: above was that tree's answer and neither was carried: `e0accb8fe6` COMMITS
+#: `(11844, "70d6cfdcd8b769e4")` on `main` and the FIFTH merge tree measured 11839 — three different trees,
 #: three different figures, NONE of which is this tree's (see the last block for the live pin).
 #: ⛔ THE +2 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, NOT BY ARITHMETIC. `--report --base 28ca66878d7c
 #: --top 5000` was run in a worktree at `origin/main` (`e0accb8fe6`) AND on this tree, both row sets
@@ -968,8 +968,8 @@ SWEEP_NAMES = 66
 #: census, so any commit that adds or retires an untyped receiver anywhere moves it, while the
 #: commits that do so have no reason to touch this file. At `1b0db04894` — this branch's own tree,
 #: before the merges — `--repin` prints `(11840, "b7eb08ff3acdcce4")`, measured, never carried
-#: forward by arithmetic; at `72c104bcbb` the tree still satisfies its own pin
-#: `(11843, "6aed5368ffa10513")` — the row map re-derived there totals 11843 — so the move happened
+#: forward by arithmetic; `72c104bcbb` COMMITS `(11843, "6aed5368ffa10513")` and its tree still
+#: satisfies that pin — the row map re-derived there totals 11843 — so the move happened
 #: strictly between those two commits.
 #: THE −3 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic: the residue map was re-derived on
 #: BOTH heads from this file's own `edits_for`/`rename_map` (not by grep over the source, which
@@ -1250,8 +1250,9 @@ SWEEP_NAMES = 66
 #: ⛔ MERGED `origin/main` `10e51693` INTO THIS BRANCH AND KEPT BOTH SIDES' BLOCKS ABOVE — each is a
 #: true measurement of the tree it NAMES, which is the ground rule of this run, so neither side is
 #: dropped to make the conflict go away. THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE, because
-#: that tree is a THIRD tree: the two parents pinned `(11860, "267dce26b4191743")` (this branch) and
-#: `(11858, "a1552662bf07a10b")` (`origin/main` `10e51693`'s own re-cut), and `--repin` ON THIS
+#: that tree is a THIRD tree: the two parents pinned `(11860, "267dce26b4191743")` (this branch's
+#: own, a tree no rev is named for) and what `10e51693f1` COMMITS `(11858, "a1552662bf07a10b")`
+#: (`origin/main`'s own re-cut, which the re-cut block above publishes as well), and `--repin` ON THIS
 #: RESOLUTION prints `(11864, "2a6400518a87775c")` — FOUR MORE than this branch's parent, none of
 #: which is the branch's own +3 end-proof rows, so the four arrived with `origin/main`'s commits and
 #: an inheritance of either parent's line would have been wrong in both directions. Arithmetic

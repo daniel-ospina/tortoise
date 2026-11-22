@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1326 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1327 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -423,6 +423,9 @@ _ARM_REFSPECS: dict[str, str] = {
     "1b0db0489408": "+1b0db0489408e1e817688f83cef0d7c1ee33be5d:refs/pi/1b0db0489408",
     "2c0d66e2ec": "+2c0d66e2ec07d673b17e31b76dc24fbdd57f8e14:refs/pi/2c0d66e2ec",
     "e74cf1d13d": "+e74cf1d13da76ba7176c73ebacd96cef843378f5:refs/pi/e74cf1d13d",
+    "2fe01fc775e": "+2fe01fc775ea5b202907cf3036565a82fd1f389f:refs/pi/2fe01fc775e",
+    "e0accb8fe6": "+e0accb8fe6362942a0c847c7daa1829e272296a9:refs/pi/e0accb8fe6",
+    "72c104bcbb": "+72c104bcbb1cbcef901476a535ed35262d167e02:refs/pi/72c104bcbb",
     # `8889f1140105` is a MERGE on a deleted feature branch, so no depth-1 REF arms it — but a sha
     # want does, measured from a clone holding neither object: `git fetch --dry-run --depth=1
     # https://github.com/daniel-ospina/tortoise.git 8889f1140105677add2c7c4dd60d0c8c5080ea26` →
@@ -2052,6 +2055,14 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # (`git show <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`).
     "2c0d66e2ec": (11835, "891187f5a4636487"),
     "e74cf1d13d": (11857, "ed40203dbbf32b87"),
+    # ⛔ THREE MORE, SAME DOORWAY (#14282 review cycle 8, P2). Each published a rev's own pin in a
+    # spelling the register does not grade — `which pins`, `pinned`, `still satisfies its own pin` —
+    # and each rev was absent from this map, so the orphan arm had no key to report. MEASURED, on the
+    # head before this commit: falsifying any of the three pairs left 35 tests green. All three are
+    # now written in the graded register (`<rev>` COMMITS `(N, "digest")`) and recorded here.
+    "2fe01fc775e": (11839, "0a7e60fa05aa31b9"),
+    "e0accb8fe6": (11844, "70d6cfdcd8b769e4"),
+    "72c104bcbb": (11843, "6aed5368ffa10513"),
     # ⛔ THE RUN-5 ILLUSTRATION'S TWO REVS (review of PR 14183, P2). The `#:` block publishes the
     # merge `8889f1140105` as committing `(11835, "891187f5a4636487")` while its own tree measures
     # `11843`, and `27cd81d55ebd` as re-pinning to that measured pair. Both pairs are true
