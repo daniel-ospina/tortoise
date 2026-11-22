@@ -1161,11 +1161,23 @@ _PR_REF_AS_TREE = re.compile(
 #: ⛔ PRESENT TENSE ON PURPOSE: `this branch's tree printed at `72c104bcbb`` is a MEASUREMENT with
 #: its rev named and must not red, while the unqualified present tense is the binding that the
 #: next re-pin falsifies — the same measurement-vs-binding line clause 1 already draws.
+#: ⛔ THE REVERSED ORDER — CLAUSE 1's OWN BLIND SPOT (#14282 fix lane, P3-class, measured).
+#: Clause 1 puts the `pair`/`pin` noun BEFORE the relative head, so the sentence `At THIS head the
+#: committed pair is `11861`` graded NOTHING and shipped GREEN on the merged head — where the
+#: committed pair is `11864` and `--check` exits 0 against it, so the sentence asserted a pair the
+#: head it ships on does not carry, the exact defect clause 1 exists to charge. The passive
+#: "committed pair"/"committed pin" is a BINDING (it states what the head commits), never the
+#: honest measurement qualifier `--check` exits 0 `on THIS tree` / `on the SAME pair` — which is
+#: why this clause keys on that noun instead of on every `pair` within reach of a relative head:
+#: that widening would charge `main`'s stale-marked `on the SAME pair` sentence, whose refutation
+#: sits in the paragraph BELOW it and so outside `_refuted`'s forward window.
 _RELATIVE_PIN_ADDRESS = re.compile(
     r"(?i)\b(?:pair|pin)\b[^.\"]{0,40}\b(?:THIS|this)\s+head\b"
     r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|tree|revision|rev)\s+pins?\b"
     r"|\b(?:THIS|this)\s+(?:branch|commit|PR|pr)'?s\s+(?:tree|tip)\s+(?:pins?|prints?)\b"
-    r"|\bthis\s+commit'?s\s+`?origin/main`?")
+    r"|\bthis\s+commit'?s\s+`?origin/main`?"
+    r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|revision|rev)\b[^.\"]{0,40}"
+    r"\bcommitted\s+(?:pair|pin)\b")
 
 #: The rewrite's PARENT claim: `83e94826a8a` is the pre-rebase DRAFT of the commit that landed as
 #: `1b82cc7063`; the rewrite's PARENT — the tree every row above is measured against — is
@@ -1399,6 +1411,14 @@ def test_the_recut_pair_is_bound_to_its_rev_never_to_a_relative_head():
         f"{flow} and the pair THIS COMMIT pins, `{RESIDUE_ABBREV}` over"), (
         "a relative pin spelled `THIS COMMIT pins` is the same defect as `THIS head pins` — the "
         "arm must refuse the SHAPE, not one spelling of it")
+    # ⛔ THE REVERSED ORDER, ADDED WITH THE MERGE-INTRODUCED FALSEHOOD IT MISSED (#14282 fix
+    # lane, P3-class). Clause 1 sees the noun only BEFORE the head, so `At THIS head the committed
+    # pair is `11861`` left this arm GREEN on a head whose committed pair is `11864`. Non-vacuity
+    # is the mutation itself: reinstall the shipped wording and the arm must bite.
+    assert _relative_pin_addresses(
+        f"{flow} At THIS head the committed pair is `11861`, and `--check` exits 0 against it"), (
+        "`At THIS head the committed pair is <pair>` must be refused: it binds the pin to the tree "
+        "the reader is standing on, which is how a merge re-cut falsified it silently")
 
 
 def test_a_pair_bound_to_the_pair_below_is_the_pins_own_pair():

@@ -1258,11 +1258,11 @@ SWEEP_NAMES = 66
 #: resolution with `typed references still pointing at a public name: 0`.
 #:
 #: ⛔ STALE AS OF THE RE-CUT BELOW — THIS SENTENCE DESCRIBES THE PREVIOUS PIN'S TREE, NOT THIS ONE
-#: (#14282 review cycle 2, P3). At THIS head the committed pair is `11861`, and `--check` exits 0
-#: against `11861`, not against `11858`. Read as a statement about the current head, "11858 is
-#: re-measured on the tree that carries them" is false, and accepting it is precisely the
-#: inherited-figure error the re-cut exists to repair. It is kept, marked, because it is the
-#: record of how the SUPERSEDED pair was arrived at.
+#: (#14282 review cycle 2, P3). The count the re-cut below publishes is `11861`, and `--check`
+#: exits 0 against it at `c5e442acd7`, the head that carries that pair, not against `11858`. Read
+#: as a statement about the tree the reader is standing on, "11858 is re-measured on the tree that
+#: carries them" is false, and accepting it is precisely the inherited-figure error the re-cut
+#: exists to repair. It is kept, marked, because it is the record of how that superseded pair arose.
 #:
 #: RE-PINNED (11858, "a1552662bf07a10b") → (11861, "f0647020531c078c"), measured with `--repin` on
 #: TWO trees rather than derived by arithmetic. `main`'s OWN tree at `5e83c2a2f6` prints the new
