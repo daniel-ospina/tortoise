@@ -1704,6 +1704,29 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # away from the frame this arm exists for. The row's first arm already uses the wide slot;
         # this arm now matches it.
         + rf"\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        # ⛔ AND `been` ITSELF IS FORBIDDEN AS A SUBJECT WORD, SO A BARE COPULA HEAD WITH ONE
+        # HAS NOTHING TO FALL THROUGH TO EITHER (round-31 review, P3, measured): the round-30
+        # fix added `(?!been(?![-/])\b)` to `_COPULA_SUBJECT` so the subject slot cannot
+        # swallow the auxiliary — right — but that left `<is|are|was|were> <subject> been
+        # <ending>` with NO notice: `is the export been archived`, `is the report been reviewed
+        # archived`, `is the export still been archived` all came back `population=None,
+        # signal=None, payload=None`, while the base `42e0c1a662` served `ended/is_copula` for
+        # every one of them. Ungrammatical input, but the mechanism is the one this module
+        # forbids — a cue reaching no answer and saying nothing — and it measured 45 of 45
+        # `is <det> <noun> been <ending>` rows silent. They report `existence_unguarded` now.
+        # ⛔ SCOPED TO THE COPULA HEADS ON PURPOSE (measured, first cut): `_COPULA_SUBJECT`'s
+        # `been` exclusion lives in the `is|are|was|were` branch, so `<has|have|had> … been` is
+        # NOT this silence — and letting the alternative take those heads made it PREEMPT
+        # another row's signal: `which customer claims has been archived` is pinned to report
+        # `which_modified_noun` and started reporting `existence_unguarded` instead, because
+        # this row is FIRST in `_ENDING_SIGNALS`. Narrowed to the copula heads, that row is
+        # untouched (the suite caught it, and the narrow scope is what it measured).
+        + r"|\b(?:is|are|was|were)\s+[^?]{0,40}?\bbeen(?![-/])\b\s+"
+        # (one `-ed/-en` participle is allowed between `been` and the ending word: the refused
+        # spelling that reached this arm was `is the report been reviewed archived`, the same
+        # silence one word further out.)
+        + r"(?:[a-z]+(?:ed|en)\s+)?"
+        + rf"{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
         + ")"
         + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),

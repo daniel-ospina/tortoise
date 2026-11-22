@@ -1139,6 +1139,11 @@ NOT_SELECTED = [
     "is to be archived",
     "is getting archived",
     "was being retired",
+    # …the BARE-`been` COPULA SUBJECT class, reported through `existence_unguarded` (the
+    # reasoning and the measurements live beside its `NOTICE_ONLY` pins).
+    "is the export been archived",
+    "is the report been reviewed archived",
+    "is the export still been archived",
 ]
 
 
@@ -1408,6 +1413,20 @@ NOTICE_ONLY = [
     "is the export to end up archived",
     "is the export to turn out archived",
     "is the export to stay archived",
+    # ⛔ THE BARE-`been` COPULA SUBJECT CLASS (round-31 review, P3, measured): round-30 forbids
+    # `been` as a SUBJECT word in `_COPULA_SUBJECT` — rightly, that is what stops the subject
+    # slot from swallowing the auxiliary — but on a copula head there is then nothing to fall
+    # through to, so `<is|are|was|were> <subject> been <ending>` came back with NOTHING while
+    # the base `42e0c1a662` served `ended/is_copula`: measured, 45 of 45 `is <det> <noun> been
+    # <ending>` rows silent, and `signal=None`/`payload=None` on every one. Ungrammatical input,
+    # but a cue reaching no answer and saying nothing is the mechanism this module forbids, so
+    # they report `existence_unguarded` now. ⛔ SCOPED TO THE COPULA HEADS: letting the same
+    # alternative take `has|have|had` made it PREEMPT `which_modified_noun` on
+    # `which customer claims has been archived` (this signal row is first in `_ENDING_SIGNALS`),
+    # which the suite caught — so `<aux> … been` is deliberately NOT in that arm.
+    "is the export been archived",
+    "is the report been reviewed archived",
+    "is the export still been archived",
 ]
 
 assert set(NOTICE_ONLY) <= set(NOT_SELECTED), (
@@ -4310,11 +4329,22 @@ def test_an_adverb_between_the_clitic_and_been_does_not_reopen_the_hijack():
     (`is_copula_long_subject`) became silent. The gap now tolerates up to three adverbial
     words, and `been` is forbidden as a subject word.
 
-    ⚠️ STATED RESIDUAL, measured and NOT closed here: the PLAIN interrogative spelling
-    (`has billing's just been deprecated`, with no caller predicate) is now SILENT rather
-    than served — but it must never be served by re-widening this slot, because the same
-    slot is what the hijack frame below relies on to be refused. Recorded in
-    `daniel-ospina/tortoise#14292` beside the other contracted-head shapes.
+    ⛔ AND THE PLAIN INTERROGATIVE SPELLING IS NO LONGER SILENT (round-31 review, P2, measured):
+    this paragraph used to say that spelling (`has billing's just been deprecated`, with no
+    caller predicate) is "now SILENT rather than served". The same round widened the NOTICE
+    arm's gap to the guard's own `{0,3}` words, so it is refused AND REPORTED — `population=None`,
+    `signal='existence_unguarded'`, payload present — and the pins beside
+    `test_a_refused_clitic_subject_REPORTS_with_a_word_between_it_and_been` assert that report.
+    It must still never be SERVED by re-widening the subject slot, which is what this paragraph
+    is about.
+
+    ⚠️ ON THE ISSUE POINTER, CORRECTED (round-31 review, P2, measured): this docstring also said
+    the spelling was "Recorded in `daniel-ospina/tortoise#14292` beside the other contracted-head
+    shapes". #14292 records four shapes and NONE of them is this adverb-bearing clitic spelling
+    (its clitic row is the ADJACENT `billing's been withdrawn`), and two of its four rows — the
+    contracted head and the bare-noun clitic — are FIXED at this head while its body still says
+    all four reproduce on `origin/main`. Round 31 posted the measured status there rather than
+    leave a pointer to a document that no longer describes the code.
     """
     from tortoise.state_intent import detect_state_question, missed_route_payload
 
