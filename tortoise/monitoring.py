@@ -6118,7 +6118,7 @@ class HealthProbe:
         # so the cause was recorded and wiped inside ONE read. Measured 5/5
         # reads returning `db.error='probe in flight (0.0s)'`,
         # `start_error=None` — the exact signature this change exists to remove,
-        # on the one surface an operator reads (`hosted_api.py:8575-8580`).
+        # on the one surface an operator reads (`hosted_api.py:8648`).
         # `_run` clears it when a start actually LANDS.
         worker = threading.Thread(
             target=self._run, args=(seq,),
