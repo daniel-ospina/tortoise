@@ -567,6 +567,14 @@ def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
     _parent = parents.get(id(node))
     if not isinstance(node, ast.Constant) or node.value not in _READ_NAMES:
         return False
+    # ⛔ A WALRUS IS TRANSPARENT HERE (#14326 round 5, measured):
+    #     vars(type(sdk))[(_N := "_tortoise_fts_query")](…)   # kind="statement"
+    # delivered the literal to the same fetch position the plain `vars(...)["…"]` reaches,
+    # but the `Constant`'s immediate parent is the `NamedExpr`, so the `Subscript` test below
+    # never saw it — mentions=2, calls=2, `refuses=False` while the DIRECT spelling is
+    # refused. Step out of the walrus to grade the position the value actually lands in.
+    if isinstance(_parent, ast.NamedExpr):
+        _parent = parents.get(id(_parent)) or _parent
     if isinstance(_parent, ast.Subscript):
         # ⛔ A STORE CANNOT BE CALLED (#14281 review P2, measured): counting every subscript
         # red `_counts["_tortoise_fts_query"] = 0` and
@@ -605,19 +613,62 @@ def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
 
 
 def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]]) -> list[ast.Call]:
-    """`getattr`/`setattr` calls that reach the read BY NAME — the census's own diagnosis.
+    """Calls that reach the read BY NAME through an argument — the census's own diagnosis.
 
     ⛔ MEASURED BYPASS (#14279 review F3/P2), each GREEN before this arm resolved a name
     carried through a container: `_pair, = (_N,)` or `_pair = (sdk, _N)` followed by
     `getattr(sdk, _pair)(…)` / `getattr(*_pair)(…)`, and `getattr(*[sdk, _N])(…)`. The
     census cannot recover them (the `_is_read_ref` Name arm requires an executable parent),
     so this fires FIRST, under its own diagnosis, before `len(mentions) == 2` can mask it.
+
+        # ⛔ THE FETCHER NAME IS NOT THE HOLE; THE CONTAINER IS (#14326 round 5). Four
+        # escapes were MEASURED GREEN at `8f13cb24` (`refuses=False`, mentions=2, calls=2)
+        # while the DIRECT spelling of each callee was refused:
+        #
+        #     _g = sdk.__getattribute__(*("_tortoise_fts_query",)); _g(query=…, kind="statement")
+        #     _A = ("_tortoise_fts_query",); operator.attrgetter(*_A)(sdk)(…, kind="statement")
+        #     _A = (…); dict.get(*[sdk.__dict__, *_A])(…, kind="statement")
+        #     vars(type(sdk))[(_N := "_tortoise_fts_query")](…, kind="statement")   [NamedExpr]
+        #
+        # The first three deliver through a SPLAT (the arm below); the fourth is the
+        # `Constant` arm's NamedExpr step. Each is a row in
+        # `test_EVERY_static_binding_form_is_a_READ_reach`.
     """
-    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-            and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
-            in ("getattr", "setattr")
-            and any(_carries_read_name(arg, consts)
-                    for arg in _name_reaching_operands(n))]
+    out: list[ast.Call] = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        _callee = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+        if _callee in _PURE_READS:
+            continue  # a pure callee cannot fetch by name — the `print("…")` control
+        if not any(_carries_read_name(arg, consts)
+                   for arg in _name_reaching_operands(n)):
+            continue
+        # ⛔ THE FIRING CONDITION IS A SPLAT (#14326 round 5, three measurements). `getattr`
+        # / `setattr` were once a NAMED branch here; it was DELETED because nothing could red
+        # it: every shape it fired on was already refused by the mention census
+        # (`getattr(sdk, _pair)` over a name-carried tuple measures mentions=3), and every
+        # shape the census CANNOT see — the four round-5 escapes, each measured GREEN at
+        # `8f13cb24` with `refuses=False`, mentions=2, calls=2 — delivers the literal through
+        # a SPLAT:
+        #
+        #     _g = sdk.__getattribute__(*("_tortoise_fts_query",)); _g(query=…, kind="statement")
+        #     _A = ("_tortoise_fts_query",); operator.attrgetter(*_A)(sdk)(…, kind="statement")
+        #     _A = (…); dict.get(*[sdk.__dict__, *_A])(…, kind="statement")
+        #
+        # A splat's arity and position are not statically knowable, so the fetcher behind it
+        # cannot be excluded by name — fail-closed on ANY non-pure callee. Emptying a named
+        # set of eight fetchers left all 25 tests green, which is why it is not kept "for
+        # safety": an entry no row can red reads as coverage and is not.
+        if any(isinstance(arg, ast.Starred) for arg in n.args):
+            out.append(n)
+    return out
+
+
+# ⛔ THERE IS NO NAMED FETCHER SET HERE (#14326 round 5). `getattr`/`setattr` were a named
+# branch; it was measured DEAD twice — emptying it left 25 green, and every shape it fired
+# on was already refused by the mention census. The surviving arm in `_indirect_reads` is
+# the SPLAT delivery, which is the only container shape the census cannot see.
 
 
 def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
@@ -3217,6 +3268,35 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "unpack bound BEFORE its source": ('    _pair, = (_N,)\n'
                                            '    _N = "_tortoise_fts_query"\n'
                                            f'    {reach.format(name="_pair")}\n'),
+        # ⛔ THE FETCHER NAME IS NOT THE HOLE; THE CONTAINER IS (#14326 round 5, EACH
+        # MEASURED GREEN at `8f13cb24`: `refuses=False`, mentions=2, calls=2 — while the
+        # DIRECT spelling of the same callee was refused, which is what proves it). The
+        # literal rides inside a tuple/list that is SPLATTED into a callee that fetches an
+        # attribute by name, so `_is_read_ref` sees the `Constant`'s parent as the container,
+        # never the `Call`. All four rows below pin the SPLAT delivery, which is fail-closed
+        # on ANY callee that is not provably pure — that is the arm whose deletion reds them.
+        "`__getattribute__` over a splatted literal": (
+            '    _g = sdk.__getattribute__(*("_tortoise_fts_query",))\n'
+            '    _g(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`operator.attrgetter` over a NAME-carried tuple": (
+            '    _A = ("_tortoise_fts_query",)\n'
+            '    _lever = operator.attrgetter(*_A)(sdk)\n'
+            '    _lever(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`dict.get` over a splatted mixed container": (
+            '    _A = ("_tortoise_fts_query",)\n'
+            '    _lever = dict.get(*[sdk.__dict__, *_A])\n'
+            '    _lever(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "WALRUS inside the fetch subscript": (
+            '    vars(type(sdk))[(_N := "_tortoise_fts_query")]'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ THE SAME ARM UNDER A CALLEE NAME NO SET COULD ENUMERATE (#14326 round 5): a
+        # callable object fetches by name behind a splat, so a named-fetcher list cannot see
+        # it — the ``case is the container, not the callee. This row is the arm's own
+        # attribution: deleting the splat arm reds it.
+        "UNKNOWN callee over a splatted literal": (
+            '    _fetcher = _PageFetcher()\n'
+            '    _lever = _fetcher(*("_tortoise_fts_query",))\n'
+            '    _lever(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -3287,10 +3367,14 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a subscript STORE whose key is the read literal is a FALSE RED — it records under "
         "the name and executes nothing; the Constant arm's Load guard is what keeps the "
         "census counting CALLABLE spellings")
-    _st_m, _st_calls, _st_indirect = _read_reach(_pin_source(literal_store))
-    assert len(_st_m) == 2 and not _st_indirect, (
-        f"the store inflated the mention census to {len(_st_m)} (expected 2) — the Load "
-        "guard on the `Constant`-under-`Subscript` arm is doing nothing")
+    # ⛔ …AND THE `mentions == 2` ASSERTION THAT USED TO SIT HERE IS DELETED, NOT KEPT
+    # (#14326 round 5): `_pin_refuses` is `bool(indirect) or len(calls) != 2 or len(mentions)
+    # != 2` over the same `_read_reach` on an identically re-parsed source, so the control
+    # above passing ALGEBRAICALLY implies it — measured: with the `Load` guard replaced by
+    # `True` the failure lands on the control, and the extra assertion only fires once the
+    # control is removed. A row that can never be the failing row reads to the next lane as
+    # an independent check and is not one; this file deletes those rather than keeping them
+    # `_name_reaching_operands`' literal-splat expansion was deleted for the same reason.
 
 
 def test_the_READ_side_of_str_is_NOT_a_MUTATION() -> None:
