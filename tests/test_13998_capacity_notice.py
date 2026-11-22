@@ -34,6 +34,7 @@ import pytest
 from tests.fake_control_plane import FakeControlPlane
 from tortoise import capacity_notice as cn
 from tortoise import allowance_gate as ag
+from tortoise import quota
 from tortoise import email_notify
 from tortoise import supabase_control as sc
 from tortoise.supabase_control import (
@@ -580,8 +581,19 @@ def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
         "the gauge was never consulted — this row would be vacuous")
 
 
+@pytest.mark.parametrize("exc", [
+    # The TRANSPORT class: the PostgREST read failed.
+    RuntimeError("the allowance read failed: HTTP 500"),
+    # The OTHER class the guard exists for, and the one production actually
+    # raises here: `resolve_org_limits` raises `OrgNotFoundError` (a
+    # `QuotaCheckError`) when the org row is missing (`tortoise/quota.py:803`),
+    # which is NOT a `RuntimeError`. Pinned because a guard narrowed to
+    # `except RuntimeError` leaves every OTHER row in this file green while it
+    # regresses exactly this path (#14038 review cycle 10, P3).
+    quota.OrgNotFoundError("Team 'team-solo-001' not found in control plane"),
+], ids=["transport", "org-not-found"])
 def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
-        monkeypatch):
+        monkeypatch, exc):
     """A gauge that RAISES must answer with the documented status, not escape.
 
     `notify_account` publishes a CLOSED list of statuses a caller aggregates on,
@@ -593,9 +605,14 @@ def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
 
     MEASURED before the guard existed: the RuntimeError below escaped
     `evaluate`, which is why this row is the pin and not a restatement.
+
+    ⛔ TWO EXCEPTION CLASSES, because the guard's BREADTH is what is pinned: the
+    realistic raise from `resolve_org_limits` is `OrgNotFoundError`, not a
+    `RuntimeError`, so a single-class row could not tell `except Exception` from
+    `except RuntimeError`.
     """
     def raise_on_read(org_id):
-        raise RuntimeError("the allowance read failed: HTTP 500")
+        raise exc
 
     monkeypatch.setattr("tortoise.quota.resolve_org_limits", raise_on_read)
     # No `limits=` argument: the production path resolves them, which is exactly

@@ -1026,8 +1026,10 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     decides on — not the type alone, because `supabase_control` raises
     `RuntimeError` for BOTH a rejected column and a transport failure),
     ``unreadable-allowance`` and ``unreadable-reading`` (a gauge could not be
-    read: ``unreadable-allowance`` is the ALLOWANCE instrument raising OR its
-    figure being unusable (a non-number), and ``unreadable-reading`` is a reading
+    read: ``unreadable-allowance`` is the ALLOWANCE instrument raising, its
+    figure being unusable (a non-number), or there being no readable org record
+    to derive one from (`OrgNotFoundError` — a STATE, not a fault, #9567), and
+    ``unreadable-reading`` is a reading
     that cannot be turned into a percentage (or ``read_dimension`` itself
     failing). ⛔ A METER that raises is NOT this status: `allowance_gate.read_dimension`
     is a documented non-raising seam that catches the meter's exception and answers

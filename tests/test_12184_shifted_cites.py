@@ -1926,7 +1926,10 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "`origin/main` file lengths, the absent-at-main count, the provenance pair and the "
             "write measurement. The doc-TEXT arms (the ownership clause, the drift decomposition "
             "and the twelve-pair enumeration) still graded the sentence.",
-            stacklevel=2,
+            # ⛔ NO `stacklevel=2` (#14038 review cycle 10, P3): from inside a
+            # test that attributes the warning to pytest's own frame
+            # (`_pytest/python.py:167`), which is precisely the file:line this
+            # line exists to surface. Default `stacklevel=1` names THIS file.
         )
     if _main_readable:
         _measured_absent = sum(1 for _path, _line in _PIN_EOF_PAIRS if _line > _main_sizes[_path])
