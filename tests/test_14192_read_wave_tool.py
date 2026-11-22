@@ -310,17 +310,23 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     call (`_N, _M = cfg.pair`, `_a, _b = pair()`) are not resolved here — nothing about them
     is statically pairable, and they are named rather than implied (#14326 review P3).
 
-    ⛔ AN f-STRING IS OVER-APPROXIMATED, NOT RESIDUAL, AND THE DOCSTRING USED TO CLAIM THE
-    OPPOSITE (#14326 round 5, MEASURED at `6f66ac53`): the `JoinedStr` arms feed every part
-    to the resolver, a `FormattedValue` part yields nothing of its own, and a CONSTANT
-    fragment is resolved — so `_N = f"{p}_tortoise_fts_query"` yields `{'_tortoise_fts_query'}`
-    for `_N`. That is the fail-CLOSED direction this file takes everywhere: used as a
-    reach it REDS (`getattr(sdk, _N)(…, kind="statement")`, measured `indirect=1`), while a
-    name that merely LABELS the read stays GREEN because the `Name` arm requires an
-    executable position (`_lbl = f"{p}_tortoise_fts_query"; logging.info(_lbl)` measured
-    `refuses=False`). Stated this way because the alternative — resolving `JoinedStr` only
-    when every part is a `Constant` — would make a RUNTIME-COMPUTED read name fail OPEN,
-    which is the class this whole pin exists to close.
+    ⛔ AN f-STRING WHOSE **CONSTANT FRAGMENT IS THE READ NAME** IS OVER-APPROXIMATED, AND AN
+    f-STRING **ASSEMBLED FROM PARTS** IS RESIDUAL — two different classes, and both earlier
+    wordings got one of them wrong (#14326 rounds 5 and 8, MEASURED at `6f66ac53` and
+    `9762589e`). The `JoinedStr` arms feed every part to the resolver, so a `FormattedValue`
+    contributes nothing while a CONSTANT fragment IS resolved: `_N = f"{p}_tortoise_fts_query"`
+    yields `{'_tortoise_fts_query'}`, which REDS when the name is executed (`indirect=1`) and
+    stays GREEN as an inert label (`_lbl = f"{p}_tortoise_fts_query"; logging.info(_lbl)`,
+    measured `refuses=False`, because the `Name` arm requires an executable position).
+
+    ⛔ BUT AN f-STRING WHOSE TEXT IS ASSEMBLED IS **NOT** CAUGHT, AND SAYING OTHERWISE WAS THE
+    DEFECT (#14326 round 8, MEASURED): `_p = "_tortoise"; _N = f"{_p}_fts_query"` builds
+    exactly `_tortoise_fts_query` at runtime and the pin stays GREEN (`refuses=False`,
+    mentions 2 / calls 2 / indirect 0) — the constant fragments are `"_tortoise"` and
+    `"_fts_query"`, neither of which is the name. That is the declared residual, together
+    with `"".join(…)`, `_N + "_x"` and a parameter; the fragment over-approximation buys ONE
+    spelling at the cost of a possible over-red, it does not close the class. Recorded so the
+    next lane does not read the arm above as covering assembled names.
 
     ⛔ A PLACEHOLDER-FREE f-STRING IS NOT RESIDUAL, AND NEITHER IS A SELECTION BETWEEN
     LITERALS (#14326 review P6, each MEASURED GREEN at `8f13cb24`): `f"_tortoise_fts_query"`
@@ -393,6 +399,15 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             return {value.value}
         if isinstance(value, ast.Name):
             return set(out.get(value.id, ()))  # a chain resolves on the next pass
+        # ⛔ A WALRUS ON THE RIGHT-HAND SIDE IS THE SAME BIND AS `a = b = literal`
+        # (#14326 round 8, MEASURED GREEN at `9762589e`): `_N = (_M := "_tortoise_fts_query")`
+        # left `_N` UNRESOLVED while `_str_constants` already treats `NamedExpr` as a bind
+        # (`binds.append(…)` above), so the asymmetry opened the pin: with a third read
+        # `getattr(sdk, _N)(…, kind="statement")` the census stayed at mentions 2 / calls 2 /
+        # indirect 0, i.e. `intentional_keep` shipped a lever the door does not name. The same
+        # value written `_N = _M = …` reds correctly.
+        if isinstance(value, ast.NamedExpr):
+            return _values(value.value)
         # ⛔ A SPLATTED LITERAL IS THAT LITERAL (#14326 review P5, MEASURED GREEN):
         # `_P = [sdk, *("_tortoise_fts_query",)]; getattr(*_P)(…)` left `_P` unresolved, and
         # the sibling `_possible_strings` in this file already carries this arm (#14279 review
@@ -556,6 +571,11 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     if isinstance(node, ast.Dict):
         return frozenset().union(*(_possible_strings(key, consts)
                                    for key in node.keys if key is not None))
+    # ⛔ THE `NamedExpr` ARM MATCHES `_values` (#14326 round 8): an inline walrus operand,
+    # `getattr(sdk, (_x := "_tortoise_fts_query"))`, is a static literal reached without any
+    # bind node — the inline path must resolve it too, or the `indirect` arm cannot fire.
+    if isinstance(node, ast.NamedExpr):
+        return _possible_strings(node.value, consts)
     # ⛔ THE SAME `IfExp` / `BoolOp` / `JoinedStr` ARMS `_values` CARRIES (#14326 review P6):
     # the inline-operand path must see the same literal spellings, or
     # `getattr(sdk, f"_tortoise_fts_query")(…)` and `getattr(sdk, (A if c else B))(…)`
@@ -1835,6 +1855,37 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
 
     bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True)
 
+    def _rebound_mutator_slots(tree: ast.AST) -> frozenset[str]:
+        """CALLEE names bound to a BOUND MUTATOR — `_b.s = results.sort`, `_x.count = results.sort`.
+
+        ⛔ THE OBJECT-SLOT SPELLING WAS GREEN WHILE THE DICT-SLOT SPELLING RED (#14326 round 8,
+        MEASURED at `9762589e`): `_b.s = results.sort; _b.s(key=…)` gives `hits=[]` while
+        `_d = {"s": results.sort}; _d["s"](key=…)` gives `hits=[5]`. The seed above binds only a
+        NAME target, so an ATTRIBUTE store never reached `bound_mutator` at all, and a
+        `_PURE_METHODS` name (`_x.count = results.sort; _x.count()`) is allow-listed by NAME
+        with its VALUE never read. Collected as a name set — the same attribute-segment
+        semantics the round-7 rebind work applies to the allow-lists — because over-collecting
+        here can only RED, the cheap direction.
+        """
+        found: set[str] = set()
+        for sub in ast.walk(tree):
+            targets: list[ast.AST] = []
+            value: ast.AST | None = None
+            if isinstance(sub, ast.Assign):
+                targets, value = list(sub.targets), sub.value
+            elif isinstance(sub, ast.AnnAssign) and sub.value is not None:
+                targets, value = [sub.target], sub.value
+            if value is None or not _bound_mutator_expr(value):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Attribute):
+                    found.add(target.attr)
+                elif isinstance(target, ast.Name):
+                    found.add(target.id)
+        return frozenset(found)
+
+    rebound_mutators = _rebound_mutator_slots(run_def)
+
     def _container_of_page(v: ast.AST) -> bool:
         """A LITERAL container assigned the page: `_box = [results]`, `_d = {"p": results}`."""
         if isinstance(v, (ast.List, ast.Tuple, ast.Set)):
@@ -1861,6 +1912,16 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             continue  # the read itself COLLECTS into the trace; it is not a mutation of it
         receiver: set[str] = set()
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in rebound_mutators:
+            # ⛔ A BOUND MUTATOR REACHED THROUGH AN OBJECT SLOT (#14326 round 8, MEASURED
+            # GREEN): `_b.s = results.sort; _b.s(key=…)` permutes the page in place, and the
+            # artifact then records the CANONICALISED order so `compare()` reports
+            # `rank_identical: True` over a genuinely permuted pair — #14192's false PASS,
+            # reached through the guard built to stop it. The credit is the CALLEE NAME: the
+            # slot HOLDS the mutator, so `_tainted(node.func.value)` (which only accepts a
+            # page-holding receiver) is the wrong test here.
+            receiver = _names_in(node.func)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and _is_mutator_method(node.func.attr):
             # A method called ON a slot's value (`_d["k"].update(…)`) mutates the held
             # object, so a container the page was stored into counts here — but only when
@@ -2983,6 +3044,37 @@ def test_a_BOUND_MUTATOR_of_a_recorded_row_is_red() -> None:
         "sorted through a name bound to its `.sort`, which `compare()` reads as the order")
 
 
+def test_a_BOUND_MUTATOR_in_an_OBJECT_SLOT_is_red() -> None:
+    """`_b.s = results.sort; _b.s()` — the OBJECT-slot spelling of the dict-slot arm.
+
+    ⛔ MEASURED GREEN at `9762589e` (#14326 round 8) while the DICT-slot spelling of the same
+    thing red (`_d = {"s": results.sort}; _d["s"]()` -> `hits=[5]`): the bound-mutator seed
+    binds only NAME targets, so an ATTRIBUTE store never reached `bound_mutator`, and a
+    `_PURE_METHODS` name rebound to a mutator (`_x.count = results.sort`) is allow-listed by
+    NAME with its VALUE never read. Either shape permutes the page in place, after which the
+    artifact records the canonicalised order and `compare()` reports `rank_identical: True`
+    over a genuinely permuted pair — #14192's false PASS, through the guard built to stop it.
+    """
+    for label, body in (
+        ("object slot", "    _b.s = results.sort\n    _b.s()\n"),
+        ("rebound pure method name", "    _x.count = results.sort\n    _x.count()\n"),
+        ("object slot, keyword call", '    _b.s = results.sort\n    _b.s(key=_r.get("id"))\n'),
+    ):
+        assert _mutations_of(body), (
+            f"[{label}] a bound mutator stored in an OBJECT SLOT is GREEN (hits=[]) — the "
+            "page is sorted through a slot nothing resolves, and `compare()` then reports "
+            "`rank_identical: True` over a permuted pair")
+    # ⛔ THE OTHER POLARITY: a slot is not per se a mutation. Grading it as one would red
+    # every helper assigned to an object, so these must stay GREEN.
+    for label, body in (
+        ("pure callee", "    _b.label = len\n    _b.label()\n"),
+        ("a read method of the page", "    _b.get = results.get\n    _b.get('x')\n"),
+    ):
+        assert not _mutations_of(body), (
+            f"[{label}] an OBJECT SLOT holding a NON-mutator must stay green — over-collecting "
+            "the slot would red an inert edit")
+
+
 def test_a_FALLBACK_expression_alias_still_reaches_the_sort() -> None:
     """A fallback expression binds the SAME collection — `results or []`, `results if c else []`.
 
@@ -3453,6 +3545,16 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "unpack target": f'    (_N,) = ("_tortoise_fts_query",)\n    {reach.format(name="_N")}\n',
         "chained assign": f'    _N = _M = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n',
         "walrus": f'    (_N := "_tortoise_fts_query")\n    {reach.format(name="_N")}\n',
+        # ⛔ A WALRUS ON THE RIGHT-HAND SIDE OF A BIND (#14326 round 8, MEASURED GREEN at
+        # `9762589e`): `_str_constants` already treats `NamedExpr` as a bind, so `_values`
+        # lacking the arm was an in-file asymmetry — the same literal written `_N = _M = …`
+        # reds (row above), which is what made this one visible.
+        "walrus on the RHS of a bind": (
+            '    _N = (_M := "_tortoise_fts_query")\n'
+            f'    {reach.format(name="_N")}\n'),
+        "walrus INLINE in the getattr": (
+            '    getattr(sdk, (_M := "_tortoise_fts_query"))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "for target": ('    for _N in ("_tortoise_fts_query",):\n        '
                        f'{reach.format(name="_N")}\n'),
         "comprehension target": (f'    [_N for _N in ("_tortoise_fts_query",)]\n    '
