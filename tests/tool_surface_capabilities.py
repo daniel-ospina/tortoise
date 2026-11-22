@@ -423,14 +423,17 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # `update_knowledge` above.
 
     "_create_edge": "tortoise_create_edge",
-    # ⛔ #14169 (#11609 P7) added a SECOND `_quota_gated(sdk.link_entities, …)` wrap
-    # site — the relation-decided arm of `tortoise_link_entities` (mcp_server.py:7925)
-    # — and did not re-key this map, so the forward arm redded `main` on
-    # "unmapped _quota_gated wrap sites: ['link_entities']" while the door's write
-    # classification stayed green. That is the drift this map exists to catch, caught:
-    # the key is the WRAP SITE's method, the label is the live door, and
+    # ⛔ #14169 (#11609 P7) added the `_quota_gated(sdk.link_entities, …)` wrap site
+    # — the SECOND of the two wrappers inside `tortoise_link_entities` (its operator
+    # arm wraps `sdk._create_operator`; this one is the relation-decided arm, at
+    # `mcp_server.py:7925`) — and did not re-key this map, so the forward arm redded
+    # `main` on "unmapped _quota_gated wrap sites: ['link_entities']" while the door's
+    # write classification stayed green. That is the drift this map exists to catch,
+    # caught: the key is the WRAP SITE's method, the label is the live door, and
     # `tortoise_link_entities` is already in `WRITE_TOOL_NAMES` (the fourth arm),
-    # so nothing about the door changed — only the binding was unchecked.
+    # so nothing about the door changed — only the binding was unchecked. The method
+    # has exactly ONE wrap site, so the forward and inverse arms constrain the same
+    # site; a "second site for link_entities" is NOT what landed.
     "link_entities": "tortoise_link_entities",
     "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
