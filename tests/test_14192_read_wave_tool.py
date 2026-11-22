@@ -305,10 +305,19 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     `for`-target arm above is the same argument one statement earlier.
 
     RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`, an
-    f-string, `_N + "_x"`, a parameter), a value read out of a container or an attribute
-    (`_CFG["read"]`, `self._read`) and an unpack whose RIGHT-HAND SIDE is an attribute or a
-    call (`_N, _M = cfg.pair`, `_a, _b = pair()`) are not resolved here — nothing about
-    them is statically pairable, and they are named rather than implied (#14326 review P3).
+    f-string WITH A PLACEHOLDER (`f"{p}_tortoise_fts_query"`), `_N + "_x"`, a parameter), a
+    value read out of a container or an attribute (`_CFG["read"]`, `self._read`) and an
+    unpack whose RIGHT-HAND SIDE is an attribute or a call (`_N, _M = cfg.pair`,
+    `_a, _b = pair()`) are not resolved here — nothing about them is statically pairable, and
+    they are named rather than implied (#14326 review P3).
+
+    ⛔ A PLACEHOLDER-FREE f-STRING IS NOT RESIDUAL, AND NEITHER IS A SELECTION BETWEEN
+    LITERALS (#14326 review P6, each MEASURED GREEN at `8f13cb24`): `f"_tortoise_fts_query"`
+    parses to `JoinedStr([Constant(...)])` — nothing is computed — and `IfExp`/`BoolOp` only
+    SELECT between literal operands, which this file's own `_collection_operands` already
+    expands. All three resolve here now, in `_values` AND in `_possible_strings` (the
+    inline-operand path); what stays residual is the `FormattedValue` case, which resolves
+    to nothing.
 
     A literal ITERABLE is not residual, whatever its type: a `for`/comprehension target over
     a tuple, a list, a SET or a DICT resolves, because CPython's grammar gives `iter` as an
@@ -394,6 +403,27 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         if isinstance(value, ast.Dict):
             sides = [*value.keys, *value.values]
             return set().union(*(_values(item) for item in sides if item is not None))
+        # ⛔ A SELECTION BETWEEN LITERALS IS STATIC, AND A PLACEHOLDER-FREE f-STRING IS A
+        # CONSTANT (#14326 review P6, MEASURED GREEN without these three arms):
+        #     getattr(sdk, f"_tortoise_fts_query")(…, kind="statement")
+        #     getattr(sdk, ("_tortoise_fts_query" if q else "x"))(…, kind="statement")
+        #     _N = "_tortoise_fts_query" if q else "x"; getattr(sdk, _N)(…, kind="statement")
+        #     _N = q or "_tortoise_fts_query";            getattr(sdk, _N)(…, kind="statement")
+        # all left the pin GREEN (mentions 2, calls 2, indirect 0). None is the stated
+        # "computed at runtime" residual: `f"…"` with no `FormattedValue` parses to a
+        # `JoinedStr` holding ONE `Constant`, and `IfExp`/`BoolOp` merely SELECT between
+        # literals — this file's own `_collection_operands` already expands exactly those two
+        # node types, so their absence here was an in-file asymmetry rather than a boundary
+        # (the same argument this file used for `Starred`, `for` targets and set/dict).
+        if isinstance(value, ast.IfExp):
+            return _values(value.body) | _values(value.orelse)
+        if isinstance(value, ast.BoolOp):
+            return set().union(*(_values(operand) for operand in value.values))
+        if isinstance(value, ast.JoinedStr):
+            # Every part that IS a constant is statically known; a `FormattedValue` part
+            # yields `set()` from the fall-through, so `f"{p}_tortoise_fts_query"` resolves
+            # to nothing here and stays inside the declared residual.
+            return set().union(*(_values(part) for part in value.values))
         return set()
 
     def _store_names(target: ast.AST) -> list[ast.Name]:
@@ -504,6 +534,21 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     if isinstance(node, ast.Dict):
         return frozenset().union(*(_possible_strings(key, consts)
                                    for key in node.keys if key is not None))
+    # ⛔ THE SAME `IfExp` / `BoolOp` / `JoinedStr` ARMS `_values` CARRIES (#14326 review P6):
+    # the inline-operand path must see the same literal spellings, or
+    # `getattr(sdk, f"_tortoise_fts_query")(…)` and `getattr(sdk, (A if c else B))(…)`
+    # reach the read with the name inline and never touch `_values` at all. `_collection_operands`
+    # already expands the first two, so resolving them here closes the asymmetry; the
+    # `JoinedStr` arm only ever contributes a part that is EXACTLY a constant, so a
+    # `f"{x}_tortoise_fts_query"` still resolves to nothing (the declared residual).
+    if isinstance(node, ast.IfExp):
+        return _possible_strings(node.body, consts) | _possible_strings(node.orelse, consts)
+    if isinstance(node, ast.BoolOp):
+        return frozenset().union(*(_possible_strings(operand, consts)
+                                   for operand in node.values))
+    if isinstance(node, ast.JoinedStr):
+        return frozenset().union(*(_possible_strings(part, consts)
+                                   for part in node.values))
     return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
 
 
@@ -3113,6 +3158,13 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         the read with `kind="statement"` was GREEN against a pin carrying no row for
         either shape, so the arms were unreachable by any test — the set/dict *for-target*
         rows reach `_values`, not `_possible_strings`, and cannot red them);
+      - remove the `IfExp` / `BoolOp` / `JoinedStr` arms from `_values` AND
+        `_possible_strings` -> the five SELECTION/f-string rows pass (#14326 review P6,
+        MEASURED both ways at `8f13cb24`+this commit: with the arms present all five REFUSE
+        because `indirect` fires; with them removed all five are GREEN at mentions 2, calls
+        2, indirect 0, so a third reach carrying `kind="statement"` shipped the lever). The
+        two INLINE rows pin `_possible_strings` — a literal written inline in the `getattr`
+        operand is not a bind at all, so it never reaches `_values`;
       - at `origin/main` -> the `AnnAssign`/unpack/chained/walrus rows pass as well.
 
     The control at the end is the OTHER direction: a provenance constant whose value merely
@@ -3208,6 +3260,28 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _N = "_tortoise_fts_query"\n'
             '    getattr(*{_N: 1})(query=queries[0]["query"], limit=10, '
             'kind="statement")\n'),
+        # ⛔ A SELECTION BETWEEN LITERALS AND A PLACEHOLDER-FREE f-STRING ARE STATIC
+        # (#14326 review P6, each MEASURED GREEN at `8f13cb24` — mentions 2, calls 2,
+        # indirect 0 — so a third reach carrying `kind="statement"` passed the pin):
+        # `f"_tortoise_fts_query"` parses to `JoinedStr([Constant(...)])` (nothing is
+        # computed), and `IfExp`/`BoolOp` only SELECT between literals. The first two rows
+        # pin the `_values` arms (a name-held value), the last three the `_possible_strings`
+        # arms (the literal inline in the operand, which never reaches `_values`).
+        "f-string bound to a name": (
+            '    _N = f"_tortoise_fts_query"\n'
+            f'    {reach.format(name="_N")}\n'),
+        "IfExp bound to a name": (
+            '    _N = "_tortoise_fts_query" if queries else "x"\n'
+            f'    {reach.format(name="_N")}\n'),
+        "BoolOp bound to a name": (
+            '    _N = queries or "_tortoise_fts_query"\n'
+            f'    {reach.format(name="_N")}\n'),
+        "f-string INLINE in the getattr": (
+            '    getattr(sdk, f"_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "IfExp INLINE in the getattr": (
+            '    getattr(sdk, ("_tortoise_fts_query" if queries else "x"))'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         # ⛔ BOTH ROWS BELOW BIND **BEFORE** THEIR SOURCE (#14326 review P3, measured):
         # `ast.walk` is breadth-first, not source order, so a single pass resolves only the
         # FAVOURABLE order. The fixpoint is load-bearing and had no row that red it — with
@@ -3407,35 +3481,57 @@ def test_a_COMPREHENSION_argument_is_NOT_the_collection() -> None:
             "only READS the page, and a mutation written inside one still mutates it")
 
     # ⛔ THE EXEMPTION GRADES THE COMPREHENSION'S BODY, NOT ONLY ITS COLLECTION (#14326
-    # review F1, measured): `_derived`'s docstring records the hole its body loop closes —
-    # an ELEMENT write through a helper, which the mutator arm cannot see because the
-    # helper's parameter is not the page in THIS scope:
+    # review F1): an ELEMENT write through a helper is invisible to the mutator arm, because
+    # the helper's parameter is not the page in THIS scope:
     #
     #     def _scrub(_e): _e["id"] = "REDACTED"
     #     _j = ", ".join(_scrub(r) for r in results)
     #
-    # Deleting that loop left every row above GREEN (`_mutations_of(…)` went `[6]` -> `[]`),
-    # so the guard shipped with no mutant of its own — this PR's previous review finding F2
-    # (four fix hunks, zero assertions) recurring inside a fix. The PURE control beside it is
-    # the other polarity: the exemption must survive a body that only READS the elements.
+    # ⛔ `_derived` ITSELF HAS NO BODY LOOP AT THIS HEAD, and the comment here used to claim it
+    # did (#14326 review P7, stale pointer): the loop ran one round and could only fire for a
+    # NON-pure callee, so it was replaced by a test at the SITE — `_element_handed`, consulted
+    # in `_mutated_after`'s hit condition at:
+    #
+    #     if (receiver or handed or row_handed or slot_handed
+    #             or _element_handed(node, callee)):
+    #
+    # The node that fires for this shape is the INNER `_scrub(r)` call — it hands an ELEMENT
+    # of the page to a callee that is not in `_PURE_CALLEES` — while `join` early-returns as a
+    # pure callee. MEASURED mutant: dropping `or _element_handed(node, callee)` from that
+    # condition takes `_mutations_of(scrub)` from `[7]` to `[]`, so this block's assertion is
+    # non-vacuous against the guard that actually closes the class. The PURE control beside it
+    # is the other polarity: the exemption must survive a body that only READS the elements.
+    #
+    # ⛔ THE `_j = ", ".join(` AND ITS GENERATOR ARE ON SEPARATE LINES ON PURPOSE (#14326
+    # review P8): on one line the outer site and the inner call share a line number, so an
+    # `assert join_line in hits` passes while crediting the node it claims to exclude. Split,
+    # the two sites are distinguishable and both polarities are assertable.
     scrub = ('    def _scrub(_e):\n'
              '        _e["id"] = "REDACTED"\n'
-             '    _j = ", ".join(_scrub(r) for r in results)\n')
+             '    _j = ", ".join(\n'
+             '        _scrub(r) for r in results)\n')
     scrub_hits = _mutations_of(scrub)
     assert scrub_hits, (
         "a comprehension BODY that writes an element through a helper is not reported — the "
         "collection the outer callee receives is fresh, but the body already rewrote every "
         "`id` before `order` recorded it, so `compare()` reads `rank_identical: True` over "
         "a permuted pair")
-    # ANCHORED: the hit must be the statement that hands the comprehension, never the write
-    # inside the helper (whose parameter is untainted in this scope).
+    # ANCHORED, AND DISCRIMINATING: the credit belongs to the inner call that hands the
+    # ELEMENT, not to the pure `join` that receives a fresh collection.
     scrub_run = _pin_source(scrub).body[0]
-    join_line = next(n.lineno for n in ast.walk(scrub_run)
-                     if isinstance(n, ast.Call)
-                     and getattr(n.func, "attr", None) == "join")
-    assert join_line in scrub_hits, (
-        f"hits={scrub_hits} do not include the comprehension's own line {join_line} — the "
-        "body check is firing on a neighbouring node instead of the body it grades")
+    scrub_calls = [n for n in ast.walk(scrub_run) if isinstance(n, ast.Call)]
+    join_line = next(n.lineno for n in scrub_calls
+                     if getattr(n.func, "attr", None) == "join")
+    inner_line = next(n.lineno for n in scrub_calls
+                      if getattr(n.func, "id", None) == "_scrub")
+    assert inner_line in scrub_hits, (
+        f"hits={scrub_hits} do not include the element-handing call's own line {inner_line} "
+        "— the body check is not firing where the tainted element is handed to the helper")
+    assert join_line not in scrub_hits, (
+        f"hits={scrub_hits} credit the comprehension's own line {join_line}: `join` is a "
+        "PURE callee and early-returns, so the hit must come from the inner element-handing "
+        "call — a hit on the wrapper would mean the exemption's outer arm is what fires, "
+        "which is the false red this file's `_derived` arm exists to prevent")
     assert not _mutations_of('    _j = ", ".join(str(e) for e in results)\n'), (
         "a PURE comprehension body (`str(e)`, a listed non-mutator) must stay exempt — the "
         "body check NARROWS the exemption, it does not remove it")
