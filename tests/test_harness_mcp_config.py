@@ -1155,18 +1155,35 @@ class TestDocsPageAndSkillConfig:
         # connector holding a read-only grant is exactly the user this step
         # exists for (#9660's plan-dependent write-tool finding), so naming a
         # write/admin tool would prescribe a call that cannot be made.
+        #
+        # #14169 recorded the ordering this pin had to follow: the pin was
+        # written against the pre-retirement surface, where graph discovery was
+        # spelled `tortoise_list_graphs` (or its `tortoise_graph_overview`
+        # container). #11609's approved target RETIRED that door — the registry
+        # now carries it in `RETIRED_TOOL_REGISTRY`, and the shipped row names
+        # the container instead — so a pin that still demands the retired
+        # literal reds main for a doc that is CORRECT. This is the same class
+        # the assertion below already names for `tortoise_overview`
+        # (#4282): asserting a retired name asserts the surface shape the
+        # owner-approved target removes. The pin keeps its INTENT (the row must
+        # name the graph-discovery call, it must be read-risk, and it must be
+        # CALLABLE by a connector) and fixes the identity it names it by: the
+        # retired alias must be ABSENT from the row, and the container present.
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert "tortoise_list_graphs" in row, (
-            "the row must name the graph-discovery tool — a connector carries no "
-            "graph of its own, so the user has to see what exists before writing")
         active = {t.name: t for t in TOOL_REGISTRY}
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert "tortoise_list_graphs" in active, (
-            "the row names tortoise_list_graphs, so it must stay in tools/list")
-        assert "tortoise_list_graphs" not in retired, (
+        assert "tortoise_graph_overview" in row, (
+            "the row must name the graph-discovery call — a connector carries no "
+            "graph of its own, so the user has to see what exists before writing")
+        assert "tortoise_list_graphs" not in row, (
             "the row must not name a RETIRED tool (#3883 class) — a tool-grant "
-            "client cannot call one")
-        assert active["tortoise_list_graphs"].risk == "read", (
+            "client cannot call one; #11609 retired this door into "
+            "tortoise_graph_overview(section=\"graphs\")")
+        assert "tortoise_list_graphs" in retired, (
+            "this pin permits the alias in prose only while it is retired — if "
+            "#11609's retirement is ever reversed, revisit the assertion above "
+            "instead of deleting it")
+        assert active["tortoise_graph_overview"].risk == "read", (
             "graph discovery must be a read-risk tool — write tools are the ones "
             "a plan can withhold")
         # The advertised (consolidated) form is named too, and the section it
@@ -1186,7 +1203,7 @@ class TestDocsPageAndSkillConfig:
         # agent call these, so an http-exposure flip (the #3883 class this suite
         # already guards for other tools) must fail here rather than silently
         # hiding the tool from a tool-grant client.
-        for name in ("tortoise_list_graphs", "tortoise_graph_overview"):
+        for name in ("tortoise_graph_overview",):
             assert active[name].http_policy is True, (
                 f"step 8 asks the agent to call {name}; it must stay "
                 "http-exposed or a ChatGPT connector cannot make the call "
