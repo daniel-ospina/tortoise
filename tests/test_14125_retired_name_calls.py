@@ -457,8 +457,12 @@ _BROAD = frozenset({"Exception", "BaseException"})
 # An own-code module that is moved is a defect and must fail loudly; a module
 # behind an OPTIONAL extra must keep its skip, and "own code" does NOT imply that.
 # THE EXTRA-GATED EXEMPLAR IS `tortoise/svbp.py`, NOT `tortoise/embeddings.py` — the
-# latter was named here and in the DECLARED RESIDUAL until it was measured (review of
-# #14287, P1): `tortoise/svbp.py` does `import jax` at MODULE scope and `jax` is the
+# latter was named here and in the DECLARED RESIDUAL until it was measured — the measurement
+# is inline below and re-derivable. ⛔ THE PARENTHETICAL THAT STOOD HERE CITED A REVIEW THAT
+# NEVER EXISTED: it read "(review of #14287, P1)", and `pulls/14287/reviews` holds **0** review
+# objects and `pulls/14287/comments` **0** inline comments (measured 2026-11-22T23:16Z). What
+# actually re-derived it is a FIXER LANE'S report — PR #14287 issue comment 7087044493 — which
+# is what a reader should check. `tortoise/svbp.py` does `import jax` at MODULE scope and `jax` is the
 # `quadrature` extra (`pyproject.toml` optional-dependencies), so
 # `from tortoise.svbp import …` really does raise `ImportError` when the extra is
 # absent; `tortoise/embeddings.py` does NOT — `numpy>=1.24` is a CORE dependency in
@@ -770,8 +774,12 @@ def _raises_a_skip(exc: ast.expr) -> bool:
     STRUCTURALLY CANNOT CONTAIN TWO OF THE THREE SHAPES THIS PARAGRAPH DECLARES: (b)
     `_pytest.outcomes.XFailed(...)` and (c) `raise _s.Exception(...)` are Raises of a CALL whose
     callee is an `ast.Attribute`, so a live instance of either would leave a bare-name `0`
-    untouched and the recipe would certify a class it never scanned (review of #14287, P2 — the
-    same "figure attached to the wrong population" class this paragraph had just fixed). The
+    untouched and the recipe would certify a class it never scanned — the same "figure attached
+    to the wrong population" class this paragraph had just fixed. ⛔ THE PARENTHETICAL THAT STOOD
+    HERE CITED A REVIEW THAT NEVER EXISTED: it read "(review of #14287, P2)", and
+    `pulls/14287/reviews` holds 0 review objects and `pulls/14287/comments` 0 inline comments
+    (measured 2026-11-22T23:16Z); the re-derivation is in a FIXER LANE'S report, PR #14287 issue
+    comment 7087044493, which is what a reader should check. The
     population THIS residual is over is therefore EVERY handler-last `Raise` of a CALL, whose
     callee is a `Name` OR an `Attribute`: **408** in `tests/`+`tools/` at this head, measured as
     **394** Name-callee plus **14** Attribute-callee, and no other callee form exists, so 408 is
