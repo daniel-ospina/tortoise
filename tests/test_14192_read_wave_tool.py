@@ -779,8 +779,9 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     ⛔ THE DURABLE FIX IS NOT A THIRTEENTH CLAUSE — it is to make "the recorded page IS the
     measured page" a RUNTIME property (record the page, assert its identity in
     `compare()`), which cannot be evaded by a spelling at all. That direction was
-    recommended at #14281 review round 11 and belongs to the tool, not to this pin; this
-    pin is the static half, and the honest form of a static half is to say where it stops.
+    recommended at #14281 review round 11 and belongs to the tool, not to this pin; it is
+    filed as #14316 so the residual has a durable home. This pin is the static half, and
+    the honest form of a static half is to say where it stops.
     """
     aliases = _aliases_of(run_def, _collection_alias_predicate(var), loops=True)
     watched = {var} | aliases
