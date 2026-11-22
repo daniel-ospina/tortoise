@@ -1099,8 +1099,10 @@ SWEEP_NAMES = 66
 #: ⛔ RE-CUT → (11858, "a1552662bf07a10b"). The 11857 pair was NOT measured on this branch: it is
 #: `main`'s own pin (`e74cf1d13d`), inherited here at the merge and left in place while this branch
 #: kept adding rows under it, so `--check` reds on this tree by exactly ONE. `git log` proves the
-#: inheritance rather than asserting it: the ONLY commit that ever set the constant to that pair is
-#: `e74cf1d13d` itself, and that tree carries no `out.update` (measured: 0 occurrences in
+#: inheritance rather than asserting it: the ONLY commit ON `main` that ever set the constant to
+#: that pair is `e74cf1d13d` itself (⛔ scoped to `main`, NOT "the only commit" — five side
+#: branches set the same pair independently, so the unscoped sentence fails the very `git log` it
+#: cites), and that tree carries no `out.update` (measured: 0 occurrences in
 #: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
 #: THE ONE ROW: `out.update` 1 — `_global_declarations` in `tests/test_14125_retired_name_calls.py`,
 #: an `out: set[str]` accumulated with `out.update(node.names)` over an `ast.Global`. It arrived with
@@ -1129,13 +1131,14 @@ SWEEP_NAMES = 66
 #: and still not this tree's pin. Everything after this point is the current record.
 #:
 #: ⛔ RE-CUT AGAIN → (11861, "f0647020531c078c"). The 11858 pair does NOT reproduce on
-#: `10e51693f1` — the MAIN commit that carries it. ⛔ Named, not classed: TWO trees pin that pair,
-#: and the other one, `917ae19efd` (the branch commit above, not an ancestor of this head), is
-#: where it DOES reproduce exactly — so "the tree that commits it" is not one tree, and this
-#: sentence may not say it is. On `10e51693f1`, `--check` in a detached worktree reports 11861
-#: against its own 11858 — so the red `94d75667dc` started was still there at the commit that
-#: re-pinned over it, and every PR cut from that tree inherits it. Whatever reading produced
-#: 11858, it was not a reading of THIS tree.
+#: `10e51693f1` — the MAIN commit that carries it. ⛔ Named, not classed: TWO commits SET that pair
+#: — `10e51693f1` (main) and `917ae19efd` (the branch commit above, not an ancestor of this head)
+#: — and `main` CARRIES it on every tree since (nine at this writing, the tip this PR re-pins among
+#: them), which is exactly why main is red. Only `917ae19efd` reproduces it. So "the tree that
+#: commits it" is not one tree, and this sentence may not say it is. On `10e51693f1`, `--check` in
+#: a detached worktree reports 11861 against its own 11858 — so the red `94d75667dc` started was
+#: still there at the commit that re-pinned over it, and every PR cut from that tree inherits it.
+#: Whatever reading produced 11858, it was not a reading of THIS tree.
 #: THE THREE ROWS, ATTRIBUTED BY MEASUREMENT, one commit: `--check` on `94d75667dc^` exits 0 and
 #: on `94d75667dc` reports (11860, "57e0960ca6f20f5a") — so `94d75667dc` (#14224, the read-wave
 #: harness) is where the drift starts, and a whole-tree row-set diff `e74cf1d13d → 13b6b49fe9`
@@ -1160,11 +1163,13 @@ SWEEP_NAMES = 66
 #: alone, neither an SDK handle nor a typed reference to a public name — `typed references still
 #: pointing at a public name` is 0 at this head, which is the number the retirement owes.
 #: ⛔ WHAT TO TAKE FROM THE DRIFT RATHER THAN THE NUMBER: the reading that REPRODUCES the pair is
-#: `917ae19efd`'s — a tree that never merged `94d75667dc` — and it is not the tree that committed
-#: the pin: `10e51693f1` commits the same pair while measuring 11861 against it, so an error three
-#: rows old was CARRIED FORWARD at the one place that exists to correct it. Whether the pin's author
-#: ran that command on that tree is NOT measured and is not claimed; what IS measured is that the
-#: pair reproduces there, and on no `main` tree in that span.
+#: `917ae19efd`'s — a tree that never merged `94d75667dc`. That commit did SET the pair (its
+#: parent pins 11857), so the drift is NOT "a branch invented the number": it is that
+#: `10e51693f1`, the MAIN commit, commits the same pair while measuring 11861 against it — an error
+#: three rows old CARRIED FORWARD at the one place that exists to correct it. Whether the pin's
+#: author ran that command on that tree is NOT measured and is not claimed; what IS measured is
+#: that the pair reproduces on `917ae19efd`, and on neither tree of the drift pair (`94d75667dc^`
+#: reads 11857, `94d75667dc` reads 11860).
 #: A re-pin is a READING of the tree that will commit it — one command — and a row-by-row diff
 #: explains a delta, it never replaces the read.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
