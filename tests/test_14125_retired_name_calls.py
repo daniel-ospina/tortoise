@@ -740,8 +740,13 @@ def _raises_a_skip(exc: ast.expr) -> bool:
     at this head, so an alias/parts table is
     deferred until the first live instance, not built ahead of it. ⛔ THE SECTION THAT USED TO BE
     NAMED HERE DOES NOT CARRY THIS MEASUREMENT: `4j-undetriginta` grades the pytest-skip conversion
-    over four inline sources and states no population at all, so the citation sent a reader to a
-    section that could not confirm the figure it was quoted for (review of #14287, P3).
+    over the inline sources below — a chained `pytest.skip.Exception`, a bare `pytest.skip` call, and
+    a genuine `raise exc` — and states no population at all, so the citation sent a reader to a
+    section that could not confirm the figure it was quoted for (review of #14287, P3). ⛔ THIS
+    SENTENCE SAID "four" AND NAMED NO SOURCES: the duplicate `raise RuntimeError(…) from exc`
+    witness was deleted in this same series (P3, above), which made "four" false while no reader
+    could tell WHICH four were meant. The rows are named instead of counted, the same remedy the
+    `345` figure took — a count restated here goes stale at the next added or removed row.
     """
     node: ast.expr = exc
     if isinstance(node, ast.Call):
