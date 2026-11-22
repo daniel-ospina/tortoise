@@ -683,9 +683,11 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     `if node.handlers` and merely DESCENDS into a handler-less `try`'s guarded body (so a
     probe nested inside such a wrapper IS still found — the `test_integration_search.py:45`
     fix), and `_probe_blocks_from_source` skips a nested block `if not block.handlers`.
-    Measured, a module-level `try` importing own code yields `()` when the availability
-    assignment OR the handler is missing, and exactly one row `(lineno, (), False, True,
-    True)` only when it has both.
+    Measured: a module-level `try/finally` that imports own code yields NO row at all,
+    with or without an availability assignment — so no row of that shape can reach this
+    predicate. (Deliberately NOT stated here: which variants DO produce a row, or what that
+    row's `covered`/`swallows` fields read — those depend on the arm and on which admission
+    arm admits the block, and a summary of that matrix is what an earlier cut got wrong.)
     It needs the owning `ast.Try`, not the handlers; the shape has
     0 instances in `tests/`+`tools/` (no probe there has `finally:` + `return`), so the
     machinery is deferred and this paragraph is the record. Re-read it before adding the
