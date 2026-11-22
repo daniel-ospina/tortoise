@@ -223,7 +223,7 @@ not a shared threshold — precision needs hard rule-based vetoes"*
 ⛔ **`group_join` stands down when the alias already proves the spelling**
 (`facts["mention_is_alias"]`). `apply_entity_merge` writes the candidate's folded
 spelling into the survivor's `aliases[]`, and the by-name resolver reads
-`$k IN n.aliases` **as a resolution** (`entity_resolver.py:611`) — so that
+`$k IN n.aliases` **as a resolution** (`entity_resolver.py:733`) — so that
 spelling's membership is *recorded*, not inferred, and no group-level comparison
 is being skipped. Without the escape, every later re-mention of an already-folded
 variant is refused **on every run for the lifetime of the merge**, and an entity

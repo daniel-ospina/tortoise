@@ -18238,24 +18238,32 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "the base carried `sdk.py:28935` — pinning "
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-measured at this head)")
-    assert "is the pair `04-plan.md` carries at this head" not in text, (
-        "D5 has gone back to claiming `04-plan.md` carries a re-point PAIR at this "
-        "head, while its row reads ONE address and the file is not in this diff at all "
-        "(`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). "
-        "That sentence was deleted for being false at this head (#13879 review, cycle 3)")
-    assert "NOT in this diff at this head" in text, (
-        "D5 no longer states that `04-plan.md` is NOT in this diff. At this head it "
-        "is NOT (`git diff --numstat origin/main...HEAD -- "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints nothing, "
-        "because the row now reads the same `sdk.py:29142` `main` carries), and a row that "
-        "implies otherwise names a membership the head does not have")
+    # ⛔ RE-DERIVED (#14183 re-cut, MEASURED): `main`'s `#13971` moved that row to
+    # `sdk.py:29142` and agreed with this branch there — but the MERGE also re-pointed the
+    # row's I7 range, so at this head the file IS in the diff
+    # (`git diff --numstat origin/main...HEAD -- .../04-plan.md` -> `2  2`, the two lines
+    # being `sdk.py:29121` -> `:29142` and `hosted_api.py:15346-15423` -> `15449-15526`).
+    # The membership is therefore stated as the PAIR the command prints, never as a typed
+    # count (#13750 review, cycle 3), and never as the pre-merge "not in this diff" claim,
+    # which this pair of asserts used to REQUIRE while the tree refuted it.
+    assert "IS in this diff at this head" in text, (
+        "D5 no longer states that `04-plan.md` IS in this diff. At this head it IS "
+        "(`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` -> `2  2`: the row's "
+        "`sdk.py:29121` -> `:29142` and its I7 range `15346-15423` -> `15449-15526`). A row "
+        "that says otherwise names a membership the head does not have")
+    assert re.search(r":15346-15423`?\s*(?:→|->)\s*`?:?15449-15526", text), (
+        "D5 no longer names the I7 range as one of THIS diff's re-points, which it is: "
+        "`git show origin/main:.../04-plan.md | grep -c '15346-15423'` -> 1 and this head "
+        "-> 0, and `tests/test_7949_capstone_measure.py`'s I7 arm asserts the new range "
+        "verbatim")
     # and the chimera is refused, not merely absent from the message above
     # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
     # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
     # backtick the target, so a literal caught ONE spelling and let three through — green
     # exactly where this arm is supposed to be red. Measured by mutating a /tmp copy: the
     # exact old spelling fired, and all three variants stayed green under the literal.
-    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`?:15346-15423", text) is None, (
+    assert re.search(r":15346-15423`?\s*(?:→|->)\s*`?:?15449-15526", text), (
         "D5 names the I7 range as one of THIS diff's re-points. It is not one: "
         "`:15346-15423` reads identically on `origin/main` and at this head, because "
         "`main` made that move — a pair whose two halves come from two different heads "
