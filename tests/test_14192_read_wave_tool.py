@@ -171,45 +171,103 @@ def test_a_tool_only_diff_selects_this_pin():
 
 
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
+_HOSTED = _REPO_ROOT / "tortoise" / "hosted_api.py"
 _READ_NAMES = ("tortoise_fts_query", "_tortoise_fts_query")
 
 
-def _read_call_contract() -> tuple[set[str], set[str]]:
-    """`(levers, instruments)` — DERIVED from the read's own signature, not remembered.
+def _read_calls(tree: ast.AST) -> list[ast.Call]:
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in _READ_NAMES]
 
-    A *lever* changes what the read returns (so a mirror must not name it); an
-    *instrument* is a caller-owned out-sink that leaves the result alone (so a
-    faithful mirror may name it). The split is read off `_tortoise_fts_query`'s
-    signature: a boolean-defaulted parameter is a lever, a `None`-defaulted one is an
-    out-sink. ⛔ The earlier shape used "any `_`-prefixed keyword" as the lever test,
-    which forbade `_truncation_out` — an instrument the `/v1/search` door this file
-    mirrors actually passes (`hosted_api.py`) — and would have false-red a faithful
-    mirror while its message claimed the door names no lever.
+
+def _door_read_contract() -> set[str]:
+    """The kwargs the SHIPPED door hands the read — DERIVED from `hosted_api.py`.
+
+    A mirror must not name an argument the door does not name: `kind` selects a
+    different mode entirely (omit `query` and it returns every Point of that kind),
+    `_elevated_timeout_ms` is the read's collective budget, `pool_size` / `order_by` /
+    `claim_class` / `exclude_status` each change WHICH rows survive `limit`. So the
+    allow-list is not "the read's parameters" (that is 40-odd names, most of them
+    levers) and not "private keywords" (that forbids the door's own `_truncation_out`
+    out-sink): it is **exactly what `hosted_api.py::search` passes**, plus the
+    out-sink this harness needs to declare the legs it measured.
+
+    ⛔ Two successive shapes of this check were falsified by review before this one: a
+    "any `_`-prefixed keyword" test false-red a faithful mirror passing the door's
+    `_truncation_out`, and a "`None`-defaulted parameter is an out-sink" test let 18
+    levers through (`kind`, `_elevated_timeout_ms`, `pool_size`, `claim_class`,
+    `order_by`, `exclude_status`…). The door's own call site is the one authority that
+    is neither too narrow nor too wide, and it is measured, not remembered.
     """
-    tree = ast.parse(_SDK.read_text())
-    defs = [n for n in ast.walk(tree)
+    sdk_tree = ast.parse(_SDK.read_text())
+    defs = [n for n in ast.walk(sdk_tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
             and n.name == "_tortoise_fts_query"]
     assert len(defs) == 1, f"sdk.py holds {len(defs)} `_tortoise_fts_query` definitions"
     spec = defs[0].args
-    pairs = [(a, d) for a, d in zip(spec.args[len(spec.args) - len(spec.defaults):],
-                                    spec.defaults, strict=True)]
-    pairs += list(zip(spec.kwonlyargs, spec.kw_defaults, strict=True))
-    levers, instruments = set(), set()
-    for arg, default in pairs:
-        if default is None:
-            continue
-        if isinstance(default, ast.Constant) and isinstance(default.value, bool):
-            levers.add(arg.arg)
-        elif isinstance(default, ast.Constant) and default.value is None:
-            instruments.add(arg.arg)
-    assert {"_rerank_candidates", "_record_reads", "_valid_time_rerank"} <= levers, levers
-    assert {"leg_trace", "_truncation_out"} <= instruments, instruments
-    return levers, instruments
+    positional = [a.arg for a in spec.args if a.arg != "self"]
+    bool_levers = {a.arg for a, d in
+                   list(zip(positional[len(positional) - len(spec.defaults):],
+                            spec.defaults, strict=True))
+                   + list(zip(spec.kwonlyargs, spec.kw_defaults, strict=True))
+                   if isinstance(d, ast.Constant) and isinstance(d.value, bool)}
+    assert {"_rerank_candidates", "_record_reads", "_valid_time_rerank",
+            "include_terminal"} <= bool_levers, sorted(bool_levers)
+
+    door_calls = _read_calls(ast.parse(_HOSTED.read_text()))
+    assert door_calls, "hosted_api.py no longer calls the read — this contract is stale"
+    allowed: set[str] = set()
+    for call in door_calls:
+        allowed |= {k.arg for k in call.keywords if k.arg is not None}
+        allowed |= set(positional[:len(call.args)])  # positional → the read's own names
+    assert {"query", "limit", "read_status_out", "_truncation_out"} <= allowed, sorted(allowed)
+    named_levers = allowed & bool_levers
+    assert not named_levers, (
+        f"the door itself already names {sorted(named_levers)} — the mirror cannot be "
+        "distinguished from a lever-carrying reader; re-derive this contract")
+    # `leg_trace` is an out-sink (the harness reads the legs it measured from it); it is
+    # NOT a lever — nothing about which rows survive `limit` depends on it.
+    allowed.add("leg_trace")
+    return allowed
+
+
+def _enclosing(node: ast.AST, parents: dict[int, ast.AST]) -> ast.AST | None:
+    return parents.get(id(node))
+
+
+def _owner(node: ast.AST, parents: dict[int, ast.AST]) -> str:
+    parent = _enclosing(node, parents)
+    while parent is not None:
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return parent.name
+        parent = _enclosing(parent, parents)
+    return "<module>"
+
+
+def _in_loop(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    parent = _enclosing(node, parents)
+    while parent is not None:
+        if isinstance(parent, (ast.For, ast.AsyncFor)):
+            return True
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        parent = _enclosing(parent, parents)
+    return False
+
+
+def _str_constants(tree: ast.AST) -> dict[str, str]:
+    """Every name bound to a string LITERAL anywhere in the file, module or local scope."""
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            out.setdefault(node.targets[0].id, node.value.value)
+    return out
 
 
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
-    """The harness must time the read the PRODUCT runs — and name no LEVER.
+    """The harness must time the read the PRODUCT runs — with the door's own arguments.
 
     `tests/test_rerank_pool.py`'s census refuses an un-opted-out site in `tools/`
     unless it is on its `intentional_keep` list, and this file is granted on the
@@ -220,15 +278,20 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     very page permutation the rank-identity check exists to catch.
 
     A grant can only say "this file MAY run the lever", so the mirror is asserted here
-    instead of assumed. Lever vs instrument is DERIVED from the read's signature
-    (``_read_call_contract``), so this pin cannot rot into a remembered deny-list and
-    cannot forbid an out-sink the mirrored door itself passes.
+    instead of assumed, against the door's OWN call site (``_door_read_contract``):
+    every keyword must be one the door names (plus the ``leg_trace`` out-sink), every
+    argument must be a keyword (a positional one is invisible to a kwargs check), and
+    the measured read must be the one that collects ``leg_trace``.
 
     ⛔ EVERY MENTION OF THE READ IN THIS FILE IS CENSUSED, not just the two calls: a
     bound-method alias (``_read = sdk._tortoise_fts_query`` then ``_read(…)``) and a
     ``getattr(sdk, "_tortoise_fts_query")`` both left a lexer that only read
     ``Call.func`` green with a lever-carrying third read (measured), and a bare
     attribute mention with no call at all would be invisible to the census as well.
+    ``getattr``/``setattr`` with the read's name — as a literal OR as a name bound to
+    one — is refused too. Residual, stated rather than implied: a name COMPUTED at
+    runtime (``"".join(…)``, a parameter) cannot be resolved statically, so the pin
+    bounds the static reaches, not every conceivable dynamic one.
     """
     tree = ast.parse(_TOOL.read_text())
     parents: dict[int, ast.AST] = {}
@@ -236,19 +299,12 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         for child in ast.iter_child_nodes(node):
             parents[id(child)] = node
 
-    def _owner(node: ast.AST) -> str:
-        parent = parents.get(id(node))
-        while parent is not None:
-            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                return parent.name
-            parent = parents.get(id(parent))
-        return "<module>"
-
+    consts = _str_constants(tree)
+    read_names = set(_READ_NAMES) | {v for v in consts.values() if v in _READ_NAMES}
     mentions = [n for n in ast.walk(tree)
-                if (isinstance(n, ast.Attribute) and n.attr in _READ_NAMES)
-                or (isinstance(n, ast.Name) and n.id in _READ_NAMES)]
-    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in _READ_NAMES]
+                if (isinstance(n, ast.Attribute) and n.attr in read_names)
+                or (isinstance(n, ast.Name) and n.id in read_names)]
+    calls = _read_calls(tree)
     # Anti-vacuity: TWO mentions, both calls, both the reads this pin is about (the
     # warm-up and the per-query measurement), and both inside `run()`.
     assert len(calls) == 2, (
@@ -258,36 +314,50 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         f"the tool MENTIONS the read {len(mentions)} times but calls it {len(calls)} — an "
         f"alias or a `getattr` reference is unaccounted for: "
         f"{[(ast.unparse(m), m.lineno) for m in mentions]}")
-    assert all(_owner(m) == "run" for m in mentions), (
-        f"the read is mentioned outside `run()`: {[(_owner(m), m.lineno) for m in mentions]}")
+    assert all(_owner(m, parents) == "run" for m in mentions), (
+        f"the read is mentioned outside `run()`: "
+        f"{[(_owner(m, parents), m.lineno) for m in mentions]}")
+    def _resolved(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return consts.get(node.id)  # a literal bound to a name, in ANY scope
+        return None  # e.g. a parameter — not statically knowable here, see the docstring
+
     indirect = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                 and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
                 in ("getattr", "setattr")
-                and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)
-                and n.args[1].value in _READ_NAMES]
+                and len(n.args) >= 2 and _resolved(n.args[1]) in read_names]
     assert not indirect, (
         f"the tool reaches the read through {indirect[0].func.id}() by name — that bypasses "
         "every check in this pin")
-    levers, instruments = _read_call_contract()
-    traced = 0
+
+    allowed = _door_read_contract()
+    looped = [c for c in calls if _in_loop(c, parents)]
+    assert len(looped) == 1, (
+        f"expected exactly one read inside the measurement loop, found {len(looped)} of "
+        f"{len(calls)}")
+    measured = looped[0]
+    warm = next(c for c in calls if c is not measured)
     for call in calls:
-        named = {k.arg: k.value for k in call.keywords if k.arg is not None}
-        handed = sorted(set(named) & levers)
-        assert not handed, (
-            f"line {call.lineno} hands {handed} to the read — a lever changes WHICH rows "
-            "survive `limit`, so a mirror that names one times a reader `/v1/search` does "
-            "not run (and hides the page permutation the verdict exists to catch)")
-        unknown = sorted(n for n in named
-                         if n.startswith("_") and n not in levers and n not in instruments)
-        assert not unknown, (
-            f"line {call.lineno} hands {unknown}, which `_tortoise_fts_query`'s signature "
-            "does not classify as a lever or an out-sink — decide which it is in "
-            "`_read_call_contract` before trusting this pin")
+        assert not call.args, (
+            f"line {call.lineno} hands the read {len(call.args)} POSITIONAL argument(s) — "
+            "this pin reads keywords, so a positional `kind`/`limit` would be invisible")
         assert not any(k.arg is None for k in call.keywords), (
-            f"line {call.lineno} splats a mapping into the read, so which levers it "
+            f"line {call.lineno} splats a mapping into the read, so which arguments it "
             "carries is invisible to this pin")
-        if "leg_trace" in named:
-            traced += 1
-    assert traced == 1, (
-        f"{traced} of the two reads collect a `leg_trace` — the per-query read declares "
-        "the legs it measured from that trace, and the warm-up is the one that does not")
+        named = {k.arg for k in call.keywords}
+        extra = sorted(named - allowed)
+        assert not extra, (
+            f"line {call.lineno} hands {extra} to the read — the `/v1/search` door names "
+            f"only {sorted(allowed - {'leg_trace'})}, and each of these changes WHICH rows "
+            "survive `limit`, so a mirror that names one times a reader the product does "
+            "not run (and hides the page permutation the verdict exists to catch)")
+    # Identity, not a count: the WARM-UP must not collect the trace, and the measured
+    # read must — otherwise every `legs` table in the artifact is silently empty.
+    assert "leg_trace" in {k.arg for k in measured.keywords if k.arg}, (
+        f"the measured read (line {measured.lineno}) collects no `leg_trace` — the "
+        "artifact's per-query `legs` table would be empty")
+    assert "leg_trace" not in {k.arg for k in warm.keywords if k.arg}, (
+        f"the warm-up (line {warm.lineno}) collects a `leg_trace` — its result is "
+        "discarded, so that trace is not the measurement")
