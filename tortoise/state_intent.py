@@ -700,9 +700,16 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: measured): the sentence above first said "SIX or SEVEN", and the one below said "beyond eight
 #: adverbials … both bounds answer identically". Both halves were measurably false — the slot
 #: allows EIGHT, so the n=6,7,8 rows report; the silent band is n=9,10; and the two bounds agree
-#: again only at n>=11 — ⛔ WHERE THE LIMIT IS THE SLOT ITSELF, NOT THE 60-CHARACTER WINDOW (turn-5
-#: review, P2, measured: a `{0,12}` copy reports n=11 AND n=12, which no window limitation could
-#: produce, while a `[^?]{0,300}` window copy with the slot left at `{0,10}` is still silent there).
+#: again only at n>=11 — and ⛔ WHAT LIMITS THE RUN THERE IS THE SLOT *WITHIN THIS WINDOW*, NOT THE
+#: WINDOW BEING IRRELEVANT (turn-5 review, P2, measured — an earlier cut of this paragraph said a
+#: wide window "is still silent there", WHICH IS FALSE, and false in the dangerous direction):
+#: a `{0,12}` slot copy reports n=11 AND n=12; widening the ROUTING guard's window
+#: (`_EXISTENCE_WINDOW`, `[^?]{0,300}` with the slot left at `{0,10}`) does NOT stay silent — it
+#: **ROUTES** n=11,12,13 to `ended` with `signal=None`, the #14033 hijack itself, because the window
+#: absorbs the adverb run and re-anchors the arm on the trailing `been` of `and been withdrawn`.
+#: Widening only the SIGNAL arm's window merely reports. So the SLOT is what caps this run while the
+#: window is what it is, and the window must NOT be widened to "help" it — that trade turns a
+#: silence into a route.
 #: Probed on `have any it has been <n x just> deprecated and been withdrawn` against a `{0,8}`
 #: copy: head and copy identical for n=1..8 and n>=11, different at n=9,10. The `_EXISTENCE_HELPER`
 #: note ~60 lines above already states nine/ten for the same class, so this file carried two
@@ -713,10 +720,10 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: window, so the count is at most 8 on the grid as described. What DOES re-derive, and is what the
 #: two load-bearing claims need, is the shape of the difference: every diff is a silence ->
 #: `existence_unguarded` transition at **n=9,10 only**, and **0 population/shape moves** — the
-#: widening is refusal-side and cannot route. Beyond ten tokens BOTH bounds answer identically —
-#: and that is the SLOT's edge, not the window's: the window sits BEFORE `been` and never bounds
-#: this run (measured, see the paragraph above), so the helper's own note is the only place the
-#: window's end-to-end caveat belongs.
+#: widening is refusal-side and cannot route. Beyond ten tokens BOTH bounds answer identically,
+#: and that is the SLOT's edge WITHIN the window the row actually has — see the paragraph above for
+#: why the window must not be widened to chase this run: at `[^?]{0,300}` the ROUTING guard answers
+#: n>=11 with `ended` and `signal=None`, i.e. a route, not a notice.
 #: ⛔ AND THE WIDENING IT PAID FOR OVER-REFUSED THE SAME SPELLING INSIDE A RELATIVE CLAUSE
 #: (round-6 review, P2, measured — this lane's own regression, caught by a fresh reviewer): with
 #: `{0,8}` a RELATIVE clause whose own participle is an ENDING word was refused instead of routed,
