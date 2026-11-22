@@ -963,10 +963,11 @@ def test_a_write_whose_outcome_a_door_reads_is_never_deferred(armed):
     sink: list = []
     outcome = types.SimpleNamespace(applied=True, refusal=None, outcome="applied")
 
-    # `tenant=` as well: without it the tenant gate (`live_write.py:336`) would
-    # decline the write too, so the `record_sink` condition (in the FIRST `if`,
-    # `live_write.py:334`) would never be the reason and this row would pass with
-    # it deleted (ISSUE 2).
+    # `tenant=` as well: without it the `tenant is None` gate would decline the
+    # write too, so the `record_sink` condition (in the FIRST gate, the
+    # `journal_skipped or record_sink is not None or not durable` one) would never
+    # be the reason and this row would pass with it deleted (ISSUE 2). ⛔ Cited by
+    # gate TEXT, not `file:line`: both numbers here were wrong by five lines.
     write = live_write.write(
         {"type": "PointAdded"}, log=_Log(), record_sink=sink, tenant=_TENANT,
         project=lambda e, s, journal_skipped=False: outcome)
@@ -1820,12 +1821,17 @@ def test_a_queue_fault_is_COUNTED_before_it_propagates(armed, monkeypatch):
 
 def test_an_UNIMPORTABLE_loop_folds_inline_instead_of_breaking_the_write(
         monkeypatch):
-    """The `except ImportError` arm at `live_write.py:340-342`, on its own.
+    """The unimportable-loop arm — `except Exception` around the import — on its own.
 
     ⛔ A SEPARATE ROW FROM THE QUEUE FAULT (#14222 review cycle 5, ISSUE 2). The
     sibling test patches `submit` and therefore never reaches the import, so the
-    `try: from . import projection_worker / except Exception: return False` arm
-    had no assertion at all — deleting it reddened nothing. An import that fails
+    arm had no assertion at all — deleting it reddened nothing. ⛔ THE CLAUSE IT
+    CATCHES IS `except Exception`, NOT `except ImportError` (round-15 review, P2:
+    an earlier title said ImportError and cited two line numbers that are not the
+    arm). The breadth is deliberate — a partially-shipped wheel raising
+    `AttributeError`/`RuntimeError` at import is the same hazard — and narrowing it
+    would let that failure escape AFTER the journal append committed, which is the
+    "written to neither store" outcome the chokepoint exists to prevent. An import that fails
     here is not a fault to report: the line has committed, the fold must happen,
     and folding inline is the pre-#14185 shape.
 
