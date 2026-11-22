@@ -377,6 +377,26 @@ _PREPOSITIONS = (
 #: `\b` that follows it.
 _PREPOSITION_RE = "|".join(sorted(_PREPOSITIONS, key=lambda w: (-len(w), w)))
 
+#: ⛔ THE MEMBERS OF :data:`_PREPOSITIONS` THAT CAN ALSO HEAD A CLAUSE — and therefore may NOT
+#: be treated as a bare qualifier inside the `is_copula` subject (re-cut review, P1, measured):
+#: `during`, `until`, `as` and `than` introduce a second clause (`is the report as the board
+#: archived`), so exempting them let the shape swallow a whole clause and serve the ended
+#: population with the caller's own predicate dropped and NO notice — #14033's own defect in the
+#: worst direction. Declared as a ROLE, not a second hand-typed list: the exemption is DERIVED
+#: below, so a new member of :data:`_PREPOSITIONS` is covered by default and only a member that can
+#: head a clause has to be named here.
+_CLAUSE_HEADING_PREPOSITIONS = ("as", "during", "than", "until")
+
+#: :data:`_PREPOSITIONS` MINUS the clause-heading members — the qualifier class the `is_copula`
+#: subject guard may treat as one noun phrase. Longest-first for the same reason as
+#: :data:`_PREPOSITION_RE`.
+_QUALIFIER_PREPOSITION_RE = "|".join(
+    sorted(
+        (p for p in _PREPOSITIONS if p not in _CLAUSE_HEADING_PREPOSITIONS),
+        key=lambda w: (-len(w), w),
+    )
+)
+
 #: …and the tail a BLOCKED state question has INSTEAD of the end: punctuation, or
 #: a FUNCTION WORD the caller appended (`by legal`, `in Q3`, `when challenged`).
 #: ⛔ This is what keeps the notice off an ATTRIBUTIVE use — `is the archived
@@ -515,6 +535,7 @@ _BLOCKED_TAIL = (
 #: quantifier's own relativizer, directly adjacent with no preceding word inside this
 #: span, still routes. That row is pinned in the routing table, so a blanket widening
 #: of this guard reds instead of quietly costing it.
+
 _EXISTENCE_HEAD = (
     r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
@@ -528,16 +549,152 @@ _EXISTENCE_ADVERB = (
     # `signal=None`, i.e. the round-23 defect one spelling over. Measured over 7 verbs x
     # 7 subjects x 12 spellings: 291 of 588 routed before this list was widened.
     r"very|quite|rather|almost|nearly|too|much|all|as|so|about|in|fact|practice|"
-    r"effect|good|long|since|far)"
+    r"effect|good|long|since|far|"
+    # ⛔ AND THE LIST IS STILL AN ENUMERATION, WHICH IS THE POINT (round-25 review, P1,
+    # measured): `often`, `always`, `sometimes`, `seldom`, `soon`, `again`, `twice`,
+    # `then`, `no longer`, `to date`, `of late`, `at last` are adverbials in NO `-ly`
+    # shape and were not named, so twelve of twelve still routed the whole ended
+    # population with the caller's predicate dropped and `signal=None` — the same defect
+    # one spelling over, for the third round running. The tokens below close the
+    # spellings this review measured; the RESIDUAL is stated rather than called closed:
+    # an adverbial this list does not name still routes, because telling an adverbial
+    # from a noun without a lexicon is the limit `_COPULA_SUBJECT` already states.
+    r"often|always|sometimes|seldom|rarely|soon|again|twice|then|longer|date|late|"
+    # …and the MULTI-WORD adverbials need their own leading word in the gap (`no longer`,
+    # `to date`, `of late`, `at last`): the gap consumes ONE token per iteration, so a
+    # two-word adverbial matched neither half alone. These four join the slot for exactly
+    # that reason; a two-word adverbial this list does not lead is the stated residual.
+    r"last|first|no|to|of|at)"
 )
 _EXISTENCE_HELPER = (
-    # …and the REPETITION BOUND is 5, not 3: `only just very recently` is four adverbials,
-    # and a count bound is a spelling this guard is blind to if it is one short (measured
-    # in the same round). The bound exists to keep the window from swallowing a whole
-    # clause, not to grade English.
-    rf"(?:not\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}"
-    rf"(?:have\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}been\b"
+    # ⛔ `not` IS POSITIONAL, NOT FIRST (round-25 review, P1, measured): the slot used to
+    # accept `(?:not\s+)?` only at the FRONT of the gap, so `has still not been` and
+    # `has recently not been` both routed — a negation after any adverbial re-opened the
+    # hole. `have` joins the same gap alternation for the same reason (the modal passives
+    # `will have recently been`, where `have` is not adjacent to `been`).
+    # …and the REPETITION BOUND is 10, because the bound it REPLACES was effectively 10: the
+    # old helper was TWO `{0,5}` runs (adverbs, optional `have`, adverbs), so any bound below
+    # ten is a NARROWING of this guard, not a widening — and narrowing it is the dangerous
+    # direction, because a question the guard no longer matches is ROUTED to the whole ended
+    # population with the caller's predicate dropped and `signal=None` (the #14033 hijack).
+    # Measured at the guard-regex level (so the 60-char window does not confound it): at
+    # `{0,8}` a nine- and a ten-adverb question FAILED TO MATCH the guard while the previous
+    # head matched both. ⚠️ END-TO-END THIS IS UNOBSERVABLE: the window dominates at that
+    # length, so `detect_state_question` answers identically at both bounds (420 probes, 0
+    # diffs) — the bound is a guard property, not a route claim:
+    #     n=8  prev_refuses=True   {0,8}_refuses=True
+    #     n=9  prev_refuses=True   {0,8}_refuses=False   <- the narrowing
+    #     n=10 prev_refuses=True   {0,8}_refuses=False   <- the narrowing
+    # The bound still keeps the window from swallowing a whole clause; it does not grade
+    # English, and a bound chosen for "how many adverbials a person writes" is exactly the
+    # spelling-blind count this guard has been bitten by in three consecutive rounds.
+    rf"(?:[,\s]*(?:not|have|{_EXISTENCE_ADVERB})\b[,\s]+){{0,10}}been\b"
 )
+# ⛔ THE PASSIVE PERFECT WITH AN ADVERB (re-cut review, P1, measured): the window required
+# `been` ADJACENT to the participle, so `have any claims been already retracted`,
+# `has anything been already withdrawn`, `have any of our bookings been already cancelled` and
+# `have any claims been ever retracted` came back `population=None, signal=None` while `main`
+# routes every one of them to `ended` — #14033's own defect (an unrouted state question that
+# is indistinguishable from "nothing has ended") reintroduced by a guard fixing a different
+# spelling. The slot is ONE adverbial (the fixed set below, not the whole `_EXISTENCE_ADVERB`
+# class: those are the ones a customer writes between the auxiliary and the participle, and a
+# wider slot here would swallow a second clause). `have any reports already archived` — where
+# `already` is the AUXILIARY and `archived` stays ATTRIBUTIVE — is `main`'s behaviour traded
+# away deliberately and is pinned in NOT_SELECTED.
+#: ⛔ TWO SLOTS, AND THE ASYMMETRY IS THE POINT (two rounds of review, both measured).
+#: The WINDOW is RECALL: its slot is the narrow set a customer actually writes between the auxiliary
+#: and the participle (`already|ever|recently`), because a wider slot there would let the window
+#: swallow a second clause.
+#: The two LOOKAHEADS are REFUSAL: they only ever ADD a refusal, so their slot is the WHOLE
+#: :data:`_EXISTENCE_ADVERB` class. Giving them the narrow slot was a measured hole — `just` and
+#: `only` are members of that class (so `{_EXISTENCE_HELPER}` already accepts them BEFORE `been`)
+#: but were not in the narrow slot, so they blinded both lookaheads and
+#: `have any users reported it has been just deprecated and been withdrawn` ROUTED the whole ended
+#: population with the caller's predicate dropped and `signal=None`, while the `already` spelling of
+#: the same string was refused. Refusal-side widening cannot create a route: it can only over-refuse,
+#: which the canonical relative-clause rows below measure.
+_EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
+#: The refusal-side slot: ANY adverbial the guard's own class knows, INCLUDING the multi-word ones.
+#: ⛔ THE REPETITION IS THE POINT (round-3 review, P2, measured): the class carries the LEADING
+#: words of four multi-word adverbials (`no longer`, `to date`, `of late`, `at last`) precisely so a
+#: token-per-iteration gap can consume them, and a slot bounded to ONE token could not — measured,
+#: `have any users reported it has been no longer deprecated and been withdrawn` still ROUTED with
+#: the caller's predicate dropped while the same adverbial BEFORE `been` was refused. The bound is
+#: 3 (a multi-word adverbial is 2 tokens, plus headroom), and it is REFUSAL-SIDE: it can only add a
+#: refusal, never a route.
+#: ⛔ THE BOUND IS NOT 3 (round-5 review, P2, measured): TWO multi-word adverbials in a row need
+#: FOUR tokens, and `{0,3}` refused at most three — so
+#: `have any reported it has been in fact only just deprecated and been withdrawn` ROUTED the whole
+#: ended population with the caller's predicate dropped and `signal=None` while its 3-token twin was
+#: refused, the same defect one token higher. The bound is now the `_EXISTENCE_HELPER` gap's own
+#: `{0,8}`: a count bound one short of the class it carries is a spelling this guard is blind to,
+#: and this is the fourth consecutive round that lesson has been paid for.
+#: ⛔ AND THE WIDENING IT PAID FOR OVER-REFUSED THE SAME SPELLING INSIDE A RELATIVE CLAUSE
+#: (round-6 review, P2, measured — this lane's own regression, caught by a fresh reviewer): with
+#: `{0,8}` a RELATIVE clause whose own participle is an ENDING word was refused instead of routed,
+#: because the lookahead's job is to spot a SECOND CLAUSE and a relative clause's participle can
+#: carry the same adverb run. Each of these routed on `main` AND on the pre-change head, and only
+#: the TOKEN COUNT separated them from the asyndetic hijack they were meant to be refused with:
+#:   relative (must ROUTE): `has anything that has been only just very recently deprecated been
+#:                           withdrawn` / `… in fact only just superseded been withdrawn` /
+#:                          `… in fact only just superseded by legal been withdrawn`
+#:   asyndetic (must REFUSE): `have any reported it has been in fact only just deprecated and been
+#:                            withdrawn`
+#: Both consumers therefore carry `(?!\s*been\b)` after the ending word: the ending is the RELATIVE
+#: clause's when that clause CONTINUES into the question's own `been …`, and then it is not the
+#: question's predicate. Both directions are pinned in `SELECTED` / `NOT_SELECTED`.
+#: ⛔ AND THE AGENT ARM WAS A MISTAKE (round-7 review, P2, measured — this lane's own regression,
+#: caught within the same hour): tolerating `by` as well made both lookaheads blind whenever the
+#: reported clause's participle took an agent, so the asyndetic hijack this guard exists for ROUTED
+#: again — `have any users reported it has been deprecated by legal been withdrawn`, and its bare-
+#: noun and clitic twins, all returned `ended` with `signal=None` (the silent, predicate-dropping
+#: direction). A `by` phrase cannot separate the two readings by tokens alone: the RELATIVE row
+#: `… that has been … superseded by legal been withdrawn` and the ASYNDETIC row
+#: `… it has been deprecated by legal been withdrawn` differ only by a relativizer, which lives
+#: OUTSIDE this slot. So the `by` tolerance is WITHDRAWN and its cost is stated rather than hidden:
+#: a relative clause whose own participle takes an agent is refused AND REPORTED (a recall loss in
+#: the module's preferred direction), pinned in `NOT_SELECTED` + `NOTICE_ONLY`;
+_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,8}}"
+#: ⛔ A CONTRACTED AUXILIARY CARRIES ITS NEGATION INSIDE THE WORD (round-26 review, P1; round-28
+#: at `feb2c740bb`, P1, measured — the SAME class, one guard over). One home, THREE consumers:
+#: both `_EXISTENCE_GUARD` lookaheads and `_COPULA_SUBJECT`'s second-verb lookahead. The third
+#: copy was missing entirely, and that is what the round-28 review measured: the contracted
+#: asyndetic twins ROUTED through the shape `detect_state_question` evaluates FIRST
+#: (`_ENDING_SHAPES` before `_ENDING_SIGNALS`), with the caller's own verb dropped and
+#: `signal=None` —
+#:
+#:   `has anyone reported v3 hasn't been deprecated`   <- routed, signal None
+#:   `has anyone complained billing hasn't been deprecated`
+#:
+#: Both are refused now. Measured: 80 of 150 templated `<head> <subject> <contraction> been
+#: <ending>` probes routed before this constant was interpolated here, 0 after, and 0 pinned
+#: rows move. ⛔ AND THE APOSTROPHE IS TWO CHARACTERS, not one: `hasn't` and `hasn’t` are the
+#: same word, and a spelling that accepted only ASCII would keep the class open for every
+#: phone keyboard that types the typographic quote.
+_CONTRACTED_AUX = (
+    r"hasn['’]t|hadn['’]t|haven['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|"
+    r"doesn['’]t|didn['’]t|don['’]t|won['’]t|wouldn['’]t|can['’]t|couldn['’]t|"
+    r"mightn['’]t|mustn['’]t|shouldn['’]t"
+)
+#: ⛔ THE NON-FINITE VERB PHRASE IS A SECOND VERB, AND THE CLASS IS A ROLE, NOT TWO SPELLINGS
+#: (round-28 review, P1, measured). Listing literally `to be|being` closed the two spellings the
+#: previous round measured and left the rest of the class open — every one of these still ROUTED
+#: the whole ended population with the qualifier dropped and `signal=None`:
+#:
+#:   `is the export getting archived`            <- colloquial progressive
+#:   `is the export to eventually be archived`   <- ONE adverb splits `to be`
+#:   `is the export to get archived` / `… to become archived`
+#:
+#: One home, two consumers — `_COPULA_INFINITIVE_REFUSAL` (the `is|are|was|were` branch's own
+#: refusal lookahead; it is NOT in the shared `_COPULA_SUBJECT`, which the perfect branch also
+#: uses — see that constant) and `_COPULA_LONG_SUBJECT`'s arm B — because fixing the refusal
+#: without widening the report trades a wrong route for a silent drop: measured, with only the
+#: refusal side widened, `is the export getting archived` came back `signal=None`.
+#: ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: the `to <adverb> <verb>` window is bounded
+#: to TWO adverbs (a third puts the phrase outside the subject's own word bound anyway), and a
+#: non-finite verb this list does not name (`to wind up archived`) still routes — a closed list is
+#: the mechanism this module uses everywhere and the residual it always carries.
+_NONFINITE_COPULA = r"(?:to\s+(?:[a-z]+\s+){0,2}(?:be|get|become|became)|being|getting)"
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -556,7 +713,34 @@ _EXISTENCE_GUARD = (
     # lookahead below, which owns that boundary).
     r"that)\s+)?(?!it\b|they\b|he\b|she\b|we\b|you\b|i\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
-    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
+    # ⛔ A CONTRACTION IS NOT A `not` TOKEN (round-26 review, P1, measured): the negation
+    # slot accepts `not` anywhere in the gap, but `hasn't` carries its negation INSIDE
+    # the auxiliary, so an anchor spelled `has` followed by space/punctuation never
+    # matched it, and all 17 contracted twins — `have any users reported the vendor
+    # ⛔ 17, NOT 18 (review P3, measured): the alternation below enumerates 17, and the
+    # test's `_CONTRACTED_AUXILIARIES` — whose docstring says "one per member" — is 17
+    # too. The "18" this sentence carried before was a count nobody held, which is the
+    # same defect class as a pin that does not pin.
+    # hasn't been deprecated` — routed the whole ended population with the caller's
+    # predicate dropped and `signal=None`, while every UN-contracted twin was refused.
+    # This is a CLOSED set, unlike the open adverbial class: one alternation closes it.
+    rf"(?:{_CONTRACTED_AUX}|"
+    # ⛔ AND `do|does|did` ARE NOT HERE (round-26 review, P2, measured): none of them can
+    # precede `been`, so they add NO detection power to a guard whose window requires
+    # `been` — their only effect was to let an ordinary verb fill the noun slot and the
+    # next verb fill the auxiliary: `has anything we said we would do been cancelled`
+    # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
+    # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
+    # ⛔ AND THE CLITIC SPELLINGS (round-27 review, P2, measured): `'s`, `'ve` and `'d`
+    # are the COMMONEST English spelling of exactly these auxiliaries — `have any users
+    # reported the vendor's been deprecated`, `have any customers said they've been
+    # cancelled` — and all 5 of 5 constructed rows routed with the caller's predicate
+    # dropped and `signal=None`. The clitic attaches to the SUBJECT, so the noun slot
+    # takes the noun and the auxiliary alternation takes `<noun>'s`, which is why this is
+    # one pattern and not a new lookahead. The apostrophe inventory is normalised above,
+    # so `’` is already `'` by the time any of this runs.
+    r"[a-z0-9][a-z0-9'’._/-]*['’](?:s|ve|d)|"
+    r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
     # ⛔ AND THE CLAUSE'S OWN PARTICIPLE ANCHORS IT (round-24 review, P2, measured):
     # without the `been <ENDING>` anchor the widened adverb slot refused a RELATIVE
     # clause whose own verb is `<aux> <adverb> been <other participle>`, which is the
@@ -564,7 +748,7 @@ _EXISTENCE_GUARD = (
     # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
     # after. The anchor is the same one the pronoun branch below already uses: the
     # lookahead fires only when the second clause's passive ends an ENDING participle.
-    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b(?!\s*been\b))"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -581,10 +765,36 @@ _EXISTENCE_GUARD = (
     # relative clause's) from `we have been tracking` (relative: the ending is still the
     # question's).
     rf"(?![^?]{{0,60}}?\b(?:it|they|he|she|we|you)\s+"
-    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
+    # ⛔ A CONTRACTION IS NOT A `not` TOKEN (round-26 review, P1, measured): the negation
+    # slot accepts `not` anywhere in the gap, but `hasn't` carries its negation INSIDE
+    # the auxiliary, so an anchor spelled `has` followed by space/punctuation never
+    # matched it, and all 17 contracted twins — `have any users reported the vendor
+    # hasn't been deprecated` — routed the whole ended population with the caller's
+    # predicate dropped and `signal=None`, while every UN-contracted twin was refused.
+    # This is a CLOSED set, unlike the open adverbial class: one alternation closes it.
+    rf"(?:{_CONTRACTED_AUX}|"
+    # ⛔ AND `do|does|did` ARE NOT HERE (round-26 review, P2, measured): none of them can
+    # precede `been`, so they add NO detection power to a guard whose window requires
+    # `been` — their only effect was to let an ordinary verb fill the noun slot and the
+    # next verb fill the auxiliary: `has anything we said we would do been cancelled`
+    # matched `noun='would' aux='do'` and was wrongly refused. Measured: 6 of 6
+    # legitimate capstone questions refused with them, all 6 route without, 0 pins flip.
+    # ⛔ AND THE CLITIC SPELLINGS (round-27 review, P2, measured): `'s`, `'ve` and `'d`
+    # are the COMMONEST English spelling of exactly these auxiliaries — `have any users
+    # reported the vendor's been deprecated`, `have any customers said they've been
+    # cancelled` — and all 5 of 5 constructed rows routed with the caller's predicate
+    # dropped and `signal=None`. The clitic attaches to the SUBJECT, so the noun slot
+    # takes the noun and the auxiliary alternation takes `<noun>'s`, which is why this is
+    # one pattern and not a new lookahead. The apostrophe inventory is normalised above,
+    # so `’` is already `'` by the time any of this runs.
+    r"[a-z0-9][a-z0-9'’._/-]*['’](?:s|ve|d)|"
+    r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b(?!\s*been\b))"
 )
-_EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
+
+_EXISTENCE_WINDOW = (
+    rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+)
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
 
 #: "what ended" / "what has been withdrawn" / "what was retracted" — the WHOLE
@@ -849,8 +1059,30 @@ _COPULA_SUBJECT = (
     # guards: this row still routed, and every routing row in the suite still routes with
     # the tokens below (`is the data all archived`, `has the onboarding flow been
     # retired`, `is the v3 export deprecated`).
-    r"where|whereas|after|before|now|what|how|why|has|have|had|is|are|was|were|will|"
-    r"would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
+    # ⛔ AND A CONTRACTED AUXILIARY BELONGS TO THE SAME CLASS (round-28 review, P1,
+    # measured). This lookahead is the THIRD copy of the second-verb class and the one
+    # that had no contractions at all, so the perfect branch below swallowed an asyndetic
+    # second clause whose own auxiliary was contracted: the contracted twins ROUTED the
+    # whole ended population with the caller's predicate dropped and `signal=None`, while
+    # every UN-contracted twin was refused. The class is interpolated from
+    # :data:`_CONTRACTED_AUX` — one home, three consumers, so the fourth copy cannot go
+    # missing the way this one did.
+    rf"where|whereas|after|before|now|what|how|why|{_CONTRACTED_AUX}|"
+    r"has|have|had|is|are|was|were|will|would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
+    # ⛔ THE NON-FINITE COPULA IS **NOT** IN THIS LIST, DELIBERATELY (review P1,
+    # measured): it belongs to the `is|are|was|were` branch ONLY, via
+    # `{_COPULA_INFINITIVE_REFUSAL}` below. This guard is SHARED with the perfect branch,
+    # where the question's predicate is already anchored by `has … been`, so a
+    # `to be <participle>` inside the subject can only be a POST-NOMINAL MODIFIER and the
+    # question is legitimate. Excluding it here refused those questions SILENTLY
+    # (`missed_route_payload` is None — `_COPULA_LONG_SUBJECT` is anchored
+    # `^(?:is|are|was|were)`). Measured on the head that had it here:
+    #   `has the contract to be signed been archived`  -> None / None   (was `ended`)
+    #   `has the report to be reviewed been archived`  -> None / None   (was `ended`)
+    #   `has the decision to be taken been archived`   -> None / None   (was `ended`)
+    #   `has the report being reviewed been archived`  -> None / None   (was `ended`)
+    # i.e. a routed->silent regression against this PR's own prior head, on ordinary
+    # English noun phrases — the exact defect class this PR exists to remove.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
     # ⛔ A PREPOSITION IS NOT A SECOND NOUN PHRASE (review P1, measured). `of` was
     # already excluded here — a genitive (`the export of the vendor`) is ONE noun
@@ -899,7 +1131,7 @@ _COPULA_SUBJECT = (
     # before a nominal (`since the merger`) and `SCONJ` before a clause (`since the
     # merger closed`), so the tags separate them only after the fact.
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|"
-    rf"{_PREPOSITION_RE}|"
+    rf"{_QUALIFIER_PREPOSITION_RE}|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
@@ -936,8 +1168,19 @@ _COPULA_SUBJECT = (
     r"(?:"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,5}"
     r"(?:i|you|he|she|it|we|they|there)(?![-/])\b)"
+    # ⛔ A SUBJECT WORD MAY NOT CARRY AN AUXILIARY CLITIC (round-28 review, P1, measured):
+    # the word class below admits `'`, so it swallowed `billing's` whole and the copula
+    # shape matched the FULL string on the first pass — `have any users reported billing's
+    # been deprecated` returned the ended population with the caller's predicate dropped
+    # and `signal=None`, while its DETERMINER twin (`the billing's been deprecated`) was
+    # refused with the notice. One article apart, opposite verdicts: the guard in the
+    # branch above could not help, because this shape is matched BEFORE it and never
+    # consults it. Excluding the clitic here lets the row fall through to
+    # `_ENDING_SIGNALS`, where the clitic alternative refuses it and reports.
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
-    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+[a-z0-9][a-z0-9'’._/-]*){0,3}"
+    r"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*){0,3}"
     r"|(?:i|you|he|she|it|we|they|there)(?![-/])"
     r")"
 )
@@ -965,8 +1208,31 @@ _COPULA_SUBJECT = (
 #: Adding it here would be dead code that reads as coverage — measured:
 #: `is the export now archived` is REFUSED by the subordinator guard, not routed, and
 #: `is it now retired` likewise. Recorded rather than duplicated.
+#: ⛔ AN INFINITIVE OR PROGRESSIVE COPULA IS A SECOND VERB — **on the copula branch only**
+#: (review P1 at `42e0c1a662`, measured). `is the export to be archived` (scheduled /
+#: FUTURE state), `is the data being archived` (progressive), `is the export yet to be
+#: archived` (the OPPOSITE of archived), `is the export supposed to be archived` / `…
+#: going to be …` / `… due to be …` all serve the whole ended population, which cannot
+#: contain a row that is pending-but-not-yet-ended — so the caller reads a full
+#: population as "no", with `yet to be` answered upside down, and no notice. Measured:
+#: 240 of 240 templated `<is|are> <subject> <infinitive> <ending>` probes routed with no
+#: signal. A `to` that is a PREPOSITION rather than an infinitive (`is the export to
+#: Europe archived`) carries no `be`, so it still routes.
+#: ⛔ IT IS APPLIED HERE, NOT IN `_COPULA_SUBJECT`, because that guard is SHARED with the
+#: perfect branch, where the predicate is already anchored by `has … been` and a
+#: `to be <participle>` inside the subject is only a POST-NOMINAL MODIFIER — excluding it
+#: there refused `has the contract to be signed been archived` and its siblings SILENTLY.
+_COPULA_INFINITIVE_REFUSAL = (
+    # ⛔ THE CLASS, NOT A SPELLING — interpolated from `_NONFINITE_COPULA` (which also
+    # covers `to get|become|became`, `getting`, and up to two modifiers before the verb),
+    # so the two consumers cannot drift the way `to\s+be|being` did: the literal form
+    # missed `is the export to eventually get archived` while the shared guard's richer
+    # class refused it.
+    rf"(?!(?:[a-z0-9][a-z0-9'\u2019._/-]*\s+){{0,6}}{_NONFINITE_COPULA}(?![-/])\b)"
+)
+
 _COPULA_PREFIX = (
-    rf"^(?:(?:is|are|was|were)\s+{_COPULA_SUBJECT}"
+    rf"^(?:(?:is|are|was|were)\s+{_COPULA_INFINITIVE_REFUSAL}{_COPULA_SUBJECT}"
     rf"\s+(?:(?:already|ever|really|still|actually|just)\s+)?(?:{_ENDING_WORDS})\b"
     rf"|(?:has|have|had)\s+{_COPULA_SUBJECT}"
     rf"\s+been\s+(?:{_ENDING_WORDS})\b)"
@@ -1059,8 +1325,19 @@ _WHICH_MODIFIED_NOUN = re.compile(
 #: `is_copula_long_subject`. That leak is a notice on a content question — the safe
 #: direction (a report, never a route) — and it is recorded rather than claimed
 #: closed.
+#: ⛔ AND IT CARRIES TWO ARMS, because the shape can refuse a SHORT subject too (review
+#: P1 at `42e0c1a662`, measured). Arm A is the long subject above. Arm B is the
+#: INFINITIVE OR PROGRESSIVE SUBJECT — `is the export to be archived`, `is the data
+#: being archived` — which the shape's own second-verb lookahead now refuses, and whose
+#: subject is FOUR words or fewer, so arm A's `{5,}` never saw it: measured, both were
+#: SILENT after the exclusion alone, which would have traded one #14033 defect (a route
+#: with the qualifier dropped) for the other one (an unrouted state question that looks
+#: like an honest empty answer). Arm B reports them: a report is advice on a refused
+#: cue, never a route, and the population served stays the relevance read.
 _COPULA_LONG_SUBJECT = re.compile(
     rf"^(?:is|are|was|were)\s+"
+    rf"(?:"
+    # ARM A — the subject runs past the shape's four-word bound.
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     rf"(?!(?:[a-z0-9'’._/-]+\s+){{0,12}}"
     # ⛔ `and`/`or` are NOT in this list: they introduce no finite verb, and a
@@ -1071,7 +1348,37 @@ _COPULA_LONG_SUBJECT = re.compile(
     rf"which|who|whom|whose|where|is|are|was|were|has|have|had|do|does|did|will|"
     rf"would|can|could|may|might|must|should)\b)"
     rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{5,}}"
-    rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b{_BLOCKED_TAIL}"
+    rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
+    rf"|"
+    # ARM B — the subject carries an infinitive or progressive copula, so the ending
+    # participle is inside a scheduled/future (`to be archived`) or ongoing (`being
+    # archived`) verb phrase rather than a state the ended population can answer. The
+    # same subordinator/second-auxiliary negation applies: a clause that SUPPLIES the
+    # predicate is still not this question's.
+    # ⛔ THE LOWER BOUND IS ZERO, NOT ONE (fresh review, P3, measured): the REFUSAL
+    # lookahead (`_COPULA_INFINITIVE_REFUSAL`) allows `{0,6}` words before the non-finite
+    # verb, so with `{1,5}` here the ZERO-word endpoint — a SUBJECT-LESS non-finite question —
+    # was refused with NO report, which is the silence this module's contract forbids and the
+    # exact reason arm B exists. ⛔ THE MEASURED HISTORY, WITH THE COMMITS NAMED, because an
+    # earlier cut of this note said "at the delta's base these ROUTED" and that is FALSE —
+    # the base of the commit that fixed it was ALREADY silent (re-measured, all four rows):
+    #   at `0e52593c91` (before `_COPULA_INFINITIVE_REFUSAL` landed)      -> ended / is_copula
+    #   at `d8295ea8b2` (the refusal landed, arm B still `{1,5}`)          -> None / None / no payload
+    #   at this commit (the refusal + arm B `{0,5}`)                       -> None / is_copula_long_subject
+    #   `is being archived` / `is to be archived` / `is getting archived` / `was being retired`
+    # Enumerated class 4 auxiliaries x 6 non-finite forms x 5 endings = 120 rows. ⛔ ALL 120
+    # gain `is_copula_long_subject` — an earlier cut of this note said "56 rows gain" one line
+    # below the "= 120 rows" it was describing, which reads as 64 still unreported. Measured.
+    # The verdict (refuse) is right — a scheduled or progressive state must not be served —
+    # but the report must survive it. Measured after widening: 0 population changes across
+    # 34,560 probes.
+    rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
+    rf"(?!.*\b(?:because|that|given|since|when|while|if|unless|which|who|whom|"
+    rf"whose|where)\b)"
+    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{0,5}}{_NONFINITE_COPULA}\s+"
+    rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
+    rf")"
+    rf"{_BLOCKED_TAIL}"
 )
 
 _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -1106,18 +1413,37 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         rf"(?=\s+(?!(?:the|a|an|this|that|these|those|its|their|our|my|your|his|her|"
         rf"any|some|every|no|all|both|each|either|neither|another|other|such|one|two|"
         rf"three|first|last|next)\b)[a-z])")),
-    # …and the unguarded `existence` expression: a state question that fails ONLY on
-    # the clause guard above is reported, never silenced (silence is the defect).
+    # …and the unguarded `existence` expression: a state question whose state cue is seen and
+    # that no shape selects is reported, never silenced (silence is the defect).
     # ⛔ IT CARRIES THE TAIL GUARD, AND THAT IS THE ROUND-16 REVIEW'S P2 (measured):
     # without one it reported on ANY tail — `… been withdrawn most recently`,
     # `… been withdrawn only after the audit`, `… been withdrawn zzzz` all emitted a
     # notice with the cue truncated at `withdrawn` — which falsified the two paragraphs
     # above that say a qualifier OUTSIDE the closed tail list stays silent, and the
-    # definition of "strong" at `:317-322`. Its stated job is "fails only on the clause
-    # guard", so it is the shape's tail that decides; every `NOTICE_ONLY` existence row
-    # ends at `$` or punctuation and still reports.
+    # definition of "strong" at `:317-322`. Its stated job is "reports the cue wherever the shape
+    # declined, and the TAIL decides whether the decline is worth a notice", so it is the shape's
+    # tail that decides; every `NOTICE_ONLY` existence row ends at `$` or punctuation and reports.
+    # ⛔ AND IT IS NOT "FAILS ONLY ON THE CLAUSE GUARD" (round-6 review, P3, measured): this row
+    # carries `_EXISTENCE_HEAD` + the REFUSAL-SIDE middle slot + the blocked tail, so it also fires
+    # where the guard PASSES and only the WINDOW's narrow recall slot fails — measured,
+    # `has any we relied on been just withdrawn` has the guard passing (head+guard matches) and
+    # still reports, declining on the recall slot rather than the guard. The two older paragraphs
+    # above said otherwise; this is what the code does.
+    # ⛔ THE NOTICE MUST SEE THE CLASS THE GUARD REFUSES ON (round-5 review, P3, measured): this
+    # row carried `_EXISTENCE_WINDOW`, whose slot is the NARROW recall set (`already|ever|recently`),
+    # while the guard itself refuses on the WHOLE `_EXISTENCE_ADVERB` class. So the same refused
+    # frame reported on one spelling and went SILENT on the next (each needs the quantifier after
+    # `has`, which `_EXISTENCE_HEAD` requires — measured, `billing has been …` alone reports
+    # neither way, so these are the frames that discriminate):
+    # `has anyone complained billing has been recently deprecated` → existence_unguarded, but
+    # `has anyone complained billing has been just deprecated` / `… only deprecated` → refused,
+    # `signal=None` — and the §"refusal reports" pins only passed because a trailing
+    # `been <ending>` clause supplied their notice. A signal cannot affect routing (it is only
+    # computed when NO shape applies), so widening the slot here cannot create a route.
     ("existence_unguarded", re.compile(
-        _EXISTENCE_HEAD + _EXISTENCE_WINDOW + _BLOCKED_TAIL)),
+        _EXISTENCE_HEAD
+        + rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
     ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
 )
@@ -1337,6 +1663,12 @@ class StateQuestion:
     byte). ``shape``: the cue-table row that matched, for diagnostics and for
     the routing test's table; ``None`` with a ``None`` population.
     ``cue``: the matched text, so a caller can say WHICH words selected the
+    shape. ⛔ IT IS THE MATCHED TEXT **AFTER NORMALISATION**, not the caller's own
+    spelling: the detector lower-cases, collapses whitespace, and translates the
+    apostrophe inventory to ASCII before it matches, so a caller who typed `hasn’t`
+    is shown `hasn't`. That is deliberate — the cue is what the PATTERN saw — but a
+    caller comparing it against their own string will not find it, so the contract
+    says so here rather than leaving the difference to be discovered.
     population instead of asserting one.
     """
     population: str | None = None
@@ -1354,6 +1686,38 @@ class StateQuestion:
     signal: str | None = None
     #: The matched text of that signal, so a caller can say WHICH words it saw.
     signal_cue: str | None = field(default=None)
+
+
+#: The apostrophe INVENTORY normalised before any pattern runs (round-27 review, P1,
+#: measured). `_EXISTENCE_GUARD`'s contraction class is closed over `'` (U+0027) alone,
+#: while the product routinely receives the typographic forms — `tortoise/extractor_v2.py`
+#: normalises the same inventory before tokenising for exactly that reason, and this
+#: module's own copula lookahead admits `\u2019` beside `'` (one token class, at `:1219`;
+#: the INVENTORY below is what makes the rest of the family reachable at all).
+#: ⛔ ONE CONSTANT, so the test that pins the family cannot drift off it: the pin asserts
+#: THIS tuple and exercises every member, which is what makes a codepoint added to the
+#: normaliser without being pinned a RED instead of a silent gap (the round-27 fix shipped
+#: with 4 of these 7 exercised, i.e. three silently droppable).
+#: ⛔ THE INVENTORY IS `extractor_v2`'s, NOT SEVEN HANDSOME CODEPOINTS (fresh review, P1,
+#: measured). The first cut of this constant carried the seven that read nicely and its
+#: docstring claimed parity with `tortoise/extractor_v2.py` — which normalises TWENTY-FIVE.
+#: Measured: the eighteen it left out (`\u201a \u201b \u02b9 … \u00b4 \uff02 \ua78c`)
+#: each still ROUTED the whole ended population with the caller's predicate dropped and
+#: `signal=None`, i.e. the defect this constant exists to close, eighteen spellings over,
+#: while the pin derived from the constant itself stayed green — a pin that reads the same
+#: tuple it pins can never see the tuple is incomplete.
+#: The set below is `extractor_v2._APOSTROPHES`' keys verbatim, and
+#: `tests/test_13557_13558_reachable_reads.py` asserts PARITY against that table (not
+#: against this tuple), so the two cannot drift and a codepoint added upstream reds here.
+#: ⛔ Why a copy rather than an import: this module carries no project imports on purpose
+#: (it is the pure detector several layers call), so the coupling is held by the parity
+#: test instead of by an import edge.
+_APOSTROPHES = (
+    "\u2018", "\u2019", "\u201a", "\u201b", "\u02bc", "\u02b9", "\u2032", "\u2035",
+    "\uff07", "\u00b4", "\u02be", "\u02bf", "\u02c8", "\u055a", "\u05f3", "\uff02",
+    "\ua78c", "\u02bb", "\u02bd", "\u02c0", "\u02c1", "\u02ca", "\u02cb", "\u02cc",
+    "\u02d0",
+)
 
 
 def detect_state_question(text: str | None) -> StateQuestion:
@@ -1393,7 +1757,21 @@ def detect_state_question(text: str | None) -> StateQuestion:
     """
     if not text or not str(text).strip():
         return StateQuestion()
-    t = " ".join(str(text).lower().split())
+    # ⛔ THE APOSTROPHE IS NOT ONE CHARACTER, AND THIS IS THE ONE CONSUMER THAT SEES THE
+    # CALLER'S RAW TEXT (round-27 review, P1, measured). The contraction class is closed
+    # over `'` (U+0027), but the product routinely RECEIVES U+2019 — `tortoise/
+    # extractor_v2.py` normalises the whole `‘’‚‛` inventory before tokenising for exactly
+    # that reason, and this module's own token classes admit `’` beside `'` in eleven
+    # places. `detect_state_question` receives the string from `sdk.py` untouched, so
+    # `have any users reported the vendor hasn’t been deprecated` (U+2019) routed the whole
+    # ended population with the caller's predicate dropped and `signal=None` — 384 of 384
+    # rows in a 6-spelling × 8-subject × 8-verb population — while its ASCII twin was
+    # refused. One normalisation step closes the family, so it is done HERE rather than by
+    # widening every alternation with a second apostrophe.
+    _t = str(text).lower()
+    for _apostrophe in _APOSTROPHES:
+        _t = _t.replace(_apostrophe, "'")
+    t = " ".join(_t.split())
     for shape, pattern in _ENDING_SHAPES:
         m = pattern.search(t)
         if m:
