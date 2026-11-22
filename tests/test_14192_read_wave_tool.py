@@ -526,10 +526,25 @@ def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
     # `getattr(*…)` splat is not this arm's — it is `_indirect_reads`' (#14279 review F3).
     if isinstance(node, ast.Name) and _carries_read_name(node, consts):
         _np = parents.get(id(node))
+        # ⛔ THE NAME MUST BE THE SUBSCRIPT'S **INDEX**, NOT ITS CONTAINER (#14326 review
+        # P2, measured RED at `399ddc2`): the arm credited ANY `Load` subscript over a name
+        # that resolves to the literal, so an INERT provenance container red the census —
+        #     _READ = {"name": "_tortoise_fts_query"}
+        #     print(f"measuring {_READ['name']}")
+        # went from 2 mentions to 3 (`[('_READ', 308)]`) purely because `_values`' DICT arm
+        # binds the WHOLE mapping to its name (deliberately: it is what keeps `match _m:`
+        # captures resolvable). The lever shape is the opposite position — the read NAME as
+        # the KEY that fetches the callable (`vars(type(sdk))[_N]`) — so only the SLICE
+        # counts. `_READ.get("name")` already stayed green (its Name's parent is the
+        # `Attribute`), which is what makes the un-narrowed arm's polarity syntax-decided
+        # rather than executable-decided: `_READ["name"]` and `_READ.get("name")` are the
+        # same non-read. Both directions are pinned in
+        # `test_EVERY_static_binding_form_is_a_READ_reach`.
         return (isinstance(_np, ast.Call)
                 and (getattr(_np.func, "id", None)
                      or getattr(_np.func, "attr", None)) not in _PURE_READS) \
-            or (isinstance(_np, ast.Subscript) and isinstance(_np.ctx, ast.Load))
+            or (isinstance(_np, ast.Subscript) and _np.slice is node
+                and isinstance(_np.ctx, ast.Load))
     # ⛔ A STRING LITERAL MATTERS ONLY WHERE IT CAN BE EXECUTED. The census counts mentions
     # because a bare name can be handed to `getattr`; a `Constant` in dict-value position is
     # INERT — and recording provenance is the direction #14289 asks for. Measured RED
@@ -3247,6 +3262,36 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "a parameter default that is merely PRINTED is a FALSE RED — the default is a bind, "
         "and this pin still bounds EXECUTABLE reaches")
 
+    # ⛔ THE FIFTH CONTROL — A CONTAINER THAT HOLDS THE LITERAL IS NOT A REACH (#14326
+    # review P2, measured RED at `399ddc2` before `_is_read_ref`'s subscript arm was
+    # narrowed to the slice). `_values`' DICT arm deliberately binds the WHOLE mapping to
+    # its name (that is what keeps `match _m: case {"read": _N}:` resolvable), so the
+    # container's name resolves to the literal too — and a `Load` subscript over that NAME
+    # was credited as a reach, so this inert provenance line went 2 mentions -> 3. The
+    # LEVER is the opposite position (`vars(type(sdk))[_N]`, pinned by the rows above); a
+    # read used as a dict's VALUE is not executed.
+    provenance_box = ('    _READ = {"name": "_tortoise_fts_query"}\n'
+                      '    print(f"measuring {_READ[\'name\']}")\n')
+    assert not _pin_refuses(_pin_source(provenance_box)), (
+        "a container that HOLDS the read name and is only subscripted is a FALSE RED — "
+        "nothing is executed, and the recording direction #14289 asks for must not red the "
+        "census just because `_values` binds a mapping's whole literal to its name")
+
+    # ⛔ THE SIXTH CONTROL, the OTHER polarity of the same clause: a subscript STORE under
+    # the literal (`_counts["_tortoise_fts_query"] = 0`) is a recording write, not a read
+    # — the `Constant` arm's `isinstance(_parent.ctx, ast.Load)` guard exists for it and
+    # had NO row in either direction (#14326 review P3, measured: replacing that guard
+    # with `True` left all 25 tests green). A store cannot be CALLED.
+    literal_store = '    _counts["_tortoise_fts_query"] = 0\n'
+    assert not _pin_refuses(_pin_source(literal_store)), (
+        "a subscript STORE whose key is the read literal is a FALSE RED — it records under "
+        "the name and executes nothing; the Constant arm's Load guard is what keeps the "
+        "census counting CALLABLE spellings")
+    _st_m, _st_calls, _st_indirect = _read_reach(_pin_source(literal_store))
+    assert len(_st_m) == 2 and not _st_indirect, (
+        f"the store inflated the mention census to {len(_st_m)} (expected 2) — the Load "
+        "guard on the `Constant`-under-`Subscript` arm is doing nothing")
+
 
 def test_the_READ_side_of_str_is_NOT_a_MUTATION() -> None:
     """`strip`/`lower`/`split` return a NEW object; they do not mutate the tainted receiver.
@@ -3327,6 +3372,34 @@ def test_a_COMPREHENSION_argument_is_NOT_the_collection() -> None:
             "non-mutator, and `compare()` then reads `rank_identical: True` over a genuinely "
             "permuted pair — a pure wrapper (`any`, `sorted`, `min`) does not make the BODY "
             "safe")
+
+    # ⛔ A CALLBACK PASSED **BY NAME** AS A NESTED `def` — the row the `callable_params`
+    # seed exists for, and it had none (#14326 review P1, measured). `sorted(results,
+    # key=_key)` hands the collection to a PURE callee (`sorted`, so `handed`
+    # short-circuits) and hands the ELEMENTS to `_key` only through the call SITE; the
+    # callback's own `_e["id"] = …` is then invisible unless
+    # `callable_params.setdefault(_n.name, _n)` tied `_key`'s parameter to the page. The
+    # LAMBDA spelling beside it (`_key = lambda _e: …`) is pinned by the row above, so the
+    # `def` spelling read as covered while nothing red it.
+    #
+    # Measured at this head (`tools/read_wave_latency.py` mutated in place and restored):
+    # the tool mutant `def _key(_e): _e["id"] = "REDACTED"` + `_sorted = sorted(results,
+    # key=_key)` reds the pin (`line(s) [308] mutate a collection AFTER the measured read`);
+    # with ONLY the `setdefault` line replaced by `pass`, the SAME tool mutant is GREEN and
+    # every test in this file stays green — so the seed was load-bearing and unpinned, the
+    # round-3 F1 defect class recurring inside the commit written to close it.
+    def_callback = ('    def _key(_e):\n'
+                    '        _e["id"] = "REDACTED"\n'
+                    '    _sorted = sorted(results, key=_key)\n')
+    assert _mutations_of(def_callback), (
+        "a nested `def` used as `sorted(key=…)` receives the page's ELEMENTS and rewrites "
+        "every `id` before `order` records them, so `compare()` reads `rank_identical: "
+        "True` over a permuted pair — the `callable_params` seed is what taints its "
+        "parameter, and deleting that seed must red THIS row")
+    assert not _mutations_of('    def _key(_e):\n        return len(_e)\n'
+                             '    _sorted = sorted(results, key=_key)\n'), (
+        "a nested `def` that only READS the element must stay exempt — tainting a "
+        "callback's parameter is not a blanket red on every named callback")
     for body in ('    _x = [results.clear() for r in results]\n',
                  '    _y = [results.sort() or r for r in results]\n'):
         assert _mutations_of(body), (
