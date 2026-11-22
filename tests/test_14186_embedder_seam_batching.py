@@ -41,6 +41,7 @@ import math
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1384,6 +1385,84 @@ class TestTheWorkerBacking:
         finally:
             client.close()
         assert not os.path.exists(path), "the worker left its socket path behind"
+
+
+#: How long the PARENT-DEATH BELT may take to exit the worker process. It fires on
+#: its first loop iteration (``_parent_alive`` answers in microseconds for a reaped
+#: pid) so the measured cost is interpreter boot, ~0.1 s; the bound exists only to
+#: make "never exits" a FAILURE inside the suite, and the mutant it exists for —
+#: ``args=(parent_pid,)`` — never exits at all, so any finite value reddens it.
+_BELT_EXIT_BOUND_S = 30.0
+
+
+class TestTheParentDeathBeltIsArmed:
+    """The BELT, not the pipe — the wiring review finding 2 said was unpinned.
+
+    ``tortoise/embed_worker.py::serve`` starts ``_watch_parent`` with
+    ``args=(parent_pid, stop)``. It once omitted ``stop``, so the thread died on
+    its first line with ``TypeError`` and the parent-death check never ran — an
+    enforcer that looked armed and could not fire. The fix has a comment saying
+    exactly that, and no row exercised it: ``args=(parent_pid,)`` kept this whole
+    file GREEN, because every test that reaches ``serve`` stubs ``_watch_parent``
+    out and the one real-subprocess row kills the child through STDIN, which is
+    the PRIMARY mechanism.
+
+    The row below is the only shape that tells the two apart: the stdin pipe is
+    held OPEN (so ``_watch_stdin`` can never fire) and the parent pid has already
+    been reaped (so ``_parent_alive`` has a death it can PROVE).
+    """
+
+    def test_a_real_worker_exits_when_its_parent_pid_is_provably_gone(
+            self, tmp_path):
+        """``args=(parent_pid,)`` must redden this, and deleting the thread too.
+
+        ⛔ WHY A REAL SUBPROCESS AND A DEAD PID. ``_parent_alive`` answers
+        ``False`` only for a ``ProcessLookupError``, and every in-process caller
+        passes ``os.getpid()`` or ``0`` — neither can make it answer ``False``.
+        So the belt's decision is unreachable in-process, and a double would pin
+        the double rather than the wiring. Here the pid is a child of this test
+        that has already exited AND been reaped, which is the one state whose
+        ``kill(pid, 0)`` is a lookup miss.
+        """
+        reaped = subprocess.Popen([sys.executable, "-c", "pass"])
+        reaped.wait(timeout=60.0)
+        dead_pid = reaped.pid
+        path = str(tmp_path / "orphan.sock")
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "tortoise.embed_worker",
+             "--socket", path, "--parent-pid", str(dead_pid),
+             "--log-level", "WARNING"],
+            # ⛔ stdin is a PIPE WE KEEP OPEN: the worker's primary death signal is
+            # EOF on this pipe, so holding it open means only the BELT can exit
+            # the child. A closed or absent stdin would let ``_watch_stdin``
+            # answer for a belt that is not armed, which is the false PASS this
+            # row exists to prevent.
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+        try:
+            started = time.monotonic()
+            try:
+                returncode = proc.wait(timeout=_BELT_EXIT_BOUND_S)
+            except subprocess.TimeoutExpired:
+                pytest.fail(
+                    f"the worker was still alive after {_BELT_EXIT_BOUND_S:.0f}s "
+                    f"with a parent pid ({dead_pid}) that no longer exists — the "
+                    "parent-death belt fired nothing, so a SIGKILLed or OOM-killed "
+                    "parent orphans a 432 MB worker for the life of the box "
+                    "(the pipe was held open, so ``_watch_stdin`` is not the "
+                    "mechanism under test)")
+            elapsed = time.monotonic() - started
+            assert returncode == 0, (
+                f"the parent-death belt exited the worker with {returncode} "
+                f"after {elapsed:.2f}s")
+        finally:
+            if proc.poll() is None:  # pragma: no cover — only on the mutant
+                proc.kill()
+                proc.wait(timeout=30.0)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    with contextlib.suppress(OSError):
+                        stream.close()
 
 
 class TestWorkerReadinessIsTheSocketExisting:
