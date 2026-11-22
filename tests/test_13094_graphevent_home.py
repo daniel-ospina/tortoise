@@ -1564,9 +1564,12 @@ def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
     `RETURN size((collect(n)))` is a grouping paren with no relationship anywhere.
     ⛔ `exists {` is the fourth and a different mechanism: it was a real arm, but
     first-match ordering left it reachable ONLY on a NODE-existence predicate
-    (`EXISTS { (n:Point) }`) — an EDGE-existence predicate is decided by `-[` /
-    `)<-` / `)--(` first — so the arm could only misfile a predicate that walks
-    nothing, and it was removed (#14183 round-16 review, P3).
+    (`EXISTS { (n:Point) }`) — an EDGE-existence predicate is decided by one of the
+    five hop arms ordered before it (`-[`, `]->`, `)<-`, `)--(`, `)-->`; a DIRECTED
+    predicate, for instance, is `)-->`) — so the arm could only misfile a predicate
+    that walks nothing, and it was removed (#14183 round-16 review, P3; the
+    five-arm list is the tool's own, corrected after round 18 measured `)-->` on
+    `EXISTS { (e)-->(p) }` and caught a three-arm list here that read as complete).
 
     WHAT IT WOULD BE FALSE WITHOUT. `readers_report()` derives its verdict from this
     predicate, so one misfiled row does not merely red a test: it publishes
