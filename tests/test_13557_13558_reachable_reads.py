@@ -1930,25 +1930,30 @@ def test_the_pronoun_subject_parity_gap_is_a_DECLARED_loss_not_an_unstated_one()
 
     ⛔ IF YOU CLOSE THE GAP — by widening the routing slot, or by adding a notice arm
     over it — UPDATE OR DELETE THIS TEST AND the paragraph in `state_intent` that
-    states it. It fails on purpose in BOTH directions: the SLOT half below reds if a
-    slot member stops routing behind a pronoun (that WIDENS the gap), and the SILENT
-    half reds if an outside-the-slot adverbial starts routing (that closes it).
+    states it. It fails on purpose in BOTH directions: the SLOT half below reds if the
+    slot's MEMBERSHIP changes (a member removed, or swapped for another that still
+    routes — that WIDENS the gap), and the SILENT half reds if an outside-the-slot
+    adverbial starts routing (that closes it).
     """
     from tortoise.state_intent import _COPULA_PREFIX, detect_state_question
 
     # THE WIDENING GUARD: the pronoun's routing set is exactly `_COPULA_PREFIX`'s slot, so
-    # losing a slot member cannot hide — it turns one of these rows from `ended` into
-    # silence, i.e. it makes the declared gap BIGGER. The members are EXTRACTED from the
-    # constant rather than re-spelled here, so the two cannot drift: a member dropped from
-    # the code reds the row it moved, and a member added to the code reds the shape assert.
+    # losing a slot member turns a row from `ended` into silence, i.e. it makes the declared
+    # gap BIGGER. Two halves, on purpose: the SET is FROZEN here (this is the half that
+    # reds on a membership change — including a SWAP that keeps the width, which a count
+    # cannot see: `just` -> `often` preserves six members, drops a route this test exists to
+    # declare, and a width assert stays green, measured), and the routing probes below are
+    # EXTRACTED from the constant so they cannot drift from the code they describe.
     extracted = re.search(r"\\s\+\(\?:\(\?:([a-z|]+)\)\\s\+\)\?", _COPULA_PREFIX)
     assert extracted is not None, (
         f"the post-subject adverb slot is not in the shape this test derives it from — "
         f"re-measure `_COPULA_PREFIX` before trusting the declaration below: {_COPULA_PREFIX!r}")
     members = extracted.group(1).split("|")
-    assert len(members) == 6, (
-        f"the post-subject adverb slot changed width ({members!r}) — the pronoun/determiner "
-        f"gap is a function of this slot, so the declaration below must be re-measured")
+    assert sorted(members) == sorted(
+        ["already", "ever", "really", "still", "actually", "just"]), (
+        f"the post-subject adverb slot changed MEMBERSHIP ({members!r}) — the pronoun/determiner "
+        f"gap is a function of this slot, so the declaration below must be re-measured; if the "
+        f"change is intentional, update this frozen set AND the paragraph in `state_intent`")
     for adverb in members:
         moved = detect_state_question(f"is it {adverb} archived")
         assert moved.population == "ended", (
