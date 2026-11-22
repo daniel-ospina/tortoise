@@ -316,7 +316,14 @@ figures would have predicted the merged reading. ⛔ **THE MERGE WITH `origin/ma
 FURTHER TREE AND MOVES IT AGAIN, so the figure quoted above is HISTORY and not this tree's term:**
 `--emit-push-matrix` here emits **25 m on all eleven shards** at a worst `est_seconds` of **721.1**
 (and dropping the three `durations:` rows still reads 721.1 — measured by doing exactly that, then
-restoring the manifest), which is `#14192`'s added suites packing into the same pool. The three
+restoring the manifest), which is `#14192`'s added suites packing into the same pool. ⛔ **AND THE `cypher-reconcile` INTEGRATION IS A FURTHER TREE, so read the term off it
+rather than inheriting either parent's:** `--emit-push-matrix` on the reconciled tree (nine PRs merged onto
+`origin/main` `70fbd1a27d`) emits **25 m on all eleven shards** at a worst `est_seconds` of **721.8**
+(shards `a`–`e`, `g`, `i`–`k` at 721.8; `f` and `h` at 721.7) — still 25 m, and 0.7 s above the 721.1
+this paragraph quotes for the `10e51693` tree, which is exactly the point: the minute is stable across
+these merges while the `est_seconds` is not, and every line above that names one names the tree it came
+from. The three hand-added figures below are unchanged by it (the arm-2 SUM is a different arm), and
+`tests/test_ci_selection.py`'s arm-2 invariant is the guard that says so. The three
 hand-added figures are re-added from the emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row
 above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 56.64 m,
 x 1.5 = 85.0 m, 5.0 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
