@@ -565,6 +565,21 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
         "over a ±7% band, and then restated the tolerance instead of deriving "
         "it, i.e. told the first reader who hit the red something false about "
         "the row (rounds 21, 22 and 23).")
+    # ⛔ AND THE PROSE FIGURE ITSELF, not only the emission it describes: the
+    # band above grades the SPAN, so `the ~11.7k-char coercion CASE` could be
+    # rewritten to 15.0k with every row green (round-24 review, measured). The
+    # prose numeral is the span rounded to the one decimal it quotes, so a span
+    # that moves far enough to change that rounding reds this and the band above
+    # independently.
+    prose_k = re.search(r"the ~([\d.]+)k-char coercion", doc)
+    assert prose_k, (
+        "`beta_variance_sum_bound`'s docstring no longer names the spared span as "
+        "'the ~N.Nk-char coercion' — restore the wording or re-point this test, "
+        "but do not leave the figure ungraded")
+    assert float(prose_k.group(1)) == round(spared_span / 1000, 1), (
+        f"the docstring calls the spared span ~{prose_k.group(1)}k chars, but "
+        f"THIS predicate measures {spared_span} ({spared_span / 1000:.3f}k) — "
+        "re-derive the figure against the emission")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 
