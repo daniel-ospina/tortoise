@@ -6813,6 +6813,23 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("probes/capstone_measure.py", "with the flag ON", (
             ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
+        # ⛔ THE GATES `_IDLE_CITES["vet"]` NAMES, in the rule's own docstring — the
+        # second surface of one claim (#14269 review). `_IDLE_CITES["vet"]` 40 lines
+        # above was re-pointed `:17967` → `:17970`; this docstring, whose whole
+        # subject is "the FLAG is not the GATE", kept `:17967`, which reads
+        # `vet_s2_pool: dict = {}` — so a reader following the sentence landed on an
+        # assignment. No leg could see it: `_BUNDLE_CITE` needs a cite to NAME its
+        # file (this is a bare continuation), and the only row reaching this
+        # docstring above scopes on "with the flag ON", whose number sits one
+        # markdown line ABOVE the gate sentence. Measured pre-fix: `git grep -F
+        # '17967'` over `docs/ tests/ tools/` returned this line and nothing else.
+        # Non-vacuity: on the pre-fix line `:17970` is ABSENT (it carried `:17967`),
+        # so this row reds on exactly the number it was added for, and the `_locate_hint`
+        # leg names the live line (`if vet_enabled and embed_list:` at `:17970`).
+        ("probes/capstone_measure.py", "and ``if vet_enabled and complete_list:``", (
+            ("17970", "if vet_enabled and embed_list:"),
+            ("15372", "if vet_enabled and complete_list:"),
+        )),
         ("probes/capstone_measure.py", "follows at", (
             ("14791", "edus = _edus_from_conversation(conversation)"),
         )),
