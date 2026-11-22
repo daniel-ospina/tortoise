@@ -104,16 +104,25 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    module from ``sys.modules`` and never produced a module object — Python
    reference §5.3.1/§5.4 — so no worker and no queue exist for an inline fold to
    overtake). ⛔ BUT THE ``except`` IS BROADER THAN THAT ONE PATH, so the exclusion
-   is not universal and must not be stated as one. It also answers (i) a HALTED
-   import — a ``sys.modules`` entry of ``None``, which raises
-   ``ModuleNotFoundError`` — and (ii) a RE-import that fails after an earlier load
-   SUCCEEDED (the entry is dropped, then the new load raises). In both, a
-   PREVIOUSLY imported module object, its worker thread and its queue are all
-   still alive. There the arm folds inline with an earlier position still queued,
+   is not universal and must not be stated as one. It also answers (i) an import
+   HALTED by a ``sys.modules`` entry of ``None`` and (ii) a RE-import that fails
+   after an earlier load SUCCEEDED — and in both, a PREVIOUSLY imported module
+   object, its worker thread and its queue are all still alive. ⛔ NEITHER IS
+   REACHED BY THE CACHE ENTRY ALONE, which is the part that is easy to get wrong:
+   ``from . import projection_worker`` does not consult ``sys.modules`` once a load
+   has succeeded — it compiles to ``IMPORT_NAME``/``IMPORT_FROM``, and
+   ``_handle_fromlist`` attempts an import only when
+   ``hasattr(package, "projection_worker")`` is False (and this package also has a
+   module ``__getattr__``). So an unusable entry by itself still yields a QUEUED
+   write — the arm never runs. The precondition is BOTH acts: the entry made
+   unusable (``None``, or dropped) AND the package attribute removed (``del
+   tortoise.projection_worker`` / ``delattr``), which is exactly the pair this PR's
+   own test performs. There the arm folds inline with an earlier position still queued,
    the later write's row lands first, and its predecessor overwrites it — the
-   residual itself. That state is reachable (this PR's own test builds it by
-   assigning ``None`` into ``sys.modules``) but is not PRODUCED by this tree:
-   nothing in ``tortoise/`` assigns ``None`` there. So the arm is charged with the
+   residual itself. That state is reachable (this PR's own test builds it, and
+   names both acts) but is not PRODUCED by this tree: nothing in ``tortoise/``
+   assigns ``None`` into ``sys.modules``, drops that entry, or removes the package
+   attribute. So the arm is charged with the
    INLINE FOLD and not with the residual, and the residual's exclusion from this
    arm is a fact about a FIRST load that fails — not a guarantee at every raise. Its
    cost is the inline fold itself, which is why it belongs in the
