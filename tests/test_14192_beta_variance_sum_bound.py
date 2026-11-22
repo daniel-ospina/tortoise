@@ -287,7 +287,9 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     same value the twin returns. (An earlier cut of this docstring quoted guard
     offset 2163 at depth ``1 → 2``; the emitted predicate measures 2136 at
     ``1 → 3``. The assertion reads the offsets rather than the prose, so nothing
-    depended on the stale pair — but nothing recomputed it either.)
+    depended on the stale pair — but nothing recomputed it either. The ``CASE
+    WHEN`` numeral the module docstring quotes IS recomputed, in this test, since
+    round-17 review P2 3.)
     """
     graph, _ = _decorate_under_capture()
     crits = [(c, kw) for c, kw in graph.calls
@@ -315,6 +317,28 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     assert _paren_depth(crit, guard) > _paren_depth(crit, arm), (
         "the guard is not enclosed by the contested arm — it would prune "
         "NAND/terminal peers")
+    # ⛔ THE DOCSTRING'S "8 ``CASE WHEN`` BEFORE ``$contested_sum_bound``" IS A
+    # MEASURED NUMERAL, so it is GRADED here rather than trusted (round-17
+    # review, P2 3). Without this the figure rots silently the moment
+    # `numeric_operand_cypher` or the guard's operand set changes — the same
+    # ungraded-numeral class the docstring's own OBSERVED paragraph apologises
+    # for. Both bounds are claims, so both are asserted:
+    #   * BEFORE THE ARM, 0 — the coercion is the price of the GUARD. A
+    #     `CASE WHEN` ahead of the arm would mean the coercion is paid on rows
+    #     the arm then discards, which is the opposite of the correction this
+    #     docstring makes (the arm's presence checks use raw
+    #     `coalesce(…) IS NOT NULL` and contribute none).
+    #   * BEFORE THE GUARD, 8 — attributable, not coincidental: 4 `CASE WHEN`
+    #     per `numeric_operand_cypher` operand x the guard's TWO operands.
+    assert crit[:arm].count("CASE WHEN") == 0, (
+        "a coercion `CASE WHEN` precedes the contested arm, so the docstring's "
+        "claim that the coercion is the GUARD's price (and no saving) is no "
+        "longer true")
+    assert crit[:guard].count("CASE WHEN") == 8, (
+        f"{crit[:guard].count('CASE WHEN')} coercion `CASE WHEN` precede "
+        "`$contested_sum_bound`, but the docstring promises 8 (4 per "
+        "`numeric_operand_cypher` operand x the guard's two operands) — "
+        "re-derive the docstring's numeral against THIS predicate")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 

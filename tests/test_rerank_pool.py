@@ -1642,8 +1642,12 @@ def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
         f"exemption's recorded reason says {expected} call sites (a discarded "
         "warm-up, and the measured loop) and the grant is owner-granular — a "
         "further read inside the granted owner is exempted with no recorded "
-        "reason. Re-derive the comment in `intentional_keep`, or opt the new "
-        "read out, which needs no grant.")
+        "reason. ⛔ RE-DERIVING THE COMMENT ALONE CANNOT CLEAR THIS RED: this "
+        "assert compares the tree against the expected count it is CALLED "
+        f"with ({expected!r}, a literal at the call site) and never reads "
+        "`intentional_keep`. So the two fixes are (a) re-derive BOTH the "
+        "comment in `intentional_keep` AND that literal, or (b) opt the new "
+        "read out, which needs no grant and no re-derivation.")
     return read_sites
 
 
@@ -2112,32 +2116,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                         or any(node is k.value for k in c.keywords)):
                     call = c
                     break
-            # ⛔ THE VALUE, NOT THE NAME. A presence test accepted
-            # ``_rerank_candidates=True`` as an opt-out at every site here
-            # (measured: the one-word flip at the volunteer seam left all 58
-            # tests green while the armed gate re-picked that pool), which is
-            # exactly the edit this census exists to catch.
-            opted_out = bool(call) and any(
-                k.arg == "_rerank_candidates"
-                and isinstance(k.value, _ast.Constant)
-                and k.value.value is False
-                for k in call.keywords)
-            if call is not None and not opted_out:
-                # a read BOUND as a seam (``_search_fn=sdk.tortoise_fts_query``):
-                # the flag rides in the adjacent ``_search_kwargs`` dict, so the
-                # call itself carries no keyword for it — and the DICT is
-                # evaluated, not grepped, for the reason above
-                for k in call.keywords:
-                    if k.arg != "_search_kwargs":
-                        continue
-                    try:
-                        opts = _ast.literal_eval(k.value)
-                    except (ValueError, SyntaxError):
-                        continue        # not a literal: cannot be proven, so not
-                    if isinstance(opts, dict) and opts.get(
-                            "_rerank_candidates") is False:
-                        opted_out = True
-                        break
+            # ⛔ THE VALUE, NOT THE NAME — and ⛔ THE SAME PREDICATE THE GRANT'S
+            # ARM GRADES. A presence test accepted ``_rerank_candidates=True``
+            # as an opt-out at every site here (measured: the one-word flip at
+            # the volunteer seam left all 58 tests green while the armed gate
+            # re-picked that pool), which is exactly the edit this census exists
+            # to catch.
+            #
+            # This rule used to be COPIED inline here while `_seam_opts_out`
+            # (the predicate `_seam_live_reads` — and therefore the synthetic
+            # pin — exercises) held a SECOND copy: the pin then graded a
+            # duplicate, so that same one-word flip could land in either copy
+            # without the other noticing, and the docstring's claim that the pin
+            # grades "the SAME predicate the census runs" was false (round-17
+            # review, P2 1). ONE predicate, called from both places — a spelling
+            # this census learns is a spelling the pin grades, and a defect in
+            # it reds both.
+            opted_out = _seam_opts_out(call)
             owner = ""
             parent = parents.get(id(node))
             while parent is not None:
