@@ -228,6 +228,14 @@ _FENCED = {
     "container ends after a nested quoted fence": (
         "# t\n\n> ```\n> > ```\na $5\n",
         "> ```\n> > ```"),
+    # A quoted fence inside a LIST ITEM: the markers are offset by the item's
+    # content indent, and one content line sits at column 4. A marker regex
+    # capped at {0,3} read that line as depth 0, ended the fence on it, and
+    # re-read the real closer as a NEW opener — escaping a code line AND leaving
+    # the following prose bare. Graded against a CommonMark renderer.
+    "quoted fence inside a list item": (
+        "- item\n  > ```\n  > a $1\n    > b $2\n  > ```\n  > prose $P\n",
+        "  > ```\n  > a $1\n    > b $2\n  > ```"),
     # An unclosed fence makes the REST of the document code — deliberate, and
     # stated in the docstring.
     "unclosed fence": ("# t\n\ntotal $5\n\n```\necho $HOME\nmore $7 code\n",
@@ -247,10 +255,15 @@ def test_a_fenced_block_is_never_escaped(case):
     # INCLUDING one after the fence — that is what proves the fence state was
     # left, rather than escaping being switched off for the rest of the doc.
     for before, after in (("total $5", "total \\$5"), ("z $2", "z \\$2"),
-                          ("$5 total", "\\$5 total"), ("b $2", "b \\$2"),
-                          ("a $5\n", "a \\$5")):
+                          ("$5 total", "\\$5 total"), ("a $5\n", "a \\$5"),
+                          ("$P", "\\$P")):
         if before in doc:
             assert after in out, f"{case}: prose {before!r} must be escaped"
+    if case == "nested blockquote fence":
+        assert "b \\$2" in out, "prose after a nested quoted fence must be escaped"
+    if case == "quoted fence inside a list item":
+        assert "b $2" in out, (
+            "a code line at column 4 inside a list-item quote must stay bare")
     if case != "unclosed fence" and "after $6" in doc:
         assert "after \\$6" in out, (
             f"{case}: prose AFTER the fence must be escaped again — a fence "

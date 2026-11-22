@@ -847,22 +847,36 @@ def _mean_item_tokens(arm_rep: dict) -> float:
     return float(item.get("median") or 0)
 
 
-_BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
+# A blockquote marker may sit at ANY column: inside a list item the quote is
+# offset by the item's content indent (`  > ``` ` on one line, `    > code` on the
+# next, both inside the same quote). Bounding this to {0,3} made a fence CONTENT
+# line at >=4 columns read as "the container ended" — measured: it escaped code
+# and left the following prose bare (two wrong outcomes at once).
+_BLOCKQUOTE = re.compile(r"^[ \t]*> ?")
 _FENCE_OPEN = re.compile(r"^ {0,3}(?P<delim>`{3,}|~{3,})(?P<info>.*)$")
 
 
-def _quote_depth(line: str) -> int:
-    """How many blockquote markers this line starts with."""
-    depth = 0
-    while _BLOCKQUOTE.match(line):
-        line = line[_BLOCKQUOTE.match(line).end():]
-        depth += 1
-    return depth
+def _marker_columns(line: str) -> list[int]:
+    """The COLUMN of each leading blockquote marker on this line.
+
+    Columns, not just a count: inside a list item a quote's markers are offset
+    by the item's content indent, so the same quote can carry `  > ``` ` on the
+    opener and `    > code` on a content line. Comparing counts alone therefore
+    cannot tell a content line from a line that left the container.
+    """
+    columns: list[int] = []
+    pos = 0
+    while True:
+        marker = _BLOCKQUOTE.match(line[pos:])
+        if not marker:
+            return columns
+        columns.append(pos + len(marker.group(0)) - len(marker.group(0).lstrip(" \t")))
+        pos += marker.end()
 
 
-def _strip_markers(line: str, depth: int) -> str:
-    """Drop AT MOST ``depth`` blockquote markers — never more than the opener had."""
-    for _ in range(depth):
+def _strip_markers(line: str, count: int) -> str:
+    """Drop AT MOST ``count`` blockquote markers — never more than the opener had."""
+    for _ in range(count):
         marker = _BLOCKQUOTE.match(line)
         if not marker:
             break
@@ -870,30 +884,46 @@ def _strip_markers(line: str, depth: int) -> str:
     return line
 
 
-def _opens_fence(line: str) -> tuple[str, int]:
-    """(the opener's FULL delimiter run, its blockquote depth) or ("", 0)."""
-    depth = _quote_depth(line)
-    match = _FENCE_OPEN.match(_strip_markers(line, depth))
+def _opens_fence(line: str) -> tuple[str, list[int]]:
+    """(the opener's FULL delimiter run, its marker columns) or ("", [])."""
+    columns = _marker_columns(line)
+    match = _FENCE_OPEN.match(_strip_markers(line, len(columns)))
     if not match:
-        return "", 0
+        return "", []
     delim = match.group("delim")
     if delim[0] == "`" and "`" in match.group("info"):
         # CommonMark: a backtick fence's info string may not contain a backtick.
-        return "", 0
-    return delim, depth
+        return "", []
+    return delim, columns
 
 
-def _closes_fence(line: str, delim: str, depth: int) -> bool:
+def _left_container(line: str, columns: list[int]) -> bool:
+    """Did this line end the container the fence was opened in?
+
+    ONE way: FEWER markers than the opener. A line with NO marker ends the
+    container; a line whose markers are merely offset differently does not.
+    """
+    if not columns:
+        # An unquoted fence is not held by a container: only a closer ends it.
+        return False
+    # COUNT only — measured against a CommonMark renderer, a line with a marker
+    # at a SHALLOWER column than the opener's is still fence CONTENT (the quote
+    # that opened it ended, but the fence's content carries on). Comparing
+    # columns here would escape that code line and leave the real prose bare.
+    return len(_marker_columns(line)) < len(columns)
+
+
+def _closes_fence(line: str, delim: str, columns: list[int]) -> bool:
     """A closer is AT LEAST as long as its opener, and only spaces follow.
 
-    ``depth`` is the OPENER's blockquote depth, and it is the whole point: a
-    ``>``-prefixed line INSIDE a fence is fence CONTENT, never a container
-    marker, so stripping markers the opener did not have would let a quoted
-    example close the block it is quoted inside.
+    The opener's marker columns are stripped, never more and never fewer: a
+    ``>``-prefixed line INSIDE a fence is fence CONTENT, so stripping markers
+    the opener did not have would let a quoted example close the block it is
+    quoted inside.
     """
     return re.fullmatch(
         r" {0,3}" + re.escape(delim[0]) + "{" + str(len(delim)) + r",}[ \t]*",
-        _strip_markers(line, depth)) is not None
+        _strip_markers(line, len(columns))) is not None
 
 
 def escape_dollars_outside_code(markdown: str) -> str:
@@ -935,11 +965,20 @@ def escape_dollars_outside_code(markdown: str) -> str:
       That one is deliberate: a fence that never closes really does make what
       follows code. A fence opened INSIDE a blockquote is not in that class —
       the quote ending closes it — so a line carrying fewer markers than the
-      opener ends both the fence and the container, and is escaped as prose.
+      opener ends both the fence and the container, and is re-read from the top:
+      escaped as prose, or treated as a new opener (and so left alone) when it
+      opens a fence itself.
     * An INDENTED code block (4+ spaces, which CommonMark makes code) is not
       tracked as code, so a ``$`` inside one IS escaped — the fence rules above
       are applied, indentation-based code blocks are not. This module emits
       neither shape.
+    * CONTAINER tracking (a fence opened inside a blockquote, so the quote
+      ending closes it) approximates CommonMark's list/quote interaction rather
+      than modelling it: a marker at any column is recognised, and the fence ends
+      when a line carries FEWER markers than the opener. Degenerate documents —
+      a fence inside a list-item quote whose content lines' marker offsets vary
+      wildly — can still be classified differently from a full CommonMark
+      renderer. Every shape this module actually emits is fence-free.
     * A ``$`` preceded by an ESCAPED backslash (``\\$``) stays bare: the
       lookbehind that keeps this function idempotent cannot tell it from an
       already-escaped ``$``, so that ``$`` is left unescaped and can still pair
@@ -951,25 +990,25 @@ def escape_dollars_outside_code(markdown: str) -> str:
     """
     out: list[str] = []
     fence: str = ""
-    fence_depth: int = 0
+    fence_columns: list[int] = []
     for line in markdown.split("\n"):
-        if fence and _quote_depth(line) < fence_depth:
-            # The blockquote that held the fence ENDED on this line, so the fence
+        if fence and _left_container(line, fence_columns):
+            # The container that held the fence ENDED on this line, so the fence
             # ended with it and this line is prose (or a new opener) again —
             # CommonMark closes the container, it does not carry it on.
             fence = ""
-            fence_depth = 0
+            fence_columns = []
         if fence:
             out.append(line)
             out.append("\n")
-            if _closes_fence(line, fence, fence_depth):
+            if _closes_fence(line, fence, fence_columns):
                 fence = ""
-                fence_depth = 0
+                fence_columns = []
             continue
-        opened, depth = _opens_fence(line)
+        opened, columns = _opens_fence(line)
         if opened:
             fence = opened
-            fence_depth = depth
+            fence_columns = columns
             out.append(line)
             out.append("\n")
             continue
