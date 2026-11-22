@@ -2581,6 +2581,27 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
     """
     import yaml
 
+    # ⛔ THE CONSTANT'S OWN VALUE IS A CLAIM, AND IT WAS UNPINNED (review cycle 12, P2,
+    # MEASURED). `_RUNNER_SHELL` stops harnesses from drifting APART; nothing stopped its own
+    # value being edited back to `("bash", "-c")` — which is exactly the state both
+    # pre-existing harnesses were in on `origin/main` — and the whole suite stayed GREEN
+    # (`112 passed`). The assertion and the probe below are the two halves: the value is
+    # stated once, and a script only errexit can pass proves the flags are in force.
+    assert _RUNNER_SHELL == ("bash", "-e", "-c"), (
+        "the harness shell drifted to a laxer one than the runner's `bash -e {0}`: "
+        f"{_RUNNER_SHELL!r} — under `bash -c` a step the real runner ABORTS reports a clean "
+        "exit code, which is the false green this constant exists to prevent"
+    )
+    aborted = subprocess.run(
+        [*_RUNNER_SHELL, "true\ngrep -q sdist /dev/null\nexit 0"],
+        capture_output=True,
+        text=True,
+    )
+    assert aborted.returncode == 1, (
+        "the harness shell did not abort on an unguarded failing command, so errexit is not "
+        f"in force and every case below is measured under a laxer shell: rc={aborted.returncode}"
+    )
+
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
     )
@@ -2604,6 +2625,16 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         python_stub.chmod(0o755)
         runner_temp = tmp_path / "runner"
         runner_temp.mkdir(exist_ok=True)
+        # ⛔ EACH CASE STARTS FROM A CLEAN SINK (review cycle 12). Case (c) deliberately
+        # leaves a DIRECTORY at verdict.json so it is unreadable to every uid; a later case
+        # that inherited it would measure THAT state instead of its own — the first cut of
+        # case (d) did exactly that and reported a PASS run as a detector fault. Clearing it
+        # here keeps the cases independent without reordering them.
+        prior = runner_temp / "canary" / "verdict.json"
+        if prior.is_dir():
+            prior.rmdir()
+        elif prior.exists():
+            prior.unlink()
         out = tmp_path / "github_output"
         out.write_text("")
         env = {
@@ -2718,6 +2749,28 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         "the severity signal was not published, or disagrees with the exit — `cat` failing "
         f"under `-e` aborted the step before `$GITHUB_OUTPUT` was written: {published!r}"
     )
+
+    # (d) ⛔ THE PASS LEG IS AN ARM TOO (review cycle 12, P2, MEASURED). The docstring above
+    # claims the log must answer PASS / FAIL / crash; only the last two had a case, so a
+    # regression that gated the display on a non-zero exit — `if [ -s … ] && [ "$rc" !=
+    # "0" ]`, which is exactly the kind of "only print when something went wrong" tidy this
+    # file's readers reach for — left all 112 tests GREEN while a GREEN run told the reader
+    # "wrote NO verdict … no verdict payload exists" about a run that had one. Measured by
+    # applying that mutation: `112 passed`. A green run must print the reading it HAS and
+    # must NOT print the absence line.
+    rc, printed, published = execute(
+        'printf \'{"verdict": "PASS", "exit_code": 0, "arms": []}\\n\'; exit 0'
+    )
+    assert rc == 0, printed
+    assert "PASS" in printed, (
+        "a GREEN canary run printed no readable verdict — the first of the three answers the "
+        f"docstring promises is unpinned and now broken: {printed!r}"
+    )
+    assert "NO verdict (empty or absent verdict.json)" not in printed, (
+        "a GREEN run printed the NO-VERDICT line: the log tells a reader no payload exists "
+        f"about a run whose verdict.json is right there — {printed!r}"
+    )
+    assert published.strip() == "exit_code=0", published
 
 
 def _strip_shell_comments(script: str) -> str:
