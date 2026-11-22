@@ -85,8 +85,9 @@ to a discard-point ancestor, which is not a statement anyone should rely on.
 
 What IS verifiable from the artifacts, and is what the claims below rest on: both
 arms ran in ONE process against ONE corpus (`points: 2000`, `corpus_seed: 42`,
-`queries: 24` in both); each arm recorded **240 order ids, 0 nulls, 0 empty
-pages**; `comparable: true`; and the pre-change arm was materialised with
+`queries: 24` in both); each arm recorded `sum(len(q["order"]) for q in
+per_query)` = **240 order ids** across its 24 `per_query` entries, with `0` nulls
+and `0` empty pages; `comparable: true`; and the pre-change arm was materialised with
 `git show e74cf1d13d:tortoise/search_engine.py`, a revision that DOES resolve.
 Read the delta and the rank verdict as measurements of this change on this box.
 Do not read the sha as a pin on a commit.
