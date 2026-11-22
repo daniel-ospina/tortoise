@@ -1972,7 +1972,7 @@ def run(sdk):
                 if isinstance(n, ast.Attribute)
                 and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
     live, resolved, unresolved, calls = _seam_live_reads(tree, mentions)
-    # THREE of the five opt out — exactly the two literal `False` values and
+    # TWO of the five opt out — exactly the two literal `False` values and
     # nothing else. A presence test on either branch exempts a `True` too, and
     # `return False` exempts none of them.
     assert (len(live), len(resolved), len(unresolved), len(calls)) == (3, 3, 0, 3), (
@@ -1981,6 +1981,19 @@ def run(sdk):
         "as opted out is the fail-open the grant exists to close. "
         f"live={len(live)} resolved={len(resolved)} "
         f"unresolved={len(unresolved)} calls={len(calls)}")
+    # ⛔ AND THE COUNTS ALONE CANNOT GRADE THE VALUE, because the fixture is
+    # symmetric: one `False` and one `True` on EACH branch. Inverting either
+    # value test (`is False` -> `is True`) swaps WHICH read is exempted and
+    # leaves all four counts identical — measured green at `216e2ef66b`, the
+    # exact fail-open this test exists to close. So the verdict is pinned per
+    # READ, keyed on the fixture's unique `query=`.
+    verdicts = {k.value.value: _seam_opts_out(c)
+                for c in ast.walk(tree) if isinstance(c, ast.Call)
+                for k in c.keywords if k.arg == "query"}
+    assert verdicts == {"on": True, "not-off": False, "dict-on": True,
+                        "dict-not-off": False, "bare": False}, (
+        "the opt-out must be keyed on the VALUE, per read — a `True` on either "
+        f"branch re-picks the pool and is NOT an opt-out: {verdicts}")
 
 
 def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
