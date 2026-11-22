@@ -699,7 +699,12 @@ class _LineJSONClient:
     THAT REPORTS IT (review P3, cycle 6): where it does not (macOS's
     ``LOCAL_PEERCRED`` is not implemented here), the check is a no-op by
     construction and ``open_stream`` says so once in the log. The remaining
-    defence there is the ``0700`` directory, which is why it is not decoration.
+    defence there is the ``0700`` directory, which is why it is not decoration —
+    ⛔ AND NOTHING IS LEFT when the operator pointed ``TORTOISE_EMBED_WORKER_SOCKET``
+    at a path this uid does not own privately: the two controls are independent,
+    and :meth:`WorkerBacking._warn_if_shared_parent` says so at the path (review
+    P3, cycle 8 — this docstring used to promise the directory unconditionally, as
+    the sibling of the warning it contradicts).
     """
 
     def __init__(self, address: str) -> None:
@@ -895,9 +900,11 @@ class WorkerBacking:
                 "reports (SO_PEERCRED)"
                 if peer_check_available else
                 "this kernel reports NO SO_PEERCRED, so NEITHER the worker's nor "
-                "the client's peer check can run — leave this path unshared, or "
-                "set TORTOISE_EMBED_WORKER_REQUIRE_PEER=1 to refuse peers whose "
-                "uid is unknown")
+                "the client's peer check can run — leave this path unshared. "
+                "TORTOISE_EMBED_WORKER_REQUIRE_PEER=1 makes the WORKER refuse its "
+                "CLIENTS (on such a kernel every one, so the worker backing stops "
+                "serving); no lever stops a foreign process binding this path "
+                "FIRST, which is the direction this warning is about")
 
     def described_socket_path(self) -> str | None:
         """The socket path WITHOUT minting anything — for diagnostics.
@@ -2171,11 +2178,20 @@ def seam_status() -> dict:
         }
         return view
     except Exception as exc:
+        # ⛔ ``injected`` IS NOT ``None`` HERE (review P3, cycle 8). It is a
+        # question about MODULE STATE, not about the read that failed, and the
+        # runbook tells an operator to read ``injected: true`` as "a test installed
+        # a backing, nothing above can be trusted" — so a hardcoded ``False``
+        # answered "no test hatch" on the one read that cannot know otherwise, and
+        # disagreed with :func:`tortoise.hosted_api._embed_seam_health`'s own
+        # degraded arm, which publishes every value as ``None``. The read is a
+        # total attribute access on a module global, so the never-raise contract
+        # holds.
         return {
             "backing": None, "max_wait_ms": None, "max_batch": None,
             "timeout_s": None, "last_decline": None, "last_decline_age_s": None,
-            "injected": False, "backing_state": None, "latency": None,
-            "latency_stale": None, "backings": None,
+            "injected": _injected is not None, "backing_state": None,
+            "latency": None, "latency_stale": None, "backings": None,
             "error": f"{type(exc).__name__}: {exc}"[:200],
         }
 

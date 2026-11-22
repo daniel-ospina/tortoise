@@ -837,7 +837,11 @@ class TestTheDistributionsAreExported:
 
         ``_embed_seam_health``'s ``except`` only catches a RAISE, but
         ``seam_status`` has its OWN degraded arm returning every key as ``None``
-        PLUS ``error``. The reason was therefore dropped: ``/health`` published
+        PLUS ``error`` — except ``injected``, which that arm answers from module
+        state (review P3, cycle 8: ``injected: true`` is how an operator detects
+        the test hatch, so a hardcoded ``False`` there was the one field the
+        runbook tells them to trust, answered from nothing). The reason was
+        therefore dropped: ``/health`` published
         ``backing: null`` with nothing saying why, contradicting this module's own
         comment and the runbook ("every value null, plus ``error``"). The raise arm
         is pinned above; this drives the INTERNAL arm, which is the one that
@@ -1672,6 +1676,50 @@ class _FakeProc:
         return None
 
 
+class TestTheDegradedSeamArmStillTellsTheHatch:
+    """⛔ The one field a degraded block must NOT answer from nothing (cycle 8).
+
+    The runbook tells an operator that `injected: true` means a test installed a
+    backing and nothing above can be trusted. The degraded arm used to hardcode
+    `False`, so the field the operator is told to trust answered "no hatch" on the
+    read that cannot know — while `hosted_api`'s own degraded arm publishes it as
+    `null`. It is module state, not a fact about the failed read, so it is
+    answerable.
+    """
+
+    def test_a_degraded_block_reports_the_INJECTED_hatch(self, monkeypatch):
+        class _Fake:
+            name = "fake"
+
+            def encode(self, texts, *, timeout_s=None):  # pragma: no cover
+                return None
+
+            def close(self) -> None:
+                return None
+
+            def describe(self) -> dict:
+                return {}
+
+        embed_seam.install_backing(_Fake())
+        try:
+            monkeypatch.setattr(
+                embed_seam, "resolve_max_wait_ms",
+                lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+            degraded = embed_seam.seam_status()
+        finally:
+            embed_seam.install_backing(None)
+        assert degraded.get("error") and "boom" in degraded["error"], degraded
+        assert degraded.get("injected") is True, (
+            "the degraded arm answered `injected: False` while a backing WAS "
+            "injected — the field the runbook tells an operator to trust is "
+            f"reporting a fact it never checked: {degraded.get('injected')!r}")
+        # And with no hatch, the same arm says so.
+        monkeypatch.setattr(
+            embed_seam, "resolve_max_wait_ms",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert embed_seam.seam_status().get("injected") is False
+
+
 class TestTheSharedPathWarningNamesThePlatform:
     """⛔ Two warnings that contradicted each other (review P2, cycle 7).
 
@@ -1706,6 +1754,10 @@ class TestTheSharedPathWarningNamesThePlatform:
             f"kernel cannot run: {message!r}")
         assert "TORTOISE_EMBED_WORKER_REQUIRE_PEER=1" in message, (
             f"the remedy an operator can actually apply is not named: {message!r}")
+        assert "CLIENTS" in message and "FIRST" in message, (
+            "the warning offers the lever without saying what it does NOT cover "
+            "(a foreign process binding the path FIRST is the server, and no "
+            f"lever touches that direction): {message!r}")
         assert "reliance is on the client's peer-credential check" not in message
 
     def test_a_shared_path_WHERE_the_kernel_reports_it_still_names_the_check(

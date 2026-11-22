@@ -1315,10 +1315,13 @@ retired, so read them as "this is what it did last time", not as "this is what i
 `worker` backing is not a verdict either. The caller-facing contract for a dense leg that cannot run
 is #2952's per-read declaration, and this change does not touch it. If `seam_status()` itself raises,
 the block arrives with the SAME key set, every value `null`, plus `error`, and `/health` is still a
-**200** — read `backing: null` as INCONCLUSIVE, never as "in-process". ⛔ The ONE exception is
-`injected: false`, which a failed read still answers: nothing was injected before the read failed, so
-the field is not a claim about the seam, and a `jq .embed_seam.injected` on a degraded block must not
-be read as "the seam is live and un-injected" (the `error` key is the verdict).
+**200** — read `backing: null` as INCONCLUSIVE, never as "in-process". ⛔ There are **two** degraded
+arms and they differ in ONE field, so read `injected` by arm: when `seam_status()` itself raises,
+`embed_seam` answers its own arm, which reports `injected` from **module state** (`true` if a test
+installed a backing — the field is a fact about the process, not about the failed read); when the
+IMPORT or the call raises, `_embed_seam_health` publishes every key as `null`, `injected` included. In
+both, `error` is the verdict and `backing: null` means the seam could not be described — never "no
+encoder".
 
 #### The two levers
 
@@ -1330,7 +1333,7 @@ be read as "the seam is live and un-injected" (the `error` key is the verdict).
 | `TORTOISE_EMBED_QUERY_TIMEOUT_S` | `30` | The bound on ONE fired request (worker / external round trip). |
 | `TORTOISE_EMBED_WORKER_SOCKET` | a `0700` directory this process mints (`$TMPDIR/tortoise-embed-worker-<pid>-*/embed.sock`) | Where the worker listens. The private directory is not decoration: readiness is the path's EXISTENCE, and a shared directory would let any local user create it first. An explicit path here is honoured verbatim — and the CLIENT verifies the answering peer's uid (`SO_PEERCRED`) after `connect`, so an operator-pointed shared path cannot be hijacked by a foreign process **on a kernel that reports the credential (Linux)**. ⛔ Where it does not (macOS's `LOCAL_PEERCRED` is not implemented here) the client cannot check and says so once in its log: the defence there is the `0700` directory alone, so an explicit path on such a host is only as private as the directory the operator put it in. |
 | `TORTOISE_EMBED_WORKER_STARTUP_S` | `600` | How long a worker may take to become READY (cold import + model load). Never the per-request budget. |
-| `TORTOISE_EMBED_WORKER_REQUIRE_PEER` | unset | Read by the WORKER process. Unset ⇒ a kernel that reports no peer credential (e.g. macOS, whose `LOCAL_PEERCRED` is not implemented here) is WARNED about once and allowed, on the strength of the private directory. Set to `1` ⇒ such a peer is REFUSED, which is the right posture when the socket lives at an operator-supplied shared path. |
+| `TORTOISE_EMBED_WORKER_REQUIRE_PEER` | unset | Read by the WORKER process. Unset ⇒ a kernel that reports no peer credential (e.g. macOS, whose `LOCAL_PEERCRED` is not implemented here) is WARNED about once and allowed, on the strength of the private directory. Set to `1` ⇒ such a peer is REFUSED. ⛔ It covers ONE direction: it runs in the process that BOUND the socket, so it refuses foreign CLIENTS — it cannot stop a foreign process that binds the shared path FIRST (that process is the server, and its own check is the attacker's code), and on a kernel that cannot report the uid it refuses every legitimate client too, so the worker backing stops serving rather than hardening. The client's own `connect`-side check cannot be configured at all. Where the path is shared and the kernel reports no `SO_PEERCRED`, **leave the path unshared** — that is the only remedy for the bind-first direction. |
 | `TORTOISE_EMBED_WORKER_PYTHON` | the parent's `sys.executable` | The worker must import the SAME tortoise and extras — a different interpreter is a different encoder. |
 | `TORTOISE_EMBED_EXTERNAL_URL` / `_TOKEN` / `_MODEL` | unset | The remote endpoint, an optional `Bearer`, and the model id to ask for. |
 

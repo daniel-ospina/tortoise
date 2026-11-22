@@ -8594,7 +8594,11 @@ def _embed_seam_health() -> dict:
         return {**dict.fromkeys(_EMBED_SEAM_HEALTH_KEYS), "error": str(exc)[:200]}
     block = {key: status.get(key) for key in _EMBED_SEAM_HEALTH_KEYS}
     # ⛔ ``seam_status()`` NEVER RAISES — it has its OWN degraded arm, returning
-    # every declared key as ``None`` PLUS ``error``. The ``except`` above only
+    # every declared key as ``None`` PLUS ``error`` — with ONE exception (review
+    # P3, cycle 8): ``injected`` is answered from module state there, because it is
+    # a fact about this process rather than about the read that failed, so a
+    # degraded block still tells an operator whether a test installed a backing.
+    # The ``except`` above only
     # catches a RAISE, so the reason that arm carries was silently dropped: the
     # block arrived as ``backing: null`` with nothing saying why, contradicting
     # both this file's own comment and the runbook ("every value null, plus
