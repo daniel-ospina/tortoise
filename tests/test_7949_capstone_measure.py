@@ -18434,7 +18434,18 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     if _base is None:
         # STATED, NOT IMPLIED: a `--depth 1` clone has no base ref, so this half is
         # UNMEASURED there rather than green (see the fabrication guard below).
-        pass
+        # ⛔ BUT THAT GUARD CANNOT SEE THIS PATH: `_measured` already carries the named head
+        # by this point, so its `if not _measured` condition is False and a bare `pass` here
+        # is a FALSE PASS — measured on a `--single-branch` clone (the named head's blob is
+        # present, neither base ref is), where the arm went GREEN having measured no
+        # membership at all (review at `a963c908`). Same rule the two `git diff` branches
+        # follow: unmeasurable is a RECORDED failure unless the clone is shallow, which is
+        # the ONE shape where the absence is by construction.
+        if _git("rev-parse", "--is-shallow-repository").stdout.strip() != "true":
+            failures.append(
+                "neither `origin/main` nor `main` resolves in this clone and it is NOT "
+                "shallow — so D5's `in this diff` membership CANNOT be measured here, "
+                "and nothing measured is not a pass (#14260 fix lane, finding 3)")
     elif _git("merge-base", "--is-ancestor", "HEAD", _base).returncode == 0:
         # (3) THE MERGED STATE. `HEAD` is on/behind the base, so `<base>...HEAD` is empty by
         # construction and the sentence's membership is history — measured, not skipped.
