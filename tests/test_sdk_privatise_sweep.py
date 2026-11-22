@@ -1516,9 +1516,16 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     own rule 2, a catch not attributable to the guard it claims to prove. A superset assert
     carries both facts and stays reachable: delete any key and it names the rev that went
     missing, empty the map and that same line reds with all six named.
+
+    ⛔ THE REQUIRED SET INCLUDED ONLY THE SIX, SO A RE-CUT ADDRESS'S DELETION WAS STILL UNGRADED
+    (#14282 review cycle 2, P3). The three addresses the re-cut paragraph publishes were in the
+    map and their SHAPE was graded below, but they were absent from `expected`, so deleting one
+    left this arm GREEN — the loss surfacing at best as a `KeyError` out of `_rearm_command` on
+    the skip path, never as an assertion. `expected` is now the six UNION every `OWN_PINS` key,
+    because a rev the block publishes an OWN PIN for is exactly a rev a skip may name.
     """
     expected = {RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
-                RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"}
+                RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"} | set(OWN_PINS)
     missing = sorted(expected - set(_ARM_REFSPECS))
     assert not missing, (
         f"{missing} have no fetchable address — a skip naming one is inert, and an empty map "
@@ -1526,11 +1533,22 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     for rev, refspec in _ARM_REFSPECS.items():
         assert not re.fullmatch(r"[0-9a-f]{7,39}", refspec), (
             f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
-        _, _, destination = refspec.lstrip("+").partition(":")
+        source, _, destination = refspec.lstrip("+").partition(":")
         assert destination, (
             f"{rev} is mapped to a SOURCE-ONLY refspec: git records it in `FETCH_HEAD` and "
             "creates no local ref, so a skip printing it re-arms the object DB and leaves the "
             "ADDRESS assertion UNCHECKED — the round-13 inert remedy")
+        # ⛔ A WRONG SOURCE SHA UNDER A CORRECT KEY (#14282 review cycle 2, P3 residual). Grading
+        # only the DESTINATION lets `+<another-sha>:refs/remotes/origin/<rev>` pass, so the map
+        # would fetch rev B under rev A's address and every `_ref_sha` premise reading that ref
+        # would be a premise about the WRONG TREE — the same "address that resolves to a different
+        # tree" defect this block exists to catch, one level down in the re-arm path. The source is
+        # graded ONLY where it IS a sha: the six older revs address `refs/pull/14108/head`, a live
+        # pointer rather than an abbreviation of the key, and `origin/main` addresses a branch name.
+        if re.fullmatch(r"[0-9a-f]{7,40}", source):
+            assert source.startswith(rev), (
+                f"{rev} is mapped to a refspec whose SOURCE is {source[:12]} — a DIFFERENT "
+                "commit, so a skip re-arming off it fetches the wrong tree")
     assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
         "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
     assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
