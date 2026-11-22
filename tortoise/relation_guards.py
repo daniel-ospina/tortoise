@@ -61,19 +61,24 @@ outcome          when                                             reported?
 ``reversed``     the predicate is declared for the reverse pair   always —
                  and not for the pair as asked                    a DIFFERENT
                                                                   state (§2)
-``abstained``    the declarations cannot answer — see the five    never
+``abstained``    the declarations cannot answer — see the six     never
                  reasons below
 ===============  ===============================================  ============
 
-The five abstention reasons, each with its own stable id so a test (and a
+The six abstention reasons, each with its own stable id so a test (and a
 future counter) can tell which premise was missing rather than reading one
-label for five facts (§2's no-flattening rule applies to abstentions too):
+label for six facts (§2's no-flattening rule applies to abstentions too):
 
 ``predicate-not-declared``        the `#1934`/`#7551` predicate leg already owns
                                   this write; a pair check has no premise
 ``predicate-declares-no-pair``    a declared WORD with no kind pair — a
                                   ``declarationOnly: true`` row, which binds no
                                   write path
+``ambiguous-pair``                MORE than one distinct declared pair matches
+                                  the ask (a bare ``issue`` two namespaces both
+                                  declare), so the declarations answer with
+                                  several pairs at once and picking one would be
+                                  a guess (round-6 review, P2)
 ``outside-declared-scope``        neither endpoint kind occurs anywhere in the
                                   declared vocabulary, so the pairs are not
                                   talking about the packs' domain at all
@@ -194,6 +199,11 @@ ABSTAIN_NO_DECLARED_PAIR = "predicate-declares-no-pair"
 #: Neither endpoint kind occurs anywhere in the declared relation vocabulary —
 #: the pairs are not talking about the packs' domain at all.
 ABSTAIN_OUTSIDE_SCOPE = "outside-declared-scope"
+#: MORE than one distinct declared pair matches the ask — a bare ``issue`` that
+#: two namespaces both declare as an endpoint. The declarations DO cover it, but
+#: with several pairs at once, so choosing one is a guess and reporting
+#: ``undeclared_pair`` is a plain falsehood (round-6 review, P2).
+ABSTAIN_AMBIGUOUS_PAIR = "ambiguous-pair"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -440,12 +450,20 @@ def _kind_equivalent(asked_kind: str, declared: str,
 def _pair_matches(pairs: tuple[tuple[str, str], ...],
                   from_kind: str, to_kind: str,
                   from_label: str | None = None,
-                  to_label: str | None = None) -> tuple[str, str] | None:
-    """The declared pair this asked pair IS, or ``None``.
+                  to_label: str | None = None,
+                  ) -> tuple[tuple[str, str] | None, bool]:
+    """The declared pair this asked pair IS, and whether the match was AMBIGUOUS.
 
-    Matched under ``_kind_equivalent`` in BOTH slots, and only when the match is
-    UNIQUE: a bare ``issue`` that two declared pairs resolve to names no single
-    relation, so it resolves to none of them rather than to an arbitrary one.
+    Matched under ``_kind_equivalent`` in BOTH slots. Three outcomes, and the
+    third is why this returns two values instead of one (round-6 review, P2):
+
+    * exactly ONE distinct pair matches → ``(pair, False)``;
+    * NO pair matches → ``(None, False)`` — the caller reports undeclared;
+    * MORE than one distinct pair matches → ``(None, True)``. A bare endpoint
+      that two namespaces both declare (``issue``) makes the declarations
+      answer with several pairs at once; the caller must ABSTAIN there, because
+      picking one would be a guess and reporting ``undeclared_pair`` would
+      contradict the block's own ``declaredBetweenTheseKinds``.
     """
     hits = [pair for pair in pairs
             if _kind_equivalent(from_kind, pair[0], from_label)
@@ -463,7 +481,9 @@ def _pair_matches(pairs: tuple[tuple[str, str], ...],
     # moment a tenant/extra manifest re-declares a pair — which is exactly what
     # "over every loaded pack" invites.
     distinct = list(dict.fromkeys(hits))
-    return distinct[0] if len(distinct) == 1 else None
+    if len(distinct) == 1:
+        return distinct[0], False
+    return None, len(distinct) > 1
 
 
 def _predicates_between(declared: dict[str, tuple[tuple[str, str], ...]],
@@ -717,7 +737,12 @@ def relation_pair_verdict(
 
     if not (_speaks(from_kind, from_label) or _speaks(to_kind, to_label)):
         return _abstain(ABSTAIN_OUTSIDE_SCOPE, canonical, from_kind, to_kind)
-    matched = _pair_matches(pairs, from_kind, to_kind, from_label, to_label)
+    matched, _ambiguous = _pair_matches(
+        pairs, from_kind, to_kind, from_label, to_label)
+    if _ambiguous:
+        # the declarations DO cover this ask — with several pairs at once. Say
+        # nothing rather than pick one or claim there is none (round-6, P2).
+        return _abstain(ABSTAIN_AMBIGUOUS_PAIR, canonical, from_kind, to_kind)
     if matched is not None:
         # A pure re-spelling (of the predicate or of a bare endpoint kind) is
         # AX Rule 1 class 1 — SILENT. A receipt here would ask the caller to
@@ -726,8 +751,10 @@ def relation_pair_verdict(
         return PairVerdict(outcome=outcome, predicate=canonical,
                            from_kind=from_kind, to_kind=to_kind)
 
-    reversed_match = _pair_matches(pairs, to_kind, from_kind, to_label,
-                                   from_label)
+    reversed_match, _reverse_ambiguous = _pair_matches(
+        pairs, to_kind, from_kind, to_label, from_label)
+    if _reverse_ambiguous:
+        return _abstain(ABSTAIN_AMBIGUOUS_PAIR, canonical, from_kind, to_kind)
     outcome = REVERSED_PAIR if reversed_match is not None else UNDECLARED_PAIR
     rule = RULE_REVERSED if outcome == REVERSED_PAIR else RULE_UNDECLARED
     declared_for = [{"fromKind": one, "toKind": two} for one, two in pairs]
@@ -787,6 +814,7 @@ def warning_shape(payload: dict) -> dict:
 
 __all__ = [
     "ABSTAIN",
+    "ABSTAIN_AMBIGUOUS_PAIR",
     "ABSTAIN_NOT_DECLARED",
     "ABSTAIN_NO_DECLARED_PAIR",
     "ABSTAIN_NO_KINDS",

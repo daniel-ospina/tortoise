@@ -29123,11 +29123,15 @@ class TortoiseSDK:
         # .predicate` verbs and the write path passes bare labels, so the
         # bare-vs-bare comparison is consistent. Namespaced enforcement
         # resolution (#2030) applies to the KIND arm of resolve_enforcement
-        # only; a namespaced relation label is out of scope here. (Epic §6
-        # scope: the "undeclared relation/kind-PAIR → warn-not-block"
-        # contract has NO kind-pair leg on the write path — this check
-        # covers the relation leg only; the kind-pair leg is an epic-level
-        # gap, out of #2030 scope.)
+        # only; a namespaced relation label is out of scope here. This block
+        # answers DECLAREDNESS only: the MECHANISM leg is the block below, and the
+        # kind-PAIR leg now EXISTS on this door — reached through
+        # `_relation_pair_notes` at the end of this method, which asks
+        # `relation_guards.relation_pair_verdict` (warn-not-block, #1934/#14263).
+        # ⛔ An earlier revision of this comment said the kind-pair leg was "an
+        # epic-level gap" with NO write-path leg; round-6 review (P3) caught it
+        # describing the gap this PR closes, in the comment a lane reads before
+        # touching this door.)
         warnings: list[dict] = []
         # ── #14263 (review F3): ONE spelling resolution, on this door too ────
         # A re-spelling of a DECLARED predicate (`HASPART`, `ASSIGNEDTO`,

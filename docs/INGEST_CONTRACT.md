@@ -398,9 +398,13 @@ That judgement is `out["relation_declarations"]`.
   compares every STABLE field of this block (the ones above, `direction`
   included on the reversed case it is defined for) to a real emitted payload, so
   THOSE cannot drift silently — a field ADDED to the payload still needs an
-  example line here, and the pin checks the compared set, not the payload's
-  whole key set (round-4 review, F1). The example is a FORWARD write, so it
-  carries no `direction` key and the pin additionally asserts that absence.
+  example line here. That pin is stronger than the compared set: it ALSO asserts
+  `set(emitted) - {target, connection, fromId, toId, message} == STABLE`, so a
+  field added to the PAYLOAD reds it. What it cannot see is an extra key in THIS
+  example block (round-6 review, P3 — the earlier wording claimed the pin checks
+  only the compared set, i.e. the exact opposite of what it asserts). The example
+  is a FORWARD write, so it carries no `direction` key and the pin additionally
+  asserts that absence.
 - ⛔ **`declaredFor` is what the predicate IS declared for — never the pair being
   judged.** If it listed this example's own `dev:api -> dev:database` together with
   `outcome: undeclared_pair`, the block would contradict itself (that was the

@@ -730,19 +730,48 @@ class TestThePairUniquenessIsOverPairs:
             "dependsOn", "dev:api", "dev:database", declared=declared)
         assert verdict.outcome == REVERSED_PAIR
 
-    def test_two_DIFFERENT_matching_pairs_still_resolve_to_none(self):
-        """Deduping must not turn a genuine ambiguity into a guess."""
+    def test_a_GENUINE_ambiguity_abstains_instead_of_reporting(self):
+        """Round-6 review, P2 — two matching pairs must say NOTHING, not "undeclared".
+
+        `_pair_matches` answered `None` both for "no pair matches" and for
+        "several do", and the caller turned `None` into a REPORTED verdict — so a
+        bare `issue` that two namespaces both declare was answered
+        `undeclared_pair`, in a payload whose own `declaredBetweenTheseKinds`
+        listed the predicate as declared. MEASURED before the fix with
+        `declared={"contains": (("dev:issue","dev:bug"),("pm:issue","dev:bug"))}`
+        and the ask `("issue","dev:bug")`: `outcome='undeclared_pair'`,
+        `declaredBetweenTheseKinds=['contains']`. The declarations DO cover the
+        ask — with several pairs at once — so the only honest answer is silence,
+        under its own reason id (the no-flattening rule applies to abstentions).
+        """
+        declared = {"contains": (("dev:issue", "dev:bug"),
+                                  ("pm:issue", "dev:bug"))}
+        verdict = relation_pair_verdict(
+            "contains", "issue", "dev:bug", declared=declared)
+        assert verdict.outcome == ABSTAIN, (
+            f"an ambiguous match must not be reported; got {verdict.outcome}")
+        assert verdict.reason == rg.ABSTAIN_AMBIGUOUS_PAIR
+        assert verdict.payload is None, "an abstention says nothing"
+
+    def test_one_asked_pair_still_resolves_when_the_match_is_UNIQUE(self):
+        """The control for the row above: one distinct match still resolves."""
         declared = {"dependsOn": (("dev:api", "dev:database"),
                                    ("dev:api", "dev:cache"))}
-        # A bare `dev` pair that both declarations' local halves could answer is
-        # not expressible here, so assert the surviving rule directly: one
-        # asked pair resolves only when exactly ONE distinct pair matches.
         assert relation_pair_verdict(
             "dependsOn", "dev:api", "dev:cache", declared=declared
         ).outcome == ACCEPT
         assert relation_pair_verdict(
             "dependsOn", "dev:cache", "dev:database", declared=declared
         ).outcome == UNDECLARED_PAIR
+
+    def test_the_reverse_check_abstains_on_ambiguity_too(self):
+        """`REVERSED_PAIR` shares the helper, so it shares the ambiguity rule."""
+        declared = {"contains": (("dev:bug", "dev:issue"),
+                                  ("dev:bug", "pm:issue"))}
+        verdict = relation_pair_verdict(
+            "contains", "issue", "dev:bug", declared=declared)
+        assert verdict.outcome == ABSTAIN
+        assert verdict.reason == rg.ABSTAIN_AMBIGUOUS_PAIR
 
 
 class TestAReportedTargetIsAttributable:

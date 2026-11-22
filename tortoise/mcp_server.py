@@ -7946,9 +7946,12 @@ def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict
     about*, related, dependsOn, etc. Operator-less by default — lazy promotion
     via operator_action(action='mitigate') when mitigation becomes needed.
     Returns {edge, created, nudges} — plus `relation_declaration` and
-    `warnings[]` when the installed packs declare no relation (or only the
-    REVERSE one) between the two kinds: the write still lands (`#1934`,
-    warn-not-block) and the judgement is reported, never used to refuse.
+    `warnings[]` when the installed packs declare no relation FOR THAT PREDICATE
+    between the two kinds (or declare it only for the REVERSE orientation): the
+    write still lands (`#1934`, warn-not-block) and the judgement is reported,
+    never used to refuse. ⛔ Read it per PREDICATE, not per pair: `contains`
+    written between two kinds that OTHER predicates connect is still reported,
+    and the payload's `declaredBetweenTheseKinds` names what those are.
     (Param order kept from the legacy surface:
     source_id, target_id, predicate → SDK create_edge(relation, from_id, to_id).)
     """
