@@ -537,14 +537,28 @@ class ProjectionWorker:
         while True:
             self._ensure_not_inherited()
             with self._cond:
-                # ⛔ "EMPTY AND NOTHING IN FLIGHT" IS THE EXACT PREDICATE
-                # (#14222 review cycle 2, NEW-3). The counter form
-                # (`projected + failures >= submitted`) was an APPROXIMATION that
-                # a forked child could never satisfy — it inherits the parent's
-                # high-water marks with an empty queue, so its exit drain burned
-                # the full timeout on a worker that had nothing to do. The loop
-                # pops and clears `_inflight` under this same lock, so this is
-                # exact rather than approximate.
+                # ⛔ "EMPTY AND NOTHING IN FLIGHT" IS THE PREDICATE
+                # (#14222 review cycle 2, NEW-3), and it is EXACT because the loop
+                # pops and clears `_inflight` under this same lock: depth alone is
+                # the wrong question (a WEDGED fold leaves an empty deque, which
+                # would read as drained — see the branch below), and the counter
+                # form (`projected + failures >= submitted`) is a DERIVED reading
+                # of two counters rather than the queue's own state.
+                # ⛔ AN EARLIER REVISION OF THIS COMMENT GAVE A DIFFERENT REASON and
+                # it is false at this head, so it is withdrawn rather than kept:
+                # it said the counter form is one "a forked child could never
+                # satisfy — it inherits the parent's high-water marks with an empty
+                # queue". `_reset_for_fork_locked` ZEROES `_submitted`, `_projected`
+                # and `_failures`, so `0 + 0 >= 0` holds and no inherited mark
+                # survives to spoil it. (Round-14 review, P3.)
+                # ⚠️ AND THE SUITE DOES NOT PIN THIS PREDICATE: restoring the
+                # counter comparison leaves
+                # `test_a_drain_predicate_is_exact_even_after_a_fork` and
+                # `test_a_drain_wait_reports_UNDRAINED_when_the_fold_is_wedged`
+                # green, because those legs pin the RESET and the WEDGE, not the
+                # comparison. So read this comment as the reason the queue's own
+                # state is asked directly, and do NOT read it as evidence that a
+                # mutation here would red.
                 if not self._pending and self._inflight is None:
                     return True
                 remaining = (IDLE_WAIT_SECONDS if deadline is None

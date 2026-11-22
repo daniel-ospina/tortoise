@@ -440,12 +440,14 @@ class LiveWrite:
     #: ⛔ The record's fold was HANDED TO THE PROJECTION WORKER instead of run
     #: here (#14185). ``True`` means: the journal line is committed, the fold is
     #: QUEUED, and ``record`` is ``None`` because nothing has ANSWERED yet — not
-    #: because nothing is armed. It is a separate field rather than a FOURTH
-    #: meaning of ``record is None`` precisely so that "deferred" and "unarmed"
-    #: cannot be confused by a caller or by :attr:`armed`. (The class docstring's
-    #: list of arms was still saying THREE when this field made it four; #14222's
-    #: round-9 review found the two sentences contradicting each other, and both
-    #: now count four.)
+    #: because nothing is armed. ⛔ ``record`` IS ``None`` on this arm too — it is
+    #: the fourth one (the class docstring lists all four) — and this field exists
+    #: so the arm is DISTINGUISHABLE, not so that ``record`` carries a different
+    #: value. An earlier revision of this comment said the field was "a separate
+    #: field rather than a FOURTH meaning of ``record is None``", which its own
+    #: next parenthetical disproved; the contradiction is corrected here rather
+    #: than renumbered (round-9 said "both now count four" while the sentence still
+    #: denied it — round-14, P3).
     #:
     #: A deferred write is a LANDED write (the line exists, and
     #: ``derived = replay(journal)`` guarantees the record can be rebuilt to
