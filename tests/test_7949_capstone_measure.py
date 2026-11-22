@@ -17996,11 +17996,13 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # import list — ⛔ **not a call site** — and that second address was graded by NOTHING:
     # reverting it to a pre-fix value reddened no arm at all, which is the class this tuple
     # exists to close. The needle is that line's own text, so the number and the content it
-    # describes are read by the same regex. ⛔ BOTH figures are HEAD-RELATIVE, so each is stated
-    # with the head it belongs to: the grep `-n 'subject_binding_available,'` prints `12175` and
-    # `46094` on `tortoise/sdk.py` at `ae26adf963c` (2026-11-20, the head they were READ at) and
-    # `12227` and `46301` at this file's own head. `main` named the second at `:45867` at that same
-    # commit, 227 lines off its then-value.
+    # describes are read by the same regex. ⛔ The pair is HEAD-RELATIVE, so the head it was READ
+    # at travels with it: the grep `-n 'subject_binding_available,'` prints `12175` and `46094` on
+    # `tortoise/sdk.py` at `ae26adf963c` (2026-11-20), and `main` named the second at `:45867` at
+    # that same commit, 227 lines off its then-value. ⛔ THIS HEAD'S pair is deliberately NOT typed
+    # here: the document sentence this row reads states both addresses and the arm grades them from
+    # THERE, so the figure needs one home, not two — a copy in a comment is a figure nothing reads,
+    # which is the class this file exists to close.
     (
         "the `sdk.py` import's OTHER hit",
         r"the same grep also hits `:(?P<n>\d+)`",
