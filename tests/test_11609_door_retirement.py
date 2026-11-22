@@ -1180,8 +1180,16 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         running — the tag strip (r10), an inline `<script>`/`<style>`/`display:none`
     #:         body (r11), and raw-slice segmentation that re-admitted image alt text, link
     #:         titles and reference labels (r12) — which is why the rule is opacity, not
-    #:         parsing. The declared price is the over-block: a NOTE that contains any inline
-    #:         tag, or a code span containing `<`, loses its replacement credit.
+    #:         parsing. The declared price is the over-block, and it is stated as the rule
+    #:         actually is — the trigger is the SOURCE, not the render, so a NOTE loses its
+    #:         replacement credit if its block contains a `<` at all. ⛔ MEASURED, four of the
+    #:         spellings: an inline tag/comment (`<br>`), an AUTOLINK (`<https://…>`,
+    #:         `<ops@…>`) — markdown, not a tag — a code span carrying `<` (`` `<graph.id>` ``),
+    #:         and a BACKSLASH-escaped `<`. The last three are text a reader genuinely sees, so
+    #:         this is a FALSE RED on correct prose; that is the deliberate fail-closed trade,
+    #:         and `test_the_declared_over_block_is_the_price_of_the_opacity_rule` pins each
+    #:         spelling so the bound cannot be described more narrowly than it behaves
+    #:         (**#14237 r12 review P2** — the class comment is the contract a reader trusts).
     #:   (b) * a replacement that appears ONLY where a reader cannot see it — an HTML comment, a
     #:         link destination, a link-reference definition — does NOT count (#14237 r8/r9
     #:         reviews), because the body R2 reads is the block's VISIBLE text;
@@ -2098,26 +2106,49 @@ class TestEveryReaderNamesTheLiveListingDoor:
         assert self.notes_missing_replacement(text), (
             f"a table cell's invisible {cell!r} satisfied R2")
 
-    def test_the_declared_over_block_is_the_price_of_the_opacity_rule(self):
+    @pytest.mark.parametrize("carries", [
+        "<br>",                                           # an inline HTML tag
+        "See <https://app.premiselabs.co> for details.",   # an AUTOLINK — markdown, not a tag
+        "Mail <ops@premiselabs.co> instead.",              # the email autolink spelling
+        "The id is in a code span like `<graph.id>`.",     # a code span carrying `<`
+        r"An escaped \< is plain text.",                    # an ESCAPED `<` — not markup at all
+    ], ids=["inline-tag", "autolink-url", "autolink-email", "code-span-with-lt", "escaped-lt"])
+    def test_the_declared_over_block_is_the_price_of_the_opacity_rule(self, carries):
         """The DECLARED price of the r12 rule, pinned as a verdict rather than as prose.
 
         ⛔ A bound that is only DESCRIBED is indistinguishable from an accident, and this PR
         has already had one declared residual worded away (r5 review P2). So the price is
-        measured here: a NOTE that would otherwise clear the mention loses its credit purely
-        because it carries an inline tag. That is the FAIL-CLOSED direction — the note below
-        is correct prose and it reds anyway — and it is the deliberate trade for closing an
-        invisible replacement in every path at once. Changing this row means changing the
-        declared bound, on purpose, with the review that asked for it.
+        measured here, once per SPELLING of it: a NOTE that would otherwise clear the mention
+        loses its credit purely because its block contains a `<`. That is the FAIL-CLOSED
+        direction — every note below is correct prose and it reds anyway — and it is the
+        deliberate trade for closing an invisible replacement in every path at once.
+
+        ⛔ WHY FIVE SPELLINGS AND NOT ONE (#14237 r12 review P2). The rule's trigger is the
+        block's SOURCE, not what a browser renders, so the price is wider than "carries an
+        inline tag": an AUTOLINK (`<https://…>`, `<ops@…>`) is markdown syntax rather than
+        HTML, a code span carrying `<` renders as visible text, and a BACKSLASH-escaped `<` is
+        not markup at all — yet EACH of them costs the note its credit. MEASURED at the r12
+        head: the comment named only the tag and the code span, so the class comment described
+        a narrower bound than the rule enforced, which is the same false-declaration class
+        this review round was convened on. Each spelling is now pinned, so narrowing the rule
+        to the render — if a reviewer ever asks for it — has to change these rows on purpose.
+
+        ⚠️ NON-VACUITY, stated honestly: this fix corrects the DECLARATION and completes the
+        pin, it does not change the rule, so these rows pass on the pre-fix tree BY
+        CONSTRUCTION. Their discriminating power is proven by mutation instead — removing the
+        opacity rule (`shown = cls._inline_text(token)`) reds all five, which is why they are
+        a pin on behaviour rather than a re-statement of it.
         """
         note = "The door `tortoise_list_graphs` retired into `tortoise_graph_overview`."
         assert self.notes_missing_replacement(note + "\n") == [], (
             "CONTROL: the same note with no markup must stay accepted, or this row measures "
             "nothing but the block model")
-        hidden_by_opacity = self.notes_missing_replacement(note + "<br>\n")
-        assert hidden_by_opacity, (
-            "the declared over-block is not real: an inline tag no longer costs a NOTE its "
-            "replacement credit, so the rule quietly became something else")
-        assert "NO BLOCK" not in hidden_by_opacity[0], hidden_by_opacity
+        over_blocked = self.notes_missing_replacement(f"{note} {carries}\n")
+        assert over_blocked, (
+            f"the declared over-block is not real for {carries!r}: this spelling no longer "
+            "costs a NOTE its replacement credit, so the rule quietly became something else "
+            "than the bound the class comment states")
+        assert "NO BLOCK" not in over_blocked[0], over_blocked
 
     @pytest.mark.parametrize("hidden", [
         "![tortoise_graph_overview](x.png) <br>",
