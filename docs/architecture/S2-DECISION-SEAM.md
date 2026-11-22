@@ -406,8 +406,8 @@ owed (`agent-infra#2918`).
   `EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md` and the `docs/00_index.md` row.
 - **The tokens.** `cl100k_base` over the exact serialized payload. ⚠️ These cells are a
   **recorded** measurement, not one CI re-derives — availability is not the reason (`#14277`
-  puts `tiktoken` in the `test` extra): `get_encoding("cl100k_base")` downloads its BPE ranks at construction over `requests`,
-  which the suite's httpx-shaped hermetic guard cannot see — so
+  puts `tiktoken` in the `test` extra): `get_encoding("cl100k_base")` downloads its BPE ranks
+  at construction over `requests`, which the suite's httpx-shaped hermetic guard cannot see — so
   `tests/test_s2_decision_record_5087.py` re-measures the **byte** columns exactly (they are
   the tripwire: a payload change moves those bytes first) and pins the published
   `B ≈ tok` pairs to the recorded cells instead (PR #10302 review round 6, P1 + P2; the

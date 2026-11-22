@@ -622,10 +622,13 @@ def test_the_tokenizer_the_tool_needs_is_declared_on_both_install_paths():
 
     # Third path: the hand-enumerated post-merge leg (see the docstring). It is allowed to
     # switch to the extra later; what it may NOT do is install neither. Comment lines are
-    # skipped (`:307` and the block below it both quote this command), and the extras test
-    # is a real parse rather than a substring: `".[test]"` does NOT contain `".test"` —
-    # the dot is followed by `[` — so a substring arm would be dead code and would red the
-    # very remediation the docstring blesses.
+    # skipped so that a FUTURE commented-out install command cannot red this arm — the file
+    # holds none today (measured: every revision of it has exactly one live `pip install -e`
+    # line, never a commented one); the guard is against the note that documenting the switch
+    # to `'.[test,embeddings]'` would add. The extras test is a real parse rather than a
+    # substring: `".[test]"` does NOT contain `".test"` — the dot is followed by `[` — so a
+    # substring arm would be dead code and would red the very remediation the docstring
+    # blesses.
     pmv = (_REPO_ROOT / ".github" / "workflows" / "post-merge-validation.yml").read_text()
     installs = [ln for ln in pmv.splitlines()
                 if "pip install -e" in ln and not ln.lstrip().startswith("#")]
