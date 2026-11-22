@@ -1742,9 +1742,9 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     the two anchors are quoted here EXACTLY as the code finds them: `that are NOT comparable` to
     `past the pin's copy of its file`.
     ⛔ WHICH ARM CATCHES WHAT — by MECHANISM, not by paraphrasing which sentence those anchors land in.
-    An earlier cut of this paragraph paraphrased them three times and was wrong each time, because the
-    anchor strings do not sit where a reader assumes (one of them closes the sentence AFTER the
-    enumeration):
+    An earlier cut of this paragraph paraphrased that three times and was wrong each time, because where
+    the two strings LAND in the prose is not what a reader assumes. This paragraph now asserts nothing
+    about it: it quotes the strings, and the arm's own `find` calls are the reference.
     · arm 1 reds on a cite RE-POINTED elsewhere in the document — the pair leaves the census population
       and the static table becomes an orphan. Arm 2 cannot see that, because the region text is
       untouched. Ten of the twelve pairs are that case; the two that also carry a one-token spelling
