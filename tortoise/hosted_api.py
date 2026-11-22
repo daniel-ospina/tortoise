@@ -20215,9 +20215,19 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     if proj is None or not session_id:
         return
     try:
+        # ⛔ THE PHASE IS CLEARED IN THE SAME STATEMENT (#14232 review). This is
+        # a TERMINAL write — it records that the attempt is over — and the read
+        # path publishes the in-flight phase whenever the record carries one, so
+        # leaving it set made an abandoned session claim "queued" forever on all
+        # three read surfaces, for work nothing was doing (measured: the row read
+        # `[[False, 'v2', 'queued']]` after the marker landed). FalkorDB deletes
+        # on `SET n.prop = null`, which is the same mechanism `_report_capture`'s
+        # terminal write relies on.
         proj.g.query(
             "MATCH (s:Session {id:$sid}) "
-            "SET s.capture_ok=false, s.capture_extractor=$extractor",
+            "SET s.capture_ok=false, s.capture_extractor=$extractor, "
+            "    s.capture_extraction_phase=null, "
+            "    s.capture_extraction_phase_at=null",
             params={"sid": session_id, "extractor": lane},
             timeout=_CAPTURE_ABANDON_MARKER_TIMEOUT_MS)
     except Exception:  # pragma: no cover - graph hiccup

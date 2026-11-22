@@ -437,12 +437,20 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
         key="tortoise/hosted_api.py::_capture_abandoned_marker",
         kind="capture-aux",
         lane="hosted capture (crash/timeout marker)",
-        properties=frozenset({"capture_ok", "capture_extractor"}),
+        properties=frozenset({
+            "capture_ok", "capture_extractor",
+            "capture_extraction_phase", "capture_extraction_phase_at",
+        }),
         note=(
             "Marks a capture that was abandoned mid-flight (client "
             "disconnect, task cancel) `capture_ok=false` + the lane, so the "
             "session does not read as the legacy presumed-captured case and "
-            "the next same-session POST re-attempts (#2335)."),
+            "the next same-session POST re-attempts (#2335). "
+            "⛔ It also CLEARS the in-flight phase pair, because this is a "
+            "TERMINAL write: the read path publishes the phase whenever the "
+            "record carries one, so a marker that left one behind made an "
+            "abandoned session claim `queued` forever (measured: the row read "
+            "`[[False, 'v2', 'queued']]` after the marker landed)."),
     ),
     SessionWriter(
         key="tortoise/hosted_api.py::_execute_commit_writes",

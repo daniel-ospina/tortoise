@@ -1,5 +1,3 @@
-<!-- research-path: issue daniel-ospina/tortoise#14232 comment carrying `<!-- research: v1 -->` -->
-<!-- plan-review: cycles=3, status=as-built, version=3.0.0 -->
 ---
 title: "#14232 — POST /v1/sessions acknowledges inside the budget; extraction completes behind it"
 type: plan
@@ -10,6 +8,8 @@ ownedBy: platform-team
 aboutSubjects: tortoise
 aboutObjects: tortoise-hosted-api, tortoise-capture, extractor-v4
 ---
+<!-- research-path: issue daniel-ospina/tortoise#14232 comment carrying `<!-- research: v1 -->` -->
+<!-- plan-review: cycles=3, status=as-built, version=3.0.0 -->
 
 # #14232 — capture ACKs fast, extraction completes on the worker
 
@@ -176,16 +176,16 @@ research comment, and the missing-doc gap is reported rather than worked around.
    re-POST of a raise-shaped (NULL) session must replay, not re-extract. A raised tail is REPORTED
    (exception retrieved, ERROR log), never marked.
    ⛔ **One owner of the slot at every instant**, and it is decided once per request:
-   * joined + reported → the request releases (`complete_tail` + `worker_done`) in a `finally`;
-   * deferred → `_schedule_capture_completion` owns both, on the continuation, because the
+   - joined + reported → the request releases (`complete_tail` + `worker_done`) in a `finally`;
+   - deferred → `_schedule_capture_completion` owns both, on the continuation, because the
      extraction future finishes MID-capture (releasing there would leave `_report_capture` writing
      `capture_ok` with the key already free — the #3129 window this gate exists to close);
-   * **request cancelled mid-join** → cancel the coroutine, `complete_tail` only. Capacity stays with
+   - **request cancelled mid-join** → cancel the coroutine, `complete_tail` only. Capacity stays with
      the WORKER: `_run_capture_bounded` bound `slot.worker_done` to the concurrent future precisely
      because a cancelled `await` cannot cancel a parked pool thread (#3060, pinned by
      `test_capture_loop_responsiveness.py::test_capture_slot_is_held_until_the_worker_finishes`).
      The endpoint's `CancelledError` arm writes the abandoned marker, as today;
-   * **the extraction raises inside the join** → `finally` releases both, because on that arm the
+   - **the extraction raises inside the join** → `finally` releases both, because on that arm the
      `worker_done` call is idempotent with the future's own binding and the alternative is what was
      measured: a **409 "already in flight"** on the re-POST where raise-shape (ii) says replay.
    Each of those four is a test in `tests/test_14232_ingest_ack_split.py`, because each one was a
@@ -221,7 +221,7 @@ research comment, and the missing-doc gap is reported rather than worked around.
 
 **Class:** `code` (+ `protocol` only where the receipt shape is described; no `gate-enforcement` code).
 
-**Risk surface**
+### Risk surface
 
 - **R1 — ack before the record is durable** (a crash loses the capture while the client was told it
   landed; §2.0 re-derivability) → caught by step 5's graph assertion at ack time.

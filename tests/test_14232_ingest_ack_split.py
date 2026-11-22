@@ -301,6 +301,19 @@ def test_a_cancelled_completion_writes_the_abandoned_marker(
         assert row and row[0][1] is False, (
             f"a cancelled completion must record capture_ok=false, got {row}")
         assert row[0][2] == "v2", row
+        # ⛔ THE MARKER IS A TERMINAL WRITE: it must clear the in-flight phase in
+        # the SAME statement. The read path publishes a phase whenever the record
+        # carries one, so a marker that left one behind made an abandoned session
+        # claim "queued" forever — measured `[[False, 'v2', 'queued']]` — for work
+        # nothing was doing, and the three-key pin below exists for every terminal
+        # row (`#3520`). Asserted on the SERVED block, not the row: a client reads
+        # the block.
+        assert row[0][3] is None and row[0][4] is None, (
+            f"the abandonment marker must clear the phase pair, got {row}")
+        block = client.get(f"/v1/sessions/{session_id}").json()["extraction"]
+        assert set(block) == {"status", "extractor", "outcome_known"}, (
+            f"a terminal row publishes no phase: {block}")
+        assert block["outcome_known"] is True, block
         parked.release.set()
     _drain_tails()
 
