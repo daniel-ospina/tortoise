@@ -4634,14 +4634,14 @@ operator who read the line above as "CI defends this" would never run it.
 > ⛔ **This is a WARM-UP switch, not a request-path kill switch.** With it `0`, the app still loads
 > the model on the **first request that needs an embedding**, cold, under its own bound. Turning it
 > off MOVES the cost to that first request; it does not remove it. The check is
-> `tortoise/embeddings.py::_embedder_warmup_enabled` (`:40-50`, `env_flag(..., True)` — shipped
+> `tortoise/embeddings.py::_embedder_warmup_enabled` (`:43-53`, `env_flag(..., True)` — shipped
 > default **ON**), and it gates **five** read sites:
 >
-> 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1361`;
+> 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1364`;
 > 2. the SDK **write-path** bound — `tortoise/embeddings.py::await_write_ready_reason`,
->    `:1466` (#13224);
+>    `:1469` (#13224);
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
->    `:1592` (#13528);
+>    `:1595` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
 >    `:3272-3282` (the reader that runs on the deployed box);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
@@ -4667,7 +4667,7 @@ operator who read the line above as "CI defends this" would never run it.
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
 > Number 2 and 3 are the second most likely to be missed, and they change behaviour: with the flag
-> `0` each returns `None` immediately (`:1466-1470`, `:1592-1593`), so the write and read paths fall
+> `0` each returns `None` immediately (`:1469-1473`, `:1595-1596`), so the write and read paths fall
 > back to the **synchronous in-request load** — that fallback is part of what flipping the switch
 > chooses.
 
