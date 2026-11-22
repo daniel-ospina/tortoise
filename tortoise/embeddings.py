@@ -1405,7 +1405,8 @@ class EmbeddingModel:
         distinct reasons a bounded write declines, and they need OPPOSITE operator
         responses: install the extra / repair a broken load / retry later / wait
         longer / re-encode once the BACKING answers (``backing_cold``, #14186 — the
-        encoder is another process, so nothing here needs warming). Collapsing
+        encoder is another process, so no LOCAL model needs warming — the decline
+        starts the backing's own warm, #14332 review P2). Collapsing
         them into one ``False`` forced the decline's one log
         line to assert a cause and a wait that had not happened — measured: a
         designed absence (``not_installed``, the DOCUMENTED default install)
@@ -1473,6 +1474,18 @@ class EmbeddingModel:
         # which loads the local model even under `worker`.
         if not embed_seam.encodes_in_process():
             if embed_seam.backing_booting():
+                # ⛔ A DECLINE NEEDS A LANDING (#14332 review P2). `backing_cold`
+                # means "not warm *yet*", and in a process that issues ONLY
+                # bounded writes nothing ever changed "yet" into "now": the
+                # decline returns before anything constructs a backing, so
+                # `_peek_backing()` stayed None for the life of the process and
+                # every derived fold stayed vectorless. The warm is STARTED here,
+                # on a daemon thread — the caller still declines (it must not pay
+                # a 600 s boot), but the boot is now somebody's job, which is what
+                # the message has always claimed. Once it lands, this branch is
+                # not taken at all: `backing_booting()` reads the constructed
+                # backing's own phase.
+                embed_seam.warm_backing_async()
                 return _WRITE_DECLINE_BACKING_COLD
             return None
         inst = cls._instance
@@ -2325,9 +2338,12 @@ _WRITE_DECLINE_FAIL_COOLDOWN = "fail_cooldown"
 _WRITE_DECLINE_ATTEMPT_SPENT = "attempt_spent"
 _WRITE_DECLINE_BUDGET_EXPIRED = "budget_expired"
 #: #14186: the encoder is served by ANOTHER process (``worker`` / ``external``).
-#: Not a cold LOCAL load and not the same repair: nothing here needs warming, the
-#: row is declined so the create keeps #13224's promise, and the vector is
-#: recomputed by `graph-scripts/backfill_embeddings.py` once the backing answers.
+#: Not a cold LOCAL load and not the same repair: no model in THIS process needs
+#: warming, the row is declined so the create keeps #13224's promise, and the
+#: vector is recomputed by `graph-scripts/backfill_embeddings.py` once the backing
+#: answers. ⛔ #14332 review P2: "once it answers" needs the backing to be LANDED,
+#: and a process issuing only bounded writes never constructed one — the decline
+#: now starts that warm (``embed_seam.warm_backing_async``) so the phrase is true.
 _WRITE_DECLINE_BACKING_COLD = "backing_cold"
 
 #: Poll interval for the bounded wait above — small enough that a model that

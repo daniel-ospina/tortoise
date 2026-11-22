@@ -2850,23 +2850,30 @@ class TestASubmitToAStoppedCollectorIsRefused:
         landing in that gap still fired the batch, and after ``reset_seam`` cleared
         the module globals it CONSTRUCTED a fresh backing through
         ``active_backing`` that nothing would ever close (432 MB, for ``worker``).
-        ``_fire`` now claims the batch under the lock ``stop()`` sets the flag
-        under, so the ordering is defined instead of lucky.
 
-        Driven directly rather than raced: ``_fire`` is the unit that has to
-        re-check, and a thread race would decide which arm of the window was hit.
+        This is the ENTRY-guard arm, driven directly: ``_run``'s own check has
+        already passed when ``_fire`` is entered, so a flag set at that instant is
+        exactly the window. (``test_a_stop_landing_in_the_backing_factory_does_not_encode``
+        is the other arm — the flag set FROM the factory — and the two redden on
+        different guards, so neither row stands in for the other.)
         """
         recorder = backing()
-        collector = embed_seam._Collector(lambda: recorder)
+        factory_calls: list = []
+        collector = embed_seam._Collector(
+            lambda: factory_calls.append(1) or recorder)
         ticket = embed_seam._Ticket("a")
         # What ``stop()`` leaves behind, without the join: the flag AND the
         # terminal ``_closed``. Nothing here may reach a backing.
         collector._stop = True
         collector._closed = True
-        collector._window_opened_at = time.monotonic()
 
         collector._fire([ticket])
 
+        assert factory_calls == [], (
+            "the factory was CONSULTED on a collector whose stop() had already "
+            "landed — that is the call that re-resolves (and, after "
+            "``reset_seam``, CONSTRUCTS) a backing nothing owns, so the "
+            "post-factory guard alone declines the batch only AFTER the leak")
         assert recorder.batches == [], (
             "a batch already dequeued was still ENCODED after stop() had set the "
             "flag — the collector fired a forward pass teardown had already "
@@ -2876,9 +2883,6 @@ class TestASubmitToAStoppedCollectorIsRefused:
             "waits out its whole bound for a batch that will never fire")
         assert isinstance(ticket.error, RuntimeError) and \
             "stopped before" in str(ticket.error), ticket.error
-        assert collector._window_opened_at is None, (
-            "the re-check returned without clearing the window marker, so a "
-            "later snapshot would date the next batch from THIS one's dequeue")
 
 
 # ── the worker's reap arms ──────────────────────────────────────────────────
@@ -3738,3 +3742,142 @@ class TestTheExpansionPassStatesItsTrueCost:
             "a SECOND round trip on a remote backing — an operator arming "
             "TORTOISE_ENTITY_KEY_DENSE then has nothing at the call site telling "
             "them the encode is not free")
+
+
+class TestTheDeclineHasALanding:
+    """#14332 review P2/P3: the cold-write decline must land, and two windows.
+
+    ⛔ P2, the product defect. ``backing_booting()`` answers ``True`` for a
+    backing that was NEVER CONSTRUCTED, so a bounded write declines with
+    ``backing_cold`` — "not warm *yet*". In a process that issues ONLY bounded
+    writes, nothing ever constructed that backing either, so "yet" never arrived:
+    ``_peek_backing()`` stayed ``None`` for the life of the process and every
+    derived fold stayed vectorless. The rows below pin the LANDING (the warm) and
+    the call from the decline into it. Mutants they redden on:
+
+    * delete ``embed_seam.warm_backing_async()`` from
+      ``EmbeddingModel.await_write_ready_reason``'s cold arm — the spy row;
+    * make ``warm_backing_async`` a no-op that returns ``True`` — the landing
+      row, because the backing never becomes peekable;
+    * drop the once-guard — the second call would start a second thread.
+
+    ⛔ P3, ``stop()``'s window. ``_run`` checked ``_stop`` before ``_fire``, never
+    inside it, so a ``stop()`` landing between the two still fired a batch and
+    re-resolved a backing through the factory — constructing a worker after
+    teardown had promised it closed none. The mutant is deleting either of the
+    two guards inside ``_fire``.
+    """
+
+    def test_a_bounded_write_starts_the_warm_it_declines_on(
+            self, monkeypatch):
+        """The ``backing_cold`` decline is not a dead end: it starts the landing."""
+        from tortoise import embeddings as embeddings_module
+
+        started: list[bool] = []
+        monkeypatch.setattr(
+            embed_seam, "encodes_in_process", lambda: False)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+        monkeypatch.setattr(
+            embed_seam, "warm_backing_async",
+            lambda: (started.append(True), True)[1])
+
+        reason = embeddings_module.EmbeddingModel.await_write_ready_reason(0.05)
+
+        assert reason == embeddings_module._WRITE_DECLINE_BACKING_COLD, (
+            "the cold-boot arm must still DECLINE — a bounded write must never "
+            f"pay the worker's boot (got {reason!r})")
+        assert started == [True], (
+            "the decline did not start the warm that makes \u201cnot warm yet\u201d "
+            "true: in a process that issues only bounded writes, nothing else "
+            "ever constructs the backing, so `_peek_backing()` stays None for "
+            "the life of the process and the derived folds stay vectorless "
+            "(#14332 review P2)")
+
+    def test_the_warm_lands_the_backing_exactly_once(self, monkeypatch):
+        """The warm CONSTRUCTS the backing (so a later write stops declining)."""
+        embed_seam.reset_seam()
+        recorder = _RecordingBacking()
+        constructed: list[str] = []
+
+        def _construct(name: str):
+            constructed.append(name)
+            return recorder
+
+        monkeypatch.setattr(embed_seam, "_construct", _construct)
+        try:
+            assert embed_seam.warm_backing_async() is True, (
+                "the first warm must report that it STARTED one")
+            thread = embed_seam._warm_thread
+            assert thread is not None
+            thread.join(timeout=10)
+            assert not thread.is_alive(), "the warm thread never finished"
+            assert constructed, (
+                "the warm returned without CONSTRUCTING a backing — it must "
+                "land the backing, not merely report intent")
+            assert embed_seam._peek_backing() is recorder, (
+                "the warm did not land the backing: `_peek_backing()` still "
+                "answers something else, so the next bounded write declines on "
+                "the same cold answer")
+            assert len(constructed) == 1, (
+                f"the backing was constructed {len(constructed)} time(s) — a "
+                "warm run more than once per landing leaks a process each time")
+            assert embed_seam.warm_backing_async() is False, (
+                "a second warm was STARTED over an already-landed backing")
+        finally:
+            embed_seam.reset_seam()
+
+    def test_the_warm_never_starts_over_an_injected_backing(self):
+        """A hermetic backing is what the next encode uses — never boot behind it."""
+        embed_seam.reset_seam()
+        recorder = _RecordingBacking()
+        embed_seam.install_backing(recorder)
+        try:
+            assert embed_seam.warm_backing_async() is False, (
+                "a warm was started while a backing was INJECTED — that spawns a "
+                "real worker inside a hermetic row and retires the test's own "
+                "backing")
+        finally:
+            embed_seam.reset_seam()
+
+    def test_a_stop_landing_in_the_backing_factory_does_not_encode(self):
+        """A ``stop()`` between the pre-fire check and the factory is still a stop.
+
+        REDDENING MUTANT: delete either ``if self._stop:`` guard inside
+        ``_Collector._fire`` — the batch then encodes on a stopped collector and
+        (in production) re-resolves a backing after teardown.
+        """
+        recorder = _RecordingBacking()
+        collector: embed_seam._Collector
+
+        def _factory():
+            # The ``stop()`` lands HERE: after ``_run``'s own check, before the
+            # encode — the exact window #14332's review names (P3).
+            collector._stop = True
+            return recorder
+
+        collector = embed_seam._Collector(_factory)
+        answer: list = []
+
+        def _submit() -> None:
+            try:
+                answer.append(("ok", collector.submit("x", timeout_s=1.0)))
+            except BaseException as exc:  # recorded, asserted below
+                answer.append(("err", exc))
+
+        thread = threading.Thread(target=_submit, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), (
+            "the submit never returned — a stopped collector parked its caller "
+            "instead of declining it")
+        assert answer, "the submit recorded no outcome"
+        kind, value = answer[0]
+        assert kind == "err" and isinstance(value, RuntimeError), (
+            f"a stopped collector answered a ticket with {value!r} instead of "
+            "declining it")
+        assert "stopped" in str(value), (
+            f"the decline does not name the stop: {value!r}")
+        assert recorder.batches == [], (
+            "the collector ENCODED a batch after `stop()` had been set — that is "
+            "work the deployment already tore down, and the factory call above it "
+            "is where a fresh worker gets constructed and never closed")

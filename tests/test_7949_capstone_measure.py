@@ -17996,9 +17996,13 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # import list — ⛔ **not a call site** — and that second address was graded by NOTHING:
     # reverting it to a pre-fix value reddened no arm at all, which is the class this tuple
     # exists to close. The needle is that line's own text, so the number and the content it
-    # describes are read by the same regex. Re-derived at the re-cut's merged head: the
-    # grep `-n 'subject_binding_available,'` prints `12175` and `46094` on `tortoise/sdk.py`
-    # (measured 2026-11-20; `main` named the second at `:45867`, which is 227 lines off).
+    # describes are read by the same regex. ⛔ The pair is HEAD-RELATIVE, so the head it was READ
+    # at travels with it: the grep `-n 'subject_binding_available,'` prints `12175` and `46094` on
+    # `tortoise/sdk.py` at `ae26adf963c` (2026-11-20), and `main` named the second at `:45867` at
+    # that same commit, 227 lines off its then-value. ⛔ THIS HEAD'S pair is deliberately NOT typed
+    # here: the document sentence this row reads states both addresses and the arm grades them from
+    # THERE, so the figure needs one home, not two — a copy in a comment is a figure nothing reads,
+    # which is the class this file exists to close.
     (
         "the `sdk.py` import's OTHER hit",
         r"the same grep also hits `:(?P<n>\d+)`",
@@ -18283,7 +18287,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # keeps the difference, so the triad still evaluates — and the row then names a line the
     # tree does not carry while its own `at THIS head` triple names the right one, i.e. two
     # answers for one statement on one line. Measured before this arm: that edit (and the same
-    # edit on `22052−19077` or `29142−25461`) left the WHOLE covering set GREEN (554 passed).
+    # edit on `22052−19077` or `29142−25461`) left the WHOLE covering set GREEN — nothing in it
+    # read the subtractand, which is the class this arm closes. ⛔ No count is stated on purpose:
+    # the covered set's size is head-bound, and a bare `N passed` outlives the head that measured
+    # it — the figure this comment used to carry was a whole-suite count with no head named.
     # The row's live subtraction triples are built FROM the anchors its `at THIS head` clause
     # states — the new-column triple and the old-column one share their a-side — so the
     # a-side must BE those anchors, which are graded separately by the anchor-slot loop below (`_D5_TRIPLE_RE`).
