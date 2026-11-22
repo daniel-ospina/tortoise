@@ -1,3 +1,14 @@
+---
+title: "#14192 — the read path's legs, measured"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-21
+subjects.team: epistemic-team
+aboutSubjects: read path, post-fusion reads, read wave, p50/p95 latency, rank identity, retrieval legs
+aboutObjects: "#14192, #14224, #14262, #2952, #7780, #6971, #3834, tools/read_wave_latency.py"
+---
+
 # #14192 — the read path's legs, measured
 
 Two artifacts, both from `tools/read_wave_latency.py` (added by this issue). They
