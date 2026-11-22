@@ -216,6 +216,28 @@ SELECTED = [
     # is the same defect class the relativizer lookahead already has a dedicated row for.
     ("has anything we said we would do been cancelled", "ended", "existence"),
     ("have any of the things we said we would do been withdrawn", "ended", "existence"),
+    # …AND THE PRONOUN BRANCH OF THAT SAME DELETION NEEDS ITS OWN ROWS (round-6 review, P3,
+    # measured): the two rows above are refused by the THIRD lookahead, so restoring
+    # `did|does|do` in the FOURTH (pronoun) lookahead alone left the suite GREEN — a coverage
+    # hole with reachable consequences (`has anything they did, in fact, been archived` and its
+    # twins refuse under that mutant). These rows have a pronoun subject, so only the fourth
+    # lookahead can refuse them, and they red when `do|does|did` is restored there.
+    ("has anything they did, in fact, been archived", "ended", "existence"),
+    ("has anything we did of late been withdrawn", "ended", "existence"),
+    ("has anything you did to date been cancelled", "ended", "existence"),
+    # ⛔ …AND THE OVER-REFUSAL THE `{0,8}` BOUND CAUSED, PINNED AS ROUTING (round-6 review, P2,
+    # measured — this lane's own regression): a RELATIVE clause whose own participle is an ENDING
+    # word was refused at the widened bound while it routed on `main` and on the pre-change head,
+    # and only the TOKEN COUNT separated it from the asyndetic hijack the widening exists for.
+    # The two lookaheads now carry `(?!\s*(?:been|by)\b)` — the ending belongs to the relative
+    # clause when the clause continues or takes an agent — so these three route again while their
+    # asyndetic twins stay refused (NOT_SELECTED). Pin BOTH directions: this list is the half that
+    # reds if the tail-negative is dropped.
+    ("has anything that has been only just very recently deprecated been withdrawn",
+     "ended", "existence"),
+    ("has anything that has been in fact only just superseded been withdrawn", "ended", "existence"),
+    ("has anything that has been in fact only just superseded by legal been withdrawn",
+     "ended", "existence"),
     ("what ended", "ended", "wh_whole_question"),
     ("what ended?", "ended", "wh_whole_question"),
     ("what has been withdrawn", "ended", "wh_whole_question"),

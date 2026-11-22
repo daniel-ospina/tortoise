@@ -625,6 +625,21 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: refused, the same defect one token higher. The bound is now the `_EXISTENCE_HELPER` gap's own
 #: `{0,8}`: a count bound one short of the class it carries is a spelling this guard is blind to,
 #: and this is the fourth consecutive round that lesson has been paid for.
+#: ⛔ AND THE WIDENING IT PAID FOR OVER-REFUSED THE SAME SPELLING INSIDE A RELATIVE CLAUSE
+#: (round-6 review, P2, measured — this lane's own regression, caught by a fresh reviewer): with
+#: `{0,8}` a RELATIVE clause whose own participle is an ENDING word was refused instead of routed,
+#: because the lookahead's job is to spot a SECOND CLAUSE and a relative clause's participle can
+#: carry the same adverb run. Each of these routed on `main` AND on the pre-change head, and only
+#: the TOKEN COUNT separated them from the asyndetic hijack they were meant to be refused with:
+#:   relative (must ROUTE): `has anything that has been only just very recently deprecated been
+#:                           withdrawn` / `… in fact only just superseded been withdrawn` /
+#:                          `… in fact only just superseded by legal been withdrawn`
+#:   asyndetic (must REFUSE): `have any reported it has been in fact only just deprecated and been
+#:                            withdrawn`
+#: Both consumers therefore carry `(?!\s*(?:been|by)\b)` after the ending word: the ending is the
+#: RELATIVE clause's when the clause continues (`… been withdrawn`) or when it takes an agent
+#: (`… superseded by legal`), and only then is it the question's own predicate. Both directions are
+#: pinned in `SELECTED` / `NOT_SELECTED`;
 _EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,8}}"
 #: ⛔ A CONTRACTED AUXILIARY CARRIES ITS NEGATION INSIDE THE WORD (round-26 review, P1; round-28
 #: at `feb2c740bb`, P1, measured — the SAME class, one guard over). One home, THREE consumers:
@@ -718,7 +733,7 @@ _EXISTENCE_GUARD = (
     # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
     # after. The anchor is the same one the pronoun branch below already uses: the
     # lookahead fires only when the second clause's passive ends an ENDING participle.
-    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b(?!\s*(?:been|by)\b))"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -759,7 +774,7 @@ _EXISTENCE_GUARD = (
     # so `’` is already `'` by the time any of this runs.
     r"[a-z0-9][a-z0-9'’._/-]*['’](?:s|ve|d)|"
     r"has|have|had|is|are|was|were|will|would|can|could|may|might|"
-    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b)"
+    rf"must|should)[,\s]+{_EXISTENCE_HELPER}\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b(?!\s*(?:been|by)\b))"
 )
 
 _EXISTENCE_WINDOW = (
@@ -1355,25 +1370,33 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         rf"(?=\s+(?!(?:the|a|an|this|that|these|those|its|their|our|my|your|his|her|"
         rf"any|some|every|no|all|both|each|either|neither|another|other|such|one|two|"
         rf"three|first|last|next)\b)[a-z])")),
-    # …and the unguarded `existence` expression: a state question that fails ONLY on
-    # the clause guard above is reported, never silenced (silence is the defect).
+    # …and the unguarded `existence` expression: a state question whose state cue is seen and
+    # that no shape selects is reported, never silenced (silence is the defect).
     # ⛔ IT CARRIES THE TAIL GUARD, AND THAT IS THE ROUND-16 REVIEW'S P2 (measured):
     # without one it reported on ANY tail — `… been withdrawn most recently`,
     # `… been withdrawn only after the audit`, `… been withdrawn zzzz` all emitted a
     # notice with the cue truncated at `withdrawn` — which falsified the two paragraphs
     # above that say a qualifier OUTSIDE the closed tail list stays silent, and the
-    # definition of "strong" at `:317-322`. Its stated job is "fails only on the clause
-    # guard", so it is the shape's tail that decides; every `NOTICE_ONLY` existence row
-    # ends at `$` or punctuation and still reports.
+    # definition of "strong" at `:317-322`. Its stated job is "reports the cue wherever the shape
+    # declined, and the TAIL decides whether the decline is worth a notice", so it is the shape's
+    # tail that decides; every `NOTICE_ONLY` existence row ends at `$` or punctuation and reports.
+    # ⛔ AND IT IS NOT "FAILS ONLY ON THE CLAUSE GUARD" (round-6 review, P3, measured): this row
+    # carries `_EXISTENCE_HEAD` + the REFUSAL-SIDE middle slot + the blocked tail, so it also fires
+    # where the guard PASSES and only the WINDOW's narrow recall slot fails — measured,
+    # `has any we relied on been just withdrawn` has the guard passing (head+guard matches) and
+    # still reports, declining on the recall slot rather than the guard. The two older paragraphs
+    # above said otherwise; this is what the code does.
     # ⛔ THE NOTICE MUST SEE THE CLASS THE GUARD REFUSES ON (round-5 review, P3, measured): this
     # row carried `_EXISTENCE_WINDOW`, whose slot is the NARROW recall set (`already|ever|recently`),
     # while the guard itself refuses on the WHOLE `_EXISTENCE_ADVERB` class. So the same refused
-    # frame reported on one spelling and went SILENT on the next:
-    # `billing has been recently deprecated` → existence_unguarded, but
-    # `billing has been just deprecated` / `only deprecated` → refused, `signal=None` — and the
-    # §"refusal reports" pins only passed because a trailing `been <ending>` clause supplied their
-    # notice. A signal cannot affect routing (it is only computed when NO shape applies), so
-    # widening the slot here cannot create a route.
+    # frame reported on one spelling and went SILENT on the next (each needs the quantifier after
+    # `has`, which `_EXISTENCE_HEAD` requires — measured, `billing has been …` alone reports
+    # neither way, so these are the frames that discriminate):
+    # `has anyone complained billing has been recently deprecated` → existence_unguarded, but
+    # `has anyone complained billing has been just deprecated` / `… only deprecated` → refused,
+    # `signal=None` — and the §"refusal reports" pins only passed because a trailing
+    # `been <ending>` clause supplied their notice. A signal cannot affect routing (it is only
+    # computed when NO shape applies), so widening the slot here cannot create a route.
     ("existence_unguarded", re.compile(
         _EXISTENCE_HEAD
         + rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
