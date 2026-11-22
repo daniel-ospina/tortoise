@@ -607,11 +607,26 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     while changed:
         changed = False
         for _node in ast.walk(run_def):
-            if not isinstance(_node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            if isinstance(_node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                _iter, _target = _node.iter, _node.target
+            elif isinstance(_node, (ast.Assign, ast.AnnAssign)) and _node.value is not None:
+                # ⛔ AN UNPACKED BIND IS AN ELEMENT BIND (#14281 review P1, measured).
+                # `(_a,) = results` takes the FIRST ELEMENT, and `_a |= {"id": …}` then
+                # rewrote it — MEASURED GREEN (16 passed) even after the `for`-target
+                # fixpoint, because `_aliases_of` resolves an unpack only when the VALUE
+                # is a literal Tuple/List (`(page,) = (results,)`), and a Name there falls
+                # through. The element of a tainted collection is a tainted element, so the
+                # target names join `muts` exactly as a `for` target does.
+                _targets = (list(_node.targets) if isinstance(_node, ast.Assign)
+                            else [_node.target])
+                _iter = _node.value
+                _unpacked = [t for t in _targets if isinstance(t, (ast.Tuple, ast.List))]
+                if not _unpacked or not (_names_in(_iter) & muts):
+                    continue
+                _target = _unpacked[0]
+            else:
                 continue
-            if not (_names_in(_node.iter) & muts):
-                continue
-            fresh = _names_in(_node.target) - muts
+            fresh = _names_in(_target) - muts
             if fresh:
                 muts |= fresh
                 changed = True
@@ -632,6 +647,20 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             receiver = _names_in(node.func.value)
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
             receiver = _names_in(node.value)
+        # ⛔ THE AUGMENTED SPELLING IS THE SAME MECHANISM (#14281 review P1, measured).
+        # `dict |= other` is PEP 584's in-place merge — the exact semantics of `update`,
+        # which `_MUTATORS` already carries — but an `AugAssign` whose target is a BARE
+        # tainted name matched NEITHER receiver arm, so `for _r in results: _r |= {"id":
+        # "REDACTED"}` was GREEN (16 passed) and `compare()` then reported
+        # `rank_identical: True` on a permuted pair: the ids are `"REDACTED"`, not absent,
+        # so its `if not any(pq["order"])` refusal passes too. Same for `_r0 = results[0];
+        # _r0 |= …`, an unpack target, and the `per_query` cascade. Not a new class, and
+        # the asymmetry was the defect: `_per_query_element_mutations` already carries this
+        # arm for the recorded rows. `_r["id"] += "X"` was already red through the
+        # Subscript arm above; this is only the bare-name target. The real `run()` holds
+        # zero `AugAssign` nodes, so this cannot false-red the tool (measured).
+        elif isinstance(node, ast.AugAssign):
+            receiver = _names_in(node.target)
         callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None) \
             if isinstance(node, ast.Call) else None
         def _element_only(arg: ast.AST) -> bool:
