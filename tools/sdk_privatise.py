@@ -1120,7 +1120,37 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#: ⛔ RE-PINNED FROM `main`'s DRIFT → (11861, "f0647020531c078c"). The 11858 pair above is three
+#: rows SHORT of the tree it landed in, so `--check` reds on `origin/main`'s OWN tree and
+#: `surface-guard` — a REQUIRED leg — with it; the `10e51693f166` block above is correct about its
+#: own `out.update` row and wrong about the BASE it added it to. THE THREE MISSING ROWS ARRIVED
+#: BEFORE THAT PIN WAS WRITTEN, from a commit with no reason to touch this file: `94d75667dc76`
+#: (`#14224`, the post-fusion read wave) ADDS `tools/read_wave_latency.py`, which holds three
+#: `proj.g.query` reads. ⛔ MEASURED, NOT INFERRED FROM THAT SUBJECT LINE: the residue map was
+#: re-derived with this file's own `rename_map`/`edits_for` in a detached worktree at
+#: `e74cf1d13d` (the last tree that SATISFIES its own pin — it prints `(11857,
+#: "ed40203dbbf32b87")`, the pair it carries) and at `13b6b49fe9c6` (the commit the 11858 squash
+#: was applied to), and the two row sets sorted and diffed. EXACTLY ONE row differs:
+#:   * `proj.g.query` **3643 → 3646** (+3), every one of the three in `tools/read_wave_latency.py`
+#:     (that file: 0 → 3; no other file moves), which is `94d75667dc76`'s contribution — `git log
+#:     e74cf1d13d..13b6b49fe9c6 -- tools/read_wave_latency.py` names it as the range's ONLY
+#:     commit on that file. `proj.g` is a **FalkorDB `Graph`** there, the receiver shape already
+#:     pinned 3643 times tree-wide, so it is this sweep's documented edge and NOT an SDK handle.
+#: Then `10e51693f166` adds the SECOND row, `out.update` **42 → 43** in
+#: `tests/test_14125_retired_name_calls.py` — the one the block above declares — and its tree
+#: prints `(11861, "f0647020531c078c")` against the 11858 it pins, i.e. `--check` has red on
+#: `main` from that commit onward, not on this PR. BOTH figures here are re-derived on the trees
+#: they name; neither is carried from the block above.
+#: ⛔ THIS PR'S OWN CONTRIBUTION IS ZERO ROWS, and that is measured rather than asserted: the pair
+#: below is `--repin`'s output on THIS tree and it is the SAME pair `origin/main`'s tree prints
+#: (cross-checked, never the derivation), because the diff adds no executable line for the AST
+#: walk to see. `--check` exits 0 on this tree with
+#: `typed references still pointing at a public name: 0`, so no public name was legitimised in
+#: either direction and no new SHAPE was absorbed: the direction this pin exists to catch is the
+#: SET moving, and both rows are DECLARED here rather than rewritten away — re-pointing an
+#: ordinary-word receiver on a `Graph` would be sabotage, which is the `declared_markers.update`
+#: precedent, and a plain `set[str]` in a test helper is the `terms.update` precedent.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
