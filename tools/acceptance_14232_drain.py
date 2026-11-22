@@ -504,9 +504,14 @@ def run(args) -> int:
                  "why_not_graded": (None if ack_graded else
                                     "host oversubscribed (load > cpu_count): the "
                                     "absolute p95 would grade the scheduler")},
+        # ⛔ A PASS REQUIRES A GRADED p95: `ok_ack` is still *computed* when the
+        # host is oversubscribed (so the number is printed either way), but it
+        # must not be able to produce PASS on a criterion this run declined to
+        # grade — measured on the first cut of this change, which printed
+        # "NOT GRADED" beside a `VERDICT: PASS` at load 21.29 on 16 cpus.
         "verdict": (
             "FAIL" if not all((ok_refusal, ok_terminal, ok_extract, ok_deferral))
-            else "PASS" if ok_ack
+            else "PASS" if (ack_graded and ok_ack)
             else "INCONCLUSIVE"),
     }
 
