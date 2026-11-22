@@ -1167,7 +1167,14 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         replacement written as raw HTML text in the same block counts.
     #:   (b) * a replacement that appears ONLY where a reader cannot see it — an HTML comment, a
     #:         link destination, a link-reference definition — does NOT count (#14237 r8/r9
-    #:         reviews), because the body R2 reads is the block's VISIBLE text;
+    #:         reviews), because the body R2 reads is the block's VISIBLE text. ⛔ MEASURED
+    #:         FALSE for one shape until r10 (#14237 r10 review P2): a comment containing a
+    #:         `>` was NOT stripped, because `<[^>]*>` ended the "tag" at that character and
+    #:         left the rest of the comment behind as visible text — so the replacement DID
+    #:         count and an instruction was ACCEPTED. Comments are now stripped before tags,
+    #:         and `test_a_replacement_a_reader_cannot_SEE_is_not_a_replacement` carries the
+    #:         in-block variants that pin it (the pre-existing `comment-with-gt` row passed on
+    #:         the block split alone and never exercised this);
     #:       * a mention that falls in NO block at all (a link-reference definition, a
     #:         preamble) is REPORTED, not ignored — `test_a_mention_outside_every_block_is_reported`
     #:         pins it, and that row exists because "no block means clean" was measured as a
@@ -1274,18 +1281,28 @@ class TestEveryReaderNamesTheLiveListingDoor:
 
         found: list[tuple[int, int, str]] = []
         row_cursor: int | None = None
+        row_spans: list[tuple[int, int]] = []
         for token in cls.MD.parse(text):
             if token.type == "tr_open" and token.map:
                 row_cursor = off(token.map[0])
+                row_stop = off(token.map[1]) if token.map[1] is not None else len(text)
+                row_spans = cls._row_cell_spans(text, row_cursor, row_stop)
                 continue
             if token.type == "tr_close":
                 row_cursor = None
+                row_spans = []
                 continue
             if token.type in ("fence", "code_block", "html_block") and token.map:
                 begin, finish = off(token.map[0]), off(token.map[1])
                 body = text[begin:finish]
                 if token.type == "html_block":
                     # An HTML block IS rendered, so its text is visible; its tags are not.
+                    # ⛔ COMMENTS FIRST, THEN TAGS. A tag strip alone is defeated by a `>`
+                    # INSIDE a comment: `<[^>]*>` ends the "tag" at that `>`, leaving the
+                    # rest of the comment (`the live door is X -->`) behind as VISIBLE
+                    # text, so a replacement only the source can see satisfied R2
+                    # (#14237 r10 review P2, measured fail-OPEN).
+                    body = re.sub(r"<!--.*?-->", " ", body, flags=re.S)
                     body = re.sub(r"<[^>]*>", " ", body)
                 found.append((begin, finish, body))
                 continue
@@ -1294,17 +1311,49 @@ class TestEveryReaderNamesTheLiveListingDoor:
             shown = cls._inline_text(token)
             if row_cursor is not None:
                 cell = token.content
+                span = row_spans.pop(0) if row_spans else None
                 at = text.find(cell, row_cursor)
-                if at < 0:
-                    at, end = row_cursor, row_cursor
-                else:
+                if at >= 0:
                     end = at + len(cell)
-                    row_cursor = end
+                elif span is not None:
+                    # `find` cannot locate a cell whose source carries an escape the parser
+                    # removed (`\|` -> `|`), so fall back to the row's own source span rather
+                    # than a ZERO-LENGTH block (#14237 r10 review P2, measured false red).
+                    at, end = span
+                else:
+                    at, end = row_cursor, row_cursor
+                row_cursor = max(end, row_cursor)
                 found.append((at, end, shown))
                 continue
             if token.map:
                 found.append((off(token.map[0]), off(token.map[1]), shown))
         return found
+
+    @classmethod
+    def _row_cell_spans(cls, text: str, row_start: int,
+                        row_stop: int) -> list[tuple[int, int]]:
+        """The SOURCE span of every cell in one table row, in order.
+
+        Derived by splitting the row's own source on **unescaped** pipes, not by
+        `text.find(token.content)`. ⛔ MEASURED (#14237 r10 review P2): markdown-it UNESCAPES
+        `\\|` inside a cell's `content`, so `find` misses a cell that contains an escaped
+        pipe — and the old fallback produced a ZERO-LENGTH block, which reported a CORRECT
+        note (mention and replacement in the same cell) as `NO BLOCK`, a false red. The
+        parser emits one `inline` token per cell including an empty one (measured), so these
+        spans line up with the cell tokens one-to-one.
+        """
+        raw = text[row_start:row_stop]
+        spans: list[tuple[int, int]] = []
+        at = row_start
+        for chunk in re.split(r"(?<!\\)\|", raw):
+            spans.append((at, at + len(chunk)))
+            at += len(chunk) + 1
+        # GFM's outer pipes are optional, and each one contributes an empty span.
+        if raw.lstrip().startswith("|"):
+            spans = spans[1:]
+        if raw.rstrip().endswith("|") and not raw.rstrip().endswith("\\|"):
+            spans = spans[:-1]
+        return spans
 
     @classmethod
     def replacements(cls, name: str) -> set[str]:
@@ -1614,8 +1663,18 @@ class TestEveryReaderNamesTheLiveListingDoor:
         "[1]: https://example.invalid/tortoise_graph_overview\nCall `tortoise_list_graphs` for names.\n",
         "See [tortoise_list_graphs][1] for names.\n\n[1]: https://example.invalid/tortoise_graph_overview\n",
         "<!-- see > the live door is `tortoise_graph_overview` -->\nCall `tortoise_list_graphs` for names.\n",
+        # ⛔ #14237 r10 review P2 — the row ABOVE passes on the BLOCK split alone (the comment
+        # is its own block, so the Call never shares it) and therefore does NOT pin the
+        # visibility property it claims to. These two put the comment INSIDE an HTML block,
+        # where a `>` (or a `<b>`) in the comment made `<[^>]*>` end the "tag" at that
+        # character and leave the rest of the comment behind as VISIBLE text — measured
+        # ACCEPTED until comments were stripped before tags, i.e. the exact fail-OPEN the
+        # declared bound below says cannot happen.
+        "<div>\n<!-- see > the live door is `tortoise_graph_overview` -->\nCall `tortoise_list_graphs` for names.\n</div>\n",
+        "<details>\n<!-- see <b> tortoise_graph_overview -->\nCall `tortoise_list_graphs` for names.\n</details>\n",
     ], ids=["html-comment", "link-target", "html-attribute", "ref-definition",
-            "ref-link-text", "comment-with-gt"])
+            "ref-link-text", "comment-with-gt", "comment-with-gt-INSIDE-html-block",
+            "comment-with-tag-INSIDE-html-block"])
     def test_a_replacement_a_reader_cannot_SEE_is_not_a_replacement(self, text):
         """R2 intersects the block's VISIBLE text, not its markdown source.
 
@@ -1649,6 +1708,27 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "must fail closed")
         assert "NO BLOCK" in self.notes_missing_replacement(text)[0], (
             self.notes_missing_replacement(text))
+
+    def test_an_escaped_pipe_in_a_cell_does_not_lose_the_cell(self):
+        """A cell containing `\\|` is still ONE block, at its own SOURCE span.
+
+        ⛔ MEASURED (#14237 r10 review P2): markdown-it UNESCAPES `\\|` inside a cell's
+        `token.content`, so `text.find(cell, row_cursor)` missed the cell and the fallback
+        produced a ZERO-LENGTH block — which reported a CORRECT note (the mention and its
+        replacement in the SAME cell) as `NO BLOCK`. That is a false red on a document that
+        obeys the rule; the direction is fail-closed, but the cost is a correct doc refused.
+        """
+        row = ("| door | note |\n"
+               "| --- | --- |\n"
+               "| x | `tortoise_list_graphs` retired forward into a \\| b "
+               "`tortoise_graph_overview` |\n")
+        assert not self.notes_missing_replacement(row), (
+            "a correct note in a cell containing an escaped pipe was refused: "
+            f"{self.notes_missing_replacement(row)}")
+        held = [b for b in self.blocks(row) if "tortoise_list_graphs" in b[2]]
+        assert held, f"the mention's cell was not located at all: {self.blocks(row)}"
+        assert all(b1 > b0 for b0, b1, _ in held), (
+            f"the cell holding the mention is a ZERO-LENGTH block: {held}")
 
     @pytest.mark.parametrize("mid", ["# Heading\n", "```\nx\n```\n", "***\n"],
                              ids=["heading", "fence", "thematic-break"])
