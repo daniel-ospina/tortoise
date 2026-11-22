@@ -244,13 +244,45 @@ def _read_calls(tree: ast.AST) -> list[ast.Call]:
 
 
 def _str_constants(tree: ast.AST) -> dict[str, str]:
-    """Every name bound to a string LITERAL anywhere in the file, module or local scope."""
+    """Every name bound to a string LITERAL anywhere in the file, module or local scope.
+
+    ⛔ EVERY STATIC BINDING FORM, and the LAST bind wins (#14281 review P1, measured GREEN
+    over the whole pin file): this resolved a single-`Name` `Assign` only, with
+    `setdefault` keeping the FIRST binding, so
+
+        _N: str = "_tortoise_fts_query"          # AnnAssign
+        (_N,) = ("_tortoise_fts_query",)         # unpack target
+        _N = _M = "_tortoise_fts_query"          # chained
+        (_N := "_tortoise_fts_query")            # walrus
+
+    each left the name unresolved, and `getattr(sdk, _N)(…, kind="statement")` — a third
+    reach carrying a lever — left the pin GREEN while the grant stood. An annotated literal
+    is statically visible; it is not the declared "computed at runtime" residual.
+    """
     out: dict[str, str] = {}
+
+    def _bind(target: ast.AST, value: ast.AST) -> None:
+        # ⛔ AN UNPACKED LITERAL PAIRS ELEMENT-WISE (`(_N,) = ("…",)`), so the target shape
+        # and the value shape have to be walked together — the flat form treated the tuple
+        # VALUE as the literal and bound nothing (measured GREEN).
+        if (isinstance(target, (ast.Tuple, ast.List))
+                and isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)):
+            for _t, _v in zip(target.elts, value.elts, strict=True):
+                _bind(_t, _v)
+            return
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            return
+        for name in _names_in(target):
+            out[name] = value.value  # LAST bind wins — a re-bind is what the file ends with
+
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
-            out.setdefault(node.targets[0].id, node.value.value)
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                _bind(target, node.value)
+        elif isinstance(node, ast.NamedExpr) or (
+                isinstance(node, ast.AnnAssign) and node.value is not None):
+            _bind(node.target, node.value)
     return out
 
 
@@ -648,8 +680,12 @@ _PURE_METHODS = frozenset({
     "__getitem__", "__iter__", "__contains__",
     # identity / display / comparison
     "__eq__", "__ne__", "__hash__", "__str__", "__repr__", "__format__",
-    # str reads (a tainted for-target is not always a collection)
+    # str reads (a tainted for-target is not always a collection). ⛔ The common ones were
+    # MISSING and red as "an in-place sort/clear" (#14281 review P3, measured:
+    # `print(results[0]["query"].strip())`, `_lbl = results[0]["query"].lower()`).
     "startswith", "endswith", "find", "rfind", "isdigit", "isalpha",
+    "strip", "lstrip", "rstrip", "lower", "upper", "casefold", "split", "rsplit",
+    "replace", "format", "join", "title", "capitalize", "zfill", "center",
 })
 
 
@@ -1213,8 +1249,20 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             # tool at lines 329/333), and the rows it iterates never reach the callee.
             return False
 
+        def _derived(arg: ast.AST) -> bool:
+            """A comprehension BUILDS A NEW collection, so it cannot mutate its source.
+
+            ⛔ Measured RED without this (#14281 review P2): `", ".join(e.get("leg") or ""
+            for e in trace)` and `statistics.fmean(len(r) for r in results)` were reported
+            as "an in-place sort/clear" by the `handed` arm, decided by the CALLEE's name
+            rather than by any mutation. `_row_ref` already documented the same shape over
+            `per_query` as a measured false red.
+            """
+            return isinstance(arg, (ast.ListComp, ast.GeneratorExp, ast.SetComp,
+                                    ast.DictComp))
+
         handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
-            _names_handed(arg) & watched and not _element_only(arg)
+            _names_handed(arg) & watched and not _element_only(arg) and not _derived(arg)
             for arg in list(node.args) + [k.value for k in node.keywords])
         def _slot_ref(arg: ast.AST) -> bool:
             """A slot's VALUE handed to a call is the object stored there (#14281 P1).
@@ -2630,8 +2678,17 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     def _is_read_ref(node: ast.AST) -> bool:
         if isinstance(node, ast.Attribute) and node.attr in _READ_NAMES:
             return True
+        # ⛔ A NAME IS ONLY A REACH WHERE IT CAN BE EXECUTED (#14281 review P2, measured):
+        # the Name arm was blanket, so a provenance constant beside `git_sha`/`db_uri` —
+        # `_NOTE = "_tortoise_fts_query"` then `print(f"measuring {_NOTE}")` — red the
+        # census with "an alias, a string reference or a getattr", the exact false red the
+        # Constant arm was narrowed to remove. Same executable-parent test, same reason.
         if isinstance(node, ast.Name) and _resolved(node) in _READ_NAMES:
-            return True
+            _np = parents.get(id(node))
+            return (isinstance(_np, ast.Call)
+                    and (getattr(_np.func, "id", None)
+                         or getattr(_np.func, "attr", None)) not in _PURE_READS) \
+                or (isinstance(_np, ast.Subscript) and isinstance(_np.ctx, ast.Load))
         # ⛔ A STRING LITERAL MATTERS ONLY WHERE IT CAN BE EXECUTED. The census counts
         # mentions because a bare name can be handed to `getattr`; a `Constant` in
         # dict-value position is INERT — and recording provenance is the direction #14289
