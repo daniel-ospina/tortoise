@@ -288,6 +288,10 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`, an
     f-string, `_N + "_x"`, a parameter) and a value read out of a container or an attribute
     (`_CFG["read"]`, `self._read`) are not resolved here.
+
+    A literal ITERABLE is not residual, whatever its type: a `for`/comprehension target over
+    a tuple, a list, a SET or a DICT resolves, because CPython's grammar gives `iter` as an
+    arbitrary `expr` and iteration over a literal is statically visible (#14326 review F2).
     """
     binds: list[tuple[ast.AST, ast.AST]] = []
     for node in ast.walk(tree):
@@ -312,6 +316,16 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
             # turn, so every element is a possible value — the fail-closed reading, and the
             # one that makes `for _N in ("_tortoise_fts_query",)` resolvable at all.
             return set().union(*(_values(elt) for elt in value.elts))
+        # ⛔ A SET/DICT LITERAL IS THE SAME BIND SPELLING (#14326 review F2, measured GREEN
+        # without this): CPython's grammar gives `For.iter` and `comprehension.iter` as an
+        # arbitrary `expr`, so `for _N in {"_tortoise_fts_query"}` and
+        # `for _N in {"_tortoise_fts_query": 1}` are binds with no `Assign` node whose
+        # value is statically visible — not the "computed at runtime" residual. Iterating a
+        # dict yields its KEYS, and a `**spread` key is `None`.
+        if isinstance(value, ast.Set):
+            return set().union(*(_values(elt) for elt in value.elts))
+        if isinstance(value, ast.Dict):
+            return set().union(*(_values(key) for key in value.keys if key is not None))
         return set()
 
     def _bind(target: ast.AST, value: ast.AST) -> bool:
@@ -362,6 +376,14 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
         return _possible_strings(node.value, consts)
     if isinstance(node, (ast.Tuple, ast.List)):
         return frozenset().union(*(_possible_strings(elt, consts) for elt in node.elts))
+    # ⛔ THE SAME LITERAL-ITERABLE ARMS `_values` CARRIES (#14326 review F2): an operand
+    # carrying the read's name inside a set/dict literal is that name here too, so a
+    # `getattr(*{sdk, _N})` / `getattr(*{_N: 1})` splat cannot slip the `indirect` arm.
+    if isinstance(node, ast.Set):
+        return frozenset().union(*(_possible_strings(elt, consts) for elt in node.elts))
+    if isinstance(node, ast.Dict):
+        return frozenset().union(*(_possible_strings(key, consts)
+                                   for key in node.keys if key is not None))
     return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
 
 
@@ -2892,6 +2914,8 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
       - revert `_str_constants` to its previous form -> the `for`-target, comprehension,
         re-bind, subscript-store, name-chain, tuple-unpack and name-carried rows all pass
         (the third reach goes uncensused);
+      - revert `_values`' SET/DICT arms -> the three literal-iterable rows pass (#14326
+        review F2: a `for` target over `{"…"}` / `{"…": 1}` was GREEN);
       - revert `_indirect_reads` to its arity test -> the two `getattr(*…)` splat rows pass;
       - at `origin/main` -> the `AnnAssign`/unpack/chained/walrus rows pass as well.
 
@@ -2909,6 +2933,16 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
                        f'{reach.format(name="_N")}\n'),
         "comprehension target": (f'    [_N for _N in ("_tortoise_fts_query",)]\n    '
                                  f'{reach.format(name="_N")}\n'),
+        # ⛔ A SET/DICT LITERAL IS THE SAME BIND SPELLING (#14326 review F2, each measured
+        # GREEN with a third reach carrying `kind="statement"`): `For.iter` is an arbitrary
+        # expression, so these are binds with no `Assign` node whose value is statically
+        # visible — not the "computed at runtime" residual.
+        "set literal for target": (f'    for _N in {{"_tortoise_fts_query"}}:\n        '
+                                   f'{reach.format(name="_N")}\n'),
+        "dict literal for target": (f'    for _N in {{"_tortoise_fts_query": 1}}:\n        '
+                                    f'{reach.format(name="_N")}\n'),
+        "set bound, then iterated": (f'    _S = {{"_tortoise_fts_query"}}\n'
+                                     f'    for _N in _S:\n        {reach.format(name="_N")}\n'),
         "re-bind AFTER the reach": (f'    _N = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n'
                                     '    _N = "done"\n'),
         "subscript STORE target": ('    _N = "_tortoise_fts_query"\n    _counts = {}\n'
@@ -3001,6 +3035,40 @@ def test_a_COMPREHENSION_argument_is_NOT_the_collection() -> None:
         assert _mutations_of(body), (
             f"{body.strip()!r} MUST stay red — the exemption is for a comprehension that "
             "only READS the page, and a mutation written inside one still mutates it")
+
+    # ⛔ THE EXEMPTION GRADES THE COMPREHENSION'S BODY, NOT ONLY ITS COLLECTION (#14326
+    # review F1, measured): `_derived`'s docstring records the hole its body loop closes —
+    # an ELEMENT write through a helper, which the mutator arm cannot see because the
+    # helper's parameter is not the page in THIS scope:
+    #
+    #     def _scrub(_e): _e["id"] = "REDACTED"
+    #     _j = ", ".join(_scrub(r) for r in results)
+    #
+    # Deleting that loop left every row above GREEN (`_mutations_of(…)` went `[6]` -> `[]`),
+    # so the guard shipped with no mutant of its own — this PR's previous review finding F2
+    # (four fix hunks, zero assertions) recurring inside a fix. The PURE control beside it is
+    # the other polarity: the exemption must survive a body that only READS the elements.
+    scrub = ('    def _scrub(_e):\n'
+             '        _e["id"] = "REDACTED"\n'
+             '    _j = ", ".join(_scrub(r) for r in results)\n')
+    scrub_hits = _mutations_of(scrub)
+    assert scrub_hits, (
+        "a comprehension BODY that writes an element through a helper is not reported — the "
+        "collection the outer callee receives is fresh, but the body already rewrote every "
+        "`id` before `order` recorded it, so `compare()` reads `rank_identical: True` over "
+        "a permuted pair")
+    # ANCHORED: the hit must be the statement that hands the comprehension, never the write
+    # inside the helper (whose parameter is untainted in this scope).
+    scrub_run = _pin_source(scrub).body[0]
+    join_line = next(n.lineno for n in ast.walk(scrub_run)
+                     if isinstance(n, ast.Call)
+                     and getattr(n.func, "attr", None) == "join")
+    assert join_line in scrub_hits, (
+        f"hits={scrub_hits} do not include the comprehension's own line {join_line} — the "
+        "body check is firing on a neighbouring node instead of the body it grades")
+    assert not _mutations_of('    _j = ", ".join(str(e) for e in results)\n'), (
+        "a PURE comprehension body (`str(e)`, a listed non-mutator) must stay exempt — the "
+        "body check NARROWS the exemption, it does not remove it")
 
 
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
