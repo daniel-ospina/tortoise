@@ -2730,8 +2730,12 @@ def _strip_shell_comments(script: str) -> str:
             i += 1
             continue
         if quote == '"':
-            # A backslash escapes the next byte inside double quotes, so `\`` is a
-            # literal backtick and must not be reported as substitution syntax.
+            # A backslash escapes the next byte inside double quotes, so `\"` must not
+            # close the quote. The PAIR is kept verbatim, so an escaped backtick — inert at
+            # runtime (bash prints it literally) — IS still reported: a deliberate false
+            # POSITIVE on an inert byte, never a silent pass. Stated because this comment
+            # previously claimed the opposite of what the code does, in code whose whole
+            # purpose is not claiming more than it can see.
             if ch == "\\" and i + 1 < len(script):
                 out.append(script[i : i + 2])
                 i += 2
