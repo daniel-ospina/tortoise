@@ -65,10 +65,10 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    write at ANY depth, including an idle queue: ``tenant is None`` (the
    ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
    pass no tenant) and every ``record_sink`` door. (c) An inline fold the bound
-   cannot reach at all: an UNCOPYABLE record (the deep snapshot above fails, so a
-   write that would otherwise already be queued folds inline instead) and a
-   ``submit`` FAULT (the ``queue_fault`` arm below, published before it
-   propagates). So raising the bound does NOT remove this residual — it only
+   cannot reach at all: an UNCOPYABLE record (the deep snapshot in :func:`submit`
+   fails, so a write that would otherwise already be queued folds inline instead)
+   and a ``submit`` FAULT (the ``queue_fault`` arm in :func:`submit`, published
+   before it propagates). So raising the bound does NOT remove this residual — it only
    removes arm (a); a same-tenant queued write can be overtaken by a structural-arm
    fold at zero depth, or by a (c) fold at any depth. Nothing detects it: both
    positions are present, so ``journal_coverage`` / ``record-reconcile`` read
@@ -756,8 +756,13 @@ class ProjectionWorker:
           processes — and the EPOCH bump is what makes a SNAPSHOT FROM THE PARENT
           unmatchable;
         * **THE THIRD PARTY'S LOCKS TOO**, one layer down: ``prometheus_client``
-          gives every ``MutexValue`` a ``_lock`` (and a ``Counter`` family one; a
-          plain ``Gauge`` family carries none),
+          gives every ``MutexValue`` a ``_lock``, and a LABELLED metric family one of
+          its own — ⛔ the discriminator is ``labelnames``, NOT the metric type
+          (``_is_parent()`` is ``self._labelnames and not self._labelvalues``, so a
+          labelled ``Gauge``/``Counter``/``Histogram``/``Summary`` carries one and an
+          unlabelled one of those carries none; ``Info``/``Enum`` are the exception,
+          setting ``self._lock`` unconditionally in their own ``_metric_init`` and
+          this module defines neither),
           plain ``threading.Lock``s a child inherits from a peer that did not
           survive the ``fork()``. ``set``, ``inc``, ``get``, ``labels`` and
           ``collect`` all take one, and a blocked lock is not an exception, so the
