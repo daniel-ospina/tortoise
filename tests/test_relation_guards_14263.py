@@ -716,6 +716,47 @@ class TestIngestCarriesTheReport:
             "the field is part of the STABLE key set — always present")
         assert out["relation_declarations"] == []
 
+    def test_a_non_pair_door_warning_does_not_emit_a_null_declaration(self, sdk):
+        """Round-4 review F1 — a `null` judgement on a write that has none.
+
+        `_carry_relation_declaration` gated on *any* warning the door returned,
+        not on any PAIR warning. `_create_operator` puts the `#1934` predicate
+        and mechanism warnings in that same list
+        (`enforcement.warning_for_relation`, `mechanism_mismatch`) and NEITHER
+        carries `relation_declaration` — so a bundle whose pair is DECLARED (the
+        leg accepts and says nothing) but whose mechanism contradicts the
+        declaration still stamped `conn_result["relation_declaration"] = None`.
+        §3.3's first bullet says an absent judgement contributes NOTHING; a
+        present key holding `null` is a third state the contract never assigns a
+        meaning to, and a client written against the published example
+        (`entry = conn_result["relation_declaration"]; entry["outcome"]`) raises
+        TypeError on exactly the honest-answer path this leg exists to create.
+        """
+        # `dependsOn` is declared `mechanism: IMPL` for exactly
+        # `dev:api -> dev:database` (`packs/dev/manifest.yaml`), so the PAIR leg
+        # ACCEPTS; `NAND` contradicts the declared mechanism, which appends
+        # `mechanism_mismatch` and lets the write land (warn-not-block, #1934).
+        out = sdk._ingest(
+            _pair_bundle(reify=True, label="dependsOn", operator="NAND"),
+            granularity="granular")
+        assert out["relation_declarations"] == [], (
+            "the pair IS declared — the leg must report nothing")
+        result = next(r for r in out["results"]
+                      if r["section"] == "connections")["result"]
+        # Preconditions: the door DID warn (so the carry helper entered its body
+        # at all) and the warning is NOT a pair judgement — that combination is
+        # the shape that published the `null`, and without it this row could
+        # pass on an inert leg.
+        assert result.get("warnings"), (
+            "precondition: a non-pair warning must be present for this row to "
+            "exercise the gate it is about")
+        assert not any(w.get("code", "").endswith("_relation_pair")
+                       for w in result["warnings"] if isinstance(w, dict)), (
+            "precondition: the pair leg must have reported nothing")
+        assert "relation_declaration" not in result, (
+            "absent, not null: §3.3 assigns `null` no meaning, and every other "
+            f"surface in this leg omits — got {result.get('relation_declaration')!r}")
+
     def test_the_RELATION_route_reports_too(self, sdk):
         """Round-3 review F1 — `{"relation": …}` is a connect door as well.
 
@@ -804,11 +845,16 @@ class TestTheContractExampleIsTheEmittedPayload:
     #: Everything in the block that is a FACT about the verdict. The id fields
     #: (`target`/`connection`/`fromId`/`toId`) are per-write and are shown in the
     #: doc as placeholders on purpose, so they are not compared.
-    #: ⛔ `direction` is IN the compared set (round-4 review, F1): it became a
-    #: payload field on the doors that resolve a direction, and an allow-list
-    #: that did not name it would have watched the doc gain a field-blind pin —
-    #: which is exactly what happened before this round.
-    STABLE = ("outcome", "predicate", "from", "to", "rule", "direction",
+    #: ⛔ `direction` is NOT here, and the equality below makes that an ABSENCE
+    #: assertion (round-4 review, F3, superseding round-4 F1's inclusion): the
+    #: field is emitted only on a REVERSED write (`canonical_direction(direction)
+    #: == "<-"`), because on every other write the value is the door's resolved
+    #: per-op_type default — a fact the direction chain explicitly calls NOT a
+    #: declaration. This example is a forward write; if the payload started
+    #: carrying `direction` again the set equality below reds. The reversed case
+    #: is pinned end-to-end by `TestTheJudgedPairFollowsTheDeclaredDirection` and
+    #: `TestIngestCarriesTheReport::test_a_reversed_rollup_entry_names_the_JUDGED_ends`.
+    STABLE = ("outcome", "predicate", "from", "to", "rule",
               "declaredFor", "declaredBetweenTheseKinds", "override", "undo")
 
     @staticmethod
@@ -826,12 +872,27 @@ class TestTheContractExampleIsTheEmittedPayload:
         assert {k: documented[k] for k in self.STABLE} == {
             k: emitted[k] for k in self.STABLE}, (
             "INGEST_CONTRACT.md §3.3 drifted from the payload it documents")
-        # the compared set must not silently fall behind the payload: a field the
-        # code emits that the pin does not name is a doc gap this test cannot see
-        # (round-4 review, F1 — `direction` was added and the pin stayed green).
-        assert set(self.STABLE) <= set(emitted), (
-            "this test compares a field the payload does not carry: "
-            f"{sorted(set(self.STABLE) - set(emitted))}")
+        # ⛔ BOTH directions, and the payload side is the one that matters: a
+        # field the code emits but `STABLE` does not name is a doc gap this pin
+        # cannot see (round-4 review F1 — `direction` was added and the pin
+        # stayed green). `STABLE` ⊆ emitted alone only catches the opposite
+        # mistake (a compared field the payload never carries).
+        # The per-write/message fields are excluded by name: `target`/
+        # `connection`/`fromId`/`toId` are placeholders on purpose (§3.3), and
+        # `message`'s factual core is pinned by its own assertion below.
+        _not_compared = {"target", "connection", "fromId", "toId", "message"}
+        assert set(emitted) - _not_compared == set(self.STABLE), (
+            "the pin's compared set and the payload disagree: "
+            f"emitted-only={sorted(set(emitted) - _not_compared - set(self.STABLE))}, "
+            f"stable-only={sorted(set(self.STABLE) - set(emitted))}")
+        # ⛔ …and the ONE conditional field is asserted absent on this forward
+        # write (round-4 review, F3). The door resolves a direction
+        # (`bidirectional` for IMPL) BEFORE the pair leg runs; publishing that
+        # resolution stated a provenance the caller never gave. Re-gating the
+        # note on `direction is not None` reds the line above by name.
+        assert "direction" not in emitted, (
+            "a forward write must not carry `direction`: the value there is the "
+            f"door's resolved default, not a declaration, got {emitted['direction']!r}")
 
     def test_the_example_publishes_the_RULE_id_and_not_the_warning_CODE(self):
         documented = self._documented_example()

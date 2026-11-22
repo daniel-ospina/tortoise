@@ -361,7 +361,6 @@ That judgement is `out["relation_declarations"]`.
   "fromId": "01J8…",
   "toId": "01J8…",
   "rule": "relation-pair-not-declared",
-  "direction": "bidirectional",
   "declaredFor": [
     {"fromKind": "pm:card", "toKind": "Subject"},
     {"fromKind": "venture:actionItem", "toKind": "Subject"}
@@ -381,9 +380,11 @@ That judgement is `out["relation_declarations"]`.
   branches on `rule` will never match it against `code` (#14284 review F2).
   `tests/test_relation_guards_14263.py::TestTheContractExampleIsTheEmittedPayload`
   compares every STABLE field of this block (the ones above, `direction`
-  included) to a real emitted payload, so THOSE cannot drift silently — a field
-  ADDED to the payload still needs an example line here, and the pin checks the
-  compared set, not the payload's whole key set (round-4 review, F1).
+  included on the reversed case it is defined for) to a real emitted payload, so
+  THOSE cannot drift silently — a field ADDED to the payload still needs an
+  example line here, and the pin checks the compared set, not the payload's
+  whole key set (round-4 review, F1). The example is a FORWARD write, so it
+  carries no `direction` key and the pin additionally asserts that absence.
 - ⛔ **`declaredFor` is what the predicate IS declared for — never the pair being
   judged.** If it listed this example's own `dev:api -> dev:database` together with
   `outcome: undeclared_pair`, the block would contradict itself (that was the
@@ -412,6 +413,28 @@ That judgement is `out["relation_declarations"]`.
   `direction="<-"` write the relation runs target → source, so the entry
   carries `direction: "<-"` and `fromId` is the connection's `to` — the two
   halves of one entry never name different nodes (round-3 review, F2).
+- **`direction` is present ONLY on that reversed case**, and its absence is not
+  "no direction declared". The doors resolve an absent direction to the
+  per-op_type default (`bidirectional` for IMPL, `unidirectional` for NAND)
+  before the pair leg runs, and that resolved value is explicitly *not* a
+  declaration, so echoing it here would publish a provenance the caller never
+  gave. The field therefore means exactly one thing — "the judged ends are the
+  reverse of the argument order" — which is the fact a rollup needs to orient
+  `fromId`/`toId`, and it is withheld otherwise (round-4 review, F3; the example
+  above is a forward write and carries no such key). Read the operator/edge for
+  the stored direction.
+  ⚠️ **Which doors can carry it:** only a write whose direction is resolved AND
+  reversed — `create_direct_edge` and `create_operator`, reached directly or
+  through `link_entities`' `IMPL`/`NAND` and epistemic / `operator=True` arms. A
+  `create_edge` write — which is also `link_entities`' **plain-edge arm** — and a
+  `{"relation": …}` connection take no direction at all, so their entries can
+  never be reversed and never carry the key; `link_entities`' derivation and
+  provenance arms report NO entry (they judge no relation). ⛔ Read an absent key
+  as "the judged orientation is the argument order" — never as a missing field,
+  and never as "the caller declared no direction": the doors resolve a default
+  (`bidirectional`/`unidirectional`) and that value is deliberately NOT published
+  (round-5 review, F1; corrected by round-4 review, F3, which found the earlier
+  wording describing a payload the code no longer emits).
 - **A resubmission that mints nothing reports nothing.** The operator route's
   exact-dedup and partial-absorb arms write no edge, so they carry no fresh
   judgement — the same reason `ids["connections"]` is stable across a retry.

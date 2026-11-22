@@ -144,6 +144,7 @@ from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
 from .search_engine import belief_value, VECTOR_LEG_BUDGET_MS  # #11702; #11691
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
+from .live import canonical_direction  # #7852 legacy alias → model value
 from .live import direction_flows  # #7852 (source→target, target→source) flows
 from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
@@ -37661,8 +37662,22 @@ class TortoiseSDK:
         entries = list(door_result.get("warnings") or ())
         if not entries:
             return
-        conn_result["relation_declaration"] = door_result.get(
-            "relation_declaration")
+        # ⛔ The judgement is set only when the door actually reported ONE
+        # (round-4 review, F1 — still open at `d6c0d707bd`). `entries` is *any*
+        # warning the door returned, and two producers put a dict in that list
+        # that has nothing to do with this leg: `#1934`'s
+        # `undeclared_relation` (`enforcement.warning_for_relation`) and
+        # `mechanism_mismatch`. Neither carries `relation_declaration`, so the
+        # unconditional assignment below published
+        # ``conn_result["relation_declaration"] = None`` — a present key holding
+        # null where §3.3 says an absent judgement contributes NOTHING. A client
+        # written against that contract (`entry["outcome"]`) then raises
+        # `TypeError` on a bundle that reports no pair fact at all, i.e. on the
+        # honest-answer path this leg exists to create. Every other surface in
+        # this diff is omit-when-absent; this is the one nullable scalar.
+        _declaration = door_result.get("relation_declaration")
+        if _declaration is not None:
+            conn_result["relation_declaration"] = _declaration
         conn_result["warnings"] = entries
         for entry in entries:
             if not isinstance(entry, dict):
@@ -62278,12 +62293,29 @@ class TortoiseSDK:
                     # on the prior review's finding 3).
                     note = dict(verdict.payload)
                     note["target"] = target_id
-                    # The ORIENTATION the pair was judged in travels too: on a
+                    # The orientation the pair was judged in travels, but ONLY
+                    # when it differs from the argument order: on a
                     # `direction="<-"` write the judged ends are
                     # (target, source), so a rollup that stamps `fromId` from
                     # the connection's arguments would name a different node
                     # than ``from`` does (round-3 review, F2).
-                    if direction is not None:
+                    #
+                    # ⛔ EVERY OTHER TOKEN IS WITHHELD, including the one the
+                    # doors RESOLVE before this leg runs (round-4 review, F3).
+                    # `_create_operator` canonicalizes an absent direction to
+                    # the per-op_type default and `_create_direct_edge` fills
+                    # the same default in, so emitting `direction` whenever it
+                    # is not ``None`` published `"bidirectional"` /
+                    # `"unidirectional"` for a write where the caller declared
+                    # nothing — a value this file's own direction chain calls
+                    # *"NEITHER … a declaration"*, stamped into the stable
+                    # machine-readable block with no `direction_basis` beside it
+                    # to say how it was reached. Absence here is therefore NOT
+                    # "no direction declared" (read the operator/edge for that);
+                    # it is "the judged orientation is the argument order",
+                    # which is the single fact a consumer orients on, and the
+                    # only one §3.3 documents.
+                    if canonical_direction(direction) == "<-":
                         note["direction"] = direction
                     notes.append(note)
             return notes

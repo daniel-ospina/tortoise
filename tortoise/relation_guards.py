@@ -127,8 +127,18 @@ The declarations are read lazily and the verdict is a dict lookup plus string
 folding — no model, no embedding, no graph read (``tests/
 test_relation_guards_14263.py`` asserts zero model calls). The SDK layer reads
 the two endpoint kinds only when the predicate is pack-declared at all: every
-core/structural predicate (``hasPart``, ``related``, ``references`` …) abstains
-before any read, which is the overwhelming majority of edge writes.
+core/structural predicate no pack declares a pair for (``related``,
+``references`` …) abstains before any read, which is the overwhelming majority
+of edge writes.
+
+⛔ ``hasPart`` is NOT in that list and must not be moved back into it. It is a
+structural predicate AND a pack-declared one — `packs/dev/manifest.yaml`
+declares it for ``dev:theme -> dev:epic`` — so narrowing (1) does not fire and
+``_endpoint_kind_map`` (the leg's one graph read) IS paid on it. Naming it among
+the abstainers was false, and this is the module that owns the claim: a reader
+reasoning from it would treat widening narrowing (1) as free, or delete the
+read guard believing ``hasPart`` never reaches it (round-4 review, F4). The
+same correction is already stated on the SDK side (``_endpoint_kind_map``).
 """
 from __future__ import annotations
 
