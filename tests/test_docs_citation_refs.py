@@ -4955,6 +4955,16 @@ def _d5_grep_declined_the_spelling(
     Requiring the message to NAME the spelling is what keeps a refusal of one option from
     licensing another.
 
+    ⛔ THE TEST IS A SUBSTRING TEST, NOT AN EQUALITY, AND THAT IS DELIBERATE — STATED HERE BECAUSE
+    THE PREVIOUS PROSE CLAIMED OTHERWISE (#14306 review F4, P3 — MEASURED FROM THE SOURCE).
+    `spelling in stderr` licenses a refusal whose message names the spelling **or a longer spelling
+    that contains it**, which is exactly how an ABBREVIATION is covered: `--u` abbreviates
+    `--unix-byte-offsets` (grep 3.11 resolves it to that option — `grep -c --u` prints its own
+    `obsolete` warning), so a message refusing the long form must decline the prefix too. What the
+    predicate does refuse to license is an UNRELATED option: a refusal naming `--fixed-regexp`
+    must not decline `--unix-byte-offsets`, because neither names the other. Both directions are
+    pinned in `test_the_d5_grep_portability_tolerance_covers_a_REFUSAL_and_nothing_else`.
+
     ⛔ THE EXIT CODE IS HALF THE PREDICATE, NOT THE CALLER'S BUSINESS. A grep that RAN the
     spelling exits 0 (or 1, "no match"); it has not declined anything, whatever an unrelated
     warning happens to say on stderr. Keeping that check here means the predicate answers its own
@@ -5040,6 +5050,27 @@ def test_the_d5_grep_portability_tolerance_covers_a_REFUSAL_and_nothing_else():
     assert _d5_grep_declined_the_spelling(
         ran(2, "grep: option '--u' is ambiguous; possibilities: '--unrestricted'\n"), "--u"), (
         "an ABBREVIATION grep refuses to resolve is the same platform fact: grep will not run it")
+    # ⛔ EVERY DECLARED WORDING NEEDS A FIXTURE THAT REDS WHEN IT IS DELETED (#14306 review F3, P2 —
+    # this file's own ruling at `:3959`, MEASURED). At the previous head, deleting `"invalid
+    # option"` and `"illegal option"` from `_D5_GREP_OPTION_REFUSAL_MARKERS` left the WHOLE SUITE
+    # GREEN: four fixtures fed `unrecognized option` and one fed `ambiguous`, so tolerance for the
+    # two POSIX wordings was witnessed by nothing. The wording IS the thing under test, so a
+    # syntactic stand-in is enough — each row below reds if its own member is dropped.
+    assert _d5_grep_declined_the_spelling(
+        ran(2, "grep: invalid option -- '--unix-byte-offsets'\n"), "--unix-byte-offsets"), (
+        "the POSIX `invalid option` wording is a refusal too — dropping it from the markers reds "
+        "here and nowhere else (#14306 review F3, P2)")
+    assert _d5_grep_declined_the_spelling(
+        ran(2, "grep: illegal option -- '--fixed-regexp'\n"), "--fixed-regexp"), (
+        "the BSD `illegal option` wording is a refusal too — dropping it from the markers reds "
+        "here and nowhere else (#14306 review F3, P2)")
+    # ⛔ THE ABBREVIATION DIRECTION IS PINNED, NOT JUST DESCRIBED (#14306 review F4, P3). The
+    # negative arm below (`--fixed-regexp` refusal vs `--unix-byte-offsets`) is the pair where
+    # prefix-blindness CANNOT show, so it cannot witness this property on its own; this row can.
+    assert _d5_grep_declined_the_spelling(
+        ran(2, "grep: unrecognized option '--unix-byte-offsets'\n"), "--u"), (
+        "`--u` ABBREVIATES `--unix-byte-offsets`, so a refusal naming the long form declines the "
+        "prefix too — the substring test is the deliberate behaviour, not a leak (#14306 F4, P3)")
     assert not _d5_grep_declined_the_spelling(
         ran(2, "grep: /tmp: Is a directory\n"), "--fixed-regexp"), (
         "a MEASUREMENT failure (rc 2, a message that names no option) is not a portability gap: "
@@ -5235,12 +5266,15 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
     assert _conflict is None, (
         f"{_conflict} — the verdicts collected here must describe ONE grep; a verdict for only one "
         "of the two `-u` spellings is the false PASS this cell exists to refuse (#14306 review F2)")
-    if not measured:
-        pytest.skip(
-            "this grep runs NONE of the three spellings this cell measures "
-            f"(`--unix-byte-offsets`, `--u`, `--fixed-regexp`; declined: {sorted(declined)}), so no "
-            "acceptance exists to check; the reader's own behaviour is asserted unconditionally "
-            "above and below (#14027)")
+    # ⛔ THE SKIP SITS BELOW EVERY READER-ONLY ASSERTION, AND THAT POSITION IS THE FIX (#14306
+    # review F2, P2 — this file's own inert-enforcer ruling at `:1219`, MEASURED). `pytest.skip`
+    # RAISES, so a skip placed here — above the six rows that follow — made them unreachable on a
+    # grep that runs none of the three spellings: the cell reported a GREEN skip while certifying
+    # none of them, on a `core`+`tier1` surface selected on every PR, while this cell's own prose
+    # said the reader's behaviour is "asserted unconditionally". Not one of the rows below reads
+    # `measured` or `declined`, so none of them needs a working grep and none may be skipped by
+    # grep's verdict. The skip is deferred to the very end of the cell; it still marks the test
+    # SKIPPED, and a reader assertion that fails on the way there REDS instead of skipping.
 
     assert {"--unix-byte-offsets"} == set(_D5_UNDOCUMENTED_LONG_OPTIONS), (
         "the undocumented allowance is a DECLARED set of the spellings THIS READER accepts although "
@@ -5269,6 +5303,17 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
         "`--fixed-regexp` is `-F`: a LITERAL pattern, which counts `0` of this class on the probe "
         "(measured), so declining it cannot hide a blank-class prescription — that measurement is "
         "what makes the exclusion safe (#14027)")
+
+    # ⛔ LAST, AND ONLY AFTER EVERY READER CLAIM HAS ALREADY BEEN ASSERTED (#14306 review F2, P2).
+    # Nothing above this line consults `measured` or `declined`: those six rows are claims about the
+    # READER, which is portable, and grep's verdict may not suppress them. This arm is the one thing
+    # that genuinely needs an acceptance to exist, so an oracle-less platform loses only it.
+    if not measured:
+        pytest.skip(
+            "this grep runs NONE of the three spellings this cell measures "
+            f"(`--unix-byte-offsets`, `--u`, `--fixed-regexp`; declined: {sorted(declined)}), so no "
+            "acceptance exists to check; the reader's own behaviour is asserted unconditionally "
+            "ABOVE this point and has just run (#14027, #14306 review F2)")
 
 
 def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_prefix():
