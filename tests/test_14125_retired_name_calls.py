@@ -2326,12 +2326,41 @@ def _required_names(own_import: bool) -> set[str]:
     return _RAISED if own_import else _RAISED - {"ImportError"}
 
 
-def _unarmed_probe_blocks() -> tuple[tuple[str, int], ...]:
-    """Probe roots that swallow a programming error instead of re-raising it."""
+def _unarmed_from_rows(
+    rows: tuple[tuple[str, int, tuple[str, ...], bool, bool, bool], ...],
+) -> tuple[tuple[str, int], ...]:
+    """The UNARMED gate's verdict, over any row population.
+
+    Split out of `_unarmed_probe_blocks` so the gate VERDICT itself can be witnessed from
+    synthetic source (`_probe_blocks_from_source` rows) and not only from the real tree's
+    census. Every self-test in this file used to exercise a PREDICATE and never a gate
+    verdict, which is why a shape BOTH gates passed could have no red row anywhere
+    (review of PR #14287, F1's second half).
+    """
     return tuple(
         (rel, lineno)
-        for rel, lineno, covered, swallows, own_import, is_root in _probe_report()
+        for rel, lineno, covered, swallows, own_import, is_root in rows
         if is_root and swallows and not set(covered) >= _required_names(own_import)
+    )
+
+
+def _unarmed_probe_blocks() -> tuple[tuple[str, int], ...]:
+    """Probe roots that swallow a programming error instead of re-raising it."""
+    return _unarmed_from_rows(_probe_report())
+
+
+def _seam_from_rows(
+    rows: tuple[tuple[str, int, tuple[str, ...], bool, bool, bool], ...],
+) -> tuple[tuple[str, int], ...]:
+    """The IMPORT-SEAM gate's verdict, over any row population.
+
+    Split out for the same reason as `_unarmed_from_rows`: a gate verdict needs a witness
+    that does not depend on the real tree happening to contain the shape.
+    """
+    return tuple(
+        (rel, lineno)
+        for rel, lineno, covered, swallows, own_import, _is_root in rows
+        if swallows and own_import and "ImportError" not in covered
     )
 
 
@@ -2342,11 +2371,7 @@ def _probe_blocks_with_an_uncovered_import_seam() -> tuple[tuple[str, int], ...]
     `ImportError` at its import propagates and there is nothing to fix — redding
     it would be a false positive on a shape that is already loud.
     """
-    return tuple(
-        (rel, lineno)
-        for rel, lineno, covered, swallows, own_import, _is_root in _probe_report()
-        if swallows and own_import and "ImportError" not in covered
-    )
+    return _seam_from_rows(_probe_report())
 
 
 def test_every_availability_probe_re_raises_a_programming_error():
@@ -2480,6 +2505,94 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     assert split == (
         (3, ("AttributeError", "ImportError", "NameError", "TypeError"), True, True, True),
     ), f"a split arm covers all four names and must not be redded for its shape: {split}"
+
+    # ⛔ F1 (review of PR #14287): THE RENAME IS DROPPED AT THE FIRST ARM, and the later
+    #     four-name re-raise credited `ImportError` anyway — producing a row BYTE-IDENTICAL
+    #     to the `fixed` row above, so the census could not tell "armed" from "rename
+    #     swallowed". Both gates passed, because both are conjunctions with coverage. This
+    #     is the shape a lane reaches by obeying the gates' own repair message on a block
+    #     that already carries an `except ModuleNotFoundError: pass` skip, so it is the
+    #     fail-open this whole file exists to catch (category A: a false PASS).
+    rename_dropped = rows(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK as _ProbeSDK
+            _ProbeSDK()
+            FALKORDB_AVAILABLE = True
+        except ModuleNotFoundError:
+            pass
+        except (AttributeError, NameError, TypeError, ImportError):
+            raise
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert rename_dropped == (
+        (3, ("AttributeError", "NameError", "TypeError"), True, True, True),
+    ), (
+        "a `ModuleNotFoundError: pass` arm DROPS the module rename, so the later four-name "
+        "re-raise must NOT credit `ImportError` back into coverage — that credit made this "
+        f"row identical to the armed `fixed` row: {rename_dropped}"
+    )
+
+    # ⛔ …and the GATE VERDICTS themselves are witnesses, not just the predicate: both gates
+    #     must RED this block and stay green on the armed one. Without this pair the whole
+    #     class had no red row anywhere, because every other self-test exercises `_covered`
+    #     / `_swallows_everything` directly and never a gate verdict (review of PR #14287,
+    #     F1's second half — the fix that closed the leak added predicate rows only).
+    _witness = "tests/_14287_witness.py"
+    assert _unarmed_from_rows(tuple((_witness, *row) for row in rename_dropped)) == (
+        (_witness, 3),
+    ), (
+        "the UNARMED gate must report a probe that drops the module rename at its first "
+        "arm, even though a later arm re-raises the four names"
+    )
+    assert _seam_from_rows(tuple((_witness, *row) for row in rename_dropped)) == (
+        (_witness, 3),
+    ), (
+        "the IMPORT-SEAM gate must report an own-code import whose rename is dropped at "
+        "the first arm — `ImportError` in `covered` is not the same question"
+    )
+    assert _unarmed_from_rows(tuple((_witness, *row) for row in fixed)) == (), (
+        f"the armed control must stay GREEN in the unarmed gate: {fixed}"
+    )
+    assert _seam_from_rows(tuple((_witness, *row) for row in fixed)) == (), (
+        f"the armed control must stay GREEN in the import-seam gate: {fixed}"
+    )
+
+    # …and the same leak in the OTHER alias family: a dropped `UnboundLocalError` must not be
+    # credited back as `NameError` by a later arm (a renamed LOCAL, not a moved module). The
+    # arm still names `ImportError`, so the seam gate stays green and the UNARMED gate is the
+    # one that must catch it.
+    _local_dropped = rows(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK as _ProbeSDK
+            _ProbeSDK()
+            FALKORDB_AVAILABLE = True
+        except UnboundLocalError:
+            pass
+        except (AttributeError, ImportError, NameError, TypeError):
+            raise
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert _local_dropped == (
+        (3, ("AttributeError", "ImportError", "TypeError"), True, True, True),
+    ), (
+        "an `UnboundLocalError: pass` arm drops `NameError`'s family, so the later `NameError` "
+        f"re-raise must not credit it back: {_local_dropped}"
+    )
+    assert _unarmed_from_rows(tuple((_witness, *row) for row in _local_dropped)) == (
+        (_witness, 3),
+    ), "the UNARMED gate must report a dropped `UnboundLocalError` recredited as `NameError`"
+    assert _seam_from_rows(tuple((_witness, *row) for row in _local_dropped)) == (), (
+        "the import seam IS covered here, so the seam gate stays green — the local family is "
+        "the unarmed gate's question"
+    )
 
     # A bare `except:` covers NOTHING and swallows everything — the worst shape.
     bare = rows(
@@ -4953,6 +5066,16 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "tell the seam gate that any ImportError propagates while a reachable arm below "
         f"could still swallow one: {_covered(_subclass_credit)}"
     )
+    #: ⛔ WHAT THIS ROW DOES *NOT* PIN (review of PR #14287, F2). It is GREEN on the code
+    #: before the alias map existed — `_covered` was `out |= names` for a lone re-raising
+    #: arm, which is already `set(_handler_names(...))` — so it cannot witness the credit
+    #: half of the subclass work, and this comment used to present it as if it did. What it
+    #: DOES pin, and must keep pinning, is that credit is never CANONICALISED on output: the
+    #: mutation `out |= {_RAISED_ALIAS.get(n, n) …}` reds this row and nothing else. The
+    #: alias map's live effects are the CHARGE side, the masking account, and the
+    #: family-close; the GATE-level witness for the family-close lives in
+    #: `test_the_import_seam_census_sees_the_shapes_it_grades` (`rename_dropped`), because a
+    #: predicate row cannot see a gate verdict.
     #: …and it IS accounted as `ImportError` for ORDERING, so an earlier plain
     #: `except ImportError:` masks it — that arm catches every subclass, which is how a
     #: later `except ModuleNotFoundError: raise` becomes unreachable (review of #14160,
