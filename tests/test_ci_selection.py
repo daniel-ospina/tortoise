@@ -10638,6 +10638,17 @@ ROWED_BY_THIS_FOLD = (
     # file nobody listed has no `durations:` row and nothing reds (#14086 cycle-3 review, F1).
     "test_10893_capture_off_loop.py",
     "test_10893_pre_handler_parts.py",
+    # #14263 (PR #14284) — the relation-PAIR leg's falsifiers. A file this fold ADDED,
+    # registered on `core` + `durations:` because `tortoise/relation_guards.py` matches
+    # no `SOURCE_PATTERNS` entry (a module-only diff falls through to `core`) and
+    # `tortoise/sdk.py` is a `SHARED_MODULE`. The first cut shipped the 505-line file
+    # with NO surface row and NO `durations:` row at all — `--integrity` redded the
+    # required `manifest-integrity` leg, and even had it not, no diff could SELECT the
+    # file, so the entire proof-of-work would never have run in CI (review F1 @
+    # `69a9fae6c8`). Listed here for the reason every row above states: the ENTRY-RULE
+    # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:` row
+    # and nothing reds.
+    "test_relation_guards_14263.py",
 )
 
 
