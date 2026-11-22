@@ -682,6 +682,46 @@ class TestIngestCarriesTheReport:
         assert out["relation_declarations"] == []
 
 
+class TestTheJudgedPairFollowsTheDeclaredDirection:
+    """A reversed DECLARATION must not be read as a reversed WRITE.
+
+    Measured before the fix, at the head the review left `UNVERIFIED`:
+
+        _create_operator("IMPL", db, [api], label="dependsOn", direction="<-")
+        -> outcome == "reversed_pair"   (direction="<-", basis="explicit")
+
+    `dependsOn` is declared exactly `dev:api -> dev:database`, and this write
+    IS that orientation — `direction="<-"` says the relation runs target ->
+    source, i.e. api -> db. So the reply told the caller the pack declares only
+    the reverse of the pair it had in fact declared.
+    """
+
+    def test_a_declared_reverse_direction_is_not_reported_as_reversed(self, sdk):
+        api = _obj(sdk, "API", "dev:api")
+        db = _obj(sdk, "DB", "dev:database")
+        out = sdk._create_operator("IMPL", db, [api], label="dependsOn",
+                                    direction="<-")
+        assert out.get("direction") == "<-"
+        assert "relation_declaration" not in out, (
+            "the relation runs api -> db, which the pack DOES declare — this "
+            f"write must be silent, got {out.get('relation_declaration')}")
+
+    def test_a_forward_write_of_a_declared_pair_stays_silent(self, sdk):
+        api = _obj(sdk, "API", "dev:api")
+        db = _obj(sdk, "DB", "dev:database")
+        out = sdk._create_operator("IMPL", api, [db], label="dependsOn")
+        assert "relation_declaration" not in out
+
+    def test_the_wrong_way_round_is_still_REPORTED(self, sdk):
+        """The pin must not become "never report again": a real reversal is."""
+        api = _obj(sdk, "API", "dev:api")
+        db = _obj(sdk, "DB", "dev:database")
+        # forward declaration on the reversed pair -> the pack declares the
+        # reverse, so this IS the reported state
+        out = sdk._create_operator("IMPL", db, [api], label="dependsOn")
+        assert out["relation_declaration"]["outcome"] == REVERSED_PAIR
+
+
 def _pair_bundle(*, reify: bool, label: str) -> dict:
     """Two Object endpoints of DECLARED kinds, and one connection by label.
 

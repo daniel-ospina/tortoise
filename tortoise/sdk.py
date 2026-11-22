@@ -29834,7 +29834,8 @@ class TortoiseSDK:
         # judge and pays no graph read. Warn-not-block, exactly as the
         # predicate and mechanism legs are: the operator has already landed.
         _declaration_notes = self._relation_pair_notes(
-            predicate=label, source_id=source_id, target_ids=list(target_ids))
+            predicate=label, source_id=source_id, target_ids=list(target_ids),
+            direction=direction)
         if _declaration_notes:
             from tortoise.relation_guards import warning_shape
 
@@ -37076,7 +37077,8 @@ class TortoiseSDK:
         # therefore has no declared pair to judge and pays no graph read.
         # Warn-not-block: the edge has already landed (#1934).
         _declaration_notes = self._relation_pair_notes(
-            predicate=label, source_id=source_id, target_ids=[target_id])
+            predicate=label, source_id=source_id, target_ids=[target_id],
+            direction=direction)
         if _declaration_notes:
             from tortoise.relation_guards import warning_shape
 
@@ -62070,7 +62072,8 @@ class TortoiseSDK:
         except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
             return None
 
-    def _relation_pair_notes(self, *, predicate, source_id, target_ids) -> list[dict]:
+    def _relation_pair_notes(self, *, predicate, source_id, target_ids,
+                             direction=None) -> list[dict]:
         """AX blocks for edges whose KIND PAIR no installed pack declares (#14263).
 
         The ONE reader every connect door shares — ``_create_edge`` (the
@@ -62098,6 +62101,27 @@ class TortoiseSDK:
         (the mechanism ``op_type`` is not a relation) and the ``relation`` on
         the structural path. An absent label means the caller named no domain
         relation, so there is nothing for this leg to judge.
+
+        ``direction`` is the door's RESOLVED Layer-1 direction token, and it is
+        what lets the judged pair follow the relation instead of the argument
+        order. ``"<-"`` declares the REVERSE orientation — the relation runs
+        target → source — so the pair to judge is ``(target, source)``. Without
+        it the leg answered ``reversed_pair`` for a write that WAS the declared
+        orientation: measured at the head before this parameter existed,
+
+            _create_operator("IMPL", db, [api], label="dependsOn",
+                             direction="<-")
+            -> relation_declaration.outcome == "reversed_pair"
+               direction="<-" direction_basis="explicit"
+
+        while `dependsOn` is declared exactly ``dev:api -> dev:database`` — so
+        the reply told the caller the pack declares only the reverse of the pair
+        it had in fact declared. A false statement in an agent-facing reply is
+        the one thing this module exists not to produce, so it is fixed here
+        rather than disclosed (`69a9fae6c8` review's UNVERIFIED note).
+        ``"<->"``/``"-"``/absent/forward are judged as asked: those either
+        declare both orientations (where the asked one is the one to check) or
+        declare none (where the argument order is all there is).
         """
         if not predicate or not isinstance(predicate, str) or not target_ids:
             return []
@@ -62126,9 +62150,22 @@ class TortoiseSDK:
                     if isinstance(source_id, str) else (None, None)
                 tgt_label, tgt_kind = kinds.get(target_id, (None, None)) \
                     if isinstance(target_id, str) else (None, None)
+                # The judged pair follows the RELATION, not the argument
+                # order: `direction="<-"` declares the reverse orientation, so
+                # the relation runs target -> source and the declared pair to
+                # compare against is `(target, source)`. Every other token
+                # (`->`, `<->`, `-`, absent) is judged as asked — the first two
+                # declare the asked orientation among others, the last two
+                # declare none, and in both the argument order is all there is.
+                if direction == "<-":
+                    f_kind, t_kind = tgt_kind, src_kind
+                    f_label, t_label = tgt_label, src_label
+                else:
+                    f_kind, t_kind = src_kind, tgt_kind
+                    f_label, t_label = src_label, tgt_label
                 verdict = relation_pair_verdict(
-                    predicate, src_kind, tgt_kind,
-                    from_label=src_label, to_label=tgt_label,
+                    predicate, f_kind, t_kind,
+                    from_label=f_label, to_label=t_label,
                     declared=declared)
                 if verdict.reportable and verdict.payload is not None:
                     # The TARGET id travels with the judgement. A multi-target
