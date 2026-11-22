@@ -1140,6 +1140,9 @@ SWEEP_NAMES = 66
 #: no defect is hidden: the row SHAPE set is unchanged, and `typed references still pointing at a
 #: public name` is **0** on this tree (measured, `--check`). ⛔ NEITHER SIDE'S FIGURE WAS CARRIED BY
 #: ARITHMETIC on the previous pin: both pairs above are `--repin` output on the tree they name.
+#: ⛔ THIS +9 IS THE READING TAKEN BEFORE `dcf5e3621c` — that commit removed the third row, so the
+#: live delta is +8; the RE-CUT block below re-measures it on the current tree rather than adjusting
+#: this paragraph's figure by the one that was deleted.
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
 #: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
@@ -1203,14 +1206,33 @@ SWEEP_NAMES = 66
 #: `(11861, "f0647020531c078c")` on ITS tree at that same commit. A merge takes the union of
 #: both trees' rows, so NEITHER number can be correct for it, and arithmetic on the two is
 #: exactly what this pin chain forbids: the delta is re-derived by running `--repin` at the
-#: merged tree, which is what produced the pair below — and it reads the BRANCH's own pair,
-#: not a third number: `--repin` prints `(11870, "fccc31bf7f22f941")` here, so `main`'s four
+#: merged tree, which is what produced the pair below — and it read the BRANCH's own pair,
+#: not a third number: `--repin` printed `(11870, "fccc31bf7f22f941")` on the merged tree
+#: `8abd01cada` (the CI-isolation commits after it moved it — RE-CUT block below), so `main`'s four
 #: commits since `70fbd1a27dd5` (`0467ba329d73`, `ee0e460fb364`, `2bdbb10efd45`, `fa4d1c8065f0`)
 #: contribute NO residue row, MEASURED by that run rather than assumed from their subjects.
 #: That is a coincidence of the two readings and is recorded as one: the evidence is the
 #: `--repin` run on THIS tree, never the arithmetic that would have predicted 11870.
-#: `--check` exits 0 on it.
-SWEEP_RESIDUE = (11870, "fccc31bf7f22f941")
+#:
+#: ⛔ RE-CUT → (11869, "a598f8ca97800573") AFTER THE CI-ISOLATION REPAIR, AND THE −1 IS NAMED
+#: RATHER THAN ABSORBED. `dcf5e3621c` deleted the `sdk` fixture's DEAD teardown, whose only
+#: statement was `s._get_proj().g.query("MATCH (n) DETACH DELETE n")` — the single test-side
+#: `s._get_proj().g.query(…)` the +9 attribution above counted. It never ran: `_live_write_scope`
+#: is a `tortoise.projection` FUNCTION, so `contextlib.suppress(Exception)` swallowed the
+#: `AttributeError` and the DELETE never executed. Its removal is therefore the whole delta and it
+#: removes no live read — the required `surface-guard` job went red on the stale pair, not on a new
+#: shape.
+#: MEASURED ON BOTH TREES, never by adjusting the previous figure: `--repin` on THIS tree prints
+#: `(11869, "a598f8ca97800573")`, and `--report --base 28ca66878d7c --top 5000` run here AND in a
+#: detached worktree at `origin/main` `0467ba329d73` yields UNCHANGED 856-row shape sets with
+#: EXACTLY TWO rows differing — `proj.g.query` 3646 → 3647 (+1) and `sdk._get_proj().g.query`
+#: 1431 → 1438 (+7), i.e. 1 + 7 = 8 = 11869 − 11861, with the `s._get_proj().g.query` row reading
+#: 29 on BOTH sides. So this PR's own contribution is +8 over `main`'s `(11861, "f0647020531c078c")`.
+#: Both rows are `Graph.query` calls on a FalkorDB `Graph` — the documented edge this counter
+#: reports and deliberately leaves alone, never an SDK handle — so no new shape was absorbed, the
+#: row SHAPE set is unchanged, and `typed references still pointing at a public name` is **0** on
+#: this tree (measured). `--check` exits 0 on the pair below.
+SWEEP_RESIDUE = (11869, "a598f8ca97800573")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
