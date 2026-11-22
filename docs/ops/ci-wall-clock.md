@@ -290,21 +290,27 @@ because the pack as a whole moved to `720.0` (720.0 × 2.0 / 60 = 24.00, which `
 ceils to **24**; 720.6 lands at 24.02, which ceils to **25**). ⛔ An earlier cut of this sentence claimed
 the subtraction had stopped separating the pair and withdrew the `24 m` arm on that basis — that
 reading does NOT reproduce at the head it named and is itself withdrawn here. ⛔ **AND THE PAIR STOPS
-SEPARATING AFTER THE MERGE WITH `main` `b4da1f5c01`, WHICH IS THE FINDING WORTH KEEPING**: the pool now
-reads **25 m** at **720.7**, and with the same three removed it STILL reads **25 m** at **720.2** —
-because the 24/25 boundary is EXACTLY `est_seconds` 720.0 (`shard_watchdog_minutes` is
-`ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and 720.2 → 24.0067 → **25**), and `main`'s pack moved
-the three-removed arm 0.2 s above that cliff. Two lanes measured this same pair opposite ways within
-an hour for exactly that reason, so the durable fact is NOT which minute a given tree emits: it is
-that these three suites move the ceiling by ~0.5 s around a 720.0 s cliff (`720.7 − 720.2` at the
-merged tree; their declared 6.0 s over the 11 shards is ~0.55 s/shard), so any conclusion quoted
+SEPARATING AFTER THE MERGE WITH `main` `b4da1f5c01`, WHICH IS THE FINDING WORTH KEEPING**: at the
+commit that folds it (`8674087341`) the pool reads **25 m** at **720.8-720.9**, and with the same three
+removed it STILL reads **25 m** at **720.3-720.4** — because the 24/25 boundary is EXACTLY
+`est_seconds` 720.0 (`shard_watchdog_minutes` is `ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and
+720.3 → 24.01 → **25**), and `main`'s pack moved the three-removed arm 0.3-0.4 s above that cliff. ⛔
+The `720.7` / `720.2` an earlier cut of this sentence quoted HERE are real, but they belong to the
+PRE-merge head `ccb98b3623` (**720.6-720.7** with the three present, **720.1-720.2** with them
+removed) — one tree's emission carried under another tree's sha is the exact defect this section
+records, so both trees are named and each figure is the one measured AT it. Two lanes measured this
+same pair opposite ways within an hour for exactly that reason, so the durable fact is NOT which
+minute a given tree emits: it is that these three suites move the ceiling by ~0.5-0.6 s around a
+720.0 s cliff (max-to-max `720.9 − 720.4` = 0.5, max-to-min `720.9 − 720.3` = 0.6 at the merge;
+`720.7 − 720.2` and `720.7 − 720.1` at the pre-merge head; their declared 6.0 s over the 11 shards
+is ~0.55 s/shard), so any conclusion quoted
 here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
 LOWER A WEIGHT: the three enter at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
 their `durations:` rows, so removing or shrinking those rows changes nothing (measured at `main`'s
 own tree `10e51693f1`: the emission reads **721.0-721.1** with the rows present AND with all three
-dropped — the arm that moves the pack is UNREGISTERING those suites, which reads **720.6** there and
-**720.7** at the `10e51693f1` MERGE tree `c0b929403aa9`, the figure quoted in §2) — the three files' +6 s
+dropped — the arm that moves the pack is UNREGISTERING those suites, which reads **720.5-720.6** there
+and **720.6-720.7** at the `10e51693f1` MERGE tree `c0b929403aa9`) — the three files' +6 s
 over 11 shards is what was measured to cross the minute boundary at the earlier head. ⛔ **And
 `#13998`'s registration lands in the SAME pool without a further re-pack**:
 `tests/test_13998_capacity_notice.py` enters at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (it has no
@@ -318,8 +324,8 @@ shards at **721.3 s** (a, b, c, i) and **seven** at **721.2 s**, and `ceil(721.3
 **25 m**. An earlier cut of this paragraph overwrote that split with THIS head's 721.6 while the
 sentence still carried the `10e51693f1` sha — one tree's emission carried under another tree's sha
 is the exact defect class this section exists to record for the minute boundary — and the follow-up
-that claimed to restore the split carried no edit to this file at all (`git show --stat <that commit>
--- docs/ops/ci-wall-clock.md` is empty), which is why the figure is restored here by measurement
+that claimed to restore the split carried no edit to this file at all (`git show --stat 8abf4844 --
+docs/ops/ci-wall-clock.md` is empty), which is why the figure is restored here by measurement
 instead. Nothing grades this number (`grep -rn '721\.' tests/ tools/` finds no pin), so re-derive it
 with `--emit-push-matrix` at the sha the sentence names. The three
 hand-added figures are re-added from the
