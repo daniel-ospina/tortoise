@@ -407,7 +407,11 @@ _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 #: coverage: the same block read green in both gates when it dropped, and RED when it
 #: re-raised correctly, so a lane that fixed a block with the more precise name was redded
 #: for having fixed it (review of #14160, cycle 10, P1-2).
-_RAISED_ALIAS = {"ModuleNotFoundError": "ImportError", "UnboundLocalError": "NameError"}
+_RAISED_ALIAS = {
+    "ModuleNotFoundError": "ImportError",
+    "ZipImportError": "ImportError",
+    "UnboundLocalError": "NameError",
+}
 _RAISED_ALL = _RAISED | set(_RAISED_ALIAS)
 
 #: What counts as a BROAD arm. `BaseException` belongs here: it swallows the
@@ -479,6 +483,14 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     module-keyed allowance naming the extra-gated module, which is why it is deferred
     rather than guessed at. Re-read this paragraph before adding one.
 
+    ⛔ AND IT IS ORDER-BLIND, which is a FALSE-RED residual, not a fail-open one: a
+    dropping arm BELOW a re-raising arm that already handles the same names can never run,
+    yet it is counted here. `_covered` is the order-aware predicate; this one answers
+    "could any arm in this block drop it", which is the question `swallows` asks when it is
+    used to decide whether a block is hiding something at all. 0 instances in the tree
+    (review of #14160, cycles 10-12); making it as precise as `_covered` is deferred, and
+    the direction it errs in is the recoverable one.
+
     Whether the handler re-raises is part of the question, not a separate one:
     the property is *"the programming error never reaches the caller"*, and a
     broad arm that re-raises never swallows anything. Charging it would be a
@@ -503,6 +515,19 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
         (names == {"<bare>"} or names & (_BROAD | _RAISED_ALL)) and not _reraises(h)
         for h, names in ((h, _handler_names(h)) for h in handlers)
     )
+
+
+def _masked_by(name: str, caught_earlier: set[str]) -> bool:
+    """Whether an EARLIER arm already catches every instance `name` would catch.
+
+    Exact spelling, or a PARENT of it: an earlier `except ImportError:` catches every
+    `ModuleNotFoundError`, so a later `except ModuleNotFoundError: raise` is unreachable —
+    but the converse is NOT true, and that asymmetry is why this is a containment test and
+    not a canonical-set membership test (review of #14160, cycle 12). A later plain
+    `except ImportError:` after an `except ModuleNotFoundError:` arm is perfectly reachable
+    for a plain `ImportError`, and must still be credited.
+    """
+    return name in caught_earlier or _RAISED_ALIAS.get(name) in caught_earlier
 
 
 def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
@@ -535,6 +560,15 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     message produces — "Insert the re-raise arm immediately before the broad handler" — on a
     block that already carries an `except ImportError:` skip: the charged ImportError drop
     stayed green in BOTH gates. Measured, and the population is unchanged (70/58/0).
+
+    ⛔ THE HIERARCHY IS COMPARED, THE SPELLING IS CREDITED — and the two are NOT the same
+    set (review of #14160, cycle 11, both P1s). Accounting is done on the CANONICAL name, so
+    an earlier `except ImportError:` also masks a later `except ModuleNotFoundError:` (it
+    catches every subclass, so that later arm is unreachable for the name). Credit is
+    returned as the RAW spelling, because an arm that narrows to `ModuleNotFoundError` does
+    NOT re-raise a plain `ImportError` — crediting the parent for it told the seam gate that
+    any ImportError propagates while a reachable arm below could still swallow one. So:
+    charge and account by FAMILY, credit by SPELLING, and never normalise the result.
     """
     out: set[str] = set()
     caught_earlier: set[str] = set()
@@ -543,9 +577,12 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
         if names == {"<bare>"} or names & _BROAD:
             break  # nothing below a broad arm can ever run
         if _reraises(handler):
-            out |= names - caught_earlier
+            #: per-NAME, not per-arm: an arm that names four errors credits only the three
+            #: whose family no earlier arm already caught, because Python never reaches its
+            #: clause for the fourth.
+            out |= {name for name in names if not _masked_by(name, caught_earlier)}
         caught_earlier |= names
-    return {_RAISED_ALIAS.get(name, name) for name in out}
+    return out
 
 
 def _reraises(handler: ast.ExceptHandler) -> bool:
@@ -4665,10 +4702,68 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         )
         if isinstance(node, ast.ExceptHandler)
     ]
-    assert _covered(_subclass_credit) >= _RAISED, (
-        "the control: `ModuleNotFoundError` normalises to `ImportError`, so a re-raise that "
-        f"names it credits the required set: {_covered(_subclass_credit)}"
+    assert _covered(_subclass_credit) == set(_handler_names(_subclass_credit[0])), (
+        "an arm that narrows to `ModuleNotFoundError` credits THAT SPELLING and nothing "
+        "more: it does not re-raise a plain `ImportError`, so crediting the parent would "
+        "tell the seam gate that any ImportError propagates while a reachable arm below "
+        f"could still swallow one: {_covered(_subclass_credit)}"
     )
+    #: …and it IS accounted as `ImportError` for ORDERING, so an earlier plain
+    #: `except ImportError:` masks it — that arm catches every subclass, which is how a
+    #: later `except ModuleNotFoundError: raise` becomes unreachable (review of #14160,
+    #: cycle 11, P1-1). The mirror pair does the same for `NameError` / `UnboundLocalError`.
+    for _parent, _child in (
+        ("ImportError", "ModuleNotFoundError"),
+        ("NameError", "UnboundLocalError"),
+    ):
+        _alias_order = [
+            node
+            for node in ast.walk(
+                ast.parse(
+                    "try:\n    _probe = _make()\n"
+                    f"except {_parent}:\n    pass\n"
+                    f"except {_child}:\n    raise\n"
+                    "except Exception:\n    _probe = None\n"
+                )
+            )
+            if isinstance(node, ast.ExceptHandler)
+        ]
+        assert _covered(_alias_order) == set(), (
+            f"an earlier `except {_parent}:` catches every {_child} too, so the later "
+            f"`except {_child}: raise` is unreachable and credits nothing: "
+            f"{_covered(_alias_order)}"
+        )
+
+    # 4j-septenvicesimus-bis. THE MASKING IS CONTAINMENT, NOT EQUALITY, and the direction
+    #     matters both ways: an earlier PARENT arm masks a later CHILD arm (Python catches
+    #     every subclass), but an earlier CHILD arm does NOT mask a later PARENT one — a
+    #     plain `ImportError` still reaches an `except ImportError:` arm placed after an
+    #     `except ModuleNotFoundError:` arm. Canonicalising both sides into one set got the
+    #     second direction wrong and cost a legitimate arm its credit, which is a false red
+    #     on a correct repair (review of #14160, cycles 11-12).
+    for _label, _arms, _expect in (
+        (
+            "parent then child",
+            "except ImportError:\n    pass\nexcept ModuleNotFoundError:\n    raise\n",
+            set(),
+        ),
+        (
+            "child then parent",
+            "except ModuleNotFoundError:\n    pass\nexcept ImportError:\n    raise\n",
+            {"ImportError"},
+        ),
+    ):
+        _masking = [
+            node
+            for node in ast.walk(
+                ast.parse("try:\n    _probe = _make()\n" + _arms + "except Exception:\n    _p = None\n")
+            )
+            if isinstance(node, ast.ExceptHandler)
+        ]
+        assert _covered(_masking) == _expect, (
+            f"masking runs from a PARENT arm to a later CHILD arm and not back ({_label}): "
+            f"{_covered(_masking)} != {_expect}"
+        )
 
     # 4j-quadrovicesimus. `type Y[torch] = torch.query(…)` — THE TYPE PARAMETER IS BOUND IN
     #     THE ALIAS VALUE. Measured on 3.12.3: `__value__` raises `AttributeError:
