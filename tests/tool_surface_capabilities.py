@@ -423,6 +423,17 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # `update_knowledge` above.
 
     "_create_edge": "tortoise_create_edge",
+    # ⛔ `link_entities` was MISSING here and the forward arm had gone red on `main`
+    # with nothing repairing it — the same "a permanently red gate enforces nothing"
+    # shape the `update_entity` note above records (found as CI `test-slow`'s only
+    # failure at the #14232 head: `unmapped _quota_gated wrap sites: ['link_entities']`).
+    # Measured, not inferred: the wrap site is `('link_entities', mcp_server.py:7925)`,
+    # inside `tortoise_link_entities`'s relation-decided arm, and that door IS in the
+    # derived `WRITE_TOOL_NAMES` — so the binding is unambiguous and the forward arm
+    # was reporting a real, unchecked write surface. The method is NOT in
+    # `WEIGHT_BEARING_METHODS` and its site carries `abuse_weight=False`, which is the
+    # consistent pair the weight arm wants, so no other declared set moves.
+    "link_entities": "tortoise_link_entities",
     "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
     # #11609 lane C's containers: each wraps its own SDK operation, so each is a
