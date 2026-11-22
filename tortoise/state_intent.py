@@ -1327,10 +1327,22 @@ _COPULA_INFINITIVE_REFUSAL = (
     # direction this widening must not take, and the perfect branch was unaffected
     # (`has the remaining invoice been archived` still routes) — the signature that this
     # guard alone was responsible. The refusal is therefore FRAME-AWARE, exactly as arm B
-    # already is: the non-finite verb must be FOLLOWED (within two adverbs) by an ending
-    # word, i.e. it must be carrying the predicate rather than modifying a noun.
+    # already is: the non-finite verb must be FOLLOWED (within FOUR adverbs) by an ending
+    # word. ⛔ THE BOUND IS FOUR BECAUSE THE PREFIX ABSORBS FOUR (round-12 review, P1,
+    # measured): `_COPULA_PREFIX` carries `{0,3}` subject words PLUS one adverb slot before
+    # the ending, so a refusal bounded at two let THREE adverbs (`is the export being really
+    # actually already archived`) fall through the gap and the prefix then carried the row to
+    # the ending — 216 of 216 such rows ROUTED the whole ended population with `signal=None`
+    # and no notice, the fail-open direction. A guard narrower than the frame it guards is
+    # not a guard: the bound must match the consumer's, not a guess at the prose.
+    # ⚠️ AND "FOLLOWED BY AN ENDING WORD" IS WEAKER THAN "CARRYING THE PREDICATE" (round-12
+    # review, P3, measured): an ENDING WORD can itself be a noun-modifier, so
+    # `is the remaining archived report archived` is refused with NO notice — the attributive
+    # `-ing` followed by an attributive participle. That residual is pinned in `NOT_SELECTED`,
+    # not claimed away: this rule discriminates on POSITION, and position cannot tell a
+    # predicate participle from a modifying one.
     rf"(?!(?:[a-z0-9][a-z0-9'\u2019._/-]*\s+){{0,6}}{_NONFINITE_COPULA}(?![-/])\b"
-    rf"\s+(?:(?:[a-z]+ly|already|ever|really|still|actually|just|only|never|not)\s+){{0,2}}"
+    rf"\s+(?:(?:[a-z]+ly|already|ever|really|still|actually|just|only|never|not)\s+){{0,4}}"
     rf"(?:{_ENDING_WORDS})\b)"
 )
 _COPULA_PREFIX = (
@@ -1458,7 +1470,13 @@ _COPULA_LONG_SUBJECT = re.compile(
     # coordinated SUBJECT (`is the SOC2 audit and its evidence package archived`) is a
     # plain long noun phrase this row exists to report. A coordinated CLAUSE still
     # carries its own verb, which the list below already refuses.
-    rf"(?:because|that|given|since|when|while|if|unless|after|before|now|"
+        # ⛔ `now` IS NOT IN THIS LIST (round-12 review, P3, measured): it made the notice arm
+    # FALL SILENT for a progressive frame with three adverbs — `is the export being really
+    # actually definitely archived now` reported NOTHING while the same row without ` now`
+    # reported `is_copula_long_subject`. A question ending in an adverb of time introduces no
+    # finite verb, so it cannot be the second clause this list exists to detect; refusing to
+    # report it only converted a notice into a silence. A report is the safe direction.
+    rf"(?:because|that|given|since|when|while|if|unless|after|before|"
     rf"which|who|whom|whose|where|is|are|was|were|has|have|had|do|does|did|will|"
     # ⛔ NO `_CONTRACTED_AUX` HERE, AND THAT IS A MEASURED DECISION, NOT AN OVERSIGHT
     # (fresh review, P2). Everywhere else in this module the contraction class is

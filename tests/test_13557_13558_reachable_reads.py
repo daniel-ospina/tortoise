@@ -1039,6 +1039,25 @@ NOT_SELECTED = [
     "is the claim turning out archived",
     "is the export remaining archived",
     "is the export keeping archived",
+    # ⛔ THE ADVERB BOUND IS THE PREFIX'S BOUND, NOT A GUESS (round-12 review, P1, measured).
+    # `_COPULA_PREFIX` absorbs `{0,3}` subject words PLUS one adverb slot, so a refusal
+    # bounded at two let THREE adverbs fall through and the prefix carried the row to the
+    # ending: `is the export being really actually already archived` ROUTED the whole ended
+    # population with `signal=None` — 216 of 216 such rows — the fail-open direction, one
+    # round after the same widening fixed the same direction. The bound is `{0,4}` now.
+    # ⛔ AND `now` USED TO DISABLE THE NOTICE (round-12 review, P3): arm A's second-clause
+    # list carried `now`, so the same row with a trailing ` now` reported NOTHING. Removed —
+    # an adverb of time introduces no finite verb.
+    "is the export being really actually already archived",
+    "is the export being really actually definitely archived now",
+    "is the export getting really actually already deprecated",
+    # ⚠️ THE DECLARED RESIDUAL, PINNED RATHER THAN CLAIMED AWAY (round-12 review, P3): the
+    # frame rule discriminates on POSITION, and position cannot tell a predicate participle
+    # from a modifying one — so an attributive `-ing` followed by an ATTRIBUTIVE ENDING WORD
+    # is refused with NO notice. Not a regression (identical before the widening), but it sits
+    # inside the class the attributive pins declare fixed, so it is pinned as silent.
+    "is the remaining archived report archived",
+    "is the keeping withdrawn invoice archived",
     # ── …and the FOUR PHRASAL / RESULTATIVE verbs the class was missing (fresh review,
     # P2, measured). `to wind up`, `to end up`, `to turn out` and `to stay` are the same
     # scheduled or continuing frame as `to be`, and each ROUTED the whole ended population
@@ -1256,6 +1275,18 @@ NOTICE_ONLY = [
     "is the claim turning out archived",
     "is the export remaining archived",
     "is the export keeping archived",
+    # ⛔ THE ADVERB BOUND IS THE PREFIX'S BOUND, NOT A GUESS (round-12 review, P1, measured).
+    # `_COPULA_PREFIX` absorbs `{0,3}` subject words PLUS one adverb slot, so a refusal
+    # bounded at two let THREE adverbs fall through and the prefix carried the row to the
+    # ending: `is the export being really actually already archived` ROUTED the whole ended
+    # population with `signal=None` — 216 of 216 such rows — the fail-open direction, one
+    # round after the same widening fixed the same direction. The bound is `{0,4}` now.
+    # ⛔ AND `now` USED TO DISABLE THE NOTICE (round-12 review, P3): arm A's second-clause
+    # list carried `now`, so the same row with a trailing ` now` reported NOTHING. Removed —
+    # an adverb of time introduces no finite verb.
+    "is the export being really actually already archived",
+    "is the export being really actually definitely archived now",
+    "is the export getting really actually already deprecated",
     "has anyone reported v3 hasn't been deprecated",
     "has anyone complained billing hasn't been deprecated",
     # …and the ADVERB between the non-finite verb and the participle (round-4 review, P2,
