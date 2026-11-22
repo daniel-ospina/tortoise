@@ -2683,6 +2683,89 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
     )
 
 
+def _strip_shell_comments(script: str) -> str:
+    """The script with its real `#` comments removed and every QUOTED byte kept.
+
+    ⛔ A LINE FILTER IS NOT A COMMENT FILTER (review cycle 8 — this replaced one).
+    "Some line whose first non-space character is `#`" is a COMMENT only when the `#`
+    starts a word OUTSIDE any quote. Inside a multi-line double- or single-quoted `echo`
+    the continuation line is still quoted text at execution time, so `$(…)` there EXECUTES
+    — and a line filter drops the line instead of reading it. That was residual R1: the
+    pin passed while the substitution ran (measured; pinned by
+    `test_the_prose_pin_catches_a_substitution_on_a_COMMENT_LOOKING_continuation`).
+
+    So comments are lexed the way the shell lexes them: a `#` starts a comment only at
+    the start of a word and outside any quote, and a backslash escapes the next byte
+    outside single quotes. Everything else is returned verbatim, including `#` inside an
+    echo (`See #12363`) and `${EXIT_CODE:-…}`.
+
+    ⛔ DELIBERATE CONSERVATIVE EDGE, stated so it is not read as completeness: `$(` and a
+    backtick inside a SINGLE-quoted span are inert at runtime but still flagged, because
+    this filter does not model single-quote spans as removable. That direction is a false
+    POSITIVE on a line a human can see and reword — never a silent pass. No line in the
+    alarm block uses single quotes today.
+    """
+    out: list[str] = []
+    quote: str | None = None  # None | "'" | '"'
+    at_word_start = True
+    i = 0
+    while i < len(script):
+        ch = script[i]
+        if quote == "'":
+            out.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            # A backslash escapes the next byte inside double quotes, so `\`` is a
+            # literal backtick and must not be reported as substitution syntax.
+            if ch == "\\" and i + 1 < len(script):
+                out.append(script[i : i + 2])
+                i += 2
+                continue
+            out.append(ch)
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(script):
+            out.append(script[i : i + 2])
+            at_word_start = False
+            i += 2
+            continue
+        if ch == "#" and at_word_start:
+            newline = script.find("\n", i)
+            if newline == -1:
+                break
+            i = newline  # keep the newline itself; it ends the comment
+            continue
+        out.append(ch)
+        if ch in "'\"":
+            quote = ch
+        at_word_start = ch in " \t\n"
+        i += 1
+    return "".join(out)
+
+
+def _executable_prose_lines(script: str) -> list[str]:
+    """The lines of `script` that carry a backtick or a `$(`, comments excluded."""
+    return [
+        line for line in _strip_shell_comments(script).splitlines() if "`" in line or "$(" in line
+    ]
+
+
+def _assert_no_executable_prose(script: str) -> None:
+    """The alarm block's obligation: no backtick, no command substitution, in CODE OR PROSE."""
+    offending = _executable_prose_lines(script)
+    assert not offending, (
+        "the alarm block's ECHOED text now contains a backtick or a command substitution: "
+        "inside its double-quoted echoes those EXECUTE and corrupt the summary silently, "
+        "which is the #12660 defect. Prose names must be plain text. Offending line(s):\n"
+        + "\n".join(offending)
+    )
+
+
 def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
     """The release-finding summary EXECUTED the artifact names it was naming (#12660).
 
@@ -2743,23 +2826,18 @@ def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
     # mangled-but-not-missing, exactly the class #12660 exists to end. This block only echoes
     # prose and needs no substitution, so the absence is the property — and it holds for
     # every spelling, which is what the docstring above now claims.
-    # ⛔ COMMENTS ARE EXEMPT — AND THE FILTER IS TEXTUAL, SO ITS BLIND SPOT IS NAMED HERE
-    # (review cycle 5+6, P3, MEASURED). A backtick or `$(` on a line whose first non-space
-    # character is `#` cannot execute, and this file's steps document backticks in comments
-    # throughout, so those lines are dropped: a `See #12363` inside an echo is still scanned
-    # and the legitimate `${EXIT_CODE:-…}` expansions still pass (`$(` cannot match `${`).
-    # ⛔ RESIDUAL, not a guarantee: the filter is textual, not quote-aware. A multi-line
-    # double-quoted `echo` whose CONTINUATION line starts with `#` is still inside the quote
-    # at execution time, so a substitution there would be dropped here and go unnoticed
-    # (measured: such a block passes this pin while still executing). This block's echoes are
-    # single-line and must stay that way; a quote-aware filter is the fix if that changes.
-    prose = "\n".join(line for line in run.splitlines() if not line.lstrip().startswith("#"))
-    assert "`" not in prose and "$(" not in prose, (
-        "the alarm block's ECHOED text now contains a backtick or a command substitution: "
-        "inside its double-quoted echoes those EXECUTE and corrupt the summary silently, "
-        "which is the #12660 defect. Prose names must be plain text. Offending line(s):\n"
-        + "\n".join(line for line in prose.splitlines() if "`" in line or "$(" in line)
-    )
+    # ⛔ COMMENTS ARE EXEMPT, AND THEY ARE LEXED THE WAY THE SHELL LEXES THEM (review
+    # cycle 5+6 P3; residual R1 CLOSED in cycle 8). A backtick or `$(` cannot execute in a
+    # comment, and this file's steps document backticks in comments throughout, so real
+    # comments are removed before the absence is asserted: a `See #12363` inside an echo is
+    # still scanned, and the legitimate `${EXIT_CODE:-…}` expansions still pass (`$(`
+    # cannot match `${`).
+    # ⛔ THE FILTER USED TO BE `line.lstrip().startswith("#")`, WHICH WAS A BYPASS: a
+    # multi-line double-quoted `echo` whose CONTINUATION line starts with `#` is inside the
+    # quote at execution time, so a substitution there ran while the line filter dropped it
+    # (measured in `_strip_shell_comments`'s docstring). `_strip_shell_comments` reads quote
+    # state instead, so the continuation line is scanned.
+    _assert_no_executable_prose(run)
 
     # The property the corruption destroyed: the only branch that orders an irreversible
     # release NAMES the workflow to run and the artifact to publish.
@@ -2768,6 +2846,54 @@ def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
         "the release-finding summary no longer names the workflow and the artifact — it "
         f"read: {release_summary!r}"
     )
+
+
+def test_the_prose_pin_catches_a_substitution_on_a_COMMENT_LOOKING_continuation():
+    """Residual R1, closed and pinned from BOTH sides (#12660 review cycle 8).
+
+    The pin used to filter with `line.lstrip().startswith("#")`. A `#` starts a comment only
+    OUTSIDE a quote, so a multi-line `echo` whose CONTINUATION line begins with `#` is still
+    quoted text and still runs. Measured:
+
+        $ bash -e -c 'echo "begin
+        # $(printf HIDDEN) tail"'
+        begin
+        # HIDDEN tail
+
+    The filter therefore dropped an EXECUTING line — an assertion a PR could satisfy while
+    the release summary it guards was mangled, which is the #12660 defect one level in. This
+    test reds the pin on the REAL block with such a line injected, and asserts the pre-fix
+    line filter passes it, so neither side of the fix is vacuous.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
+    )
+    steps = {step.get("name"): step for step in workflow["jobs"]["report"]["steps"]}
+    run = steps["What a red here means"]["run"]
+
+    anchor = 'echo "the publish-pypi.yml workflow) and tortoise-client is published. See #12363."'
+    assert anchor in run, "the release-finding echo moved; re-derive this injection point"
+    injected = run.replace(
+        anchor,
+        'echo "the publish-pypi.yml workflow) and tortoise-client is published. See #12363.\n'
+        "# $(printf HIDDEN) — this continuation is still INSIDE the echo's quotes\"",
+    )
+
+    # The block as shipped is green — the injection is the only thing that reds it.
+    _assert_no_executable_prose(run)
+
+    # ⛔ NON-VACUOUS, PRE-FIX SIDE: the filter this replaced cannot see the line.
+    pre_fix = "\n".join(line for line in injected.splitlines() if not line.lstrip().startswith("#"))
+    assert "`" not in pre_fix and "$(" not in pre_fix, (
+        "the pre-fix line filter CAUGHT this, so the test no longer reproduces residual R1 "
+        "and is not pinning the quote-lexing fix"
+    )
+
+    # ⛔ AND THE FIX SEES IT: the continuation is quoted text, so it is scanned, not dropped.
+    with pytest.raises(AssertionError, match="command substitution"):
+        _assert_no_executable_prose(injected)
 
 
 def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):
