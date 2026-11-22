@@ -3787,6 +3787,25 @@ surfaces:
   # the gate's own `meters=` seam, and the door halves are SOURCE-order pins via
   # `inspect.getsource`. No DSN, no graph, no model.
   - test_13829_cache_cap_at_fold.py
+  # #14185: the record's projection on its OWN loop — the projection worker, the
+  # seven conditions under which a write may be deferred, and the lag metric.
+  # ⛔ SEVEN: four correctness arms, the unimportable loop, and the two switches
+  # (`live_write._submitted_to_worker`; an earlier cut said six and lost the
+  # unimportable arm).
+  # `core` for the same MEASURED reason as the two rows above: the subjects
+  # (`tortoise/projection_worker.py` — a new file — and `tortoise/live_write.py`)
+  # have no `SOURCE_PATTERNS` entry, so `--changed-files
+  # tortoise/projection_worker.py` resolves `['core']` and a diff to the loop or
+  # to the chokepoint's deferral gate collects this file only through a `core`
+  # row. ⛔ The `tortoise/monitoring.py` half is covered by the same fallback
+  # (`--changed-files tortoise/monitoring.py` -> `['core']`, the #10893 row's own
+  # measurement at the head of this list).
+  # ⛔ NO CASE COUNT IN THIS COMMENT: derive it
+  # (`grep -c '^def test_' tests/test_14185_projection_worker.py`).
+  # DB-FREE: the fold is represented by a callable — the exact boundary the
+  # worker owns (it decides WHEN a fold runs, never WHAT it does) — and the
+  # stall is a `threading.Event`, not a sleep. No DSN, no graph, no model.
+  - test_14185_projection_worker.py
   # #13034: the ONE currency rule (lifecycle word AND position axis) and its
   # five consumers. `core` for the same reason as the rows above —
   # `tortoise/live.py`, `tortoise/pipeline.py` and
@@ -15401,6 +15420,26 @@ durations:
   # wall time `pytest -q` reports belongs to the shared session fixture; `--durations=5`
   # is the authority and `--refresh-durations` replaces this row from junit.
   test_14192_read_wave_tool.py: 2.0
+  # #14185 (PR #14222) — the record's projection on its OWN loop. The #3400/#4348 trap
+  # applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations`
+  # refresher samples push-to-main runs only), so this is the flat
+  # `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a
+  # SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default
+  # ("a default is not a reading"): the `core` registration above is what puts the
+  # file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green
+  # over the absence — so only this row records the weight (the #14222 review's P3
+  # finding; the file also had to be added to `tests/test_ci_selection.py::
+  # ROWED_BY_THIS_FOLD`, whose ENTRY-RULE pin iterates an EXPLICIT tuple and could
+  # not see a file nobody listed). `tools/ci_timing.py --refresh-durations` replaces
+  # this value from the first push-to-main junit sweep that includes the file. What
+  # the weight covers, hermetically: the worker's FIFO and its seven deferral gates
+  # driven against a CALLABLE in place of the fold, a stalled fold as a
+  # `threading.Event` rather than a sleep, the gauge/publish protocol under its
+  # sequence, and one `os.fork()` leg — no DSN, no graph, no model, no docker. ⛔ No
+  # local timing and no case count are quoted on purpose — a figure beside a
+  # shard-layout input re-stales against the run it came from, and the count moves
+  # with every review round (`tools/ci_selection.py --integrity` is the authority).
+  test_14185_projection_worker.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2
   test_name_entropy_12294.py: 0.1
