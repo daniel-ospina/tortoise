@@ -674,7 +674,18 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
 #: The dotted-path parts that mark a RAISED exception as a skip/xfail signal rather than a
 #: surfaced failure (`_raises_a_skip`). Deliberately not "Exception": that tail is shared by
 #: every ordinary error, and a raise of an ordinary error is a LOUD failure, not a swallow.
-_SKIP_RAISE_PARTS = frozenset({"skip", "skipif", "xfail", "Skipped", "SkipTest"})
+#:
+#: ⛔ EVERY MEMBER HERE IS GRADED BY A ROW IN `4j-quinvicesimus`, because a member nothing can
+#: raise is a rule that cannot fail closed. This set originally also carried "skipif", which
+#: NOTHING CAN RAISE: `pytest.skipif` is a decorator, and `pytest.skipif.Exception` does not
+#: exist (measured: `AttributeError`), so no raise of it is spellable and its membership could
+#: never decide anything. Removed rather than left as a plausible-looking rule.
+#: The retained spellings each have a live raiser, measured on this tree:
+#: `pytest.skip.Exception` / `_pytest.outcomes.skip.Exception` (part "skip"),
+#: `pytest.xfail.Exception` / `_pytest.outcomes.xfail.Exception` (part "xfail"),
+#: `_pytest.outcomes.Skipped` (part "Skipped"), `unittest.SkipTest` (part "SkipTest", raised as
+#: a BARE name, which is what grades `_raises_a_skip`'s `ast.Name` tail).
+_SKIP_RAISE_PARTS = frozenset({"skip", "xfail", "Skipped", "SkipTest"})
 
 
 def _raises_a_skip(exc: ast.expr) -> bool:
@@ -5704,6 +5715,30 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         (
             "convert the seam into a skip, un-chained",
             "raise pytest.skip.Exception('no engine')",
+            False,
+        ),
+        #: ⛔ THE BARE-NAME TAIL AND THE REMAINING DOTTED PARTS (review of PR #14287, P2).
+        #: `_raises_a_skip` answers a skip on EITHER a dotted part OR a bare `ast.Name` in
+        #: `_SKIP_RAISE_PARTS`, and every row above spells the skip as `pytest.skip.…` — i.e.
+        #: through the dotted arm alone. MEASURED BEFORE THESE ROWS: deleting the `ast.Name`
+        #: tail outright left the whole suite green (8 passed), and so did every dotted-part
+        #: member except "skip", because no raise of `SkipTest`/`Skipped`/`xfail` existed in the
+        #: file at all. Each row below reds on the deletion of exactly one branch/member, so the
+        #: residual it guards — `except ImportError: raise SkipTest("no engine")`, a bare-name
+        #: conversion into a skip — cannot revert to being credited as coverage unnoticed.
+        (
+            "convert the seam into a skip by BARE NAME (grades the ast.Name tail)",
+            "raise SkipTest('no engine')",
+            False,
+        ),
+        (
+            "convert the seam into an xfail skip (grades the 'xfail' member)",
+            "raise pytest.xfail.Exception('no engine')",
+            False,
+        ),
+        (
+            "convert the seam into an outcomes.Skipped (grades the 'Skipped' member)",
+            "raise _pytest.outcomes.Skipped('no engine')",
             False,
         ),
     ):
