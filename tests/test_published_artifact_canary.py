@@ -2471,12 +2471,21 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
 
     ⛔ `OWN shell` IS LOAD-BEARING, and it was FALSE when this harness was first written:
     it ran the block under plain `bash -c` while the runner runs `bash -e {0}` (review
-    cycle 9, P2, MEASURED). The difference is not cosmetic — under the cycle-1 regression
-    (the display moved above the `$GITHUB_OUTPUT` write, `|| true` removed) the lax shell
-    returned rc=2 having already written `exit_code=2`, while the real step aborted with
-    rc=1 and an EMPTY sink. The harness now takes its argv from `_RUNNER_SHELL`, which is
-    the runner's, so case (a) below actually measures "the step crash-lands on a
-    detector-fault path" instead of "a shell that cannot abort agreed with us".
+    cycle 9, P2, MEASURED). The harness now takes its argv from `_RUNNER_SHELL`, which is
+    the runner's, so the block is executed by the shell the runner uses and no harness in
+    this file reads a shell the runner does not.
+
+    ⛔ AND WHAT THIS HARNESS DOES *NOT* MEASURE, stated because this docstring claimed it
+    (fresh-context review, P3, MEASURED): the errexit-ORDERING discrimination — a display
+    write aborting the step under `-e` — is NOT what these three cases test. Measured, they
+    pass under BOTH shells (swapping `_RUNNER_SHELL` to `bash -c` still gives the whole file
+    green), and under the cycle-1 mutant too, because no command on their crash path is
+    unguarded (the tool is invoked `… || rc=$?`). The `-e` discrimination for that mutant
+    lives in the sibling `test_the_pre_upload_gate_step_EXITS_with_the_tool_VERDICT`, which
+    reds under `bash -e` and is green under `bash -c`. This harness's three cases pin the
+    exit-code CLASSIFIER — a crash publishes 2, a genuine FAIL publishes 1, a compact
+    payload is the same report — so do not read it as the errexit pin: the load-bearing
+    `|| true`/ordering guarantee would then look doubly covered when it is covered once.
 
     exit 1 is the irreversible instruction ("the published artifact is broken — cut a
     release"), and BOTH consumers act on it. An interpreter-level failure exits 1 too — a
