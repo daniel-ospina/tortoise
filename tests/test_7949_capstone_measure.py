@@ -7940,8 +7940,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # ⛔ AND THE NUMBER IS DERIVED, NOT TYPED (the 2026-11-21 merge of `origin/main`): the
     # twin used to read "this head `:9753`, `origin/main` `:9722` — they no longer agree",
     # which was true on the branch `#13971` merged FROM and false the moment it landed —
-    # `main` moved `+31` in `tortoise/sdk.py` while this branch inserts nothing there
-    # (`git diff --numstat origin/main...HEAD -- tortoise/sdk.py` prints nothing), so the two
+    # `main` moved `+31` in `tortoise/sdk.py` while this branch's own inserts there (`10`/`2`)
+    # sit BELOW this line, so the two
     # heads carry ONE number and there is one present-tense fact to state. Typing it again
     # would repeat the very defect D5 exists to catch, so this row reads the line out of the
     # tree and asserts the twins against it: a half-move still reds (count 1), an all-move
@@ -17906,7 +17906,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 278 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 281 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -17939,7 +17939,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 278 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 281 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
@@ -18405,7 +18405,7 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     re-pointed the `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
     docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
     value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
-    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 278 of
+    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 281 of
     them. A row whose own thesis is that a typed line number rots cannot re-point a figure
     and leave it unread; that is the class #13879 review named when a reverted address
     "reddened no arm at all".
