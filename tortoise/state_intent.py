@@ -1318,7 +1318,20 @@ _COPULA_INFINITIVE_REFUSAL = (
     # so the two consumers cannot drift the way `to\s+be|being` did: the literal form
     # missed `is the export to eventually get archived` while the shared guard's richer
     # class refused it.
-    rf"(?!(?:[a-z0-9][a-z0-9'\u2019._/-]*\s+){{0,6}}{_NONFINITE_COPULA}(?![-/])\b)"
+    # ⛔ AND IT MUST BE IN THE ENDING FRAME, NOT MERELY PRESENT (round-11 review, P2,
+    # measured). The blanket form above refused the non-finite word at ANY position in the
+    # subject, so an ATTRIBUTIVE `-ing` word — a participle doing a noun's work — took the
+    # whole question down silently: `is the remaining invoice archived` went `ended` ->
+    # `None`/`signal=None` (no notice, no route) for 120 of 120 rows, and the same for
+    # `keeping`/`staying`/`becoming` (30/30 each). That is a route -> silence move, the ONE
+    # direction this widening must not take, and the perfect branch was unaffected
+    # (`has the remaining invoice been archived` still routes) — the signature that this
+    # guard alone was responsible. The refusal is therefore FRAME-AWARE, exactly as arm B
+    # already is: the non-finite verb must be FOLLOWED (within two adverbs) by an ending
+    # word, i.e. it must be carrying the predicate rather than modifying a noun.
+    rf"(?!(?:[a-z0-9][a-z0-9'\u2019._/-]*\s+){{0,6}}{_NONFINITE_COPULA}(?![-/])\b"
+    rf"\s+(?:(?:[a-z]+ly|already|ever|really|still|actually|just|only|never|not)\s+){{0,2}}"
+    rf"(?:{_ENDING_WORDS})\b)"
 )
 _COPULA_PREFIX = (
     rf"^(?:(?:is|are|was|were)(?:n['’]t)?\s+{_COPULA_INFINITIVE_REFUSAL}{_COPULA_SUBJECT}"

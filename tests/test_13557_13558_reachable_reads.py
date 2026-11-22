@@ -490,6 +490,18 @@ SELECTED = [
     # used by `_EXISTENCE_GUARD` for exactly this reason. These two route.
     ("is the vendor's been-signed contract archived", "ended", "is_copula"),
     ("is the client's been-archived contract archived", "ended", "is_copula"),
+    # ⛔ AN ATTRIBUTIVE `-ing` WORD IS A NOUN-MODIFIER, NOT A PREDICATE (round-11 review, P2,
+    # measured). The `-ing` widening refused the non-finite word at ANY position in the
+    # subject, so `is the remaining invoice archived` went `ended` -> `None`/`signal=None` —
+    # no route, no notice — for 120 of 120 rows (and 30/30 each for `keeping`/`staying`/
+    # `becoming`). A route -> silence move is the one direction that widening must not take.
+    # The refusal is frame-aware now: the non-finite verb must be FOLLOWED (within two
+    # adverbs) by an ending word. These four rows FAIL on `8cbe45d646` (all `None`/silent)
+    # and ROUTE here.
+    ("is the remaining invoice archived", "ended", "is_copula"),
+    ("is our remaining budget archived", "ended", "is_copula"),
+    ("is the keeping invoice archived", "ended", "is_copula"),
+    ("is the staying contract retired", "ended", "is_copula"),
 ]
 
 
