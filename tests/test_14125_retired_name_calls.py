@@ -3055,14 +3055,31 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             FALKORDB_AVAILABLE = False
         """
     )
-    assert len(_trystar_armed) == 1, (
-        f"an armed `except*` probe is one graded root, not nothing: {_trystar_armed}"
-    )
-    _trystar_covered = set(_trystar_armed[0][1])
-    assert _trystar_covered >= _required_names(True), (
-        "the re-raising `except*` arm must COUNT as coverage, or the widening would "
-        "red every correctly-written `except*` probe instead of grading it — the "
-        f"over-block half: covered={sorted(_trystar_covered)}"
+    # ⛔ ONE EXACT-ROW ASSERTION, NOT `len == 1` PLUS A SEPARATE COVERAGE CHECK (review
+    #     of this PR, mutation-attribution pass, P3). The coverage half used to be
+    #     `set(_trystar_armed[0][1]) >= _required_names(True)` — a claim about
+    #     `_covered` and `_required_names`, NEITHER of which this diff touches and
+    #     neither of which is node-kind-sensitive, so NO revert-mutant of this diff
+    #     could ever red it: mutants that drop `ast.TryStar` red the swallow row above
+    #     first, and where they do not, the coverage set is unchanged. An assertion
+    #     that cannot fail reads to the next lane as an enforced over-block guarantee
+    #     that nothing enforces. Pinning the WHOLE row keeps that claim and makes it
+    #     reachable: dropping either `ast.TryStar` term takes this value to `()`, and so
+    #     would a `_covered` that stopped counting an `except*` re-raise arm.
+    #     ⛔ THIS ROW IS A SECOND WITNESS, NOT THE FIRST — stated so the next reader is
+    #     not misled: the swallow pair above is in the same test function and fires on
+    #     the same revert, so a mutant reds THAT line and this one is then never
+    #     reached. That is not the dead-weight shape the P3 named (its value DOES move
+    #     with the diff); it is the over-block direction, which no revert can red
+    #     FIRST — pre-fix the node was invisible, so neither the arm nor its absence
+    #     could red — and which is graded here rather than only asserted in prose. The
+    #     two together say "graded identically" AND "counts as coverage".
+    assert _trystar_armed == (
+        (3, ("AttributeError", "ImportError", "NameError", "TypeError"), True, True, True),
+    ), (
+        "an armed `except*` probe is ONE graded root carrying all four re-raised "
+        "names, not nothing and not an empty coverage set — the over-block half: "
+        f"{_trystar_armed}"
     )
 
     # …and the whole shape must be VISIBLE, not only the root case. Pre-fix this
