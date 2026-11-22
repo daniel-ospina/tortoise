@@ -353,6 +353,22 @@ class TestAXAdmission:
         assert w["relation_declaration"]["rule"] == payload["rule"]
         assert w["outcome"] == payload["outcome"]
 
+    def test_a_REVERSED_report_does_not_arrive_under_the_UNDECLARED_code(self):
+        """Round-2 review F2 — `code` must not flatten the two reported states.
+
+        `warning_shape` hardcoded one `code`, so a `reversed_pair` (the pack
+        DECLARES this predicate for the reverse pair) arrived as
+        `undeclared_relation_pair` for the consumer §2's rule protects: the one
+        that reads only `warnings[].code` and never unrolls
+        `relation_declaration`. `outcome` distinguished them, so nothing FALSE
+        was said — but the code said "no declared relation at all" about a
+        declared one.
+        """
+        payload = relation_pair_verdict(
+            "dependsOn", "dev:database", "dev:api").payload
+        assert payload["outcome"] == REVERSED_PAIR
+        assert rg.warning_shape(payload)["code"] == "reversed_relation_pair"
+
 
 # ══ 4. the shipped packs, read as the guard reads them ═══════════════════
 
@@ -427,6 +443,10 @@ class TestDoors:
         assert out["created"] is True
         assert out["relation_declaration"]["outcome"] == REVERSED_PAIR
         assert out["relation_declaration"]["rule"] == rg.RULE_REVERSED
+        # …and the door's warning CODE says so too, end to end (round-2 review
+        # F2): a consumer that reads only `warnings[].code` must not be told
+        # "no declared relation at all" about a pair the packs DO declare.
+        assert [w["code"] for w in out["warnings"]] == ["reversed_relation_pair"]
 
     def test_a_predicate_re_spelling_is_written_as_declared_and_says_nothing(self, sdk):
         api = _obj(sdk, "API", "dev:api")
@@ -747,6 +767,31 @@ class TestAResubmissionOfAReSpellingDedupes:
         second = sdk._ingest(bundle)
         assert second["ids"]["connections"] == first["ids"]["connections"]
         assert len(self._operator_labels(sdk, "IMPL")) == 1
+
+    def test_a_LEGACY_operator_stored_under_the_raw_spelling_is_still_found(self, sdk):
+        """The SECOND probe (round-3 review, VGATE F-3): pre-resolution graphs.
+
+        A build that predates the doors' spelling resolution stored the CALLER's
+        token verbatim, so that operator is keyed in a spelling `_ingest` has
+        just replaced. Asking only for the declared one would turn this retry —
+        which exact-hit before the fix — into the very miss F1 is about.
+        """
+        from tortoise.projection import _live_write_scope
+
+        bundle = _pair_bundle(reify=True, label="DEPENDSON")
+        first = sdk._ingest(bundle)
+        oid = first["ids"]["connections"][0]
+        # Re-create the pre-resolution stored shape: the row carries the RAW token.
+        with _live_write_scope("test-legacy-spelling-14263"):
+            sdk._get_proj().g.query(
+                "MATCH (o:Point {id:$id}) SET o.label = 'DEPENDSON'",
+                params={"id": oid})
+        second = sdk._ingest(bundle)
+        assert second["ids"]["connections"] == [oid], (
+            "a legacy operator keyed under the caller's spelling must still be "
+            "adopted — this retry exact-hit it before the fix")
+        assert len(self._operator_labels(sdk, "IMPL")) == 1, (
+            "the legacy arm minted a duplicate instead of adopting the row")
 
 
 class TestTheJudgedPairFollowsTheDeclaredDirection:

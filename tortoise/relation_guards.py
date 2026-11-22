@@ -109,7 +109,7 @@ English::
       "to":       "product-strategy:feature",
       "rule":     "relation-pair-not-declared",     # WHY, as a stable id
       "declaredFor": [{"fromKind": "pm:card", "toKind": "pm:card"}],
-      "declaredBetweenTheseKinds": [],              # predicates that DO connect them
+      "declaredBetweenTheseKinds": ["contains"],      # predicates that DO connect them
       "override": None,                             # nothing to override: accepted as asked
       "undo":     "none — the write was stored exactly as asked",
       "message":  "<the human AX block: state, why, what IS declared>",
@@ -629,13 +629,25 @@ def relation_pair_verdict(
 def warning_shape(payload: dict) -> dict:
     """The ``warnings[]`` entry for a reported verdict (``#1934``'s shape).
 
-    The same block the reply carries, under the ``code`` the write path already
-    uses for undeclared things — so a consumer that only reads ``warnings``
-    keeps working, and one that reads ``relation_declaration`` gets the stable
-    field. Never a second judgement: this is a rendering of ``payload``.
+    The same block the reply carries, under a ``code`` naming its reported
+    state — so a consumer that only reads ``warnings`` keeps working (the
+    undeclared state keeps the code the write path already used for undeclared
+    things), and one that reads ``relation_declaration`` gets the stable field.
+    Never a second judgement: this is a rendering of ``payload``.
+
+    ⛔ **One ``code`` per REPORTED state** (round-2 review, F2).
+    ``docs/ax/ax-principles.md`` §2's rule — "the reported state must not
+    flatten different failures into one label" — is about exactly this: "the
+    pack declares this predicate for the REVERSE pair" and "no declared
+    relation at all" are different facts, and one ``code`` for both answered
+    them identically for any consumer that reads only ``warnings[].code``.
+    ``outcome`` already distinguished them, so nothing false was said; the code
+    said one thing about two states, which is the flattening §2 names.
     """
+    outcome = payload.get("outcome")
     return {
-        "code": "undeclared_relation_pair",
+        "code": ("reversed_relation_pair" if outcome == REVERSED_PAIR
+                 else "undeclared_relation_pair"),
         "message": payload.get("message", ""),
         "outcome": payload.get("outcome"),
         "predicate": payload.get("predicate"),

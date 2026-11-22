@@ -355,13 +355,14 @@ That judgement is `out["relation_declarations"]`.
   "outcome": "undeclared_pair",
   "predicate": "assignedTo",
   "from": "pm:card",
-  "to": "Subject",
+  "to": "Object",
   "target": "01J8…",
   "connection": "c1",
   "fromId": "01J8…",
   "toId": "01J8…",
-  "rule": "undeclared_relation_pair",
-  "declaredFor": [{"fromKind": "pm:card", "toKind": "Subject"}],
+  "rule": "relation-pair-not-declared",
+  "declaredFor": [{"fromKind": "pm:card", "toKind": "Subject"},
+                  {"fromKind": "venture:actionItem", "toKind": "Subject"}],
   "declaredBetweenTheseKinds": [],
   "override": null,
   "undo": "none — the write was stored exactly as asked",
@@ -381,6 +382,15 @@ That judgement is `out["relation_declarations"]`.
 - **A resubmission that mints nothing reports nothing.** The operator route's
   exact-dedup and partial-absorb arms write no edge, so they carry no fresh
   judgement — the same reason `ids["connections"]` is stable across a retry.
+- **`warnings[].code` keeps the REVERSED and UNDECLARED states DISTINCT.**
+  A per-connection warning carries `code: "reversed_relation_pair"` when the
+  packs declare this predicate for the REVERSE pair, and
+  `code: "undeclared_relation_pair"` when they declare no relation for the pair
+  at all. `docs/ax/ax-principles.md` §2's rule — *"the reported state must not
+  flatten different failures into one label"* — governs here, and `code` is the
+  field a consumer reads without unrolling `relation_declaration`. (Round-2
+  review of PR #14284, F2: both arrived under one code before this, distinguished
+  only by `outcome`.)
 - **NOT a §3.2 warning key**, on purpose: §3.2 is a closed enumeration whose
   members are mirrored into the upstream-authored skill, while this is a
   structured report a client branches on. `warnings` stays the string list it

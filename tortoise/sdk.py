@@ -36160,8 +36160,20 @@ class TortoiseSDK:
                 # not a declared relation under any spelling — the `#1934`
                 # predicate leg must still warn about THAT spelling.
                 _declared_label = self._canonical_relation_spelling(label)
+                _raw_label = label
                 if _declared_label:
                     label = _declared_label
+                # ── the SECOND probe, for a graph written before that
+                # resolution existed (#14284 round-3 review, VGATE F-3) ──
+                # A build that predates `_canonical_relation_spelling`'s use on
+                # these doors stored the CALLER's token verbatim, so an operator
+                # written under `DEPENDSON` is keyed in a spelling this line has
+                # just replaced. Probing only the declared spelling would turn a
+                # retry that USED to exact-hit into the very miss F1 fixed — the
+                # same duplicate, on an older graph. So `_find_operator` is asked
+                # once more with the caller's token when the declared one misses;
+                # the caller's token is remembered in `_raw_label`, never used
+                # for the write (the doors resolve it themselves).
                 direction = conn.get("direction")
                 # §8 connection-routing (A3, #1053): a PLAIN IMPL/NAND
                 # connection (route 'direct' — no reify/mitigation) is
@@ -36297,6 +36309,12 @@ class TortoiseSDK:
                 existing = self._find_operator(
                     op_type, [src, *dsts],
                     label=label, direction=direction)
+                if existing is None and _raw_label is not None \
+                        and _raw_label != label:
+                    # the legacy arm: a pre-resolution build wrote this row
+                    existing = self._find_operator(
+                        op_type, [src, *dsts],
+                        label=_raw_label, direction=direction)
                 # The door result of THIS pass, when one was written (the
                 # `exact` / `partial` arms below are resubmissions that mint
                 # nothing, so there is no fresh judgement to carry — see
