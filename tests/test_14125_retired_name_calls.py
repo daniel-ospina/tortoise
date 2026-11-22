@@ -866,7 +866,32 @@ def _skip_call_read_names(fn: ast.AST) -> set[str]:
     return out
 
 
-def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
+#: BOTH `try` node kinds. `try: … except* Exception:` parses as `ast.TryStar` —
+#: a DIFFERENT class from `ast.Try`, not a flag on it — so an
+#: `isinstance(node, ast.Try)` walk graded a swallowing `except*` guard as
+#: NOTHING: no row, no root, `UNARMED == ()` reading green over it (`#14197`,
+#: found by the reviewer of `#14160`). The two kinds share `.handlers`,
+#: `.orelse` and `.finalbody`, and the handler predicates (`_covered`,
+#: `_swallows_everything`, `_reraises`) read the HANDLERS, which both carry. The
+#: census's other kind read is `_imports_own_code`'s STOP — `ast.TryStar` is
+#: deliberately not in its descend set, so a nested `except*` is not charged to
+#: its parent (witnessed by `4e-bis` direction 4), which is why that helper
+#: needed no widening of its own.
+#: Measured before the widening: the identical probe differing only in the
+#: handler keyword gave `()` for `except*` and `((3, (), True, True, True),)` for
+#: `except`; population elsewhere unchanged (70 rows / 62 roots / 58 files).
+#: THE CLASS IS LATENT — no tracked `*.py` file contains an executable
+#: `except*` at this writing: the text appears in 10 files, and every occurrence
+#: sits in a COMMENT or a STRING literal (`tokenize`-checked) — this file's own
+#: witness snippets are string literals too. Nothing can hide in the
+#: 110 `archive/` files that do not parse (`pyproject.toml:303-304`: verbatim
+#: fragments, `SyntaxError: unexpected indent`): none of them contains the text.
+#: So the population changes by ZERO, and the `4e-bis` row below is the only
+#: thing that can red if this widening is reverted.
+_TRY_NODE_KINDS: tuple[type[ast.AST], ...] = (ast.Try, ast.TryStar)
+
+
+def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try | ast.TryStar]:
     """The `try` blocks in a helper body, descending through control flow.
 
     A probe's guard is not always a DIRECT child of its helper: the two
@@ -887,12 +912,17 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
     the census's own rule it IS the decision. Same hole as the `if _DOCKER_URI:`
     one one level out (a control-flow node it failed to descend), and the same
     consequence: a de-armed probe behind it reads GREEN (review of 3ce7ffdd867).
+
+    It matches BOTH `try` node kinds (`_TRY_NODE_KINDS`): an `except*` guard is
+    the same decision as an `except` one, and matching only `ast.Try` meant a
+    `try/except* Exception: FLAG = False` probe was graded by NOTHING — not even
+    as a nested block, because the walk never entered it (`#14197`).
     """
-    out: list[ast.Try] = []
+    out: list[ast.Try | ast.TryStar] = []
     stack: list[ast.stmt] = list(body)
     while stack:
         node = stack.pop()
-        if isinstance(node, ast.Try):
+        if isinstance(node, _TRY_NODE_KINDS):
             if node.handlers:
                 out.append(node)
             else:
@@ -1721,7 +1751,7 @@ def _reaches_capability_seam(
     return False
 
 
-def _probe_roots(tree: ast.Module) -> list[ast.Try]:
+def _probe_roots(tree: ast.Module) -> list[ast.Try | ast.TryStar]:
     """The `try` blocks that DECIDE availability — FIVE admission rules.
 
       * a module-body `try` that assigns an `*AVAILABLE` flag — admitted by the SAME
@@ -1867,7 +1897,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     check reaches into them separately, because a swallowed import there is the
     same defect one level down.
     """
-    roots: list[ast.Try] = []
+    roots: list[ast.Try | ast.TryStar] = []
     resolvers = _resolver_functions(tree)
     skip_gated = _skip_gating_functions(tree)
     skip_referenced = _skip_condition_names(tree)
@@ -2037,7 +2067,7 @@ def _is_own_code_import(node: ast.Import | ast.ImportFrom) -> bool:
     return any(alias.name.split(".")[0] in _OWN_CODE_ROOTS for alias in node.names)
 
 
-def _imports_own_code(block: ast.Try) -> bool:
+def _imports_own_code(block: ast.Try | ast.TryStar) -> bool:
     """Whether the block body imports OWN code, without leaving the block.
 
     Descends through control flow (`if`/`with`/`for`/`while`, and their `else`
@@ -2045,6 +2075,13 @@ def _imports_own_code(block: ast.Try) -> bool:
     seam. Stops at a NESTED `try` — that block is graded on its own pass, so an
     optional import already wrapped in its own `try` is not charged to its
     parent — and at `def`/`class`/`lambda`, whose bodies are not this probe.
+
+    A nested `try/except*` is not charged to the parent either, and it costs
+    this helper NO term to say so: `ast.TryStar` is not in the descend set
+    below, so the walk never enters one. Stated because the opposite is the
+    natural reading of "stops at a nested `try`" once the census grades both
+    kinds (`_TRY_NODE_KINDS`) — the seam of a nested `except*` block is graded
+    by that block's OWN row, not by its parent's (`#14197`).
     """
     stack: list[ast.stmt] = list(block.body)
     while stack:
@@ -2072,7 +2109,11 @@ def _probe_blocks_from_source(
     One row per probe `try`: `(lineno, covered, swallows, own_code_import, is_root)`.
     Rows include nested `try` blocks inside a probe body (`is_root=False`) so the
     import seam is graded one level down, without charging a cleanup `try` to the
-    availability decision.
+    availability decision. A nested block of EITHER `try` kind gets its row
+    (`_TRY_NODE_KINDS`): an `except* ImportError: pass` one level down is the same
+    swallowed seam as an `except` one, and skipping it graded that import by
+    nothing while `_imports_own_code` — which stops at both kinds — refused to
+    charge it to the parent (`#14197`).
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SyntaxWarning)
@@ -2089,7 +2130,7 @@ def _probe_blocks_from_source(
             )
         )
         for block in ast.walk(root):
-            if block is root or not isinstance(block, ast.Try) or not block.handlers:
+            if block is root or not isinstance(block, _TRY_NODE_KINDS) or not block.handlers:
                 continue
             rows.append(
                 (
@@ -2955,6 +2996,133 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     assert wrapped_guard == ((6, (), True, True, True),), (
         "a guard under a handler-less `try/finally` is a pure WRAPPER, not a "
         f"cleanup: the probe inside it is still the decision: {wrapped_guard}"
+    )
+
+    # 4e-bis. `try/except*` IS A DIFFERENT NODE KIND, and matching only `ast.Try`
+    #     graded it by NOTHING. `try: … except* Exception:` parses as
+    #     `ast.TryStar` — a separate class, not a flag on `ast.Try` — so the walk in
+    #     `_control_flow_tries` returned no root for it, `_imports_own_code` refused
+    #     to see into it, and the nested-block row loop skipped it: a swallowing
+    #     `except*` availability probe was invisible in all three places at once, so
+    #     `UNARMED == ()` read green over it (`#14197`, found by the reviewer of
+    #     `#14160`; 0 live instances then, which is why the pin — not a population
+    #     change — is what closes it). The pair below isolates the KEYWORD: the two
+    #     snippets are identical except for the `*`.
+    _trystar_swallow = roots(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK().close()
+            FALKORDB_AVAILABLE = True
+        except* Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    _plain_swallow = roots(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK().close()
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert _trystar_swallow == _plain_swallow == ((3, (), True, True, True),), (
+        "an `except*` guard is the SAME availability decision as an `except` one and "
+        "must be graded identically — the identical probe differing only in the "
+        f"handler keyword cannot be `()`: except*={_trystar_swallow} "
+        f"except={_plain_swallow}"
+    )
+
+    # …and the OTHER direction, or the fix would only turn a silent drop into a red:
+    #     an `except*` probe that DOES re-raise the programming errors is ARMED and
+    #     satisfies `_required_names`, exactly as its `except` twin would. Measured
+    #     pre-fix: `()` — graded by nothing, so neither its arm nor its absence could
+    #     red.
+    _trystar_armed = roots(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK().close()
+            FALKORDB_AVAILABLE = True
+        except* (AttributeError, NameError, TypeError, ImportError):
+            raise
+        except* Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert len(_trystar_armed) == 1, (
+        f"an armed `except*` probe is one graded root, not nothing: {_trystar_armed}"
+    )
+    _trystar_covered = set(_trystar_armed[0][1])
+    assert _trystar_covered >= _required_names(True), (
+        "the re-raising `except*` arm must COUNT as coverage, or the widening would "
+        "red every correctly-written `except*` probe instead of grading it — the "
+        f"over-block half: covered={sorted(_trystar_covered)}"
+    )
+
+    # …and the whole shape must be VISIBLE, not only the root case. Pre-fix this
+    #     snippet measured `()`: the walk never entered the `try/except*` container,
+    #     so the guard inside the `for` was no root AND the container itself got no
+    #     nested row — a swallow one level down was graded by nothing at either level
+    #     (the same asymmetry the `try/finally` case above closed for `ast.Try`).
+    _trystar_descent = roots(
+        """
+        import pytest
+
+        _FALKORDB_UP = False
+        try:
+            for _attempt in (None,):
+                try:
+                    import tortoise.sdk as _sdkmod
+                    _sdkmod.TortoiseSDK().close()
+                    _FALKORDB_UP = True
+                except Exception:
+                    _FALKORDB_UP = False
+        except* Exception:
+            pass
+
+        @pytest.mark.skipif(not _FALKORDB_UP, reason="docker")
+        def test_docker():
+            pass
+        """
+    )
+    assert _trystar_descent == ((5, (), True, False, True), (7, (), True, True, False)), (
+        "an `except*` wrapper is graded as a row of its own (5, root) and the guard "
+        "inside its `for` is graded beside it (7, nested) — before the widening both "
+        f"were `()`: {_trystar_descent}"
+    )
+
+    # …and that nesting must not be charged to the PARENT. The parent imports nothing
+    #     itself, so its `own_import` is False — and it is admitted by the CAPABILITY
+    #     SEAM its `.query` call reaches, which is the only rule that admits it
+    #     (measured: dropping that call from this fixture makes the whole row set
+    #     `()`, so the caller line is load-bearing, not decorative). The own import
+    #     lives in the nested `except*` block, whose row charges it — first to the
+    #     block that can actually swallow it. Charging it to the parent would red a
+    #     probe for an import it never runs (the over-block direction), while
+    #     skipping the nested row would grade it by nothing at all.
+    _trystar_seam = roots(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            _HANDLE = _client().query("RETURN 1")
+            try:
+                from tortoise.projection import FalkorProjection
+            except* ImportError:
+                pass
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert _trystar_seam == ((3, (), True, False, True), (5, (), True, True, False)), (
+        "the nested `except*` own import is graded on its OWN row and NOT charged to "
+        f"the parent probe: {_trystar_seam}"
     )
 
     # 4g. A helper that reuses a MODULE-LEVEL own import is still the seam: the
