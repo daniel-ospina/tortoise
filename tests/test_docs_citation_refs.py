@@ -8580,6 +8580,26 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # each measured GREEN at depth 1 (#13802 review, round 6)
     r"|numstat[^`]{0,160}?(?:prints?|print|returns?|reports?|shows?|gives?|lists?|"
     r"names?|->|\u2192)\s*`\d+\s+\d+`"
+    # ⛔ AND THE COMMAND'S OWN CODE SPAN, WHATEVER PATH IT NAMES (#14269 review, P1 — MEASURED
+    # IN BOTH DIRECTIONS). Every alternative above that reaches a figure by way of the WORD
+    # `numstat` has a window of `[^`]{0,160}?`, which cannot cross the backtick that CLOSES the
+    # command's code span. So "`git diff --numstat` prints `3 3` at this head" — the most
+    # natural spelling of all — was invisible, AND so was the long form for any path but the
+    # one `docs/00_index.md` literal hard-coded above; `05-verify.md`'s D5 row carried BOTH of
+    # those spellings and both walked green (`finditer` over the file returned `[]`).
+    # This alternative anchors on the code span INSTEAD of the word, so it cannot be defeated
+    # by either spelling, and it stays in the numstat family: no `--numstat` in the span, no
+    # match.
+    r"|`[^`]*--numstat[^`]*`\s*(?:prints?|print|returns?|reports?|shows?|gives?|lists?|names?)"
+    r"\s*`\d+\s+\d+`"
+    # ⛔ AND THE HEAD STAMP IT MUST NOT REFUSE (#14269 review, P2 — MEASURED). This document
+    # ALLOWS a head-STAMPED clause to type a figure (the archaeology, e.g. `numstat <sha> <sha>
+    # -- …` → `10 2`); the span-anchored alternative above would have refused the natural way of
+    # writing one ("`git diff --numstat` prints `10 2` at `a577d0e25c`"), i.e. a FALSE RED on a
+    # form the rule permits. A figure followed by a head stamp is therefore let through — the
+    # stamp is what makes it history rather than a claim about this head — and a figure followed
+    # by anything else (notably "at this head") is not.
+    r"(?!(?:\s*(?:at|@)\s*`?[0-9a-f]{7,40}`?))"
     # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
     # document's `both print NOTHING` clauses state the CURRENT reading without repeating
     # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
@@ -8675,6 +8695,15 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
         "and the numstat shows `1 1` here",
         "and the numstat returns `3 3` here",
         "and the numstat -> `1 1` here",
+        # the backtick-closed short form that shipped green in `05-verify.md` (measured: the
+        # window alternatives could not span the closing backtick of `` `git diff --numstat` ``)
+        "`git diff --numstat` prints `3 3` at this head",
+        "`git diff --numstat` returns `3 3` here",
+        # ⛔ AND THE LONG FORM FOR A PATH NO LITERAL ABOVE NAMES (#14269 review, P1 — the
+        # SECOND figure the same row carried, and it walked green too: the only long spelling
+        # the earlier alternatives see is the `docs/00_index.md` one)
+        "`git diff --numstat origin/main...HEAD -- docs/epics/2026-11-04-7949-extractor-v4-"
+        "capstone/04-plan.md` prints `4 4`",
         # the spelling the merge-round reviewer found GREEN (#13802 merge-round review, P2):
         # the pair is typed after the `--name-only` command, not after `--numstat`.
         "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints "
@@ -8692,6 +8721,12 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
     for _allowed in (
         "its numstat printing `1 1` at a head of its own",
         "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING",
+        # ⛔ AND THE HEAD-STAMPED FORM, IN THE NATURAL SPELLING (#14269 review, P2). The rule in
+        # `05-verify.md` lets the archaeology type a figure; the span-anchored alternative read
+        # one as a present-tense claim and refused it — a FALSE RED on a permitted form. The
+        # stamp is what distinguishes them, so the stamp must be honoured, not the verb.
+        "`git diff --numstat` prints `10 2` at `a577d0e25c`",
+        "`git diff --numstat` -> `10 2` at `ef443ea968`",
         # a HISTORICAL quote of a past head's pair, sitting a few characters after the
         # command — must stay allowed without a present-tense verb to bind it
         # (#13802 merge-round review, P2: the unbounded cut of this alternative refused it).
