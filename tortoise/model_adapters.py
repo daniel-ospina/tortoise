@@ -91,6 +91,16 @@ def _cache_hit_tokens(usage: object) -> int:
             raw = details.get("cached_tokens")
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return 0
+    # A provider can report an integer of ANY length (Python parses a JSON
+    # integer exactly), and ``float(10**400)`` raises OverflowError — so the
+    # guard below would raise where this function promises to treat a bad
+    # value as absent. It would also raise from the LAST statement of each
+    # adapter's success path, i.e. AFTER the paid response was consumed,
+    # discarding a call that succeeded. Bound the magnitude first, the same
+    # 1e300 bound ``extractor_v2._normalise_token_count`` applies for exactly
+    # this reason (#14277 review, P3).
+    if abs(raw) > 1e300:
+        return 0
     if not math.isfinite(float(raw)) or raw < 0:
         return 0
     return int(raw)

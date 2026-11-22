@@ -266,3 +266,30 @@ def test_the_documented_command_regenerates_the_committed_bundle(tmp_path):
         (_EVIDENCE / "report.md").read_text(encoding="utf-8")
     assert js.read_text(encoding="utf-8") == \
         (_EVIDENCE / "report.json").read_text(encoding="utf-8")
+
+
+def test_the_first_measured_document_is_labelled_a_resume_not_a_cold_prefix():
+    """The section used to be titled "the true cold call (first document,
+    before any prefix cached)" over a row that is 83% cache HITS.
+
+    The provider's prefix cache outlives a process and this measurement is
+    resumable (`measurements.jsonl` accumulates across runs), so the cold
+    arm's first document is where the FILE resumed, not a cold baseline — the
+    bundle therefore contains no true-cold datum, and a heading that says
+    otherwise presents a measurement artifact as the cold reading (#14277
+    review, finding 2). The heading is the claim, so the heading is pinned.
+    """
+    report = m.report_from_rows(m.load_rows(_EVIDENCE / "measurements.jsonl"))
+    fc = report["first_call"]
+    hits = sum(b["hit"] for b in fc["stages"].values())
+    prompts = sum(b["prompt"] for b in fc["stages"].values())
+    assert hits / prompts > 0.5, (
+        "this pin assumes the committed first row is heavily cached; if a "
+        "future run really does start cold, relabel the section deliberately "
+        "rather than deleting the check")
+
+    text = m.report_markdown(report)
+    assert "NOT a cold prefix" in text
+    assert "true cold call" not in text
+    assert f"{hits / prompts:.1%} of this item's prompt tokens" in text
+    assert f"{hits:,} hit of {prompts:,}" in text

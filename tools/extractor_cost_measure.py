@@ -57,11 +57,15 @@ LIMITS — stated because an unstated limit reads as a result:
    input is larger. The measured S4 figure is therefore a floor.
 3. **Cache arms are a ladder, not two points.** Both arms run the corpus in
    order, so from the second document onward the per-stage system prompt is
-   already a cached prefix. The TRUE cold cost is the first document's
-   ``s1`` call, reported separately; the cold arm's steady state is the
-   realistic production figure (sys prompt warm, document body cold); the
-   warm arm measures a perfect replay — the upper bound of the cache lever,
-   and the value content-hash dedup would collect.
+   already a cached prefix. ⛔ **NO TRULY COLD PREFIX WAS OBSERVED.** The
+   provider's prefix cache outlives a process and this measurement is
+   resumable (``measurements.jsonl`` accumulates across runs), so even the
+   cold arm's FIRST document was 83.3% cached (29,568 hit of 35,512 prompt
+   tokens) — its row is reported, labelled for what it is, rather than called
+   a cold reading. The cold arm's steady state (sys prompt warm, document body
+   cold) is the realistic production figure; the warm arm measures a perfect
+   replay — the upper bound of the cache lever, and the value content-hash
+   dedup would collect.
 """
 from __future__ import annotations
 
@@ -990,9 +994,21 @@ def render(report: dict) -> str:
         add("")
     fc = report.get("first_call")
     if fc:
-        add("### the true cold call (first document, before any prefix cached)")
+        hits = sum(b["hit"] for b in fc["stages"].values())
+        prompts = sum(b["prompt"] for b in fc["stages"].values())
+        share = (hits / prompts) if prompts else 0.0
+        # ⛔ NOT a cold-prefix reading, and the heading says so. The provider's
+        # prefix cache outlives a process and this measurement is resumable,
+        # so the cold arm's first document already carried a warm prefix from
+        # the earlier runs. Calling it "the true cold call" presented a
+        # measurement artifact as the cold baseline (#14277 review, finding 2).
+        add("### the first measured document — NOT a cold prefix")
         add("")
-        add(f"`{fc['id']}` ({fc['item_tokens']:,} tokens)")
+        add(f"`{fc['id']}` ({fc['item_tokens']:,} tokens). **{share:.1%} of this "
+            f"item's prompt tokens were served from the provider cache** "
+            f"({hits:,} hit of {prompts:,}), so this row is where the run "
+            f"resumed, not a cold one — a truly cold prefix was NOT observed "
+            f"(limit 3).")
         add("")
         add("| stage | prompt | completion | cache hit |")
         add("|---|---|---|---|")

@@ -3956,3 +3956,14 @@ def test_the_adapter_reads_both_provider_spellings_of_a_cache_hit():
     assert hit({"prompt_cache_hit_tokens": -5}) == 0
     assert hit({"prompt_cache_hit_tokens": float("nan")}) == 0
     assert hit({"prompt_cache_hit_tokens": "640"}) == 0
+    # ⛔ a provider-controlled integer of ~400 digits: Python parses a JSON
+    # integer EXACTLY, so it clears the isinstance gate and ``float(10**400)``
+    # raises OverflowError — from the LAST statement of each adapter's success
+    # path, i.e. AFTER the paid response was consumed, discarding the call.
+    # The sibling ``_normalise_token_count`` bounds at 1e300 for this reason
+    # (#14277 review, P3).
+    assert hit({"prompt_cache_hit_tokens": 10 ** 400}) == 0
+    assert hit({"prompt_cache_hit_tokens": -(10 ** 400)}) == 0
+    assert hit({"prompt_tokens_details": {"cached_tokens": 10 ** 400}}) == 0
+    # ...and a merely LARGE value is still a count, not a rejection
+    assert hit({"prompt_cache_hit_tokens": 10 ** 6}) == 10 ** 6
