@@ -1132,10 +1132,30 @@ SWEEP_NAMES = 66
 #:   * this PR's ONLY tracked source change is `tests/test_14125_retired_name_calls.py`, and putting
 #:     `origin/main`'s version of that one file back leaves the pair byte-identical — 0 rows. So the
 #:     census's own contribution to this pin is ZERO, measured, not assumed from the file list.
-#: The row SET is unchanged in shape (856 rows, same digest) on every tree measured above, which is
-#: the reason a count-only attribution is unsafe here and the DIGEST is what makes this a re-cut
-#: rather than arithmetic on the last pin (`11858 + 3 = 11861` would be a coincidence, not a proof).
+#: The row NAMES are unchanged (856 rows) on every tree measured above, but two of their COUNTS
+#: moved, so the DIGEST necessarily moved too (`f0647020531c078c` vs the pinned `a1552662bf07a10b`) —
+#: that is what reds `--check`, and it is why a count-only attribution is unsafe here: a bare
+#: `11858 + 3 = 11861` would be arithmetic on the last pin, not a reading of these two nodes.
 #: `typed references still pointing at a public name` stays **0** on this tree.
+#: THE MOVE IS ATTRIBUTED ROW BY ROW, against the last tree that DID satisfy its own pin. `e74cf1d13d`
+#: is the commit before `10e51693f1` that touches this line, and its tree derives
+#: (11857, "ed40203dbbf32b87") exactly — so the interval between those two trees is the whole move, and
+#: the residue map was re-derived on BOTH heads through this file's own `edits_for`/`rename_map`, PER
+#: FILE (never by grep over the source, which over-counts receivers inside comments and string
+#: literals). Exactly TWO rows differ, and neither is a new shape:
+#:   * `out.update` 42 → 43 in `tests/test_14125_retired_name_calls.py` — the arm the block above
+#:     already declares (a plain `set[str]` accumulated with `out.update(node.names)` over an
+#:     `ast.Global`), and the only row this branch's own census file contributes;
+#:   * `proj.g.query` 3643 → 3646 — ALL THREE in `tools/read_wave_latency.py`, added by `94d75667dc`
+#:     (#14224), the ONLY commit in the interval that touches that file. Each is a plain FalkorDB
+#:     `Graph` receiver (`proj.g.query("MATCH (n:Point) RETURN count(n)")` and one comprehension over
+#:     it) — this sweep's own documented edge, and already this census's largest row — so no shape was
+#:     absorbed in either direction and no defect is hidden.
+#: Per-file totals, each a reading of its own tree: `e74cf1d13d` 11857 → `10e51693f1` 11861 (+4, of
+#: which the 11858 pin declared only the +1). And the same per-file derivation on THIS merged tree —
+#: which carries `origin/main` `70fbd1a27d` — returns 11861, identical to `10e51693f1` row for row, so
+#: neither that merge nor this branch's own diff adds a row. `--check` exits 0 on this tree with
+#: `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
