@@ -1379,8 +1379,8 @@ SWEEP_NAMES = 66
 #: `--check` exits 0 on it.
 #: ⛔ MERGED `origin/main` `0467ba329d` INTO THIS PR (the PR was `CONFLICTING`: four commits,
 #: `#14258`, `#14295`, `#14281`, `#14303`) — a NINTH tree, so the pair is `--repin`'s output on
-#: THIS merged tree and neither side's numeral is carried: the branch's 11870 marked its own
-#: pre-merge tree and `main`'s 11861 marked `main`'s, and this is neither. `--repin` prints
+#: THIS merged tree: the branch's 11870 marked its own pre-merge tree and `main`'s 11861 marked
+#: `main`'s — and the merged reading IS the branch's own, so `main`'s numeral is not carried. `--repin` prints
 #: **(11870, '6da40999bb5162fa')** and `--check` exits 0 on it with `typed references still
 #: pointing at a public name: 0`.
 #: ⚠️ THE MERGED PIN EQUALS THE BRANCH'S PRE-MERGE FIGURE AND SITS 9 ROWS ABOVE `main`'S (11870

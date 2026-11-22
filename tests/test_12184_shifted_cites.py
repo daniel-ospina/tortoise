@@ -2015,7 +2015,7 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             f"insertion. Re-derive both addresses.")
     # ⛔ The head ADDRESS is pinned, not merely same-statement: this branch's 114 inserted lines sit
     # ABOVE `main`'s 51,506, so every pair `(n, n+114)` inside that block is a same-statement pair with
-    # the right arithmetic — a header could state `main`'s 51,494 (`params["uid"] = actor_filter`) and
+    # the right arithmetic — at that head a header could state `main`'s 51,494 (`params["uid"] = actor_filter`) and
     # this head's 51,608 and stay GREEN (#14038 cycle 15, P2 — MEASURED: that doc passed this file while
     # the same-statement and arithmetic arms both held). The split counts ONE pair for this file, so the
     # provenance sentence must name THAT one.
