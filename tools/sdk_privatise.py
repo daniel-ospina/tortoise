@@ -1100,9 +1100,12 @@ SWEEP_NAMES = 66
 #: `main`'s own pin (`e74cf1d13d`), inherited here at the merge and left in place while this branch
 #: kept adding rows under it, so `--check` reds on this tree by exactly ONE. `git log` proves the
 #: inheritance rather than asserting it: the ONLY commit ON `main` that ever set the constant to
-#: that pair is `e74cf1d13d` itself (⛔ scoped to `main`, NOT "the only commit" — five side
-#: branches set the same pair independently, so the unscoped sentence fails the very `git log` it
-#: cites), and that tree carries no `out.update` (measured: 0 occurrences in
+#: that pair is `e74cf1d13d` itself (⛔ scoped to `main`, NOT "the only commit" — TWO commits SET
+#: it, and the other is the side branch `3f289474f9` (`feat/14012-pin-and-outside-view`), so the
+#: unscoped sentence fails the very `git log` it cites. ⛔ THE COUNT, MEASURED: `-S` on that literal
+#: returns FIVE commits, and only those two SET it — the other three (`a611e89be1`, `917ae19efd`,
+#: `10e51693f1`) REPLACE the pair with 11858/11860, so the flag count is not the setter count), and
+#: that tree carries no `out.update` (measured: 0 occurrences in
 #: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
 #: THE ONE ROW: `out.update` 1 — `_global_declarations` in `tests/test_14125_retired_name_calls.py`,
 #: an `out: set[str]` accumulated with `out.update(node.names)` over an `ast.Global`. It arrived with
