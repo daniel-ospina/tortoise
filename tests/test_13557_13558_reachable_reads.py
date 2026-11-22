@@ -3184,14 +3184,15 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
         "the general \"A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE "
         "REPORT\" reads as covering arguments that do NOT silence it (#14033 "
         "round-16 review, third residual)")
-    # ⛔ AND THE TWO THAT DO SILENCE IT WITHOUT BEING KNOBS (#14140 re-cut review,
+    # ⛔ AND THE ONE THAT DOES SILENCE IT WITHOUT BEING A KNOB (#14140 re-cut review,
     # P2 — the sentence said "Only THREE parameters sit OUTSIDE it … so none
     # silences the notice", while `sdk.py`'s guard reads `not ended_scope and not
     # include_terminal and not [k for k in _retrieval_knobs() if k != "query"]`.
-    # Neither name is a member of `_retrieval_knobs()`, so BOTH sit outside the
-    # list AND silence it: the served text named no silencer at all, and a caller
-    # passing `include_terminal=True` was told a cue report had fired that the
-    # guard had already suppressed).
+    # `include_terminal` is not a member of `_retrieval_knobs()`, so it sits
+    # outside the list AND silences it: the served text named no silencer at all,
+    # and a caller passing `include_terminal=True` was told a cue report had fired
+    # that the guard had already suppressed. ⛔ `ended_scope=` IS NOT A SECOND ONE —
+    # see the assertion below, which pins it as a REFUSAL).
     for _silencer in ("include_terminal=True",):
         assert _re.search(_re.escape(_silencer), _doc_flat), (
             f"the SERVED description does not name `{_silencer}`, which sits outside "

@@ -1996,11 +1996,13 @@ non-default `threshold`, `min_confidence`, `order_by`, `relationship_filter`,
 set. Three arguments sit outside it and they change WHICH rows a read
 returns rather than asking for a filtered read, because the POPULATION applies
 them — `kind`, `entity_type`, `limit` — so none silences the notice. ⛔ AND ONE
-ARGUMENT SITS OUTSIDE THE LIST AND DOES SILENCE IT: `include_terminal=True`
-picks a scope the caller has already chosen, so the cue is not
-seen-and-unapplied and no notice is owed. ⛔ `ended_scope=` IS NOT A SECOND ONE:
-beside a question it is REFUSED with a ValueError (#13558), so it cannot
-suppress the report — it declines the call.
+ARGUMENT SITS OUTSIDE THE LIST AND DOES SILENCE IT — ⚠️ ON THE PRIVATE
+`TortoiseSDK._tortoise_fts_query` ONLY, because THIS tool takes neither of the
+two names below, so passing one here is a TypeError and not a choice you have:
+`include_terminal=True` picks a scope the caller has already chosen, so the cue
+is not seen-and-unapplied and no notice is owed. ⛔ `ended_scope=` IS NOT A
+SECOND ONE: beside a question it is REFUSED with a ValueError (#13558), so it
+cannot suppress the report — it declines the call.
 The
 filter and the population are different answers: send the question ALONE to
 get the population or the report. (The

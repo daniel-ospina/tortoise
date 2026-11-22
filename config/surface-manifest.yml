@@ -1640,23 +1640,24 @@ rows:
     `threshold`, `min_confidence`, `order_by`, `relationship_filter`, `traversal_path`, `pool_size`, `time_aware`
     — is an EXAMPLE of it, never the set. Three arguments sit outside it and they change WHICH rows a read returns
     rather than asking for a filtered read, because the POPULATION applies them — `kind`, `entity_type`, `limit`
-    — so none silences the notice. ⛔ AND ONE ARGUMENT SITS OUTSIDE THE LIST AND DOES SILENCE IT: `include_terminal=True`
-    picks a scope the caller has already chosen, so the cue is not seen-and-unapplied and no notice is owed. ⛔ `ended_scope=`
-    IS NOT A SECOND ONE: beside a question it is REFUSED with a ValueError (#13558), so it cannot suppress the report
-    — it declines the call. The filter and the population are different answers: send the question ALONE to get
-    the population or the report. (The hosted `GET /v1/search` route below takes only the question and `limit`,
-    neither of which is a routing argument, so it is not silenced.) ⛔ THIS TOOL CANNOT REPORT the cue it saw and
-    could not apply — its reply is the row list and it takes no sink — so an MCP caller who needs that report must
-    use the HOSTED deployment''s `GET /v1/search` route, whose response body carries `state_question` (`{routed:
-    false, population, reason, cue, hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK method exposes
-    it either — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink
-    (under `read_status_out["state_question"]`), so an integration that calls the SDK directly must name that private
-    method deliberately. ⛔ AND THE HOSTING MATTERS rather than being a detail of the path: the SELF-HOSTED `GET
-    /v1/search` (the same path, `selfhost_api.py`) recognises the cue too — routing happens inside the SDK call
-    — but it passes NO sink and answers with the bare row list, so on a self-hosted deployment a declined state
-    question is still indistinguishable from "nothing has ended"; the private SDK sink above is the only way to
-    read it there — and what that sink buys is the distinction between "the route declined my state question" and
-    "the graph says nothing has ended".'
+    — so none silences the notice. ⛔ AND ONE ARGUMENT SITS OUTSIDE THE LIST AND DOES SILENCE IT — ⚠️ ON THE PRIVATE
+    `TortoiseSDK._tortoise_fts_query` ONLY, because THIS tool takes neither of the two names below, so passing one
+    here is a TypeError and not a choice you have: `include_terminal=True` picks a scope the caller has already
+    chosen, so the cue is not seen-and-unapplied and no notice is owed. ⛔ `ended_scope=` IS NOT A SECOND ONE: beside
+    a question it is REFUSED with a ValueError (#13558), so it cannot suppress the report — it declines the call.
+    The filter and the population are different answers: send the question ALONE to get the population or the report.
+    (The hosted `GET /v1/search` route below takes only the question and `limit`, neither of which is a routing
+    argument, so it is not silenced.) ⛔ THIS TOOL CANNOT REPORT the cue it saw and could not apply — its reply is
+    the row list and it takes no sink — so an MCP caller who needs that report must use the HOSTED deployment''s
+    `GET /v1/search` route, whose response body carries `state_question` (`{routed: false, population, reason, cue,
+    hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK method exposes it either — the same payload
+    rides the PRIVATE `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink (under `read_status_out["state_question"]`),
+    so an integration that calls the SDK directly must name that private method deliberately. ⛔ AND THE HOSTING
+    MATTERS rather than being a detail of the path: the SELF-HOSTED `GET /v1/search` (the same path, `selfhost_api.py`)
+    recognises the cue too — routing happens inside the SDK call — but it passes NO sink and answers with the bare
+    row list, so on a self-hosted deployment a declined state question is still indistinguishable from "nothing
+    has ended"; the private SDK sink above is the only way to read it there — and what that sink buys is the distinction
+    between "the route declined my state question" and "the graph says nothing has ended".'
   dependency: declares TortoiseSDK._tortoise_fts_query (resolves)
   lifecycle: active
   used_by: never called, eval-harness, tooling, docs
