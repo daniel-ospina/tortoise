@@ -481,10 +481,17 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     """Whether some handler here CATCHES a programming error and DROPS it.
 
     The arms that count are a bare arm, an `Exception`/`BaseException` arm, and — since
-    review cycle 7 of #14160 — a NARROW arm naming one of `_RAISED`, because narrowing
+    review cycle 7 of #14160 — a NARROW arm naming one of `_RAISED_ALL`, because narrowing
     `except Exception:` to the four names and KEEPING the drop is the substitution a lane
     is most likely to make when this gate reds, and it swallows the rename exactly as
-    before. `ImportError` is INCLUDED: excluding it (cycle 8 of #14160) opened a hole in
+    before. ⛔ `_RAISED_ALL`, NOT `_RAISED`: the set that decides the charge also carries the
+    three SUBCLASS spellings that mean one of those four — `ModuleNotFoundError`,
+    `ZipImportError`, `UnboundLocalError`, via `_RAISED_ALIAS` — because a moved module and a
+    renamed local raise those, not the parent (`_subclass_drop` is the witness: `except
+    ModuleNotFoundError: pass` is CHARGED). This sentence used to name `_RAISED` alone, which
+    read as though a subclass arm were uncharged; the credit side is still keyed on the
+    literal names, and that asymmetry is deliberate (review of #14287, P3). `ImportError` is
+    INCLUDED: excluding it (cycle 8 of #14160) opened a hole in
     BOTH gates at once, because the seam gate is conditioned on this predicate — with
     `swallows=False`, `except ImportError: FLAG = False` around `from tortoise.sdk import …`
     read green in `_unarmed_probe_blocks` AND in
