@@ -4225,3 +4225,30 @@ def test_the_MODULE_BODY_REMOVED_names_the_carrier_that_HELD_the_body(tree: Path
     assert "carries statements in `tortoise/p.py`" not in row, (
         f"the message must not assert a false fact about the shim: {row}"
     )
+
+
+def test_a_symlink_whose_TARGET_TEXT_parses_as_a_STATEMENT_is_not_code(tree: Path) -> None:
+    """P1 (round-22): the mode was read AFTER the content test, so a link's TEXT could short-circuit.
+
+    `x_init.py -> impl()` is `ast.Expr(Call)` and `y_init.py -> impl = 1` is `ast.Assign` — both
+    "content" to `_init_carries_a_body` — so the test passed above the `ls-tree` read and the TARGET
+    was never consulted. Measured: an UNCHANGED dangling link of either spelling graded
+    `MODULE BODY REMOVED … carries statements in `tortoise/x_init.py` and this tree's module file
+    `tortoise/x_init.py` carries none` — a false block on a tree where nothing changed, asserting
+    two false things about a file that is a symlink holding no statements at all.
+
+    The mode is the only datum that says "this blob is a target, not source", so it is asked first.
+
+    Mutation: move the content test back above the `ls-tree` read -> RED here.
+    """
+    (tree / "tortoise" / "x_init.py").symlink_to("impl()")  # dangling, and the text parses
+    (tree / "tortoise" / "y_init.py").symlink_to("impl = 1")  # an Assign, also non-inert
+    _commit(tree, "tortoise/x_init.py", "tortoise/y_init.py")
+
+    (tree / "tortoise" / "unrelated.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/unrelated.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert problems == [], (
+        f"link TEXT is not source — neither link resolves to anything: {problems}"
+    )

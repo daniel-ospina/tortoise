@@ -1209,10 +1209,7 @@ def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
     text = _git_blob(root, sha, path)
     if text is None:
         return None
-    code, out = _git(root, "ls-tree", sha, "--", path)
-    if code != 0 or not out.strip():
-        return text
-    if not out.split(None, 1)[0].startswith("120"):
+    if not _blob_mode(root, sha, path).startswith("120"):
         return text
     # ⛔ NORMALISE FIRST (round-21 review, P1 — measured). A relative link target
     # (`../../shared/impl.py`) concatenated onto the carrier's directory yields
@@ -1226,6 +1223,23 @@ def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
     return resolved if resolved is not None else None
 
 
+@cache
+def _blob_mode(root: Path, sha: str, path: str) -> str:
+    """The commit's file mode for *path* (`""` when the tree has no such entry).
+
+    ⛔ CACHED BECAUSE THE SAME QUESTION IS ASKED THREE TIMES (round-22 VGATE, measured). Reading
+    the mode before the text asked for it 924 times per run to answer for 307 carriers —
+    `_carrier_carries_a_body` is re-asked from `base_body_modules`, `base_runtime_body_modules` and
+    the per-module carrier lookups — and on a loaded box each git spawn costs hundreds of
+    milliseconds. A commit's tree is immutable, so the answer is cacheable on `(root, sha, path)`,
+    which turns that into 307 calls plus 617 hits (measured, 3.01 asks per key).
+    """
+    code, out = _git(root, "ls-tree", sha, "--", path)
+    if code != 0 or not out.strip():
+        return ""
+    return out.split(None, 1)[0]
+
+
 def _content_or_link(root: Path, sha: str, path: str, source: str | None) -> bool:
     """Is this base carrier the module's code — counting a SYMLINK as code? (round-19 P2, measured)
 
@@ -1233,19 +1247,23 @@ def _content_or_link(root: Path, sha: str, path: str, source: str | None) -> boo
     `real_impl.py` as Python — an `Expr(Attribute)`, i.e. "dead code" — and answered "no body":
     deleting a symlinked module was GREEN while the identical regular file was RED. The docstring
     above promises that an UNREADABLE carrier never cancels a removal; this is the harder case, a
-    reader that answers plausibly and wrongly, so the mode is asked directly. Only paid when the
-    blob has no body — the common carrier never reaches the `ls-tree`.
+    reader that answers plausibly and wrongly, so the mode is asked directly.
+
+    ⛔ ASK THE MODE **FIRST** (round-22 review, P1 — measured). The content test used to run above the
+    `ls-tree` read, so any LINK TEXT that happens to parse as a non-inert statement short-circuited
+    it: `x_init.py -> impl()` is `ast.Expr(Call)` and `y_init.py -> impl = 1` is `ast.Assign`, both
+    "content", and the target was never consulted — an UNCHANGED dangling link graded `MODULE BODY
+    REMOVED`, with the message's two stated facts both false. The mode is the only thing that says
+    "this blob is a target, not source", so it is read before anything parses the blob.
+    Cost: one `ls-tree` per carrier, cached in `_blob_mode` (three askers share it: measured 924
+    asks before the cache, 307 calls after), which is the price of not answering the question from
+    the wrong datum.
     """
     if source is None:
         return True  # unreadable at this commit: never cancel a removal
-    if _init_carries_a_body(source):
-        return True
-    code, out = _git(root, "ls-tree", sha, "--", path)
-    if code != 0:
-        return True  # could not ask: fail closed toward the removal, like the `None` case
-    mode = out.split(None, 1)[0] if out.strip() else ""
+    mode = _blob_mode(root, sha, path)
     if not mode:
-        return True
+        return True  # could not ask: fail closed toward the removal, like the `None` case
     if mode.startswith("120"):
         # ⛔ ASK THE TARGET'S CONTENT, LIKE THE HEAD SIDE DOES (round-21 review, P1 — a regression
         # this branch introduced, measured). The blanket `not mode.startswith("100")` called every
@@ -1258,10 +1276,12 @@ def _content_or_link(root: Path, sha: str, path: str, source: str | None) -> boo
         # code, and deleting nothing is not a removal.
         resolved = _blob_following_links(root, sha, path)
         return resolved is not None and _init_carries_a_body(resolved)
+    if mode.startswith("100"):
+        return _init_carries_a_body(source)  # a regular file: ask its text, as before
     # `160000` (submodule) holds a TARGET, not source, so the body question cannot be asked of it —
     # and the name still resolving to code elsewhere in the package is exactly what must not
     # cancel a removal.
-    return not mode.startswith("100")
+    return True
 
 
 def _carrier_carries_a_body(root: Path, sha: str, path: str) -> bool:
