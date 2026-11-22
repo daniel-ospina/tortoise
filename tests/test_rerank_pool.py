@@ -2520,8 +2520,8 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # ⛔ THIS ROW'S MESSAGE NAMES THE DIRECTION IT CAN ACTUALLY FIRE IN. The census
     # above already reds a live read outside every granted owner, so by the time
     # this row is reached `owners ⊆ granted_owners` holds; a non-empty `live`
-    # makes the sets EQUAL, and the only mode left is a grant naming an owner
-    # with NO live read (round-21/22 mutation pass, measured: moving the warm-up
+    # rules out an EMPTY `owners` but does NOT make the sets equal, so the only
+    # mode left is a grant naming an owner with NO live read (round-21/22 pass, measured: moving the warm-up
     # into a `_warm` helper WITHOUT widening the grant reds the CENSUS, not this
     # row; moving it AND widening the grant is green for THIS row and the census.
     # ⛔ But that re-cut is NOT green for the suite: main's door pin
@@ -2538,7 +2538,9 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         f"{sorted(granted_owners, key=str)} — a grant naming an owner with NO "
         "live read over-exempts (the opposite direction, a read outside every "
         "granted owner, is the CENSUS's red in this test's derived half, above). "
-        "Re-derive the grant, or the reason the grant cites.")
+        "Re-derive the grant — narrow it to the owners the live reads sit in. "
+        "Re-deriving the recorded reason ALONE cannot clear this red: this "
+        "assert reads the grant's OWNER SET, never its comment.")
     traced = [c for c in seam_calls
               if any(k.arg == "leg_trace" for k in c.keywords)]
     assert len(traced) == 1, (
