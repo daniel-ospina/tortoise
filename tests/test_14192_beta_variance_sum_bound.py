@@ -5,11 +5,13 @@ persisted Beta width exceeds ``CONTESTED_VARIANCE_THRESHOLD``. That width is a
 division over ``α+β``, evaluated once per candidate row, and it was the cost this
 change targeted. #14192 put a NECESSARY precondition in front of it, so that the
 division and the band checks are skipped on the rows that were always going to be
-rejected. ⛔ **NOT the coercion ``CASE``** — the bound is built from the same
-``numeric_operand_cypher`` expressions the division uses, so the coercion runs on
-every candidate row INSIDE the guard itself (measured on the emitted predicate:
-8 ``CASE WHEN`` before ``$contested_sum_bound``). The coercion's cost is the
-price of the guard, not a saving:
+rejected. ⛔ **BUT NOT ALL OF THE COERCION, AND THE GUARD IS NOT FREE** — the
+bound is built from the same ``numeric_operand_cypher`` expressions the division
+uses, so coercion ALSO runs on every candidate row INSIDE the guard itself. On
+the emitted predicate: 8 ``CASE WHEN`` before ``$contested_sum_bound`` against 73
+in the division it spares, so a rejected row pays 8 coercion cases to skip 73.
+BOTH halves are graded below. The guard's own 8 are its price, not a saving —
+which is a CAVEAT on the saving, never a claim that no coercion is spared:
 
     α+β < 1/(4·threshold) − 1        (`beta_variance_sum_bound`)
 
@@ -339,6 +341,19 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
         "`$contested_sum_bound`, but the docstring promises 8 (4 per "
         "`numeric_operand_cypher` operand x the guard's two operands) — "
         "re-derive the docstring's numeral against THIS predicate")
+    # ⛔ AND THE HALF THE GUARD SPARES, so "the guard is its own price" can never
+    # be read as "no coercion is spared". Measured at the same head: 73
+    # `CASE WHEN` sit BETWEEN the guard and `$contested_threshold` — the
+    # ~11.7k-char coercion `CASE` the division carries, which the file's own
+    # `beta_variance_gt_cypher` note names. If that expression ever collapsed, the
+    # guard's saving would vanish while the `8` above stayed true, so BOTH
+    # directions are pinned rather than only the one an earlier cut of this PR
+    # asserted.
+    spared = crit[guard:division].count("CASE WHEN")
+    assert spared == 73, (
+        f"{spared} coercion `CASE WHEN` sit between the guard and "
+        "`$contested_threshold`, but the docstring promises 73 — re-derive BOTH "
+        "numerals against THIS predicate")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 
