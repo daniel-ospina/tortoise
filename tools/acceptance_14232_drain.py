@@ -55,7 +55,12 @@ Exit codes — THREE-WAY, and the middle one is not a pass:
   and the JSON `verdict` both say INCONCLUSIVE — never PASS;
 * `1` — a criterion that RAN failed: refusals, terminal state, or extraction
   evidence, **or a graded ack p95 over the target**, the report names which;
-* `2` — usage/precondition (no app, no auth, bad corpus).
+* `2` — usage/precondition (no app, no auth, bad corpus, an unusable
+  `--base-url`), **or the DEPLOYMENT being unreachable/unreadable**: a transport
+  failure on any of the three network calls reports `error: <label> unreachable
+  — <Type>: <msg>` and exits 2. It is never a verdict about the change — one API
+  blip must not print a criterion FAIL — and it is not "inconclusive" either: the
+  run did not happen, so it says so.
 
 ⛔ A GRADED FAILURE IS NEVER `INCONCLUSIVE`, and this is the one shape the tool
 is easy to get wrong in both directions: the p95 may not produce PASS on a box
@@ -72,6 +77,7 @@ working, not the split failing.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import statistics
@@ -194,7 +200,10 @@ class _HttpTransport:
         r = self.get_session(session_id)
         if r.status_code != 200:
             return {"measured": False, "why": f"detail read {r.status_code}"}
-        body = r.json()
+        try:
+            body = r.json()
+        except ValueError as exc:  # a garbled body is the WIRE, not the extraction
+            raise _UnreadableResponse(f"{type(exc).__name__}: {exc}") from exc
         # ⛔ A SUCCESSFUL DETAIL READ **IS** THE MEASUREMENT (review round 8, P1).
         # This arm used to hard-code `"measured": False` with the note below as the
         # reason — which made `ok_extract` unsatisfiable by construction, so a
@@ -393,28 +402,58 @@ def _is_transport_error(exc: BaseException) -> bool:
     name arm is false for EVERY concrete httpx error (`ConnectError`,
     `ReadTimeout`, `RemoteProtocolError`), so the guard matched only by accident
     of the module substring, and it would refuse a subclass raised from a
-    differently-named module. httpx is imported lazily and the rehearsal never
-    needs it, so the duck-typed arm stays as the fallback rather than this tool
-    hard-depending on httpx for an offline run.
+    differently-named module.
+
+    ⛔ NO DUCK-TYPED FALLBACK (review round M, P3). The first version kept the old
+    name/substring predicate under `except ImportError` for "an offline run with
+    no httpx" — but httpx is a DIRECT dependency (`pyproject.toml`) and the
+    rehearsal reaches `httpx` through `starlette.testclient` anyway, so that arm
+    was unreachable in every mode, and had it ever run it would have reinstated
+    the exact defect this function exists to remove (measured: an
+    `httpx.HTTPError` subclass from `vendor.transport` classified False under it).
+    A missing httpx is an ENVIRONMENT defect and must raise, not silently degrade
+    the classifier.
     """
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover — httpx ships with the app
-        return (type(exc).__name__ == "HTTPError"
-                or "httpx" in type(exc).__module__)
+    import httpx
     return isinstance(exc, httpx.HTTPError)
 
 
+def _is_unreadable_body(exc: BaseException) -> bool:
+    """A 200 whose BODY cannot be decoded — a broken wire, not a criterion.
+
+    ⛔ A DEDICATED TYPE, never a bare `ValueError` (measured: widening the check to
+    `isinstance(exc, ValueError)` made a criterion bug that raises `ValueError`
+    exit 2 — the exact laundering this tool refuses, reintroduced by the fix for
+    it). Only the two places that DECODE a body raise this, and they raise it
+    around the `.json()` call alone, so a `ValueError` from anywhere else in a
+    transport method still propagates.
+    """
+    return isinstance(exc, _UnreadableResponse)
+
+
+class _UnreadableResponse(Exception):
+    """A 200 whose body will not decode. Raised ONLY by a decode site."""
+
+
 def _close(transport) -> None:
-    """Release the rehearsal's graph handle on EVERY exit path.
+    """Release the rehearsal's graph handle on the normal path and on every
+    transport-failure path.
 
     The tail of `run()` used to close the transport itself, which the early
-    `return 2` from the unreachable guard — and now the two detail-read guards —
-    would skip. Same behaviour as before on the normal path; no leaked handle on
-    the failure paths.
+    `return 2` paths would skip.
+
+    ⛔ NOT "every exit path" (review round M, P3): a NON-transport exception still
+    propagates without a close, deliberately — the process is already failing and
+    the handle dies with it. ⛔ And a close that RAISES would replace the exit code
+    it was called to preserve, turning a clean "unreachable, exit 2" into a
+    traceback at 1 (measured), so the close is guarded here, once, for every
+    caller.
     """
     if isinstance(transport, _InProcessTransport):
-        transport.close()
+        # SIM105: `suppress` is the same guard, and a close must never change the
+        # verdict it was called to preserve.
+        with contextlib.suppress(Exception):
+            transport.close()
 
 
 def _exit_code(verdict: str) -> int:
@@ -451,7 +490,12 @@ def run(args) -> int:
             print("error: --base-url needs --api-key or $TORTOISE_API_KEY",
                   file=sys.stderr)
             return 2
-        transport = _HttpTransport(args.base_url, api_key)
+        try:
+            transport = _HttpTransport(args.base_url, api_key)
+        except Exception as exc:  # a URL that cannot build a client is a USAGE error
+            print(f"error: --base-url {args.base_url!r} is not usable — "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
     else:
         if not os.environ.get("TORTOISE_SESSION_LLM_MOCK") and not (
                 os.environ.get("DEEPSEEK_API_KEY")
@@ -480,17 +524,34 @@ def run(args) -> int:
         """A transport failure is a USAGE error (exit 2), never a verdict.
 
         ⛔ ALL THREE network calls report through here (review note 1, comment
-        7074468018). Only `post_capture` used to be wrapped, so a `ConnectError`
-        on a detail read — the terminal poll, or the one inside
-        `extraction_evidence` — surfaced as a traceback and exited 1, which this
-        tool's contract reads as "a criterion RAN and FAILED": a FAIL of the
-        CHANGE rather than of the deployment, and a red wall of one API blip's
-        making. The class the guard was added for was half-closed.
+        7074468018) — `post_capture`, the criterion-3 terminal poll, and the read
+        inside `extraction_evidence` — and every one of the three widens its
+        guard to a 200 whose BODY will not decode (`_is_unreadable_body`), because
+        a garbled response is a broken wire, not a criterion. Only `post_capture`
+        used to be wrapped, so a `ConnectError` on a detail read surfaced as a
+        traceback and exited 1, which this tool's contract reads as "a criterion
+        RAN and FAILED": a FAIL of the CHANGE rather than of the deployment, and a
+        red wall of one API blip's making.
         """
         print(f"error: {transport.label} unreachable — "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         _close(transport)
         return 2
+
+    def _unreadable(exc: BaseException) -> int:
+        """A 200 with an undecodable body: the wire, not the change (exit 2)."""
+        print(f"error: {transport.label} returned an unreadable response — "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        _close(transport)
+        return 2
+
+    def _wire_failure(exc: BaseException) -> int | None:
+        """Route a caught exception: 2 for a broken wire, None to re-raise it."""
+        if _is_transport_error(exc):
+            return _unreachable(exc)
+        if _is_unreadable_body(exc):
+            return _unreadable(exc)
+        return None
 
     _say(f"#14232 acceptance drain — {transport.label}")
     _say(f"  corpus: {corpus_label}, n={len(corpus)}")
@@ -508,17 +569,20 @@ def run(args) -> int:
         started = time.monotonic()
         try:
             r = transport.post_capture(cap)
-        except Exception as exc:  # a transport failure is a USAGE error, not a verdict
-            if _is_transport_error(exc):
-                return _unreachable(exc)
-            raise
-        elapsed = time.monotonic() - started
-        acks.append(elapsed)
-        body = None
-        try:
-            body = r.json()
-        except ValueError:
+            # The ack's clock stops at the RESPONSE, before any decode: the p95
+            # this tool grades must not pay for parsing our own body.
+            elapsed = time.monotonic() - started
             body = None
+            try:
+                body = r.json()
+            except ValueError:
+                body = None
+        except Exception as exc:  # a transport failure is a USAGE error, not a verdict
+            _rc = _wire_failure(exc)
+            if _rc is not None:
+                return _rc
+            raise
+        acks.append(elapsed)
         if r.status_code == 504:
             refusals.append({"session_id": cap["session_id"],
                              "stage": (body or {}).get("stage"),
@@ -557,11 +621,18 @@ def run(args) -> int:
             try:
                 r = transport.get_session(cap["session_id"])
             except Exception as exc:  # network down ≠ "every session got stuck"
-                if _is_transport_error(exc):
-                    return _unreachable(exc)
+                _rc = _wire_failure(exc)
+                if _rc is not None:
+                    return _rc
                 raise
+            detail = None
             if r.status_code == 200:
-                detail = r.json()
+                try:
+                    detail = r.json()
+                except ValueError as exc:  # a garbled body is the WIRE
+                    return _unreadable(_UnreadableResponse(
+                        f"{type(exc).__name__}: {exc}"))
+            if detail is not None:
                 done, last = _is_terminal(detail)
                 if done:
                     terminals.append({"session_id": cap["session_id"],
@@ -579,8 +650,9 @@ def run(args) -> int:
         try:
             evidence = transport.extraction_evidence(terminals[0]["session_id"])
         except Exception as exc:  # a blip here reads as "extraction did not run"
-            if _is_transport_error(exc):
-                return _unreachable(exc)
+            _rc = _wire_failure(exc)
+            if _rc is not None:
+                return _rc
             raise
         evidence["session_id"] = terminals[0]["session_id"]
 

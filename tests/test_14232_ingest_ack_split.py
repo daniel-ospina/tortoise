@@ -1741,8 +1741,8 @@ def test_the_transport_error_classifier_is_ISINSTANCE_not_a_name_match():
         "criterion into exit 2")
 
 
-@pytest.mark.parametrize("boom", ["get_session", "extraction_evidence"])
-def test_a_transport_failure_on_a_DETAIL_READ_is_UNREACHABLE_not_a_verdict(
+@pytest.mark.parametrize("boom", ["post_capture", "get_session", "extraction_evidence"])
+def test_a_transport_failure_on_ANY_NETWORK_CALL_is_UNREACHABLE_not_a_verdict(
         boom, monkeypatch, capsys, tmp_path):
     """The guard must cover ALL THREE network calls, not one (note 1, 7074468018).
 
@@ -1753,11 +1753,15 @@ def test_a_transport_failure_on_a_DETAIL_READ_is_UNREACHABLE_not_a_verdict(
     run was reported as a FAIL of the CHANGE, which is the exact class the
     `post_capture` guard exists to stop.
 
-    Both arms now report `<label> unreachable — ConnectError: …` and exit 2, the
-    code the `post_capture` guard already used. Mutants, one per arm: delete the
-    `try/except` around the terminal poll → arm `get_session` reds with the
-    propagating `ConnectError` instead of rc 2; delete it around
-    `extraction_evidence` → arm `extraction_evidence` does the same.
+    ⛔ ALL THREE arms are parametrised, including `post_capture` (review round M,
+    P2): the docstring claimed all three report through `_unreachable` while only
+    the two detail reads had a row, so deleting the ACK's guard reddened NOTHING.
+    The `closes` assertion is the witness for `_close()` on the early path (round
+    M, P3): without it, dropping that close reddened nothing either.
+
+    Mutants, one per arm: delete the `try/except` around that call → the arm reds
+    with the propagating `ConnectError` instead of rc 2; drop `_close()` from
+    `_unreachable` → `closes == 0` reds.
     """
     drain = _drain_tool()
 
@@ -1769,7 +1773,7 @@ def test_a_transport_failure_on_a_DETAIL_READ_is_UNREACHABLE_not_a_verdict(
         def json(self):
             return self._body
 
-    def _boom(_sid):
+    def _boom(_arg=None):
         import httpx
 
         raise httpx.ConnectError("connection refused")
@@ -1778,6 +1782,7 @@ def test_a_transport_failure_on_a_DETAIL_READ_is_UNREACHABLE_not_a_verdict(
         """Every criterion would be met; the NETWORK is what fails here."""
 
         label = "stub"
+        closes = 0
 
         def __init__(self, *_a, **_kw):
             pass
@@ -1786,22 +1791,26 @@ def test_a_transport_failure_on_a_DETAIL_READ_is_UNREACHABLE_not_a_verdict(
             pass
 
         def close(self):
-            pass
+            type(self).closes += 1
 
         def post_capture(self, _cap):
+            if boom == "post_capture":
+                _boom()
             return _Resp(200, {"status": "ok", "extracted": 1,
                                "extraction": None})
 
         def get_session(self, sid):
             if boom == "get_session":
                 _boom(sid)
-            # TERMINAL on the first poll, so the other arm reaches criterion 4.
+            # TERMINAL on the first poll, so the other arms reach criterion 4.
             return _Resp(200, {"extracted": 1,
                                "extraction": {"status": "ok",
                                               "outcome_known": True}})
 
         def extraction_evidence(self, sid):
-            _boom(sid)
+            if boom == "extraction_evidence":
+                _boom(sid)
+            return {"measured": True, "extracted": 1}
 
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
@@ -1811,9 +1820,230 @@ def test_a_transport_failure_on_a_DETAIL_READ_is_UNREACHABLE_not_a_verdict(
     rc = drain.main(["--n", "1"])
     err = capsys.readouterr().err
     assert rc == 2, (
-        "a network failure is a USAGE error (exit 2), not a FAIL of the change "
-        f"(exit 1): rc={rc} stderr={err!r}")
+        f"a network failure on {boom} is a USAGE error (exit 2), not a FAIL of "
+        f"the change (exit 1): rc={rc} stderr={err!r}")
     assert "unreachable" in err and "ConnectError" in err, (
         f"the failure must name the deployment as unreachable: {err!r}")
     assert "Traceback" not in err, f"a usage error must not print a traceback: {err!r}"
+    assert _Stub.closes == 1, (
+        "the early `return 2` must release the rehearsal's graph handle — "
+        f"closes={_Stub.closes}")
 
+
+def test_the_normal_path_releases_the_transport_too(monkeypatch, capsys, tmp_path):
+    """The tail's close is load-bearing: dropping it must red this row.
+
+    Round M (P3) measured that dropping the tail `_close` reddened nothing at all —
+    a leaked graph handle was unpinned in both directions.
+    """
+    drain = _drain_tool()
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class _Stub:
+        label = "stub"
+        closes = 0
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            type(self).closes += 1
+
+        def post_capture(self, _cap):
+            return _Resp({"status": "ok", "extracted": 1, "extraction": None})
+
+        def get_session(self, _sid):
+            return _Resp({"extracted": 1,
+                          "extraction": {"status": "ok", "outcome_known": True}})
+
+        def extraction_evidence(self, sid):
+            return {"measured": True, "extracted": 1, "session_id": sid}
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    rc = drain.main(["--n", "1"])
+    out = capsys.readouterr().out
+    assert rc in (0, 1), rc
+    assert "VERDICT:" in out, out
+    assert _Stub.closes == 1, f"the tail must close the transport: closes={_Stub.closes}"
+
+
+def test_a_NON_transport_exception_is_not_laundered(monkeypatch, capsys, tmp_path):
+    """A criterion BUG must propagate (never exit 2) — the no-fail-open direction.
+
+    Round M (P3) measured that nothing drove propagation end to end: the classifier
+    row only called `_is_transport_error` directly, while the commit message said
+    the negative was pinned. It also pins the honest scope of `_close()`'s
+    docstring: a non-transport exception propagates WITHOUT a close by design, so
+    this row asserts that too rather than claiming "every exit path".
+    """
+    drain = _drain_tool()
+
+    class _Stub:
+        label = "stub"
+        closes = 0
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            type(self).closes += 1
+
+        def post_capture(self, _cap):
+            raise ValueError("a criterion bug, not a wire")
+
+        def get_session(self, _sid):  # pragma: no cover — never reached
+            raise AssertionError("unreachable")
+
+        def extraction_evidence(self, sid):  # pragma: no cover — never reached
+            raise AssertionError("unreachable")
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    with pytest.raises(ValueError, match="a criterion bug"):
+        drain.main(["--n", "1"])
+    capsys.readouterr()
+    assert _Stub.closes == 0, (
+        "a non-transport exception propagates unclosed by design — `_close`'s "
+        "docstring must not claim every exit path")
+
+
+def test_an_UNDECODABLE_200_is_a_broken_wire_not_a_verdict(monkeypatch, capsys, tmp_path):
+    """A 200 whose body will not decode must exit 2, not 1 with a traceback.
+
+    Round M (P3): `r.json()` sits one line below the transport guard and raises
+    `ValueError`, which `_is_transport_error` correctly refuses — so a garbled
+    response exited 1, i.e. "a criterion RAN and FAILED", the same laundering the
+    guard exists to stop. The ACK read stays tolerant (it degrades to `body=None`,
+    pre-existing); the two DETAIL reads do not, because there a missing body is a
+    verdict about extraction.
+    """
+    drain = _drain_tool()
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class _Stub:
+        label = "stub"
+        closes = 0
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            type(self).closes += 1
+
+        def post_capture(self, _cap):
+            return _ok_resp()
+
+        def get_session(self, _sid):
+            return _Resp()
+
+        def extraction_evidence(self, sid):  # pragma: no cover — never reached
+            raise AssertionError("unreachable")
+
+    class _Ok:
+        status_code = 200
+
+        def json(self):
+            return {"status": "ok", "extracted": 1, "extraction": None}
+
+    def _ok_resp():
+        return _Ok()
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    rc = drain.main(["--n", "1"])
+    err = capsys.readouterr().err
+    assert rc == 2, (
+        f"a garbled 200 is a broken wire (exit 2), not a FAIL of the change: "
+        f"rc={rc} stderr={err!r}")
+    assert "unreadable response" in err and "ValueError" in err, err
+    assert "Traceback" not in err, err
+
+
+def test_an_UNUSABLE_base_url_is_a_usage_error(monkeypatch, capsys, tmp_path):
+    """`httpx.InvalidURL` is not an `HTTPError`, so it must be caught by the build.
+
+    Round M (P3) measured `--base-url 'http://[::1'` raising from
+    `_HttpTransport.__init__`, outside every guard → a traceback at exit 1 where
+    the contract says 2. `HOME` is redirected so the corpus is the SYNTHETIC one:
+    the default spool path exists on a real box and would end the run at the
+    corpus check before the URL is ever built.
+    """
+    drain = _drain_tool()
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rc = drain.main(["--n", "1", "--base-url", "http://[::1",
+                     "--api-key", "k"])
+    err = capsys.readouterr().err
+    assert rc == 2, f"an unusable --base-url is a USAGE error: rc={rc} stderr={err!r}"
+    assert "is not usable" in err, err
+    assert "Traceback" not in err, err
+
+
+
+def test_a_garbled_HTTP_detail_body_is_an_UNREADABLE_RESPONSE():
+    """The HTTP transport's own decode site raises the DEDICATED type.
+
+    `_HttpTransport.extraction_evidence` decodes the body INSIDE the transport, so
+    `run()` cannot put a `try` around that `.json()` — it sees the exception the
+    method raises. A bare `ValueError` is indistinguishable from a criterion bug
+    there (measured: classifying every `ValueError` as a wire failure made a
+    `ValueError` from a transport method exit 2 — the laundering this tool
+    refuses). The conversion is therefore the transport's, and this row pins it.
+
+    Mutant: delete the `except ValueError → _UnreadableResponse` conversion → this
+    row reds with the raw `ValueError`.
+    """
+    drain = _drain_tool()
+
+    class _Garbled:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    class _Transport(drain._HttpTransport):
+        def __init__(self):  # no client, no network
+            pass
+
+        def get_session(self, _sid):
+            return _Garbled()
+
+    with pytest.raises(drain._UnreadableResponse, match="ValueError"):
+        _Transport().extraction_evidence("s-1")
+    assert drain._is_unreadable_body(drain._UnreadableResponse("x")) is True
+    assert drain._is_unreadable_body(ValueError("a criterion bug")) is False, (
+        "the classifier must stay narrow: only the decode sites raise the "
+        "dedicated type")
