@@ -5331,8 +5331,10 @@ def test_the_alias_cell_reds_a_broken_reader_claim_even_when_grep_declines_every
     Here every spelling is refused AND the reader's declared allowance is corrupted, so the two
     behaviours the claim distinguishes have OPPOSITE outcomes: the fixed cell reaches
     `assert {"--unix-byte-offsets"} == set(_D5_UNDOCUMENTED_LONG_OPTIONS)` and REDS, while a cell
-    whose skip sits above that row SKIPS first. `pytest.raises(AssertionError)` refuses a skip,
-    which is what makes the position a measurement instead of a sentence.
+    whose skip sits above that row SKIPS first. A bare `pytest.raises(AssertionError)` would NOT
+    refuse that skip (it derives from `BaseException`, so it is reported SKIPPED and the arm goes
+    green); `_d5_drive_the_cell` charges it as a FAILURE instead, and that is what makes the
+    position a measurement instead of a sentence.
     """
     real_run = subprocess.run
 
@@ -5371,7 +5373,7 @@ def test_the_d5_spelling_measurement_FAILS_CLOSED_and_tolerates_a_NAMED_refusal(
     `test_the_alias_cell_reds_a_MEASUREMENT_FAILURE_it_must_not_call_portability` (4 failed, 37
     passed); the narrower `if False:` mutant reds these same two. That is not redundancy: this one
     pins the MAPPING's contract directly, that one pins the CELL's wiring to it. The two DIRECTIONS
-    live in two places, and neither is here: this test's single `pytest.raises` is the NARROWING
+    live in two places, and only one is here: this test's single `pytest.raises` is the NARROWING
     direction, while WIDENING the tolerance past a named refusal (adding `"Is a directory"` to
     `_D5_GREP_OPTION_REFUSAL_MARKERS`) leaves this test green and reds the marker row of
     `test_the_d5_grep_portability_tolerance_covers_a_REFUSAL_and_nothing_else` — MEASURED, 1 failed
