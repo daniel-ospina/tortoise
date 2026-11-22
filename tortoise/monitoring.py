@@ -908,7 +908,7 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
     ["decline"],
 )
 
-#: THE PROJECTION WORKER'S OWN FOUR FAMILIES (#14185), and why the record's
+#: THE PROJECTION WORKER'S OWN FIVE FAMILIES (#14185), and why the record's
 #: existing counters cannot answer any of them.
 #:
 #: Once the record's fold runs on its own loop (`tortoise/projection_worker.py`)
@@ -922,7 +922,13 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #: `CACHE_LEG_FAILURE_COUNT` misattribution lesson ("the record's counters read
 #: perfectly healthy") pointed the other way.
 #:
-#: FOUR families, four different questions — none of them a sum of the others:
+#: FIVE families, five different questions — none of them a sum of the others.
+#: The first FOUR are the LAG set (two absolute, one temporal, one that says which
+#: way an ACK went); the FIFTH, ``PROJECTION_WORKER_FAILURE_COUNT``, is the
+#: FAILURE channel and is described separately below, because it answers "did a
+#: deferred fold lose its row?" rather than "how far behind is the record?".
+#: ⛔ An earlier header said FOUR, and this file said FIVE 290 lines later — the
+#: count is a claim like any other, so it is enumerated here rather than asserted.
 #:
 #: * ``PROJECTION_QUEUE_DEPTH`` — items the loop still OWES: queued PLUS the one
 #:   being folded (a wedged fold must not report depth 0 and read as caught-up).
@@ -947,8 +953,8 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   ⛔ NOTHING IS DROPPED on any of the four — a dropped item would be a
 #:   silently short record — so the visible cost is a slower ACK, and this counter
 #:   is what makes it attributable rather than an unexplained latency.
-#:   ``reason`` is a closed vocabulary of FOUR, one per way an ACK can end up
-#:   folding on its own thread: ``queue_full`` (the bound in
+#:   ``reason`` is a closed vocabulary of FOUR, one per way the QUEUE declined to
+#:   take the item: ``queue_full`` (the bound in
 #:   ``projection_worker.ENV_QUEUE_MAX`` was reached), ``worker_stopping`` (the
 #:   loop was being shut down, or a wedged consumer kept it from restarting —
 #:   `stop()` does not clear its thread after a timed-out join), ``uncopyable``
@@ -956,6 +962,17 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   rather than aliased) and ``queue_fault`` (``submit`` raised before it could
 #:   queue — thread/fd exhaustion in ``thread.start()``; the caller answers it
 #:   inline, so the row is still written and only the latency is lost).
+#:   ⛔ **NOT EVERY INLINE FOLD IS COUNTED HERE, and the difference is the point**
+#:   (round-14 review, P3): the STRUCTURAL arms fold inline on every write at any
+#:   depth and move no counter at all — `live_write._submitted_to_worker` returns
+#:   `False` for `journal_skipped or record_sink is not None or not durable`
+#:   (`tortoise/live_write.py:334`) and for a `tenant is None` (`:335`) before any
+#:   queue or counter is touched (measured: armed loop, durable journal, no carried
+#:   tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
+#:   declines, so an operator reconciling "inline folds" against this counter will
+#:   find the structural arms missing from it — which is the correct shape (they
+#:   are the pre-#14185 path, not a degradation) and a wrong sentence if this
+#:   vocabulary is described as "every way an ACK folds on its own thread".
 #:
 #: ``PROJECTION_WORKER_FAILURE_COUNT`` is separate from both: it counts deferred
 #: folds that did NOT WRITE A ROW. Unlike a lagging queue that is a real gap the
