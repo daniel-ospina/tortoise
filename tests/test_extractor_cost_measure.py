@@ -47,6 +47,25 @@ def test_a_perfect_fit_reports_r2_of_one_and_zero_residual():
     assert fit["max_abs_resid"] == pytest.approx(0.0)
 
 
+def test_r2_falls_below_one_when_the_fit_has_residuals():
+    """The perfect-fit row above is satisfied by a constant ``r2 = 1.0``.
+
+    ``r2`` is printed in the report as the evidence that the two-constant
+    model actually tracks the data, so a formula that returns 1 for every
+    input would report a perfect fit for a fit that is not one — a false
+    PASS on the deliverable's own quality claim (#14277 review, measured
+    WEAK row). Pinned against a hand-computable non-perfect fit so the
+    mutation ``"r2": (1 - ss_res / ss_tot)`` → ``"r2": 1.0`` reddens THIS
+    row: mean y = 2.25, ss_tot = 4.75, ss_res = 0.7, so r2 = 0.8526.
+    """
+    fit = m._fit([(1.0, 1.0), (2.0, 2.0), (3.0, 2.0), (4.0, 4.0)])
+    assert fit["slope"] == pytest.approx(0.9)
+    assert fit["intercept"] == pytest.approx(0.0)
+    assert fit["max_abs_resid"] == pytest.approx(0.7)
+    assert fit["r2"] == pytest.approx(0.8526315789473684)
+    assert fit["r2"] < 1.0, "a fit with residuals cannot report a perfect fit"
+
+
 def test_item_cost_splits_the_prompt_at_the_measured_hit_rate():
     """The whole cache question in one assertion: at a 50% hit share, half the
     prompt pays the input rate and half the cache rate, and the output is
@@ -158,6 +177,27 @@ def test_the_corpus_is_deterministic_and_carries_the_length_spread():
         "constant's leverage on long documents is the thing being measured")
     assert sizes[0] < 2_000, "the small end of the spread must be present"
     assert max(sizes) > 10 * sizes[0], "the spread must span an order of magnitude"
+
+
+def test_the_corpus_seed_actually_selects_the_sample():
+    """Both calls above pass ``seed=7``, which IS the default — so they stay
+    green under ``random.Random(seed)`` → ``random.Random(7)``, i.e. with the
+    caller's ``--seed`` silently ignored (#14277 review, measured WEAK row).
+
+    The tool's whole covariance claim rests on cold and warm measuring the
+    SAME corpus, so a seed the caller cannot change would let two arms claim
+    they shared a sample while being free to diverge. Pin the plumbing: two
+    different seeds must not draw the same sample.
+    """
+    seven = [r["path"] for r in m.pick_corpus(limit=20, seed=7)]
+    ninetynine = [r["path"] for r in m.pick_corpus(limit=20, seed=99)]
+    assert seven != ninetynine, (
+        "seed=99 drew the seed=7 sample — the caller's seed is not reaching "
+        "random.Random, so --seed is inert")
+    # ...and the same seed still reproduces exactly, which is the property the
+    # determinism row above relies on (asserted here against the OTHER seed so
+    # the pin cannot pass by both calls being hardcoded to 7).
+    assert [r["path"] for r in m.pick_corpus(limit=20, seed=99)] == ninetynine
 
 
 def test_a_literal_dollar_is_escaped_outside_code_spans_only():
