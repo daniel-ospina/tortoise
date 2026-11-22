@@ -46,7 +46,10 @@ document.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -659,9 +662,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "138 of this document's 234",
+        "136 of this document's 234",
         "dedupes the **345** as-written spellings to 234 — **111**",
-        "345 written spellings → 234 pairs → 111 collisions → 138 drifters of the 234",
+        "345 written spellings → 234 pairs → 111 collisions → 136 drifters of the 234",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1162,6 +1165,10 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
     )
 
 
+#: The pin every "past the pin's EOF" fact in this file is measured against, and the rev a shallow clone
+#: re-arms with `git fetch origin ccb49741b2ec`.
+_PIN_COMMIT = "ccb49741b2ec"
+
 #: The census pairs the header's comparability split calls NON-comparable, with the pin-side line count that
 #: makes each one so: the pair's line is past `ccb49741b2ec`'s copy of its file. MEASURED, one command per
 #: file — `git show ccb49741b2ec:<path> | wc -l` — and the header publishes the same four counts in its
@@ -1173,6 +1180,16 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
 #: failure this table exists to make unreachable: the split shipped `224`/`ten`/`131`/`seven` — internally
 #: consistent, and wrong — because nothing DERIVED it, and a self-consistent stale split cannot be caught
 #: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
+#:
+#: ⛔ THE SAME CLASS RECURRED ONE ROUND LATER, which is why membership is now DERIVED rather than trusted to
+#: this table: the `#14224` repair re-pointed §2.5's operator-expansion rows `:6837`/`:6891` → `:7170`/`:7201`,
+#: moving both pairs past the pin's 7,071-line `search_engine.py` — and NOTHING reddened, for the identical
+#: reason the `#14246` finding names (`test_the_comparability_split_names_every_pair_past_the_pins_eof` buys
+#: its `expected_comparable` from THIS dict, so a table left untouched by the editing commit re-derives the
+#: stale split from itself). `test_the_split_membership_is_derived_from_the_pins_own_line_counts` closes the
+#: class in the direction that was blind: it counts the pin's lines itself and demands the table carry every
+#: pair that crossed. The two entries below are that occurrence, and the header publishes `221`/`thirteen`/
+#: `128 of the 221, plus eight of those thirteen`/`136` for them.
 _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 57951): 56415,
     ("tortoise/sdk.py", 58099): 56415,
@@ -1181,6 +1198,8 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58966): 56415,
     ("tortoise/sdk.py", 61999): 56415,
     ("tortoise/sdk.py", 62019): 56415,
+    ("tortoise/search_engine.py", 7170): 7071,
+    ("tortoise/search_engine.py", 7201): 7071,
     ("tortoise/search_engine.py", 7577): 7071,
     ("tortoise/search_engine.py", 7579): 7071,
     ("tortoise/hosted_api.py", 50935): 49851,
@@ -1323,6 +1342,78 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "but the header's pin-side `wc -l` parenthetical does not state it. Without that figure the "
             "five numerals above are unverifiable prose, which is how they shipped wrong."
         )
+
+
+def _pin_line_count(path: str) -> int | None:
+    """`git show ccb49741b2ec:<path> | wc -l` — the comparability split's membership rule, as code.
+
+    `None` when this clone cannot read the pin's copy (a shallow or partial clone): the caller turns
+    that into a SKIP that names the fetch, never into a pass — `tests/test_sdk_privatise_sweep.py`'s
+    idiom, where a `git show` absent from the clone reports UNCHECKED instead of grading nothing.
+    """
+    shown = subprocess.run(
+        ["git", "show", f"{_PIN_COMMIT}:{path}"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    return len(shown.stdout.splitlines()) if shown.returncode == 0 else None
+
+
+def test_the_split_membership_is_derived_from_the_pins_own_line_counts() -> None:
+    """A pair past the pin's EOF is NON-comparable because the pin's file is shorter — measured here.
+
+    WHY THIS EXISTS. `test_the_comparability_split_names_every_pair_past_the_pins_eof` buys its
+    `expected_comparable` from `_PIN_EOF_PAIRS` (`len(pairs) - len(_PIN_EOF_PAIRS)`) and cross-checks the
+    table's `wc -l` values against the header's PROSE, which states the same numbers — so both sides of
+    that comparison are hand-maintained literals, and a commit that re-points a cite across the boundary
+    without editing the table re-derives the stale split from itself and stays green. That is not a
+    hypothesis: the `#14224` repair moved §2.5's `search_engine.py:6837`/`:6891` → `:7170`/`:7201`, both
+    past the pin's 7,071-line copy, and the whole suite passed — the second occurrence of the class
+    `#14246`'s review named ("nothing DERIVED it"). The header's own rule is a `wc -l` on the pin's blob,
+    so this arm runs it: every resolved pair whose line exceeds that file's pin-side length must be in the
+    table, and every length the table states must be the pin's.
+
+    BOTH DIRECTIONS, because each catches a different edit: a pair CROSSING the boundary with the table
+    untouched is caught by `crossed`; a table entry whose pin-side figure was typed rather than measured
+    (or left behind by a re-point that moved a pair back inside the file) is caught by `wrong`.
+
+    ⛔ SKIPS, not passes, when the pin's blobs are absent from this clone — a shallow checkout can answer
+    neither question, and a green arm over zero measurements is the `#3442` rule-3 shape this file exists
+    to refuse.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    _spellings, pairs = _resolved_pairs(text)
+    counts = {path: _pin_line_count(path) for path in sorted({path for path, _line in pairs})}
+    unreadable = sorted(path for path, count in counts.items() if count is None)
+    if unreadable:
+        pytest.skip(
+            f"{len(unreadable)} of the {len(counts)} files this document cites are not readable at "
+            f"`{_PIN_COMMIT}` from this clone ({', '.join(unreadable[:3])}…). Re-arm with "
+            f"`git fetch origin {_PIN_COMMIT}`. The comparability split's MEMBERSHIP was NOT checked "
+            "here — this is UNCHECKED, not a pass."
+        )
+
+    crossed = sorted(pair for pair in pairs if pair[1] > counts[pair[0]] and pair not in _PIN_EOF_PAIRS)
+    assert not crossed, (
+        f"{crossed} sit past the pin `{_PIN_COMMIT}`'s own copy of their file "
+        "(`git show <pin>:<path> | wc -l` measured here), so they are NOT comparable — but "
+        "`_PIN_EOF_PAIRS` does not carry them, so the header publishes a comparable denominator that "
+        "counts them. Add each pair to the table, name it in the header's non-comparable enumeration, "
+        "and re-measure the four published figures — do not re-point the cites back inside the pin."
+    )
+
+    wrong = sorted(
+        (pair, counts[pair[0]], stated)
+        for pair, stated in _PIN_EOF_PAIRS.items()
+        if counts[pair[0]] != stated
+    )
+    assert not wrong, (
+        f"`_PIN_EOF_PAIRS` states the pin-side line count (pair, measured, stated) for {wrong}, and the "
+        f"pin `{_PIN_COMMIT}` measures a different one. Each entry's figure is the RULE that decides "
+        "membership, not a label: re-run `git show <pin>:<path> | wc -l` and correct the entry (and the "
+        "header's `wc -l` parenthetical, which is the same measurement)."
+    )
 
 
 def test_a_carried_forward_figure_is_reported() -> None:
