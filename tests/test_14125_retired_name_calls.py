@@ -428,10 +428,13 @@ _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 #: CREDIT FILTER alone (`if _RAISED_ALIAS.get(name, name) not in dropped_family`) changes NO
 #: row: no witness row differs under that mutant, because a parent arm that would put the
 #: canonical spelling in `dropped_family` has already emptied `reachable` through
-#: `_masked_by`, so the filter is a belt over the masking braces rather than a rule any row can
-#: red. Earlier cuts said "un-canonicalising BOTH of its sides" — both is SUFFICIENT, but
-#: naming the pair as the load-bearing witness read as evidence for a term nothing grades. The
-#: ACCUMULATION side is the one `rename_dropped` grades.
+#: `_masked_by`, so the filter's CANONICALISATION is a belt over the masking braces rather than
+#: a rule any row can red. ⛔ ITS CANONICALISATION is the belt, not the filter itself: replacing
+#: the whole filter with `out |= set(reachable)` DOES red the three `child dropped…` rows and
+#: `rename_dropped` (measured, review of PR #14287 cycle 8), so the filter is load-bearing and
+#: only the alias lookup inside it is ungraded. Earlier cuts said "un-canonicalising BOTH of its
+#: sides" — both is SUFFICIENT, but naming the pair as the load-bearing witness read as evidence
+#: for a term nothing grades. The ACCUMULATION side is the one `rename_dropped` grades.
 _RAISED_ALIAS = {
     "ModuleNotFoundError": "ImportError",
     "ZipImportError": "ImportError",
@@ -523,7 +526,12 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     #: (unreachable) `except ModuleNotFoundError: FLAG = False` propagates everything, and
     #: the order-blind `any()` charged it — a FALSE RED the delta introduced, on the exact
     #: ordering a lane gets by following this gate's own repair message above an existing
-    #: precise skip.
+    #: precise skip. ⛔ ONE EXCEPTION, measured and deliberate (review of PR #14287 cycle 8):
+    #: this short-circuit fires BEFORE `caught_earlier` is consulted, so a bare or `_BROAD`
+    #: arm is charged even when an earlier arm made it unreachable — 4,292 over-charges over
+    #: 245,410 enumerated sequences, 0 of them gate-level (coverage is full in that shape, so
+    #: both gates stay green). The charge rule is therefore "an unreachable NARROW arm does
+    #: not drop", not "an unreachable arm never drops".
     caught_earlier: set[str] = set()
     for handler in handlers:
         names = _handler_names(handler)
@@ -2163,6 +2171,20 @@ def _imports_own_code(block: ast.Try) -> bool:
     seam. Stops at a NESTED `try` — that block is graded on its own pass, so an
     optional import already wrapped in its own `try` is not charged to its
     parent — and at `def`/`class`/`lambda`, whose bodies are not this probe.
+
+    ⛔ DECLARED RESIDUAL — "graded on its own pass" is true only for a nested `try` WITH
+    handlers, because a handler-less `try` is never a row (`_probe_blocks_from_source`
+    requires `block.handlers`). So an own-code import inside a nested `try/finally` — or a
+    nested `try` whose arms do not catch it — is invisible HERE and ungraded THERE: the
+    root reads `own_import=False`, `_required_names` drops `ImportError`, and both gates
+    stay GREEN over a block that still swallows the module rename (measured, review of PR
+    #14287 cycle 8; the shape is pre-existing and LATENT — one graded root changes under a
+    nested-try descent, `tests/test_hnsw_vector_index.py:48`, whose own import sits in the
+    graded nested row at `:52` and is fully covered, so **0** live instances are affected).
+    The repair for that shape is to hoist the import out of the nested `try`; the gate cannot
+    ask for it until this walk descends. Filed as its own finding rather than repaired here,
+    because fixing it moves `own_import` on a graded row and so changes the census figures
+    the repair texts quote.
     """
     stack: list[ast.stmt] = list(block.body)
     while stack:
@@ -2355,9 +2377,17 @@ def _seam_from_rows(
 def _probe_blocks_with_an_uncovered_import_seam() -> tuple[tuple[str, int], ...]:
     """Blocks that SWALLOW an own-code import their arm cannot see.
 
-    `swallows` is required: a `try: … finally: …` probe has no broad arm, so an
-    `ImportError` at its import propagates and there is nothing to fix — redding
-    it would be a false positive on a shape that is already loud.
+    `swallows` is required: a probe with NO BROAD ARM propagates the `ImportError`
+    from its import, so there is nothing to fix and redding it would be a false
+    positive on a shape that is already loud — `except (AttributeError, NameError,
+    TypeError): raise` over an own import is such a probe, and it is the witness
+    that pins this term (`test_the_import_seam_census_sees_the_shapes_it_grades`;
+    measured, review of PR #14287 cycle 8: deleting `swallows and` here reds NO
+    existing row, so before that witness the term was ungraded).
+
+    ⛔ The reason is NOT "a `try: … finally: …` probe has no broad arm": a handler-less
+    `try` is never a row at all (`_probe_blocks_from_source` requires handlers), so no
+    row of that shape can reach this predicate.
     """
     return _seam_from_rows(_probe_report())
 
@@ -2395,7 +2425,9 @@ def test_every_availability_probe_re_raises_a_programming_error():
             "tuple, or separate arms — the required names are "
             "`(AttributeError, NameError, TypeError)`, PLUS `ImportError` when the block "
             "imports own code INSIDE the `try` (the seam the next gate grades); not one "
-            "line required). ⛔ CHECK WHAT DROPS FIRST: a re-raise arm placed BELOW an "
+            "line required). ⛔ `OWN` MEANS WHAT `_imports_own_code` SEES: an import inside "
+            "a NESTED `try` is not seen (see its DECLARED RESIDUAL), so hoist it out before "
+            "relying on `ImportError` being required. ⛔ CHECK WHAT DROPS FIRST: a re-raise arm placed BELOW an "
             "earlier narrow dropper can NEVER recover the family it dropped — `_covered`'s "
             "family-close is keyed on ANY family, not only `ImportError` (measured, review "
             "of PR #14287 cycle 7). So ask WHICH family the earlier arm drops: "
@@ -2655,6 +2687,31 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     )
     assert _seam_from_rows(tuple((_witness, *row) for row in hoisted)) == (), (
         f"with the import hoisted there is no seam left to cover: {hoisted}"
+    )
+
+    # ⛔ THE `swallows` TERM OF THE SEAM GATE, which had NO witness (review of PR #14287,
+    #     cycle 8): measured, deleting `swallows and` from `_seam_from_rows` red no row, so
+    #     the gate could be widened to red every probe that merely omits `ImportError` —
+    #     including ones already loud. The shape that pins it is a probe with NO BROAD ARM at
+    #     all: an own-code import whose arm omits `ImportError` but which propagates
+    #     everything. `_swallows_everything` is False there, so the gate must stay GREEN.
+    no_broad = rows(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK as _ProbeSDK
+            _ProbeSDK()
+            FALKORDB_AVAILABLE = True
+        except (AttributeError, NameError, TypeError):
+            raise
+        """
+    )
+    assert no_broad == ((3, ("AttributeError", "NameError", "TypeError"), False, True, True),), (
+        f"a probe with no broad arm propagates the rename and must not be charged: {no_broad}"
+    )
+    assert _seam_from_rows(tuple((_witness, *row) for row in no_broad)) == (), (
+        "the seam gate must stay GREEN on a probe with no broad arm — it is already loud, and "
+        f"`swallows` is the term that says so: {no_broad}"
     )
 
     # A bare `except:` covers NOTHING and swallows everything — the worst shape.
