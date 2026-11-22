@@ -2016,6 +2016,30 @@ def subscripttarget(sdk):
     _bag = {}
     _bag[sdk._tortoise_fts_query] = 1
 
+def augtarget(sdk):
+    _bag2 = {}
+    _bag2[sdk._tortoise_fts_query] += 1
+
+def anntarget(sdk):
+    _bag3 = {}
+    _bag3[sdk._tortoise_fts_query]: int = 1
+
+def fortargetobj(sdk):
+    for _bag4[sdk._tortoise_fts_query] in []:
+        pass
+
+def withtargetobj(sdk):
+    with open("x") as _bag5[sdk._tortoise_fts_query]:
+        pass
+
+def comptargetobj(sdk):
+    [1 for _bag6[sdk._tortoise_fts_query] in []]
+
+def attribtarget(sdk):
+    class _Obj:
+        pass
+    _Obj.attr = sdk._tortoise_fts_query
+
 def annotparam(sdk):
     def _g(_x: sdk._tortoise_fts_query):
         pass
@@ -2053,6 +2077,12 @@ def retann(sdk) -> sdk._tortoise_fts_query:
         (0, True, []),                  # `class _K2(metaclass=SEAM)`
         (0, True, []),                  # `case SEAM.attr:` VALUE pattern
         (0, True, []),                  # `_bag[SEAM] = 1` — a mention in an OBJECT target
+        (0, True, []),                  # `_bag2[SEAM] += 1` — OBJECT target of an AugAssign
+        (0, True, []),                  # `_bag3[SEAM]: int = 1` — OBJECT target of an AnnAssign
+        (0, True, []),                  # `for _bag4[SEAM] in []` — OBJECT target of a For
+        (0, True, []),                  # `with open() as _bag5[SEAM]` — OBJECT target of a With
+        (0, True, []),                  # `[… for _bag6[SEAM] in []]` — OBJECT target of a comprehension
+        (0, True, []),                  # `_Obj.attr = SEAM` — ATTRIBUTE target
         (0, True, []),                  # MODULE-scope `_bare_module: SEAM` — evaluated + stored
         (0, True, []),                  # `_bare: SEAM` annotation, no value (func-local: over-block)
         (0, True, []),                  # `def _g(_x: SEAM)` parameter annotation
