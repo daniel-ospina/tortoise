@@ -412,7 +412,16 @@ _PURE_READS = _NON_MUTATING | {"repr", "int", "float", "type", "min", "max", "su
                                "format", "round", "abs", "set", "dict", "frozenset",
                                # Diagnostics: `print(results)` is the natural next edit to
                                # `run()`'s existing per-query print line and mutates nothing.
-                               "print"}
+                               "print",
+                               # ⛔ A SERIALISER IS A PURE READ (#14281 review F5, measured).
+                               # `payload = json.dumps(results)` and
+                               # `pprint.pformat(results)` were reported as "line(s) [N]
+                               # mutate a collection AFTER the measured read — an in-place
+                               # sort/clear reaches the artifact". None of them mutates its
+                               # argument: they READ it and build a new string/copy. Each was
+                               # an unstated false red in a file whose stated contract is to
+                               # enumerate its false reds.
+                               "dumps", "dump", "pformat", "copy", "deepcopy"}
 
 
 def _names_handed(node: ast.AST) -> set[str]:
@@ -458,7 +467,7 @@ def _collection_operands(value: ast.AST) -> list[ast.AST]:
     return []
 
 
-def _aliases_of(tree: ast.AST, predicate) -> set[str]:
+def _aliases_of(tree: ast.AST, predicate, loops: bool = False) -> set[str]:
     """Names bound to a matching expression, TRANSITIVELY — `a = results`, `b = a`,
     `(c := results)`, `env = os.environ`, `env2 = env`.
 
@@ -482,17 +491,33 @@ def _aliases_of(tree: ast.AST, predicate) -> set[str]:
     the name-only test read GREEN on both (`aliases=[]`) while `a1.sort()` permuted the
     recorded page, because the collection was never resolved as the alias at all.
     `_collection_operands` closes it, and over-collecting there can only RED.
+
+    ⛔ AND SO IS A `for` TARGET (`loops=True`) — a bind with no `Assign` node (#14281
+    review F2/F3, both measured GREEN):
+
+        for _e in (os.environ,): _p = _e.pop; _p("TORTOISE_FUSED_RERANK")   -> []
+        for _pq in per_query: _s = _pq["order"]; _s.sort()                  -> []; []
+
+    Both are the same defect — the resolver had no arm for the one bind spelling that
+    carries no assignment — so the target names join the fixpoint exactly as an `Assign`
+    target does. `comprehension` is deliberately NOT included: the artifact's own
+    `[_result_id(r) for r in results]` hands each ELEMENT to a call, and treating a
+    comprehension target as an alias of the collection would red the tool the pin exists
+    to protect (measured before adding the arm).
     """
     binds: list[tuple[ast.AST, ast.AST]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets: list[ast.AST] = list(node.targets)
+            value: ast.AST = node.value
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-            targets = [node.target]
+            targets, value = [node.target], node.value
+        elif loops and isinstance(node, (ast.For, ast.AsyncFor)):
+            targets, value = [node.target], node.iter
         else:
             continue
         for target in targets:
-            binds.append((target, node.value))
+            binds.append((target, value))
 
     out: set[str] = set()
 
@@ -538,6 +563,33 @@ _MUTATORS = {"append", "clear", "extend", "insert", "pop", "remove", "reverse", 
              "update", "__setitem__", "popitem", "setdefault"}
 
 
+def _collection_alias_predicate(var: str):
+    """The ONE predicate for "this value IS the collection `var`" — used by the guard
+    and by the pin that checks the guard, so the two cannot drift (#14281 review F6).
+
+    ⛔ AN ELEMENT IS NOT THE COLLECTION (#14281 review F5/F6, measured). The predicate
+    used to be `bool(_names_in(value) & {var})` — a MENTION test — so `first = results[0]`
+    resolved `first` as an alias of the page. Two consequences, both measured:
+
+      `first = results[0]; print(first)`  -> RED, "in-place sort/clear reaches the artifact"
+                                             (a false red — `print` mutates nothing)
+      the pin's `assert "first" not in _aliases_of(run_def, lambda v: … v.id == "results")`
+      passed only because it ran a DIFFERENT lambda from the one production runs — no
+      mutant of the guard could red it (rule 3).
+
+    A bare `Subscript` value is that element. `first.sort()` stays GREEN (it re-orders an
+    element's own inner list, which the artifact's `_result_id(r)` does not read), while
+    the LITERAL `results[0].sort()` is still RED through the receiver arm — a subscript
+    expression is not a bind.
+    """
+    def _predicate(value: ast.AST) -> bool:
+        if isinstance(value, ast.Subscript):
+            return False
+        return bool(_names_in(value) & {var})
+
+    return _predicate
+
+
 def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                    artifact_append: ast.Call) -> list[int]:
     """Lines after the read that mutate `var` (or the recorded rows) IN PLACE.
@@ -573,13 +625,14 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     `_tidy()` after it reds at `results.sort()`). Interprocedural reach is out of scope
     for an AST pin, and `tools/read_wave_latency.py` carries no such helper today.
     """
-    aliases = _aliases_of(run_def, lambda v: bool(_names_in(v) & {var}))
+    aliases = _aliases_of(run_def, _collection_alias_predicate(var), loops=True)
     watched = {var} | aliases
     # ⛔ THE RECORDED ROWS ARE A COLLECTION TOO: `_row = per_query[-1]` then
     # `_row["order"] = _row["order"][:5]` truncated the page the verdict reads, with
     # every `"per_query" in receiver` clause passing (measured). Resolve names bound to
     # ANY expression mentioning `per_query`.
-    rows = {"per_query"} | _aliases_of(run_def, lambda v: "per_query" in _names_in(v))
+    rows = {"per_query"} | _aliases_of(
+        run_def, lambda v: "per_query" in _names_in(v), loops=True)
     # ⛔ ITERATION TARGETS ARE THE SAME COLLECTION, TO A FIXPOINT — for the MEASURED
     # collections as well as the recorded rows (#14281 review P1, measured). A `for`
     # target binds nothing that `_aliases_of` resolves, so an element rewrite through one
@@ -711,6 +764,11 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
     not, and saying so is the difference between a residual and a hole.
     """
     element_names: set[str] = set()
+    #: Nodes that BIND an element name. A bind is not a mutation (#14281 review F5,
+    #: measured): `pq = per_query[-1]` was reported as "mutate a RECORDED entry" on the
+    #: very line that only names it, so an innocent `pq = per_query[-1]; print(pq["order"])`
+    #: red the pin with a wrong diagnosis.
+    defining: set[int] = set()
     for node in ast.walk(run_def):
         # ⛔ ONLY the two shapes that name the ELEMENT ITSELF: `pq = per_query[-1]` and a
         # STATEMENT-LEVEL `for _pq in per_query:`. A name bound to a DERIVED collection
@@ -742,18 +800,72 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
         for bound in ast.walk(target):
             if isinstance(bound, ast.Name):
                 element_names.add(bound.id)
-    if not element_names:
+                defining.add(id(node))
+    # ⛔ AN ALIAS OF AN ELEMENT'S INNER LIST IS THAT INNER LIST (#14281 review F3,
+    # measured GREEN in BOTH guards):
+    #
+    #     for _pq in per_query: _s = _pq["order"]; _s.sort()   -> mutated_after=[] element=[]
+    #     for _pq in per_query: _pq["order"].sort()            -> mutated_after=[N] element=[N]
+    #
+    # Every query's page could be canonicalised before `compare()` read it — #14192's
+    # "a verdict that cannot fail" — while the direct spelling is caught, so the defect
+    # was the missing hop, not the class. Resolved to a FIXPOINT over the element names
+    # exactly as `_aliases_of` resolves a chain, and only for statically visible binds
+    # (`Assign` / `AnnAssign` / walrus / `for`), which is what a reader writes.
+    def _reaches_element(value: ast.AST, names: set[str]) -> bool:
+        """`_pq["order"]` / `_pq["order"].legs` — an ACCESS OF an element, never an
+        expression that merely MENTIONS one.
+
+        ⛔ A DERIVED COLLECTION IS NOT THE ELEMENT. `stage_table = {name: stats([
+        pq["stages"]… for pq in per_query]) for name in STAGE_ORDER}` mentions `pq` all
+        over it, and treating it as an element alias reds the artifact-building code the
+        pin exists to protect — this guard's first cut already made that exact mistake at
+        `tools/read_wave_latency.py:328,332` (recorded in the docstring above). Only a
+        `Subscript`/`Attribute` CHAIN rooted at an element name is that element's inner
+        object, so only that joins the fixpoint.
+        """
+        if isinstance(value, ast.Name):
+            return value.id in names
+        if isinstance(value, (ast.Subscript, ast.Attribute)):
+            return _reaches_element(value.value, names)
+        return False
+
+    derived = set(element_names)
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(run_def):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                targets: list[ast.AST] = list(node.targets)
+                value: ast.AST = node.value
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                targets, value = [node.target], node.value
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                targets, value = [node.target], node.iter
+            else:
+                continue
+            if not _reaches_element(value, derived):
+                continue
+            fresh = {b.id for target in targets for b in ast.walk(target)
+                     if isinstance(b, ast.Name) and b.id not in derived}
+            if fresh:
+                derived |= fresh
+                defining.add(id(node))
+                changed = True
+    if not derived:
         return []
     hits: list[int] = []
     for node in ast.walk(run_def):
         if getattr(node, "lineno", -1) <= after_lineno:
             continue
+        if id(node) in defining:
+            continue  # naming an element (or a slice of it) is not mutating it
         touched = False
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr in _MUTATORS:
-            touched = bool(_names_in(node.func.value) & element_names)
+            touched = bool(_names_in(node.func.value) & derived)
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            touched = bool(_names_in(node.value) & element_names)
+            touched = bool(_names_in(node.value) & derived)
         elif isinstance(node, ast.Assign):
             touched = bool(set().union(*(_names_in(t) for t in node.targets))
                            & element_names)
@@ -876,7 +988,7 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     # `_envs[0][...] = ...`, `_envs = [environ]` after an import, and
     # `_e1 = os.environ; _e2 = _e1; _e3 = _e2` were all measured green against the
     # one-hop, bare-Name form.
-    env_alias = _aliases_of(tree, _mentions_mapping)
+    env_alias = _aliases_of(tree, _mentions_mapping, loops=True)
     env_alias |= imported_environ
 
     def _is_environ(node: ast.AST | None) -> bool:
@@ -890,17 +1002,65 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
                 and isinstance(node.args[1], ast.Constant)
                 and node.args[1].value == "environ")
 
+    def _is_mapping_itself(node: ast.AST | None) -> bool:
+        """The mapping SPELLING — `os.environ` / `from os import environ` / `getattr`,
+        but never an ALIAS NAME of it (#14281 review F5, measured).
+
+        `rebound` asked `_is_environ`, which resolves aliases, so the innocent
+
+            `_env = os.environ`
+
+        was reported as "the harness mutates `os.environ`" — a *bind* is not a
+        replacement of the mapping, and the message is simply wrong. Only a write whose
+        TARGET is the mapping itself (or the imported name for it) replaces it.
+        """
+        return (isinstance(node, ast.Attribute) and node.attr == "environ") \
+            or (isinstance(node, ast.Name) and node.id in imported_environ) \
+            or (isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "environ")
+
+    def _reaches_mapping(node: ast.AST | None) -> bool:
+        """An ALIAS of the mapping, or a `[i]`/`[...]` slot holding it — a write to that
+        slot is a write to `os.environ` (#14281 review F4).
+
+        Measured: `_envs = [environ]; _envs[0]["TORTOISE_FUSED_RERANK"] = "1"` was the one
+        case in the environ table whose MUTATING line was never in `hits` — the table
+        passed on the over-fire at the BIND line instead, so the clause it named was
+        uncovered.
+        """
+        if node is None:
+            return False
+        if _is_environ(node):
+            return True
+        if isinstance(node, ast.Subscript):
+            return _reaches_mapping(node.value)
+        return False
+
     # ⛔ A BOUND METHOD IS THE SAME POINTER: `_set = os.environ.__setitem__` then
     # `_set(...)`, and `_pop = os.environ.pop` then `_pop(...)`, were both measured green.
+    # ⛔ AND THE SEED MUST BE THE CHECK, NOT THE SEED PREDICATE (#14281 review F2,
+    # measured). This read `_mentions_mapping(v.value)`, which resolves an `ast.Name` only
+    # through `imported_environ` — while the CHECK (`_is_environ`) resolves it through
+    # `env_alias`. So a bound mutator of a plain ALIAS was a terminal name again:
+    #
+    #     for _e in (os.environ,): _p = _e.pop; _p("TORTOISE_FUSED_RERANK")   -> []
+    #     _p = os.environ.pop;     _p("TORTOISE_FUSED_RERANK")                -> [1, 2]
+    #
+    # The identical "its-predicate-is-narrower-than-its-check" shape the docstring above
+    # says it fixed for `getattr`, left standing one spelling over. `loops=True` is what
+    # resolves the `for`-bound spelling.
     bound = _aliases_of(
         tree, lambda v: (isinstance(v, ast.Attribute) and v.attr in mutators
-                         and _mentions_mapping(v.value)))
+                         and _is_environ(v.value)), loops=True)
 
     hits: list[int] = []
     for node in ast.walk(tree):
         subscript = (isinstance(node, ast.Subscript)
                      and isinstance(node.ctx, (ast.Store, ast.Del))
-                     and _is_environ(node.value))
+                     and _reaches_mapping(node.value))
         method = (isinstance(node, ast.Call)
                   and getattr(node.func, "attr", None) in mutators
                   and _is_environ(getattr(node.func, "value", None)))
@@ -923,12 +1083,14 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
                               and getattr(node.value.func, "id", None) == "vars")
                              or (isinstance(node.value, ast.Attribute)
                                  and node.value.attr == "__dict__")))
-        # ⛔ `os.environ = {…}` REPLACES the mapping: a rebinding, not a write.
+        # ⛔ `os.environ = {…}` REPLACES the mapping: a rebinding, not a write. Only the
+        # mapping SPELLING counts — `_env = os.environ` binds a name and replaces nothing
+        # (#14281 review F5, measured false red).
         rebound = (isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete))
-                   and any(_is_environ(t) for t in (
+                   and any(_is_mapping_itself(t) for t in (
                        getattr(node, "targets", None) or [getattr(node, "target", None)])))
         handed = isinstance(node, ast.Call) and any(
-            _is_environ(a) for a in list(node.args) + [k.value for k in node.keywords])
+            _reaches_mapping(a) for a in list(node.args) + [k.value for k in node.keywords])
         if not (subscript or method or aug or bound_call or rebound or handed
                 or setattr_environ or vars_environ):
             continue
@@ -1089,10 +1251,24 @@ def test_a_FALLBACK_expression_alias_still_reaches_the_sort() -> None:
            "    first = results[0]\n"
            "    first.sort()\n")
     run_def = ast.parse(src).body[0]
-    assert "first" not in _aliases_of(
-        run_def, lambda v: isinstance(v, ast.Name) and v.id == "results"), (
+    # ⛔ THE PIN RUNS PRODUCTION'S PREDICATE (#14281 review F6, measured). This used
+    # `lambda v: isinstance(v, ast.Name) and v.id == "results"` — a predicate production
+    # NEVER calls — while `_mutated_after` resolved aliases with a MENTION test. So
+    # `first = results[0]` WAS an alias in production (`_mutated_after(...) -> [2]`, the
+    # "in-place sort/clear" verdict) and this assertion was true only of the lambda beside
+    # it: no change to the guard could red it, which is rule 3 by definition. The pin and
+    # the guard now share `_collection_alias_predicate`, so the claim and the code cannot
+    # drift apart again — and the claim is now TRUE in production.
+    assert "first" not in _aliases_of(run_def, _collection_alias_predicate("results")), (
         "`first = results[0]` is an ELEMENT of the page, not the page — treating it as "
         "an alias would red an innocent lookup")
+    read = next(n for n in ast.walk(run_def)
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+    assert not _mutated_after(run_def, "results", read.lineno, artifact_append=None), (
+        "`first = results[0]` / `first.sort()` re-orders the ELEMENT's own list, not the "
+        "measured page, and the artifact records `_result_id(r)` — this is one of the "
+        "false reds #14281 review F5 measured")
 
 
 def test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation() -> None:
@@ -1127,6 +1303,80 @@ def test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation() -> None:
         assert _hits(caught), (
             f"{caught.strip()!r} must stay RED — the page IS handed to a call that may "
             "mutate it, and stopping at pure reads must not disable that")
+
+
+def test_a_BENIGN_bind_or_serialiser_is_NOT_a_mutation() -> None:
+    """Naming a thing, or serialising it, is not mutating it (#14281 review F5).
+
+    ⛔ MEASURED FALSE REDS at `3b587cb1`, each on a line that mutates nothing and each
+    reported with a verdict that NAMES a mutation:
+
+        `_env = os.environ`        -> "the harness mutates `os.environ` at line(s) [N]"
+        `print(results)`           -> "line(s) [N] mutate a collection AFTER the read"
+        `payload = json.dumps(results)` -> same
+        `pprint.pformat(results)`  -> same
+        `pq = per_query[-1]; print(pq["order"])`
+                                   -> "mutate a RECORDED entry through an alias"
+
+    Three distinct over-fires and one shared defect: a BIND or a PURE READ was graded as
+    a mutation. `rebound` resolved ALIASES (`_env` is in `env_alias`, so `_env = os.environ`
+    looked like `os.environ = …`), the element guard flagged the node that BINDS the
+    element, and `_PURE_READS` did not carry the serialisers.
+
+    By this file's own stated contract — "an unstated false red in a file whose contract
+    is to state its false reds" — these are defects rather than taste: each costs a lane
+    an edit to a 1350-line pin for an innocent one-liner, and each misdiagnoses itself.
+    The positive controls keep the mutations the guards exist for RED.
+    """
+    # `_env = os.environ` is a BIND of the mapping, not a replacement of it.
+    env_src = "import os\n_env = os.environ\n"
+    env_tree = ast.parse(env_src)
+    assert not _environ_mutations(env_tree, {
+        id(c): p for p in ast.walk(env_tree) for c in ast.iter_child_nodes(p)}), (
+        "`_env = os.environ` is reported as a MUTATION of `os.environ` — a bind is not a "
+        "replacement, and the message is wrong about the line it names")
+
+    def _hits(body: str) -> list[int]:
+        src = ("def run(sdk):\n"
+               "    results = sdk._tortoise_fts_query(query='q', limit=10)\n" + body
+               + "    per_query = []\n    per_query.append({})\n")
+        run_def = ast.parse(src).body[0]
+        read = next(n for n in ast.walk(run_def)
+                    if isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", None) == "_tortoise_fts_query")
+        return _mutated_after(run_def, "results", read.lineno,
+                              artifact_append=next(
+                                  n for n in ast.walk(run_def)
+                                  if isinstance(n, ast.Call)
+                                  and getattr(n.func, "attr", None) == "append"))
+
+    for innocent in ("    print(results)\n",
+                     "    payload = json.dumps(results)\n",
+                     "    z = pprint.pformat(results)\n"):
+        assert not _hits(innocent), (
+            f"{innocent.strip()!r} is a FALSE RED (hits={_hits(innocent)}) — it reads the "
+            "page and builds a new value, so the 'in-place sort/clear' verdict is wrong")
+
+    # ...while an actual in-place mutation through the same call shape stays RED.
+    assert _hits("    random.shuffle(results)\n"), (
+        "`random.shuffle(results)` must stay RED — a pure-read allow-list must not "
+        "disable the branch that catches a genuinely in-place call")
+
+    # The element guard must not flag the line that BINDS the element.
+    pq_src = ("def run():\n    per_query = []\n    per_query.append({})\n"
+              '    pq = per_query[-1]\n    print(pq["order"])\n')
+    pq_def = ast.parse(pq_src).body[0]
+    pq_append = next(n for n in ast.walk(pq_def) if isinstance(n, ast.Call)
+                     and getattr(n.func, "attr", None) == "append")
+    assert not _per_query_element_mutations(pq_def, pq_append.lineno), (
+        "`pq = per_query[-1]; print(pq[\"order\"])` reports 'mutate a RECORDED entry' — "
+        "the hit is the BIND line, and printing an element's list mutates nothing")
+    assert _per_query_element_mutations(ast.parse(
+        "def run():\n    per_query = []\n    per_query.append({})\n"
+        '    pq = per_query[-1]\n    pq["order"].sort()\n').body[0], 1), (
+        "`pq = per_query[-1]; pq[\"order\"].sort()` must stay RED — dropping the bind "
+        "over-fire must not drop the mutation it sits next to")
+
 def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
     """The mapping is recognised through the STATIC spellings this repo can carry.
 
@@ -1150,16 +1400,31 @@ def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
     `Call`, not an `Attribute`. `from os import environ` is the IDIOMATIC spelling, so
     this is the shape a reader reaches for first — not an exotic one.
     """
+    #: ⛔ (SOURCE, THE MUTATING LINE). The line is the assertion, not the label
+    #: (#14281 review F4, measured): this table used to assert only TRUTHINESS, and four
+    #: of its clauses could be DELETED with the test still GREEN, because the hit it got
+    #: was an over-fire on a NEIGHBOURING BIND line (`_e = getattr(...)`, `_p = _e.pop`)
+    #: rather than the mutation the case names:
+    #:
+    #:     delete `method`     -> still GREEN      delete `bound_call` -> still GREEN
+    #:     delete `handed`     -> still GREEN      delete `bound = …`  -> still GREEN
+    #:
+    #: (`subscript` and `rebound` DID red — the two clauses that were already anchored.)
+    #: The container case was worse than uncovered: its mutating line was never in `hits`
+    #: at all — it passed on the `_envs = [environ]` bind — so the write through `_envs[0]`
+    #: that flips the gate was not covered by any clause. Anchoring each case on its
+    #: mutating line is what makes a deleted clause RED, and it required dropping the
+    #: bind over-fires too (`_is_mapping_itself`).
     cases = {
         "plain import": (
             "from os import environ\n"
-            'environ["TORTOISE_FUSED_RERANK"] = "1"\n'),
+            'environ["TORTOISE_FUSED_RERANK"] = "1"\n', 2),
         "aliased import": (
             "from os import environ as env\n"
-            'env["TORTOISE_FUSED_RERANK"] = "1"\n'),
+            'env["TORTOISE_FUSED_RERANK"] = "1"\n', 2),
         "getattr": (
             "import os\n"
-            'getattr(os, "environ")["TORTOISE_FUSED_RERANK"] = "1"\n'),
+            'getattr(os, "environ")["TORTOISE_FUSED_RERANK"] = "1"\n', 2),
         # ⛔ THE SEED MUST BE AS WIDE AS THE CHECK (#14281 review): `getattr(os, "environ")`
         # was recognised by `_is_environ` and NOT by `_mentions_mapping`, so the inline
         # spelling red and every ALIASED spelling of it stayed green — the same
@@ -1167,12 +1432,12 @@ def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
         "getattr, then aliased": (
             "import os\n"
             '_e = getattr(os, "environ")\n'
-            '_e["TORTOISE_FUSED_RERANK"] = "1"\n'),
+            '_e["TORTOISE_FUSED_RERANK"] = "1"\n', 3),
         "getattr, aliased bound mutator": (
             "import os\n"
             '_e = getattr(os, "environ")\n'
             "_p = _e.pop\n"
-            '_p("TORTOISE_FUSED_RERANK")\n'),
+            '_p("TORTOISE_FUSED_RERANK")\n', 4),
         # ⛔ SECOND-ORDER, and these are what makes the import a SEED rather than a
         # terminal name (#14281 review): adding the imported name to `env_alias` AFTER
         # `_aliases_of` had already run left every one of these GREEN, while the same
@@ -1181,24 +1446,40 @@ def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
         "imported, then aliased": (
             "from os import environ as _e\n"
             "_alias = _e\n"
-            '_alias["TORTOISE_FUSED_RERANK"] = "1"\n'),
+            '_alias["TORTOISE_FUSED_RERANK"] = "1"\n', 3),
         "imported, bound mutator": (
             "from os import environ as _e\n"
             "_pop = _e.pop\n"
-            '_pop("TORTOISE_FUSED_RERANK")\n'),
+            '_pop("TORTOISE_FUSED_RERANK")\n', 3),
         "imported, through a container": (
             "from os import environ\n"
             "_envs = [environ]\n"
-            '_envs[0]["TORTOISE_FUSED_RERANK"] = "1"\n'),
+            '_envs[0]["TORTOISE_FUSED_RERANK"] = "1"\n', 3),
+        # ⛔ A `for` TARGET IS A BIND TOO (#14281 review F2, measured GREEN). `_e` is an
+        # alias of the mapping through the one bind spelling that carries no `Assign`
+        # node, so `_p = _e.pop` never resolved and the bound mutator was a terminal name
+        # — the same "seed narrower than the check" shape, one spelling over:
+        #
+        #     for _e in (os.environ,): _p = _e.pop; _p("TORTOISE_FUSED_RERANK") -> []
+        #     from os import environ;   _p = environ.pop; _p(…)               -> [2, 3]
+        "for-bound alias of the mapping": (
+            "import os\n"
+            "for _e in (os.environ,):\n"
+            "    _p = _e.pop\n"
+            '    _p("TORTOISE_FUSED_RERANK")\n', 4),
     }
-    for label, src in cases.items():
+    for label, case in cases.items():
+        src, mutating_line = case
         tree = ast.parse(src)
         parents: dict[int, ast.AST] = {
             id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
-        assert _environ_mutations(tree, parents), (
-            f"[{label}] GREEN — the env guard does not resolve this spelling of "
-            "`os.environ`, so the fused-rerank gate can be flipped inside `run()` and "
-            "the artifact would not record which arm was in force")
+        hits = _environ_mutations(tree, parents)
+        assert mutating_line in hits, (
+            f"[{label}] the MUTATING line {mutating_line} is not in hits={hits} — either "
+            "the env guard does not resolve this spelling of `os.environ`, or it fires only "
+            "on the neighbouring BIND line, which is not coverage: the fused-rerank gate "
+            "can be flipped inside `run()` and the artifact would not record which arm was "
+            "in force (#14289)")
 
 
 def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
@@ -1228,6 +1509,17 @@ def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
             'for _i, _pq in enumerate(per_query):\n    _pq["order"].sort()\n'),
         "unpacked slice target": (
             '(zed,) = per_query[-1:]\nzed["order"].sort()\n'),
+        # ⛔ AND AN ALIAS OF THE ELEMENT'S INNER LIST (#14281 review F3, measured GREEN in
+        # BOTH guards) — the same family as the bound-mutator spelling the docstring above
+        # declares, reached by binding the INNER LIST instead of its method:
+        #
+        #     for _pq in per_query: _s = _pq["order"]; _s.sort()   -> mutated_after=[] element=[]
+        #     for _pq in per_query: _pq["order"].sort()            -> mutated_after=[N] element=[N]
+        #
+        # Every query's page could be canonicalised before `compare()` read it while the
+        # direct spelling was caught, so this was a missing HOP, not a missing class.
+        "inner-list alias of a loop target": (
+            'for _pq in per_query:\n    _s = _pq["order"]\n    _s.sort()\n'),
     }
     for label, body in cases.items():
         src = "def run():\n    per_query.append({})\n" + "".join(
@@ -1240,6 +1532,18 @@ def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
             f"[{label}] GREEN — a recorded `per_query` entry is re-ordered through an "
             "alias after it was appended, so the returned report carries a page the pin "
             "never inspected")
+        # ⛔ ANCHORED ON THE MUTATING LINE (#14281 review F4's rule, applied here): the hit
+        # must be the statement that MUTATES, never the bind that merely names the element
+        # or its inner list — a bind-line over-fire is what let the environ table stay
+        # green with half its clauses deleted.
+        mutating = [n.lineno for n in ast.walk(run_def) if n is not append
+                    and ((isinstance(n, ast.Call)
+                          and getattr(n.func, "attr", None) in _MUTATORS)
+                         or (isinstance(n, ast.Subscript)
+                             and isinstance(n.ctx, ast.Store)))]
+        assert min(mutating) in hits, (
+            f"[{label}] hits={hits} do not include the mutating line {min(mutating)} — the "
+            "guard is firing on a neighbouring bind instead of the mutation")
 
     # CONTROLS, so a future reader can tell these two clauses are still covered elsewhere
     # and are not what this guard exists for.
@@ -1247,6 +1551,21 @@ def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
         "def run():\n    per_query.append({})\n    per_query[-1][\"order\"].sort()\n").body[0]
     ctrl_append = next(n for n in ast.walk(ctrl) if isinstance(n, ast.Call)
                        and getattr(n.func, "attr", None) == "append")
+    # ⛔ AND THE OTHER GUARD'S HALF OF THE SAME SHAPE (#14281 review F3, measured): before
+    # `_aliases_of` had a `for` arm, `_s = _pq["order"]` resolved to nothing at all, so
+    # `_s.sort()` was GREEN here too. Both halves are asserted because either one alone
+    # leaves every query's page re-orderable.
+    alias_src = ("def run():\n    per_query.append({})\n"
+                 '    for _pq in per_query:\n        _s = _pq["order"]\n'
+                 "        _s.sort()\n")
+    alias_def = ast.parse(alias_src).body[0]
+    alias_append = next(n for n in ast.walk(alias_def) if isinstance(n, ast.Call)
+                        and getattr(n.func, "attr", None) == "append")
+    alias_hits = _mutated_after(alias_def, "per_query", alias_append.lineno, alias_append)
+    assert alias_hits, (
+        "`for _pq in per_query: _s = _pq[\"order\"]; _s.sort()` is GREEN in "
+        "`_mutated_after` — an alias of an element's inner list is that inner list, so "
+        "every query's page can be canonicalised before `compare()` reads it")
     ctrl_hits = _mutated_after(ctrl, "results", 0, ctrl_append)
     assert ctrl_hits, (
         "the LITERAL `per_query[-1][\"order\"].sort()` is no longer caught by "
