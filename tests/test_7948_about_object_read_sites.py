@@ -3718,9 +3718,26 @@ def test_every_customer_callable_row_reaches_a_declared_door():
             f"`_DISTANCE_EXCEPTIONS` carries {exception_reader!r}, but no customer-callable "
             "row names that reader — a budget for a row that no longer exists is debt"
         )
-        deepest = max(
-            (_door_distance(door, exception_reader) or 0) for door in exception_doors
+        # ⛔ `or 0` would be WRONG here: `_door_distance` returns `None` for "not found
+        # within `_DISTANCE_SEARCH_CAP` hops", and `0` is a LEGITIMATE distance (a door
+        # that IS the reader) — see `_door_distance:3056` and `_DISTANCE_SEARCH_CAP`'s
+        # docstring, which requires "every message that consumes the value [to say] which
+        # of the two it is". Collapsing `None` into `0` reports a capped search as a
+        # zero-hop door, which is the exact confusion the sibling arm above
+        # (`if distance is None:` → "is not found within the … search cap") was written
+        # to prevent.
+        distances = [_door_distance(door, exception_reader) for door in exception_doors]
+        unresolved = sum(1 for distance in distances if distance is None)
+        assert not unresolved, (
+            f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]`: {unresolved} of "
+            f"{len(distances)} door(s) are not found within the "
+            f"{_DISTANCE_SEARCH_CAP}-hop search cap, so they are UNVERIFIED here — this "
+            "arm cannot tell 'no chain' from 'a chain longer than it looked'. Raise "
+            "`_DISTANCE_SEARCH_CAP` (and re-derive the pinned figures) or shorten the "
+            "chain. ⛔ A `_DISTANCE_EXCEPTIONS` entry cannot help: it raises the reader's "
+            "BUDGET, and the search stops at the cap before any budget is consulted."
         )
+        deepest = max(d for d in distances if d is not None)
         assert deepest == exception_budget, (
             f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]` budgets {exception_budget} "
             f"references, but its deepest door needs {deepest} — the entry must state the "
