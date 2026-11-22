@@ -400,13 +400,19 @@ def test_the_sweep_is_not_vacuous():
 _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 
 #: The subclass spellings that mean the SAME event as an `_RAISED` member, normalised on
-#: the way in (charging) and on the way out (coverage credit). `ModuleNotFoundError` is how
-#: a moved/renamed module actually raises — it is `ImportError`'s canonical spelling at the
-#: seam this file exists for — and `UnboundLocalError` is `NameError`'s. Without the map,
-#: `except ModuleNotFoundError:` alone was neither CHARGED as swallowing nor CREDITED as
-#: coverage: the same block read green in both gates when it dropped, and RED when it
-#: re-raised correctly, so a lane that fixed a block with the more precise name was redded
-#: for having fixed it (review of #14160, cycle 10, P1-2).
+#: the way in (charging) and on the way out (coverage accounting).
+#: `ModuleNotFoundError` is how a moved/renamed module actually raises — it is
+#: `ImportError`'s canonical spelling at the seam this file exists for — and
+#: `UnboundLocalError` is `NameError`'s.
+#:
+#: ⛔ WHAT THE MAP FIXES IS THE CHARGE SIDE, and the honest statement of the other side is
+#: that it cannot be fixed here: `_required_names` holds only the concrete parents and the
+#: seam gate tests the literal `"ImportError"`, so a credited subclass spelling satisfies
+#: neither — a block that re-raises ONLY `ModuleNotFoundError` is still red. That is
+#: deliberate, because the arm naming the subclass does not re-raise the plain `ImportError`
+#: that a renamed NAME raises inside an own-code import. The map's live effects are the
+#: charge and the masking (`_masked_by`), where a parent arm really does mask a child one
+#: (review of #14287, P2-2).
 _RAISED_ALIAS = {
     "ModuleNotFoundError": "ImportError",
     "ZipImportError": "ImportError",
@@ -480,8 +486,8 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     "an own-code import dropped by an `ImportError`-family arm"; instances of it exist in
     `tests/` and `tools/`, none of them is a probe root, and that is why the census is
     silent about them. Re-derive the population from the census's own inputs before adding
-    an allowance: a block for which `_imports_own_code` holds, whose arm names
-    `ImportError`/`ModuleNotFoundError` (or is bare), and for which `_reraises` is false —
+    an allowance: a block for which `_imports_own_code` holds, whose `ImportError`-NAMING
+    ARM does not re-raise (`not _reraises(that_handler)`) —
     NOT `_swallows_everything`, which also charges broad-`Exception` drops and therefore
     matches far more, including graded roots. A future widening that admits own-code `try`s
     outside the probe roots meets this rule first.
@@ -493,23 +499,23 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     (clean up, then propagate) is a probe that already fails loudly, and
     `tests/e2e/hosted/conftest.py` is exactly that shape.
     """
-    return any(
-        #: `_RAISED` is part of THIS question, not only of the coverage one: narrowing
-        #: `except Exception:` to the four names and KEEPING the drop — the substitution a
-        #: lane is most likely to make when this gate reds — read as neither covered nor
-        #: swallowing, i.e. invisible to BOTH gates while the rename stayed swallowed
-        #: (review of #14160, cycle 7, P2-3; pre-existing at `origin/main`, LATENT: the tree
-        #: holds 0 instances, so the census row set is unchanged).
-        #: …and COVERAGE is read from `_reraises` (the handler's LAST statement), not from
-        #: a walk for any `raise` anywhere in the body: a handler that raises on
-        #: one path and DROPS on the default path — `except Exception: if _STRICT: raise;
-        #: FLAG = False` — drops the programming error, and the walking predicate called it
-        #: "re-raises, drops nothing" while `_reraises` called it "no coverage", so the block
-        #: was green in BOTH gates (review of #14160, cycle 8, P2-2). `_reraises` accepts all
-        #: three propagation forms, so nothing real is lost.
-        (names == {"<bare>"} or names & (_BROAD | _RAISED_ALL)) and not _reraises(h)
-        for h, names in ((h, _handler_names(h)) for h in handlers)
-    )
+    #: ONE reachability notion for BOTH predicates (review of #14287, cycles 1-2). An arm
+    #: that Python can never reach is not a drop: `except ImportError: raise` followed by an
+    #: (unreachable) `except ModuleNotFoundError: FLAG = False` propagates everything, and
+    #: the order-blind `any()` charged it — a FALSE RED the delta introduced, on the exact
+    #: ordering a lane gets by following this gate's own repair message above an existing
+    #: precise skip.
+    caught_earlier: set[str] = set()
+    for handler in handlers:
+        names = _handler_names(handler)
+        if names == {"<bare>"} or names & _BROAD:
+            # nothing below a broad/bare arm can run: it catches whatever is left
+            return not _reraises(handler)
+        reachable = {name for name in names if not _masked_by(name, caught_earlier)}
+        if reachable & (_BROAD | _RAISED_ALL) and not _reraises(handler):
+            return True
+        caught_earlier |= names
+    return False
 
 
 def _masked_by(name: str, caught_earlier: set[str]) -> bool:
@@ -564,18 +570,33 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     NOT re-raise a plain `ImportError` — crediting the parent for it told the seam gate that
     any ImportError propagates while a reachable arm below could still swallow one. So:
     charge and account by FAMILY, credit by SPELLING, and never normalise the result.
+
+    ⛔ AND A FAMILY AN EARLIER ARM *DROPPED* CANNOT BE CREDITED EITHER — masking is one-way
+    (parent masks child) but DROPPING is not: `except ModuleNotFoundError: FLAG = False`
+    followed by `except (AttributeError, NameError, TypeError, ImportError): raise` left the
+    move/rename swallowed by arm 1 while arm 2 credited `ImportError`, which is the ONE name
+    both gates test — green in both over #14125 class 2 verbatim. Measured: 278 of 30,930
+    enumerated arm sequences leaked, all this single root (review of #14287, P1-1). So the
+    credit set is also family-closed against what has already been DROPPED.
     """
     out: set[str] = set()
     caught_earlier: set[str] = set()
+    dropped_family: set[str] = set()
     for handler in handlers:
         names = _handler_names(handler)
         if names == {"<bare>"} or names & _BROAD:
             break  # nothing below a broad arm can ever run
+        reachable = {name for name in names if not _masked_by(name, caught_earlier)}
         if _reraises(handler):
-            #: per-NAME, not per-arm: an arm that names four errors credits only the three
-            #: whose family no earlier arm already caught, because Python never reaches its
-            #: clause for the fourth.
-            out |= {name for name in names if not _masked_by(name, caught_earlier)}
+            #: per-NAME, not per-arm: an arm that names four errors credits only the ones
+            #: whose family no earlier arm already caught or DROPPED.
+            out |= {
+                name
+                for name in reachable
+                if _RAISED_ALIAS.get(name, name) not in dropped_family
+            }
+        else:
+            dropped_family |= {_RAISED_ALIAS.get(name, name) for name in reachable}
         caught_earlier |= names
     return out
 
@@ -595,8 +616,9 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     `try: … except Exception: raise finally: return ok` reads as propagating while the
     probe still converts the failure into "capability unavailable", and because
     `_probe_blocks_with_an_uncovered_import_seam` is conditioned on `swallows`, both gates
-    skip it. That rationale claims a `try/finally` probe propagates its import error, which
-    is false for this shape. It needs the owning `ast.Try`, not the handlers; the shape has
+    skip it. The seam gate's rationale — a HANDLER-LESS `try/finally` probe has no broad arm,
+    so its import error propagates — describes a different shape: this one carries a broad
+    arm that re-raises, and it is skipped only because that re-raise reads as propagating. It needs the owning `ast.Try`, not the handlers; the shape has
     0 instances in `tests/`+`tools/` (no probe there has `finally:` + `return`), so the
     machinery is deferred and this paragraph is the record. Re-read it before adding the
     first live instance.
@@ -4879,6 +4901,26 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a `ModuleNotFoundError` arm that DROPS the error swallows the module rename just as "
         "an `ImportError` arm does"
     )
+    #: A DEAD DROP CANNOT SWALLOW: `except ImportError: raise` above an (unreachable)
+    #: `except ModuleNotFoundError: <drop>` propagates everything, and the order-blind
+    #: `any()` charged it — the exact ordering a lane gets by following this gate's repair
+    #: message above an existing precise skip (review of #14287, P2-1). `origin/main` left the
+    #: block ungraded, so charging it was a NEW false red.
+    _dead_drop = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                "try:\n    _probe = _make()\nexcept ImportError:\n    raise\n"
+                "except ModuleNotFoundError:\n    _probe = None\n"
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _swallows_everything(_dead_drop) is False, (
+        "an arm below a re-raising arm that already catches its whole family can never run, "
+        "so it drops nothing"
+    )
+
     #: `ImportError`'s OTHER 3.12 subclass, and the map listed it with no witness at all
     #: (review of #14160, cycle 12, P1-1): deleting the entry was green while re-opening
     #: BOTH fail-open directions — the drop stopped being charged, and a
@@ -4952,9 +4994,30 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             set(),
         ),
         (
-            "child then parent",
-            "except ModuleNotFoundError:\n    pass\nexcept ImportError:\n    raise\n",
-            {"ImportError"},
+            #: a dropped child family is exactly what the seam gate looks for, so a later
+            #: parent re-raise cannot credit it (review of #14287, P1-1; this row previously
+            #: expected `{"ImportError"}`, which LOCKED the leak in).
+            "child dropped, then parent raise",
+            "except ModuleNotFoundError:\n    _p = None\nexcept ImportError:\n    raise\n",
+            set(),
+        ),
+        (
+            #: A DROPPED child family blocks a later PARENT arm's credit for it — masking is
+            #: one-way, dropping is not (review of #14287, P1-1: 278 of 30,930 enumerated
+            #: arm sequences leaked through this single root).
+            "child dropped, then four-name raise",
+            "except ModuleNotFoundError:\n    _p = None\nexcept (AttributeError, NameError, "
+            "TypeError, ImportError):\n    raise\n",
+            {"AttributeError", "NameError", "TypeError"},
+        ),
+        (
+            #: …and a mixed tuple credits only the names the earlier arm neither caught nor
+            #: dropped — the "per-NAME, not per-arm" rule, which nothing else pinned
+            #: (review of #14287, P2-5). `ImportError` is DROPPED by arm 1 and `TypeError` is
+            #: untouched, so a per-ARM credit would take both and a per-NAME credit takes one.
+            "child dropped, then a mixed tuple",
+            "except ModuleNotFoundError:\n    _p = None\nexcept (ImportError, TypeError):\n    raise\n",
+            {"TypeError"},
         ),
         (
             #: The EXACT-SPELLING half of `_masked_by` — already pinned by
