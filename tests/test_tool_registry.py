@@ -1571,11 +1571,14 @@ class TestCapabilityModel:
         assert any("stale map" in v
                    for v in write_surface_map_violations(dropped))
         # ⛔ THE VALUE IS GRADED TOO, and this mutation is the one that proves it
-        # (`#14249` review P2-1). The two cases above move a KEY, so they only ever
-        # exercise the `dead` and `inverse` clauses: pointing a method at a DIFFERENT
-        # live, write-classified door stated nothing any clause could refuse, which is
-        # how `link_entities -> tortoise_create_point` stayed green while the entry's
-        # own comment claimed the pair is what makes the wrap site checkable.
+        # (`#14249` review P2-1). The clause it exercises had NO arm: the assertion
+        # above points a value at a DEAD name (the `dead` clause), and the one above
+        # THAT adds a key with no wrap site (the `inverse` clause — which also happens
+        # to trip the reach clause, because no handler reaches a method that does not
+        # exist). Neither ASSERTS the wrong-door message, so neither can red if that
+        # clause is deleted — which is how `link_entities -> tortoise_create_point`
+        # stayed green while the entry's own comment claimed the pair is what makes the
+        # wrap site checkable.
         # The pair below is measured wrong against the source (the arm builds the tool's
         # own handler reach), and `tortoise_create_point` is live and write-typed, so
         # only the reach clause can red it — deleting that clause reds this line.
