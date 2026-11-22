@@ -1770,8 +1770,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #     refuse or refuse-to-claim: `db.example`/`hunter2` are the non-ephemeral and
     #     secret-bearing shapes N8 asserts are refused (and never echoed), and both
     #     arms here patch `tortoise.sdk.TortoiseSDK`, so no store is contacted.
+    #     ⚠️ THE LITERALS BELOW ARE TWO, NOT ONE: this row was written against
+    #     `docker://:@127.0.0.1:1/x` alone, and `main`'s #14183 (the walk that could not
+    #     prove it reached the end) re-pointed TWO of that file's sites to `docker://x`
+    #     while five kept the old literal. Declared as two literal rows rather than
+    #     widened to a shape-level pattern: the LITERAL scoping is this row's whole
+    #     point — a future, different URI in this file must still red.
     "test_13094_graphevent_home.py": [
-        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:1/x"\)$'],
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://:@127\.0\.0\.1:1/x"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://x"\)$'],
     "test_13337_cache_graph_declaration.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "docker://localhost:6379"\)$',
         r'^monkeypatch\.delenv\("TORTOISE_DB_URI", raising=False\)$'],
