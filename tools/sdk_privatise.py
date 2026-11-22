@@ -1102,9 +1102,13 @@ SWEEP_NAMES = 66
 #: inheritance rather than asserting it: the ONLY commit ON `main` that ever set the constant to
 #: that pair is `e74cf1d13d` itself (⛔ scoped to `main`, NOT "the only commit" — TWO commits SET
 #: it, and the other is the side branch `3f289474f9` (`feat/14012-pin-and-outside-view`), so the
-#: unscoped sentence fails the very `git log` it cites. ⛔ THE COUNT, MEASURED: `-S` on that literal
-#: returns FIVE commits, and only those two SET it — the other three (`a611e89be1`, `917ae19efd`,
-#: `10e51693f1`) REPLACE the pair with 11858/11860, so the flag count is not the setter count), and
+#: unscoped sentence fails the very `git log` it cites. ⛔ THE COUNT IS THE COMMAND'S, NOT THE
+#: PAIR'S — reproduce it exactly: `git log --all -S'SWEEP_RESIDUE = (11857,
+#: "ed40203dbbf32b87")' -- tools/sdk_privatise.py` returns FIVE, of which those two SET it and the
+#: other three (`a611e89be1`, `917ae19efd`, `10e51693f1`) REPLACE it with 11858/11860. Search the
+#: BARE pair instead of the assignment line and you get NINE — a different set that does not even
+#: contain `917ae19efd` or `10e51693f1` — so the number belongs to the command, and a reader who
+#: runs a shorter one will not find the commits this sentence names), and
 #: that tree carries no `out.update` (measured: 0 occurrences in
 #: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
 #: THE ONE ROW: `out.update` 1 — `_global_declarations` in `tests/test_14125_retired_name_calls.py`,
@@ -1125,8 +1129,12 @@ SWEEP_NAMES = 66
 #: branch's census file, and named by log rather than counted here, because a count restated in this
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
-#: not carried forward. ⛔ THAT CLAUSE IS FALSIFIED AND KEPT ONLY AS THE CLAIM THE RE-CUT BELOW
-#: REPLACES: `11858` was never a reading of THIS tree. WHERE THE PAIR REPRODUCES is measured too —
+#: not carried forward. ⛔ NOT FALSIFIED EVERYWHERE — KEPT BECAUSE THE TREE IT NAMES IS REAL: that
+#: sentence is a TRUE measurement of `917ae19efd` (`--check` exits 0 there on its own 11858) and
+#: false of the head this block ships from, which reads 11861 because it merged `94d75667dc`.
+#: "THIS tree" means that head and nothing else — this block's own doctrine, stated above, is that
+#: every figure is a reading of the tree it NAMES. The re-cut below replaces the clause for THIS
+#: head: `11858` was never a reading of it. WHERE THE PAIR REPRODUCES is measured too —
 #: `--repin` on `917ae19efd` (a branch commit, NOT an ancestor of this head) prints it exactly:
 #: that tree carries the `out.update` row and NONE of `94d75667dc`'s three `proj.g.query` rows,
 #: because it is not rebased over that commit (`--check` reads 11857 at `94d75667dc^` and 11860 at
