@@ -1056,8 +1056,9 @@ PROJECTION_WORKER_FAILURE_COUNT = Counter(
     "tortoise_record_projection_worker_failures_total",
     "Deferred record projections that did NOT WRITE A ROW on the projection "
     "worker's loop (#14185) — raised, answered nothing, or were refused; the "
-    "journal holds the line, so a replay re-creates the ROW (with `embedding` "
-    "NULL — only a live fold derives one)",
+    "journal holds the line, so a replay re-creates the ROW with no DERIVED "
+    "`embedding` (`object`/`subject` only; a vector the line CARRIED survives on "
+    "`point`/`source`/`event`)",
     ["reason"],
 )
 PROJECTION_INLINE_FALLBACK_COUNT = Counter(

@@ -159,12 +159,16 @@ compromise:
   to do with it) — the trade the issue itself asks for.
 
 The inline fallback is counted (``inline_fallbacks{reason="queue_full"}``), so
-"the worker is not keeping up" is a number rather than an inference. The
-DECLINES that never reach the queue are counted on the same family, because they
-are the same fact — this ACK paid the fold — and a silent one would read as a
-caught-up idle loop: ``uncopyable`` (the deep snapshot could not be made, so the
-item is folded inline rather than aliased) and ``queue_fault`` (``submit`` raised
-before it could queue, e.g. ``thread.start()`` under thread exhaustion).
+"the worker is not keeping up" is a number rather than an inference. The TWO
+declines that never reach the queue and are NOT structural are counted on the same
+family, because they are the same fact — this ACK paid the fold — and a silent one
+would read as a caught-up idle loop: ``uncopyable`` (the deep snapshot could not be
+made, so the item is folded inline rather than aliased) and ``queue_fault``
+(``submit`` raised before it could queue, e.g. ``thread.start()`` under thread
+exhaustion). ⛔ The five STRUCTURAL arms below also fold inline on every write and
+move NO counter — by design, and because there is nothing to count — so a reader
+reconciling ``inline_fallbacks{}`` against a deployment's inline folds must expect
+those to be ABSENT rather than zero.
 
 WHAT MAKES A WRITE DEFERRABLE AT ALL
 ====================================
@@ -1024,8 +1028,8 @@ class ProjectionWorker:
                     "line and the record does not. This is the named "
                     "disagreement `record_projection.journal_coverage` counts; "
                     "`tools/record_runner.py apply` re-creates the row idempotently "
-                    "(the row only — a fold passed no `derived` leaves `embedding` "
-                    "NULL) (#14185)",
+                    "(the row only — a fold passed no `derived` leaves a DERIVED "
+                    "`embedding` NULL, `object`/`subject` only) (#14185)",
                     type(e).__name__, e, s))
             else:
                 # ⛔ THE CLASSIFIER IS INSIDE ITS OWN GUARD (round-13 review, P3):
