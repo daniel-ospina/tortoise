@@ -18236,12 +18236,12 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
     # "CARRIES". Both ends are still pinned so the row cannot drift back to the base's value,
     # which is what a re-derivation-by-offset produces — and `sdk.py:28935` is NOT
-    # `declared = declared_relation_predicates()` at this head (`:29121` is), so a row that kept
+    # `declared = declared_relation_predicates()` at this head (`:29142` is), so a row that kept
     # the base's value would name a line that does not carry the statement.
-    for _provenance in ("its own row now reads `sdk.py:29121`", "the base read `sdk.py:28935`"):
+    for _provenance in ("its own row now reads `sdk.py:29142`", "the base read `sdk.py:28935`"):
         assert _provenance in text, (
             f"D5 no longer states {_provenance!r} about `04-plan.md`. The row carries "
-            "`sdk.py:29121` at this head (`declared = declared_relation_predicates()`) and "
+            "`sdk.py:29142` at this head (`declared = declared_relation_predicates()`) and "
             "the base carried `sdk.py:28935` — pinning "
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-measured at this head)")
