@@ -4303,11 +4303,85 @@ def test_a_DANGLING_symlink_is_not_the_archived_module_COMING_BACK(tree: Path) -
     """
     (tree / "tortoise" / "x").mkdir()
     (tree / "tortoise" / "x" / "__init__.py").symlink_to("../../shared/impl.py")
-    surface = {"modules": {"tortoise.x"}, "modules_with_a_body": {"tortoise.x"}}
+    # ⛔ `modules` HOLDS PATHS, `modules_with_a_body` HOLDS DOTTED NAMES (round-25 review, P2 —
+    # measured). This fixture put the DOTTED name in `modules`, which no candidate path can ever
+    # equal, so the loop fell through to `return None` WITHOUT reading the file — the row passed
+    # with the defect present, the behaviour it exists to pin was ungraded, and its stated
+    # `Mutation:` did not hold. Production builds `modules` from `_package_modules` (repo-relative
+    # paths) — see `_surface` and the sibling at `surface={"tortoise/pp/__init__.pyi"}`.
+    surface = {
+        "modules": {"tortoise/x/__init__.py"},
+        "modules_with_a_body": {"tortoise.x"},
+    }
     entry = {"kind": arch.MODULE, "symbol": "tortoise.x"}
+    # POSITIVE CONTROL, so an empty candidate set can never make this row vacuous again: the same
+    # surface with a carrier that holds real code IS the module coming back.
+    (tree / "tortoise" / "x" / "__init__.py").unlink()
+    (tree / "tortoise" / "x" / "__init__.py").write_text(
+        "def body():\n    return 1\n", encoding="utf-8"
+    )
+    assert arch.live_return(entry, surface, tree) == "tortoise/x/__init__.py", (
+        "positive control: a candidate that matches the surface AND holds code is a return"
+    )
+    # …and the row under test: the same candidate, now a DANGLING link.
+    (tree / "tortoise" / "x" / "__init__.py").unlink()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../../shared/impl.py")
     assert arch.live_return(entry, surface, tree) is None, (
         "a dangling link holds no code: counting it LIVE contradicts arm 1b about one file"
     )
+
+
+def test_an_ABSOLUTE_link_target_is_UNREADABLE_not_a_known_empty(tree: Path) -> None:
+    """P2 (round-25): `git show` refusing a path is NOT a reading that the carrier holds no code.
+
+    `_blob_following_links` used to map every refused read to `_DANGLING` ("provably holds no
+    code"), and an absolute target is always refused (`git show HEAD:/abs/…` -> rc 128). So a
+    package symlinked by ABSOLUTE path to its real code dropped out of the carrier sets and
+    deleting it graded GREEN — while the byte-identical RELATIVE link reds. The verdict was
+    decided by the link's SPELLING, the class rounds 19 and 23 removed one spelling over.
+
+    Mutation: return `_DANGLING` for a target that leaves the repo -> RED here.
+    """
+    (tree / "tortoise" / "real.py").write_text("def real(x):\n    return x * 2\n", encoding="utf-8")
+    (tree / "tortoise" / "x").mkdir()
+    # ABSOLUTE on purpose: `symlink_to(str(...))` stores the absolute path verbatim.
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to(str(tree / "tortoise" / "real.py"))
+    _commit(tree, "tortoise/real.py", "tortoise/x/__init__.py")
+
+    assert arch._blob_following_links(
+        tree, "HEAD", "tortoise/x/__init__.py"
+    ) is arch._UNREADABLE, (
+        "an absolute target is not addressable by `git show`, so nothing is known about it: "
+        f"_DANGLING ({arch._DANGLING!r}) would claim a reading that was never taken"
+    )
+
+
+def test_an_UNREADABLE_blob_mode_is_not_read_as_a_regular_file(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P3 (round-25): `"".startswith("120")` is False, so a failed `ls-tree` returned the LINK TEXT.
+
+    `_blob_mode_at` answers `""` when `ls-tree` fails or prints nothing, and the caller read that as
+    "regular file" and handed back the link text — the "plausible-looking link text" the docstring
+    forbids inventing, and the opposite polarity to `_content_or_link`, which reads the same `""` as
+    fail-closed. One question, two answers, on the one datum the whole chain read turns on.
+
+    Mutation: test `not _blob_mode(...).startswith("120")` without the empty guard -> RED here.
+    """
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("real.py")
+    (tree / "tortoise" / "real.py").write_text("def real(x):\n    return x * 2\n", encoding="utf-8")
+    _commit(tree, "tortoise/real.py", "tortoise/x/__init__.py")
+    arch._blob_mode_at.cache_clear()
+
+    monkeypatch.setattr(arch, "_blob_mode", lambda *a, **k: "")
+    assert arch._blob_following_links(
+        tree, "HEAD", "tortoise/x/__init__.py"
+    ) is arch._UNREADABLE, (
+        "a mode that could not be read is not a regular file: returning the link text here is the "
+        "plausible-but-wrong reading the bound exists to refuse"
+    )
+    arch._blob_mode_at.cache_clear()
 
 
 def test_the_blob_MODE_cache_is_keyed_on_a_SHA_not_a_ref(tree: Path) -> None:

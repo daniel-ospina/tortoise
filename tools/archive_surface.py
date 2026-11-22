@@ -1217,10 +1217,14 @@ def _modules_with_a_body(paths, read) -> set[str]:
 _LINK_HOPS = 8
 
 #: Two failures a link read can have, and they are NOT the same answer:
-#: `_DANGLING` — the target does not exist at that commit, so the carrier provably holds no code;
-#: `_UNREADABLE` — a cycle bound or an unresolvable path, where nothing is known, so the caller must
-#: fail CLOSED (never cancel a removal). Returning `None` for both is what let a 7-link chain to
-#: real code grade GREEN (round-24 review, measured).
+#: `_DANGLING` — the target does not exist at that commit **and the ask reached the tree**, so the
+#: carrier provably holds no code;
+#: `_UNREADABLE` — an exhausted hop bound, a target that is ABSOLUTE or leaves the repo root, or a
+#: mode that cannot be read at all: nothing is known, so the caller must fail CLOSED (never cancel a
+#: removal). ⛔ A link LOOP is neither — it answers the peer's LINK TEXT, because a loop holds no
+#: code (measured; an earlier draft of this comment called it `_UNREADABLE`, which the docstring
+#: below contradicts — round-25 review, P2). Returning `None` for `_DANGLING` and `_UNREADABLE`
+#: alike is what let a 7-link chain to real code grade GREEN (round-24 review, measured).
 _DANGLING = ""
 _UNREADABLE: str | None = None
 
@@ -1254,25 +1258,51 @@ def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
     and a link loop holds no code. A chain longer than `_LINK_HOPS` links answers `_UNREADABLE`,
     and a link that DANGLES answers `_DANGLING` — a KNOWN reading ("holds no code"), not the
     unknown one. The sentence that stood here said BOTH answered `None`, which contradicted the
-    fix (round-25 review, P3 — measured: a dangling link reads `''`, `is _DANGLING` True). No depth
-    bound is reached by any shape this repo has, and a bound that IS reached must not invent a
-    reading by returning the last link's text.
+    fix (round-25 review, P3 — measured: a dangling link reads `''`, `is _DANGLING` True).
+
+    ⛔ AND `_UNREADABLE` IS WIDER THAN THAT BOUND (round-25 review, P2/P3 — measured). A target
+    that is ABSOLUTE or escapes the repo root, and a mode that cannot be read at all, are ALSO
+    `_UNREADABLE`: nothing is known about either, so neither may cancel a removal. Only a target
+    git resolved nothing for, INSIDE the tree, is `_DANGLING`.
+
+    No depth bound is reached by any shape this repo has, and a bound that IS reached must not
+    invent a reading by returning the last link's text.
     """
     text = _git_blob(root, sha, path)
     if text is None:
         return None
     seen = {path}
     for _ in range(_LINK_HOPS + 1):  # +1 so the FINAL target's mode is tested, not assumed
-        if not _blob_mode(root, sha, path).startswith("120"):
+        mode = _blob_mode(root, sha, path)
+        # ⛔ AN UNANSWERABLE MODE IS `_UNREADABLE`, NOT "NOT A LINK" (round-25 review, P3 —
+        # measured). `_blob_mode_at` answers `""` when `ls-tree` fails, and testing
+        # `"".startswith("120")` read that as "regular file" and returned the LINK TEXT — the very
+        # "plausible-looking link text" this docstring forbids inventing — while `_content_or_link`
+        # reads the same `""` the other way (`if not mode: return True`, fail closed toward the
+        # removal). One question, one polarity at both sites.
+        if not mode:
+            return _UNREADABLE  # could not ask: nothing is known, so never cancel a removal
+        if not mode.startswith("120"):
             return text
         # ⛔ NORMALISE BEFORE THE ASK (round-21 review, P1 — measured). A relative link target
         # (`../../shared/impl.py`) concatenated onto the carrier's directory yields
         # `tortoise/x/../../shared/impl.py`, which `git show <sha>:<path>` REFUSES with
         # `fatal: path … exists on disk` — so the read answered `None`, which the carrier tests
         # treat as "unreadable, never cancel a removal". `posixpath.normpath` collapses the `..`
-        # segments before the ask; the result never escapes the repo root because `git show`
-        # refuses an absolute or outside path anyway.
+        # segments before the ask.
         target = posixpath.normpath((Path(path).parent / text.strip()).as_posix())
+        # ⛔ A TARGET THAT LEAVES THE REPO IS NOT A FACT ABOUT THE CODE (round-25 review, P2 —
+        # measured). The comment above used to end "…the result never escapes the repo root because
+        # `git show` refuses an absolute or outside path anyway", and that refusal is exactly the
+        # problem: this function then mapped it to `_DANGLING`, i.e. "provably holds no code", which
+        # is a GUESS where it claims a reading. Measured: `tortoise/x/__init__.py ->
+        # /home/…/shared/impl.py` dropped the module out of `base_body_modules`, so deleting the
+        # package AND its real target graded `[]` (the byte-identical RELATIVE link reds — the
+        # verdict decided by the link's spelling again), and the anchor then refused the commit that
+        # really holds the code. Only "git resolved nothing for a path inside the tree" is
+        # `_DANGLING`; anything the read cannot address at all is `_UNREADABLE`.
+        if target.startswith("/") or target == ".." or target.startswith("../"):
+            return _UNREADABLE
         if target in seen:
             return text  # a loop holds no code: the peer's link text, as measured
         seen.add(target)
