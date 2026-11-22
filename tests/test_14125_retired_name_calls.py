@@ -562,8 +562,12 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
         #: the arm above RETURNS for `names & _BROAD`, `reachable ⊆ names`, and `_handler_names`
         #: yields `{"<bare>"}` only as a SINGLETON, so a broad or bare name is always already gone
         #: by here. Keeping it read as though masking could leave a broad name behind, which it
-        #: cannot (review of #14287, P3: removing it changed 0 verdicts over 18,278 enumerated
-        #: arm sequences; this is a proof from the two rules, not an empirical coincidence).
+        #: cannot — that is a PROOF from the two rules above, so NO COUNT IS QUOTED to support it
+        #: (review of #14287, P3: an earlier cut of this note carried "removing it changed 0 verdicts
+        #: over 18,278 enumerated arm sequences"; the enumeration's arm alphabet and length bound
+        #: were never stated, so the figure could not be re-derived from this tree — the same
+        #: un-re-derivable-figure class this file deleted twice in review cycle 8, and one this
+        #: paragraph does not need, because the proof above is checkable in three lines).
         if reachable & _RAISED_ALL and not _reraises(handler):
             return True
         caught_earlier |= names
@@ -732,12 +736,18 @@ def _raises_a_skip(exc: ast.expr) -> bool:
     `_pytest.outcomes.XFailed(...)`, `errors.Skip(...)`; (c) a skip exception bound to a bare
     identifier — `from pytest import skip as _s; raise _s.Exception(...)`, which is `ast.Name` up
     to its `.Exception` and matches no part. ⛔ THE RESOLUTION IS PART OF THE SHAPE: "a raise whose
-    callee is a bare `Name`" alone is NOT the shape — that is every `raise ValueError(...)` in the
-    tree (measured 394 at this head), and it is the READING of the name that decides, not its AST
-    form. Re-derive the population: walk every `ast.ExceptHandler` whose LAST statement is a
-    `Raise`, resolve each raised expression against its module scope, and count the ones that
-    resolve to a skip/xfail signal while spelling none of the parts above. 0 in `tests/`+`tools/`
-    at this head, so an alias/parts table is
+    callee is a bare `Name`" alone is NOT the shape — it is the READING of the name that decides,
+    not its AST form. WHY the AST form is too broad, measured on the census's own population: every
+    `ast.ExceptHandler` whose LAST statement is a `Raise` of a `<BareName>(…)` CALL is **394** in
+    `tests/`+`tools/` at this head, naming **68** distinct exceptions of which only **26** are
+    `ValueError` (the rest read like `CensusError`, `SystemExit`, `AssertionError` — loud failures,
+    none of them a skip). ⛔ THAT FIGURE REPLACES ONE THAT MIS-STATED ITS OWN CLASS: an earlier cut
+    read "that is every `raise ValueError(...)` in the tree (measured 394 at this head)", attaching
+    the population's size to a spelling that is 26 of it (and 403 in `tests/`+`tools/` if you count
+    `raise ValueError(...)` anywhere rather than as a handler's last statement) — review of #14287,
+    P3. The population THIS residual is over: that same set, with each raised expression resolved
+    against its module scope, counting the ones that resolve to a skip/xfail signal while spelling
+    none of the parts above — **0** in `tests/`+`tools/` at this head, so an alias/parts table is
     deferred until the first live instance, not built ahead of it. ⛔ THE SECTION THAT USED TO BE
     NAMED HERE DOES NOT CARRY THIS MEASUREMENT: `4j-undetriginta` grades the pytest-skip conversion
     over the inline sources below — a chained `pytest.skip.Exception`, a bare `pytest.skip` call, and
