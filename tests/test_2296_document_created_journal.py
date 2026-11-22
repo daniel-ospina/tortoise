@@ -401,6 +401,34 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
             "(#2296)")
 
 
+def test_a_caller_write_sink_prop_is_not_bound_as_the_internal_sink(env):
+    """A caller ``write_sink`` prop must be DROPPED, never reinterpreted (#14111).
+
+    ``write_sink`` is an append-only OUTCOME sink, not a write target (see
+    `_RESERVED_EMIT_CALL_PROPS`): `_emit_event`'s only use of the parameter is
+    ``write_sink.append(write)``, on the far side of ``live_write.write`` — the
+    destination of the write is already decided when the sink is filled. So the
+    harm an unreserved caller prop of that name does is REINTERPRETATION: the
+    prop binds the parameter at the splat, the emit delivers the chokepoint's
+    own ``LiveWrite`` into the CALLER's value, and the sink the caller actually
+    named is starved.
+
+    A LIST is the value that makes this observable: a forged scalar only makes
+    it loud, because the door's ``except Exception`` swallows the resulting
+    ``AttributeError`` as a WARNING (``source journal emission failed for …``)
+    while the journal line has already committed — measured. Pre-fix, the bag
+    below came back holding a ``LiveWrite``.
+    """
+    sdk, _events = env
+    _caller_bag: list = []
+    sdk.register_source("https://example.com/write-sink-prop", "document",
+                        write_sink=_caller_bag)
+    assert _caller_bag == [], (
+        "a caller `write_sink` prop was bound as the INTERNAL sink: the emit "
+        f"appended its own verdict into caller data ({_caller_bag!r}) instead "
+        "of the strip dropping the reserved name (#14111)")
+
+
 def test_a_caller_seq_prop_cannot_forge_a_journal_position(env):
     """A caller ``seq`` prop must never reach the journal line's TOP level (#12894).
 
