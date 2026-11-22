@@ -1119,9 +1119,12 @@ SWEEP_NAMES = 66
 #: branch's census file, and named by log rather than counted here, because a count restated in this
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop). The
 #: pin is RE-DERIVED after every integration rather than carried forward: integrating
-#: `origin/main` (`0467ba329d`, this branch's base) re-measured `--repin` at
-#: `(11861, "f0647020531c078c")` — the SAME pair — and `--check` exits 0 on the integrated tree,
-#: so that integration added no untyped receiver either.
+#: `origin/main` (`0467ba329d`) re-measured `--repin` at `(11861, "f0647020531c078c")` — the SAME
+#: pair — and the base's later move to `47e28b549e76` re-measured that SAME pair again, with
+#: `--check` exiting 0 on each integrated tree, so no integration added an untyped receiver.
+#: ⛔ NAMED BY ITS COMMITS, NOT BY "this branch's base": the base moves under every integration
+#: and a parenthetical reading `this branch's base` went stale at the very next merge (measured:
+#: written naming `0467ba329d`, false the moment `47e28b549e76` was merged).
 #:
 #: ⛔ SUPERSEDED BY THE RE-CUT BELOW — the sentence above ends "`--check` exits 0 at this head on
 #: the SAME pair", and that reading did NOT survive the commits merged beside it: the census moved
