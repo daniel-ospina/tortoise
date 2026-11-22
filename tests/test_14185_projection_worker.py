@@ -1125,6 +1125,54 @@ def test_a_failing_deferred_fold_is_counted_and_the_loop_survives(armed):
         "projection_raised", 0) - before) == 1
 
 
+def test_a_fold_whose_OUTCOME_cannot_be_read_is_counted_not_absorbed(armed):
+    """⛔ #14222 round-13 review, P3: the classifier sat OUTSIDE the fold's `try`.
+
+    `_classify_fold_outcome` asks the door's return value what happened
+    (`getattr(result, "applied", True)` / `getattr(result, "refusal", None)`), so
+    a `project` callable returning an object with a RAISING property raised there —
+    outside the guard around `item.project`, and BEFORE `_inflight` was cleared.
+    That kills the consumer thread while `_inflight` still names an item, so every
+    lag gauge reads a permanent phantom +1, `oldest_pending_seconds` grows without
+    bound, `wait_for_drain` never answers True, and the next `submit` silently
+    starts a replacement consumer — a gauge that disagrees with reality forever.
+
+    The leg drives exactly that shape: a first fold whose outcome object raises,
+    then a second fold that must still run. ⛔ If the classifier is moved back
+    outside its guard, `wait_for_drain` below never returns True (the assertion
+    fails on the drain, not on a phantom gauge), which is the observable the
+    defect produces.
+    """
+    attempts = []
+
+    class _OutcomeThatCannotBeRead:
+        @property
+        def applied(self):
+            raise RuntimeError("the door's outcome is unreadable")
+
+    def project(event, seq, *, journal_skipped=False):
+        attempts.append(seq)
+        if seq == 1:
+            return _OutcomeThatCannotBeRead()
+        return types.SimpleNamespace(applied=True, refusal=None,
+                                     outcome="applied")
+
+    log = _Log()
+    live_write.write({"type": "A"}, log=log, project=project, tenant=_TENANT)
+    live_write.write({"type": "B"}, log=log, project=project, tenant=_TENANT)
+
+    assert projection_worker.wait_for_drain(10) is True, (
+        "the consumer did not finish the queue: an outcome the classifier could "
+        "not read must be COUNTED, not able to kill the loop with `_inflight` set")
+    stats = projection_worker.stats()
+    assert attempts == [1, 2], "the loop stopped on the unreadable outcome"
+    assert stats.failures == 1, (
+        "an unclassifiable fold must be counted as a failure, never assumed to "
+        "have written a row")
+    assert stats.projected == 1
+    assert stats.queue_depth == 0 and stats.pending_positions == 0
+
+
 def test_the_fold_runs_in_journal_order(armed):
     """ONE consumer, in order — a second consumer is a correctness hazard.
 
@@ -1361,11 +1409,14 @@ def test_the_MODULE_lock_is_replaced_in_a_forked_child():
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
 def test_the_fork_hook_replaces_prometheus_locks_before_the_METRICS_SCRAPE():
-    """⛔ #14222 review round 11, P2-1: the repair was on five CALL SITES, and the
+    """⛔ #14222 review round 11, P2-1: the repair was on CALL SITES, and the
     scrape path is not one of them.
 
-    `ensure_projection_metrics_fork_safe()` was reached from the five
-    projection-metric helpers, which covers the publish arm, the health read and
+    `ensure_projection_metrics_fork_safe()` was reached from every projection-metric
+    helper that publishes or reads these families (⛔ no count is stated: the
+    number moves whenever a helper is added, and a stale count beside a coverage
+    argument certifies something false — round-13 review, P3), which covers the
+    publish arm, the health read and
     that read's `collect()`. It did NOT cover the TEXT exposition: `/metrics`
     calls `generate_latest(REGISTRY)` directly (`monitoring._Handler.do_GET`), and
     that walk takes the same inherited locks — `_child_samples` ->
@@ -1429,9 +1480,13 @@ def test_the_fork_hook_replaces_the_REGISTRY_lock_the_scrape_takes_FIRST():
     """⛔ #14222 review round 12, P3: `registry.collect()` takes the REGISTRY's own
     lock BEFORE it iterates a single collector.
 
-    The repair replaced the locks of the five projection families, which covers
-    every family this module's exposure path touches — but
-    `CollectorRegistry.collect()` opens with `with self._lock:` (a lock that is
+    The repair replaced the locks of the five projection families — ⛔ NOT "every
+    family this module's exposure path touches": `_handle_endpoint` touches
+    `REQUEST_COUNT` / `REQUEST_LATENCY` BEFORE `generate_latest`, and neither is
+    repaired (see `monitoring`'s residual), which is why this leg holds a
+    projection family and the registry leg below holds the registry. What those
+    five did not cover is the registry: `CollectorRegistry.collect()` opens with
+    `with self._lock:` (a lock that is
     neither a family's nor a `MutexValue`'s) to copy `_collector_to_names`, so a
     child that forked while a peer held the REGISTRY lock blocked on the scrape's
     FIRST statement and never reached a family at all. The family repair was

@@ -1117,9 +1117,10 @@ def ensure_projection_metrics_fork_safe() -> bool:
     ``registry.collect()`` opens with ``with self._lock:`` **before** it iterates a
     single collector, so a child that forked while a peer held the REGISTRY lock
     blocked on the scrape's FIRST statement — before any family's lock was touched,
-    which makes the family repair irrelevant to that wedge. The registry holds it
-    only to copy a dict, so replacing it loses nothing, and the replacement is the
-    same defensive shape as the families above.
+    which makes the family repair irrelevant to that wedge. ``collect()`` holds it
+    only to copy a dict (``register``/``unregister`` hold it to mutate), so
+    replacing it loses nothing, and the replacement is the same defensive shape as
+    the families above.
 
     RETURNS whether this call replaced anything (``False`` = already valid here).
     """
@@ -1149,9 +1150,13 @@ def ensure_projection_metrics_fork_safe() -> bool:
         # leg caught it): `type(lock)()` raises `TypeError: cannot create
         # '_thread.lock' instances` for the raw lock `threading.Lock()` returns, so
         # the families loop's `threading.Lock()` fallback is what actually builds
-        # every fresh lock. A registry block WITHOUT that fallback swallows the
-        # TypeError and replaces nothing — which is exactly the state the new leg
-        # red-lined before this line existed.
+        # every fresh lock. A registry block WITHOUT that fallback replaces the
+        # lock on NO fork at all — the TypeError either escapes the hook (CPython
+        # prints it as `Exception ignored in: ...` on stderr and SKIPS the rest of
+        # this function, `_PROJECTION_METRICS_PID` assignment included, rather than
+        # raising to the caller) or is caught by a bare `except: pass` and silently
+        # drops the replacement. A leg red-lined that second shape before this
+        # fallback existed; both outcomes are the same defect.
         try:
             fresh_registry_lock = type(registry_lock)()
         except Exception:      # noqa: BLE001, RUF100
@@ -1189,14 +1194,22 @@ if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
     # today `test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang`
     # simulates the fork by moving the pid, which the hook cannot see.
     #
-    # ⛔ Residual, stated rather than hidden: the REGISTRY lock above and the five
-    # projection families are repaired, which covers every lock this module's own
-    # exposure path takes. What is NOT repaired is any OTHER family's lock — a child
-    # forked while a peer mutated some unrelated metric can still block when
-    # `generate_latest` walks to THAT family (the registry walk itself no longer
-    # blocks, because its lock was replaced). Rebuilding every metric in the
-    # registry would fork-bomb the values an operator is watching, so the scope stays
-    # the families this module documents plus the registry they are read through.
+    # ⛔ Residual, stated rather than hidden — and stated at its TRUE width, because
+    # an earlier revision of this paragraph narrowed it into a falsehood (round-13
+    # review, P2): what is repaired is the REGISTRY lock and the five projection
+    # families. That is NOT "every lock this module's exposure path takes":
+    # `_Handler._handle_endpoint` touches `REQUEST_COUNT.labels(...).inc()` and
+    # `REQUEST_LATENCY.time()` BEFORE it calls `generate_latest`, and neither family
+    # is in `_PROJECTION_METRIC_FAMILIES` — so a child forked while a peer held one
+    # of THOSE blocks at the handler's first statement, before the scrape body runs.
+    # Nor is any other family's `MutexValue` safe: a child forked while a peer
+    # mutated some unrelated metric can still block when `generate_latest` walks to
+    # that family (the registry walk itself no longer blocks, because its lock IS
+    # replaced). Rebuilding every metric in the registry, or repairing every family
+    # the handler touches, would fork-bomb the values an operator is watching, so
+    # the scope stays the families this module documents plus the registry they are
+    # read through — and this paragraph names what that leaves open instead of
+    # claiming coverage it does not have.
     os.register_at_fork(after_in_child=ensure_projection_metrics_fork_safe)
 
 

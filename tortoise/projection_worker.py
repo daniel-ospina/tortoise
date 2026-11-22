@@ -53,17 +53,25 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    consumers would let two records for one tenant overtake each other; the
    record's writes are absolute per row, so that is a correctness hazard, not
    only a delay). ⛔ **THE INLINE FALLBACK IS OUTSIDE THAT ORDER, and that is
-   stated rather than implied** (#14222 review cycle 5, ISSUE 3): when the queue
-   is FULL (or the worker is stopping) the caller folds its OWN, LATER position
-   on its own thread, at ``live_write``'s inline call, while an EARLIER position
-   is still queued — so with ``TORTOISE_PROJECTION_QUEUE_MAX=1``, or once the
-   default bound saturates, one writer's row can be overwritten by its
-   predecessor. Nothing detects it: both positions are present, so
-   ``journal_coverage`` / ``record-reconcile`` read green. The alternative to
-   that residual is a caller that WAITS on the queue — which is the coupling this
-   module exists to remove — so the honest form is the declared one: the bound's
-   visible cost is a slower ACK **and** a possible same-tenant reorder during the
-   window in which the queue is saturated. Closing it needs an ordering token at
+   stated rather than implied** (#14222 review cycle 5, ISSUE 3; widened in
+   round 13, P2, because the trigger was understated): when a write does not go
+   through the queue, the caller folds its OWN position on its own thread, at
+   ``live_write``'s inline call, while an EARLIER position may still be queued —
+   so one writer's row can be overwritten by its predecessor. ⚠️ **THERE ARE TWO
+   FAMILIES OF TRIGGER, AND ONLY ONE OF THEM IS THE BOUND.** (a) A DECLINE by the
+   bound or by a stopping worker (``queue_full`` / ``worker_stopping``), which is
+   what ``TORTOISE_PROJECTION_QUEUE_MAX`` controls — with the bound at ``1``, or
+   once the default saturates. (b) The STRUCTURAL arms, which fold inline on EVERY
+   write at ANY depth, including an idle queue: ``tenant is None`` (the
+   ``api.EventAPI._emit`` / ``ConversationMiner._emit_event`` shape, whose doors
+   pass no tenant) and every ``record_sink`` door. So raising the bound does NOT
+   remove this residual — it only removes arm (a); a same-tenant queued write can
+   be overtaken by a structural-arm fold at zero depth. Nothing detects it: both
+   positions are present, so ``journal_coverage`` / ``record-reconcile`` read
+   green. The alternative to that residual is a caller that WAITS on the queue —
+   which is the coupling this module exists to remove — so the honest form is the
+   declared one: the bound's visible cost is a slower ACK **and** a possible
+   same-tenant reorder, from either arm. Closing it needs an ordering token at
    the fold seam, which is a change to ``record_projection``, not to this module.
    ⚠️ ``.env.example`` states the same residual where the bound is documented.
 2. **A write's ack excludes projection time.** :func:`submit` appends to a deque
@@ -198,8 +206,14 @@ ENV_WORKER = "TORTOISE_PROJECTION_WORKER"
 
 #: How many queued projections the bound allows before :func:`submit` starts
 #: declining (and the caller folds inline). Sized so a normal burst is absorbed
-#: and a wedged fold is bounded in MEMORY: one item holds one record, so the
-#: ceiling is a few MB at the default. Read as an integer; an unparseable or
+#: and a wedged fold is bounded in MEMORY — ⛔ AND THE MEMORY FIGURE IS NOT "a few
+#: MB" (round-13 review, P3): an item holds one record, ``submit`` DEEP-COPIES it,
+#: and a record carrying a 1536-dimensional embedding measures **12.8 KiB** per
+#: copy (tracemalloc, this branch), so the default 10,000 is a ceiling of roughly
+#: **125 MiB**, not a few MB — and it scales with the embedding width and the
+#: record's own size. An earlier revision of this comment said "a few MB", which
+#: understated the ceiling by ~30x; use this figure for capacity planning.
+#: Read as an integer; an unparseable or
 #: non-positive value falls back to :data:`DEFAULT_QUEUE_MAX` rather than
 #: disabling the worker (a typo must not silently change the mode).
 ENV_QUEUE_MAX = "TORTOISE_PROJECTION_QUEUE_MAX"
@@ -815,7 +829,28 @@ class ProjectionWorker:
                     "(#14185)",
                     type(exc).__name__, exc, item.seq)
             else:
-                failure = _classify_fold_outcome(result, item.seq)
+                # ⛔ THE CLASSIFIER IS INSIDE ITS OWN GUARD (round-13 review, P3):
+                # it asks the door's return value what happened, and a door whose
+                # `project` returns an object with a RAISING property would raise
+                # HERE — outside the `try` above and BEFORE `_inflight` is cleared
+                # below. That kills the consumer thread with `_inflight` still set,
+                # which makes every lag gauge read a permanent phantom +1,
+                # `oldest_pending_seconds` grow without bound and `wait_for_drain`
+                # never answer True, while `stats().running` correctly reads False
+                # and the next `submit` silently starts a replacement — the exact
+                # "gauge disagrees with reality forever" class this branch treats
+                # as P1-1. An unclassifiable outcome is counted as a failure: the
+                # item is not retried, and the journal line stands for a replay.
+                try:
+                    failure = _classify_fold_outcome(result, item.seq)
+                except Exception as exc:      # noqa: BLE001, RUF100
+                    failure = "record_no_outcome"
+                    LOGGER.warning(
+                        "projection_worker: the fold's OUTCOME could not be "
+                        "classified (%s: %s) for journal position %s — counted "
+                        "as a failure rather than assumed to have written "
+                        "(#14185)",
+                        type(exc).__name__, exc, item.seq)
             # ⛔ ALL THREE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
             # never from a value captured at POP time (#14222 review P1-1). The
             # pop-time depth counts the item that is about to be folded, so
