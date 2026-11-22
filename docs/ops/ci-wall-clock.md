@@ -301,8 +301,10 @@ merged tree; their declared 6.0 s over the 11 shards is ~0.55 s/shard), so any c
 here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
 LOWER A WEIGHT: the three enter at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
-their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
-all three `durations:` rows still emits 720.7 at `main`'s tree `10e51693f1`) — the three files' +6 s
+their `durations:` rows, so removing or shrinking those rows changes nothing (measured at `main`'s
+own tree `10e51693f1`: the emission reads **721.0-721.1** with the rows present AND with all three
+dropped — the arm that moves the pack is UNREGISTERING those suites, which reads **720.6** there and
+**720.7** at the `10e51693f1` MERGE tree `c0b929403aa9`, the figure quoted in §2) — the three files' +6 s
 over 11 shards is what was measured to cross the minute boundary at the earlier head. ⛔ **And
 `#13998`'s registration lands in the SAME pool without a further re-pack**:
 `tests/test_13998_capacity_notice.py` enters at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (it has no
