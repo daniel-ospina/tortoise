@@ -372,7 +372,16 @@ class RecordUnavailable(RuntimeError):
 def _graph_connection(uri: str):
     from falkordb import FalkorDB
 
-    return FalkorDB.from_url(uri.replace("docker://", "redis://"))
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    # #8118/#3065: `falkordb` defaults `socket_timeout=None` and hands it to redis-py
+    # explicitly, so an unbounded read parks this process in `recv()` forever on a
+    # stalled server. The bound is taken from the product's ONE resolver, never
+    # spelled here, so a knob change reaches this harness too.
+    return FalkorDB.from_url(
+        uri.replace("docker://", "redis://"),
+        **_bounded_server_socket_kwargs(),
+    )
 
 
 def _known_graphs(db) -> list[str]:
