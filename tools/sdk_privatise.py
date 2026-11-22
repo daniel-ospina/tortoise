@@ -1144,7 +1144,7 @@ SWEEP_NAMES = 66
 #: ⛔ THIS PR'S OWN CONTRIBUTION IS ZERO ROWS, and that is measured rather than asserted: the pair
 #: below is `--repin`'s output on THIS tree and it is the SAME pair `origin/main`'s tree prints
 #: (cross-checked, never the derivation) — MEASURED at the head that carries the test arm below
-#: too, not assumed from the pre-arm diff: `edits_for` on BOTH files this change touches yields
+#: too, not assumed from the pre-arm diff: `edits_for` on BOTH files whose CENSUS text this change touches yields
 #: zero typed references and ZERO residue rows (`tools/sdk_privatise.py` contributes only the two
 #: `residue_all.update`/`after_residue.update` accumulators already inside the pinned set, and
 #: `tests/test_sdk_privatise_sweep.py` contributes nothing), which is why the pair is the base's

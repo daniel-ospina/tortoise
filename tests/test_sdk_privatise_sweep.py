@@ -166,10 +166,79 @@ def test_the_residue_pin_is_a_reading_of_the_whole_set():
 #: branch: three `proj.g.query` rows in `tools/read_wave_latency.py`, added to `main` by
 #: `94d75667dc76` (`#14224`) before the pin that missed them was written. Naming the file and the
 #: row is what makes the attribution checkable without the tree-wide walk, so both are graded
-#: here.
+#: here — and so are the FIGURES, read out of the sentence rather than restated below.
 DECLARED_DRIFT_FILE = ROOT / "tools" / "read_wave_latency.py"
-DECLARED_DRIFT_ROW = "proj.g.query"
-DECLARED_DRIFT_ROWS = 3
+#: The block's published form for a tree-wide row: `` `row` **before → after** (+delta) ``. The
+#: delta is sometimes published inline (`**3643 → 3646** (+3)`) and sometimes left to the pair
+#: (`**42 → 43**`), so it is OPTIONAL here and derived from the pair when absent.
+_GROWTH_CLAIM_RE = re.compile(
+    r"`(?P<row>[A-Za-z_][\w.]*)`\s*\*\*(?P<before>\d+)\s*→\s*(?P<after>\d+)\*\*"
+    r"(?:\s*\((?P<sign>[+−-])(?P<delta>\d+)\))?"
+)
+#: …and the file-scoped clause the attribution paragraph prints beside it: `(that file: 0 → 3; …)`.
+_FILE_CLAIM_RE = re.compile(r"\(that file:\s*(?P<before>\d+)\s*→\s*(?P<after>\d+)\b")
+#: A clause sits inside one sentence, so its neighbours are found within this many characters of
+#: the paragraph's flattened text (the block wraps its sentences across several `#:` lines).
+_CLAIM_WINDOW = 200
+
+
+def _flow(block: str) -> str:
+    """The block's `#:` prefixes flattened, so a sentence wrapped across lines reads as one."""
+    return re.sub(r"\n#:\s?", " ", block)
+
+
+def _growth_claim(
+    block: str, row: str | None = None, near: str | None = None
+) -> tuple[str, int, int, int]:
+    """The ONE published growth clause — optionally for `row`, optionally published beside `near`.
+
+    ⛔ KEYED TO THE CLAUSE, NOT TO A TOKEN SOMEWHERE IN THE RUN (review, finding 1). The previous
+    form asserted `DECLARED_DRIFT_ROW in block` with `DECLARED_DRIFT_ROW = "proj.g.query"`, and
+    that shape already sits on TEN pre-existing lines of this run (`tools/sdk_privatise.py:179,
+    596, 599, 602, 710, 722, 846, 919, 952, 1034`) — so deleting the whole attribution paragraph,
+    or replacing the row name inside it, left the assertion GREEN while its message claimed the
+    block had stopped naming the row. `near` locates the clause by the FILE the paragraph
+    introduces (the windowed idiom `_attributions` already uses), which is unique to it.
+
+    ⛔ AND THE NUMBERS COME OUT OF THE BLOCK (review, finding 2). The arm used to compare the file
+    against `DECLARED_DRIFT_ROWS = 3`, a constant restated in the test, so editing the sentence's
+    own `3643 → 3646 (+3)` to `(+4)` left it GREEN. The sentence IS the claim, so the sentence is
+    the input and the MEASUREMENT is what it is compared to.
+    """
+    flat = _flow(block)
+    claims = [c for c in _GROWTH_CLAIM_RE.finditer(flat) if row is None or c["row"] == row]
+    where = ""
+    if near is not None:
+        anchors = [m.start() for m in re.finditer(re.escape(near), flat)]
+        assert anchors, (
+            f"the block no longer names `{near}`, the file this attribution paragraph names")
+        claims = [c for c in claims
+                  if any(abs(c.start() - anchor) <= _CLAIM_WINDOW for anchor in anchors)]
+        where += f" beside `{near}`"
+    if row is not None:
+        where += f" for `{row}`"
+    assert len(claims) == 1, (
+        f"expected exactly ONE `row` **before → after** (+delta) clause{where}, found "
+        f"{[c.group(0) for c in claims]!r} — this arm is keyed to that clause, so it cannot grade "
+        "a sentence that is missing, duplicated or reflowed away")
+    claim = claims[0]
+    before, after = int(claim["before"]), int(claim["after"])
+    delta = after - before
+    if claim["delta"] is not None:
+        assert claim["sign"] == "+" and delta == int(claim["delta"]), (
+            f"the block's own arithmetic: `{claim['row']}` {before} → {after} is "
+            f"{delta:+d}, not ({claim['sign']}{claim['delta']}) — a published figure that does "
+            "not add up is the defect class this block exists to remove")
+    return claim["row"], before, after, delta
+
+
+def _file_claim(block: str) -> tuple[int, int]:
+    """The attribution paragraph's file-scoped clause `(that file: 0 → 3)`, read out of it."""
+    claims = list(_FILE_CLAIM_RE.finditer(_flow(block)))
+    assert len(claims) == 1, (
+        "the attribution paragraph must publish the file's own share as `(that file: 0 → N)` "
+        f"exactly once; found {[c.group(0) for c in claims]!r}")
+    return int(claims[0]["before"]), int(claims[0]["after"])
 
 
 def test_the_declared_source_of_the_pin_drift_reproduces_into_its_own_file(tmp_path):
@@ -182,9 +251,10 @@ def test_the_declared_source_of_the_pin_drift_reproduces_into_its_own_file(tmp_p
     is exactly what went red and what a re-pin turns green. What nothing graded before is the
     ATTRIBUTION — the prose that says WHERE the drift came from — and prose that outlives its
     measurement is this block's own recorded defect class. So this arm grades the declared
-    source: the file still exists, it still holds exactly that many rows of that shape, and the
-    receiver is still UNTYPED (`edits_for` proves nothing there), which is the only reason a
-    `Graph` read may sit in the census instead of being swept.
+    source: the file still exists, it still holds exactly as many rows of that shape as the
+    paragraph CLAIMS (its own figures, not a constant here), and the receiver is still UNTYPED
+    (`edits_for` proves nothing there), which is the only reason a `Graph` read may sit in the
+    census instead of being swept.
 
     Falsifiable without the walk: if the three reads are re-pointed, move, or gain an SDK
     binding, this reds and the block's attribution has to be re-measured — the recurrence the
@@ -194,13 +264,23 @@ def test_the_declared_source_of_the_pin_drift_reproduces_into_its_own_file(tmp_p
         f"`{DECLARED_DRIFT_FILE.relative_to(ROOT)}` is the file the block attributes this tree's "
         "+3 to; if it was moved or deleted the attribution is stale")
     block = _residue_block()
-    assert DECLARED_DRIFT_FILE.name in block, "the block no longer names the file it attributes to"
-    assert DECLARED_DRIFT_ROW in block, "the block no longer names the row it declares"
+    # ⛔ BOTH FIGURES THE PARAGRAPH PUBLISHES ARE READ OUT OF IT AND GRADED (review, findings 1-2):
+    # the tree-wide row clause (`proj.g.query` **3643 → 3646** (+3)) and the file-scoped share
+    # beside it (`(that file: 0 → 3)`). Nothing keyed on the ROW token, because `proj.g.query`
+    # sits on ten earlier lines of this run; the clause's proximity to the file name is what makes
+    # it THIS paragraph's claim.
+    row, before, after, delta = _growth_claim(block, near=DECLARED_DRIFT_FILE.name)
+    file_before, file_after = _file_claim(block)
+    assert (file_before, file_after) == (0, delta), (
+        f"the paragraph says `(that file: {file_before} → {file_after})` beside its own tree-wide "
+        f"`+{delta}`: the file's share must BE the whole delta, because the same sentence's next "
+        "words are `no other file moves` — two figures in one sentence that disagree is how a "
+        "re-pin sentence goes false while reading as measured")
     edits = privatise.edits_for(DECLARED_DRIFT_FILE, {"query": "_query"})
-    assert dict(edits.residue) == {DECLARED_DRIFT_ROW: DECLARED_DRIFT_ROWS}, (
-        f"the block declares `{DECLARED_DRIFT_ROW}` x{DECLARED_DRIFT_ROWS} in "
-        "`tools/read_wave_latency.py`; the file now yields "
-        f"{dict(edits.residue)!r} — re-measure the attribution instead of leaving it stale")
+    assert dict(edits.residue) == {row: file_after}, (
+        f"the block declares `{row}` x{file_after} in `{DECLARED_DRIFT_FILE.name}` "
+        f"({before} → {after} tree-wide); the file now yields {dict(edits.residue)!r} — "
+        "re-measure the attribution instead of leaving it stale")
     assert not (edits.attrs or edits.defs or edits.strings), (
         "a TYPED rewrite in this file means those reads are no longer the untyped edge the block "
         "declares them as, so the pin is absorbing a reference the sweep should have made")
@@ -213,6 +293,30 @@ def test_the_declared_source_of_the_pin_drift_reproduces_into_its_own_file(tmp_p
     assert [repl for *_span, repl in typed.attrs] == ["._query"] and not typed.residue, (
         "the falsifier: an SDK-typed receiver must be REWRITTEN and leave no residue, or the "
         "arm above cannot tell this file's `Graph` reads from a typed reference")
+
+
+OUT_UPDATE_FILE = ROOT / "tests" / "test_14125_retired_name_calls.py"
+
+
+def test_the_second_declared_row_also_reproduces_into_its_own_file():
+    """The paragraph's SECOND row (`out.update` **42 → 43**) is graded the same way, from itself.
+
+    ⛔ FINDING 2 REACHED THIS FIGURE TOO: the paragraph names two rows, and only the first was
+    compared to anything — the `out.update` half could be edited to any number while the suite
+    stayed green, so half of one measured sentence was ungraded. It is graded here through the
+    same parse (its own `before → after (+delta)` arithmetic, then the file its own prose names),
+    so the arm cannot be satisfied by a row name that merely appears elsewhere in the run.
+    """
+    block = _residue_block()
+    row, before, after, delta = _growth_claim(block, row="out.update")
+    assert OUT_UPDATE_FILE.is_file(), (
+        f"`{OUT_UPDATE_FILE.relative_to(ROOT)}` is the file the paragraph attributes this row to; "
+        "if it was moved or deleted the attribution is stale")
+    edits = privatise.edits_for(OUT_UPDATE_FILE, {"update": "_update"})
+    assert dict(edits.residue) == {row: delta}, (
+        f"the block declares `{row}` +{delta} ({before} → {after}) from "
+        f"`{OUT_UPDATE_FILE.name}`; the file now yields {dict(edits.residue)!r} — re-measure the "
+        "attribution instead of leaving it stale")
 
 
 # ── F2: typing is per SCOPE; ambiguity is not rewritten ─────────────────────────
@@ -305,7 +409,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (985 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1044 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair), AND THE ARMS GRADE
     ALL OF IT
@@ -319,7 +423,8 @@ def _residue_block() -> str:
 
     `test_the_residue_block_is_a_real_block_and_publishes_its_addresses` anchors the extent, so
     a reflow that breaks the run with a blank line SCREAMS here instead of silently shrinking
-    every arm's grading surface.
+    every arm's grading surface — and it READS THE FIGURE ABOVE BACK OUT of this docstring, so the
+    instruction to re-derive it after a prose edit is enforced rather than trusted.
     """
     lines = (ROOT / "tools" / "sdk_privatise.py").read_text(encoding="utf-8").splitlines()
     pin = next(i for i, line in enumerate(lines) if line.startswith("SWEEP_RESIDUE = ("))
@@ -461,6 +566,19 @@ def test_the_residue_block_is_a_real_block_and_publishes_its_addresses():
     """
     block = _residue_block()
     assert block.count("\n") > 100, "the residue block is missing or truncated"
+    # ⛔ THE PUBLISHED EXTENT FIGURE IS GRADED (review, finding 5). This docstring tells the next
+    # lane to re-derive "N lines at this head" after a prose edit, and NOTHING graded it — so it
+    # had already rotted 25 lines behind `main` (1010 measured vs `985` published) before the
+    # re-pin paragraph added 34 more. A published figure with no grader is the same defect class
+    # as finding 2, in the docstring of the guard built to catch it, so it is read back out here.
+    figure = re.search(r"(\d+) lines at this head", _residue_block.__doc__ or "")
+    assert figure, (
+        "`_residue_block()` must keep publishing the run's measured extent as `N lines at this "
+        "head` — the extent is what a prose edit silently shortens")
+    measured = block.count("\n") + 1
+    assert int(figure.group(1)) == measured, (
+        f"the docstring publishes {figure.group(1)} lines; `_residue_block()` walks {measured} — "
+        "re-derive the figure after a prose edit instead of trusting it")
     # ⛔ THE EXTENT IS PINNED, NOT ASSUMED (review, round 17, P3). `_residue_block()` walks up
     # while lines are `#:`-prefixed, so a single blank line inserted mid-run TRUNCATES it — and
     # every negative arm below would then pass over a surface that no longer contains the
