@@ -1435,7 +1435,8 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
         that has gone missing. Measured: replace the warm-up with a dead
         `_search = SEAM` and add a module-level
         `def _first(_search, q): return _search(query=q, limit=1)` — one real read
-        remains inside `run`, the grant's recorded reason ("TWO") is false, and the
+        remains inside `run`, the tool's two reads (a discarded warm-up and the
+        per-query loop) are not both live, and the
         count still reads `2`, so the arm is GREEN. `unresolved` is `0` throughout;
         the count row cannot see this at all.
 
@@ -1655,10 +1656,11 @@ def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
 def test_the_grant_grader_counts_CALL_SITES_across_ONE_mention():
     """#14278 (round 9, F1-B) — one binding driven twice is ONE mention, TWO reads.
 
-    `_seam_live_reads` reports both facts because the two records count different
-    things: the census (`_sites`) counts MENTIONS, which is the unit an
-    owner-granular grant absorbs, while the grant's recorded reason counts CALL
-    SITES. Measured at `7d18f1c824`, binding the warm-up once and calling it twice
+    `_seam_live_reads` reports both facts because the two units differ: the census
+    (`_sites`) counts MENTIONS, which is the unit an
+    owner-granular grant absorbs, while the READ's count is the tool's own CALL
+    SITES (`tools/read_wave_latency.py:296` the discarded warm-up, `:305` the
+    per-query loop). Measured at `7d18f1c824`, binding the warm-up once and calling it twice
     gave 2 mentions / 3 distinct calls and the arm stayed GREEN — the third read
     inherited a PERMANENT exemption with no recorded reason. The call-site row is
     what closes it, so this pin exists to make that row's subject visible without
@@ -1736,7 +1738,8 @@ def run(sdk):
         "the chain must ADMIT the escaping mention rather than resolve it away: "
         f"live={len(e_live)} resolved={len(e_res)} "
         f"unresolved={len(e_unres)} calls={len(e_calls)}")
-    # The call-site count is exactly the recorded reason's TWO here, so ONLY the
+    # The call-site count is exactly the tool's TWO here (a discarded warm-up, and
+    # the per-query loop), so ONLY the
     # admission can red this — which is precisely what a tree with a third,
     # unfollowable read looks like.
     with pytest.raises(AssertionError, match="escaped into a binding shape"):
@@ -2417,9 +2420,16 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # two EXECUTIONS while the loop executes once per query.) ⛔ NOTE WHAT THIS
     # ARM IS *NOT* FOR: the door pin main landed (`tests/test_14192_read_wave_tool.py`,
     # `test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags`) already
-    # detects a third reach — including spellings this AST walk declares as its
-    # residual (`getattr`, a computed name) — and it pins every read's owner to
-    # the literal `"run"`. This arm grades the GRANT instead: it reads
+    # detects a third reach through the STATIC spellings this walk cannot follow
+    # — a literal `getattr`, an alias, a string literal — and it pins every read's
+    # owner to the literal `"run"`. ⛔ BUT NOT ALL OF THEM: a name COMPUTED at
+    # runtime (`_nm = "_tortoise_" + "fts_query"; getattr(sdk, _nm)(…)`) is
+    # GREEN in main's pin and GREEN here — main's pin declares it its own
+    # "computed at runtime" residual (`tests/test_14192_read_wave_tool.py:539`),
+    # and this walk returns the same 2 live / 2 calls. That spelling is therefore
+    # covered by NEITHER pin, and it is named here rather than listed as detected
+    # so the lane that closes it does not read it as closed. This arm otherwise
+    # grades the GRANT: it reads
     # `intentional_keep` rather than hardcoding an owner, so a grant the census
     # ACCEPTS is not false-blocked here. If this reds, the grant and the tool
     # disagree: re-derive this row's literal and the grant's ground above, do not
@@ -2482,7 +2492,8 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # never claims a read it did not attribute.
     live, resolved, unresolved, seam_calls = _seam_live_reads(
         harness, seam_mentions)
-    # ⛔ COUNT CALL SITES, NOT MENTIONS. The object the recorded reason describes is
+    # ⛔ COUNT CALL SITES, NOT MENTIONS. The object this row's expected count
+    # describes is
     # a set of READS (`:296`'s discarded warm-up, `:305`'s measured loop), and one
     # mention can feed several calls — `_w = SEAM; _w(a); _w(b)` is one mention and
     # TWO reads. While this row asserted on mentions, that spelling kept `live` at
@@ -2531,15 +2542,15 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     traced = [c for c in seam_calls
               if any(k.arg == "leg_trace" for k in c.keywords)]
     assert len(traced) == 1, (
-        "the recorded reason says exactly ONE of the two reads is the MEASURED "
+        "this row's expected count says exactly ONE of the two reads is the MEASURED "
         f"loop and attaches `leg_trace`: {len(traced)} of {len(seam_calls)} do")
 
     def _enclosing_repeat(node):
         """The nearest enclosing loop, or None.
 
-        One read per iteration is the unit the recorded reason counts (`1 + N`
-        executions, not two), so a loop — `for`, `async for` or `while` — is the
-        only thing that breaks it.
+        One read per iteration is the unit this row's `1 + N` counts (one
+        warm-up, plus one per query — not two fixed reads), so a loop — `for`,
+        `async for` or `while` — is the only thing that breaks it.
         """
         up = harness_parent.get(id(node))
         while up is not None:
@@ -2550,14 +2561,14 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
 
     assert _enclosing_repeat(traced[0]) is not None, (
         "the `leg_trace` read is not inside a loop, so it does not "
-        "execute once per query and the recorded reason's `1 + N` is wrong")
+        "execute once per query and this row's `1 + N` is wrong")
     # ⛔ AND THE `1` HALF OF `1 + N`. The row above only proves the TRACED read
     # runs once per query; nothing proved the OTHER site runs ONCE, which is the
     # whole difference between `1 + N` and `2N`. Measured at `d4729e151f`:
     # deleting the warm-up and adding an untraced read inside the same `for` left
-    # the arm GREEN at `{mentions: 2, live: 2, calls: 2}` while the recorded
-    # reason went on describing a site that no longer existed, and moving the
-    # warm-up into a `while` was GREEN too. The reason says "the warm-up issued
+    # the arm GREEN at `{mentions: 2, live: 2, calls: 2}` while this row went on
+    # describing a site that no longer existed, and moving the
+    # warm-up into a `while` was GREEN too. The tool's shape is "the warm-up issued
     # BEFORE the per-query loop (result discarded)", so every non-traced site
     # must sit outside every loop — that is what makes `1 + N` true rather than
     # merely `traced in for`.
@@ -2566,10 +2577,10 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
             continue
         repeat = _enclosing_repeat(call)
         assert repeat is None, (
-            "the recorded reason's `1 + N` says the OTHER seam read is the "
+            "this row's `1 + N` says the OTHER seam read is the "
             "warm-up issued BEFORE the per-query loop and discarded, but this "
             f"one sits inside a loop at line {repeat.lineno}: every iteration "
-            "adds a read, so the reason's `1 + N` is wrong")
+            "adds a read, so the row's `1 + N` is wrong")
 
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
     # volunteer pipeline does exactly that) is not an ``ast.Call`` on
