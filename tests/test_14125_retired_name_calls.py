@@ -2684,13 +2684,23 @@ def test_every_availability_probe_re_raises_a_programming_error():
     `skipif` calls directly). The walk now answers from the DECISION — a flag
     whose name ends in `AVAILABLE`, or a helper whose value a `skipif` reads —
     so a fourth spelling or a fourth resolution shape cannot go quietly blind.
+
+    ⛔ THE FAIL MESSAGE'S FIRST SENTENCE ONCE LISTED ALL FOUR REQUIRED NAMES
+    UNCONDITIONALLY — "without re-raising `(AttributeError, NameError, TypeError,
+    ImportError)` first" — which is STRICTER than the gate enforces and than the message's
+    OWN correction paragraph, four lines below it, already said. `_required_names` returns
+    three names for a block that imports no own code inside its `try` (21 root rows at this
+    head, 18 of them swallowing), so a lane reading the header would have believed
+    `ImportError` was always required (review of #14287, round 2, P3). The sentence now
+    states three names plus the conditional fourth, matching the gate and the repair text.
     """
     unarmed = _unarmed_probe_blocks()
     if unarmed:
         rendered = "\n".join(f"  {rel}:{lineno}" for rel, lineno in unarmed)
         pytest.fail(
-            "these availability probes catch `Exception` without re-raising "
-            "`(AttributeError, NameError, TypeError, ImportError)` first, so a "
+            "these availability probes catch `Exception` without re-raising the names the "
+            "block requires — `(AttributeError, NameError, TypeError)` in every block, PLUS "
+            "`ImportError` when it imports own code INSIDE the `try` — first, so a "
             "renamed or mistyped seam reads as 'storage unavailable' — a SKIP "
             "locally and a hard refusal in CI that names no door (#14114 class "
             f"2, #14125):\n{rendered}\n\n"
@@ -5487,9 +5497,15 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #: `b83e5511f4`, final P2; follow-up recorded on #14125). Measured, it has NO unique
     #: discriminating power, and the earlier claim here — "the control, this is not 'broad arms
     #: never charge'" — was the opposite of what it pins:
-    #:   * that reading applied CONSISTENTLY (drop `names & _BROAD` here AND `_BROAD` from the
-    #:     charge test) leaves this row `True` — green, because its own second arm
-    #:     `except ImportError: <drop>` charges that shape on its own merits;
+    #:   * that reading applied (drop `names & _BROAD` here) leaves this row `True` — green,
+    #:     because its own second arm `except ImportError: <drop>` charges that shape on its own
+    #:     merits. ⛔ THE RECIPE USED TO SAY "AND `_BROAD` FROM THE CHARGE TEST", WHICH IS NOW A
+    #:     NO-OP LEFT BEHIND BY THE COMMIT THAT REMOVED THE TERM: the charge test reads
+    #:     `if reachable & _RAISED_ALL and not _reraises(handler):`, and its own comment records
+    #:     that `_BROAD` was deliberately deleted from it — so the second half of the stated
+    #:     mutant cannot be performed, and two comments in this one file disagreed about whether
+    #:     the term is there at all (review of #14287, round 2, P2). The CONCLUSION is unaffected:
+    #:     dropping only `names & _BROAD` still leaves this row green;
     #:   * the `return not _reraises(handler)` → `return False` mutant reds it, but reds the
     #:     PRE-EXISTING table row `("a broad arm", …, True)` in the `_swallows_everything`
     #:     table just as hard.
@@ -5857,9 +5873,14 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "only a raise that converts the failure into a SKIP drops it"
         )
 
-    # 4j-undetriginta. ⛔ THE GATE VERDICT on the pytest-skip conversion (review of #14287,
-    #     P1). The rows above grade `_reraises`; this one grades what the CENSUS charges,
-    #     because a predicate row cannot see a verdict. This is the shape a lane reaches by
+    # 4j-undetriginta. ⛔ THE GATE VERDICTS on the pytest-skip conversion (review of #14287,
+    #     P1). The rows above grade `_reraises`; the loop below grades `_swallows_everything`;
+    #     and the assertions at the END of this block grade what each GATE returns for a root
+    #     probe carrying the conversion. ⛔ AN EARLIER CUT OF THIS ROW SAID "this one grades what
+    #     the CENSUS charges" AND ASSERTED ONLY THE PREDICATE (review of #14287, round 2, P1):
+    #     the heading named a witness that did not exist, which is the "presented as load-bearing
+    #     with no row that reds" class this file deletes elsewhere. It is now true. This is the
+    #     shape a lane reaches by
     #     converting a broken-engine import into a SKIP — `except ImportError as exc: raise
     #     pytest.skip.Exception(…) from exc` — and at runtime the caught error does NOT reach
     #     anyone: `Skipped` is raised, pytest skips, the tree reads green. Measured before
@@ -5877,7 +5898,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         #: ⛔ THE `raise RuntimeError(...) from exc` ROW IS DELETED, NOT KEPT HERE (review of
         #: #14287, P3): it was a second witness of a path already pinned — the `_reraises` row
         #: `("raise X from exc", True)` above pins that spelling, and "a genuine re-raise, which
-        #: charges nothing" below pins the census-level arm that would have to misread it. No
+        #: charges nothing" below pins that the DROPPING spelling is what charges, not the
+        #: re-raise. ⛔ IT DOES NOT PIN A GATE VERDICT, which this comment claimed: that row is a
+        #: `_swallows_everything` call too, so "pins the census-level arm that would have to
+        #: misread it" named a witness that does not exist (review of #14287, round 2, P1). The
+        #: gate verdict for this family is asserted at the END of this block instead. No
         #: mutant reverts one without the other, so the row added no discriminating power; the
         #: PROPERTY it stated lives in the `_reraises` rows, where it belongs.
         (
@@ -5903,6 +5928,55 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "so the caught error does not propagate and converting it into a skip is the "
             "same drop as calling `pytest.skip` directly"
         )
+
+    # ⛔ AND THE GATES THEMSELVES, not only the predicate — the standard this file states
+    # above ("the GATE VERDICTS themselves are witnesses, not just the predicate: both gates
+    # must RED this block and stay green on the armed one"). Without these four rows the
+    # heading above named a witness that did not exist: every assertion in the loop is a
+    # `_swallows_everything` call, so a mutant that made a GATE misread the skip conversion
+    # could not red anything here (review of #14287, round 2, P1). Measured at this head: the
+    # skip shape reds BOTH gates and the armed control is green on both.
+    _skip_witness = "tests/_14287_witness.py"
+    _skip_probe_src = (
+        "FALKORDB_AVAILABLE = False\n"
+        "try:\n"
+        "    from tortoise.sdk import TortoiseSDK as _ProbeSDK\n"
+        "    _ProbeSDK()\n"
+        "    FALKORDB_AVAILABLE = True\n"
+        "except ImportError as exc:\n"
+        "    raise pytest.skip.Exception('no engine') from exc\n"
+    )
+    _armed_probe_src = (
+        "FALKORDB_AVAILABLE = False\n"
+        "try:\n"
+        "    from tortoise.sdk import TortoiseSDK as _ProbeSDK\n"
+        "    _ProbeSDK()\n"
+        "    FALKORDB_AVAILABLE = True\n"
+        "except (AttributeError, NameError, TypeError, ImportError):\n"
+        "    raise\n"
+        "except Exception:\n"
+        "    FALKORDB_AVAILABLE = False\n"
+    )
+    _skip_rows = tuple(
+        (_skip_witness, *row) for row in _probe_blocks_from_source(_skip_probe_src)
+    )
+    _armed_rows = tuple(
+        (_skip_witness, *row) for row in _probe_blocks_from_source(_armed_probe_src)
+    )
+    assert _unarmed_from_rows(_skip_rows) == ((_skip_witness, 2),), (
+        "the UNARMED gate must RED a root probe that converts its own-code `ImportError` "
+        f"into a pytest skip — that is the drop the skip conversion performs: {_skip_rows}"
+    )
+    assert _seam_from_rows(_skip_rows) == ((_skip_witness, 2),), (
+        "the IMPORT-SEAM gate must also RED it: the arm names `ImportError` but the raise "
+        f"converts the failure into a skip, so nothing propagates: {_skip_rows}"
+    )
+    assert _unarmed_from_rows(_armed_rows) == (), (
+        f"the armed control must stay GREEN in the unarmed gate: {_armed_rows}"
+    )
+    assert _seam_from_rows(_armed_rows) == (), (
+        f"the armed control must stay GREEN in the import-seam gate: {_armed_rows}"
+    )
 
     # 4j-sesvicesimus. A NESTED CLASS BODY IS A SEPARATE SCOPE, in BOTH directions. The
     #     `crossed_callable` flag's CLASS half was unpinned: the two METHOD controls pass via
