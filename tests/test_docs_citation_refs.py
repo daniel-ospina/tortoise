@@ -3537,7 +3537,7 @@ def _d5_documented_long_options(completed: subprocess.CompletedProcess) -> set[s
     exit code can, so the floor never degenerates into an excuse.
     """
     documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)",
-                                (completed.stdout or "") + (completed.stderr or "")))
+                                (completed.stdout or "") + "\n" + (completed.stderr or "")))
     if len(documented) >= _D5_LONG_OPTION_FLOOR:
         return documented
     if completed.returncode != 0:
@@ -5365,14 +5365,34 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # Pinning `_d5_grade_alias_spelling` with a stub does NOT pin what THIS loop calls: replacing the
     # loop body with a local `subprocess.run` plus a two-way `rc in (0, 1)` left this file GREEN on
     # both platforms (`36 passed`) — the exact fail-open read the seam exists to prevent, reinstated
-    # at the call site with nothing reding, because a stub can only reach the helper. Recording the
-    # seam's calls proves the loop actually routes through it: a loop-local two-way records NOTHING.
+    # at the call site with nothing reding, because a stub can only reach the helper.
+    # ⛔ AND CALLING IS NOT USING (#14303 review round 5, P2 — MEASURED). Recording the CALLS alone
+    # left a loop that kept the call and re-derived `accepted = ran.returncode in (0, 1)` from the
+    # returned run completely green — it records every spelling and reads the wrong answer. So the
+    # recorder hands back a verdict that RECORDS ITS OWN CONSUMPTION: the loop's `if accepted:` is
+    # the only thing that asks what the verdict means, and a locally re-derived one is never asked,
+    # leaving `seam_verdicts` short and reding here.
     seam_calls: list[str] = []
+    seam_verdicts: list[str] = []
     real_grade = _d5_grade_alias_spelling
+
+    class _RecordingVerdict:
+        """A verdict that RECORDS being consulted, so the loop's USE of it is attributable."""
+
+        __slots__ = ("_spelling", "_verdict")
+
+        def __init__(self, verdict: bool, spelling: str) -> None:
+            self._verdict = verdict
+            self._spelling = spelling
+
+        def __bool__(self) -> bool:
+            seam_verdicts.append(self._spelling)
+            return self._verdict
 
     def recording_grade(spelling: str, grep: str = "grep"):
         seam_calls.append(spelling)
-        return real_grade(spelling, grep)
+        ran, verdict = real_grade(spelling, grep)
+        return ran, _RecordingVerdict(verdict, spelling)
 
     monkeypatch.setitem(globals(), "_d5_grade_alias_spelling", recording_grade)
     for spelling in alias_spellings:
@@ -5396,6 +5416,11 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
         "the alias loop did not classify every spelling through `_d5_grade_alias_spelling` — a "
         "loop-local two-way `rc in (0, 1)` reads a NON-ANSWER as a refusal and reinstates the "
         f"fail-open read the seam exists to prevent (#14303 round 4): seam called for {seam_calls!r}")
+    assert seam_verdicts == list(alias_spellings), (
+        "the alias loop called `_d5_grade_alias_spelling` but did not USE its verdict — keeping the "
+        "call and re-deriving `accepted = ran.returncode in (0, 1)` from the returned run records "
+        "every spelling and still reads a NON-ANSWER as a refusal, which is the same fail-open read "
+        f"one layer down (#14303 round 5): verdict consulted for {seam_verdicts!r}")
 
     hidden = ("row: `grep -c '^[+-]$'`\n"
               "and: `grep -c --unix-byte-offsets '^[+-]$'`\n")
@@ -5684,8 +5709,9 @@ def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
     # ⛔ THE MARKER PATH IS QUOTED. Unquoted, a `tmp_path` containing a space makes `touch` fail, the
     # marker is never created, and this guard then passes VACUOUSLY while grep really was spawned
     # (#14303 review, P2 — reproduced by hand with a spaced path). pytest's basetemp is pinned under
-    # `/tmp/tt_<hex>` today, so it is unreachable in this suite; that makes the quoting hardening,
-    # not a live fix, which is why it is stated rather than silently tightened.
+    # `/tmp/tt_<hex>` by the suite's conftest, so it takes an explicit `--basetemp` with a space to
+    # reach; that makes the quoting hardening, not a live fix, which is why it is stated rather than
+    # silently tightened.
     spy_dir = tmp_path / "spy-bin"
     spy_dir.mkdir()
     marker = tmp_path / "grep-was-spawned"
