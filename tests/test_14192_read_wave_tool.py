@@ -619,7 +619,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         handed = isinstance(node, ast.Call) and callee not in _NON_MUTATING and any(
             _names_handed(arg) & watched
             for arg in list(node.args) + [k.value for k in node.keywords])
-        if receiver & (watched | rows) or "per_query" in receiver or handed:
+        if receiver & (watched | rows) or handed:
             hits.append(node.lineno)
     return hits
 
@@ -635,19 +635,23 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
         for _i, _pq in enumerate(per_query): _pq["order"].sort()
         (zed,) = per_query[-1:]; zed["order"].sort()
 
-    ⛔ RE-MEASURED, not carried: the two assignment spellings
-    (`pq = per_query[-1]; pq["order"].sort()` and its `= sorted(…)` variant) were GREEN
-    when this guard was written and are RED at `e66d23f539d4` because that commit's
-    `rows` clause in `_mutated_after` reaches them — so they are NOT this guard's
-    subject and are NOT claimed as measured-green here. What is uniquely this guard's
-    is the `for`-target and unpacked-target half. (An un-remeasured sentence in a
-    guard's own evidence base is the same defect class as an unmeasured assertion —
-    which is why this paragraph cites the commit it was measured at.)
+    ⛔ WHAT IS UNIQUELY THIS GUARD'S IS THE UNPACKED TARGET — re-measured at
+    `bb14ebfc501c`, not carried. The `for` shapes below are PINS of this guard, but their
+    coverage is `_mutated_after`'s `rows` clause (that commit widened `rows` with every
+    loop/comprehension target over `per_query`), which fires FIRST and reports its own
+    message. Deleting the element guard still leaves them RED. The unpacked slice is the
+    only listed shape it alone catches.
 
-    `_mutated_after`'s `"per_query" in receiver` clause covers a LITERAL receiver
-    (`per_query[-1]["order"].sort()`, measured RED); `rows` covers a name bound to
-    `per_query[-1]`; neither covers a `for` target or an unpacked one, which is what
-    this function exists for.
+    `_mutated_after` covers a LITERAL receiver (`per_query[-1]["order"].sort()`) and, since
+    `bb14ebfc501c`, a name bound to `per_query[-1]` and a `for` target — all through
+    `rows`. `rows` is `{"per_query"} | …` on every call, so the older
+    `or "per_query" in receiver` term was provably subsumed and has been deleted rather
+    than left standing as a clause nothing can red.
+
+    Residual, stated rather than implied: a BOUND MUTATOR of an element is not followed —
+    `for _pq in per_query: _s = _pq["order"].sort; _s()` is GREEN. Same family as the
+    `environ` half's `_set = os.environ.__setitem__`, which IS handled there; here it is
+    not, and saying so is the difference between a residual and a hole.
     """
     element_names: set[str] = set()
     for node in ast.walk(run_def):
@@ -789,8 +793,24 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
                     imported_environ.add(spec.asname or "environ")
 
     def _mentions_mapping(value: ast.AST) -> bool:
+        """The SEED predicate. It must be as wide as `_is_environ` below, or the seed
+        resolves one spelling and the check catches another (#14281): `getattr(os,
+        "environ")` was in the CHECK and not in the SEED, so
+
+            _e = getattr(os, "environ"); _e["TORTOISE_FUSED_RERANK"] = "1"
+
+        was GREEN while the inline spelling was RED — the same its-predicate-is-narrower
+        shape that made the import a terminal name instead of a seed. Measured: four
+        variants (alias + subscript, alias + `pop`, alias + bound mutator) all GREEN
+        before this clause, all RED after, and the real tool unchanged (`[]`).
+        """
         return any((isinstance(n, ast.Attribute) and n.attr == "environ")
                    or (isinstance(n, ast.Name) and n.id in imported_environ)
+                   or (isinstance(n, ast.Call)
+                       and getattr(n.func, "id", None) == "getattr"
+                       and len(n.args) >= 2
+                       and isinstance(n.args[1], ast.Constant)
+                       and n.args[1].value == "environ")
                    for n in ast.walk(value))
 
     # ⛔ To a FIXPOINT, and through CONTAINERS: `_envs = [os.environ]` then
@@ -1032,7 +1052,14 @@ def test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation() -> None:
             f"{caught.strip()!r} must stay RED — the page IS handed to a call that may "
             "mutate it, and stopping at pure reads must not disable that")
 def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
-    """Every STATIC spelling of `os.environ` is the mapping (#14281 review F1).
+    """The mapping is recognised through the STATIC spellings this repo can carry.
+
+    ⛔ `os.environ`, `from os import environ` (incl. `as`), `getattr(os, "environ")`, and
+    ANY alias/container/bound-mutator chain over those, to a fixpoint (#14281 review F1).
+    Residual, stated rather than implied: `vars(os)["environ"]`, `os.__dict__["environ"]`
+    and a name COMPUTED at runtime are not recognised, and a helper that reaches
+    `os.environ` inside its own body is not followed — `tools/read_wave_latency.py`
+    carries none of these.
 
     ⛔ MEASURED GREEN before this fix, each against a genuinely flipped
     `TORTOISE_FUSED_RERANK` gate — which the artifact does not record (#14289), so a
@@ -1057,6 +1084,19 @@ def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
         "getattr": (
             "import os\n"
             'getattr(os, "environ")["TORTOISE_FUSED_RERANK"] = "1"\n'),
+        # ⛔ THE SEED MUST BE AS WIDE AS THE CHECK (#14281 review): `getattr(os, "environ")`
+        # was recognised by `_is_environ` and NOT by `_mentions_mapping`, so the inline
+        # spelling red and every ALIASED spelling of it stayed green — the same
+        # narrower-predicate-than-check shape that made the import a terminal name.
+        "getattr, then aliased": (
+            "import os\n"
+            '_e = getattr(os, "environ")\n'
+            '_e["TORTOISE_FUSED_RERANK"] = "1"\n'),
+        "getattr, aliased bound mutator": (
+            "import os\n"
+            '_e = getattr(os, "environ")\n'
+            "_p = _e.pop\n"
+            '_p("TORTOISE_FUSED_RERANK")\n'),
         # ⛔ SECOND-ORDER, and these are what makes the import a SEED rather than a
         # terminal name (#14281 review): adding the imported name to `env_alias` AFTER
         # `_aliases_of` had already run left every one of these GREEN, while the same
@@ -1134,8 +1174,9 @@ def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
     ctrl_hits = _mutated_after(ctrl, "results", 0, ctrl_append)
     assert ctrl_hits, (
         "the LITERAL `per_query[-1][\"order\"].sort()` is no longer caught by "
-        "`_mutated_after` — the clause that comment names as the coverage for this "
-        "class has been dropped, and the guard above is now standing alone")
+        "`_mutated_after`'s `rows` clause — that clause is the coverage for this class "
+        "(the older `or \"per_query\" in receiver` term was subsumed by it and has been "
+        "deleted; this control names `rows`, which is what actually reds)")
     rows_ctrl = ast.parse(
         "def run():\n    per_query.append({})\n    pq = per_query[-1]\n"
         '    pq["order"].sort()\n').body[0]
@@ -1175,6 +1216,9 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     AS THEMSELVES by the ``order``/``legs`` comprehensions of the one artifact dict (and
     never rebound after the read), and no ``os.environ`` mutation may happen in ``run()``
     at all — which arm of the fused-rerank gate was in force is not recorded (#14289).
+    That last clause is scoped to the STATIC spellings the guard resolves (`os.environ`,
+    `from os import environ`, `getattr(os, "environ")` and their alias/container chains);
+    its declared residuals are on `_environ_mutations`.
 
     Accepted FALSE-REDs, because the pin follows SHAPES and a shape shift costs an edit
     here rather than a silent change there — collating the id mapping
@@ -1387,11 +1431,14 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             f"line(s) {mutations} mutate a collection AFTER the measured read — an in-place "
             f"sort/clear reaches the artifact while the measured {what} no longer matches it")
 
-    # ⛔ AND MUTATING AN ELEMENT THROUGH AN ALIAS — the half this comment used to claim was
-    # already covered (`"per_query" in receiver`) and was NOT (#14281 review F2, measured):
-    # `pq = per_query[-1]; pq["order"].sort()` and `for _pq in per_query: …` were both
-    # GREEN, because the clause matches a literal receiver and cannot see a name bound to
-    # an element. Both halves are now assertions; neither is a sentence.
+    # ⛔ AND MUTATING AN ELEMENT THROUGH AN ALIAS. The clause this comment used to name
+    # (`"per_query" in receiver`) was PROVABLY SUBSUMED — `rows` is `{"per_query"} | …`
+    # on every call — so it was deleted rather than left as a clause no mutant can red
+    # (#14281 review F3, measured: deleting it red nothing). What covers the shapes is
+    # `rows`: the literal receiver, a name bound to `per_query[-1]`, and (since
+    # `bb14ebfc501c`) every `for`/comprehension target over `per_query`. What is uniquely
+    # `_per_query_element_mutations`'s is the UNPACKED target. Both halves are assertions;
+    # neither is a sentence.
     #
     # ⛔ BOTH ANCHORED AT THE READ, NOT AT THE `append` (#14281 review P1, measured). The
     # first form filtered on `artifact_append.lineno`, so a rebind placed INSIDE the loop
