@@ -614,13 +614,16 @@ def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
     MEASURED before the guard existed: the RuntimeError below escaped
     `evaluate`, which is why this row is the pin and not a restatement.
 
-    ⛔ TWO EXCEPTION CLASSES, because the guard's BREADTH is what is pinned:
-    `OrgNotFoundError` is a `QuotaCheckError`, not a `RuntimeError`, so a single-class
-    row could not tell `except Exception` from `except RuntimeError`.
-    ⛔ This paragraph deliberately does NOT rank the two classes by "which one
+    ⛔ THREE EXCEPTION CLASSES, because the guard's BREADTH is what is pinned:
+    `OrgNotFoundError` is a `QuotaCheckError` (not a `RuntimeError`), and the third
+    row is a `QuotaCheckError` that is neither — so a single-class row could not tell
+    `except Exception` from `except RuntimeError`, and the two named classes alone
+    could not tell it from `except (RuntimeError, OrgNotFoundError)`.
+    ⛔ This paragraph deliberately does NOT rank the classes by "which one
     production raises": an earlier cut did, twice, and both times it was wrong (a
     transport failure and a terminal non-2xx raise `RuntimeError`; a missing org row
-    raises `OrgNotFoundError`). The two params exist to pin breadth, nothing else.
+    raises `OrgNotFoundError`; an empty `org_id` raises `QuotaCheckError`). ALL THREE
+    params exist to pin breadth, nothing else.
     """
     def raise_on_read(org_id):
         raise exc
