@@ -1543,8 +1543,10 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
         # would fetch rev B under rev A's address and every `_ref_sha` premise reading that ref
         # would be a premise about the WRONG TREE — the same "address that resolves to a different
         # tree" defect this block exists to catch, one level down in the re-arm path. The source is
-        # graded ONLY where it IS a sha: the six older revs address `refs/pull/14108/head`, a live
-        # pointer rather than an abbreviation of the key, and `origin/main` addresses a branch name.
+        # graded ONLY where it IS a sha: FIVE of the older entries address `refs/pull/14108/head`
+        # (a live pointer rather than an abbreviation of the key — measured: `83e94826a8a`,
+        # `2fe01fc775e`, `aee14c5ceb`, `d5ecef0d72`, `d523c9be8c`) and `origin/main` addresses a
+        # branch name, so SIX of the map's nine entries carry a non-sha source and are excused.
         if re.fullmatch(r"[0-9a-f]{7,40}", source):
             assert source.startswith(rev), (
                 f"{rev} is mapped to a refspec whose SOURCE is {source[:12]} — a DIFFERENT "
