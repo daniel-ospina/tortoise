@@ -455,13 +455,25 @@ _BROAD = frozenset({"Exception", "BaseException"})
 # `battery/runner/setup.py` defines our own `query` wrapper — leaving them out made
 # `import battery.runner.setup as torch; torch.query(…)` read EXEMPT over our seam).
 # An own-code module that is moved is a defect and must fail loudly; a module
-# behind an OPTIONAL extra must keep its skip, and "own code" does NOT imply that:
-# `tortoise/embeddings.py` does `import numpy as np` at module scope and numpy ships
-# only in the `embeddings` extra, which is why
-# `tests/test_rebuild_graph_only_derived_parity.py` wraps `from tortoise.embeddings`
-# in a broad `try` with a deliberate fallback. Demanding a re-raise there would turn
-# a legitimate skip into a collection error and contradict the recorded rule that
-# an absent capability skips. (That block DOES import own code inside its `try`
+# behind an OPTIONAL extra must keep its skip, and "own code" does NOT imply that.
+# THE EXTRA-GATED EXEMPLAR IS `tortoise/svbp.py`, NOT `tortoise/embeddings.py` — the
+# latter was named here and in the DECLARED RESIDUAL until it was measured (review of
+# #14287, P1): `tortoise/svbp.py` does `import jax` at MODULE scope and `jax` is the
+# `quadrature` extra (`pyproject.toml` optional-dependencies), so
+# `from tortoise.svbp import …` really does raise `ImportError` when the extra is
+# absent; `tortoise/embeddings.py` does NOT — `numpy>=1.24` is a CORE dependency in
+# `[project] dependencies`, and its heavy deps are reached through `heavy_imports` at
+# CALL time, so it imports with every extra blocked (measured: a `sys.meta_path` finder
+# raising `ImportError` for `sentence_transformers`/`torch`/`sklearn`/`scipy`/`jax`/
+# `jaxlib`/`pyarrow` still let `import tortoise.embeddings` and `import tortoise.sdk`
+# succeed). Demanding a re-raise on an extra-gated own module WOULD turn a legitimate
+# skip into a collection error and contradict the recorded rule that an absent
+# capability skips. ⛔ AND THE PARITY TEST'S FALLBACK IS NOT AN EXTRA GATE: `tests/`
+# `test_rebuild_graph_only_derived_parity.py` wraps `from tortoise.embeddings import
+# EMBEDDING_DIM` in a broad `try` for VERSION SKEW — its own comment reads "the base
+# tree hardcodes 384 in the index DDL; main exposes the constant" — so it was never
+# evidence of an absent extra, and citing it for one attached a true observation to a
+# false cause. (That block DOES import own code inside its `try`
 # and is still not graded today — but for a different reason: it binds no
 # availability decision and sits in no skip-gated helper, so `_probe_roots`
 # never reaches it. A future widening that grades ANY module-body `try` that
@@ -497,14 +509,16 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     read green in `_unarmed_probe_blocks` AND in
     `_probe_blocks_with_an_uncovered_import_seam`, i.e. the exact module-rename seam this
     file exists to catch (measured, cycle 9 of #14160). The legitimate skip it was
-    protecting is the optional-extra import — `from tortoise.embeddings import …` raises
-    `ImportError` when numpy is absent — and this predicate cannot tell the two apart: the
+    protecting is the optional-extra import — `from tortoise.svbp import …` raises
+    `ImportError` when `jax` is absent, and `jax` IS the `quadrature` extra — and this
+    predicate cannot tell the two apart: the
     ARM is identical, only the imported MODULE differs, so the decision belongs to a gate
     that knows the import. Until one carries it, that shape is a DECLARED RESIDUAL below.
 
     ⛔ DECLARED RESIDUAL (issue #14125): an OWN-CODE import that genuinely needs an
-    optional extra — `from tortoise.embeddings import …`, where numpy ships only in the
-    `embeddings` extra — is legitimately dropped by `except ImportError:`, and this
+    optional extra — `from tortoise.svbp import …`, where `import jax` at module scope in
+    `tortoise/svbp.py` needs the `quadrature` extra — is legitimately dropped by
+    `except ImportError:`, and this
     predicate charges it. There is no allowance for it: the EXTRA-GATED shape has 0 GRADED
     instances, and a module-keyed allowance would be machinery for a population that does
     not exist.
@@ -752,9 +766,21 @@ def _raises_a_skip(exc: ast.expr) -> bool:
     read "that is every `raise ValueError(...)` in the tree (measured 394 at this head)", attaching
     the population's size to a spelling that is 26 of it (and 403 in `tests/`+`tools/` if you count
     `raise ValueError(...)` anywhere rather than as a handler's last statement) — review of #14287,
-    P3. The population THIS residual is over: that same set, with each raised expression resolved
-    against its module scope, counting the ones that resolve to a skip/xfail signal while spelling
-    none of the parts above — **0** in `tests/`+`tools/` at this head, so an alias/parts table is
+    P3. ⛔ AND THE RESIDUAL'S POPULATION IS WIDER THAN THAT FIGURE — a `<BareName>(…)` count
+    STRUCTURALLY CANNOT CONTAIN TWO OF THE THREE SHAPES THIS PARAGRAPH DECLARES: (b)
+    `_pytest.outcomes.XFailed(...)` and (c) `raise _s.Exception(...)` are Raises of a CALL whose
+    callee is an `ast.Attribute`, so a live instance of either would leave a bare-name `0`
+    untouched and the recipe would certify a class it never scanned (review of #14287, P2 — the
+    same "figure attached to the wrong population" class this paragraph had just fixed). The
+    population THIS residual is over is therefore EVERY handler-last `Raise` of a CALL, whose
+    callee is a `Name` OR an `Attribute`: **408** in `tests/`+`tools/` at this head, measured as
+    **394** Name-callee plus **14** Attribute-callee (no other callee form exists — a
+    handler-last `Raise` of a NON-call is 1 and is out of the class by definition). The 14 read
+    `C.CurationRefused` ×7, `smc._state_error` ×3, and one each of `config.DaemonTargetError`,
+    `socket.gaierror`, `argparse.ArgumentTypeError`, `_argparse.ArgumentTypeError`. With each of
+    the **408** raised expressions resolved against its module scope, the ones that resolve to a
+    skip/xfail signal while spelling none of the parts above are — **0** in `tests/`+`tools/` at
+    this head, so an alias/parts table is
     deferred until the first live instance, not built ahead of it. ⛔ THE SECTION THAT USED TO BE
     NAMED HERE DOES NOT CARRY THIS MEASUREMENT: `4j-undetriginta` grades the pytest-skip conversion
     over the inline sources below — a chained `pytest.skip.Exception`, a bare `pytest.skip` call, and
@@ -2740,7 +2766,10 @@ def test_a_probe_that_imports_inside_its_try_covers_the_import_seam():
             "Otherwise re-raise or delete the EARLIER dropping arm. "
             "(A third-party import is out of scope here: for an optional extra, "
             "a skip is the correct outcome.) ⛔ NEITHER REPAIR FITS AN EXTRA-GATED OWN "
-            "MODULE (`tortoise.embeddings`, numpy only in the `embeddings` extra) — see "
+            "MODULE (`tortoise.svbp`: `import jax` at module scope, and `jax` is the "
+            "`quadrature` extra — NOT `tortoise.embeddings`, whose only module-scope dep "
+            "`numpy` is CORE; corrected after review P1, which measured "
+            "`import tortoise.embeddings` succeeding with every extra blocked) — see "
             "the DECLARED RESIDUAL on `_swallows_everything`: re-raising turns the "
             "legitimate skip into a collection error, and hoisting makes the module "
             "unimportable when the extra is absent."
