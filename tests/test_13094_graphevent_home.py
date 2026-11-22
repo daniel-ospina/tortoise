@@ -1202,6 +1202,37 @@ def test_the_residency_measure_script_refuses_a_graph_outside_its_prefix(
     assert touched == [], "the refusal touched a graph it had just refused"
 
 
+def test_a_run_that_COULD_NOT_RUN_is_exit_2_and_never_a_bare_traceback(
+        monkeypatch, capsys):
+    """`1` is RESERVED for a produced verdict, so an uncaught failure must not reach it.
+
+    #14183 review round 11 (measured): `main()` called `measure()` unguarded, so
+    every ordinary "could not run" — an unreachable server (`ConnectionError`),
+    a refused query — escaped as a traceback, and Python exits **1** on an
+    uncaught exception. `README` §6 declares `1` "reserved for a produced
+    verdict", so the shell could not tell a crash from a measurement that
+    returned "no". Only the prefix refusal and the refused-schema arm were
+    mapped to 2, and only those two were pinned.
+
+    The failure is injected at `measure()` on purpose: what is graded is
+    `main()`'s exit contract, not the transport's.
+    """
+    module = _measure()
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
+
+    def _cannot_run(*_args, **_kwargs):
+        raise ConnectionError("Error 111 connecting to 127.0.0.1:1. Connection refused.")
+
+    monkeypatch.setattr(module, "measure", _cannot_run)
+    code = module.main(["--sizes", "10"])
+    assert code == 2, (
+        f"a run that could not run must exit 2, not {code!r} — `1` is reserved for "
+        "a produced verdict, and an uncaught exception exits 1")
+    err = capsys.readouterr().err
+    assert "could not run" in err, err
+    assert "Connection refused" in err, err
+
+
 def test_the_measure_scripts_constraint_names_the_graph_key_not_a_constraint():
     """`GRAPH.CONSTRAINT CREATE` takes the GRAPH KEY, not a constraint name (#14183 r9).
 

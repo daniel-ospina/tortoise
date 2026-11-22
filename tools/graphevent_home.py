@@ -118,14 +118,22 @@ from typing import Any
 
 #: ── THE READER CENSUS ─────────────────────────────────────────────────────
 #:
-#: Every statement in `tortoise/` that READS or MAINTAINS the `:GraphEvent`
-#: label — including the three `ensure_event_schema` DDL statements, because a
-#: re-home has to recreate the schema they describe (the `event_id` dedupe index
-#: and the `seq` range index `read_after` scans), plus the two whole-graph scans in
-#: the RESTORE path that carry the label WITHOUT naming it. That is the inclusion rule,
-#: stated rather than implied: **statements that name the label, plus the two
-#: statements that carry it by being label-agnostic and would therefore carry it
-#: into (or drop it from) a new home.**
+#: Every SITE in `tortoise/` at which a statement READS or MAINTAINS the
+#: `:GraphEvent` label — including the three `ensure_event_schema` DDL statements,
+#: because a re-home has to recreate the schema they describe (the `event_id` dedupe
+#: index and the `seq` range index `read_after` scans), plus the sites of the
+#: label-agnostic whole-graph scan in the RESTORE path, which carries the label
+#: WITHOUT naming it. That is the inclusion rule, stated rather than implied: **one
+#: row per censused site, because a re-home must reason about each site and two
+#: sites can share one statement's text: the sites whose statement names the label,
+#: plus the sites of the label-agnostic scan, which would therefore carry the label
+#: into (or drop it from) a new home.** ⚠️ The UNIT is the site, not the statement
+#: text (#14183 review round 11, verified): that scan's text occurs FOUR times in
+#: `hosted_backup.py` — the two restore decisions censused here (`:1333` pre-check,
+#: `:1534` node-count verification), the live read inside
+#: `_restore_into_temp_verify_swap` (`:3603`) and a docstring mention — and those
+#: two rows pin the EXACT count in `occurrences`, so the third CODE occurrence is
+#: covered by that pin rather than by a row of its own.
 #:
 #: ⚠️ It is the table `#13094`'s PR carries, made checkable:
 #: `tests/test_13094_graphevent_home.py` asserts every `snippets` entry still
@@ -214,7 +222,7 @@ READERS: tuple[dict[str, Any], ...] = (
                "parse a module command, so the constraint is never created in "
                "production: the app-side dedupe pre-check in `event_store.py` is "
                "the belt that is actually there, and the store admits a duplicated "
-               "`(seq, event_id)` row if that probe goes. ⚠️ `event_store.py:794-797` "
+               "`(seq, event_id)` row if that probe goes. ⚠️ `event_store.py:795-798` "
                "still states the reverse and is tracked as #14212 (a product-code "
                "comment, out of this census's files). ⛔ THE `missing supporting exact-match index` THIS "
                "ROW ONCE RECORDED WAS A SCRIPT DEFECT, NOT A SERVER LIMIT (#14183 "
