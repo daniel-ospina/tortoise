@@ -742,8 +742,11 @@ class ProjectionWorker:
           processes — and the EPOCH bump is what makes a SNAPSHOT FROM THE PARENT
           unmatchable;
         * **THE THIRD PARTY'S LOCKS TOO**, one layer down: ``prometheus_client``
-          gives every ``MutexValue`` a ``_lock`` (and a ``Counter`` family one; a
-          plain ``Gauge`` family carries none),
+          gives every ``MutexValue`` a ``_lock``, and a LABELLED metric family one of
+          its own — ⛔ the discriminator is ``labelnames``, NOT the metric type
+          (``_is_parent()`` is ``self._labelnames and not self._labelvalues``, so a
+          labelled ``Gauge``/``Counter``/``Histogram`` all carry one and an
+          unlabelled family of any type carries none),
           plain ``threading.Lock``s a child inherits from a peer that did not
           survive the ``fork()``. ``set``, ``inc``, ``get``, ``labels`` and
           ``collect`` all take one, and a blocked lock is not an exception, so the
