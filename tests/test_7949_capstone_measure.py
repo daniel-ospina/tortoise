@@ -18230,7 +18230,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # `sdk.py:29121` — and THIS pass re-points that row to `sdk.py:29142` (the value the file
     # carries at this head and at `origin/main`, so `main`'s own ROW was the stale half), which
     # puts `04-plan.md` IN the diff again
-    # (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints `2 2`). An earlier
+    # (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints `3 3`). An earlier
     # cut of this block stated the opposite in both halves (once "NOT in this diff at all", once
     # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
     # arm has been wrong in both directions on.
@@ -18254,7 +18254,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     assert "IS in this diff at this head" in text, (
         "D5 no longer states that `04-plan.md` IS in this diff. At this head it is "
         "(`git diff --numstat origin/main...HEAD -- "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `2 2`), because "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `3 3`), because "
         "#14269 re-derives the I7 `point_count` range on that row. A row that implies "
         "otherwise names a membership the head does not have")
     assert "NOT in this diff at this head" not in text, (
