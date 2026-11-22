@@ -2647,14 +2647,24 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         'printf \'{"verdict": "FAIL", "exit_code": 1}\\n\'; '
         'chmod 000 "$RUNNER_TEMP/canary/verdict.json"; exit 1'
     )
-    assert rc == 2, (
-        f"an unreadable verdict file made the step exit {rc}: the display ran before the "
-        "exit, so a detector fault is published as exit 1 (the release call) "
-        f"— printed: {printed!r}"
+    # ⛔ ROOT READS THROUGH `chmod 000`, SO THIS CASE CANNOT BUILD ITS STATE THERE (review
+    # cycle 4, P3, MEASURED by a fresh reviewer: as uid 0 `published_fail` becomes 1 and the
+    # step legitimately exits 1 — a false block, not a defect). The house rule for exactly
+    # this is `@pytest.mark.skipif(os.geteuid() == 0, …)` on a whole test
+    # (`tests/test_11739_composed_gate_probe.py:871`); the case sits inside a larger test, so
+    # the expectation moves instead and the SAME invariant is asserted: the severity signal
+    # is always published and always agrees with the exit. What this reds on is unchanged —
+    # a display that aborts the step leaves the sink EMPTY (nothing matches) while the exit
+    # stays at 1. CI is unprivileged, where the sharp arm (rc 2) is the one measured.
+    expected_rc = 1 if os.geteuid() == 0 else 2
+    assert rc == expected_rc, (
+        f"unreadable verdict file as uid {os.geteuid()}: the step exited {rc}, not "
+        f"{expected_rc} — the display ran before the exit, so a detector fault is published "
+        f"as exit 1 (the release call) — printed: {printed!r}"
     )
-    assert published.strip() == "exit_code=2", (
-        "the severity signal was not published — `cat` failing under `-e` aborted the step "
-        f"before `$GITHUB_OUTPUT` was written: {published!r}"
+    assert published.strip() == f"exit_code={expected_rc}", (
+        "the severity signal was not published, or disagrees with the exit — `cat` failing "
+        f"under `-e` aborted the step before `$GITHUB_OUTPUT` was written: {published!r}"
     )
 
 
@@ -2674,8 +2684,12 @@ def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
     artifact to publish MISSING. Mangled, not missing, which is why no assertion saw it.
 
     ⛔ Executed, not grepped: the block is run under `bash -e` exactly as the runner runs
-    it, so any future prose that shells out fails here as a nonzero exit or a stderr line,
-    whatever spelling it uses. No shellcheck, no vocabulary pin.
+    it, so a prose substitution whose command CANNOT be found fails here as a nonzero exit
+    or a stderr line. That case is not the whole property: a substitution whose command
+    EXISTS (measured — `$(uname -s)` in this prose) exits 0 with empty stderr and publishes
+    a mangled summary, i.e. the same silent corruption one level down. The block is pure
+    prose echoes, so its obligation is the ABSENCE of substitution and of backticks, and
+    that is asserted below as text. No shellcheck, no vocabulary pin.
     """
     import yaml
 
@@ -2707,6 +2721,18 @@ def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
             f"EXIT_CODE={exit_code!r}: the alarm step EXECUTED part of its own prose — "
             f"the summary it writes is mangled: {stderr}"
         )
+
+    # ⛔ AN EMPTY STDERR IS ONLY A PROXY (review cycle 4, P3, MEASURED): a substitution whose
+    # command EXISTS runs silently — `echo "… lands (run $(uname -s) (version bump → tag →"`
+    # exited 0 with empty stderr and a summary reading `… lands (run Linux (version bump …`,
+    # mangled-but-not-missing, exactly the class #12660 exists to end. This block only echoes
+    # prose and needs no substitution, so the absence is the property — and it holds for
+    # every spelling, which is what the docstring above now claims.
+    assert "`" not in run and "$(" not in run, (
+        "the alarm block now contains a backtick or a command substitution: inside its "
+        "double-quoted echoes those EXECUTE and corrupt the summary silently, which is the "
+        f"#12660 defect. Prose names must be plain text. Offending block:\n{run}"
+    )
 
     # The property the corruption destroyed: the only branch that orders an irreversible
     # release NAMES the workflow to run and the artifact to publish.
