@@ -1384,11 +1384,18 @@ def _seam_opaque_values(node):
     (``tools/read_wave_latency.py:46``, and this test module at ``:27``): under
     PEP 563 no annotation is evaluated at all (measured: ``z: 1/0`` and
     ``def f(_x: 1/0)`` raise without the future import and do not raise with it;
-    the values land in ``__annotations__`` as STRINGS). The escape still
-    fail-closes there — a string annotation names no call, which is exactly the
-    negative this walk must not call dead — so the behaviour is right either way;
-    only the rationale needs the scope clause, or the next reader corrects it
-    back to the inverted claim (round-20 review).
+    the values land in ``__annotations__`` as STRINGS). There the mention is
+    genuinely DEAD — nothing is evaluated, so no call can be reached — and
+    admitting it is therefore an OVER-block, not a correctness win: measured on a
+    PEP-563 tree (two live reads plus one annotation-only mention) the walk
+    reports ``calls=2 live=3 unresolved=1``, i.e. a third read that does not
+    exist. ⛔ So the behaviour is NOT "right either way" — the PEP-563 case costs
+    a real false read. The cost is accepted deliberately and in the fail-closed
+    direction (a false block is class B; a deadness claim about an annotation a
+    tree DOES evaluate is class A), because the walk has no scope model to tell
+    the two trees apart — which is also why the scope clause is load-bearing
+    rather than a rationale only: dropping it lets the next reader correct it
+    back to the inverted claim (round-20 review; residual closed here).
 
     ⛔ KNOWN RESIDUALS, named rather than claimed closed: ``raise SEAM`` and
     ``await SEAM`` are value positions that evaluate the mention (``await`` even

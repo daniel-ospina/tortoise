@@ -296,15 +296,14 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     OBSERVED on ``origin/main`` (`70fbd1a27d`, re-measured, not carried): one
     crit query, one occurrence, arm at offset 579 / guard at 2136, depth 1 → 3,
     ``$contested_threshold`` at 13864, and ``contested_sum_bound == 5.25`` — the
-    same value the twin returns. (An earlier cut of this docstring quoted guard
-    offset 2163 at depth ``1 → 2``; the emitted predicate measures 2136 at
-    ``1 → 3``. The assertion reads the offsets rather than the prose, so nothing
-    depended on the stale pair — but nothing recomputed it either. The ``CASE
-    WHEN`` numerals quoted in ``beta_variance_sum_bound``'s docstring ARE
-    recomputed in this test, and this module's own copy of them is graded too
-    (round-17 review P2 3, round-20 review — the sentence used to name "the
-    module docstring" while grading the FUNCTION docstring, and the module
-    docstring's copy was ungraded.)
+    same value the twin returns. ⛔ THE FIVE NUMERALS IN THAT SENTENCE ARE GRADED,
+    not decorative: this test reads them back OUT of this docstring and compares
+    each one to the measurement, the same coupling the ``CASE WHEN`` numerals get
+    below (and in ``beta_variance_sum_bound``'s docstring). That is because an
+    earlier cut of this paragraph quoted guard offset 2163 at depth ``1 → 2`` and
+    NOTHING recomputed it: a byte offset no assertion reads is a claim, and a
+    claim rots into a false one (round-17 review P2 3, round-20 review, and the
+    cycle-2 residual that closed this).
     """
     graph, _ = _decorate_under_capture()
     crits = [(c, kw) for c, kw in graph.calls
@@ -332,12 +331,46 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     assert _paren_depth(crit, guard) > _paren_depth(crit, arm), (
         "the guard is not enclosed by the contested arm — it would prune "
         "NAND/terminal peers")
+    # ⛔ AND THE OFFSET/DEPTH PAIR THE ``OBSERVED`` PARAGRAPH QUOTES, read back
+    # OUT of that paragraph and compared to THIS predicate. The assertions above
+    # grade the RELATION (arm < guard < division, guard nested deeper than the
+    # arm) and never the bytes, so an earlier cut could quote guard offset 2163 at
+    # depth ``1 → 2`` with every row green — the ungraded-numeral class this PR
+    # exists to close, one level out in prose nothing read (cycle-2 review). The
+    # numerals are reproduced here so the paragraph is a claim the test checks,
+    # not a stale measurement the reader has to trust; a real move (a presence
+    # check added ahead of the guard, a re-spelled arm opener) reds this row and
+    # asks for a re-derive, which is the cost the span's magnitude band already
+    # accepts.
+    own_doc = " ".join(
+        (test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division
+         .__doc__ or "").split())
+    observed = re.search(
+        r"arm at offset (\d+) / guard at (\d+), depth (\d+) → (\d+), "
+        r"``\$contested_threshold`` at (\d+)", own_doc)
+    assert observed, (
+        "this docstring no longer states the offset/depth pair in the graded "
+        "form ('arm at offset N / guard at N, depth N → N, "
+        "``$contested_threshold`` at N') — restore the wording or re-point this "
+        "row, but do not leave the pair ungraded again")
+    (doc_arm, doc_guard, doc_arm_depth, doc_guard_depth,
+     doc_division) = (int(part) for part in observed.groups())
+    assert (doc_arm, doc_guard, doc_division) == (arm, guard, division), (
+        f"the docstring quotes arm/guard/threshold offsets "
+        f"({doc_arm}, {doc_guard}, {doc_division}), but THIS predicate measures "
+        f"({arm}, {guard}, {division}) — the paragraph has rotted off the "
+        f"emission it describes")
+    assert (doc_arm_depth, doc_guard_depth) == (
+        _paren_depth(crit, arm), _paren_depth(crit, guard)), (
+        f"the docstring quotes depth {doc_arm_depth} → {doc_guard_depth}, but "
+        f"THIS predicate nests the arm at {_paren_depth(crit, arm)} and the "
+        f"guard at {_paren_depth(crit, guard)}")
     # ⛔ THE DOCSTRING'S "8 ``CASE WHEN`` BEFORE ``$contested_sum_bound``" IS A
     # MEASURED NUMERAL, so it is GRADED here rather than trusted (round-17
     # review, P2 3). Without this the figure rots silently the moment
     # `numeric_operand_cypher` or the guard's operand set changes — the same
-    # ungraded-numeral class the docstring's own OBSERVED paragraph apologises
-    # for. Both bounds are claims, so both are asserted:
+    # ungraded-numeral class the ``OBSERVED`` paragraph used to apologise for
+    # (it is graded below now). Both bounds are claims, so both are asserted:
     #   * BEFORE THE ARM, 0 — the coercion is the price of the GUARD. A
     #     `CASE WHEN` ahead of the arm would mean the coercion is paid on rows
     #     the arm then discards, which is the opposite of the correction this
