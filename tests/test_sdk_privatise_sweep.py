@@ -1674,8 +1674,9 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # re-derivation and would claim another tree's figures. Recording them here is what makes the
     # addresses REACHABLE: the object-free arm above reds on a rev this map lacks, and the premise
     # arm below re-derives every entry from the repository. The mutant the review named — naming
-    # `94d75667dc`, whose tree derives the re-cut pair but which COMMITS
-    # (11857, "ed40203dbbf32b87") — therefore reds instead of passing as prose.
+    # `94d75667dc`, which COMMITS (11857, "ed40203dbbf32b87") and whose own `--repin` prints
+    # (11860, '57e0960ca6f20f5a'), ONE row short of the re-cut pair, so it is never a correct
+    # address — therefore reds instead of passing as prose.
     "5e83c2a2f6": (11858, "a1552662bf07a10b"),
     "10e51693f1": (11858, "a1552662bf07a10b"),
     "efe5605e976a": (11858, "a1552662bf07a10b"),

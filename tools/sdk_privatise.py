@@ -1151,11 +1151,12 @@ SWEEP_NAMES = 66
 #: Measured with `--repin`, never by arithmetic on the last pin, and EACH ADDRESS BELOW IS GRADED
 #: RATHER THAN DEAD WEIGHT (#14282 review, P3): all three revs COMMIT the superseded pair, so a
 #: mutant that swaps one for a rev committing a different pair reds in `OWN_PINS` instead of
-#: passing as prose. `5e83c2a2f6` — `main`'s own tree at this branch's base point, whose `--repin`
-#: prints the re-cut figure. Its own pin is `(11858, "a1552662bf07a10b")`. `10e51693f1` — the
-#: squash that committed that stale pair 64 s later. Its own pin is
-#: `(11858, "a1552662bf07a10b")` too, and by then the row set had already moved under it, so the
-#: pair was committed to a tree it was not a reading of. `efe5605e976a` — this branch's PRE-REBASE head,
+#: passing as prose. `5e83c2a2f6` — `main`'s own tree at this branch's PRE-REBASE base point: the
+#: PRE-REBASE head's parent, NOT the branch's base point, the branch having been rebased onto a
+#: later `main` afterwards. Its `--repin` prints the re-cut figure. Its own pin is
+#: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair 64 s
+#: later. Its own pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already
+#: moved under it, so the pair was committed to a tree it was not a reading of. `efe5605e976a` — this branch's PRE-REBASE head,
 #: named as what it is and NOT as a relative "THIS tree": its own `--repin` prints the re-cut
 #: pair, so the MEASUREMENT was true and only its ADDRESS was stale. Its own pin is
 #: `(11858, "a1552662bf07a10b")`, the pair it COMMITS.
