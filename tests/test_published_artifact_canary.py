@@ -2519,8 +2519,11 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
             "GITHUB_STEP_SUMMARY": str(summary),
         }
         completed = subprocess.run(
-            [*_RUNNER_SHELL, run], cwd=str(REPO_ROOT), env=env,
-            capture_output=True, text=True,
+            [*_RUNNER_SHELL, run],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
         )
         return completed.returncode, out.read_text()
 
@@ -2610,8 +2613,11 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         # stayed green while the real aborted). `_RUNNER_SHELL` is shared with the sibling
         # harness so the two cannot diverge again (review cycle 9, P2).
         completed = subprocess.run(
-            [*_RUNNER_SHELL, run], cwd=str(REPO_ROOT), env=env,
-            capture_output=True, text=True,
+            [*_RUNNER_SHELL, run],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
         )
         return completed.returncode, completed.stdout + completed.stderr, out.read_text()
 
@@ -2866,6 +2872,23 @@ def _executable_prose_lines(script: str) -> list[str]:
     the shell does) and each hit is mapped back to the PHYSICAL lines it spans — the report
     must still quote text a human can find in the file. A spliced BACKTICK needs no special
     case: a backtick is one byte, so any line containing one is already flagged.
+
+    ⛔ AN ESCAPED BACKTICK IS INERT, AND FLAGGING IT WAS AN OVER-BLOCK (review cycle 12, P2,
+    MEASURED). `\\`` starts nothing — the shell reads a literal backtick — so this spelling
+    EXECUTES nothing and keeps the Markdown code spans that the plain-text spelling loses:
+
+        $ bash -e /tmp/parity.sh      # the real alarm block's echo, `EXIT_CODE=1`
+        A: tag -> `publish-pypi.yml` and `tortoise-client` is published.      rc 0, stderr ''
+
+    `published-artifact-alert.sh:65` already writes this same sentence that way, and the pin
+    used to red it with "the summary it writes is mangled" — a false statement about a correct
+    input. So an escape pair is consumed before scanning.
+
+    ⛔ AND THE ESCAPE IS A PARITY, NOT A PREFIX: `\\` is itself an escaped backslash, so the
+    backtick AFTER it does open a substitution — measured on the same block, it printed
+    `tag -> \\SUBSTITUTED`. A `(?<!\\)` lookbehind would let that through, i.e. a fail-open in
+    the pin that exists to stop exactly this, which is why the scan consumes escape pairs
+    instead of looking one character back.
     """
     stripped = _strip_shell_comments(script)
     physical = stripped.splitlines()
@@ -2884,9 +2907,19 @@ def _executable_prose_lines(script: str) -> list[str]:
             line_no += 1
         i += 1
     hits: set[int] = set()
-    for match in re.finditer(r"`|\$\(", "".join(joined)):
-        hits.add(owners[match.start()])
-        hits.add(owners[min(match.end() - 1, len(owners) - 1)])
+    text = "".join(joined)
+    i = 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2  # an escape pair is inert: `\`` is a literal backtick, `\$(` a literal `$(`
+            continue
+        width = 2 if text.startswith("$(", i) else (1 if text[i] == "`" else 0)
+        if not width:
+            i += 1
+            continue
+        hits.add(owners[i])
+        hits.add(owners[min(i + width - 1, len(owners) - 1)])
+        i += width
     return [physical[n] for n in sorted(hits) if n < len(physical)]
 
 
@@ -2943,8 +2976,11 @@ def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
             "GITHUB_STEP_SUMMARY": str(summary),
         }
         completed = subprocess.run(
-            [*_RUNNER_SHELL, run], cwd=str(REPO_ROOT), env=env,
-            capture_output=True, text=True,
+            [*_RUNNER_SHELL, run],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
         )
         return completed.returncode, completed.stderr, summary.read_text()
 
@@ -3009,12 +3045,29 @@ def test_the_prose_pin_catches_a_substitution_on_a_COMMENT_LOOKING_continuation(
     steps = {step.get("name"): step for step in workflow["jobs"]["report"]["steps"]}
     run = steps["What a red here means"]["run"]
 
-    anchor = 'echo "the publish-pypi.yml workflow) and tortoise-client is published. See #12363."'
-    assert anchor in run, "the release-finding echo moved; re-derive this injection point"
+    # ⛔ DERIVED, NOT TRANSCRIBED (review cycle 12, P2, MEASURED): this anchor used to be the
+    # WHOLE sentence, so an information-preserving rewording of the prose — `is published` ->
+    # `must be published`, which the block's own comment invites — left both the block and the
+    # summary correct and reddened this LEXER test with "the release-finding echo moved",
+    # pointing the next lane at the prose instead of at the pin. The anchor is now the
+    # release-finding echo itself (the line that orders the upload), so the test keeps grading
+    # the REAL artifact while only its subject — quote-aware comment stripping — can red it.
+    # The injection is built FROM the anchor, so it stays faithful for any wording.
+    release_echoes = [
+        line
+        for line in run.splitlines()
+        if line.lstrip().startswith("echo ") and "publish-pypi.yml" in line
+    ]
+    assert len(release_echoes) == 1, (
+        "expected exactly ONE release-finding echo (the `echo` that names the workflow to run) "
+        f"in the report step; found {len(release_echoes)}: {release_echoes!r} — re-derive this "
+        "injection point"
+    )
+    anchor = release_echoes[0]
     injected = run.replace(
         anchor,
-        'echo "the publish-pypi.yml workflow) and tortoise-client is published. See #12363.\n'
-        "# $(printf HIDDEN) — this continuation is still INSIDE the echo's quotes\"",
+        anchor[:-1]
+        + "\n# $(printf HIDDEN) — this continuation is still INSIDE the echo's quotes\"",
     )
 
     # The block as shipped is green — the injection is the only thing that reds it.
@@ -3053,7 +3106,7 @@ def test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body():
     script = "cat <<EOF\n# $(printf HIDDEN_BY_HEREDOC)\nEOF\n"
 
     # PREMISE, executed rather than claimed: the body line really does run.
-    ran = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True)
+    ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
     assert ran.returncode == 0, ran.stderr
     assert "HIDDEN_BY_HEREDOC" in ran.stdout, (
         "the heredoc body did NOT expand, so this test no longer reproduces the hole it "
@@ -3102,7 +3155,7 @@ def test_the_prose_pin_sees_a_heredoc_operator_SPLICED_by_a_backslash_newline():
     script = "cat <\\\n<EOF\n# $(printf HIDDEN_BY_SPLICE)\nEOF\n"
 
     # PREMISE, executed rather than claimed.
-    ran = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True)
+    ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
     assert ran.returncode == 0, ran.stderr
     assert "HIDDEN_BY_SPLICE" in ran.stdout, (
         "the spliced operator did NOT start a heredoc, so this test no longer reproduces the "
@@ -3116,9 +3169,59 @@ def test_the_prose_pin_sees_a_heredoc_operator_SPLICED_by_a_backslash_newline():
     # ⛔ AND THE NON-SPLICED SHAPES ARE UNAFFECTED — this fix must not turn `<<<` into a
     # heredoc, nor stop a plain heredoc or a plain escaped `\"` from being read as before.
     assert _executable_prose_lines('cat <<<"x"\necho ok  # `tick`\n') == []
-    assert _executable_prose_lines("cat <<EOF\n# $(printf PLAIN)\nEOF\n") == [
-        "# $(printf PLAIN)"
-    ]
+    assert _executable_prose_lines("cat <<EOF\n# $(printf PLAIN)\nEOF\n") == ["# $(printf PLAIN)"]
+
+
+def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
+    """The prose pin must not red a CORRECT spelling — and must not start passing a broken one.
+
+    MEASURED (review cycle 12, P2) on the real alarm block under the runner's `bash -e`, with
+    `EXIT_CODE=1`. Three spellings of the same sentence, all executed:
+
+        $ echo "(tag → \\`publish-pypi.yml\\`) and \\`tortoise-client\\` is published."
+        (tag → `publish-pypi.yml`) and `tortoise-client` is published.     rc 0, stderr ''
+
+        $ echo "(tag → \\\\`printf SUBSTITUTED`)"        # ESCAPED BACKSLASH, then a backtick
+        (tag → \\SUBSTITUTED)                                              rc 0, stderr ''
+
+    The first preserves the Markdown code spans the shipped plain-text spelling loses, and
+    `published-artifact-alert.sh:65` writes the same sentence that way — yet the pin reddened
+    it with "the summary it writes is mangled", which is false for that input and pushed the
+    editor off the better spelling. The second DOES substitute, silently, so the looseness
+    cannot be a `(?<!\\)` lookbehind: a backslash escaped by a backslash does not escape the
+    backtick that follows it.
+    """
+    # PREMISES, executed rather than claimed: the escape pair is inert, the doubled one is not.
+    inert = 'echo "(tag -> \\`publish-pypi.yml\\`) and \\`tortoise-client\\` is published."\n'
+    live = 'echo "(tag -> \\\\`printf SUBSTITUTED`) is published."\n'
+    for label, script, want in (
+        ("inert", inert, "`tortoise-client`"),
+        ("live", live, "SUBSTITUTED"),
+    ):
+        ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
+        assert ran.returncode == 0, (label, ran.stderr)
+        assert want in ran.stdout, (
+            f"the {label} spelling did not behave as measured — this test's premise is gone: "
+            f"stdout={ran.stdout!r}"
+        )
+    assert ran.stderr == "", "a silent substitution is the case the pin exists to catch"
+
+    # THE FIX: an escaped backtick starts nothing, so it is not an offence.
+    assert _executable_prose_lines(inert) == [], (
+        "an ESCAPED backtick executes nothing and must not be reported as executable prose: "
+        f"{_executable_prose_lines(inert)!r}"
+    )
+
+    # ⛔ AND THE ESCAPE IS A PARITY — this shape still substitutes and must STILL red.
+    assert _executable_prose_lines(live) == [live.rstrip("\n")], (
+        "a backtick after an escaped backslash DOES open a substitution, so ignoring one "
+        f"character of lookbehind would be a fail-open here: {_executable_prose_lines(live)!r}"
+    )
+    with pytest.raises(AssertionError, match="command substitution"):
+        _assert_no_executable_prose(live)
+
+    # An escaped `$(` is inert for the same reason, and costs no special case.
+    assert _executable_prose_lines('echo "(tag -> \\$(printf X))"\n') == []
 
 
 def test_the_prose_pin_sees_a_dollar_paren_SPLICED_across_a_backslash_newline():
@@ -3143,7 +3246,7 @@ def test_the_prose_pin_sees_a_dollar_paren_SPLICED_across_a_backslash_newline():
     for label, script in (("heredoc body", body), ("<<- body", tabbed), ("dq echo", quoted)):
         # PREMISE, executed: the marker's SOURCE never contains its OUTPUT, so its presence in
         # stdout proves the substitution ran rather than that the text was echoed.
-        ran = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True)
+        ran = subprocess.run([*_RUNNER_SHELL, script], capture_output=True, text=True)
         assert ran.returncode == 0, (label, ran.stderr)
         assert "HIDDEN_BY_TOKEN" in ran.stdout, (
             f"{label}: the spliced `$( )` did NOT run, so this test no longer reproduces the "
