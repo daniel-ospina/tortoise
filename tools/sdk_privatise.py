@@ -1136,7 +1136,11 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name: 0` on both trees, so no typed call site is
 #: legitimised by re-cutting: the three rows are `proj.g.query` on a FalkorDB project handle, the
 #: ordinary-word receiver shape this pin exists to DECLARE and deliberately leaves alone.
-#: Measured with `--repin` on THIS tree (`efe5605e976a`), never by arithmetic on the last pin.
+#: Measured with `--repin`, never by arithmetic on the last pin, on the revs named above
+#: (`5e83c2a2f6`, `10e51693f1`) and on `efe5605e976a` — this branch's PRE-REBASE head, which still
+#: COMMITS the superseded (11858, "a1552662bf07a10b") pair. It is named as what it is, and NOT as a
+#: relative "THIS tree" (#14282 review, P3): its own `--repin` prints the re-cut pair, so the
+#: MEASUREMENT was true and only its ADDRESS was stale.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
