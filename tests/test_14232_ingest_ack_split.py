@@ -1030,6 +1030,58 @@ def test_a_completion_that_dies_before_submitting_still_returns_capacity(
     assert row and row[0][1] is None, (
         "a dispatch FAILURE is not a cancellation and must not write the "
         f"abandoned marker (raise-shape contract): {row}")
+    # ⛔ THE PHASE RETIRE'S WIRING PIN. This is the only row that reaches
+    # `_capture_tail_failed` through the REAL task — the two window rows drive the
+    # callback by hand — so a mutant that stops a failed tail from ever reaching
+    # the clear left every row green while a real failed capture kept
+    # `phase: extracting` forever (measured: deleting the raise-arm submit reds
+    # this assertion plus the hand-driven row, nothing else). The `extracting`
+    # write lands before the dispatch, this dispatch raises, the tail dies.
+    assert row[0][3] is None and row[0][4] is None, (
+        "a tail that dies between its phase write and its terminal record must "
+        f"still retire the phase through the real callback wiring: {row}")
+
+
+def test_a_failed_terminal_write_still_retires_the_phase(client, monkeypatch):
+    """A terminal SET that RAISES must not leave the phase behind.
+
+    MEASURED GAP this closes: `state["finalized"]` was set unconditionally after
+    the terminal `capture_ok` write, INCLUDING the arm where that write raised.
+    `finalized` is what suppresses the callback's phase retire, so a failed
+    terminal write left `phase: extracting` beside a `capture_ok` that was never
+    written — permanently, and reverting either half of the fix reds this row.
+
+    Drives the REAL handler: the terminal statement is recognised by its own text
+    (`s.capture_ok=$ok`), so this fails the outcome write and nothing else — the
+    record write, the phase writes, the extraction and the reads all still run.
+    `capture_ok` must stay NULL (nothing was recorded, so the raise-shape/replay
+    contract decides what the next POST does) and the phase must be gone.
+    """
+    _force_ack(monkeypatch)
+    session_id = "s-14232-terminal-write-fails"
+    graph_cls = type(_proj().g)
+    real_query = graph_cls.query
+
+    def _query_failing_the_terminal_set(graph_self, statement, *a, **kw):
+        if "s.capture_ok=$ok" in statement:
+            raise RuntimeError("terminal outcome write failed (simulated)")
+        return real_query(graph_self, statement, *a, **kw)
+
+    monkeypatch.setattr(graph_cls, "query", _query_failing_the_terminal_set)
+
+    r = client.post("/v1/sessions", json={
+        "conversation": _CONV, "session_id": session_id})
+    assert r.status_code == 200, r.text
+    _drain_tails()
+
+    row = _session_row(session_id)
+    assert row and row[0][1] is None, (
+        "the terminal write FAILED, so no outcome was recorded — `capture_ok` "
+        f"must stay NULL, got {row}")
+    assert row[0][3] is None and row[0][4] is None, (
+        "a failed terminal write must still retire the phase it left behind, or "
+        "the session reports `extracting` (and PENDING forever) beside an "
+        f"outcome that was never recorded: {row}")
 
 
 # ── review findings, now pinned ────────────────────────────────────────────
