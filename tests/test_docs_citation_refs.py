@@ -5127,10 +5127,16 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     def grep_probe(spelling: str) -> subprocess.CompletedProcess:
         # ⛔ NO rc ALLOW-LIST HERE (#14138 mutation review, P3 — MEASURED). A guard of the shape
         # `rc in (0, 1, 2)` used to sit on the next line and no mutant could red it: every spelling
-        # below also goes through `_d5_grep_runs_long_option` (via the universe), which RAISES on a
-        # third code first, with a better message. A row that cannot be attributed to the behaviour
-        # it claims to guard is dead weight (agent-infra#3442 rule 3), so it is gone rather than
-        # explained away.
+        # below is classified, with a better message, BEFORE this run's result is read —
+        # `_d5_grep_verdict` in the live loop below RAISES on a third code, and the single measured
+        # candidate (`--unix-byte-offsets`) reaches the same rule through
+        # `_d5_grep_runs_long_option`, which raises too. ⛔ IT IS NOT "EVERY SPELLING GOES THROUGH
+        # THE UNIVERSE" (#14303 review round 10, P3): only the candidate is measured there, so the
+        # four PREFIX spellings and `--fixed-regexp` never meet it and depend on the loop's own
+        # three-way verdict — a fixer who trusted the old wording and replaced that verdict with a
+        # two-way branch would reinstate the fail-open read this row was removed for, with nothing
+        # reding. A row that cannot be attributed to the behaviour it claims to guard is dead
+        # weight (agent-infra#3442 rule 3), so it is gone rather than explained away.
         return subprocess.run(["grep", "-c", spelling, "^[+-]$"], input=_D5_GREP_PROBE,
                               capture_output=True, text=True, timeout=60)
 
@@ -5269,13 +5275,15 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     ⛔ THE FAIL-OPEN ARM (#14138). The allowance is what keeps a prescription in the alias spelling
     visible, so a probe that answered `False` whenever it was confused would EMPTY it — a second
     blank-class prescription goes unread and nothing reds. grep exits 2 for an invalid option and
-    0/1 for a real count, so this cell drives SIX stub greps: one that COUNTS, one that REFUSES the
-    alias (and answers `--count` normally), one that answers a THIRD code, one that is BROKEN for
-    every spelling, one that answers `--count` with rc 0 and NO OUTPUT, and one that PRINTS the
-    count but still fails the run (rc 2 with stdout `2`). The last three must raise on the CONTROL
-    run — a bare rc 2 is grep's generic error code, a wrapper that swallows stdin prints nothing,
-    and a wrapper that counts and then fails is not a refusal either — because reading any of them
-    as "refused" empties the allowance just the same.
+    0/1 for a real count, so this cell drives SEVEN stub greps: one that COUNTS, one that REFUSES
+    the alias (and answers `--count` normally), one that answers a THIRD code, one that is BROKEN
+    for every spelling, one that answers `--count` with rc 0 and NO OUTPUT, one that PRINTS the
+    count but still fails the run (rc 2 with stdout `2`), and one that answers a REAL count and
+    exits 1 — grep RAN the spelling and selected nothing, which is an ANSWER, not a refusal.
+    The `broken`, `silent` and `counts_then_fails` stubs must raise on the CONTROL run — a bare
+    rc 2 is grep's generic error code, a wrapper that swallows stdin prints nothing, and a wrapper
+    that counts and then fails is not a refusal either — because reading any of them as "refused"
+    empties the allowance just the same.
     """
 
     def stub(name: str, body: str) -> str:
@@ -5290,6 +5298,7 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     accepts = stub("grep-accepts", "cat >/dev/null; echo 2; exit 0")
     refuses = stub("grep-refuses", "cat >/dev/null; " + answers_count
                    + 'echo "grep: unrecognized option" >&2; exit 2')
+    ran_zero = stub("grep-ran-zero", "cat >/dev/null; " + answers_count + "echo 0; exit 1")
     confused = stub("grep-confused", "cat >/dev/null; " + answers_count + "exit 3")
     broken = stub("grep-broken", 'cat >/dev/null; echo "grep: (standard input): Bad file '
                                  'descriptor" >&2; exit 2')
@@ -5301,6 +5310,19 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     assert _d5_grep_runs_long_option("--unix-byte-offsets", refuses) is False, (
         "a stub grep that answers `unrecognized option`, exit 2, must read as REFUSED — that is "
         "the GNU grep 3.12 case this allowance exists to follow (#14138)")
+    # ⛔ rc 1 IS AN ANSWER (#14303 review round 10, P3 — MEASURED). grep exits 1 when it RAN the
+    # spelling and selected no lines; only exit 2 means "I will not run that option". Nothing
+    # witnessed that distinction: reading rc 1 as `refused` left this file at `34 passed`, because
+    # the one place a real rc 1 is consumed — the `--fixed-regexp` control, which prints `0` and
+    # exits 1 on GNU grep 3.11 — has its assertion gated on the very arm being flipped. The
+    # fail-open consequence is concrete: an accepted spelling that STOPS counting the class would
+    # then be classified "refused", so the `--fixed-regexp` counting guard would stop executing and
+    # the wrong retargeted-alias class `_d5_grep_verdict`'s docstring forbids could ship unseen.
+    assert _d5_grep_runs_long_option("--unix-byte-offsets", ran_zero) is True, (
+        "a stub grep that prints `0` and exits 1 RAN the spelling and selected nothing — that is "
+        "ACCEPTED, the same as exit 0. Classifying it as `refused` is the fail-open direction: the "
+        "allowance would drop a spelling grep really runs, and every consumer gated on this arm "
+        "(#14138)")
     # ⛔ AND `MEASURED` MUST BE DISTINGUISHABLE FROM `REMEMBERED` ON THE PLATFORM CI RUNS (#14303
     # review, P2 — MEASURED). On GNU grep >= 3.12 the live allowance is `frozenset()`, so the alias
     # cell's `rederived == _d5_undocumented_long_options()` is two EMPTY sets compared and no mutant
