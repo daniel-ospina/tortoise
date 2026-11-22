@@ -944,7 +944,7 @@ NOTICE_ONLY = [
     "has anyone complained billing has been recently deprecated",
     # ⛔ THE REFUSAL-SIDE SLOT'S ROWS (round-3 review, P1, measured): the WINDOW's slot is the narrow
     # `already|ever|recently` (recall), while the two clause LOOKAHEADS are refusal-only and carry
-    # the WHOLE `_EXISTENCE_ADVERB` class (— including the multi-word adverbials, which need the
+    # the WHOLE `_EXISTENCE_ADVERB` class — including the multi-word adverbials, which need the
     # repetition the slot carries). Giving the lookaheads the narrow slot was a measured hole:
     # `just`/`only`/`no longer`/`to date` are class members but were not in it, so they blinded both
     # lookaheads and these ROUTED the whole ended population with the caller's predicate dropped and
