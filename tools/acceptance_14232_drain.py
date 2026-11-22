@@ -205,11 +205,20 @@ class _HttpTransport:
         # it is derived from") is exactly the evidence criterion 4 needs; what the
         # HTTP surface genuinely cannot answer is entities/edges, and those stay
         # unmeasured and stay governed by `--require-entities`.
+        # ⛔ THE SERVED KEY IS `extracted` / `extracted_points`, NOT `points`
+        # (review round 9, P1 — measured: `GET /v1/sessions/{id}` serves exactly
+        # `SESSION_DETAIL_FIELDS`, and `points` is not one of them, so
+        # `body.get("points")` was ALWAYS empty and the arm still could not PASS:
+        # flagging `measured` alone moved the same failure one line along). The
+        # count criterion 4 asks for is `extracted`; `extracted_points` is the
+        # list it counts. Reading either from a key the surface never publishes is
+        # how this tool certified a fiction in the first place.
         return {
             "measured": True,
-            "why": "served detail surface (points from the body; entities/edges "
-                   "are NOT measured over HTTP)",
-            "points": len(body.get("points") or []),
+            "why": "served detail surface (`extracted` / `extracted_points` from "
+                   "the body; entities/edges are NOT measured over HTTP)",
+            "points": body.get("extracted") or len(
+                body.get("extracted_points") or []),
             "extraction": body.get("extraction"),
         }
 
@@ -448,7 +457,14 @@ def run(args) -> int:
 
     for cap in corpus:
         started = time.monotonic()
-        r = transport.post_capture(cap)
+        try:
+            r = transport.post_capture(cap)
+        except Exception as exc:  # a transport failure is a USAGE error, not a verdict
+            if type(exc).__name__ == "HTTPError" or "httpx" in type(exc).__module__:
+                print(f"error: {transport.label} unreachable — "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                return 2
+            raise
         elapsed = time.monotonic() - started
         acks.append(elapsed)
         body = None

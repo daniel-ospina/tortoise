@@ -1580,16 +1580,39 @@ def test_the_deployment_transport_MEASURES_extraction_from_the_detail_body():
     deployment arm grades the same criteria.
 
     What the HTTP surface cannot answer is entities/edges, and those stay
-    unmeasured — governed by `--require-entities`. The point count IS in the body.
+    unmeasured — governed by `--require-entities`. The point count IS in the body,
+    under the keys the projection actually serves (`extracted`, and the
+    `extracted_points` list it counts) — not under `points`, which is the key the
+    first cut of this fix read and why it changed nothing.
     """
     drain = _drain_tool()
+
+    from tortoise.session_projection import SESSION_DETAIL_FIELDS
 
     class _Resp:
         status_code = 200
 
         @staticmethod
         def json():
-            return {"points": [{"id": "p1"}], "extraction": {"status": "ok"}}
+            # ⛔ BUILT FROM THE REAL PROJECTION, NOT FROM A FICTION (review round 9,
+            # P2). The first cut of this row stubbed `{"points": [...]}` — a key
+            # `GET /v1/sessions/{id}` has never served — so the row passed while the
+            # deployment arm read an always-empty list and still could not PASS. The
+            # body here carries exactly the served keys, so a projection drift (or a
+            # reader keying off something the surface does not publish) reds.
+            body = {
+                "id": "s-1", "created_at": "2026-11-22T00:00:00Z", "turns": 2,
+                "extracted": 1, "actor_user_id": None, "harness": "claude-code",
+                "actor_display": None, "machine_id": None, "model": "m",
+                "extraction": {"status": "ok", "outcome_known": True},
+                "client_captured_at": None, "client_captured_at_source": None,
+                "capture_lane": "v2", "turn_points": 3,
+                "extracted_points": [{"id": "p1"}], "source": "capture",
+            }
+            assert set(body) == set(SESSION_DETAIL_FIELDS), (
+                "this stub must be the SERVED body, or the row measures a fiction: "
+                f"{sorted(set(body) ^ set(SESSION_DETAIL_FIELDS))}")
+            return body
 
     class _Transport(drain._HttpTransport):
         def __init__(self):  # no server, no auth — the READ is what is under test
