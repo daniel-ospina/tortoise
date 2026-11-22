@@ -1526,11 +1526,12 @@ class SeedReport:
 
         ⛔ THE EMISSION ORDER IS NOT RESTATED HERE. It is documented where it is
         enforced — the comment at the `record_deferred_failures` block below —
-        because a second copy of an ordering claim is what round 17 of #14222's
-        review had to repair: the docstring here asserted an order the code did
-        not have, and handed the next editor an instruction that would have
-        reinstated the defect. One statement of the order, at the site that
-        makes it true.
+        because a second copy of an ordering claim is exactly what went wrong in
+        round 17: that round moved the block into `_fold_needed()`'s order (the
+        right fix) and then rewrote this docstring to claim the block does NOT
+        follow that order, so the file carried two mutually exclusive
+        instructions and the false one would have reinstated the defect. One
+        statement of the order, at the site that makes it true.
 
         ⛔ THE NOTE USED TO BE WRITTEN FOR TWO OF THE THREE TRIGGERS (#14222
         review, P2 of the round that read the undrained arm). It opened
