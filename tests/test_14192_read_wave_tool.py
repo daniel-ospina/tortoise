@@ -3935,14 +3935,12 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "literal one level down in a nested ** display": (
             '    _l = _PageFetcher(**{**{"name": "_tortoise_fts_query"}})\n'
             '    _l(sdk)(query=queries[0]["query"], limit=10, kind="statement")\n'),
-        # ⛔ THE DEFAULT ARM'S TWO OFFSETS (#14326 round 8, EACH MEASURED GREEN while the
-        # arithmetic was replaced by a constant): a PADDED positional parameter moves the
-        # default off index 0, and a SECOND keyword-only parameter moves it off `[0]` — every
-        # pre-existing default row had offset 0, so neither sub-clause could be red.
-        "PADDED positional default": (
-            '    def _f(_pad, _N="_tortoise_fts_query"):\n'
-            f'        {reach.format(name="_N")}\n'
-            '    _f(1)\n'),
+        # ⛔ THE KEYWORD-ONLY INDEX (#14326 round 8, MEASURED GREEN while the index was
+        # replaced by `[0]`): every pre-existing kw-only row had ONE such parameter, so the
+        # index could never differ from 0. (The POSITIONAL offset has the peer lane's own row
+        # above — the same shape, deduplicated: a repeated dict key silently shadows one row,
+        # which is exactly the "a row that can never be the failing row" defect this file
+        # deletes clauses for.)
         "SECOND keyword-only default": (
             '    def _f(*, _a="x", _N="_tortoise_fts_query"):\n'
             f'        {reach.format(name="_N")}\n'
