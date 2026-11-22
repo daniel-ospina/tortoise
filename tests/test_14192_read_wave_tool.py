@@ -1352,9 +1352,56 @@ def _collection_operands(value: ast.AST) -> list[ast.AST]:
     return []
 
 
-def _aliases_of(tree: ast.AST, predicate, loops: bool = False) -> set[str]:
+#: Callees that return a NEW CONTAINER built FROM their argument — a SHALLOW copy:
+#: `list(results)` / `sorted(results)` / `dict(row)` / `results.copy()` all build a new
+#: container whose SLOTS hold the page's OWN element objects.
+#:
+#: ⛔ NOT `_PURE_READS` (#14326 review P0, MEASURED at `36a6451d4e`): the copy exemption was
+#: `callee in _PURE_READS`, which also carries `min`/`max` — and those return an ELEMENT of
+#: the page, not a new container, so `_r = min(results, key=str); _r["id"] = "X"` was
+#: exempted as a "copy" and measured GREEN. `str`/`repr`/`len`/`sum`/`type`/`bool`/… build
+#: no container at all, so exempting them bought nothing and widened the hole. The set is
+#: the container BUILDERS and nothing else.
+_SHALLOW_COPY_CALLEES = frozenset({"list", "tuple", "sorted", "set", "frozenset",
+                                   "dict", "copy", "deepcopy"})
+
+
+def _builds_new_container(value: ast.AST) -> bool:
+    """The value is a COPY — a call to a container BUILDER, or a comprehension.
+
+    ⛔ A COPY CANNOT MUTATE THE COLLECTION IT COPIED (#14326 round 9, MEASURED at
+    `88859180`): `_copy = list(results); _copy.sort()` measured `hits=[5]` and
+    `_ids = [_result_id(r) for r in results]; _ids.sort()` measured `hits=[5]` — the pin
+    RED-ed two edits that mutate nothing the artifact records, while this file's own
+    docstring declares exactly those shapes "correctly exempt". The mention rule below
+    counts any page name inside the value, and both spellings CONTAIN one, so the copy
+    became an alias of its source. A LITERAL container is deliberately NOT exempt —
+    `_box = [results]` really does hold the page, and its own mutations stay the stated
+    accepted false red.
+
+    ⛔ AND THE COPY'S **ELEMENTS** ARE THE PAGE'S OWN OBJECTS (#14326 review P0, MEASURED
+    at `36a6451d4e` and reproduced end-to-end on the shipped tool): every shape above is a
+    SHALLOW copy — `_c = list(results); _c[0]["id"] = "X"` permuted the recorded page
+    while this predicate exempted `_c` from BOTH arms, and the pin reported PASS. So this
+    predicate answers only "is the CONTAINER new"; the caller collects the copy names
+    separately (`_mutated_after`'s `shallow_copies`) so a write THROUGH a slot still reds.
+    """
+    if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        return True
+    return (isinstance(value, ast.Call)
+            and (getattr(value.func, "id", None) or getattr(value.func, "attr", None))
+            in _SHALLOW_COPY_CALLEES)
+
+
+def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
+                copy_is_alias: bool = False) -> set[str]:
     """Names bound to a matching expression, TRANSITIVELY — `a = results`, `b = a`,
     `(c := results)`, `env = os.environ`, `env2 = env`.
+
+    `copy_is_alias=True` skips the SHALLOW-COPY exemption below, so a name bound to
+    `list(results)` / `sorted(results)` / a comprehension is COLLECTED rather than
+    excluded. That is how `_mutated_after` finds the copies themselves: a copy is not the
+    page, but its slots hold the page's own elements.
 
     ⛔ TRANSITIVE AND WALRUS-AWARE (#14281 review P2, measured). A one-hop `=` walk was
     GREEN on BOTH of these against a genuinely permuted page:
@@ -1406,26 +1453,6 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False) -> set[str]:
 
     out: set[str] = set()
 
-    def _builds_new_object(value: ast.AST) -> bool:
-        """The value is a COPY — a call to an allow-listed pure reader, or a comprehension.
-
-        ⛔ A COPY CANNOT MUTATE WHAT IT COPIED (#14326 round 9, MEASURED at `88859180`):
-        `_copy = list(results); _copy.sort()` measured `hits=[5]` and
-        `_ids = [_result_id(r) for r in results]; _ids.sort()` measured `hits=[5]` — the pin
-        RED-ed two edits that mutate nothing the artifact records, while this file's own
-        docstring declares exactly those shapes "correctly exempt". The mention rule below
-        counts any page name inside the value, and both spellings CONTAIN one, so the copy
-        became an alias of its source. The exemption is `_PURE_READS` (already carrying
-        `list`/`dict`/`set`/`sorted` and the serialisers) plus the four comprehension nodes.
-        A LITERAL container is deliberately NOT exempt — `_box = [results]` really does hold
-        the page, and its own mutations stay the stated accepted false red.
-        """
-        if isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            return True
-        return (isinstance(value, ast.Call)
-                and (getattr(value.func, "id", None) or getattr(value.func, "attr", None))
-                in _PURE_READS)
-
     def _bind(target: ast.AST, value: ast.AST) -> bool:
         """Resolve one (target, value) pair; True when it named something new."""
         if isinstance(target, ast.Name):
@@ -1435,8 +1462,8 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False) -> set[str]:
             # `_row = per_query[-1]` are aliases of the collection inside them, and the
             # bare-Name form left `_box[0].sort()` / `_row["order"] = …` green (measured).
             # …but a COPY (`list(results)`, a comprehension) is NOT an alias — see
-            # `_builds_new_object` immediately above.
-            resolves = not _builds_new_object(value) and (
+            # `_builds_new_container` above. `copy_is_alias=True` collects the copies.
+            resolves = (copy_is_alias or not _builds_new_container(value)) and (
                 predicate(value)
                 or bool(_names_in(value) & out)
                 or any(predicate(operand)
@@ -1529,6 +1556,20 @@ def _is_mutator_method(name: str | None) -> bool:
     if name is None:
         return False
     return name not in _PURE_METHODS
+
+
+def _constant_key(node: ast.AST) -> str | None:
+    """The LITERAL key of a `Subscript` (`_sl["s"]` -> `"'s'"`), or `None` when computed.
+
+    Used to compare a slot STORE with the slot a callee is CALLED through, so
+    `_sl["s"] = results.sort; _sl["label"]()` is not a mutation (#14326 review P2,
+    MEASURED at `36a6451d4e`: `hits=[6]` while the shape calls nothing that touches the
+    page). The spelling must be identical on both sides, which `repr()` gives for every
+    hashable constant (a string, an int, a tuple of them) without assuming a type.
+    """
+    if isinstance(node, ast.Constant):
+        return repr(node.value)
+    return None
 
 
 def _collection_alias_predicate(var: str):
@@ -1688,6 +1729,16 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     for the RECORDED ROWS — plus a bound mutator (`_s = results.sort`) reached directly, or
     through a LITERAL container, an OBJECT slot, a slot STORE (`_sl["s"] = results.sort`) or a
     second hop out of a container holding one (`_b.s = _d["s"]`).
+    ⛔ AND A WRITE THROUGH A SHALLOW COPY (#14326 review P0, MEASURED at `36a6451d4e`):
+    `_c = list(results); _c[0]["id"] = "X"` measured `hits=[]` while the recorded `order`
+    carried `"X"` and the pin reported PASS — the copy exemption covered the whole bind, so
+    a container whose slots ARE the page's own elements was exempt from the element arm too.
+    `sorted(…)`, `[r for r in results]`, `min(…)`/`max(…)` (an ELEMENT, never a copy) and a
+    second name for the copy, and a `for` over the copy, all measured the same way and are
+    covered by one rule: the copy's NAME joins `holders` ("a container reached THROUGH its
+    slots"), while the container-level operations (`_c.sort()`) stay exempt. The SLOT KEY is
+    compared there too — a mutator stored in `_sl["s"]` does not make `_sl["label"]()` a
+    mutation (#14326 review P2, measured).
 
     ⛔ STATED RESIDUAL, not implied coverage (#14326 round 9): a bound mutator reached through
     a DYNAMIC attribute (`getattr(_b, "s")(key=…)`, `_b.__dict__["s"]()`) is NOT resolved —
@@ -1715,8 +1766,15 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
       - an alias created INSIDE a callee, or in a module-level helper called with no
         argument (interprocedural reach, above);
       - an element reached through a function RETURN, a generator, or a global;
-      - any shape whose value is a COPY (`dict(pq)`, `list(results)`, `_result_id(r)`):
-        those are correctly exempt, and a copy cannot mutate what it copied.
+      - a DEEP copy (`deepcopy(results)`), whose elements are genuinely new: it is treated
+        exactly like a shallow one, so `_c = deepcopy(results); _c[0]["id"] = "X"` is a
+        STATED FALSE RED — the two spellings are indistinguishable statically and the
+        file's polarity is the false red;
+      - the KEY of a LITERAL container of a mutator (`_es = [results.sort]; _es[1]()` reds
+        though it calls something else): `bound_mutator` carries the container NAME for the
+        literal spelling, and only the slot-STORE spelling (`_sl["s"] = results.sort`) is
+        key-compared. Stated, tolerated, and the reason a computed key is fail-closed
+        (`_sl[_k] = results.sort` reds every call through `_sl`).
 
     ⛔ TWO SURVIVORS MEASURED AT THIS HEAD, named so the list above is evidence rather
     than a category (each permutes the recorded page while `compare()` still reads
@@ -1777,6 +1835,26 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # keeps using `watched` — that is the COLLECTION itself, and passing it to a call may
     # sort it in place. Measured: the fixpoint leaves the real tool green.
     muts = watched | rows
+    # ⛔ A SHALLOW COPY IS NOT THE PAGE, BUT ITS SLOTS ARE THE PAGE'S OWN ELEMENTS (#14326
+    # review P0, MEASURED at `36a6451d4e` and reproduced end-to-end on the shipped tool):
+    #
+    #     _c = list(results); _c[0]["id"] = "X"      artifact records "X", pin PASSED
+    #
+    # `_c` is a NEW list holding the SAME row dicts, so `_c.sort()` is innocent (round 9's
+    # measured false red, preserved) while `_c[0][…] = …` / `_c[0].sort()` rewrite what the
+    # artifact records. `_builds_new_container` therefore decides only that the CONTAINER
+    # is new; the copy's NAME goes in `holders` — the set that already means "a container
+    # through whose SLOTS the page is reached" — so every existing arm that reaches
+    # THROUGH a slot fires, and a bare `_c` stays what it is (a copy, not the page).
+    # ⛔ AND A DEEP COPY IS TREATED THE SAME WAY, which is a stated FALSE RED: `deepcopy`
+    # really does rebuild the elements, but a static walk cannot prove which of the two
+    # spellings produced a given name, and the file's polarity is the false red (the
+    # reviewer's own reading: "only a deep copy is [an exemption], and a deep copy cannot
+    # be proven statically here").
+    shallow_copies = _aliases_of(
+        run_def,
+        lambda v: _builds_new_container(v) and bool(_names_in(v) & watched),
+        loops=True, copy_is_alias=True) - watched
     # ⛔ A CONTAINER THAT HOLDS THE COLLECTION IS NOT THE COLLECTION — it is an INDEX into
     # the same object graph, so it joins a SECOND set (`holders`), never `muts` (#14281
     # review P1, measured). The distinction is load-bearing in both directions:
@@ -1809,7 +1887,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                     callable_params[_t.id] = _n.value
         elif isinstance(_n, (ast.FunctionDef, ast.AsyncFunctionDef)):
             callable_params.setdefault(_n.name, _n)
-    holders: set[str] = set()
+    holders: set[str] = set(shallow_copies)
     changed = True
     while changed:
         changed = False
@@ -2000,8 +2078,8 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
 
     bound_mutator = _aliases_of(run_def, _bound_mutator_expr, loops=True)
 
-    def _mutator_holders(tree: ast.AST) -> frozenset[str]:
-        """NAMES of containers/objects whose SLOT was ASSIGNED a bound mutator.
+    def _mutator_slot_keys(tree: ast.AST) -> dict[str, frozenset[str] | None]:
+        """CONTAINER name -> the SLOT KEYS that were ASSIGNED a bound mutator.
 
         ⛔ THE SLOT-STORE SPELLING WAS GREEN (#14326 round 9, MEASURED at `88859180`):
         `_sl = {}; _sl["s"] = results.sort; _sl["s"](key=…)` measured `hits=[]` while the
@@ -2009,10 +2087,23 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         The literal is resolved by `_bound_mutator_expr`'s `Dict` arm, but a STORE into a
         slot reaches neither `_aliases_of` (name targets only) nor the `Attribute`/`Name`
         targets `_rebound_mutator_slots` collects — so nothing knew `_sl` held a mutator.
-        The same gap made the second hop (`_b.s = _d["s"]; _b.s(…)`) green. Collected as
-        container NAMES because over-collecting here can only RED.
+        The same gap made the second hop (`_b.s = _d["s"]; _b.s(…)`) green.
+
+        ⛔ AND THE KEY, NOT ONLY THE CONTAINER (#14326 review P2, MEASURED at
+        `36a6451d4e`): collecting the container NAME put every call through ANY slot of it
+        in the mutation arm —
+
+            _sl = {}; _sl["s"] = results.sort; _sl["label"]()     hits=[6]  (false RED)
+            _sl = {}; _sl["s"] = results.sort; _sl["s"](key=str)   hits=[6]  (correct)
+
+        — the second is the mutation and the first calls nothing that can reach the page.
+        The key is statically visible on BOTH sides, so the arm compares them. A store
+        whose key is COMPUTED (`_sl[_k] = results.sort`) records `None`, which reds every
+        call through that container: that is the one shape where the keys cannot be
+        compared, and it keeps the arm fail-closed.
         """
-        found: set[str] = set()
+        found: dict[str, set[str]] = {}
+        unknown: set[str] = set()
         for sub in ast.walk(tree):
             targets: list[ast.AST] = []
             value: ast.AST | None = None
@@ -2023,11 +2114,40 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             if value is None or not _bound_mutator_expr(value):
                 continue
             for target in targets:
-                if isinstance(target, ast.Subscript):
-                    found |= _names_in(target.value)
-        return frozenset(found)
+                if not isinstance(target, ast.Subscript):
+                    continue
+                names = _names_in(target.value)
+                key = _constant_key(target.slice)
+                if key is None:
+                    unknown |= names
+                else:
+                    for name in names:
+                        found.setdefault(name, set()).add(key)
+        keys_out: dict[str, frozenset[str] | None] = {
+            name: frozenset(keys) for name, keys in found.items()}
+        for name in unknown:
+            keys_out[name] = None
+        return keys_out
 
-    mutator_holders = _mutator_holders(run_def)
+    mutator_slot_keys = _mutator_slot_keys(run_def)
+
+    def _mutator_slot_call(func: ast.Subscript) -> bool:
+        """True when `func` selects a SLOT a bound mutator was STORED into.
+
+        Keyed for the stored spellings (#14326 review P2). A LITERAL container
+        (`_es = [results.sort]; _es[0](…)`) is decided by `bound_mutator` — the container
+        NAME — and keeps its stated FALSE RED: `_es[1]()` reds though it calls something
+        else, because the literal's own key set is not carried here.
+        """
+        names = _names_in(func.value)
+        if names & bound_mutator:
+            return True
+        key = _constant_key(func.slice)
+        for name in names & set(mutator_slot_keys):
+            keys = mutator_slot_keys[name]
+            if keys is None or key is None or key in keys:
+                return True
+        return False
 
     def _rebound_mutator_slots(tree: ast.AST) -> frozenset[str]:
         """CALLEE names bound to a BOUND MUTATOR — `_b.s = results.sort`, `_x.count = results.sort`.
@@ -2121,7 +2241,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         elif isinstance(node, ast.Call) and (
                 (isinstance(node.func, ast.Name) and node.func.id in bound_mutator)
                 or (isinstance(node.func, ast.Subscript)
-                    and bool(_names_in(node.func.value) & (bound_mutator | mutator_holders)))):
+                    and _mutator_slot_call(node.func))):
             # ⛔ AND THROUGH A CONTAINER SLOT (#14281 review P2, measured GREEN):
             # `_d = {"s": results.sort}; _d["s"](key=…, reverse=True)` and
             # `_es = [results.sort]; _es[0](…)` permute the PAGE before the artifact reads
@@ -3268,10 +3388,22 @@ def test_a_BOUND_MUTATOR_in_an_OBJECT_SLOT_is_red() -> None:
     for label, body in (
         ("pure callee", "    _b.label = len\n    _b.label()\n"),
         ("a read method of the page", "    _b.get = results.get\n    _b.get('x')\n"),
+        # ⛔ THE SLOT **KEY** IS COMPARED, NOT ONLY THE CONTAINER (#14326 review P2,
+        # MEASURED at `36a6451d4e`: `hits=[6]`): a mutator stored in ONE slot of a container
+        # said nothing about what the OTHER slots hold, and the arm used to red any call
+        # through any of them.
+        ("a DIFFERENT slot of a mutator-holding container",
+         '    _sl = {}\n    _sl["s"] = results.sort\n    _sl["label"]()\n'),
     ):
         assert not _mutations_of(body), (
             f"[{label}] an OBJECT SLOT holding a NON-mutator must stay green — over-collecting "
             "the slot would red an inert edit")
+    # ⛔ AND THE KEYED ARM STAYS FAIL-CLOSED where the key cannot be compared: a store with
+    # a COMPUTED key says nothing about which slot holds the mutator, so every call through
+    # that container reds.
+    assert _mutations_of('    _sl = {}\n    _sl[_k] = results.sort\n    _sl["label"]()\n'), (
+        "a mutator stored at a COMPUTED key must red EVERY call through the container — the "
+        "key cannot be compared, and reading that as 'a different slot' is a fail-open")
 
 
 def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
@@ -3282,7 +3414,9 @@ def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
     sorting it red the pin — while this file's own docstring declares exactly these shapes
     "correctly exempt, and a copy cannot mutate what it copied". A false red on the natural
     "collect the rows" edit is the direction that makes the next author edit the PIN instead
-    of the tool. `_builds_new_object` exempts `_PURE_READS` calls and comprehensions.
+    of the tool. `_builds_new_container` exempts the container BUILDERS and comprehensions —
+    and nothing else, because the exemption is on the CONTAINER, not on its elements: the
+    fail-closed half is asserted below (#14326 review P0).
     """
     for label, body in (
         ("list() copy", "    _copy = list(results)\n    _copy.sort()\n"),
@@ -3303,6 +3437,54 @@ def test_a_COPY_of_the_page_is_NOT_an_alias() -> None:
         assert _mutations_of(body), (
             f"[{label}] must stay RED — the copy exemption must not widen into 'nothing is an "
             "alias'")
+    # ⛔ THE COPY'S **ELEMENTS** ARE THE PAGE'S OWN OBJECTS (#14326 review P0, MEASURED at
+    # `36a6451d4e`): every shape above is a SHALLOW copy, so its slots hold the SAME row
+    # dicts the artifact records. The exemption used to cover the whole BIND, so
+    #
+    #     _c = list(results); _c[0]["id"] = "X"
+    #
+    # measured `hits=[]` — the pin reported PASS while the recorded `order` carried "X" —
+    # and reproduced end-to-end on the shipped tool (inserted after the measured read, the
+    # pin stayed green). The rows below are the fail-closed half: the CONTAINER is new, the
+    # ELEMENTS are not.
+    for label, body in (
+        ("list() copy, element write",
+         '    _c = list(results)\n    _c[0]["id"] = "X"\n'),
+        ("sorted() copy, element write",
+         '    _c = sorted(results, key=str)\n    _c[0]["id"] = "X"\n'),
+        ("comprehension copy, element write",
+         '    _c = [r for r in results]\n    _c[0]["id"] = "X"\n'),
+        ("copy, a row's own list sorted",
+         '    _c = list(results)\n    _c[0]["order"].sort()\n'),
+        ("copy, element write through a SECOND name for it",
+         '    _c = list(results)\n    _d = _c\n    _d[0]["id"] = "X"\n'),
+        ("copy, element write through ITERATION of it",
+         '    _c = list(results)\n    for _e in _c:\n        _e["id"] = "X"\n'),
+        # ⛔ `min`/`max` ARE NOT COPIES AT ALL — they return an ELEMENT of the page, and the
+        # old exemption (`callee in _PURE_READS`, which carries both) treated one as a new
+        # container, so these two measured GREEN.
+        ("min() returns an ELEMENT of the page",
+         '    _r = min(results, key=str)\n    _r["id"] = "X"\n'),
+        ("max() returns an ELEMENT of the page",
+         '    _r = max(results, key=str)\n    _r["id"] = "X"\n'),
+    ):
+        assert _mutations_of(body), (
+            f"[{label}] GREEN (hits=[]) — a shallow copy holds the page's OWN elements, so a "
+            "write through one of its slots rewrites what the artifact records, and "
+            "`compare()` then reads `rank_identical: True` over a permuted page")
+    # ⛔ AND THE COPY IS STILL NOT THE PAGE, one slot in: READING through the copy must not
+    # red, or the arm above is just `_builds_new_container` deleted (the round-9 false red
+    # coming back in the other direction).
+    for label, body in (
+        ("element READ through a copy",
+         '    _c = dict(results[0])\n    print(_c["id"])\n'),
+        ("copy handed to a pure read",
+         '    _c = list(results)\n    print(len(_c))\n'),
+    ):
+        assert not _mutations_of(body), (
+            f"[{label}] FALSE RED (hits={_mutations_of(body)}) — the copy is a NEW container "
+            "and reading one of its slots mutates nothing the artifact records")
+
 
 def test_a_FALLBACK_expression_alias_still_reaches_the_sort() -> None:
     """A fallback expression binds the SAME collection — `results or []`, `results if c else []`.
