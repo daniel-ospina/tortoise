@@ -645,64 +645,121 @@ def _bind_target_names(target: ast.AST) -> set[str]:
 
 
 _NAMESPACE_CALLS = frozenset({"globals", "locals", "vars"})
+_SETATTR_SPELLINGS = frozenset({"setattr"})
+_PARTIAL_SPELLINGS = frozenset({"partial"})
 
 
-def _is_namespace_expr(node: ast.AST) -> bool:
-    """True for an expression naming a LIVE namespace MAPPING — `globals()`/`locals()`/
-    `vars(x)`/`x.__dict__`.
+def _callee_names_of(node: ast.AST) -> set[str]:
+    """The names an expression can be CALLED by — a bare `Name` or an attribute's segment."""
+    name = getattr(node, "id", None) or getattr(node, "attr", None)
+    return {name} if name else set()
 
-    Used only to SCOPE the string-key rebind below: a store into one of these binds a
-    module-level name, while a store into an ordinary container binds nothing.
+
+def _string_keys_of(node: ast.AST | None,
+                    consts: dict[str, frozenset[str]]) -> set[str]:
+    """Every STATIC string `node` can be — an inline constant, or a NAME bound to one.
+
+    ⛔ THE NAME CASE IS NOT OPTIONAL (#14326 review F3, MEASURED GREEN): a first cut took an
+    `ast.Constant` only, so `_p = "print"; setattr(_bi, _p, getattr)` laundered the name —
+    while `_str_constants` exists precisely to resolve "a name whose statically possible
+    value is a string" for every other consumer in this file.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.Name):
+        return set(consts.get(node.id, frozenset()))
+    return set()
+
+
+def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) -> bool:
+    """A live namespace MAPPING — `globals()`/`locals()`/`vars(x)`/`x.__dict__`, or an ALIAS.
+
+    ⛔ THE RECEIVER IS RESOLVED, NOT SPELLED (#14326 review F4, MEASURED GREEN):
+    `_ns = _bi.__dict__; _ns["print"] = getattr` walked past a purely syntactic test — the
+    same one-bind alias `_aliases_of` already resolves for every collection in this file.
     """
     if isinstance(node, ast.Attribute):
         return node.attr == "__dict__"
+    if isinstance(node, ast.Name):
+        return node.id in namespaces
     return (isinstance(node, ast.Call)
             and getattr(node.func, "id", None) in _NAMESPACE_CALLS)
 
 
-def _namespace_rebind_names(node: ast.AST) -> set[str]:
-    """Callee NAMES bound through a STRING KEY into a namespace — fail-closed, by name.
+def _is_setattr_like(value: ast.AST) -> bool:
+    """A value that IS `setattr`, or a `functools.partial` of it — the LAUNDERER.
 
-    ⛔ THE STRING KEY IS THE AXIS `_bind_target_names` NEVER LEARNED (#14326 review,
-    EACH MEASURED GREEN at `c380075b`: `m=2 c=2 i=0` with a third reach executing the read):
+    ⛔ THE LAUNDERER IS NOT ALWAYS SPELLED `setattr` (#14326 review F1/F1b, EACH MEASURED
+    GREEN): `_sa = setattr; _sa(_bi, "print", getattr)` and
+    `functools.partial(setattr, _bi)("print", getattr)` both rebind a callee name through a
+    spelling that matched no arm.
+    """
+    if _callee_names_of(value) & _SETATTR_SPELLINGS:
+        return True
+    return bool(isinstance(value, ast.Call)
+                and _callee_names_of(value.func) & _PARTIAL_SPELLINGS
+                and value.args
+                and _callee_names_of(value.args[0]) & _SETATTR_SPELLINGS)
+
+
+def _namespace_rebind_names(node: ast.AST, consts: dict[str, frozenset[str]],
+                            namespaces: frozenset[str], launderers: frozenset[str]) -> set[str]:
+    """Callee NAMES bound into a namespace by a STRING KEY — resolved, fail-closed.
+
+    ⛔ THE STRING KEY IS THE AXIS `_bind_target_names` NEVER LEARNED (#14326 review, EACH
+    MEASURED GREEN at `c380075b`: `m=2 c=2 i=0` with a third reach executing the read):
 
         setattr(builtins, "print", getattr)      # or globals()["print"] = getattr
         print(sdk, "_tortoise_fts_query")(…, kind="statement")
 
     Round 7 taught `_bind_target_names` to take an ATTRIBUTE SEGMENT (`_mod.print = …`),
-    which closed half the hole the name allow-lists opened. It never learned the two
-    spellings that carry the SAME name as a CONSTANT: a `setattr` name argument, and a
-    string-keyed store into the namespace mapping itself. Both launder an allow-listed
-    name into `getattr` exactly as the attribute form does — so the pin stayed GREEN while
-    the `intentional_keep` grant for `run()` stood on a pin that could not go red.
+    which closed half the hole the name allow-lists opened. It never learned the spellings
+    that carry the SAME name as a VALUE: a `setattr` name argument, a string-keyed store
+    into the namespace mapping, `.update({…})` on it, and `.__setitem__`. Each launders an
+    allow-listed name into `getattr` exactly as the attribute form does — so the pin stayed
+    GREEN while the `intentional_keep` grant for `run()` stood on a pin that could not go
+    red.
 
-    ⛔ SCOPED TO A NAMESPACE RECEIVER ON PURPOSE. A store into an ORDINARY container
-    (`_counts["write"] = 0`) binds no callee; dropping the allow-listed name `write` for it
-    would be a FALSE RED, so the control beside the rows pins that it stays green.
+    ⛔ ONE ROOT, NOT SEVEN CLAUSES (#14326 review): a `setattr`-family arm, an aliased
+    LAUNDERER, an aliased RECEIVER and a NAME-carried KEY are all the same question — "does
+    this statement put an allow-listed name into a namespace?" — so each is RESOLVED with
+    machinery this file already owns rather than matched as another constant.
+
+    ⛔ `setattr` CARRIES NO RECEIVER TEST, ON PURPOSE. The allow-lists are consulted by LAST
+    SEGMENT, so `setattr(_page, "write", getattr)` → `_page.write(sdk, …)` genuinely reaches
+    the read; scoping it to modules would open a new fail-open (measured, review (B)).
+    The mapping arms DO test the receiver: `_counts["write"] = 0` binds nothing, and the
+    control beside the rows pins that it stays green.
     """
+    out: set[str] = set()
     if isinstance(node, ast.Call):
-        # `setattr(<obj>, "<name>", …)` — the attribute form, spelled as a call.
-        if getattr(node.func, "id", None) == "setattr" and len(node.args) >= 2:
-            key = node.args[1]
-            if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                return {key.value}
-        # `<ns>.__dict__.update({"<name>": …})` binds the mapping's KEYS.
-        if (getattr(node.func, "attr", None) == "update"
-                and isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr == "__dict__"
-                and node.args and isinstance(node.args[0], ast.Dict)):
-            return {k.value for k in node.args[0].keys
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
-        return set()
-    if (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
-            and _is_namespace_expr(node.value)):
-        key = node.slice
-        if isinstance(key, ast.Constant) and isinstance(key.value, str):
-            return {key.value}
-    return set()
+        callee = _callee_names_of(node.func)
+        # `setattr(<obj>, "<name>", …)`, its ALIASES, and `partial(setattr, …)(…)`.
+        if callee & (_SETATTR_SPELLINGS | launderers):
+            if len(node.args) >= 2:
+                out |= _string_keys_of(node.args[1], consts)
+        elif (isinstance(node.func, ast.Call)
+                and _callee_names_of(node.func.func) & _PARTIAL_SPELLINGS
+                and node.func.args
+                and _callee_names_of(node.func.args[0]) & (_SETATTR_SPELLINGS | launderers)):
+            if node.args:
+                out |= _string_keys_of(node.args[0], consts)
+        # `<ns>.update({"<name>": …})` and `<ns>.__setitem__("<name>", …)`.
+        elif "update" in callee and _is_namespace_expr(node.func.value, namespaces):
+            if node.args and isinstance(node.args[0], ast.Dict):
+                for key in node.args[0].keys:
+                    out |= _string_keys_of(key, consts)
+        elif ("__setitem__" in callee and node.args
+                and _is_namespace_expr(node.func.value, namespaces)):
+            out |= _string_keys_of(node.args[0], consts)
+    elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
+            and _is_namespace_expr(node.value, namespaces):
+        out |= _string_keys_of(node.slice, consts)
+    return out
 
 
-def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
+def _rebound_callee_names(tree: ast.AST,
+                          consts: dict[str, frozenset[str]] | None = None) -> frozenset[str]:
     """Allow-listed CALLEE NAMES the source REBINDS — they are not pure any more.
 
     ⛔ THE PURITY TESTS ARE BY NAME, SO THE NAME CAN BE REBOUND (#14326 round 6, MEASURED
@@ -739,6 +796,11 @@ def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
     — a false RED on the pin's own recording-direction control, decided by whether an
     unrelated line happened to sit inside a `with`. `items[*].optional_vars` is the bind.
     """
+    consts = _str_constants(tree) if consts is None else consts
+    # ⛔ BOTH RECEIVER AND LAUNDERER ARE RESOLVED, NOT SPELLED (#14326 review F1/F1b/F4):
+    # a one-bind alias of `setattr` or of the namespace mapping walked past the first cut.
+    namespaces = frozenset(_aliases_of(tree, _is_namespace_expr, loops=True))
+    launderers = frozenset(_aliases_of(tree, _is_setattr_like, loops=True))
     out: set[str] = set()
     for node in ast.walk(tree):
         # ⛔ NO GENERIC `Name(Store)` WALK (#14326 round 8, measured: adding one and then
@@ -780,7 +842,7 @@ def _rebound_callee_names(tree: ast.AST) -> frozenset[str]:
             # `setattr(builtins, "print", getattr)` and a string-keyed store into
             # `globals()`/`vars(x)`/`x.__dict__` bind the callee name exactly as the
             # attribute arm above does. See `_namespace_rebind_names`.
-            out |= _namespace_rebind_names(node)
+            out |= _namespace_rebind_names(node, consts, namespaces, launderers)
         elif isinstance(node, ast.Match):
             for case in node.cases:
                 for capture in ast.walk(case.pattern):
@@ -1078,7 +1140,7 @@ def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
     """
     consts = _str_constants(tree) if consts is None else consts
     parents = _parents_of(tree) if parents is None else parents
-    rebound = _rebound_callee_names(tree)
+    rebound = _rebound_callee_names(tree, consts)
     mentions = [n for n in ast.walk(tree) if _is_read_ref(n, parents, consts, rebound)]
     return mentions, _read_calls(tree), _indirect_reads(tree, consts, rebound)
 
@@ -4135,6 +4197,48 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    builtins.__dict__.update({"print": getattr})\n'
             '    print(sdk, "_tortoise_fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ AND THE SPELLINGS A SYNTAX-MATCHING ARM MISSED (#14326 review at `36a6451d`,
+        # EACH MEASURED GREEN through the pin's own predicate AND end-to-end on the real
+        # tool): the LAUNDERER, the RECEIVER, and the KEY are each resolvable, so a match on
+        # the literal `setattr`/`__dict__`/constant only moves the bypass one hop out. Each
+        # row below is one of those hops; `_is_setattr_like`, `_is_namespace_expr` and
+        # `_string_keys_of` resolve them with machinery this file already owns.
+        "ALIASED `setattr` (a name bound to the launderer)": (
+            '    import builtins as _bi\n'
+            '    _sa = setattr\n'
+            '    _sa(_bi, "print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`setattr` through `functools.partial`": (
+            '    import builtins as _bi, functools\n'
+            '    functools.partial(setattr, _bi)("print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "NAME-carried key in a `setattr`": (
+            '    import builtins as _bi\n'
+            '    _p = "print"\n'
+            '    setattr(_bi, _p, getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`globals().update({…})` rebinding a PURE callee": (
+            '    globals().update({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`vars(x).update({…})` rebinding a PURE callee": (
+            '    import builtins as _bi\n'
+            '    vars(_bi).update({"print": getattr})\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "ALIASED namespace RECEIVER": (
+            '    import builtins as _bi\n'
+            '    _ns = _bi.__dict__\n'
+            '    _ns["print"] = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`__setitem__` spelling of the namespace store": (
+            '    globals().__setitem__("print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         # ⛔ THE REMAINING BIND FORMS AND DELIVERY SPELLINGS (#14326 round 7, EACH MEASURED
         # GREEN while its arm was missing). The rebind audit reaches the census from THREE
         # places — the `Name` arm, the `Constant` arm and `_indirect_reads` — and a laundering
@@ -4281,6 +4385,8 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     container_store = ('    _counts = {}\n'
                        '    _counts["write"] = 0\n'
                        '    _counts["print"] = 0\n'
+                       '    _cfg = {}\n'
+                       '    _cfg.update({"write": 0})\n'
                        '    _LOG.write("_tortoise_fts_query")\n')
     assert not _pin_refuses(_pin_source(container_store)), (
         "a string-keyed store into an ordinary CONTAINER is not a callee rebind — treating "
