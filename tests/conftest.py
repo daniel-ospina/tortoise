@@ -2138,13 +2138,26 @@ from tests._verdict import (  # noqa: E402
 )
 
 
+#: The join window the SUITE runs with, in seconds.
+#:
+#: Chosen to DOMINATE the slowest thing that legitimately sits inside the ACK's
+#: join on a cold process: `_extract_capture` compiles the tenant vocabulary on
+#: its first use in a process (~12 s cold, measured — see
+#: `tests/test_session_capture_status.py`'s warm-up note), and that compile runs
+#: between the join's start and the extraction it waits on. A window shorter than
+#: that turns every pre-existing "the POST body reports what was extracted"
+#: assertion into a red about start-up cost, which is `#5049` rule 1's forbidden
+#: verdict.
+_CAPTURE_ACK_WINDOW_S = 30.0
+
+
 @pytest.fixture(autouse=True)
 def _capture_ack_window_is_deterministic(monkeypatch):
     """#14232: the suite pins the IN-BUDGET capture, never the deferral.
 
     The handler joins the extraction for at most ``_CAPTURE_ACK_DEADLINE_S``
-    (0.5 s in production, anchored on arrival and clamped to half the transport
-    bound) and answers with the
+    (0.5 s in production, anchored on arrival and clamped to **half** the
+    transport bound) and answers with the
     async `accepted` receipt when the join misses. Whether the join misses on a
     given run is a question about MACHINE LOAD — the offline `MockModel` seam's
     whole capture measured 0.008 s to 0.95 s on one host depending on the test
@@ -2153,15 +2166,34 @@ def _capture_ack_window_is_deterministic(monkeypatch):
     race. `#5049` rule 1 forbids exactly that: a deadline expiry may not produce a
     verdict about the code under test.
 
-    So the window is opened for the whole suite (still clamped by the transport
-    bound, which is 10 s, so the join is effectively unbounded here), and the
-    deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
-    commutes this same value to 0 for the ack-path tests. Nothing in the product
+    So the window is opened for the whole suite — ``_CAPTURE_ACK_WINDOW_S`` — and
+    the deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
+    commutes this same seam to 0 for the ack-path tests. Nothing in the product
     reads this constant differently; it is the test substrate that must not race.
+
+    ⛔ TWO PINS, because one is not enough (review round 6, F2): raising
+    ``_CAPTURE_ACK_DEADLINE_S`` alone is silently clamped by
+    ``min(30, _TRANSPORT_WAIT_BOUND_S / 2)`` to **5 s** — SHORTER than the ~12 s
+    cold compile above, so the window this fixture claims to open was not open,
+    and two pre-existing rows had to grow per-row warm-ups to survive it. The
+    helper is therefore pinned too, which is the half that makes the claim true.
+    The product constant is deliberately NOT touched: ``mcp_auth._TRANSPORT_WAIT_BOUND_S``
+    is asserted to be 10 s by `tests/test_transport_wait_bound.py`, and a
+    suite-wide edit to it would let this fixture grade its own mutation. Rows that
+    must exercise the REAL arithmetic restore it from
+    ``ha._REAL_CAPTURE_ACK_GRACE_S``.
     """
     module = sys.modules.get("tortoise.hosted_api")
     if module is not None:
-        monkeypatch.setattr(module, "_CAPTURE_ACK_DEADLINE_S", 30.0)
+        monkeypatch.setattr(module, "_CAPTURE_ACK_DEADLINE_S",
+                            _CAPTURE_ACK_WINDOW_S)
+        # Captured BEFORE the override below, so a row that needs the deployed
+        # ceiling/anchor arithmetic can put it back (the two pins are one seam:
+        # leaving only this one restores the clamp the suite means to bypass).
+        monkeypatch.setattr(module, "_REAL_CAPTURE_ACK_GRACE_S",
+                            module._capture_ack_grace_s, raising=False)
+        monkeypatch.setattr(module, "_capture_ack_grace_s",
+                            lambda _request: _CAPTURE_ACK_WINDOW_S)
         # A tail left pending by a torn-down loop can never run again (its loop is
         # gone), so holding a strong reference to it only makes the registry lie
         # about what is live.

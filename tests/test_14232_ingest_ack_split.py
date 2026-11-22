@@ -115,9 +115,27 @@ def _force_join(monkeypatch, seconds: float):
     The transport ceiling is pinned to its production value too
     (`_TRANSPORT_WAIT_BOUND_S` = 10 s), so the clamp under test is
     `min(seconds, 5.0)` rather than whatever a neighbouring test left behind.
+
+    ⛔ AND THE REAL HELPER IS RESTORED. The suite fixture pins
+    `_capture_ack_grace_s` itself (it has to: the 30 s constant alone is clamped
+    to 5 s, review round 6 F2), so leaving that pin in place here would make the
+    deadline below decide nothing — the join would take the fixture's 30 s window
+    and every
+    "the production deadline is enough" row would stay green while the deployed
+    value drifted. Restoring the helper is what keeps `seconds` load-bearing.
     """
     monkeypatch.setattr(ha, "_CAPTURE_ACK_DEADLINE_S", seconds)
     monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 10.0)
+    monkeypatch.setattr(ha, "_capture_ack_grace_s", _real_ack_grace_s())
+
+
+def _real_ack_grace_s():
+    """The DEPLOYED `_capture_ack_grace_s`, which the suite fixture overrides.
+
+    The fixture stores it on the module before pinning its own window, so this is
+    the same value read twice, never a re-derivation.
+    """
+    return getattr(ha, "_REAL_CAPTURE_ACK_GRACE_S", ha._capture_ack_grace_s)
 
 
 def _drain_tails(timeout: float = 30.0) -> None:
@@ -203,6 +221,10 @@ def test_the_ack_window_is_anchored_on_arrival(monkeypatch):
 
     monkeypatch.setattr(ha, "_CAPTURE_ACK_DEADLINE_S", 0.5)
     monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 10.0)
+    # The suite fixture pins this helper to a flat 30 s window (that is what makes
+    # the suite's own claim true — see its docstring); the arithmetic below is
+    # about the DEPLOYED function, so it is restored here.
+    monkeypatch.setattr(ha, "_capture_ack_grace_s", _real_ack_grace_s())
 
     def _req(age_s):
         state = types.SimpleNamespace(_wait_bound_t0=time.monotonic() - age_s)
@@ -225,6 +247,85 @@ def test_the_ack_window_is_anchored_on_arrival(monkeypatch):
     # silently disable the compatibility half.
     assert ha._capture_ack_grace_s(types.SimpleNamespace(state=None)) == 0.5
     assert ha._capture_ack_grace_s(None) == 0.5
+
+
+def test_the_suite_window_is_WIDER_than_the_cold_start_it_must_absorb():
+    """The suite fixture's window must dominate the cost that sits INSIDE it.
+
+    `_extract_capture` compiles the tenant vocabulary on its first use in a
+    process — measured at ~12 s cold, and it runs between the join's start and the
+    extraction the join waits on. The fixture's stated job is that no pre-existing
+    assertion races a deadline (`#5049` rule 1), so a window SHORTER than that
+    compile cannot do it: the join expires on start-up cost alone and every
+    "the POST body reports what was extracted" row in the suite is a wall-clock
+    race again.
+
+    ⛔ WHY THIS ROW EXISTS AT ALL (review round 6, F2). The fixture raised
+    `_CAPTURE_ACK_DEADLINE_S` to 30 s but `_capture_ack_grace_s` clamps to HALF
+    the transport bound, so the effective window was `min(30, 10/2)` = **5 s** —
+    and the fixture's docstring said "effectively unbounded" beside it. Two
+    pre-existing rows (`test_session_capture_status.py`'s warm-up,
+    `test_capture_loop_responsiveness.py`'s 180 s poll) had already grown
+    per-row workarounds; the 507 capture rows in `test_hosted_api.py` had not.
+    Asserting the EFFECTIVE window — through the request-shaped entry point the
+    handler really calls, not the constant — is what makes the fixture's claim
+    checkable instead of prose. Under the pre-fix fixture this returns 5.0 and
+    reds.
+    """
+    import types
+
+    age = 0.0
+    request = types.SimpleNamespace(
+        state=types.SimpleNamespace(_wait_bound_t0=time.monotonic() - age))
+    window = ha._capture_ack_grace_s(request)
+    assert window >= 12.0, (
+        "the suite's join window must absorb a ~12 s cold tenant-vocab compile "
+        f"or every in-budget row races it; measured {window:.2f}s "
+        "(the pre-fix clamp was min(30, 10/2) = 5 s)")
+
+
+def test_the_phase_view_never_runs_ahead_of_the_record(monkeypatch):
+    """The `extracting` phase reaches the ACK's own view — and only AFTER the write.
+
+    `_capture_extraction_started` is what carries "the worker is inside the model
+    call" to BOTH readers: the record (a `:Session` property) and the ACK
+    (`_capture_phase_view`, read when the body is built). The invariant is the
+    ORDER — the view may never claim a phase the record does not carry yet,
+    because a body ahead of its own record is the one thing this change must not
+    produce.
+
+    ⛔ REVIEW ROUND 6 CALLED THIS DEAD CODE (F3: "the view's `phase` is never read
+    after it is written, so the ACK can only ever say `queued`"). Its mechanism
+    claim was that nothing yields between `create_task` and the ACK — but the ACK
+    is built after `await asyncio.wait_for(asyncio.shield(task), grace)`, and that
+    await is exactly what lets the extraction task run while the request waits
+    (the cancellation rows park the phase write INSIDE it). So the assignment is
+    reachable, and it is load-bearing: delete it and the ACK reports `queued`
+    while the record it points at says `extracting`. This row pins that mutant.
+    """
+    import asyncio
+
+    written: list[tuple[str, str, object]] = []
+    view = {"phase": "queued", "armed": True}
+
+    def _recording_write(_proj, session_id, phase, _at):
+        # What the RECORD carries at this instant, beside what the VIEW claims.
+        written.append((session_id, phase, view["phase"]))
+        return None
+
+    monkeypatch.setattr(ha, "_write_capture_phase", _recording_write)
+    asyncio.run(
+        ha._capture_extraction_started(None, "s-14232-view", view, "now"))
+
+    assert [(sid, phase) for sid, phase, _v in written] == [
+        ("s-14232-view", "extracting")], (
+        f"the armed lane must write exactly one `extracting` phase: {written}")
+    # ⛔ WRITE FIRST: at the moment the record is written the view still says
+    # `queued`, so the ACK cannot be ahead of the record it describes.
+    assert written[0][2] == "queued", (
+        f"the view claimed the phase before the record carried it: {written}")
+    # …and after the write it carries it, which is what the ACK reads.
+    assert view["phase"] == "extracting", view
 
 
 # ── R1: durable at the ACK ────────────────────────────────────────────────
@@ -926,9 +1027,17 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
         f"the breach must name the stage it landed in: {body}")
     assert body["stages_ms"].get("capture_gates") is not None, (
         f"the finished gate phase must be timed beside it: {body}")
-    # The bound's own envelope, not any 504: a refusal that lost its cause would
-    # satisfy neither assertion below.
-    assert "str(slow)" not in body.get("detail", ""), body
+    # The bound's own envelope, not any 504, and not the caller's exception text:
+    # the refusal's `detail` is `_TRANSPORT_WAIT_BOUND_MESSAGE` (the constant both
+    # surfaces ship, `mcp_auth.py:823`), so a refusal that lost its cause — a bare
+    # FastAPI 504, or one that leaked the swallowed write's error — cannot satisfy
+    # this. ⛔ It used to read `assert "str(slow)" not in body["detail"]`, whose
+    # subject was a STRING LITERAL naming a helper (`_slow_write`) that is not in
+    # scope: no mutation could red it, and the comment above advertised an
+    # assertion that did not exist (review round 6, F1).
+    assert body["detail"] == ha._mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE, (
+        f"the refusal must carry the wait-bound envelope, not an arbitrary 504: "
+        f"{body}")
 
 
 def test_the_write_mark_sits_between_the_gates_and_the_extraction(

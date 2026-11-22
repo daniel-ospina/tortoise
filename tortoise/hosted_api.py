@@ -717,16 +717,29 @@ async def _capture_extraction_started(proj, session_id: str, view: dict,
 
     No-op unless this request took the deferred lane (``view["armed"]``): the
     inline lanes finish before any reader could see a phase, so writing one there
-    would be two extra graph round trips that nobody can observe. The view is
-    also what the ACK reads, so the body names the phase the RECORD carries
-    rather than a guess.
+    would be two extra graph round trips that nobody can observe.
+
+    ⛔ THE VIEW IS READ, LATE — by the ACK, after the join. `_capture_phase_view`
+    reaches the ACK body at
+    `session_extraction_status(..., phase=_capture_phase_view["phase"])`, and that
+    body is built AFTER `await asyncio.wait_for(asyncio.shield(task), grace)`. That
+    await yields to the loop, which is exactly how THIS coroutine gets to run while
+    the request is still waiting on it. So on the deferred path the assignment
+    below is observable: a request whose join expires after the phase write reports
+    `extracting`, and one whose join expires before it reports `queued` — BEHIND
+    the record, which is the only direction that is honest. (Review round 6 read
+    this as dead code on the assumption that nothing yields between `create_task`
+    and the ACK; the join is that yield. See
+    `test_the_phase_view_never_runs_ahead_of_the_record`.)
     """
     if not view.get("armed"):
         return
     await _mark_capture_extraction_phase(proj, session_id, "extracting", now)
     # AFTER the write, so the view never claims a phase the record does not carry
-    # yet: the ACK is built from this dict, and a body that is ahead of its own
-    # record is the one thing this change must not produce.
+    # yet: the ACK is built from this dict after the join (see the docstring), and a
+    # body AHEAD of its own record is the one thing this change must not produce.
+    # Delete this line and the ACK reports `queued` while the record it points at
+    # says `extracting` — the row above reds on exactly that mutant.
     view["phase"] = "extracting"
 
 
