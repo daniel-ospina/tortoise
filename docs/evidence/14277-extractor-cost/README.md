@@ -9,7 +9,7 @@ and both can be regenerated from the raw rows without spending another token:
 ```bash
 uv run python tools/extractor_cost_measure.py run \
     --out docs/evidence/14277-extractor-cost/measurements.jsonl \
-    --docs 50 --sessions 10 --workers 8 --long-split
+    --docs 50 --sessions 10 --workers 6 --long-split
 uv run python tools/extractor_cost_measure.py report \
     --out docs/evidence/14277-extractor-cost/measurements.jsonl \
     --json-out docs/evidence/14277-extractor-cost/report.json \
@@ -85,7 +85,7 @@ measurement.
 3. **The cache arms are a ladder, not two points — and NO TRULY COLD PREFIX
    WAS OBSERVED.** Within an arm the per-stage system prompt is already a
    cached prefix from the second item onward. ⛔ The provider's prefix cache
-   outlives a single call, and the six workers run concurrently against the
+   outlives a single call, and the workers run concurrently against the
    same per-stage system prompts, so even the cold arm's FIRST item was
    **83.3% cached** (29,568 hit of 35,512 prompt tokens). That row is not a
    cold reading — the prefix was already warm when it was measured — and the

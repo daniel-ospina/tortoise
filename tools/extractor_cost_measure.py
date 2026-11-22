@@ -58,7 +58,7 @@ LIMITS — stated because an unstated limit reads as a result:
 3. **Cache arms are a ladder, not two points.** Both arms run the corpus in
    order, so from the second document onward the per-stage system prompt is
    already a cached prefix. ⛔ **NO TRULY COLD PREFIX WAS OBSERVED.** The
-   provider's prefix cache outlives a single call, and six workers run
+   provider's prefix cache outlives a single call, and the workers run
    concurrently against the same per-stage prompts, so even the cold arm's
    FIRST document was 83.3% cached (29,568 hit of 35,512 prompt tokens) — the
    prefix was already warm when it was measured, from a sibling call or an
@@ -1124,7 +1124,7 @@ def render(report: dict) -> str:
         prompts = sum(b["prompt"] for b in fc["stages"].values())
         share = (hits / prompts) if prompts else 0.0
         # ⛔ NOT a cold-prefix reading, and the heading says so. The provider's
-        # prefix cache outlives a single call, and six workers run concurrently
+        # prefix cache outlives a single call, and the workers run concurrently
         # against the same per-stage system prompts, so the cold arm's first
         # document already carried a warm prefix. Calling it "the true cold
         # call" presented a measurement artifact as the cold baseline (#14277
