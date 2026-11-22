@@ -5308,7 +5308,22 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # why the verdict comes from `_d5_grep_verdict` rather than a local two-way branch. Only
     # `--unix-byte-offsets` itself passes through the allowance probe; the four PREFIX spellings
     # reach this loop without ever meeting its three-way rule, so a two-way branch here would read a
-    # non-answer as a refusal and print "(measured: exit 2)" over a run that did not exit 2.
+    # non-answer as a refusal and report it as one — the message interpolates whatever code was
+    # actually seen, so it never says `exit 2` unless the run really exited 2.
+    # ⛔ AND THE LOOP'S USE OF THE SEAM HAS ITS OWN WITNESS (#14303 review round 4, P3 — MEASURED).
+    # Pinning `_d5_grade_alias_spelling` with a stub does NOT pin what THIS loop calls: replacing the
+    # loop body with a local `subprocess.run` plus a two-way `rc in (0, 1)` left this file GREEN on
+    # both platforms (`36 passed`) — the exact fail-open read the seam exists to prevent, reinstated
+    # at the call site with nothing reding, because a stub can only reach the helper. Recording the
+    # seam's calls proves the loop actually routes through it: a loop-local two-way records NOTHING.
+    seam_calls: list[str] = []
+    real_grade = _d5_grade_alias_spelling
+
+    def recording_grade(spelling: str, grep: str = "grep"):
+        seam_calls.append(spelling)
+        return real_grade(spelling, grep)
+
+    monkeypatch.setitem(globals(), "_d5_grade_alias_spelling", recording_grade)
     for spelling in alias_spellings:
         ran, accepted = _d5_grade_alias_spelling(spelling)
         read = _d5_count_prescriptions(f"a count: `grep -c {spelling} '^[+-]$'`\n")
@@ -5325,6 +5340,11 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
                 f"{spelling!r} is REFUSED by this grep (measured: exit {ran.returncode}) and the "
                 "reader still graded it — grading the expression of a command grep will not run is "
                 "a false RED on a document that merely mentions it (#13995, MEASURED)")
+
+    assert seam_calls == list(alias_spellings), (
+        "the alias loop did not classify every spelling through `_d5_grade_alias_spelling` — a "
+        "loop-local two-way `rc in (0, 1)` reads a NON-ANSWER as a refusal and reinstates the "
+        f"fail-open read the seam exists to prevent (#14303 round 4): seam called for {seam_calls!r}")
 
     hidden = ("row: `grep -c '^[+-]$'`\n"
               "and: `grep -c --unix-byte-offsets '^[+-]$'`\n")
