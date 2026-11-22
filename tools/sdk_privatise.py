@@ -1022,7 +1022,19 @@ SWEEP_NAMES = 66
 #: `super().query` 74 → 75, the `_EventGraph` fake in `tests/test_14012_outside_view.py` delegating to
 #: its parent for the statements it does not answer (the end-to-end per-label timestamp row).
 #: `typed references still pointing at a public name` stays **0**.
-SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
+#:
+#: RE-CUT → (11860, "57e0960ca6f20f5a") by the #14192 lane (`fix/14192-parallel-legs`), ON THIS
+#: BRANCH'S OWN TREE, because `--check` reddened `surface-guard` on it. ⛔ The number is NOT
+#: `11857 + this PR's delta`: `origin/main` had ALREADY moved to **11861** on its own tree while
+#: the pin still read 11857, so the pin was stale BEFORE this branch touched it and arithmetic on
+#: it would have hidden that. Both sides were re-measured with the tool's own row dump instead:
+#: `origin/main` (`5e83c2a2f6`) → 11861, this tree → 11860, and the row diff between them is a
+#: SINGLE row, `out.update` 43 → 42 — one `out.update(...)` call site removed from
+#: `tools/read_wave_latency.py` by this PR's harness rewrite. Nothing else moves; in particular the
+#: five `graph.query` receivers this PR ADDS inside `_ReadWave` are already counted under the
+#: existing `graph.query` row, and `typed references still pointing at a public name` stays **0**.
+#: ⚠️ A SHRINK IS NOT EVIDENCE ON ITS OWN — the pair is, and it is what `--check` grades.
+SWEEP_RESIDUE = (11860, "57e0960ca6f20f5a")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
