@@ -743,6 +743,16 @@ class ProjectionWorker:
           advertise the parent's permanent backlog), so it is NOT deferred to the
           first write.
         """
+        # ⛔ THIS CALL IS PART OF THE RESET, not a courtesy (#14222 review, finding
+        # 1). `_publish_queue_state` reaches the same function through
+        # `monitoring.record_projection_queue_state`, so the guarantee held either
+        # way — but the docstring above names THIS method as the one that replaces
+        # the third party's locks, and a reader who trusted that sentence and
+        # deleted the gate from `monitoring` would restore the measured wedge while
+        # the prose said it was safe. `_emit` swallows every failure (a metrics
+        # problem must never break the fold) and the replacement is idempotent and
+        # pid-gated, so on the ordinary path it is one comparison.
+        _emit("ensure_projection_metrics_fork_safe")
         self._cond = threading.Condition()
         self._cond_pid = os.getpid()
         self._publish_lock = threading.Lock()
