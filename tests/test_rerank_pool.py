@@ -1768,7 +1768,10 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     matches the raised exception by class/mro (§8.4.1 — a non-class raises
     `TypeError`, so it is not a call); and `type-alias`, `match-subject`,
     `type-param` and `class-dead` grade the enumerations and the class-body
-    admission ADDED for round 10.
+    admission ADDED for round 10; `helper-arg` is the one row that exercises the
+    argument-carrier branch (a seam handed to ANOTHER call rather than called),
+    which nothing else reached — deleting that branch left every row GREEN
+    (measured at `62fb081200`).
 
     ⛔ AND EVERY BRANCH OF THE TWO ENUMERATIONS HAS A ROW, because a pin cannot be
     a tripwire for a binding kind it never exercises: measured at `93178a6495`,
@@ -1885,6 +1888,9 @@ def matchvalue(sdk):
     match 1:
         case sdk._tortoise_fts_query:
             pass
+
+def helperarg(sdk):
+    _helper(sdk._tortoise_fts_query, query="helper-arg")
 '''
     tree = ast.parse(source)
     mentions = [n for n in ast.walk(tree)
@@ -1919,6 +1925,7 @@ def matchvalue(sdk):
         (1, False, ["comprehension"]),  # `for _c in [SEAM]: _c(…)`
         (1, False, ["container"]),      # `_reads = [SEAM]; _reads[0](…)`
         (1, False, ["for-target"]),     # `for _fn in (SEAM,): _fn(…)`
+        (1, False, ["helper-arg"]),     # `_helper(SEAM, query=…)` — an ARGUMENT
         (1, False, ["one-hop"]),        # `_opt = SEAM; _opt(…)`
         (1, False, ["two-hop"]),        # `_n = _m` ABOVE `_m = SEAM`
         (1, False, ["walrus"]),         # `if (_w := SEAM): _w(…)`
@@ -1926,6 +1933,50 @@ def matchvalue(sdk):
         (1, False, ["with-target"]),    # `with SEAM as _v: _v(…)`
         (1, True, ["class-attr"]),      # `class _Tbl: f = SEAM; _Tbl.f(…)`
     ], f"the resolver mis-graded a shape: {sorted(observed)}"
+
+
+def test_the_grant_grader_honours_ONLY_a_real_opt_out_VALUE():
+    """#14278 (round-17, P2) — the opt-out is keyed on the VALUE, and nothing pinned it.
+
+    `_seam_opts_out` is `_sites`' own exemption rule, hoisted so the grant's arm
+    consults the predicate the census does. Measured at `62fb081200`: making it
+    `return False` — i.e. exempting NOTHING — left this whole file GREEN (71
+    passed), and so did the mirror regression the next reader would write,
+    replacing its `k.value.value is False` with a presence test on the kwarg
+    NAME. Both fail in the direction the arm exists to catch: a read spelled
+    ``_rerank_candidates=True`` re-picks the pool, and a presence test would
+    exempt it.
+
+    Every direction is graded here, because each is a different code path:
+    the kwarg branch's value check (``False`` exempts, ``True`` does NOT), the
+    ``_search_kwargs`` dict branch's value check (same two ways), and the fact
+    that a mention with NO opt-out at all is still counted (that last one is
+    what makes `return False` red rather than merely noisy).
+    """
+    source = '''
+def run(sdk):
+    sdk._tortoise_fts_query(query="on", limit=10, _rerank_candidates=False)
+    sdk._tortoise_fts_query(query="not-off", limit=10, _rerank_candidates=True)
+    sdk._tortoise_fts_query(query="dict-on", limit=10,
+                            _search_kwargs={"_rerank_candidates": False})
+    sdk._tortoise_fts_query(query="dict-not-off", limit=10,
+                            _search_kwargs={"_rerank_candidates": True})
+    sdk._tortoise_fts_query(query="bare", limit=10)
+'''
+    tree = ast.parse(source)
+    mentions = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute)
+                and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+    live, resolved, unresolved, calls = _seam_live_reads(tree, mentions)
+    # THREE of the five opt out — exactly the two literal `False` values and
+    # nothing else. A presence test on either branch exempts a `True` too, and
+    # `return False` exempts none of them.
+    assert (len(live), len(resolved), len(unresolved), len(calls)) == (3, 3, 0, 3), (
+        "only a literal `False` may exempt a seam read: `_rerank_candidates=True` "
+        "and `{'_rerank_candidates': True}` RE-PICK the pool, so counting them "
+        "as opted out is the fail-open the grant exists to close. "
+        f"live={len(live)} resolved={len(resolved)} "
+        f"unresolved={len(unresolved)} calls={len(calls)}")
 
 
 def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
@@ -2429,20 +2480,61 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     _seam_check_read_sites(2, live, seam_calls, resolved, unresolved,
                            "tools/read_wave_latency.py")
     owners = {(_enclosing(m).name if _enclosing(m) else None) for m in live}
-    assert owners == {"run"}, (
-        "the exempted reads are not all inside `run`, the only owner the grant "
-        f"names: {sorted(owners, key=str)}")
+    # ⛔ THE GRANT, NOT A LITERAL. `owners == {"run"}` pinned the owner SET as a
+    # constant while its own message claimed it was "the only owner the grant
+    # names", so the row did not read the grant it described: a legitimate
+    # re-cut that moved the warm-up into a `_warm` helper and widened the grant to
+    # `frozenset({"run", "_warm"})` — which the census above ACCEPTS — red this
+    # row with `['_warm', 'run'] == {'run'}`, and the message was then simply
+    # false (measured at `d4729e151f`). Reading the grant keeps exactly what the
+    # row is FOR — a live read outside EVERY granted owner still reds — and stops
+    # it asserting a fact the reason it cites does not state.
+    granted_owners = set(intentional_keep["tools/read_wave_latency.py"])
+    assert owners == granted_owners, (
+        "the exempted reads are not all inside an owner the grant names "
+        f"({sorted(granted_owners)}): {sorted(owners, key=str)}")
     traced = [c for c in seam_calls
               if any(k.arg == "leg_trace" for k in c.keywords)]
     assert len(traced) == 1, (
         "the recorded reason says exactly ONE of the two reads is the MEASURED "
         f"loop and attaches `leg_trace`: {len(traced)} of {len(seam_calls)} do")
-    parent = harness_parent.get(id(traced[0]))
-    while parent is not None and not isinstance(parent, (_ast.For, _ast.AsyncFor)):
-        parent = harness_parent.get(id(parent))
-    assert parent is not None, (
-        "the `leg_trace` read is not inside a `for` loop, so it does not "
+
+    def _enclosing_repeat(node):
+        """The nearest enclosing loop, or None.
+
+        One read per iteration is the unit the recorded reason counts (`1 + N`
+        executions, not two), so a loop — `for`, `async for` or `while` — is the
+        only thing that breaks it.
+        """
+        up = harness_parent.get(id(node))
+        while up is not None:
+            if isinstance(up, (_ast.For, _ast.AsyncFor, _ast.While)):
+                return up
+            up = harness_parent.get(id(up))
+        return None
+
+    assert _enclosing_repeat(traced[0]) is not None, (
+        "the `leg_trace` read is not inside a loop, so it does not "
         "execute once per query and the recorded reason's `1 + N` is wrong")
+    # ⛔ AND THE `1` HALF OF `1 + N`. The row above only proves the TRACED read
+    # runs once per query; nothing proved the OTHER site runs ONCE, which is the
+    # whole difference between `1 + N` and `2N`. Measured at `d4729e151f`:
+    # deleting the warm-up and adding an untraced read inside the same `for` left
+    # the arm GREEN at `{mentions: 2, live: 2, calls: 2}` while the recorded
+    # reason went on describing a site that no longer existed, and moving the
+    # warm-up into a `while` was GREEN too. The reason says "the warm-up issued
+    # BEFORE the per-query loop (result discarded)", so every non-traced site
+    # must sit outside every loop — that is what makes `1 + N` true rather than
+    # merely `traced in for`.
+    for call in seam_calls:
+        if call is traced[0]:
+            continue
+        repeat = _enclosing_repeat(call)
+        assert repeat is None, (
+            "the recorded reason's `1 + N` says the OTHER seam read is the "
+            "warm-up issued BEFORE the per-query loop and discarded, but this "
+            f"one sits inside a loop at line {repeat.lineno}: every iteration "
+            "adds a read, so the reason's `1 + N` is wrong")
 
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
     # volunteer pipeline does exactly that) is not an ``ast.Call`` on
