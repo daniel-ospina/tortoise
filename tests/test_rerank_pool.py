@@ -1345,6 +1345,56 @@ def _seam_object_targets(*targets):
     return found
 
 
+def _seam_enclosing_repeat(node, parents):
+    """The nearest enclosing REPEAT of ``node``, or ``None``.
+
+    A repeat is anything that re-EXECUTES the expression it encloses, which is
+    what a read-count of ``1 + N`` (one warm-up, plus one per query) is asserting
+    over: a ``for``/``async for``/``while`` body, and — since round-25 review — a
+    COMPREHENSION.
+
+    ⛔ WHY A COMPREHENSION COUNTS. A comprehension's element, its ``if`` clauses
+    and every INNER generator execute once per iteration, so
+    ``[SEAM(query=q) for q in queries]`` issues N reads exactly like a loop does.
+    Counting only ``For``/``While`` was measured doing BOTH things wrong at once:
+    a warm-up rewritten as
+    ``[_w for _w in (SEAM(query=…) for _i in range(len(queries)))]`` issues N
+    warm-up reads and stayed GREEN (a false PASS — the fail-open direction,
+    measured against ``tools/read_wave_latency.py``), while the legitimate
+    refactor ``_ONE = [SEAM(query=q["query"], leg_trace=[]) for q in queries]``
+    — still exactly one traced read per query — was refused as "not inside a
+    loop" (a false BLOCK).
+
+    ⛔ AND THE OUTERMOST ``generators[0].iter`` IS *NOT* A REPEAT, which is the
+    half that keeps this from over-blocking: ``[x for x in SEAM(query="once")]``
+    evaluates its iterable ONCE, so the read is a single read. Only descendants
+    of that one expression execute once; everything else in the comprehension
+    tree is per-iteration. The test is positional, not a parent identity check —
+    ``ast`` interposes a ``comprehension`` node between the comprehension and its
+    ``iter``, so the path's child is that node, never the expression itself:
+    ``node`` is inside the ONCE slot exactly when it IS ``generators[0].iter`` or
+    something under it.
+
+    One predicate, two callers (the arm over the real tool, and the synthetic pin
+    that grades every shape below) for the reason round-17 established for
+    ``_seam_opts_out``: a pin over a COPY of the rule grades the copy.
+    """
+    up = parents.get(id(node))
+    while up is not None:
+        if isinstance(up, (ast.For, ast.AsyncFor, ast.While)):
+            return up
+        if isinstance(up, (ast.ListComp, ast.SetComp, ast.GeneratorExp,
+                          ast.DictComp)):
+            first_iter = up.generators[0].iter if up.generators else None
+            once = first_iter is not None and (
+                first_iter is node
+                or any(sub is node for sub in ast.walk(first_iter)))
+            if not once:
+                return up
+        up = parents.get(id(up))
+    return None
+
+
 def _seam_opaque_values(node):
     """Value positions of a binder this walk does NOT model (#14278 F1).
 
@@ -2825,23 +2875,21 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         "this row's expected count says exactly ONE of the two reads is the MEASURED "
         f"loop and attaches `leg_trace`: {len(traced)} of {len(seam_calls)} do")
 
-    def _enclosing_repeat(node):
-        """The nearest enclosing loop, or None.
-
-        One read per iteration is the unit this row's `1 + N` counts (one
-        warm-up, plus one per query — not two fixed reads), so a loop — `for`,
-        `async for` or `while` — is the only thing that breaks it.
-        """
-        up = harness_parent.get(id(node))
-        while up is not None:
-            if isinstance(up, (_ast.For, _ast.AsyncFor, _ast.While)):
-                return up
-            up = harness_parent.get(id(up))
-        return None
-
-    assert _enclosing_repeat(traced[0]) is not None, (
-        "the `leg_trace` read is not inside a loop, so it does not "
-        "execute once per query and this row's `1 + N` is wrong")
+    # ⛔ THE REPEAT PREDICATE IS THE MODULE-LEVEL `_seam_enclosing_repeat`, NOT A
+    # COPY: `for`/`async for`/`while` AND comprehensions (bar the outermost
+    # iterable) are what make a read execute once per query. It was a local
+    # closure counting only the three loop nodes until round-25, and that missed
+    # a comprehension in BOTH directions — a warm-up rewritten as a comprehension
+    # issues N warm-up reads and stayed GREEN (measured against this tool: one
+    # mutation of `tools/read_wave_latency.py`, the whole row passed), while one
+    # traced read per query written as a comprehension was refused as "not
+    # inside a loop". The synthetic row
+    # `test_the_repeat_grader_counts_a_COMPREHENSION_and_not_its_outer_iterable`
+    # grades every shape of it, so this call site is not its only tripwire.
+    assert _seam_enclosing_repeat(traced[0], harness_parent) is not None, (
+        "the `leg_trace` read is not inside a repeat (a loop or a "
+        "comprehension), so it does not execute once per query and this "
+        "row's `1 + N` is wrong")
     # ⛔ AND THE `1` HALF OF `1 + N`. The row above only proves the TRACED read
     # runs once per query; nothing proved the OTHER site runs ONCE, which is the
     # whole difference between `1 + N` and `2N`. Measured at `d4729e151f`:
@@ -2855,12 +2903,13 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     for call in seam_calls:
         if call is traced[0]:
             continue
-        repeat = _enclosing_repeat(call)
+        repeat = _seam_enclosing_repeat(call, harness_parent)
         assert repeat is None, (
             "this row's `1 + N` says the OTHER seam read is the "
             "warm-up issued BEFORE the per-query loop and discarded, but this "
-            f"one sits inside a loop at line {repeat.lineno}: every iteration "
-            "adds a read, so the row's `1 + N` is wrong")
+            f"one sits inside a repeat ({type(repeat).__name__}) at line "
+            f"{repeat.lineno}: every iteration adds a read, so the row's "
+            "`1 + N` is wrong")
 
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
     # volunteer pipeline does exactly that) is not an ``ast.Call`` on
@@ -2893,6 +2942,84 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
             "_rerank_candidates") is False, (
             "_search_kwargs at line "
             f"{kw.lineno} does not opt out of the rerank: {opts!r}")
+
+
+def test_the_repeat_grader_counts_a_COMPREHENSION_and_not_its_outer_iterable():
+    """``_seam_enclosing_repeat``, graded on every shape it must classify.
+
+    The `1 + N` row reads a repeat off the REAL tool, so it can only ever exercise
+    the shapes that tool happens to contain — and ``tools/read_wave_latency.py``
+    contains a plain ``for`` and nothing else, which is why the comprehension
+    clause could be deleted with every row green. This row is that clause's own
+    tripwire, and it grades both directions (round-25 review):
+
+    * every per-iteration position — a comprehension's element, an ``if`` clause,
+      an inner generator, a dict ``value`` — is a REPEAT, because each executes
+      once per item. Miss it and a warm-up rewritten as a comprehension issues N
+      reads while the row describing it as "issued once" stays green; measured
+      against this tool before the fix, that mutation passed the whole row.
+    * the OUTERMOST ``generators[0].iter`` is NOT a repeat: it is evaluated once,
+      so ``[x for x in SEAM(query="once")]`` is a single read. Counting it would
+      false-block a perfectly good rewrite, which is the over-block direction of
+      the same bug.
+
+    The returned NODE is graded, not a bare truthiness, so "it is a repeat" and
+    "it is a repeat FOR THE RIGHT REASON" are different assertions.
+    """
+    src = '''
+from __future__ import annotations
+def reads(queries, sdk):
+    [sdk._tortoise_fts_query(query="elem") for _q in queries]
+    [w for w in (sdk._tortoise_fts_query(query="nwarm")
+                 for _i in range(len(queries)))]
+    [x for x in sdk._tortoise_fts_query(query="once")]
+    (sdk._tortoise_fts_query(query="gen") for _q in queries)
+    {"k": sdk._tortoise_fts_query(query="dictval") for _q in queries}
+    [sdk._tortoise_fts_query(query="ifbody") for _q in queries
+     if sdk._tortoise_fts_query(query="ifclause")]
+    for _q in queries:
+        sdk._tortoise_fts_query(query="loop")
+    while queries:
+        sdk._tortoise_fts_query(query="whilst")
+'''
+    tree = ast.parse(src)
+    parents = {id(child): parent for parent in ast.walk(tree)
+               for child in ast.iter_child_nodes(parent)}
+    calls = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_tortoise_fts_query"):
+            tag = node.keywords[0].value.value
+            assert tag not in calls, f"duplicate fixture tag {tag!r}"
+            calls[tag] = node
+    expected = {
+        "elem": ast.ListComp,        # element: once per item
+        "nwarm": ast.GeneratorExp,   # inner generator's element: once per item
+        "once": None,                # OUTERMOST iterable of the generator: ONCE
+        "gen": ast.GeneratorExp,     # a generator's element: once per item
+        "dictval": ast.DictComp,     # the dict VALUE: once per item
+        "ifbody": ast.ListComp,      # the element, beside an `if` clause
+        "ifclause": ast.ListComp,    # the `if` clause itself: once per item
+        "loop": ast.For,             # the shape the tool actually has
+        "whilst": ast.While,
+    }
+    assert sorted(calls) == sorted(expected), (
+        "the fixture and the expectation disagree — this row would grade a "
+        f"shape it does not parse: calls={sorted(calls)}, "
+        f"expected={sorted(expected)}")
+    observed = {
+        tag: (type(repeat).__name__ if repeat is not None else None)
+        for tag, node in calls.items()
+        for repeat in [_seam_enclosing_repeat(node, parents)]
+    }
+    want = {tag: (kind.__name__ if kind is not None else None)
+            for tag, kind in expected.items()}
+    assert observed == want, (
+        "`_seam_enclosing_repeat` mis-graded a shape: the `1 + N` arm's "
+        "read-count is only true if a repeat is recognised exactly where an "
+        "expression re-executes (comprehension element / `if` / inner "
+        "generator / dict value) and NOT at the outermost iterable, which "
+        f"runs once. observed={observed}, want={want}")
 
 
 def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypatch):
