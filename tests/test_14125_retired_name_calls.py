@@ -3064,8 +3064,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     first, and where they do not, the coverage set is unchanged. An assertion
     #     that cannot fail reads to the next lane as an enforced over-block guarantee
     #     that nothing enforces. Pinning the WHOLE row keeps that claim and makes it
-    #     reachable: dropping either `ast.TryStar` term takes this value to `()`, and so
-    #     would a `_covered` that stopped counting an `except*` re-raise arm.
+    #     reachable: dropping `ast.TryStar` from `_control_flow_tries` takes this value to
+    #     `()`; dropping it from the NESTED-ROW loop leaves this row intact and reds
+    #     `_trystar_seam` instead (measured — the armed fixture has no nested `try`, so only
+    #     one widening site reaches it), and a `_covered` that stopped counting an `except*`
+    #     re-raise arm reds this row alone.
     #     ⛔ THIS ROW IS A SECOND WITNESS, NOT THE FIRST — stated so the next reader is
     #     not misled: the swallow pair above is in the same test function and fires on
     #     the same revert, so a mutant reds THAT line and this one is then never
