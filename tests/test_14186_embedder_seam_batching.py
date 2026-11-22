@@ -967,7 +967,11 @@ class TestTheInProcessBackingIsUnchangedWork:
 
         `install_backing` makes a consulted backing VISIBLE rather than merely
         slow, so "the guard holds" is observable rather than a claim about
-        timing.
+        timing. The row also pins that an ARRAY-LIKE batch still works: the
+        guard reads a MATERIALISED list, so `np.array([...])` — which has no single
+        truth value and would raise `ValueError` if `if not texts` were asked
+        directly — keeps reaching the backing exactly as the old `list(texts)` let
+        it.
         """
         class _CountingBacking:
             name = "counting"
@@ -991,6 +995,12 @@ class TestTheInProcessBackingIsUnchangedWork:
             assert embed_seam.encode_texts([]) == []
             assert counting.calls == [], (
                 f"an EMPTY batch reached the backing: {counting.calls!r}")
+            # An ARRAY-LIKE batch keeps working: truthiness of an ndarray is
+            # ambiguous, so the guard must read the materialised list (this
+            # raised `ValueError` when the guard was `if not texts`).
+            assert embed_seam.encode_texts(np.array(["alpha", "beta"])) == \
+                [[1.0, 2.0], [1.0, 2.0]]
+            assert counting.calls == [["alpha", "beta"]], counting.calls
         finally:
             embed_seam.install_backing(None)
 
