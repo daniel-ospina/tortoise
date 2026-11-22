@@ -320,10 +320,15 @@ FURTHER TREE AND MOVES IT AGAIN, so the figure quoted above is HISTORY and not t
 that, then restoring the manifest), which is `#14192`'s added suites packing into the same pool.
 ⛔ **THE MERGE WITH `origin/main` `0467ba32` IS YET ANOTHER TREE, AND THE FIGURE MOVES AGAIN — so
 `721.1` is HISTORY too, and this document's own lesson now has a third data point:**
-`--emit-push-matrix` at head `f56aac204ca6` (the tree that merged `0467ba32`) emits **25 m on all
-eleven shards** at a worst `est_seconds` of **721.3** (shards `a`, `b`, `c`, `i`; the other seven
-read 721.2), and dropping the same three `durations:` rows still reads **721.3** — re-derived by
-doing exactly that and restoring the manifest. The `+0.2 s` is ONE file: `git log --diff-filter=A
+`--emit-push-matrix` at head `f56aac204ca6` emits **25 m on all eleven shards** at a worst
+`est_seconds` of **721.3** (shards `a`, `b`, `c`, `i`; the other seven read 721.2), and dropping
+the same three `durations:` rows still reads **721.3** — re-derived by doing exactly that and
+restoring the manifest. ⛔ Provenance, because that is what this paragraph exists to keep right:
+`f56aac204ca6` is NOT the merge that carried `0467ba32` — its parents are `89b2eff808cb` and
+`52790225a552` (`git rev-list --parents -n1 f56aac204ca6`), and `89b2eff808cb` is the commit that
+merged `origin/main`. Nothing turns on the difference for THIS figure: `config/ci-surfaces.yml`
+is byte-identical across `89b2eff808cb`, `f56aac204ca6`, `0f41e95d3664` and this head
+(`sha256 f5cc27b5d72151ed…`), so all four emit 721.3. The `+0.2 s` is ONE file: `git log --diff-filter=A
 --name-status 10e51693..0467ba32 -- 'tests/test_*.py'` names exactly one addition,
 `tests/test_extractor_cost_measure.py` (`config/ci-surfaces.yml:2955`), and removing THAT row —
 nothing else — drops the worst back to **721.1** (measured, then restored). So the reading is the
