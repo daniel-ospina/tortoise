@@ -1147,9 +1147,12 @@ SWEEP_NAMES = 66
 #: when `9a771c59db` reflowed that same harness on `main` afterwards. Reproduce the position,
 #: never restate it — `git show <sha>:tools/read_wave_latency.py | grep -n 'proj\.g\.query'`
 #: (no hits before `94d75667dc`, three after; the numbers move, the texts do not).
-#: (`tests/test_relationships_bounded.py` carries one
-#: `proj.g.query` too, but it is pre-existing and byte-identical on both sides of that commit, so
-#: it is not part of this delta — the per-file split is what a COUNT cannot show.)
+#: (`tests/test_relationships_bounded.py` carries one `proj.g.query` too — the same
+#: `proj.g.query("MATCH (n) DETACH DELETE n")` row on both sides — but that ROW does not move, so it
+#: is not part of this delta. ⛔ NOT because the FILE is unchanged: `94d75667dc` adds 149 lines to it
+#: (`git show --stat 94d75667dc -- tests/test_relationships_bounded.py`), so a reader who checks the
+#: file sees a diff and a correct exclusion then reads as a false one. The ROW is what is pinned;
+#: the per-file split is what a COUNT cannot show.)
 #: DECLARED, not rewritten: that is the ordinary-word receiver this sweep deliberately leaves
 #: alone, neither an SDK handle nor a typed reference to a public name — `typed references still
 #: pointing at a public name` is 0 at this head, which is the number the retirement owes.
