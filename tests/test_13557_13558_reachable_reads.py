@@ -1111,7 +1111,9 @@ NOT_SELECTED = [
     "is the export being, in fact, archived",
     "hasn't the billing's been deprecated",
     "has somebody reported the vendor has been deprecated",
-    # …and the two spellings the round-13 widening of `_EXISTENCE_HEAD` still left out
+    # …and the two spellings the round-13 widening of the quantifier enumeration still left
+    # out (that enumeration now lives in `_EXISTENCE_QUANTIFIERS`, shared by both heads — the
+    # round-33 split moved it out of `_EXISTENCE_HEAD`, which no longer carries it)
     # (round-14 review, P2, measured): `anybody` is the exact synonym of the
     # `anyone`/`somebody` pair that widening had just made report, and the gap consumes ONE
     # token so a two-word `no one` matched neither half. All three were SILENT at
@@ -1386,7 +1388,9 @@ NOTICE_ONLY = [
     "is the export being, in fact, archived",
     "hasn't the billing's been deprecated",
     "has somebody reported the vendor has been deprecated",
-    # …and the two spellings the round-13 widening of `_EXISTENCE_HEAD` still left out
+    # …and the two spellings the round-13 widening of the quantifier enumeration still left
+    # out (that enumeration now lives in `_EXISTENCE_QUANTIFIERS`, shared by both heads — the
+    # round-33 split moved it out of `_EXISTENCE_HEAD`, which no longer carries it)
     # (round-14 review, P2, measured): `anybody` is the exact synonym of the
     # `anyone`/`somebody` pair that widening had just made report, and the gap consumes ONE
     # token so a two-word `no one` matched neither half. All three were SILENT at
