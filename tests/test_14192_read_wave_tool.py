@@ -354,10 +354,24 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             "survive `limit`, so a mirror that names one times a reader the product does "
             "not run (and hides the page permutation the verdict exists to catch)")
     # Identity, not a count: the WARM-UP must not collect the trace, and the measured
-    # read must — otherwise every `legs` table in the artifact is silently empty.
-    assert "leg_trace" in {k.arg for k in measured.keywords if k.arg}, (
+    # read must collect it into a list that `run()` actually ITERATES — a discarded sink
+    # leaves every `legs` table in the artifact silently empty (`leg_trace=[]`, or a
+    # `_throwaway` nobody loops over, both read as "a trace was collected").
+    lt = next((k for k in measured.keywords if k.arg == "leg_trace"), None)
+    assert lt is not None, (
         f"the measured read (line {measured.lineno}) collects no `leg_trace` — the "
         "artifact's per-query `legs` table would be empty")
+    assert isinstance(lt.value, ast.Name), (
+        f"the measured read collects `leg_trace` into {ast.unparse(lt.value)} — the pin "
+        "cannot tell whether `run()` ever reads it, so a discarded sink would pass")
+    run_defs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == "run"]
+    assert len(run_defs) == 1, f"tools/read_wave_latency.py defines `run` {len(run_defs)}×"
+    assert any(isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension))
+               and lt.value.id in {x.id for x in ast.walk(n.iter) if isinstance(x, ast.Name)}
+               for n in ast.walk(run_defs[0])), (
+        f"`{lt.value.id}` is handed to the read as `leg_trace` but `run()` never iterates "
+        "it — a discarded sink leaves the artifact's `legs` table empty")
     assert "leg_trace" not in {k.arg for k in warm.keywords if k.arg}, (
         f"the warm-up (line {warm.lineno}) collects a `leg_trace` — its result is "
         "discarded, so that trace is not the measurement")
