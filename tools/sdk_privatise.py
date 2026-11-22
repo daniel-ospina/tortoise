@@ -1143,8 +1143,11 @@ SWEEP_NAMES = 66
 #: it, so the step demonstrably RUNS on `main` rather than being skipped there. The real mechanism
 #: is DROPPED RUNS, not a missing gate: a superseded main push is routinely discarded before it
 #: starts a job (this workflow's own concurrency block measures 17 of the 20 push-to-main runs
-#: created 2026-10-26T22:40Z..10-27T04:50Z never starting one; re-measured on `main` at this PR's
-#: base, 18 of the last 20 are `cancelled`), so the red arrives after merge or not at all — and
+#: created 2026-10-26T22:40Z..10-27T04:50Z never starting one; read again over the 20 push-to-main
+#: runs newest at this PR's base, `gh api …/runs?event=push&branch=main&per_page=20` prints 15
+#: `cancelled`, 3 `failure` and 2 unfinished at the instant of that read — a POINT READING, not a
+#: standing figure: an earlier cut of this clause said "18 of the last 20 are `cancelled`", which no
+#: reading of that window reproduces), so the red arrives after merge or not at all — and
 #: every open PR then grades `main`'s rows as its own (`#14062`). ⛔ CORRECTED: this sentence read
 #: "the pin is graded on PULL REQUESTS only, so `main` drifts off it with nothing measuring it",
 #: which is false of the tree it lands on and sends the next lane looking for a gate to BUILD
@@ -1195,12 +1198,20 @@ SWEEP_NAMES = 66
 #: forward" (it closes the `11858` paragraph, several paragraphs up; the `STALE AS OF THE RE-CUT`
 #: note immediately UNDER that sentence marks the same reading) did NOT survive the commits merged
 #: beside it: the census moved three rows before the pin commit itself landed. Read the re-cut, not
-#: that sentence. ⛔ NAMED BY ITS CLOSING WORDS, NOT BY "the sentence above" and NOT BY "the re-cut
-#: below" (#14282, P3): `main` wrote BOTH positionally, correctly, and the merge that carried the
-#: note in inserted the `#14258` reconciliation paragraph between the note and the sentence, AND
-#: this branch's `(11858 …) → (11861 …)` re-cut between the note and the re-cut — so both addresses
-#: pointed one record off. That is the rot this block's own rule against positional addresses
-#: exists to prevent, demonstrated by the merge that imported one. ⛔ AND THE FIRST FORM OF THAT
+#: that sentence. ⛔ NAMED BY ITS CLOSING WORDS, NOT BY "the sentence above" (#14282, P3): `main`
+#: wrote that address positionally and it was CORRECT where it wrote it — the merge inserted the
+#: `#14258` reconciliation paragraph between the note and the sentence, so it now names a different
+#: record. ⛔ AND THE FIRST FORM OF THIS NOTE ALSO CLAIMED THE "below" HALF HAD ROTTED, WHICH IS
+#: FALSE AND WAS MEASURED (#14282 review, P3): the paragraph immediately BELOW the note is
+#: byte-identical on `origin/main` and here, compared line for line — nothing was inserted under it,
+#: so its "below" reading survived the merge untouched. What actually happened is that the
+#: `(11858 …) → (11861 …)` re-cut this branch publishes sits ABOVE the note, separating the note
+#: from it — so a positional "the re-cut below" cannot name it either way, not because the address
+#: rotted but because it never named this branch's re-cut at all. Both targets are therefore named
+#: by TEXT, the only form that survives an insertion, which is the rule this block already states.
+#: ⛔ AND NO DISTANCE OR OFFSET IS TYPED HERE: "sits ABOVE" deliberately carries no line count,
+#: because a span restated in this block goes stale at the next edit — the same reason the census
+#: figure above is named by log rather than counted. ⛔ AND THE FIRST FORM OF THAT
 #: QUOTE WAS A PREFIX CALLED AN ENDING (#14282 fix lane, P3): `the sentence that ENDS "`--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured"` is FALSE of this text — the
 #: sentence runs on to `not carried forward` — so a reader sent to verify the ending finds no

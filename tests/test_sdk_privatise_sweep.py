@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1152 lines at this head, measured through THIS
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1163 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`.
     "Re-derive it after a prose edit instead of trusting the figure" was advice nothing
     enforced, and the figure has been carried forward wrong repeatedly because of it:
@@ -262,7 +262,9 @@ def _residue_block() -> str:
     #14258, P3) — then the #14282/#14258 reconciliation recorded below moved it to 1140, the
     re-anchor of `main`'s positionally-addressed note (the `NAMED BY ITS CLOSING WORDS` note in
     the block) moved it to 1147, and correcting that note's own mis-quoted ending — it called a
-    PREFIX of the sentence its close — moved it to 1152. Every one of those readings was an honest
+    PREFIX of the sentence its close — moved it to 1152, and correcting that note's FALSE account of
+    how the second address rotted, plus an unreproducible "18 of the last 20" count in the same
+    block, moved it to 1163. Every one of those readings was an honest
     attempt at the number the sentence asks for, which is exactly why the number is now a gate
     rather than a note. ⛔ AND NO TOTAL IS ASSERTED HERE: the readings are listed above and their
     count is left to the history, because counting a prose enumeration in this same block is the
