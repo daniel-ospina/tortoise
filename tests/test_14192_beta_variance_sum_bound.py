@@ -444,50 +444,66 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     # kept for the look of coverage (round-20 review). The claim they were meant
     # to pin — that the SHARE rests on the split, not on the totals — is pinned
     # by the row above, which is the one a re-split actually reds.
-    # ⛔ AND THE SHARE ITSELF — `72 of 80`, `90%`, `99%`, `64` — because
-    # arithmetic CANNOT rot on its own but PROSE still does: measured at
-    # `de4cab96`, inverting any of the four in the docstring left every row green,
-    # which is the inverted-headline class this PR exists to close (round-21
-    # review). Both docstrings' copies are read and compared to the same
-    # derivation, so a re-inverted share cannot return.
-    guard_cases = crit[:guard].count("CASE WHEN")
-    doc_share = re.search(r"\*\*(\d+) of the predicate's (\d+) coercion", doc)
-    doc_pct = re.search(r"i\.e\. (\d+)% of the coercion", doc)
-    doc_slice = re.search(r"(\d+) of the (\d+) ``CASE WHEN`` it spares", doc)
-    doc_slice_pct = re.search(r"— (\d+)%, a different number", doc)
-    doc_net = re.search(r"still skips (\d+) coercion", doc)
-    assert all((doc_share, doc_pct, doc_slice, doc_slice_pct, doc_net)), (
-        "`beta_variance_sum_bound`'s docstring no longer states its share in the "
-        "graded form ('**N of the predicate's M coercion**', 'i.e. N% of the "
-        "coercion', 'N of the M ``CASE WHEN`` it spares', '— N%, a different "
-        "number', 'still skips N coercion') — restore the wording or re-point "
-        "this test, but do not leave the share ungraded")
+    # ⛔ AND THE SHARE ITSELF, IN EVERY COPY — not just the four headline
+    # numerals. Arithmetic cannot rot on its own but PROSE still does: measured at
+    # `de4cab96`, inverting any of `72 of 80` / `90%` / `99%` / `64` left every
+    # row green, and at `21f9da1a` the DERIVATION copies were still ungraded —
+    # `(72 coercion + the division's own selector)`, `pays 8 coercion ``CASE``s to
+    # skip 72`, and `(the 8 above + the 72 below)`, the last being the
+    # paragraph's own derivation of 80, so inverting it stated a false derivation
+    # while the graded headline stayed true (round-21 and round-22 reviews).
+    #
+    # So the rows below are built FROM the emission and demanded as literal
+    # substrings of each docstring that quotes them. That is stronger than a
+    # per-numeral regex and it is the only form that cannot be narrowed by
+    # accident: a copy that is not demanded here is either absent from both
+    # docstrings or a new copy this tuple must learn about. ⛔ The claim is
+    # deliberately no wider than that: these are the copies THIS list enumerates,
+    # not "every sentence either docstring contains".
     coercions_total = guard_cases + coercions
-    assert (
-        int(doc_share.group(1)), int(doc_share.group(2)), int(doc_pct.group(1)),
-        int(doc_slice.group(1)), int(doc_slice.group(2)),
-        int(doc_slice_pct.group(1)), int(doc_net.group(1)),
-    ) == (
-        coercions, coercions_total, round(100 * coercions / coercions_total),
-        coercions, spared, round(100 * coercions / spared),
-        coercions - guard_cases,
-    ), (
-        "the docstring's share numerals no longer follow from THIS predicate "
-        f"(spared {spared}, coercions {coercions}, guard {guard_cases}): re-derive "
-        "72 of 80 / 90% / 99% / 64 against the emission")
+    pct_coercion = round(100 * coercions / coercions_total)
+    pct_slice = round(100 * coercions / spared)
+    net_cases = coercions - guard_cases
+    function_doc_copies = (
+        f"{coercions} of the predicate's {coercions_total} coercion",
+        f"{pct_coercion}% of the coercion",
+        f"{coercions} of the {spared} ``CASE WHEN`` it spares",
+        f"{pct_slice}%, a different number",
+        f"still skips {net_cases} coercion",
+        f"({coercions} coercion + the division's own selector)",
+        f"pays {guard_cases} coercion ``CASE``s to skip {coercions}",
+        f"(the {guard_cases} above + the {coercions} below)",
+    )
+    module_doc_copies = (
+        f"({coercions} of {coercions_total} coercion, {pct_coercion}%, "
+        f"{net_cases} net)",
+        f"({coercions} coercion + the division's own selector)",
+        f"pays {guard_cases} coercion cases to skip {coercions}",
+    )
+    for where, text, rows in (
+            ("`beta_variance_sum_bound`'s docstring", doc, function_doc_copies),
+            ("this module's docstring", module_doc, module_doc_copies)):
+        missing = [row for row in rows if row not in text]
+        assert not missing, (
+            f"{where} no longer states {missing!r} — these are the share numerals "
+            "derived from THIS emission (spared "
+            f"{spared}, coercions {coercions}, guard {guard_cases}), so a copy "
+            "that drifts off them re-inverts the claim this PR exists to keep "
+            "true. Restore the wording or re-point this test; do not leave a "
+            "copy ungraded")
     assert 11_000 < len(crit[guard:division]) < 12_500, (
         "the docstring calls the spared span a ~11.7k-char coercion `CASE` and "
-        f"THIS predicate measures {len(crit[guard:division])} chars — this is a "
-        "MAGNITUDE tripwire, not a byte pin: the band is the measured 11,728 "
-        "rounded to ±~7%, so it can only red if that expression collapsed or "
-        "grew by an order of magnitude, which is the point at which the "
-        "paragraph's claim stops being true. A semantics-preserving rename "
-        "inside the slice is EXPECTED to be able to red it (measured: "
-        "`other` -> `other_peer` moves it by +1,080); that is the accepted cost "
-        "of grading a figure the prose quotes only to one significant figure. "
-        "An earlier cut's message promised an order-of-magnitude tolerance over "
-        "a ±7% band, which told the first reader who hit it something false "
-        "about the row (round-21 review).")
+        f"THIS predicate measures {len(crit[guard:division])} chars. This is a "
+        "MAGNITUDE tripwire for a figure the prose quotes to one significant "
+        "figure, NOT a byte pin, and its real tolerance is what it actually "
+        "implements: the band reds below 11,000 (−728, −6.2%) or above 12,500 "
+        "(+772, +6.6%). ⛔ A semantics-preserving rename inside the slice REDS "
+        "IT — measured, `other` -> `other_peer` (216 occurrences) moves the span "
+        "by +1,080 to 12,808 — and that false block is the ACCEPTED cost of "
+        "grading an approximate figure at all, not a bug to be explained away. "
+        "Earlier cuts of this message claimed an order-of-magnitude tolerance "
+        "over a ±7% band, i.e. told the first reader who hit the red something "
+        "false about the row (rounds 21 and 22).")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 
