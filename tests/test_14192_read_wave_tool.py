@@ -491,6 +491,14 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
     # ⛔ THE SAME LITERAL-ITERABLE ARMS `_values` CARRIES (#14326 review F2): an operand
     # carrying the read's name inside a set/dict literal is that name here too, so a
     # `getattr(*{sdk, _N})` / `getattr(*{_N: 1})` splat cannot slip the `indirect` arm.
+    # ⛔ AND EACH ARM IS PINNED BY ITS OWN ROW (#14326 review F1, measured at `285984005a`,
+    # where the claim above was still only a comment): deleting both left every executable
+    # pin test GREEN (`test_EVERY_static_binding_form_is_a_READ_reach` included) while
+    #     _N = "_tortoise_fts_query"; getattr(*{sdk, _N})(…, kind="statement")
+    # executed the product read — mentions 2, calls 2, indirect 0, `refuses=False`. Note
+    # which arms those rows reach: the set/dict *for-target* rows go through `_values`,
+    # a DIFFERENT function, so they can never red these two arms. The rows are
+    # `SET literal splatted into getattr` and `DICT literal splatted into getattr` below.
     if isinstance(node, ast.Set):
         return frozenset().union(*(_possible_strings(elt, consts) for elt in node.elts))
     if isinstance(node, ast.Dict):
@@ -3085,6 +3093,11 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
       - revert `_values`' SET/DICT arms -> the three literal-iterable rows pass (#14326
         review F2: a `for` target over `{"…"}` / `{"…": 1}` was GREEN);
       - revert `_indirect_reads` to its arity test -> the two `getattr(*…)` splat rows pass;
+      - delete `_possible_strings`' SET/DICT arms -> the two literal-splat rows pass
+        (#14326 review F1, measured: `getattr(*{sdk, _N})` / `getattr(*{_N: 1})` executing
+        the read with `kind="statement"` was GREEN against a pin carrying no row for
+        either shape, so the arms were unreachable by any test — the set/dict *for-target*
+        rows reach `_values`, not `_possible_strings`, and cannot red them);
       - at `origin/main` -> the `AnnAssign`/unpack/chained/walrus rows pass as well.
 
     The control at the end is the OTHER direction: a provenance constant whose value merely
@@ -3162,8 +3175,24 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # ⛔ A TRUE LITERAL splat (#14326 review P3): the row above is labelled "literal"
         # while binding a NAME, so nothing red the literal carrier itself.
         "LITERAL carried into a splat": ('    getattr(*[sdk, "_tortoise_fts_query"])'
+
                                          '(query=queries[0]["query"], limit=10, '
                                          'kind="statement")\n'),
+        # ⛔ THE SHAPES `_possible_strings`' SET/DICT ARMS EXIST FOR (#14326 review F1,
+        # each MEASURED GREEN at `285984005a` with the arms deleted and a third reach
+        # carrying `kind="statement"`): a splat is a positional list, so a literal
+        # container handed to it delivers operands no other row builds. `indirect` is the
+        # firing condition for both — the label says which arm it pins. ⛔ Neither of these
+        # is covered by the set/dict *for-target* rows, which reach `_values`, a DIFFERENT
+        # function.
+        "SET literal splatted into getattr": (
+            '    _N = "_tortoise_fts_query"\n'
+            '    getattr(*{sdk, _N})(query=queries[0]["query"], limit=10, '
+            'kind="statement")\n'),
+        "DICT literal splatted into getattr": (
+            '    _N = "_tortoise_fts_query"\n'
+            '    getattr(*{_N: 1})(query=queries[0]["query"], limit=10, '
+            'kind="statement")\n'),
         # ⛔ BOTH ROWS BELOW BIND **BEFORE** THEIR SOURCE (#14326 review P3, measured):
         # `ast.walk` is breadth-first, not source order, so a single pass resolves only the
         # FAVOURABLE order. The fixpoint is load-bearing and had no row that red it — with
