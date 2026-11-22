@@ -1333,11 +1333,12 @@ def _seam_opaque_values(node):
 
     ⛔ This is an enumeration, not a proof about future syntax: it is every binder
     kind in the Language Reference's list ("Naming and binding", §4.2.1) that this
-    walk does not model, as of this grammar. Adding a binding kind to Python is a
-    change to this function, and the pin's ``escapes`` and ``except-as`` rows are
-    the tripwire that says so. The one kind deliberately omitted is ``import``,
-    which binds module paths (strings and dotted ``Name``s), never an expression
-    that could be a seam mention.
+    walk does not model, as of this grammar — including ``type`` parameter lists
+    (`def f[T: SEAM]()`). Adding a binding kind to Python is a change to this
+    function, and the pin's ``escapes``/``except-as``/``type-param`` rows are the
+    tripwire that says so. The one kind deliberately omitted is ``import``, which
+    binds module paths (strings and dotted ``Name``s), never an expression that
+    could be a seam mention.
 
     ``kw_defaults`` may hold ``None`` for a required keyword-only parameter; the
     walk treats ``None`` as an expression it does not carry.
@@ -1350,14 +1351,16 @@ def _seam_opaque_values(node):
         return [*node.args.defaults, *node.args.kw_defaults]
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return [*node.decorator_list, *node.args.defaults,
-                *node.args.kw_defaults]
+                *node.args.kw_defaults,
+                *(getattr(node, "type_params", None) or [])]
     if isinstance(node, ast.ClassDef):
         return [*node.decorator_list, *node.bases,
-                *(k.value for k in node.keywords)]
+                *(k.value for k in node.keywords),
+                *(getattr(node, "type_params", None) or [])]
     if isinstance(node, ast.ExceptHandler):
         return [node.type]
     if isinstance(node, ast.TypeAlias):
-        return [node.value]
+        return [node.value, *(getattr(node, "type_params", None) or [])]
     if isinstance(node, ast.Match):
         values = [node.subject]
         for case in node.cases:
@@ -1405,12 +1408,17 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
     review, P2). So a mention that reaches a binding form this walk does not model
     is returned with ``opaque=True``, and the caller must count it as a read.
 
-    ⛔ SO THE ONE THING THIS RETURN VALUE PROVES IS NEGATIVE: ``calls == [] and not
-    opaque`` means nothing in this file can reach the mention. ``opaque`` is an
-    admission, not a verdict — the caller must not let an opt-out on the calls it
-    DID find suppress a mention that also escaped, or the admission buys nothing
-    (round-10 review, P3: ``_o = SEAM; _o(…, _rerank_candidates=False); return
-    _o`` was skipped as "all opted out" while ``opaque`` was True).
+    ⛔ SO THE ONE THING THIS RETURN VALUE PROVES IS NEGATIVE — AND ONLY ABOUT THE
+    SHAPES THIS WALK MODELS: ``calls == [] and not opaque`` means no call this
+    resolver can FOLLOW reaches the mention. It is not a statement about the whole
+    file: a name dispatched by a string the walk cannot read (`globals()["fn"]`,
+    `getattr(obj, "x")`) reaches the mention without ever naming it, which is why
+    the class-body case admits rather than denies (round-11 review, P3).
+    ``opaque`` is an admission, not a verdict — the caller must not let an opt-out
+    on the calls it DID find suppress a mention that also escaped, or the admission
+    buys nothing (round-10 review, P3: ``_o = SEAM; _o(…,
+    _rerank_candidates=False); return _o`` was skipped as "all opted out" while
+    ``opaque`` was True).
 
     ⛔ KNOWN OVER-BLOCK, deliberately accepted. The carrier set is FILE-scoped and
     keyed on bare names, so binding a mention to a name that the file already uses
@@ -1421,17 +1429,29 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
     from the one this resolver exists to catch, and the direction the gate must
     err in. It is not repaired by a name-rebinding heuristic here: a file-scoped
     walk cannot tell the two `q`s apart without a scope model, and a cheap guess
-    would re-open the fail-open. The count row names how many of its reads it
-    could NOT attribute, so the red it raises is at least truthful about why.
+    would re-open the fail-open. The count row does NOT detect this: the
+    colliding name makes unrelated calls look ATTRIBUTED, so the red it raises
+    reports them as resolved reads (round-11 review, P3). What it does report is
+    how many mentions it could not attribute, which is why the over-block shows as
+    a plain count mismatch rather than a named cause.
     """
     carriers: set = set()
     parent = {id(child): node for node in ast.walk(tree)
               for child in ast.iter_child_nodes(node)}
 
     def _in_class_body(node) -> bool:
-        """Is `node` a statement of a class body (so its name IS an attribute)?"""
+        """Is `node` a statement of a class BODY (so its name IS an attribute)?
+
+        ⛔ The walk STOPS at the first function boundary: §4.2.2 says "the scope of
+        names defined in a class block is limited to the class block; it does not
+        extend to the code blocks of methods", so a binding inside a method is a
+        LOCAL, not an attribute — treating it as a class-body name counted a dead
+        local as a live read (round-11 review, P3).
+        """
         up = parent.get(id(node))
         while up is not None:
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return False
             if isinstance(up, ast.ClassDef):
                 return True
             up = parent.get(id(up))
@@ -1490,11 +1510,12 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
                 _carries(arg) for arg in
                 (*node.args, *(k.value for k in node.keywords))):
             reads.append(node)
-    # A class-body binding only makes the mention UNPROVEN when the walk could not
-    # attribute its read at all: once `_Tbl.seamfn(…)` is found, the read is known
-    # and there is nothing left to admit.
-    return _SeamFlow(calls=reads,
-                     opaque=opaque or (class_bound and not reads))
+    # ⛔ A CLASS-BODY BINDING IS ALWAYS AN ADMISSION, even when a read was found:
+    # the name has escaped into a namespace the walk can only then follow by
+    # STRING (`getattr(_Tbl, "seamfn")`), so letting a found read suppress the
+    # admission hides a second, unattributed read on the same binding — the exact
+    # shape the opt-out paragraph above condemns (round-11 review, P2).
+    return _SeamFlow(calls=reads, opaque=opaque or class_bound)
 
 
 def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
@@ -1516,13 +1537,17 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     and the arm stayed green on three reads (round-9 review). Graded in both
     directions so neither "skip it as dead" nor "call everything dead" can pass.
 
-    ⛔ THREE ROWS EXIST SO THE PIN CANNOT PASS WITHOUT THE MECHANISM IT CLAIMS:
+    ⛔ FIVE ROWS EXIST SO THE PIN CANNOT PASS WITHOUT THE MECHANISM IT CLAIMS:
     `class-attr` needs the attribute carrier (a class body IS the class's
-    attribute dict — round-10 P2 read it as dead), `two-hop` is written in REVERSE
+    attribute dict — round-10 P2 read it as dead); `two-hop` is written in REVERSE
     textual order so a single pass cannot resolve it (without it, deleting the
-    `while grown` fixpoint left every row green — round-10 P3), and `except-as`
-    needs the ``except`` clause's exception TYPE treated as an escape, because
-    Python CALLS it.
+    `while grown` fixpoint left every row green); `except-as` needs the ``except``
+    clause's exception TYPE treated as an escape, because Python CALLS it; and
+    `type-alias`, `match-subject`, `type-param` and `class-dead` grade the
+    enumerations and the class-body admission ADDED for round 10 — without them
+    deleting `ast.TypeAlias`, the `ast.Match` opener or the `class_bound`
+    admission left the pin green, so those fixes were graded nowhere (round-11
+    review, P3).
     """
     source = '''
 class SDK:
@@ -1559,6 +1584,21 @@ def exc(sdk):
         pass
     except sdk._tortoise_fts_query as _e:
         _e(query="except-as", limit=10)
+
+def typealias(sdk):
+    type _T = sdk._tortoise_fts_query
+
+def matched(sdk):
+    match sdk._tortoise_fts_query:
+        case _:
+            pass
+
+def classbodydead(sdk):
+    class _C:
+        deadfn = sdk._tortoise_fts_query
+
+def generic[T: sdk._tortoise_fts_query]():
+    pass
 '''
     tree = ast.parse(source)
     mentions = [n for n in ast.walk(tree)
@@ -1574,7 +1614,10 @@ def exc(sdk):
         (0, False, []),                 # the dead binding: provably no call
         (0, True, []),                  # `return SEAM`: NOT provably dead
         (0, True, []),                  # `except SEAM as e`: Python CALLS it
-        (1, False, ["class-attr"]),     # `class _Tbl: f = SEAM; _Tbl.f(…)`
+        (0, True, []),                  # `type _T = SEAM`
+        (0, True, []),                  # `match SEAM:` subject
+        (0, True, []),                  # dead name bound in a CLASS body
+        (0, True, []),                  # PEP 695 `def f[T: SEAM]()` bound
         (1, False, ["comprehension"]),  # `for _c in [SEAM]: _c(…)`
         (1, False, ["container"]),      # `_reads = [SEAM]; _reads[0](…)`
         (1, False, ["for-target"]),     # `for _fn in (SEAM,): _fn(…)`
@@ -1582,6 +1625,7 @@ def exc(sdk):
         (1, False, ["two-hop"]),        # `_n = _m` ABOVE `_m = SEAM`
         (1, False, ["walrus"]),         # `if (_w := SEAM): _w(…)`
         (1, False, ["warm"]),           # the direct call
+        (1, True, ["class-attr"]),      # `class _Tbl: f = SEAM; _Tbl.f(…)`
     ], f"the resolver mis-graded a shape: {sorted(observed)}"
 
 
@@ -2099,16 +2143,24 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         live.append(mention)
         (unresolved if flow.opaque else resolved).append(mention)
         seam_calls.extend(fed)
-    assert len(live) == 2, (
-        f"{len(live)} un-opted-out seam read(s) of `tortoise_fts_query` in "
-        f"tools/read_wave_latency.py ({len(resolved)} the walk attributed to a "
-        f"call, {len(unresolved)} it had to COUNT because the binding could not "
-        "be followed — an unresolvable mention is not a dead one), but the "
-        "exemption's recorded reason says TWO (a discarded warm-up, and the "
-        "measured loop) and the grant is owner-granular — a further read inside "
-        "the granted owner is exempted with no recorded reason. Re-derive the "
-        "comment in `intentional_keep`, or opt the new read out, which needs no "
-        "grant.")
+    # ⛔ COUNT CALL SITES, NOT MENTIONS. The object the recorded reason describes is
+    # a set of READS (`:296`'s discarded warm-up, `:305`'s measured loop), and one
+    # mention can feed several calls — `_w = SEAM; _w(a); _w(b)` is one mention and
+    # TWO reads. While this row asserted on mentions, that spelling kept `live` at
+    # 2 and the arm passed with THREE call sites inside the granted owner (round-11
+    # review, P2 — the remaining half of round 9's F1-B). Distinct by identity, so a
+    # mention and the call that consumes it are not double-counted.
+    read_sites = {id(call) for call in seam_calls}
+    assert len(read_sites) == 2, (
+        f"{len(read_sites)} un-opted-out seam CALL SITE(s) of `tortoise_fts_query` "
+        f"in tools/read_wave_latency.py, reached from {len(live)} mention(s) "
+        f"({len(resolved)} attributed by the walk, {len(unresolved)} COUNTED "
+        "because the binding could not be followed — an unresolvable mention is "
+        "not a dead one), but the exemption's recorded reason says TWO (a "
+        "discarded warm-up, and the measured loop) and the grant is "
+        "owner-granular — a further read inside the granted owner is exempted "
+        "with no recorded reason. Re-derive the comment in `intentional_keep`, or "
+        "opt the new read out, which needs no grant.")
     owners = {(_enclosing(m).name if _enclosing(m) else None) for m in live}
     assert owners == {"run"}, (
         "the exempted reads are not all inside `run`, the only owner the grant "
