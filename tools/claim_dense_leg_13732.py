@@ -1540,18 +1540,23 @@ class SeedReport:
             causes.append(
                 f"{self.record_unprojected} write(s) came back unprojected — caught "
                 f"by the `record_dense` arm's id-scoped guard")
-        if self.record_deferred_failures:
-            causes.append(
-                f"{self.record_deferred_failures} deferred fold(s) RAN and did not "
-                f"write a row (the loop's own failure counter: `projection_raised`, "
-                f"`record_no_outcome` or `projection_refused`) — a converged drain "
-                f"is not a written record, so this needs the fold from the journal")
         if self.record_deferred_undrained:
             causes.append(
                 f"{self.record_deferred_undrained} queued position(s) were still "
                 f"undrained when the projection loop's drain timed out — the "
                 f"journal line committed and the loop had not reached the record "
                 f"(#14185)")
+        # ⛔ EMITTED AFTER `undrained`, i.e. in ``_fold_needed``'s order (that
+        # predicate tests ``unprojected`` → ``deferred_undrained`` →
+        # ``deferred_failures``). Round 17 of #14222's review found this block had
+        # been inserted ABOVE `undrained`, which made this docstring's ordering
+        # claim false; the order is the fix, not the sentence.
+        if self.record_deferred_failures:
+            causes.append(
+                f"{self.record_deferred_failures} deferred fold(s) RAN and did not "
+                f"write a row (the loop's own failure counter: `projection_raised`, "
+                f"`record_no_outcome` or `projection_refused`) — a converged drain "
+                f"is not a written record, so this needs the fold from the journal")
         if self.positions_unproven and self.record_armed is not False:
             causes.append(
                 f"{self.positions_unproven} append(s) proved no position — such a "
