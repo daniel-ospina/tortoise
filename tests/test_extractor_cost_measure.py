@@ -184,18 +184,69 @@ def test_a_literal_dollar_is_escaped_outside_code_spans_only():
     assert out.count("\\$") == 1
 
 
-@pytest.mark.parametrize("fence", ["```", "~~~"])
-def test_a_fenced_block_is_never_escaped(fence):
-    """A backslash is literal inside a fence, so escaping `$VAR` there would
-    print a backslash the author never wrote — and the fence is the construct
-    that breaks "prose `$` can always be escaped" if the scan is fence-blind."""
-    doc = (f"# t\n\ntotal $5\n\n{fence}\necho $HOME\n{fence}\n\n"
-           f"after $6\n")
+_FENCED = {
+    # (id, document, the span that must survive byte for byte)
+    "backtick": ("# t\n\ntotal $5\n\n```\necho $HOME\n```\n\nafter $6\n",
+                 "```\necho $HOME\n```"),
+    "tilde": ("# t\n\ntotal $5\n\n~~~\necho $HOME\n~~~\n\nafter $6\n",
+              "~~~\necho $HOME\n~~~"),
+    "info string": ("# t\n\n```sh\necho $HOME\n```\n", "```sh\necho $HOME\n```"),
+    # An opener of FOUR backticks: a three-backtick line inside it is CONTENT,
+    # so `$HOME` must stay bare. Truncating the opener to three (the first cut
+    # of this fix did) closes the fence early and escapes it.
+    "four-backtick opener": ("# t\n\n````\nexample:\n```\necho $HOME\n```\n"
+                             "````\n\nafter $6\n",
+                             "````\nexample:\n```\necho $HOME\n```\n````"),
+    # A closer with trailing text is not a closer (CommonMark: only whitespace
+    # may follow), so the block continues and `$C` is content.
+    "closer with trailing text": ("# t\n\n```sh\necho $A\n``` not a fence $B\n"
+                                 "echo $C\n```\n\nz $2\n",
+                                 "```sh\necho $A\n``` not a fence $B\necho $C\n```"),
+    "blockquote": ("# t\n\ntotal $5\n\n> ```\n> echo $HOME\n> ```\n\n"
+                   "after $6\n",
+                   "> ```\n> echo $HOME\n> ```"),
+    "list-indented (2 spaces, still a fence)": (
+        "# t\n\n  ```\n  echo $HOME\n  ```\n\nafter $6\n",
+        "  ```\n  echo $HOME\n  ```"),
+    # An unclosed fence makes the REST of the document code — deliberate, and
+    # stated in the docstring.
+    "unclosed fence": ("# t\n\ntotal $5\n\n```\necho $HOME\nmore $7 code\n",
+                       "```\necho $HOME\nmore $7 code\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FENCED))
+def test_a_fenced_block_is_never_escaped(case):
+    """A backslash is literal inside a fence, so escaping `$VAR` there prints a
+    backslash the author never wrote — and a fence-blind scan is what breaks
+    "prose `$` can always be escaped"."""
+    doc, must_survive = _FENCED[case]
     out = m.escape_dollars_outside_code(doc)
-    assert f"{fence}\necho $HOME\n{fence}" in out, (
-        "a `$` inside a fenced block must survive byte for byte")
-    assert "total \\$5" in out and "after \\$6" in out, (
-        "prose dollars on both sides of the fence must still be escaped")
+    assert must_survive in out, f"{case}: fenced `$` must survive byte for byte"
+    # Every prose figure this case carries outside the fence must be escaped,
+    # INCLUDING one after the fence — that is what proves the fence state was
+    # left, rather than escaping being switched off for the rest of the doc.
+    for before, after in (("total $5", "total \\$5"), ("z $2", "z \\$2")):
+        if before in doc:
+            assert after in out, f"{case}: prose {before!r} must be escaped"
+    if case != "unclosed fence" and "after $6" in doc:
+        assert "after \\$6" in out, (
+            f"{case}: prose AFTER the fence must be escaped again — a fence "
+            f"that is never left switches escaping off for the rest of the doc")
+
+
+def test_an_indented_code_block_is_escaped_and_that_is_stated():
+    """4+ spaces is an indented code block, not a fence. The first cut of this
+    fix stripped all leading whitespace, so such a line OPENED a fence and
+    silently switched escaping off for the rest of the document — the silent
+    direction. It must not open a fence; the `$` inside it is escaped, which is
+    the residual the docstring names."""
+    doc = "# t\n\ntotal $5\n\n        ```\n        $HOME\n\n\nafter $6\n"
+    out = m.escape_dollars_outside_code(doc)
+    assert "after \\$6" in out, (
+        "an indented ``` must NOT open a fence — prose after it is still prose")
+    assert "        \\$HOME" in out, (
+        "the residual, as documented: an indented code block is not tracked")
 
 
 def test_finalize_markdown_leaves_exactly_one_trailing_newline():
@@ -215,11 +266,34 @@ def test_the_shipped_report_carries_no_bare_dollar_outside_a_code_span():
               / "report.md").read_text(encoding="utf-8")
     assert report.endswith("\n") and not report.endswith("\n\n"), (
         "the report must not end on a blank line (MD012)")
-    bare = m.escape_dollars_outside_code(report)
-    assert bare == report, (
-        "the shipped report carries a bare `$` outside a code span — it was "
-        "hand-edited, or regenerated with a stale tool; regenerate it with "
-        "`uv run python tools/extractor_cost_measure.py report …`")
+    # The check must NOT be the escaper judging itself: a document the escaper
+    # leaves alone is a fixed point whether or not it needed escaping (that is
+    # how the odd-backtick direction stays silent). So strip code spans and
+    # fenced blocks HERE, independently, and assert the prose carries no bare
+    # `$` at all.
+    import re as _re
+    prose_bare: list[str] = []
+    in_fence = False
+    for number, line in enumerate(report.split("\n"), 1):
+        if line.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        assert len(_re.findall(r"`+", line)) % 2 == 0, (
+            f"report.md:{number} has an odd number of backtick runs — its tail "
+            f"reads as code, and the escaper leaves bare `$` there (silently)")
+        outside_code = _re.sub(r"`+[^`]*`+", "", line)
+        if _re.search(r"(?<!\\)\$", outside_code):
+            prose_bare.append(f"{number}: {outside_code.strip()[:70]}")
+    assert not prose_bare, (
+        "the shipped report carries a bare `$` in prose — markdownlint pairs it "
+        "as math and re-pairs the surrounding delimiters (MD037/MD038); "
+        "regenerate it with `uv run python tools/extractor_cost_measure.py "
+        f"report …`: {prose_bare[:3]}")
+    assert m.escape_dollars_outside_code(report) == report, (
+        "regenerate the report: it is not a fixed point of the escaper, so it "
+        "was hand-edited or written by a stale tool")
 
 _EVIDENCE = _REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
 

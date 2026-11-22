@@ -847,47 +847,93 @@ def _mean_item_tokens(arm_rep: dict) -> float:
     return float(item.get("median") or 0)
 
 
+_BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
+_FENCE_OPEN = re.compile(r"^ {0,3}(?P<delim>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def _unquote(line: str) -> str:
+    """Drop blockquote markers, so a fence inside a quote is recognised."""
+    while True:
+        marker = _BLOCKQUOTE.match(line)
+        if not marker:
+            return line
+        line = line[marker.end():]
+
+
+def _opens_fence(line: str) -> str:
+    """The opener's FULL delimiter run, or "" if this line opens no fence."""
+    match = _FENCE_OPEN.match(_unquote(line))
+    if not match:
+        return ""
+    delim = match.group("delim")
+    if delim[0] == "`" and "`" in match.group("info"):
+        # CommonMark: a backtick fence's info string may not contain a backtick.
+        return ""
+    return delim
+
+
+def _closes_fence(line: str, delim: str) -> bool:
+    """A closer is AT LEAST as long as its opener, and only spaces follow."""
+    return re.fullmatch(
+        r" {0,3}" + re.escape(delim[0]) + "{" + str(len(delim)) + r",}[ \t]*",
+        _unquote(line)) is not None
+
+
 def escape_dollars_outside_code(markdown: str) -> str:
     """Backslash-escape every literal ``$`` that is not in a code span or fence.
 
-    A bare ``$`` beside a figure is ambiguous to Markdown's inline parser, and
-    the repo's linter (markdownlint 0.41, micromark-based) resolves the
-    ambiguity by pairing ``$…$`` spans — which silently re-pairs the
-    surrounding ``**emphasis**`` and code-span delimiters too. That produced
-    three findings (MD037, MD038, MD012) in this report whose POSITION MOVED
-    when unrelated prose changed, so no hand-edit of the generated text could
-    keep them fixed: the defect is the emission, not the sentence it landed
-    on (#14295).
+    A bare ``$`` beside a figure is ambiguous to Markdown's inline parser: the
+    parser runs ``micromark-extension-math``, so ``$…$`` is a MATH span, and
+    pairing one re-pairs the surrounding ``**emphasis**`` and code-span
+    delimiters. That produced two findings in this report (MD037, MD038) whose
+    POSITION MOVED when unrelated prose changed, so no hand-edit of the
+    generated text could keep them fixed: the defect is the emission, not the
+    sentence it landed on (#14295).
 
     ``\\$`` renders as ``$`` (it is a normal punctuation escape), so the
     rendered report is unchanged while its inline structure no longer depends
     on how many figures a sentence carries. A backslash is LITERAL inside code,
     so both kinds of it pass through untouched: inline spans, located by
     matching backtick RUNS (a double-backtick span is one unit), and fenced
-    blocks, located by their ``` / ~~~ delimiter lines. Escaping a fenced
-    ``$HOME`` would print a backslash the author never wrote.
+    blocks, located by the CommonMark fence rules — at most three spaces of
+    indentation, blockquote markers ignored, the closer at least as long as its
+    opener with nothing but whitespace after it. Escaping a fenced ``$HOME``
+    would print a backslash the author never wrote.
 
-    Scope, stated so the boundary is not mistaken for completeness: this is a
-    line-local scan, so it does not track an inline span that WRAPS a line, and
-    a line with an odd number of backtick runs leaves that line's tail read as
-    code (bare ``$`` there stays bare — the ``docs`` lint gate reports that
-    direction; it does not fail silently). Neither shape is emitted by this
-    module today: it prints no fences, and every line of its output has an even
-    number of backtick runs.
+    MD012 (a blank line at end of file) is NOT this function's cause; see
+    ``finalize_markdown``.
+
+    Scope, stated so the boundary is not mistaken for completeness:
+
+    * An inline span that WRAPS a line is not tracked — the scan is line-local.
+    * A line with an ODD number of backtick runs leaves that line's tail read as
+      code, so a bare ``$`` there stays bare. That direction is SILENT: the
+      ``docs`` gate reports it only when the ``$`` pairing happens to swallow an
+      emphasis or code delimiter on the same line — a line left bare this way
+      lints clean (measured), so the gate must not be relied on to catch it.
+    * An UNCLOSED fence leaves the rest of the document unescaped. That one is
+      deliberate: a fence that never closes really does make what follows code.
+    * An INDENTED code block (4+ spaces, which CommonMark makes code) is not
+      tracked as code, so a ``$`` inside one IS escaped — the fence rules above
+      are applied, indentation-based code blocks are not. This module emits
+      neither shape.
+
+    Neither of the first two shapes is emitted by this module today: it prints
+    no fences, and every line of its output has an even number of backtick runs
+    (pinned by a test against the shipped report).
     """
     out: list[str] = []
     fence: str = ""
     for line in markdown.split("\n"):
-        stripped = line.lstrip()
         if fence:
             out.append(line)
-            if stripped.startswith(fence):
-                fence = ""
             out.append("\n")
+            if _closes_fence(line, fence):
+                fence = ""
             continue
-        opener = re.match(r"(`{3,}|~{3,})", stripped)
-        if opener:
-            fence = opener.group(1)[:3]
+        opened = _opens_fence(line)
+        if opened:
+            fence = opened
             out.append(line)
             out.append("\n")
             continue
