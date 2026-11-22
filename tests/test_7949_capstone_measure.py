@@ -7582,12 +7582,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("20457", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:20329` now, and its own `hosted_api.py:19589` (`19558` before that) is that SAME guard at an older head — so it is
+        # re-states `hosted_api.py:20432` now, and the `hosted_api.py:18205` beside it
+        # (`19589`, `19558` in earlier readings) is that SAME guard at an older head — so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
-        # merger to re-point line 82, which is exactly how 236 comes to assert the old
-        # number while 82 moves. Unpinned until the review reverted it green. Only the
-        # current-head number is pinned: the `:18205` beside it is a STAMP read at
-        # `a577d0e25c` and does NOT resolve here, so pinning it would red a true record.
+        # merger to re-point line 82, which is exactly how 236 came to assert an older
+        # number while 82 moved. Unpinned until the review reverted it green; only the
+        # current-head number is pinned: `:18205` is a STAMP at `a577d0e25c`, not an address.
         ("03-test-design.md", "`:82`'s `hosted_api.py:", (
             ("20432", "if count + est > max_points:"),
         ), "hosted_api"),
