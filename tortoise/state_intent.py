@@ -1211,7 +1211,12 @@ _COPULA_SUBJECT = (
     # decision archived`, `is Q3's report archived`, `is O'Brien's claim retracted` — 800
     # of 800 rows in a 4-head × 2-det × 20-subject × 5-participle population, SILENTLY
     # (`signal=None`, so not even a notice). Those are exactly the multi-word subjects this
-    # slot was widened to admit, and `HEAD~1` served them. The clitic that matters is the
+    # slot was widened to admit, and `21cc92e90c` served them (⛔ ABSOLUTE, never `HEAD~1` —
+    # the file forbids relative revisions in prose because the first cut of a note twenty
+    # lines above said `HEAD~1` and by the time it was read it had become round 21; measured
+    # here, `a3886ee055^` is `3d4d5d5b62`, which REFUSED all three of these silently — it is
+    # the very regression this sentence describes, not the revision that served them).
+    # The clitic that matters is the
     # one on the FINAL word that IS the auxiliary (`billing's been`), so the exclusion is
     # anchored on the following `been`.
     # ⚠️ A "guard only the last word" rewrite (`(?:word\s+){0,3}(?!clitic)word`) LEAKS: the
@@ -1848,8 +1853,11 @@ def detect_state_question(text: str | None) -> StateQuestion:
     # CALLER'S RAW TEXT (round-27 review, P1, measured). The contraction class is closed
     # over `'` (U+0027), but the product routinely RECEIVES U+2019 — `tortoise/
     # extractor_v2.py` normalises the whole `‘’‚‛` inventory before tokenising for exactly
-    # that reason, and this module's own token classes admit `’` beside `'` in eleven
-    # places. `detect_state_question` receives the string from `sdk.py` untouched, so
+    # that reason, and this module's own word classes admit `’` beside `'` (the class is
+    # `['’]`, spelled from `_APOSTROPHES` — ⛔ NO COUNT HERE: an earlier cut of this note said
+    # "eleven places" and its sibling said "eighteen", and the file carries neither number
+    # consistently, so the count was replaced by the constant that decides it).
+    # `detect_state_question` receives the string from `sdk.py` untouched, so
     # `have any users reported the vendor hasn’t been deprecated` (U+2019) routed the whole
     # ended population with the caller's predicate dropped and `signal=None` — 384 of 384
     # rows in a 6-spelling × 8-subject × 8-verb population — while its ASCII twin was

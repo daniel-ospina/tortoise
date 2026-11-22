@@ -458,9 +458,16 @@ SELECTED = [
     # question was refused with NO notice, against this branch's own base:
     #   base `21cc92e90c`: copula 96/96 routed → head 0/96 (all silent); perfect 72/72 → 0/72.
     # It was not even self-consistent: the PLURAL possessive still routed, because there the
-    # apostrophe is word-final. The discriminator is now what FOLLOWS the clitic — a noun
-    # after a possessive, a predicate marker (`been|not|already|ever|…|ENDING`) after the
-    # auxiliary — and these rows are pinned as ROUTES so a future widening cannot re-drop them.
+    # apostrophe is word-final.
+    # ⛔ THE MECHANISM, DESCRIBED AS THE CODE IMPLEMENTS IT: the exclusion is anchored on the
+    # FOLLOWING `been` — `(?!…['’](?:s|ve|d)\s+been\b)` — i.e. it refuses only the AUXILIARY
+    # reading (`billing's been deprecated`) and ADMITS every other `'s|'ve|'d` as a possessive.
+    # An earlier cut of THIS comment claimed a broader discriminator (a noun after a possessive,
+    # a predicate list `been|not|already|ever|…|ENDING` after the auxiliary) — that was the
+    # design I had built and then DROPPED in favour of the branch's own fix, so the comment was
+    # describing a mechanism that is not in the file. Measured against the code: `is the plan's
+    # not archived` and `is the plan's already archived` still ROUTE, because only `been` is
+    # anchored. These rows are pinned as ROUTES so a future widening cannot silently re-drop them.
     ("is the client's contract archived", "ended", "is_copula"),
     ("is the client’s contract archived", "ended", "is_copula"),
     ("is the clients' contract archived", "ended", "is_copula"),
