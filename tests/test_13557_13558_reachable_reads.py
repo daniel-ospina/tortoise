@@ -4356,3 +4356,58 @@ def test_a_refused_clitic_subject_REPORTS_with_a_word_between_it_and_been():
         assert missed_route_payload(got) is not None, (
             f"{query!r} reports a signal but no payload — a notice a caller cannot read "
             f"is the same silence one layer down")
+
+
+def test_the_clitic_notice_gap_is_the_guard_s_separator_and_covers_modal_heads():
+    """The notice arm's gap must be as wide as the GUARD's, or the silence survives.
+
+    ⛔ ONE GAP SPELLED IN TWO PLACES DRIFTS (round-32 review, P3, measured). The guard
+    (`_COPULA_SUBJECT`) treats `,` as the same gap the clitic rule uses, but the notice
+    arm's token class was `[a-z0-9'’._/-]+` and its separator was `\\s+`, so a comma, a
+    non-ASCII letter, `#` or `$` in the gap blinded the arm and the row was refused with
+    NO report: `has the vendor's recently, been deprecated`, `has the client's café been
+    archived`, `has the vendor's report #12 been archived`, `has the client's $5 fee been
+    archived`, `has billing's, just, been deprecated`.
+    ⛔ AND A MODAL PERFECT IS THE SAME CUE: the head class was
+    `has|have|had|is|are|was|were`, so `could the vendor's supply have been archived` and
+    `will the client's report have been archived` reported NOTHING.
+    Both widenings are on a SIGNAL arm, which is computed only after every shape has
+    declined — so they can only add a report, never a population.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    for query in (
+        "has billing's, just, been deprecated",
+        "has the vendor's recently, been deprecated",
+        "has the client's supply, been archived",
+        "has the client's café been archived",
+        "has the vendor's report #12 been archived",
+        "has the client's $5 fee been archived",
+        "has the client's supply been archived",
+        "has billing's just been deprecated",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None, (
+            f"{query!r} served {got.population!r} — a SIGNAL arm cannot route; a "
+            f"population means a shape matched first and this assertion is moot")
+        assert got.signal, (
+            f"{query!r} is refused with NO notice (signal={got.signal!r}) — the gap "
+            f"between the clitic and `been` is wider in the GUARD than in this arm, so "
+            f"the spellings the guard admits keep the silence the arm exists to remove")
+        assert missed_route_payload(got) is not None, query
+    # …and the modal perfects.
+    for query in (
+        "could the vendor's supply have been archived",
+        "will the client's report have been archived",
+        "should the invoice's date have been archived",
+        "will billing's just been deprecated",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, (
+            f"{query!r} reports nothing ({got.population!r}, {got.signal!r}) — a modal "
+            f"perfect carrying `been <ending>` is the same state cue")
+    # …while every served row stays served, so the widening bought no serving.
+    for query in ("has the client's contract been archived", "is the export archived",
+                  "has anything we have been tracking been withdrawn", "what ended",
+                  "which claims were archived"):
+        assert detect_state_question(query).population == "ended", query
