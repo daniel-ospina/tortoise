@@ -579,9 +579,16 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     # is why this is STAGED, not a precision choice. The propagation below is what lets
     # `_M = _N` (written after the `+=`) resolve to the augmented value.
     for target, value in augments:
-        out.setdefault(target.id, set()).update(
-            {base + suffix for base in out.get(target.id, ())
-             for suffix in _values(value)})
+        # ⛔ NOT `out.setdefault(...).update({...})` (#14326): that shape is one row of
+        # `tools/sdk_privatise.py`'s untyped-receiver RESIDUE, and adding one moved the
+        # repo-wide pin 11864 -> 11865, turning `surface-guard` red on a diff that touches
+        # no production code. The subscript form accumulates identically without growing
+        # that residue, so the gate keeps its absolute pin.
+        _acc = out.get(target.id)
+        if _acc is None:
+            _acc = out[target.id] = set()
+        _acc |= {base + suffix for base in out.get(target.id, ())
+                 for suffix in _values(value)}
     _fixpoint()
     return {name: frozenset(values) for name, values in out.items() if values}
 
@@ -5859,15 +5866,18 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                bound = alias.asname or alias.name
-                if bound != _SDK_CONSTRUCTOR:
+                if alias.name != _SDK_CONSTRUCTOR:
                     continue
+                bound = alias.asname or alias.name
                 if node.module != "tortoise.sdk" or alias.asname is not None:
                     out.append(
                         f"line {node.lineno} binds `{_SDK_CONSTRUCTOR}` from "
                         f"`{node.module}` as `{bound}` — the pin names the CLASS the product "
                         f'ships, so its only binding may be `from tortoise.sdk import '
-                        f"{_SDK_CONSTRUCTOR}`")
+                        f"{_SDK_CONSTRUCTOR}` — an ALIASED import is its own red because the "
+                        "receiver clause needs the bare name, so either the alias is unused "
+                        "(and the bare name is bound somewhere else) or it is a second "
+                        "spelling this pin cannot resolve")
                 else:
                     bound_from_shipped += 1
         elif isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) \
@@ -5881,11 +5891,50 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
                 if isinstance(target, ast.Attribute):
+                    # ⛔ A STORE ON A MODULE REBINDS THE DEFERRED IMPORT (#14326 review P1,
+                    # MEASURED GREEN at `a77e4fe3`): `run()` imports the class INSIDE the
+                    # body, so it resolves the attribute at CALL time — a module-level
+                    #
+                    #     import tortoise.sdk as _t
+                    #     _t.TortoiseSDK = _Mirror
+                    #
+                    # makes `sdk = TortoiseSDK()` construct the mirror while every clause
+                    # here passes (the ClassDef arm sees `_Mirror`, and the in-`run`
+                    # import satisfies `bound_from_shipped`). This pin cannot prove WHICH
+                    # object receives an attribute store, so the store reds.
+                    if target.attr == _SDK_CONSTRUCTOR:
+                        out.append(
+                            f"line {node.lineno} STORES `{_SDK_CONSTRUCTOR}` on "
+                            f"`{ast.unparse(target.value)}` — `run()` resolves the class at "
+                            "CALL time, so a module-attribute store swaps the object the "
+                            "receiver clause trusts (measured: `import tortoise.sdk as _t;"
+                            " _t.TortoiseSDK = _Mirror` left the pin GREEN)")
                     continue
                 if _SDK_CONSTRUCTOR in _bind_target_names(target):
                     out.append(
                         f"line {node.lineno} ASSIGNS `{_SDK_CONSTRUCTOR}` — the receiver "
                         "clause would accept whatever was assigned there as the shipped SDK")
+        elif isinstance(node, ast.Call):
+            # ⛔ THE SAME STORE, CARRIED AS A STRING CONSTANT (#14326 review P1): the
+            # module-attribute arm above is a spelling, and `setattr(mod, "TortoiseSDK", X)`
+            # binds exactly the same attribute. Fail-closed on the NAME alone — this pin
+            # cannot resolve which receiver the setattr targets.
+            if (getattr(node.func, "id", None) == "setattr" and len(node.args) >= 2
+                    and isinstance(node.args[0], ast.Name)
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value == _SDK_CONSTRUCTOR):
+                out.append(
+                    f"line {node.lineno} `setattr`s `{_SDK_CONSTRUCTOR}` on "
+                    f"`{node.args[0].id}` — the same store as an attribute write, carried "
+                    "as a string constant, so `run()`'s deferred import can resolve to a "
+                    "different class")
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
+                and isinstance(node.slice, ast.Constant) \
+                and node.slice.value == _SDK_CONSTRUCTOR:
+            # …and through a mapping key, the third spelling of the same store.
+            out.append(
+                f"line {node.lineno} stores `{_SDK_CONSTRUCTOR}` under a string key on "
+                f"`{ast.unparse(node.value)}` — the same rebind as an attribute store")
     if not bound_from_shipped:
         out.append(
             f"no `from tortoise.sdk import {_SDK_CONSTRUCTOR}` binding exists in this file — "
@@ -6007,6 +6056,35 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     assigned = shipped + "TortoiseSDK = _Compat\n"
     got = ctor_findings(assigned)
     assert got and any("ASSIGNS" in g for g in got), got
+
+    # ⛔ THE THREE STORES THAT REBIND THE CLASS `run()` RESOLVES AT CALL TIME (#14326
+    # review P1, the first one MEASURED GREEN at `a77e4fe3` with the pin untouched):
+    # `run()` imports the class INSIDE the body, so a store performed before the call is
+    # what the import resolves.
+    module_attr = ("import tortoise.sdk as _t\n"
+                   "class _Mirror:\n    pass\n"
+                   "_t.TortoiseSDK = _Mirror\n")
+    got = ctor_findings(module_attr)
+    assert got and any("STORES" in g for g in got), got
+
+    setattr_store = (shipped
+                     + 'setattr(_t, "TortoiseSDK", _Mirror)\n')
+    got = ctor_findings(setattr_store)
+    assert got and any("setattr`s" in g for g in got), got
+
+    keyed_store = (shipped + 'sys.modules["tortoise.sdk"] = _M\n')
+    assert ctor_findings(keyed_store) == []          # an unrelated KEY is not this store
+    keyed_ctor = (shipped + '_t.__dict__["TortoiseSDK"] = _Mirror\n')
+    got = ctor_findings(keyed_ctor)
+    assert got and any("under a string key" in g for g in got), got
+
+    # ⛔ THE `asname` HALF IS ITS OWN CLAUSE (#14326 review P2, measured: deleting it left
+    # 31 passed, because the `subclass` row above satisfies the arm's FIRST disjunct).
+    # Over-block only — `_receiver_findings` still requires a bare `TortoiseSDK()` — but a
+    # clause no row can red is not a guard.
+    aliased_only = "from tortoise.sdk import TortoiseSDK as _R\ndef run():\n    sdk = _R()\n"
+    got = ctor_findings(aliased_only)
+    assert got and any("as `_R`" in g for g in got), got
 
     no_import = "def run(queries):\n    sdk = TortoiseSDK()\n"
     got = ctor_findings(no_import)
