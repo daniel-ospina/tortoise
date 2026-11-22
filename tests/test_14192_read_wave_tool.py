@@ -5146,6 +5146,12 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     # timed a door the product never opens. Shared with its rows, like `_read_reach`.
     receiver_findings = _receiver_findings(run_defs[0])
     assert not receiver_findings, receiver_findings[0]
+    # ⛔ THE CONSTRUCTOR'S PROVENANCE (#14326 review P1, both MEASURED GREEN at `91db903`):
+    # `_receiver_findings` proves the NAME `TortoiseSDK` is what `run()` constructs, and a
+    # foreign import or a same-named subclass satisfies that while timing — or silently
+    # re-ordering — a door the product never opens.
+    constructor_findings = _constructor_provenance_findings(tree)
+    assert not constructor_findings, constructor_findings[0]
     # ⛔ THE BLESSED MAPPER IS A NAME, SO IT CAN BE SHADOWED (#14281 review P1, measured
     # GREEN): `_result_id = lambda _r: "X"` inside `run()` made every `order` a list of
     # constants while the element check — which blesses the NAME — stayed satisfied.
@@ -5428,7 +5434,7 @@ def _receiver_findings(run_def: ast.AST) -> list[str]:
             continue
         stores = [n for n in ast.walk(run_def)
                   if isinstance(n, ast.Name) and n.id == name
-                  and isinstance(n.ctx, (ast.Store, ast.Del))]
+                  and isinstance(n.ctx, ast.Store)]
         if len(stores) != 1:
             out.append(
                 f"`{name}` is bound {len(stores)} time(s) inside `run()` — the receiver must "
@@ -5497,6 +5503,64 @@ def _generator_filter_findings(key: str, gen: ast.comprehension) -> list[str]:
                 f"is not read off the iterated entry (`{target}`) — a filter over a different "
                 "object reports a table that is not the measured page's"]
     return []
+
+
+def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
+    """Every reason the name `TortoiseSDK` is not provably the class the product ships.
+
+    ⛔ THE RECEIVER CLAUSE PINNED A NAME, NOT A CLASS (#14326 review P1, both spellings
+    MEASURED GREEN at `91db903`): `_receiver_findings` proves `sdk = TortoiseSDK()`, so the
+    NAME is satisfied by anything that carries it —
+
+        from _compat.sdk import TortoiseSDK          # a foreign constructor
+        from tortoise.sdk import TortoiseSDK as _R   # …and a class-level wrapper:
+        class TortoiseSDK(_R):                      # every page re-sorted before `order`
+            __getattr__ = staticmethod(
+                lambda _s, _n: (lambda *a, **k: sorted(_R.__getattribute__(_s, _n)(*a, **k),
+                                                       key=lambda _r: str(_r.get("id")))))
+
+    Both left the pin GREEN (`31 passed`) while the harness timed — or silently re-ordered
+    — a door the product never opens. So the NAME's provenance is pinned too: the only
+    binding of `TortoiseSDK` anywhere in the file must be `from tortoise.sdk import
+    TortoiseSDK`, and no class/def/assignment may carry that name.
+    """
+    out: list[str] = []
+    bound_from_shipped = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if bound != _SDK_CONSTRUCTOR:
+                    continue
+                if node.module != "tortoise.sdk" or alias.asname is not None:
+                    out.append(
+                        f"line {node.lineno} binds `{_SDK_CONSTRUCTOR}` from "
+                        f"`{node.module}` as `{bound}` — the pin names the CLASS the product "
+                        f'ships, so its only binding may be `from tortoise.sdk import '
+                        f"{_SDK_CONSTRUCTOR}`")
+                else:
+                    bound_from_shipped += 1
+        elif isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name == _SDK_CONSTRUCTOR:
+            out.append(
+                f"line {node.lineno} DEFINES `{_SDK_CONSTRUCTOR}` — a subclass or wrapper "
+                "wearing the shipped class's name satisfies the receiver clause while every "
+                "page it returns can be rewritten (measured: a `__getattr__` that sorts each "
+                "page left the pin GREEN before this clause)")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Attribute):
+                    continue
+                if _SDK_CONSTRUCTOR in _bind_target_names(target):
+                    out.append(
+                        f"line {node.lineno} ASSIGNS `{_SDK_CONSTRUCTOR}` — the receiver "
+                        "clause would accept whatever was assigned there as the shipped SDK")
+    if not bound_from_shipped:
+        out.append(
+            f"no `from tortoise.sdk import {_SDK_CONSTRUCTOR}` binding exists in this file — "
+            "the receiver clause then proves nothing about WHICH class `run()` constructs")
+    return out
 
 
 def _findings_of_run(source: str, predicate) -> list[str]:
@@ -5581,6 +5645,43 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     got = _findings_of_run(parameter, _receiver_findings)
     assert got and "as a PARAMETER" in got[0], got
 
+    # ⛔ THE CLASS, NOT ONLY THE NAME (#14326 review P1, both MEASURED GREEN at `91db903`
+    # with `_receiver_findings` alone): the receiver clause is satisfied by ANY name spelled
+    # `TortoiseSDK`, so the name's PROVENANCE is pinned too. Each row below is the lever the
+    # review actually applied to `tools/read_wave_latency.py`, measured end-to-end:
+    #
+    #   `from _compat.sdk import TortoiseSDK`                 -> 31 passed (foreign ctor)
+    #   `from tortoise.sdk import TortoiseSDK as _R` +        -> 31 passed (a subclass whose
+    #   `class TortoiseSDK(_R): __getattr__ = … sorted(…)`         every page is re-sorted)
+    def ctor_findings(source: str) -> list[str]:
+        return _constructor_provenance_findings(ast.parse(source))
+
+    shipped = ("from tortoise.sdk import TortoiseSDK\n"
+               "def run(queries):\n"
+               "    sdk = TortoiseSDK()\n")
+    assert ctor_findings(shipped) == []
+
+    foreign_ctor = shipped.replace("from tortoise.sdk import TortoiseSDK",
+                                   "from _compat.sdk import TortoiseSDK", 1)
+    got = ctor_findings(foreign_ctor)
+    assert got and "from `_compat.sdk`" in got[0], got
+
+    subclass = ("from tortoise.sdk import TortoiseSDK as _R\n"
+                "class TortoiseSDK(_R):\n"
+                "    __getattr__ = staticmethod(lambda *_a, **_k: None)\n"
+                "def run(queries):\n"
+                "    sdk = TortoiseSDK()\n")
+    got = ctor_findings(subclass)
+    assert got and any("DEFINES" in g or "as `_R`" in g for g in got), got
+
+    assigned = shipped + "TortoiseSDK = _Compat\n"
+    got = ctor_findings(assigned)
+    assert got and any("ASSIGNS" in g for g in got), got
+
+    no_import = "def run(queries):\n    sdk = TortoiseSDK()\n"
+    got = ctor_findings(no_import)
+    assert got and "no `from tortoise.sdk import TortoiseSDK`" in got[0], got
+
 
 def test_every_door_contract_clause_reds() -> None:
     """Each fail-closed clause of `_door_read_contract` must be RED by a row (#14326 P1).
@@ -5632,6 +5733,15 @@ def test_every_door_contract_clause_reds() -> None:
     assert sdk.count("_rerank_candidates: bool = True") == 1
     raised("", sdk_source=sdk.replace("_rerank_candidates: bool = True",
                                       "_rerank_candidates: bool | None = None", 1))
+
+    # 5. a SECOND `_tortoise_fts_query` definition in `sdk.py` (#14326 review P3, measured:
+    #    replacing the cardinality assert with `assert defs` left 31 passed). Two
+    #    definitions mean the door's parameter list may be derived from the wrong one —
+    #    the constructor half of the same "exactly one authority" rule.
+    second_def = ('\n\ndef _tortoise_fts_query(self, query=None, limit=10):\n'
+                  '    return []\n')
+    raised("_tortoise_fts_query` definitions",
+           sdk_source=sdk + second_def)
 
 
 def test_the_artifact_generator_filter_clauses_red() -> None:
