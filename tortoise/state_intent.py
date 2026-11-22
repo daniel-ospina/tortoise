@@ -1200,9 +1200,18 @@ _COPULA_SUBJECT = (
     # became silent. So the gap between the clitic and `been` tolerates up to three
     # adverbial words, and `been` itself is FORBIDDEN as a subject word — that is what
     # stops the slot from swallowing the whole clause.
-    r"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+[a-z-]+){0,3}[,\s]+been\b)"
+    # ⛔ AND THE GAP IS THE MODULE'S OWN ADVERB CLASS, NOT "ANY WORD" (round-30 review,
+    # measured both ways): a free `[a-z-]+` gap closed the hijack and then refused the
+    # POSSESSIVE-SUBJECT class the same way — `has the client's contract been archived` and
+    # `has the vendor's invoice been retired` are legitimate questions whose subject noun
+    # happens to sit between the clitic and `been`, and they went silent. The distinguishing
+    # feature is grammatical ROLE (adverb vs noun), which needs the lexicon this detector
+    # does not have, so the gap is `_EXISTENCE_ADVERB` — the same closed table the asyndetic
+    # guard already uses. RESIDUAL: an adverb outside that table re-opens the hijack for
+    # this one spelling; it is the same boundary stated at `_EXISTENCE_ADVERB` itself.
+    rf"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+(?:{_EXISTENCE_ADVERB})){{0,3}}[,\s]+been\b)"
     r"(?!been\b)[a-z0-9][a-z0-9'’._/-]*"
-    r"(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+[a-z-]+){0,3}[,\s]+been\b)"
+    rf"(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+(?:{_EXISTENCE_ADVERB})){{0,3}}[,\s]+been\b)"
     r"(?!been\b)[a-z0-9][a-z0-9'’._/-]*){0,3}"
     r"|(?:i|you|he|she|it|we|they|there)(?![-/])"
     r")"
