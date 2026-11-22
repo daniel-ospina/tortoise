@@ -1176,7 +1176,29 @@ SWEEP_NAMES = 66
 #: NEW row SHAPE — is not what happened here. Re-measured on the MERGED tree with `--repin`,
 #: never carried from the pair quoted above by arithmetic: `(11861, "f0647020531c078c")`, and
 #: `--check` exits 0 on it.
-SWEEP_RESIDUE = (11861, "f0647020531c078c")
+#: RE-CUT AT THE `#14232` MERGE (`432540dc44`, × `main` `0467ba329d`) — `main`'s
+#: `(11861, "f0647020531c078c")` → `(11875, "6c8727fc80045370")`, and the +14 is ENTIRELY the
+#: `#14232` change rather than inherited drift, which is measured rather than assumed the same way
+#: the merge notes above measure it: `--report --base 28ca66878d --top 5000` on `origin/main`
+#: `0467ba329d`'s own tree prints **11861** — the number that tree re-cut to, so the base
+#: contributes nothing — and **11875** on the merged tree. Seven shapes move, each read on BOTH
+#: trees and none absorbed in the other direction:
+#:   * `_proj().g.query` did not exist on the base and reads **6** here: the six
+#:     `_proj().g.query(` reads the async-ACK rows add in `tests/test_14232_ingest_ack_split.py`
+#:     (`git diff origin/main...HEAD -- tests/ | grep -c '^+.*_proj()\.g\.query'` → 6);
+#:   * `proj.g.query` 3646 → 3649 (**+3**, the NET of `tortoise/hosted_api.py` +8/−6 as the capture
+#:     path is split around the ACK, plus +1 in `tools/acceptance_14232_drain.py`);
+#:   * `graph_cls.query` 11 → 12 (**+1**), `registry.query` 38 → 39 (**+1**) and
+#:     `string 'query' on untyped receiver` 109 → 110 (**+1**), all three in this branch's own test
+#:     rows;
+#:   * two shapes the base did not carry at all: `self.get_session` **0 → 1** and
+#:     `transport.get_session` **0 → 1**, the acceptance tool's transport read reached through an
+#:     untyped receiver, left alone deliberately like every other row here.
+#: 6 + 3 + 1 + 1 + 1 + 1 + 1 = 14 = 11875 − 11861, which is the cross-check that no row was
+#: silently absorbed; the pair is `--repin`'s output on the merged tree at `432540dc44`, not
+#: arithmetic on `main`'s, and `--check` exits 0 on it with `typed references still pointing at a
+#: public name` at **0**.
+SWEEP_RESIDUE = (11875, "6c8727fc80045370")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
