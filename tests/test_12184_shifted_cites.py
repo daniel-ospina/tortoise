@@ -301,11 +301,18 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # (§7 ×2, §2.4) were in NO row at all. Both re-derived at `69d79287f5f` by OPENING the statement,
     # not by applying the delta — verified against `ae26adf963`, where the same cites resolved:
     # `45028` was `prior = proj.g.query(` and `50935` was `conds.insert(0, "s.actor_user_id = $uid")`.
-    (_AUDIT, 'hosted_api.py:45700-45712', 'tortoise/hosted_api.py', 45704, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
-    (_AUDIT, 'hosted_api.py:45700-45717', 'tortoise/hosted_api.py', 45704, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
-    (_AUDIT, 'hosted_api.py:51607', 'tortoise/hosted_api.py', 51607, 's.actor_user_id = $uid'),
+    # ⚠️ Re-derived by CONTENT again at `b377f6f6`: the merge that folded `origin/main` added 13 lines
+    # to `hosted_api.py` above both anchors, so the composed `turn_max_index` statement now opens at
+    # `45713` (`prior = proj.g.query(`) and its mark composition closes at `45725`
+    # (`total = max(total, mark + 1)`), while row 7's wider range ends on `45730` (`return total`).
+    # The LIST endpoint's `actor_user_id` condition moved `51607` -> `51620`. MEASURED:
+    # `grep -n 'RETURN s.turn_max_index, s.turn_count, count(t)' tortoise/hosted_api.py` -> 45717 and
+    # `grep -n 's.actor_user_id = $uid' tortoise/hosted_api.py` -> 51620 — never an applied delta.
+    (_AUDIT, 'hosted_api.py:45713-45725', 'tortoise/hosted_api.py', 45717, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
+    (_AUDIT, 'hosted_api.py:45713-45730', 'tortoise/hosted_api.py', 45717, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
+    (_AUDIT, 'hosted_api.py:51620', 'tortoise/hosted_api.py', 51620, 's.actor_user_id = $uid'),
     # the same condition written BARE twice in the header's comparability clause — its own SITE
-    (_AUDIT, '`:51607`', 'tortoise/hosted_api.py', 51607, 's.actor_user_id = $uid'),
+    (_AUDIT, '`:51620`', 'tortoise/hosted_api.py', 51620, 's.actor_user_id = $uid'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -572,10 +579,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23551-23553`'): 1,
     # the composed `turn_max_index` site (long-form ×3 + row 7's own wider range) and the LIST
     # endpoint's `actor_user_id` condition (long-form ×1, bare ×2 in the header clause)
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45700-45712'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45700-45717'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51607'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51607`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45713-45725'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45713-45730'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51620'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51620`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7167` inside the same function'): 1,
@@ -1696,7 +1703,7 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
 #: consistent, and wrong — because nothing DERIVED it, and a self-consistent stale split cannot be caught
 #: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
 _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
-    ("tortoise/hosted_api.py", 51607): 49851,
+    ("tortoise/hosted_api.py", 51620): 49851,
     ("tortoise/mcp_server.py", 11590): 11466,
     ("tortoise/sdk.py", 58120): 56415,
     ("tortoise/sdk.py", 58336): 56415,
