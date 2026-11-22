@@ -2824,6 +2824,19 @@ class TestThePrivateSocketDirectoryLifecycle:
         assert worker._socket_dir is None
 
 
+def _indent_at(source: str, offset: int) -> int:
+    """The leading-whitespace width of the line containing ``offset``.
+
+    Read from the WHOLE line, not the prefix before ``offset``: an offset that IS
+    a line start has an empty prefix, and the prefix form answers 0 for it — which
+    made a block-boundary scan end the block on its own first body line.
+    """
+    line_start = source.rfind("\n", 0, offset) + 1
+    line_end = source.find("\n", line_start)
+    line = source[line_start:line_end if line_end != -1 else len(source)]
+    return len(line) - len(line.lstrip())
+
+
 class TestTheReadinessBoundsKnowWhereTheEncoderLives:
     """#14186 review P1 — the write/read bounds must not kick a load that is not theirs.
 
@@ -2852,14 +2865,16 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
         monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
         return kicked
 
-    def test_a_worker_backing_declines_without_kicking_a_local_load(
+    def test_a_BOOTING_worker_declines_without_kicking_a_local_load(
             self, cold_model, monkeypatch):
+        """A boot in flight ⇒ decline, having loaded and waited for nothing."""
         monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
         from tortoise.embeddings import _WRITE_DECLINE_BACKING_COLD, EmbeddingModel
 
         reason = EmbeddingModel.await_write_ready_reason(0.05)
         assert reason == _WRITE_DECLINE_BACKING_COLD, (
-            "a bounded write on a worker-backed deployment answered "
+            "a bounded write while the backing boots answered "
             f"{reason!r} — the causes are distinct and an operator repairs "
             "them differently")
         assert EmbeddingModel.await_read_ready_reason(0.05) is None, (
@@ -2867,6 +2882,112 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
         assert cold_model == [], (
             "the readiness bounds kicked a LOCAL 432 MB load with the encoder "
             f"served elsewhere: {cold_model}")
+
+    def test_a_WARM_worker_is_READY_and_does_not_decline(self, cold_model,
+                                                         monkeypatch):
+        """⛔ The gate is on the BACKING's phase, not on the LEVER (review P2).
+
+        Declining on the lever alone would have stored no derived vector for the
+        LIFE of the process, not for one boot: with `worker` configured, a warm
+        worker answered `backing_cold` forever. The predicate is
+        `embed_seam.backing_booting()`, so a warm backing is READY and the encode
+        goes through the seam in milliseconds.
+        """
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: False)
+        from tortoise.embeddings import EmbeddingModel
+
+        assert EmbeddingModel.await_write_ready_reason(0.05) is None, (
+            "a WARM worker backing declined a bounded write — every derived "
+            "fold would store no vector for the life of the process")
+        assert cold_model == []
+
+    def test_the_boot_predicate_reads_the_backing_not_the_lever(self, monkeypatch):
+        """``backing_booting()``: warm worker ⇒ False, booting ⇒ True, external ⇒ False."""
+        class _Fake:
+            #: A real WorkerBacking's own name — the boot predicate also answers
+            #: True when the LEVER says worker but the live backing is not one.
+            name = embed_seam.BACKING_WORKER
+
+            def __init__(self, pending: bool) -> None:
+                self._pending = pending
+
+            def startup_pending(self) -> bool:
+                return self._pending
+
+            def encode(self, texts, *, timeout_s=None):  # pragma: no cover
+                return None
+
+            def close(self) -> None:
+                return None
+
+            def describe(self) -> dict:
+                return {}
+
+        try:
+            monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+            # Nothing constructed and the lever says worker ⇒ the FIRST encode
+            # pays a boot, which is the same wait for this question.
+            embed_seam.install_backing(None)
+            embed_seam._backing = None
+            embed_seam._backing_name = None
+            assert embed_seam.backing_booting() is True
+
+            embed_seam.install_backing(_Fake(pending=True))
+            assert embed_seam.backing_booting() is True
+            embed_seam.install_backing(_Fake(pending=False))
+            assert embed_seam.backing_booting() is False
+
+            # `external` is a round trip: no boot to wait for, ever.
+            monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+            embed_seam.install_backing(None)
+            embed_seam._backing = None
+            embed_seam._backing_name = None
+            assert embed_seam.backing_booting() is False
+        finally:
+            embed_seam.install_backing(None)
+            embed_seam.reset_seam()
+
+    def test_the_backing_cold_line_names_the_backing_and_claims_no_wait(
+            self, cold_model, monkeypatch, caplog):
+        """⛔ The arm that reports `backing_cold` had no row (review P3).
+
+        Deleting it silently fell through to the budget-expired text — *"stored
+        WITHOUT a vector after waiting 0.25s"* — for the one cause where nothing
+        was waited, which is the exact false claim #13229 F2 removed. So: INFO
+        (not a fault to repair), no wait claim, the backing named, the backfill
+        named, and ONE line per process per cause.
+        """
+        import logging as _logging
+
+        from tortoise import embeddings as embeddings_module
+        from tortoise.embeddings import EmbeddingModel
+
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+        embeddings_module._COLD_WRITE_REPORTED.clear()
+        with caplog.at_level(_logging.DEBUG, logger="tortoise.embeddings"):
+            assert EmbeddingModel.await_write_ready_reason(0.05) == \
+                embeddings_module._WRITE_DECLINE_BACKING_COLD
+            embeddings_module._note_cold_write(
+                0.25, reason=embeddings_module._WRITE_DECLINE_BACKING_COLD)
+            # Latched: a second call adds nothing.
+            embeddings_module._note_cold_write(
+                0.25, reason=embeddings_module._WRITE_DECLINE_BACKING_COLD)
+        lines = [r for r in caplog.records
+                 if r.name == "tortoise.embeddings"
+                 and "vector" in r.getMessage()]
+        assert len(lines) == 1, [r.getMessage() for r in lines]
+        msg = lines[0].getMessage()
+        assert lines[0].levelno == _logging.INFO, (
+            f"`backing_cold` is logged at {lines[0].levelname} — nothing local "
+            f"needs repairing, so this is not a fault line: {msg!r}")
+        assert "after waiting" not in msg, (
+            f"the line claims a wait for a cause that waited 0 s: {msg!r}")
+        assert embed_seam.BACKING_WORKER in msg, (
+            f"the backing that is booting is not named: {msg!r}")
+        assert "backfill_embeddings.py" in msg, (
+            f"the repair an operator runs is not named: {msg!r}")
 
     def test_the_in_process_backing_still_kicks_the_load(self, cold_model,
                                                         monkeypatch):
@@ -2921,15 +3042,35 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
         source = inspect.getsource(sdk_module)
         gate = source.index("if _embedder_engine_kick_allowed():")
         warm = source.index("EmbeddingModel.start_warm_up()", gate)
-        # The call must be inside the gate's block: indented deeper than the gate
-        # line, and before the next statement at the gate's own indent.
         gate_line = source.rfind("\n", 0, gate) + 1
-        gate_indent = len(source[gate_line:gate]) - len(
-            source[gate_line:gate].lstrip())
-        warm_line = source.rfind("\n", 0, warm) + 1
-        warm_indent = len(source[warm_line:warm]) - len(
-            source[warm_line:warm].lstrip())
+        gate_indent = _indent_at(source, gate)
+        warm_indent = _indent_at(source, warm)
         assert warm_indent > gate_indent, (
             "the engine-init warm-up call is not guarded by "
             "_embedder_engine_kick_allowed() — the SDK kick ignores the embed "
             "backing again")
+
+        # ⛔ THE BLOCK BOUNDARY, not just the indent (review P3). An indent test
+        # alone passed `if gate(): pass` / `else: EmbeddingModel.start_warm_up()`
+        # — the call is deeper than the gate line but NOT inside its block — and
+        # passed a kick moved to any later deeper block. So: the gate's block ENDS
+        # at the first following line at (or left of) the gate's own indent, the
+        # call must fall inside it, and no `else:`/`elif:` may appear in it (that
+        # is the polarity inversion).
+        block_end = len(source)
+        cursor = gate_line
+        while True:
+            newline = source.find("\n", cursor)
+            if newline == -1:
+                break
+            cursor = newline + 1
+            line_end = source.find("\n", cursor)
+            line = source[cursor:line_end if line_end != -1 else len(source)]
+            if line.strip() and _indent_at(source, cursor) <= gate_indent:
+                block_end = cursor
+                break
+        assert gate < warm < block_end, (
+            "the engine-init warm-up call is not INSIDE the "
+            "_embedder_engine_kick_allowed() block (an `else:`/`elif:` inversion "
+            "or a moved call both look guarded by indentation alone) — the SDK "
+            "kick ignores the embed backing again")

@@ -1478,7 +1478,7 @@ class EmbeddingModel:
         # remote twin to the create.
         #
         # Two rounds of review named opposite halves of this and both are right:
-        # (a) answering READY made the create go on to `embed_seam.encode_texts`,
+        # (a) answering READY unconditionally made the create go on into the seam,
         # where `WorkerBacking.encode` waits out the WORKER'S BOOT (up to
         # `resolve_worker_startup_s()`, 600 s) on the request's own thread —
         # charging process initialization to a request, which #4055/#13224
@@ -1486,14 +1486,21 @@ class EmbeddingModel:
         # nothing consults and then blamed "the local embedder is cold" for a
         # deployment whose encoder was healthy.
         #
-        # So: decline, WITHOUT kicking anything, and name the real cause. The
-        # derived row is stored vectorless for the duration of the backing's boot
-        # (exactly the trade #13224 already makes for a cold LOCAL load — the
-        # vector is recomputable, which is why only bounded writes opt into this
-        # budget) and `graph-scripts/backfill_embeddings.py` re-encodes it once
-        # the backing answers.
+        # And a third review caught the first version of this gate declining on
+        # the LEVER rather than on the BACKING: with `worker` configured, a WARM
+        # worker was treated as cold, so every derived fold would have stored no
+        # vector for the LIFE of the process instead of for one boot. So the
+        # question is asked of the backing (`embed_seam.backing_booting()`):
+        #
+        #   * a worker boot in flight ⇒ DECLINE, having waited and loaded nothing;
+        #     the derived row is re-encoded by
+        #     `graph-scripts/backfill_embeddings.py` once the backing answers;
+        #   * warm worker, or `external` (a round trip has no boot) ⇒ READY, and
+        #     the encode happens through the seam in milliseconds.
         if not embed_seam.encodes_in_process():
-            return _WRITE_DECLINE_BACKING_COLD
+            if embed_seam.backing_booting():
+                return _WRITE_DECLINE_BACKING_COLD
+            return None
         # ⛔ A DESIGNED ABSENCE IS PERMANENT BY CONTRACT (#2952): with the
         # `embeddings` extra absent the model can never load, so neither waiting
         # nor retrying can help. This is the DOCUMENTED DEFAULT install (a plain
@@ -2598,11 +2605,12 @@ def _note_cold_write(budget: float, *, reason: str) -> None:
     * ``budget_expired`` — a load is genuinely in flight and the budget ran out ⇒
       WARNING; the only cause where a wait happened, so the only one that names
       the budget it waited.
-    * ``backing_cold`` — the encoder is served by ANOTHER process (``worker`` /
-      ``external``, #14186) and that backing is not warm yet ⇒ **INFO**. Nothing
-      local was waited for or loaded: the create kept #13224's promise instead of
-      paying the backing's boot, and the repair is a backfill once the backing
-      answers (no install, no load to fix).
+    * ``backing_cold`` — the encoder is served by another process (``worker`` /
+      ``external``, #14186) and that backing is mid-BOOT ⇒ **INFO**. Nothing local
+      was waited for or loaded: the create kept #13224's promise instead of
+      paying the boot, and the repair is a backfill once the backing answers (no
+      install, no load to fix). A WARM remote backing is not this cause — it
+      answers ready and the encode goes through the seam.
 
     Latched per cause on module state rather than a counter so a bulk write costs
     at most one line per cause, and re-armed by `EmbeddingModel._reset()` (tests)

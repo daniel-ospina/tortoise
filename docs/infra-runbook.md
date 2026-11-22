@@ -1369,16 +1369,28 @@ elsewhere their only effect was to start a local load and then decline the write
 It is deliberately NOT inside `start_warm_up` itself — those bounds read that call's return value as
 "a load is in flight", so a skip inside it would turn a healthy local load into a decline.
 
-⛔ **A bounded WRITE declines — `backing_cold` — while the backing is not warm, and pays nothing.**
+⛔ **A bounded WRITE declines — `backing_cold` — while the backing is BOOTING, and pays nothing.**
 `encode_for_row(bounded=True)` keeps #13224's promise (a create never waits for setup it did not
-trigger); the derived row is stored without a vector and `graph-scripts/backfill_embeddings.py`
-re-encodes it once the backing answers. The alternative — carrying on into the seam — would charge
-the worker's BOOT to the create (#4055/#13224 forbid exactly that), so it is refused by design.
+trigger): if `embed_seam.backing_booting()` is true the derived row is stored without a vector and
+`graph-scripts/backfill_embeddings.py` re-encodes it once the backing answers. The alternative —
+carrying on into the seam — would charge the worker's BOOT to the create (#4055/#13224 forbid
+exactly that), so it is refused by design. ⛔ The predicate is the BACKING's phase, not the lever:
+a WARM `worker` (or `external`, which is a round trip with no boot) answers ready and the encode goes
+through the seam in milliseconds — declining on the lever alone would have stored no derived vector
+for the LIFE of the process.
+
+⚠️ **THE BUDGET COVERS `bounded=True` ONLY — the RECORD-TRUTH writes still pay the boot.**
+`compute_embeddings` (`bounded` default `false`) has no such bound, and it must not: a Point's vector
+is stamped into the journal with PRESENCE IS OWNERSHIP, so declining it would record an explicit
+CLEAR that a rebuild reproduces. On `worker`/`external` those calls block on the seam, which waits
+out the boot under `TORTOISE_EMBED_WORKER_STARTUP_S` (600 s) — so the first create/update/capture
+after a deploy can be slow rather than wrong. That is the deliberate trade, not an oversight.
 
 ⚠️ **NOTHING WARMS THE WORKER AT BOOT TODAY.** The lifespan pre-warm is skipped on `worker` /
 `external` (it would load a local copy), and no equivalent kick boots the *worker* — so the first
-encode after a deploy or a lever change is the one that pays the boot, and writes before it lands
-decline as above. A boot-time worker warm is a known follow-up, not something this section promises.
+encode after a deploy or a lever change is the one that pays the boot: bounded writes decline until
+it lands, and record-truth writes block on it. A boot-time worker warm is a known follow-up, not
+something this section promises.
 
 ⚠️ **WHAT THE GATE DOES NOT REMOVE — read this before promising an RSS drop.** A few residual paths
 still encode IN-PROCESS and call `EmbeddingModel.get()` synchronously rather than going through the
@@ -4662,7 +4674,7 @@ operator who read the line above as "CI defends this" would never run it.
 > 2. the SDK **write-path** bound — `tortoise/embeddings.py::await_write_ready_reason`,
 >    `:1471` (#13224);
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
->    `:1618` (#13528);
+>    `:1625` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
 >    `:3272-3282` (the reader that runs on the deployed box);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
@@ -4688,7 +4700,7 @@ operator who read the line above as "CI defends this" would never run it.
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
 > Number 2 and 3 are the second most likely to be missed, and they change behaviour: with the flag
-> `0` each returns `None` immediately (`:1471-1475`, `:1618-1619`), so the write and read paths fall
+> `0` each returns `None` immediately (`:1471-1475`, `:1625-1626`), so the write and read paths fall
 > back to the **synchronous in-request load** — that fallback is part of what flipping the switch
 > chooses.
 

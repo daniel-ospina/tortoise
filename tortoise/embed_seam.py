@@ -457,17 +457,41 @@ def resolve_ticket_wait_s(timeout_s: float,
     a perfectly healthy query. Sizing a bound is a READ, so it reads.
     """
     window_s = max(resolve_max_wait_ms(), 0.0) / 1000.0
+    budget_s = (resolve_worker_startup_s() if backing_booting(backing)
+                else timeout_s)
+    return window_s + budget_s + _TICKET_WAIT_SLACK_S
+
+
+def backing_booting(backing: EmbeddingBacking | None = None) -> bool:
+    """Whether the NEXT encode would pay a BACKING BOOT — a READ, never a resolve.
+
+    ``True`` only when a ``worker`` boot is in flight (or about to be paid, which
+    is the same wait for this question): a warm worker is ``False``, and
+    ``external`` is ``False`` because a round trip has no boot. The configured
+    lever is also read, so a lever that has just moved to ``worker`` while the
+    live backing is still the old one answers ``True`` — the next encode pays the
+    whole boot.
+
+    ⛔ WHY IT IS PUBLIC. Two callers must ask the same question with the same
+    answer: :func:`resolve_ticket_wait_s` (sizing a ticket's bound) and
+    ``EmbeddingModel.await_write_ready_reason`` (deciding whether a bounded write
+    declines or proceeds, #14186). A second copy of this logic is how one of them
+    ends up believing a warm worker is cold — which stored no derived vector for
+    the life of the process instead of for a boot (review P2).
+
+    ⛔ THE BACKING IS PEEKED, NEVER RESOLVED. :func:`active_backing` CONSTRUCTS a
+    backing on first use and retires the collector it replaces, so a health or
+    readiness read must not use it.
+    """
     candidate = backing if backing is not None else _peek_backing()
     configured = resolve_backing()
     pending = getattr(candidate, "startup_pending", None)
     if candidate is None:
         # Nothing constructed yet: the configured name is the only evidence about
         # which phase the FIRST encode will pay.
-        booting = configured == BACKING_WORKER
-    elif pending is not None:
-        booting = pending()
-    else:
-        booting = False
+        return configured == BACKING_WORKER
+    if pending is not None and pending():
+        return True
     # ⛔ A LEVER THAT NOW SAYS `worker` WHILE THE LIVE BACKING IS NOT ONE. The
     # candidate answers for the backing it IS, but the next encode will resolve
     # the CONFIGURED one — and for a worker that first encode pays the whole
@@ -475,11 +499,8 @@ def resolve_ticket_wait_s(timeout_s: float,
     # so this is a supported path: reading only the candidate sized the bound
     # for a steady-state request and declined a healthy boot (review: the phase
     # sizing asked the OLD backing).
-    if not booting and configured == BACKING_WORKER and \
-            getattr(candidate, "name", None) != BACKING_WORKER:
-        booting = True
-    budget_s = resolve_worker_startup_s() if booting else timeout_s
-    return window_s + budget_s + _TICKET_WAIT_SLACK_S
+    return (configured == BACKING_WORKER
+            and getattr(candidate, "name", None) != BACKING_WORKER)
 
 
 # ── vector normalisation ─────────────────────────────────────────────────────
