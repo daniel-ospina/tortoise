@@ -1124,6 +1124,10 @@ NOT_SELECTED = [
     # SILENT while the ASCII twin reported — the module already treats apostrophes as an
     # inventory for exactly this reason, so the dash is one too.
     "has no‑one reported the vendor has been deprecated",
+    # U+2013 is pinned as well, not just named in prose: a class the body claims but no row
+    # asserts is a claim, not a contract (review, P3 — dropping U+2013 from the range reddened
+    # NOTHING before this row existed).
+    "has no–one reported the vendor has been deprecated",
     "has no—one reported the vendor has been deprecated",
     "has noone reported the vendor has been deprecated",
     # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (round-3 review, P3, measured): the
@@ -1381,6 +1385,10 @@ NOTICE_ONLY = [
     # SILENT while the ASCII twin reported — the module already treats apostrophes as an
     # inventory for exactly this reason, so the dash is one too.
     "has no‑one reported the vendor has been deprecated",
+    # U+2013 is pinned as well, not just named in prose: a class the body claims but no row
+    # asserts is a claim, not a contract (review, P3 — dropping U+2013 from the range reddened
+    # NOTHING before this row existed).
+    "has no–one reported the vendor has been deprecated",
     "has no—one reported the vendor has been deprecated",
     "has noone reported the vendor has been deprecated",
     # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
