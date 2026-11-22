@@ -197,15 +197,20 @@ surfaces:
   # tests/test_ci_selection.py::test_the_github_prober_paths_fail_closed_to_the_full_matrix.
   - test_10892_served_liveness.py
   # #14281 review F1: the door-read contract pin. `tests/test_14192_read_wave_tool.py`
-  # derives its ENTIRE right-hand side from `tortoise/hosted_api.py::search`
-  # (`_door_read_contract()` → `assert len(door_calls) == 1`), so the diff class able to
-  # red it is a `hosted_api.py`-only change. MEASURED before this row
-  # (`select(['tortoise/hosted_api.py'], 'pull_request', m)`): surfaces
-  # `['api','onboarding']`, this file ABSENT from `test_files` — the guard was asleep on
-  # the only diff that can break it, which is #14279's own recurrence shape one layer out
-  # (a door refactor reds the pin on an unrelated PR's head instead).
+  # derives its allow-list from the `/v1/search` DOOR's own read call
+  # (`tortoise/hosted_api.py::search` → `_door_read_contract()` → `assert len(door_calls)
+  # == 1`), and the read's SIGNATURE half from `tortoise/sdk.py::_tortoise_fts_query`
+  # (its first positional name and its bool-defaulted levers). Both halves can red the
+  # pin, and they are registered in DIFFERENT places on purpose: an `sdk.py`-only diff
+  # resolves to `SHARED_MODULES` (full matrix), so it already ran the pin; a
+  # `hosted_api.py`-only diff resolved to `['api','onboarding']` and did NOT. MEASURED
+  # before this row (`select(['tortoise/hosted_api.py'], 'pull_request', m)`): that
+  # surface pair, this file ABSENT from `test_files` — so the guard was asleep on the
+  # one diff class that reaches it unrun (a door refactor would then red the pin on an
+  # unrelated PR's head instead), which is #14279's own recurrence shape one layer out.
   # The `api` row is the half that covers a hosted_api.py-only diff; the existing `core`
-  # row (near the end of the `core:` block) is the other half — a `tests/`-only diff.
+  # row (near the end of the `core:` block) is another half — a `tests/`-only diff — and
+  # `SHARED_MODULES` covers `sdk.py`.
   # NOT a `CORE_ALSO` candidate: that would put the whole `core` member set on every
   # `hosted_api.py` diff. Pinned by
   # `tests/test_14192_read_wave_tool.py::test_a_door_diff_selects_this_pin`.

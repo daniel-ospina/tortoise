@@ -574,29 +574,41 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     # every `"per_query" in receiver` clause passing (measured). Resolve names bound to
     # ANY expression mentioning `per_query`.
     rows = {"per_query"} | _aliases_of(run_def, lambda v: "per_query" in _names_in(v))
-    # ⛔ AND THE LOOP / COMPREHENSION TARGETS OVER IT (#14281 review P1, measured). The
-    # `rows` closure above resolves NAMES BOUND BY AN ASSIGNMENT, so the one shape that
-    # rewrites every recorded page goes straight through it:
+    # ⛔ ITERATION TARGETS ARE THE SAME COLLECTION, TO A FIXPOINT — for the MEASURED
+    # collections as well as the recorded rows (#14281 review P1, measured). A `for`
+    # target binds nothing that `_aliases_of` resolves, so an element rewrite through one
+    # went straight through BOTH halves:
     #
+    #     for _r in results: _r["id"] = "REDACTED"         -> 16 passed
+    #     for _e in trace:  _e["reason"] = "ok"             -> 16 passed
     #     for row in per_query:
-    #         row["order"].sort(key=str)
+    #         for cell in row.values(): cell.sort()          -> 16 passed
     #
-    # MEASURED GREEN on the previous form — 14 passed — with every query's `order`
-    # canonicalised, so `compare()` reported `rank_identical: True` over pages the run had
-    # genuinely re-ordered. The receiver is `row`, the loop target, which nothing binds.
-    # So every name in a `for` / comprehension target whose iterable mentions `per_query`
-    # is tainted too. Residual, stated rather than implied: this follows ONE level of
-    # iteration — `for row in per_query:` then `for cell in row.values(): cell.sort()`
-    # relies on `row` already being tainted, which it is, so the mutation of `cell` is
-    # still red; what is NOT followed is a name read back out of a container by a helper
-    # defined outside `run()`.
-    for _node in ast.walk(run_def):
-        if isinstance(_node, (ast.For, ast.AsyncFor, ast.comprehension)):
-            _iter, _target = _node.iter, _node.target
-        else:
-            continue
-        if "per_query" in _names_in(_iter):
-            rows |= _names_in(_target)
+    # The first turns every `order` into a list of constants, so `compare()` compares
+    # equal lists for ever — #14192's "a verdict that cannot fail" reached through a `for`
+    # instead of a `getattr` — and the `intentional_keep` grant for this tool rests on
+    # exactly that verdict. ONE LEVEL of taint (the previous form) missed the cascade, so
+    # this is a fixed point over `watched | rows`.
+    #
+    # ⛔ THE TAINT IS A RECEIVER SET, NEVER A "HANDED" SET. The tool's own artifact builds
+    # `[_result_id(r) for r in results]` and `{… e.get("leg") … for e in trace}`: handing
+    # a tainted ELEMENT to a call is how the artifact is SUPPOSED to be built, so only a
+    # mutator receiver or a `Store`/`Del` subscript on the tainted name is red. `handed`
+    # keeps using `watched` — that is the COLLECTION itself, and passing it to a call may
+    # sort it in place. Measured: the fixpoint leaves the real tool green.
+    muts = watched | rows
+    changed = True
+    while changed:
+        changed = False
+        for _node in ast.walk(run_def):
+            if not isinstance(_node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                continue
+            if not (_names_in(_node.iter) & muts):
+                continue
+            fresh = _names_in(_node.target) - muts
+            if fresh:
+                muts |= fresh
+                changed = True
     hits: list[int] = []
     for node in ast.walk(run_def):
         if node is artifact_append:
@@ -619,7 +631,7 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         handed = isinstance(node, ast.Call) and callee not in _NON_MUTATING and any(
             _names_handed(arg) & watched
             for arg in list(node.args) + [k.value for k in node.keywords])
-        if receiver & (watched | rows) or handed:
+        if receiver & muts or handed:
             hits.append(node.lineno)
     return hits
 
