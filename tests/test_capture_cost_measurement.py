@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1456,12 +1457,35 @@ def test_hosted_capture_emits_that_session_s_measured_cost_row(
             "session_id": "sess-b7-attrib"}),
         what="POST /v1/sessions answered")
     assert resp.status_code == 200, resp.text
+    # ⛔ THE EXTRACTION IS DEFERRED ON THIS LANE (#2952 capture-phase contract):
+    # `capture_session` runs the extracting REST lane's tail as a TASK and JOINS
+    # IT WITH A DEADLINE, so the ack legitimately lands BEFORE the model calls
+    # whenever the deadline expires first — the body then carries
+    # `extraction.phase == "queued"` and an empty `stats`, and the row this test
+    # pins is emitted by the deferred task. Waiting for it is the contract, not
+    # padding: an immediate read of `model.calls` measures the deadline, not the
+    # emission (measured on this branch: the assertion below saw `set()`).
+    _deadline = time.monotonic() + 60
+    while time.monotonic() < _deadline:
+        _rows_now = [r for r in _b7_rows(tmp_path)
+                     if r.get("event_name") == "capture_cost"]
+        if _rows_now and set(c[0] for c in model.calls) == {"s1", "s2", "s4"}:
+            break
+        time.sleep(0.05)
     # the extractor really ran all three stages we are measuring (the call
     # COUNT/order is extractor_v2's chunking property, not the emission
     # contract this test pins — expected_props tolerates any call sequence,
     # so only the stage SET is asserted here)
     assert set(c[0] for c in model.calls) == {"s1", "s2", "s4"}
-    assert resp.json()["stats"]["llm"]["calls"] == len(model.calls)  # telemetry present
+    # telemetry present — in the ACK only when the join won the race; the
+    # deferred ack says so instead (it carries no receipt), and the row below is
+    # then where the measured calls surface.
+    _ack = resp.json()
+    if _ack["stats"]:
+        assert _ack["stats"]["llm"]["calls"] == len(model.calls)
+    else:
+        assert _ack["extraction"]["phase"] in ("queued", "extracting")
+        assert _ack["extraction"]["outcome_known"] is False
 
     cost_rows = [r for r in _b7_rows(tmp_path)
                  if r.get("event_name") == "capture_cost"]

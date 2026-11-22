@@ -258,7 +258,8 @@ def _str_constants(tree: ast.AST) -> dict[str, str]:
 #: on purpose: `_door_read_contract()` derives the same set from the door, and this is the
 #: independent statement that reds when the DOOR moves — a derivation checked only against
 #: itself cannot tell "unchanged" from "widened".
-_EXPECTED_DOOR_ARGS = frozenset({"query", "limit", "read_status_out", "_truncation_out"})
+_EXPECTED_DOOR_ARGS = frozenset(
+    {"query", "limit", "read_status_out", "_truncation_out", "_state_route_out"})
 
 
 def _door_read_contract() -> set[str]:
