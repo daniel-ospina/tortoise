@@ -1419,6 +1419,25 @@ _COPULA_SUBJECT = (
 #: the grid it cites and is not repeated here). A negative question is
 #: still a question about a state, and the ended population answers it the same way it answers
 #: the uncontracted spelling, so the two must not differ — routing, not a notice, is the parity.
+#: ⛔ AND THAT PARITY IS DETERMINER-SUBJECT PARITY — STATED, NOT IMPLIED (measured at
+#: `6821050cf2`). The grid above is determiner NPs, and a PRONOUN subject is a different class,
+#: because a determiner subject does not depend on the post-subject adverb slot at all: the
+#: noun-phrase run swallows the adverb, while the bare-pronoun branch may not, so the six-member
+#: slot is the only thing standing between a pronoun subject and its answer. Measured over 27
+#: adverbials against both subjects: **22 ROUTE behind a determiner and go SILENT behind a
+#: pronoun** — `is the export recently archived` -> `ended`/`is_copula` while `is it recently
+#: archived` is `population=None, signal=None`. The negative-question spelling is the sharpest,
+#: because it is this class's own decision: `isn't it archived` ROUTES while its uncontracted
+#: twin `is it not archived` is silent (`not` is not in :data:`_EXISTENCE_ADVERB` at all).
+#: Direction is SAFE (silence, never a wrong population) and it is PRE-EXISTING — every one of
+#: those rows is silent on `main` `70fbd1a27d` too — so this is a residual of the class, not a
+#: route this PR lost. ⛔ IT IS NOT CLOSED HERE ON PURPOSE: the parity argues for a ROUTING
+#: widening, which is the one direction this issue exists to close, and the alternative (a notice
+#: arm over the same gap) is a new `_ENDING_SIGNALS` row — each needs its own adversarial round,
+#: and a late unmeasured widening in this guard is what 30 rounds have been undoing. It is pinned
+#: as a DECLARED loss (`tests/test_13557_13558_reachable_reads.py`::
+#: `test_the_pronoun_subject_parity_gap_is_a_DECLARED_loss_not_an_unstated_one`) so it can drift
+#: in neither direction without reddening.
 #: The typographic apostrophe is accepted for the same reason as `:data:`_CONTRACTED_AUX``: it is
 #: the same word on a phone keyboard.
 #: ⛔ AN INFINITIVE OR PROGRESSIVE COPULA IS A SECOND VERB — **on the copula branch only**

@@ -1893,6 +1893,62 @@ def test_a_contracted_auxiliary_does_not_silence_the_which_modified_noun_row():
             f"subordinate-clause class out was widened along with the auxiliary slot")
 
 
+def test_the_pronoun_subject_parity_gap_is_a_DECLARED_loss_not_an_unstated_one():
+    r"""The contracted/uncontracted parity holds for DETERMINER subjects only.
+
+    Measured at `6821050cf2`. The `is_copula` post-subject adverb slot names six
+    adverbials, and a determiner subject does not depend on it — the noun-phrase run
+    swallows the adverb — while the bare-pronoun branch may not. So the two subject
+    classes disagree on 22 of 27 measured adverbials:
+
+        `is the export recently archived`  -> ended / is_copula
+        `is it recently archived`          -> population=None, signal=None
+
+    and the negative-question spelling is the sharpest, because routing (not a notice)
+    is this class's own recorded decision:
+
+        `isn't it archived`                -> ended / is_copula   (the contracted head)
+        `is it not archived`               -> population=None, signal=None
+
+    Direction is SAFE (silence, never a wrong population) and every one of these rows
+    is silent on `main` `70fbd1a27d` too, so it is a residual of the class rather than a
+    route this PR lost. It is DECLARED here instead of left to be rediscovered.
+
+    ⛔ IF YOU CLOSE THE GAP — by widening the routing slot, or by adding a notice arm
+    over it — UPDATE OR DELETE THIS TEST AND the paragraph in `state_intent` that
+    states it. It fails on purpose, so the declaration cannot drift away from the
+    behaviour in either direction: a silent re-narrowing reds here just as a fix does.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    # The determiner twin ROUTES — that half is what makes this a gap rather than a
+    # silence by design, so it is asserted first and separately.
+    for adverb in ("recently", "not", "never", "soon"):
+        twin = detect_state_question(f"is the export {adverb} archived")
+        assert twin.population == "ended", (
+            f"'is the export {adverb} archived' no longer routes ({twin!r}) — the "
+            f"determiner half of this declared gap changed, so re-measure before "
+            f"touching the declaration below")
+
+    # …and the pronoun subject is SILENT with no notice. That is the declared loss.
+    for query in (
+        "is it recently archived",
+        "is it not archived",
+        "is it never archived",
+        "is it soon archived",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal is None, (
+            f"{query!r} now reads {got!r} — the pronoun/adverbial residual this test "
+            f"DECLARES has been closed (good!): delete this declaration and the "
+            f"paragraph in `state_intent`'s `_COPULA_PREFIX` prose that states it")
+
+    # The sharpest spelling: the contracted twin routes, its uncontracted twin does not.
+    assert detect_state_question("isn't it archived").population == "ended", (
+        "the contracted pronoun head no longer routes — re-measure the parity class, "
+        "its other half is asserted below")
+
+
 def test_the_contraction_in_a_LONG_subject_stays_on_the_safe_side():
     r"""`_COPULA_LONG_SUBJECT` arm A is the ONE copy that deliberately omits contractions.
 
