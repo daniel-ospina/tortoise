@@ -1183,9 +1183,11 @@ class TestDocsPageAndSkillConfig:
             "this pin permits the alias in prose only while it is retired — if "
             "#11609's retirement is ever reversed, revisit the assertion above "
             "instead of deleting it")
-        assert active["tortoise_graph_overview"].risk == "read", (
-            "graph discovery must be a read-risk tool — write tools are the ones "
-            "a plan can withhold")
+        # The container's read-risk claim is asserted below with its membership
+        # guard FIRST (`assert "tortoise_graph_overview" in active` precedes the
+        # subscript) — asserting it here would subscript `active` before that
+        # guard, so a container dropped from the registry would raise KeyError
+        # instead of naming the reason (code-review round 1, non-blocking).
         # The advertised (consolidated) form is named too, and the section it
         # teaches must be one the tool really accepts: a card that names an
         # `overview(section=…)` value the handler rejects sends the agent into a
