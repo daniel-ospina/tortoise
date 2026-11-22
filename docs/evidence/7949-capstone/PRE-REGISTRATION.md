@@ -3220,8 +3220,9 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
 - **Why it exists.** `#14277` measures the extractor's real token spend and adds the prompt-cache
   split to the cost envelope, which inserts lines in `tortoise/extractor_v2.py` in ONE region and
   then a CLUSTER, so the shift is **not uniform**: **`+5`** from the hunk at `-14741,6 +14741,11`
-  down to the cost-envelope block, then **`+6` … `+76`** progressively as that block's remaining
-  hunks land (`-16314,6 +16319,12` through `-16986,6 +17061,8`), so `:15239`→`:15244`,
+  down to the cost-envelope block, then **`+11` … `+76`** progressively as that block's remaining
+  hunks land (`-16314,6 +16319,12` — the +6 of that hunk takes the shift from +5 to +11 — through
+  `-16986,7 +17061,8`), so `:15239`→`:15244`,
   `:15701`→`:15706` and `:15620`→`:15625` move `+5` while `:17894`→`:17970` moves `+76`. ⛔ **`+76`
   IS NOT A CONSTANT FOR "THE REST"**: this entry stated `+73` first and then `+76` for the whole
   tail, and BOTH are wrong for every cite inside the `14746`–`16313` window — which is why the
