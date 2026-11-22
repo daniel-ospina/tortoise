@@ -873,6 +873,22 @@ def _capture_tail_failed(task, proj, session_id, state) -> None:
         except Exception:  # pragma: no cover — pool shut down
             _logger.exception(
                 "capture phase clear submit failed (session %s)", session_id)
+    elif (state is not None and state.get("attempted")
+            and not state.get("finalized")):
+        # ⛔ AND ON THE ARM THAT DID NOT RAISE EITHER (#14232 review, round 2).
+        # The terminal `capture_ok` SET is non-fatal: a graph hiccup becomes a
+        # receipt warning, so a tail can finish NORMALLY with `finalized` still
+        # False — nothing recorded, nothing running, and the phase it wrote still
+        # on the record. Without this arm the phase survives until some later
+        # attempt records an outcome, which is the same "still running, forever"
+        # lie this retire exists to end.
+        try:
+            _submit_off_loop(
+                _CAPTURE_MARKER_EXECUTOR, _clear_capture_phase,
+                proj, session_id)
+        except Exception:  # pragma: no cover — pool shut down
+            _logger.exception(
+                "capture phase clear submit failed (session %s)", session_id)
     if exc is not None:
         _logger.error(
             "capture completion failed after its record landed (session %s) — "
@@ -22822,6 +22838,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # would leave capture_ok=None → the next same-session re-POST would
             # legacy-replay instead of re-attempting. Additive warning names the
             # residue.
+            _terminal_written = True
             try:
                 # ⛔ #10893 (second cycle): a graph round trip INLINE on the single
                 # uvicorn worker until now — the LAST one on this handler's tail.
@@ -22844,11 +22861,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                         params={"sid": session_id, "ok": _capture_ok_record,
                                 "extractor": _capture_extractor_record}))
             except Exception as exc:  # pragma: no cover - graph hiccup
+                _terminal_written = False
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
-            if state is not None:
+            if state is not None and _terminal_written:
                 # #3129: the outcome is recorded — an abandonment from here on can
                 # no longer leave the NULL→replay shape (nothing below suspends).
+                # ⛔ ONLY when that write LANDED (#14232 review, round 2). A failed
+                # terminal SET records nothing, so `finalized` there suppressed the
+                # callback's phase retire and left `phase: extracting` beside a
+                # `capture_ok` that was never written — the very "still running,
+                # forever" lie the retire exists to end, on the one arm where no
+                # other write would ever clear it.
                 state["finalized"] = True
         # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
         # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
