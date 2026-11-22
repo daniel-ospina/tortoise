@@ -301,7 +301,8 @@ def _existing_rows(path: Path) -> set[tuple[str, str, str]]:
 def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
                     workers: int, seed: int, arms: tuple[str, ...],
                     arm_gap_s: float, long_split: bool,
-                    split_max_turns: int = 40) -> int:
+                    split_max_turns: int = 40,
+                    split_only: bool = False) -> int:
     import concurrent.futures as cf
 
     docs = pick_corpus(limit=docs_limit, seed=seed)
@@ -340,7 +341,7 @@ def run_measurement(*, out: Path, docs_limit: int, sessions_limit: int,
         return rec
 
     jobs: list[tuple[dict, str, str]] = []
-    for arm in arms:
+    for arm in (() if split_only else arms):
         for doc in docs:
             if (arm, "doc", doc["path"]) in done:
                 continue
@@ -420,7 +421,8 @@ def _measure_long_split(out: Path, docs: list[dict], arms: tuple[str, ...],
         rec = measure_one(model,
                           [{"role": "user", "content": t} for t in turns],
                           session_date="2026-11-21T00:00:00+00:00")
-        rec.update({"arm": arm, "kind": "doc_split", "id": longest["path"],
+        rec.update({"arm": arm, "kind": "doc_split",
+                    "id": f"{longest['path']}#{len(turns)}turns",
                     "item_tokens": longest["tokens"],
                     "turns": len(turns),
                     "paragraphs": len(paras),
@@ -588,15 +590,17 @@ def build_report(rows: list[dict]) -> dict:
                                 for r in sess]) if len(sess) >= 3 else None,
         }
         if split:
-            arm_rep["long_split"] = {
-                "id": split[0]["id"],
-                "turns": split[0]["turns"],
-                "item_tokens": split[0]["item_tokens"],
-                "tokens_in": split[0]["prompt_tokens"],
-                "tokens_out": split[0]["completion_tokens"],
-                "stages": {k: v.get("prompt_tokens", 0)
-                           for k, v in (split[0]["stages"] or {}).items()},
-            }
+            arm_rep["long_split"] = [
+                {"id": r.get("id", ""), "turns": r.get("turns", 0),
+                 "item_tokens": r.get("item_tokens", 0),
+                 "tokens_in": r["prompt_tokens"],
+                 "tokens_out": r["completion_tokens"],
+                 "calls": r.get("calls", 0),
+                 "stages": {k: {"calls": v.get("calls", 0),
+                                "in": v.get("prompt_tokens", 0),
+                                "out": v.get("completion_tokens", 0)}
+                            for k, v in (r.get("stages") or {}).items()}}
+                for r in sorted(split, key=lambda r: r.get("turns", 0))]
         report["arms"][arm] = arm_rep
     report["_rows"] = ok
 
@@ -896,9 +900,16 @@ def render(report: dict) -> str:
         ls = rep.get("long_split")
         if ls:
             add("")
-            add(f"- long document split into {ls['turns']} turns "
-                f"({ls['item_tokens']:,} tokens): in {ls['tokens_in']:,} / out "
-                f"{ls['tokens_out']:,} — stage in: {ls['stages']}")
+            add(f"- the longest document ({ls[0]['item_tokens']:,} tokens) "
+                "delivered as different numbers of turns:")
+            add("")
+            add("| turns | calls | in | out | stage in | stage out |")
+            add("|---|---|---|---|---|---|")
+            for row in ls:
+                st_in = {k: v["in"] for k, v in row["stages"].items()}
+                st_out = {k: v["out"] for k, v in row["stages"].items()}
+                add(f"| {row['turns']} | {row['calls']} | {row['tokens_in']:,} | "
+                    f"{row['tokens_out']:,} | {st_in} | {st_out} |")
         add("")
     fc = report.get("first_call")
     if fc:
@@ -1093,6 +1104,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--split-max-turns", type=int, default=40,
                      help="cap on the long-document split's turn count (cost "
                           "is linear in turns; the cap bounds the spend)")
+    run.add_argument("--split-only", action="store_true",
+                     help="skip the corpus and measure ONLY the long-document "
+                          "split (for re-measuring the per-chunk constant at a "
+                          "different turn count without re-spending on the "
+                          "corpus)")
     run.add_argument("--corpus-only", action="store_true",
                      help="print the selected corpus and exit (no API calls)")
 
@@ -1115,7 +1131,8 @@ def main(argv: list[str] | None = None) -> int:
                                workers=args.workers, seed=args.seed, arms=arms,
                                arm_gap_s=args.arm_gap_s,
                                long_split=args.long_split,
-                               split_max_turns=args.split_max_turns)
+                               split_max_turns=args.split_max_turns,
+                               split_only=args.split_only)
     rows = load_rows(args.out)
     report = build_report(rows)
     report["rates_issue"] = ISSUE_RATES
