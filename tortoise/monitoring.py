@@ -1095,13 +1095,17 @@ def ensure_projection_metrics_fork_safe() -> bool:
     ⛔ THE DISCRIMINATOR IS ``labelnames``, NOT THE METRIC TYPE (measured on
     ``prometheus-client`` 0.26.0): ``MetricWrapperBase.__init__`` takes
     ``self._lock`` only under ``if self._is_parent():``, and ``_is_parent()`` is
-    ``self._labelnames and not self._labelvalues``. So a LABELLED family of ANY
-    type carries one (``Gauge(…, ['l'])``, ``Counter(…, ['l'])``,
-    ``Histogram(…, ['l'])`` all measured PRESENT) and an UNLABELLED family of any
-    type carries NONE (measured ABSENT for all three) — and the three unlabelled
-    ``Gauge``s this module repairs, ``PROJECTION_QUEUE_DEPTH`` /
-    ``PROJECTION_PENDING_POSITIONS`` /
-    ``PROJECTION_OLDEST_PENDING_SECONDS``, do not own one at all. A child
+    ``self._labelnames and not self._labelvalues``. So a LABELLED
+    ``Gauge``/``Counter``/``Histogram``/``Summary`` family carries one
+    (``Gauge(…, ['l'])``, ``Counter(…, ['l'])``, ``Histogram(…, ['l'])`` all
+    measured PRESENT) and an UNLABELLED one of those carries NONE (measured ABSENT
+    for all three) — and the three unlabelled ``Gauge``s this module repairs,
+    ``PROJECTION_QUEUE_DEPTH`` / ``PROJECTION_PENDING_POSITIONS`` /
+    ``PROJECTION_OLDEST_PENDING_SECONDS``, do not own one at all. ⛔ ``Info`` and
+    ``Enum`` are the exception: each sets ``self._lock = Lock()`` unconditionally in
+    its own ``_metric_init``, so an UNLABELLED ``Info``/``Enum`` does carry one —
+    this module defines neither, and the repair below reads
+    ``getattr(holder, "_lock", None)`` and so replaces whatever it finds. A child
     that forked while a PEER THREAD held one inherits a lock with no owner, so the
     child's next ``set``/``inc``/``get``/``labels``/``collect`` blocks FOREVER — and
     ``contextlib.suppress`` cannot help, because a blocked lock is not an exception.
