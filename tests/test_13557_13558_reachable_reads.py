@@ -451,6 +451,21 @@ SELECTED = [
     ("has the report to be reviewed been archived", "ended", "is_copula"),
     ("has the decision to be taken been archived", "ended", "is_copula"),
     ("has the report being reviewed been archived", "ended", "is_copula"),
+    # ── A POSSESSIVE SUBJECT IS NOT AN AUXILIARY CLITIC (round-3 review, P1, measured) ──
+    # The clitic exclusion in `_COPULA_SUBJECT` first refused ANY subject word ending in
+    # `'s|'ve|'d`, which cannot tell the auxiliary clitic (`billing's been deprecated`) from a
+    # POSSESSIVE DETERMINER (`the client's contract archived`) — so every possessive-subject
+    # question was refused with NO notice, against this branch's own base:
+    #   base `21cc92e90c`: copula 96/96 routed → head 0/96 (all silent); perfect 72/72 → 0/72.
+    # It was not even self-consistent: the PLURAL possessive still routed, because there the
+    # apostrophe is word-final. The discriminator is now what FOLLOWS the clitic — a noun
+    # after a possessive, a predicate marker (`been|not|already|ever|…|ENDING`) after the
+    # auxiliary — and these rows are pinned as ROUTES so a future widening cannot re-drop them.
+    ("is the client's contract archived", "ended", "is_copula"),
+    ("is the client’s contract archived", "ended", "is_copula"),
+    ("is the clients' contract archived", "ended", "is_copula"),
+    ("has the client's contract been archived", "ended", "is_copula"),
+    ("has the vendor's invoice been retired", "ended", "is_copula"),
 ]
 
 
@@ -982,11 +997,15 @@ NOT_SELECTED = [
     # twin was refused. Refused now, and reported through `existence_unguarded`.
     "has anyone reported v3 hasn't been deprecated",
     "has anyone complained billing hasn't been deprecated",
-    # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (fresh review, P3, measured): the
-    # refusal lookahead allows `{0,6}` words before `to be|being|getting`, so a SUBJECT-LESS
-    # question is refused — but arm B's reporter required `{1,5}`, so these four came back
-    # `population=None, signal=None, payload=None` (SILENT) while each ROUTED at the delta's
-    # base. Refusing is right; going silent is not. Pinned in BOTH lists.
+    # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (round-3 review, P3, measured): the
+    # refusal lookahead allows `{0,6}` words before `_NONFINITE_COPULA` (`to be|to get|to
+    # become|being|getting`, plus up to two modifiers — NOT the three-spelling literal an
+    # earlier cut of this comment named), so a SUBJECT-LESS question is refused; but arm B's
+    # reporter required `{1,5}`, so these four came back `population=None, signal=None,
+    # payload=None` (SILENT). ⛔ THE HISTORY, WITH THE COMMITS NAMED: they ROUTED at
+    # `0e52593c91` (before `_COPULA_INFINITIVE_REFUSAL` landed) and were ALREADY SILENT at
+    # `21cc92e90c` — the base of the commit that fixed them — so "routed at the delta's base"
+    # would be false. Refusing is right; going silent is not. Pinned in BOTH lists.
     "is being archived",
     "is to be archived",
     "is getting archived",

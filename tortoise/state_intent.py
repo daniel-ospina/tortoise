@@ -1718,7 +1718,11 @@ class StateQuestion:
 #: measured). `_EXISTENCE_GUARD`'s contraction class is closed over `'` (U+0027) alone,
 #: while the product routinely receives the typographic forms — `tortoise/extractor_v2.py`
 #: normalises the same inventory before tokenising for exactly that reason, and this
-#: module's own copula lookahead admits `\u2019` beside `'` (one token class, at `:1219`;
+#: module's own copula lookahead admits `\u2019` beside `'` (one token class; the
+#: class is spelled with the escape, so it is the `['’]` suffix of the word slot in
+#: `_COPULA_SUBJECT` — pointed at by NAME rather than by line number, because a line
+#: pointer is invalidated by the next comment inserted above it, which is exactly what
+#: happened to the `:1219` this note used to carry);
 #: the INVENTORY below is what makes the rest of the family reachable at all).
 #: ⛔ ONE CONSTANT, so the test that pins the family cannot drift off it: the pin asserts
 #: THIS tuple and exercises every member, which is what makes a codepoint added to the
