@@ -81,7 +81,8 @@ _CONV = [
 
 #: The window the DEPLOYED handler uses, READ FROM THE MODULE at import time.
 #: It has to be read here rather than in the row: the suite's autouse fixture opens
-#: `ha._CAPTURE_ACK_DEADLINE_S` to 30 s for the whole session (so no pre-existing
+#: `ha._CAPTURE_ACK_DEADLINE_S` to `_CAPTURE_ACK_WINDOW_S` for the whole session (so
+#: no pre-existing
 #: assertion races a deadline), so by the time a test body runs the module attribute
 #: is no longer the deployed value. Reading it at import — before any fixture runs —
 #: is what makes the row's claim ("a value too tight would keep every suite green")
@@ -114,7 +115,7 @@ def _force_join(monkeypatch, seconds: float):
     `_force_ack` takes the window to zero so the join can never land; this one
     leaves `_capture_ack_grace_s` REAL and pins the deadline to a chosen value,
     so the join must land for a local mock capture. It exists because the suite's
-    autouse fixture opens `_CAPTURE_ACK_DEADLINE_S` to 30 s (see its docstring:
+    autouse fixture opens `_CAPTURE_ACK_DEADLINE_S` to `_CAPTURE_ACK_WINDOW_S` (see its docstring:
     no pre-existing assertion may race a deadline, `#5049` rule 1) — and that
     fixture, left alone, means the PRODUCTION 0.5 s is exercised by no row at
     all, so a value too tight for the joined receipt would keep every suite
@@ -597,7 +598,8 @@ def test_completion_inside_the_window_still_returns_todays_receipt(client):
 
     With the suite's OPENED window (see the autouse
     `_capture_ack_window_is_deterministic` fixture: `_CAPTURE_ACK_DEADLINE_S` is
-    30 s for the whole suite, because whether a local mock capture beats a 0.5 s
+    `_CAPTURE_ACK_WINDOW_S` for the whole suite, because whether a local mock
+    capture beats a 0.5 s
     deadline is a question about HOST LOAD and `#5049` rule 1 forbids a deadline
     expiry from producing a verdict) and the offline mock extractor, completion
     lands inside it and the caller gets the SAME body shape as before this
@@ -634,7 +636,7 @@ def test_completion_inside_the_window_still_returns_todays_receipt(client):
 
 def test_the_in_budget_receipt_survives_the_production_deadline(
         client, monkeypatch):
-    """F4 — the PRODUCTION window (0.5 s), not the suite's opened one (30 s).
+    """F4 — the PRODUCTION window (0.5 s), not the suite's opened one.
 
     Every other row in this module runs with the autouse fixture's opened
     deadline, so without this one the constant the DEPLOYED handler uses is
@@ -665,7 +667,7 @@ def test_the_in_budget_receipt_survives_the_production_deadline(
     an idle one.
     """
     # ⛔ THE DEPLOYED VALUE IS READ AT IMPORT, not here: the suite's autouse
-    # fixture has already opened `ha._CAPTURE_ACK_DEADLINE_S` to 30 s by the time
+    # fixture has already opened `ha._CAPTURE_ACK_DEADLINE_S` by the time
     # any test body runs (that is what keeps the other rows off a wall clock), so
     # reading the live attribute would compare the fixture's value with itself.
     # Review round 5 measured the consequence of getting this wrong: a literal
@@ -1378,7 +1380,7 @@ def test_the_suite_window_is_the_opened_window_not_the_half_bound():
     """The autouse fixture's claim, pinned: the CLAMP is opened with the window.
 
     `tests/conftest.py::_capture_ack_window_is_deterministic` opens
-    `_CAPTURE_ACK_DEADLINE_S` to 30 s so that no pre-existing
+    `_CAPTURE_ACK_DEADLINE_S` to `_CAPTURE_ACK_WINDOW_S` so that no pre-existing
     "the POST body reports what was extracted" assertion races a deadline
     (`#5049` rule 1). That claim was FALSE: `_capture_ack_grace_s` clamps to
     `min(window, _TRANSPORT_WAIT_BOUND_S / 2)` = `min(30, 5)` = **5 s**, and a cold

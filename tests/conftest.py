@@ -2160,13 +2160,14 @@ def _capture_ack_window_is_deterministic(monkeypatch):
     race. `#5049` rule 1 forbids exactly that: a deadline expiry may not produce a
     verdict about the code under test.
 
-    So the window is opened for the whole suite AND the clamp is opened with it,
-    so the join is genuinely unbounded here (
-    `_capture_ack_ceiling_s` is overridden below — opening only the window left
-    `min(30.0, _TRANSPORT_WAIT_BOUND_S / 2.0)` = **5 s**, which is not unbounded and
-    is shorter than a cold `build_master_list` (~12 s; measured), so the rows this
-    fixture exists to protect still raced a deadline on a cold shard — review
-    round 5), and the deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
+    So the window is opened for the whole suite AND the clamp is opened with it
+    (`_capture_ack_ceiling_s` is overridden below), so the join is genuinely
+    unbounded here. Both halves are load-bearing: opening only the window, as an
+    earlier cut of this fixture did at 30 s, left the production clamp
+    `min(30.0, _TRANSPORT_WAIT_BOUND_S / 2.0)` = **5 s** in force, which is shorter
+    than a cold `build_master_list` (~12 s; measured), so the rows this fixture
+    exists to protect still raced a deadline on a cold shard — review round 5. The
+    deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
     commutes this same value to 0 for the ack-path tests. Nothing in the product
     reads this constant differently; it is the test substrate that must not race.
 
