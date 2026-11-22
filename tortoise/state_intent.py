@@ -721,8 +721,14 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: carry the same adverb run. Each of these routed on `main` AND on the pre-change head, and only
 #: the TOKEN COUNT separated them from the asyndetic hijack they were meant to be refused with:
 #:   relative (must ROUTE): `has anything that has been only just very recently deprecated been
-#:                           withdrawn` / `… in fact only just superseded been withdrawn` /
-#:                          `… in fact only just superseded by legal been withdrawn`
+#:                           withdrawn` / `… in fact only just superseded been withdrawn`
+#:   relative WITH AN AGENT — ⛔ REFUSED AND REPORTED, NOT ROUTED (round-35 review, P3, measured):
+#:                          `… in fact only just superseded by legal been withdrawn` was listed
+#:                          above as "must ROUTE" until this round, and the code refuses it (the
+#:                          round-7 note below WITHDREW the `by` tolerance on purpose). The pin was
+#:                          always right — it stands in `NOT_SELECTED` + `NOTICE_ONLY` as a stated
+#:                          recall loss — only this label was stale, which is why the label, not
+#:                          the pin, is what changed.
 #:   asyndetic (must REFUSE): `have any reported it has been in fact only just deprecated and been
 #:                            withdrawn`
 #: Both consumers therefore carry `(?!\s*been\b)` after the ending word: the ending is the RELATIVE

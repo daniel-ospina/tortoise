@@ -1775,7 +1775,15 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
     # claimed the slot WAS the helper's `{0,10}` while the code spelled eight, and the gap was
     # observable from the REPORT side — the two rows below were `population=None, signal=None` (a
     # refused cue with no notice, duty (b)). Both report now, and the widening is refusal-side:
-    # 0 population/shape moves over the pinned corpus.
+    # refused cue with no notice, duty (b)). Both report now, and the widening is refusal-side:
+    # measured against a `{0,8}` copy, 0 population/shape moves over the pinned corpus and the
+    # differences are silences at the top of the bound becoming `existence_unguarded` — the slot
+    # cannot route. (The peer lane landed the same correction as "0 population/shape moves over the
+    # pinned corpus"; this keeps its claim and adds why the tally that used to sit here is gone.)
+    # ⛔ AND NO PROBE TOTAL OR DIFF COUNT IS GIVEN, because the first cut of this sentence gave
+    # both and neither re-derives on the grid it describes (the retired note in
+    # `tortoise/state_intent.py` records the same finding at round 35): the shape of the difference
+    # is the load-bearing claim, the tally is not.
     # ⛔ AND THE TWO ROWS BELOW ARE NINE AND TEN TOKENS, NOT SIX AND SEVEN ADVERBIALS (peer round-34
     # review, P2, measured): the slot counts TOKENS, and `no longer` is two of them, so the rows sit
     # at the TOP of the bound while six to eight SINGLE-token adverbs (`<n> just`) would still be
