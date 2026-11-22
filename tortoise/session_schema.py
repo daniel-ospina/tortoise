@@ -384,6 +384,26 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "`try/except` on the capture pool."),
     ),
     SessionWriter(
+        key="tortoise/hosted_api.py::_clear_capture_phase",
+        kind="capture-aux",
+        lane="hosted capture (retiring a dead tail's phase, #14232), off the event loop",
+        properties=frozenset({
+            "capture_extraction_phase", "capture_extraction_phase_at",
+        }),
+        note=(
+            "#14232 review round 3: the RAISE arm's exit. `_capture_abandoned_"
+            "marker` is deliberately CANCELLATION-only (writing `capture_ok` on "
+            "a raise would turn every failed extraction into a #2335 TRUE-retry "
+            "on an already-written record), so a raised tail has no outcome "
+            "writer — but the in-flight phase is a claim that WORK IS RUNNING "
+            "and it must be retired on every exit, or every read surface "
+            "publishes `phase: extracting` with `outcome_known: false` for a "
+            "capture nothing is doing. This row owns that ONE statement: the "
+            "phase pair to null, and `capture_ok` deliberately untouched. "
+            "Synchronous graph write submitted off the loop from "
+            "`_capture_tail_failed`'s `exc is not None` arm."),
+    ),
+    SessionWriter(
         key="tortoise/hosted_api.py::_link_off_loop",
         kind="capture-aux",
         lane="hosted capture (entity linking, off the event loop)",
