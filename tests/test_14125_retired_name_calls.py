@@ -568,10 +568,22 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     broad arm is never coverage: it is what swallows the rest.
 
     A handler only COUNTS when its LAST statement re-raises its own caught exception —
-    a bare `raise`, `raise exc`, or a chained `raise X from exc` (see `_reraises`) — and
+    a bare `raise`, or `raise exc` naming the caught object (see `_reraises`) — and
     never when it merely NAMES a programming error in the clause: `except ImportError:`
     `return False` names the seam and then swallows it, and counting the name would let a
     probe pass this gate with exactly the behaviour it exists to forbid.
+
+    ⛔ `raise X from exc` IS NOT COVERAGE (review of #14287, P1 — it was, and that was a
+    fail-open). `__cause__` is diagnostic CHAINING, not propagation: the handler raises `X`,
+    and the caught exception never reaches the caller. Grading it as coverage made the
+    ordinary pytest skip idiom — `except ImportError as exc: raise pytest.skip.Exception(…)`
+    `from exc` — read `_reraises=True`, `swallows=False`, `_covered={'ImportError'}`, i.e.
+    INDISTINGUISHABLE from a true `raise exc`, while the runtime fact is `Skipped`
+    (measured: `isinstance(e, ImportError) == False`, pytest SKIPS) — a broken tree skipped
+    green, the exact class this file exists to catch. The old pair was self-refuting: the
+    same conversion with `from None` read as a DROP, so `__cause__` metadata alone decided
+    whether a swallowed error counted as propagated. Credit now requires the RAISED object
+    to be the caught one, on both the `exc` and the consumed-from-`_reraises` side.
 
     ⛔ ORDER IS PART OF THE PROPERTY (review F2, and it was still open at
     `9b7ac6ee8d`). Python tests `except` clauses in source order and runs only
@@ -669,16 +681,23 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
         # this gate's own repair instruction ("insert the re-raise arm") in that idiomatic
         # spelling was redded for having fixed it (review of #14160, cycle 6, P2-6).
         _caught = _handler_names(handler) | ({handler.name} if handler.name else set())
-        if isinstance(_last.exc, ast.Name) and _last.exc.id in _caught:
-            return True
-        # PEP 3134's CHAINED form is the same propagation with a nicer message, and the
-        # SWALLOW side must read it the same way `_covered` does (the consumer here is
-        # `_covered`; it counts the chained form because THIS predicate does, not the
-        # other way round) — reading the two halves differently
-        # made ONE handler simultaneously "no coverage" and "re-raises, drops nothing", so a
-        # block written per this gate's own repair instruction read UNARMED (review of
-        # #14160, cycle 7, P2-2). `raise X from None` discards the cause and is not coverage.
-        return isinstance(_last.cause, ast.Name) and _last.cause.id in _caught
+        # ⛔ A CHAINED `raise X from exc` IS **NOT** COVERAGE (review of #14287, P1). This
+        # predicate used to return True when `_last.cause` named a caught exception, on the
+        # reading that "PEP 3134's chained form is the same propagation with a nicer
+        # message". It is not: PEP 3134 attaches `__cause__` for DIAGNOSTICS; the object
+        # raised is `X`, and the caught exception does not reach the caller. Measured, the
+        # handler `except ImportError as exc: raise pytest.skip.Exception(…) from exc` raises
+        # `Skipped` (not an ImportError), so pytest SKIPS — a broken tree green in BOTH
+        # gates, via the single most common pytest skip idiom. It also made `__cause__`
+        # metadata decide the verdict: the identical conversion with `from None` read as a
+        # drop, so two handlers raising the SAME `RuntimeError` were graded differently.
+        #
+        # So credit requires the RAISED object to be the caught one, and `__cause__` is
+        # never consulted. The p2-2 shape the cause branch was added for stays closed, and
+        # closed better: the defect there was ONE handler reading "no coverage" to
+        # `_covered` while reading "re-raises, drops nothing" here, and `_covered` DERIVES
+        # its answer from THIS predicate — so both halves now say "not coverage" together.
+        return isinstance(_last.exc, ast.Name) and _last.exc.id in _caught
     return bool(handler.body) and (
         isinstance(handler.body[-1], ast.Raise) and handler.body[-1].exc is None
     )
@@ -5516,9 +5535,18 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         ("raise an unrelated name", "raise _other", False),
         ("swallow", "_probe = None", False),
         ("bare raise", "raise", True),
-        #: the CHAINED form is coverage — `4j-octovicesimus`; a suppressed cause is not,
-        #: because it discards the caught error it names.
+        #: a suppressed cause is not coverage — `4j-octovicesimus`; and NEITHER is a
+        #: chained one, which is the same conversion with `__cause__` attached.
         ("raise X from None", "raise RuntimeError() from None", False),
+        ("raise X from exc", "raise RuntimeError() from exc", False),
+        #: ⛔ THE LIVE IDIOM, on the COVERAGE side (review of #14287, P1): the ordinary
+        #: pytest skip spelling. At runtime this raises `Skipped`, not the caught
+        #: `ImportError` (measured), so it propagates nothing and must not be coverage.
+        (
+            "convert the seam into a skip, chained",
+            "raise pytest.skip.Exception('no engine') from exc",
+            False,
+        ),
     ):
         _handler = next(
             node
@@ -5534,6 +5562,47 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         assert _reraises(_handler) is _want, (
             f"`{_statement}` in a narrow arm must be coverage={_want} ({_label}) — a "
             "`raise exc` re-raises the caught object and drops nothing"
+        )
+
+    # 4j-undetriginta. ⛔ THE GATE VERDICT on the pytest-skip conversion (review of #14287,
+    #     P1). The rows above grade `_reraises`; this one grades what the CENSUS charges,
+    #     because a predicate row cannot see a verdict. This is the shape a lane reaches by
+    #     converting a broken-engine import into a SKIP — `except ImportError as exc: raise
+    #     pytest.skip.Exception(…) from exc` — and at runtime the caught error does NOT reach
+    #     anyone: `Skipped` is raised, pytest skips, the tree reads green. Measured before
+    #     the fix: `swallows=False`, `_covered={'ImportError'}`, `_unarmed_probe_blocks()`
+    #     empty for this block — i.e. both gates skipped a test whose engine was broken, which
+    #     is #14125 class 2 in its most common spelling. It must be CHARGED, exactly as the
+    #     dropping spelling alongside it is; that pairing is the falsifier (the two differ
+    #     only in whether the caught error is re-raised, and they now differ in verdict).
+    for _label, _skipping_statement, _charged in (
+        (
+            "a chained conversion to a pytest skip",
+            "except ImportError as exc:\n        raise pytest.skip.Exception('no engine') from exc\n",
+            True,
+        ),
+        (
+            "the plain skip it converts from",
+            "except ImportError:\n        pytest.skip('no engine')\n",
+            True,
+        ),
+        (
+            "a genuine re-raise, which charges nothing",
+            "except ImportError as exc:\n        raise exc\n",
+            False,
+        ),
+    ):
+        _skip_conversion = [
+            node
+            for node in ast.walk(
+                ast.parse("try:\n    _probe = _make()\n" + _skipping_statement)
+            )
+            if isinstance(node, ast.ExceptHandler)
+        ]
+        assert _swallows_everything(_skip_conversion) is _charged, (
+            f"{_label} must read as swallowing={_charged} — `raise X from exc` raises `X`, "
+            "so the caught error does not propagate and converting it into a skip is the "
+            "same drop as calling `pytest.skip` directly"
         )
 
     # 4j-sesvicesimus. A NESTED CLASS BODY IS A SEPARATE SCOPE, in BOTH directions. The
@@ -5648,18 +5717,31 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "arm that re-raises drops nothing"
         )
 
-    # 4j-octovicesimus. A CHAINED re-raise — `raise RuntimeError(…) from exc` — propagates the
-    #     caught error just as `raise exc` does (PEP 3134), and the DROP side has to read it
-    #     the same way `_covered` does — `_covered` counts it because this predicate does,
-    #     so the dependency runs one way only. The PREDECESSOR predicate read just a bare
-    #     `raise` or `raise exc`, so ONE handler was
-    #     simultaneously "no coverage" and "re-raises, drops nothing", and a block written per
-    #     this gate's own repair instruction read UNARMED (review of #14160, cycle 7, P2-2).
-    #     `raise X from None` is the control: it discards the cause, so it is not coverage.
+    # 4j-octovicesimus. A CHAINED `raise X from exc` IS **NOT** COVERAGE, and this row
+    #     pinned it as though it were (review of #14287, P1 — it was the false claim, not a
+    #     missing witness). `__cause__` is diagnostic chaining: the handler raises `X` and
+    #     the caught error never reaches the caller. `raise exc` is the ONLY non-bare form
+    #     that propagates the caught OBJECT, and the two `raise X …` rows below are now the
+    #     same verdict for that reason — before, `from exc` read True and `from None` read
+    #     False, so `__cause__` metadata alone decided whether a swallowed error counted as
+    #     propagated (the two rows raise the IDENTICAL `RuntimeError`).
+    #
+    #     ⛔ THE FAIL-OPEN THIS CLOSED, measured: `except ImportError as exc: raise
+    #     pytest.skip.Exception(…) from exc` — the ordinary pytest skip idiom — read
+    #     `_reraises=True`, `swallows=False`, `_covered={'ImportError'}`, i.e. the same
+    #     triple as a true `raise exc`, while at runtime it raises `Skipped`
+    #     (`isinstance(e, ImportError) → False`) and pytest SKIPS the test: a rename that
+    #     broke the engine reads as "capability unavailable" and the tree stays green. That
+    #     is #14125 class 2 verbatim, reachable through the most common skip spelling.
+    #     Population unchanged (0 live instances in `tests/`+`tools/`), so the fix is
+    #     LATENT-safe; the row is what keeps it charged.
+    #     `4j-quinvicesimus` below carries the same statement pair on the DROP side, so the
+    #     two arms cannot drift apart again — they read one predicate.
     for _label, _statement, _want in (
-        ("raise X from exc", "raise RuntimeError('boom') from exc", True),
+        ("raise X from exc", "raise RuntimeError('boom') from exc", False),
         ("raise X from None", "raise RuntimeError('boom') from None", False),
         ("raise the caught name", "raise exc", True),
+        ("raise the caught name, chained to itself", "raise exc from exc", True),
     ):
         _chained = next(
             node
