@@ -45,6 +45,13 @@ the acceptance run is meant to be the 50 sessions that were parked — re-derivi
 a synthetic corpus would test a shape no user produces. When the directory is
 absent (the normal case off the deployment box) the run SYNTHESISES captures of
 the same shape and says so; it never silently substitutes one for the other.
+A REAL spool is `entries/<key>.meta.json` + `entries/<key>.turns.jsonl`, and it is
+read through the product's own readers (`capture_spool.read_spool_turns`), so the
+corpus cannot describe a shape no producer writes.
+
+`--require-entities` is REHEARSAL-ONLY. The HTTP surface serves a point count but
+no entity/edge count, so the flag combined with `--base-url` is refused as a usage
+error (exit 2) instead of being advertised for a run that could never PASS.
 
 Exit codes — THREE-WAY, and the middle one is not a pass:
 
@@ -79,6 +86,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import statistics
 import sys
@@ -134,33 +142,135 @@ def _synthetic_corpus(n: int) -> list[dict]:
     return out
 
 
-def _spooled_corpus(spool_dir: Path, n: int, stream=None) -> list[dict]:
-    """The first `n` captures the spool holds, in spool order (oldest first).
+def _real_spool_entries(spool_dir: Path, metas: list[Path],
+                        limit: int) -> tuple[list[dict], int]:
+    """The first `limit` readable REAL spool entries (oldest first) AND how many
+    entries had to be skipped to fill that corpus.
 
-    The spool is the source of truth for "what was parked": each entry is a JSON
-    object with the captured conversation. An entry this tool cannot read is
-    SKIPPED and counted, never silently dropped — a corpus that shrank without
-    saying so would make the run's denominator a fiction.
+    The pairing is the PRODUCER's, not an invented one: `entries/<key>.meta.json`
+    carries the `session_id` (plus `created_at` and `harness`) and
+    `entries/<key>.turns.jsonl` carries the conversation, which
+    `read_spool_turns` derives from that same `session_id`. ⛔ The decoder is
+    imported from the product rather than re-implemented (review round R, P2): a
+    second JSONL parser here would disagree with the producer about the same
+    bytes — the drift this tool must not have, on the one path that reads a real
+    spool.
+
+    Ordering and the skip count are BOUNDED TOGETHER, deliberately: every meta is
+    parsed (cheap — a few hundred bytes each), the metas are ordered, and only
+    then are turn logs read, stopping as soon as the corpus is full. A spool of
+    thousands of parked captures must not cost thousands of transcripts to drain
+    fifty. So the count means exactly what the report claims: how many parked
+    entries were invisible WHILE THIS CORPUS WAS ASSEMBLED. An unparseable meta
+    sorts FIRST (its instant is unknown), so it can never hide behind the cutoff.
     """
-    files = sorted(p for p in spool_dir.rglob("*.json") if p.is_file())
+    from tortoise.capture_spool import read_spool_turns
+
+    ordered: list[tuple[str, str, dict | None]] = []
+    for path in metas:
+        meta: dict | None
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            meta = parsed if isinstance(parsed, dict) else None
+        except (OSError, UnicodeDecodeError, ValueError):
+            meta = None
+        sid = meta.get("session_id") if meta is not None else None
+        # ⛔ COERCED, NEVER COMPARED RAW (review cycle 12, P2 — measured: one meta
+        # hand-edited to a non-string `created_at` (`1735689600`) made the sort
+        # below raise `TypeError: '<' not supported between instances of 'str' and
+        # 'int'`, which escaped `main()` (only `ImportError` is guarded there) as a
+        # traceback at shell exit 1 — "a criterion RAN and FAILED"). The PRODUCT
+        # already defends this exact crash in `capture_spool._age_key` with
+        # `str(...)` and records it verbatim ("a corrupt-typed `updated_at` …
+        # crashed `session spool`"); reading its spool with a weaker key would
+        # reintroduce a defect the producer has already measured and fixed.
+        created = str(meta.get("created_at") or "") if meta is not None else ""
+        ordered.append((created, sid if isinstance(sid, str) else "", meta))
+    # Oldest first: `created_at` is the producer's own ISO-8601 instant, so its
+    # lexicographic order IS chronological; the session id breaks a same-instant
+    # tie (three captures parked inside one millisecond is a real case). The
+    # empty key puts an unreadable meta ahead of every datable entry.
+    ordered.sort(key=lambda row: (row[0], row[1]))
+
     out: list[dict] = []
     skipped = 0
-    for path in files:
-        if len(out) >= n:
+    for _created, sid, meta in ordered:
+        turns = read_spool_turns(spool_dir, sid) if sid else []
+        if meta is None or not sid or not turns:
+            skipped += 1
+            continue
+        out.append({
+            "session_id": sid,
+            "harness": meta.get("harness") or "pi",
+            "source": "acceptance-14232",
+            "conversation": turns,
+        })
+        if len(out) >= limit:
             break
+    return out, skipped
+
+
+def _flat_spool_entries(spool_dir: Path, limit: int) -> tuple[list[dict], int]:
+    """The first `limit` captures of an EXPORTED archive, and the skipped count.
+
+    The older shape — one JSON file per capture carrying `conversation`/`turns` —
+    is still read, because an exported archive has no `entries/` tree. It is
+    consulted ONLY when the directory holds no real spool entry, so the two
+    layouts can never double-count one capture, and the spool's own discard
+    RECORDS — `discarded.jsonl` in the spool ROOT (`capture_spool._discard_path`;
+    there is no `discards/` directory, which this docstring used to name) — never
+    match a `*.json` glob, so they are not miscounted as unreadable captures.
+    """
+    out: list[dict] = []
+    skipped = 0
+    for path in sorted(p for p in spool_dir.rglob("*.json") if p.is_file()):
         try:
-            entry = json.loads(path.read_text())
-        except (OSError, ValueError):
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
             skipped += 1
             continue
-        conv = entry.get("conversation") or entry.get("turns")
-        sid = (entry.get("session_id") or entry.get("sessionId")
-               or path.stem)
-        if not conv:
+        conv = (entry.get("conversation") or entry.get("turns")
+                if isinstance(entry, dict) else None)
+        if not isinstance(entry, dict) or not conv:
             skipped += 1
             continue
-        out.append({"session_id": sid, "harness": entry.get("harness") or "pi",
-                    "source": "acceptance-14232", "conversation": conv})
+        out.append({
+            "session_id": (entry.get("session_id") or entry.get("sessionId")
+                           or path.stem),
+            "harness": entry.get("harness") or "pi",
+            "source": "acceptance-14232",
+            "conversation": conv,
+        })
+        if len(out) >= limit:
+            break
+    return out, skipped
+
+
+def _spooled_corpus(spool_dir: Path, n: int,
+                    stream=None) -> tuple[list[dict], int]:
+    """The first `n` captures the spool holds (oldest first) AND how many entries
+    had to be skipped to assemble them.
+
+    The spool is the source of truth for "what was parked". Two layouts are read
+    and the REAL one wins whenever it is present:
+
+    * `entries/<key>.meta.json` + `entries/<key>.turns.jsonl` — what
+      `capture_spool.write_spool_entry` produces, i.e. every capture this product
+      has parked (review round R, P2 measured that this layout was UNREADABLE
+      here: `rglob("*.json")` matched only the meta, so the documented primary
+      corpus path returned `[]` and exited 2 "the corpus is empty" against three
+      entries the product itself had written);
+    * one JSON file per capture with `conversation`/`turns` — an exported archive.
+
+    ⛔ THE SKIP COUNT IS PART OF THE RESULT, not a log line (review round R, P3):
+    an entry this tool cannot read is SKIPPED and counted, never silently dropped
+    — and under `--json`, the documented acceptance mode, the count now travels
+    in the report instead of only on stderr. A corpus that shrank without saying
+    so would make the run's denominator a fiction.
+    """
+    metas = sorted(p for p in spool_dir.rglob("*.meta.json") if p.is_file())
+    corpus, skipped = (_real_spool_entries(spool_dir, metas, n) if metas
+                       else _flat_spool_entries(spool_dir, n))
     if skipped:
         # ⛔ NOT stdout (review round P, pre-existing P2): under `--json` this line
         # preceded the report on stdout, so the documented machine mode exited 0
@@ -168,8 +278,7 @@ def _spooled_corpus(spool_dir: Path, n: int, stream=None) -> list[dict]:
         # real spool. The caller decides the stream.
         print(f"  corpus: skipped {skipped} unreadable/empty spool entries",
               file=stream)
-    return out
-
+    return corpus, skipped
 
 # ── transports ────────────────────────────────────────────────────────────
 
@@ -236,6 +345,17 @@ class _HttpTransport:
             "extraction": body.get("extraction"),
         }
 
+    def close(self) -> None:
+        """Release the HTTP client.
+
+        ⛔ THIS CLASS HAD NO `close()` AT ALL (review round R, P3) — so the
+        deployment run, the only run that talks to real production, left its
+        `httpx.Client` (and its connection pool) to the garbage collector while
+        the rehearsal's handle was released explicitly. The mirror of
+        `_InProcessTransport.close`, so `_close()` can release either arm.
+        """
+        self._client.close()
+
 
 class _InProcessTransport:
     """`hosted_api.app` in process, local embedded graph — a REHEARSAL."""
@@ -259,9 +379,29 @@ class _InProcessTransport:
         # The SDK resolves its embedded graph from `TORTOISE_DB_PATH`, so the pin
         # IS the private DB. Restored in `close()`.
         self._prev_db_path = os.environ.get("TORTOISE_DB_PATH")
-        os.environ["TORTOISE_DB_PATH"] = self._db_path
-        self._client = TestClient(ha.app, raise_server_exceptions=False)
-        self._client.__enter__()
+        self._client = None
+        # ⛔ A CONSTRUCTION THAT FAILS MUST NOT LEAVE THE PIN BEHIND (review round
+        # R, P3): the pin used to be set before the one fallible call, and nothing
+        # restored it, so a TestClient that raised left `TORTOISE_DB_PATH`
+        # pointing into a temp dir that was then deleted — every later SDK call in
+        # the process read a dead path (measured). `run()` also turns the failure
+        # into exit 2 instead of letting a traceback read as "a criterion FAILED".
+        try:
+            os.environ["TORTOISE_DB_PATH"] = self._db_path
+            self._client = TestClient(ha.app, raise_server_exceptions=False)
+            self._client.__enter__()
+        except BaseException:
+            self._restore_db_path()
+            self._tmp.cleanup()
+            self._client = None
+            raise
+
+    def _restore_db_path(self) -> None:
+        """Undo THIS instance's `TORTOISE_DB_PATH` pin, exactly once per owner."""
+        if self._prev_db_path is None:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+        else:
+            os.environ["TORTOISE_DB_PATH"] = self._prev_db_path
 
     def authenticate(self, org_id: str) -> None:
         """Mint a real API key and let the REAL auth dependency resolve the org.
@@ -342,26 +482,32 @@ class _InProcessTransport:
         }
 
     def close(self) -> None:
-        self._client.__exit__(None, None, None)
-        if self._prev_db_path is None:
-            os.environ.pop("TORTOISE_DB_PATH", None)
-        else:
-            os.environ["TORTOISE_DB_PATH"] = self._prev_db_path
+        if self._client is not None:
+            self._client.__exit__(None, None, None)
+            self._client = None
+        self._restore_db_path()
         self._tmp.cleanup()
 
 
 # ── the run ───────────────────────────────────────────────────────────────
 
 def _percentile(values: list[float], pct: float) -> float:
+    """Nearest-rank percentile: the value at `ceil(pct/100 * n)`.
+
+    ⛔ `math.ceil`, NOT `round` (review round R, P3). Nearest-rank is
+    `ceil(pct/100 * n)`; this computed `round(...)`, which reports the p95 one
+    rank LOW for most `n != 50` — measured, 95 of `n = 1..200` differ — and LOW
+    is the LENIENT direction on the issue's headline criterion: `n=11` with ten
+    1 ms acks and one 5000 ms ack reported a p95 of **1 ms**, so `ok_ack` was
+    True and the run printed PASS with a 5 s ack in its own sample. The claim
+    "p95 ack" has to be an OBSERVED request the run made, never a spline through
+    two of them, and never a rank that flatters the measurement.
+    """
     if not values:
         return 0.0
     ordered = sorted(values)
-    # Nearest-rank: with n=50 a p95 must be an OBSERVED value, never a spline
-    # through two of them — the claim "p95 ack" has to be a request the run made.
-    # `round()` already returns an int in Python 3, so no `int()` wrapper
-    # (ruff RUF046): the cast was redundant and read as if a float could arrive.
-    idx = min(len(ordered) - 1, max(0, round(pct / 100.0 * len(ordered)) - 1))
-    return ordered[idx]
+    rank = max(1, math.ceil(pct / 100.0 * len(ordered)))
+    return ordered[min(len(ordered) - 1, rank - 1)]
 
 
 def _is_terminal(detail: dict) -> tuple[bool, str]:
@@ -447,6 +593,11 @@ def _close(transport) -> None:
     The tail of `run()` used to close the transport itself, which the early
     `return 2` paths would skip.
 
+    ⛔ BOTH ARMS (review round R, P3): `_HttpTransport` had no `close()` at all,
+    so the deployment run leaked its client while only the rehearsal's handle was
+    released. The guard is on the TYPES, not a duck-typed probe — a release is
+    only owed to an object we own.
+
     ⛔ NOT "every exit path" (review round M, P3): a NON-transport exception still
     propagates without a close, deliberately — the process is already failing and
     the handle dies with it. ⛔ And a close that RAISES would replace the exit code
@@ -454,7 +605,7 @@ def _close(transport) -> None:
     traceback at 1 (measured), so the close is guarded here, once, for every
     caller.
     """
-    if isinstance(transport, _InProcessTransport):
+    if isinstance(transport, (_InProcessTransport, _HttpTransport)):
         # SIM105: `suppress` is the same guard, and a close must never change the
         # verdict it was called to preserve.
         with contextlib.suppress(Exception):
@@ -480,11 +631,25 @@ def run(args) -> int:
             print(f"error: --sessions-dir {spool} is not a directory",
                   file=sys.stderr)
             return 2
-        corpus = _spooled_corpus(spool, args.n,
-                                 stream=sys.stderr if args.json else sys.stdout)
+        try:
+            corpus, corpus_skipped = _spooled_corpus(
+                spool, args.n, stream=sys.stderr if args.json else sys.stdout)
+        except ImportError as exc:
+            # ⛔ THE PRODUCT'S SPOOL READER IS A PRECONDITION, NOT A CRITERION
+            # (review cycle 11, P3 — measured: with `tortoise.capture_spool`
+            # unimportable, the raw `ImportError` escaped `main()` as a traceback at
+            # shell exit 1, which this tool's contract reads as "a criterion RAN and
+            # FAILED"). A tree that cannot import the module it reads a spool with
+            # has measured NOTHING about the deployment, so it says so and exits 2 —
+            # the same rule the transport arm follows.
+            print(f"error: cannot read the capture spool — the product's spool "
+                  f"reader is not importable ({type(exc).__name__}: {exc})",
+                  file=sys.stderr)
+            return 2
         corpus_label = f"spooled ({spool})"
     else:
         corpus = _synthetic_corpus(args.n)
+        corpus_skipped = 0
         corpus_label = "synthesised (no spool on this box)"
     if not corpus:
         print("error: the corpus is empty — nothing to drain", file=sys.stderr)
@@ -514,10 +679,38 @@ def run(args) -> int:
                   "TORTOISE_SESSION_LLM_MOCK=1 for the offline seam, or export "
                   "a provider key.", file=sys.stderr)
             return 2
-        transport = _InProcessTransport(args.org)
+        # ⛔ A REHEARSAL THAT CANNOT START IS A USAGE ERROR, EXIT 2 (review round
+        # R, P3). Unguarded, a construction failure propagated as a traceback and
+        # a shell exit 1 — this tool's "a criterion RAN and FAILED" — so the
+        # CHANGE was reported as broken by an environment defect. The constructor
+        # restores the `TORTOISE_DB_PATH` pin and drops its temp dir before it
+        # raises, so nothing is left pointing at a deleted path.
+        try:
+            transport = _InProcessTransport(args.org)
+        except Exception as exc:
+            print(f"error: the in-process rehearsal could not start — "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
 
     if isinstance(transport, _InProcessTransport):
-        transport.authenticate(args.org)
+        # Same class of defect as the construction above: a rehearsal that cannot
+        # authenticate has not measured the change, so it must not exit 1.
+        try:
+            transport.authenticate(args.org)
+        # ⛔ `SystemExit` IS IN THIS CLAUSE, and that is the point (review cycle 11,
+        # P2 — measured: `authenticate`'s own seed self-check raises
+        # `SystemExit("rehearsal consent seed did not persist: …")`, a
+        # `BaseException`, so `except Exception` let it escape `main()` and the
+        # shell saw exit **1** — this tool's "a criterion RAN and FAILED", the exact
+        # mis-report this guard exists to remove. That branch is the documented seed
+        # failure ("measured, three attempts"), not hypothetical). The catch is
+        # NARROW — `(Exception, SystemExit)`, never `BaseException` — so a
+        # `KeyboardInterrupt` still interrupts.
+        except (Exception, SystemExit) as exc:
+            print(f"error: the in-process rehearsal could not authenticate — "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            _close(transport)
+            return 2
 
     # ⛔ `--json` MUST BE PARSEABLE JSON. The preamble is human output, so under
     # `--json` it goes to stderr; every line below keeps its single destination.
@@ -703,8 +896,10 @@ def run(args) -> int:
     # stored turns and never extracted, which is the defect. Entities and edges
     # are asserted only where the extractor emits them — the offline `MockModel`
     # seam emits a bare claim with NO entity, measured, so requiring them there
-    # would fail a healthy run. A deployment run passes `--require-entities`,
-    # because a real extractor that produces no entity is a finding.
+    # would fail a healthy run. ⛔ `--require-entities` is REHEARSAL-ONLY and is
+    # refused with `--base-url` in `main()` (review round R, P2): the HTTP detail
+    # body serves a point count and NO entity/edge count, so the combination could
+    # never PASS while argparse advertised it for exactly that use.
     ok_points = (evidence.get("points") or 0) >= 1
     ok_entities = (not args.require_entities) or (
         (evidence.get("entities") or 0) >= 1
@@ -720,6 +915,10 @@ def run(args) -> int:
         "host_load_1m": round(load[0], 2) if load[0] is not None else None,
         "cpu_count": os.cpu_count(),
         "corpus": corpus_label,
+        # How many parked captures the reader could not read (review round R, P3).
+        # The stderr notice is easy to miss under `--json`, and a denominator that
+        # shrank silently is exactly what this count exists to prevent.
+        "corpus_skipped": corpus_skipped,
         "n": len(corpus),
         # The GRADING THRESHOLD and the enforcement flag are part of the result: a
         # machine consumer cannot interpret `ack_p95_within_budget` or
@@ -858,14 +1057,28 @@ def main(argv: list[str] | None = None) -> int:
                     help="how long a session may take to finish extracting "
                          f"(default {DEFAULT_TERMINAL_TIMEOUT_S:.0f}s)")
     ap.add_argument("--require-entities", action="store_true",
-                    help="also require extracted entities AND edges (pass this "
-                         "against a deployment with a real extractor; the "
-                         "offline MockModel seam emits none)")
+                    help="also require extracted entities AND edges — REHEARSAL "
+                         "ONLY: the HTTP detail surface serves no entity/edge "
+                         "count, so this flag is refused together with "
+                         "--base-url")
     ap.add_argument("--json", action="store_true", help="machine-readable report")
     args = ap.parse_args(argv)
 
     if args.n <= 0:
         print("error: --n must be positive", file=sys.stderr)
+        return 2
+    if args.require_entities and args.base_url:
+        # ⛔ REFUSED, NOT SILENTLY UNSATISFIABLE (review round R, P2). `GET
+        # /v1/sessions/{id}` serves `extracted`/`extracted_points` but no entity or
+        # edge counts, so `ok_entities` was False BY CONSTRUCTION on this path: a
+        # perfect deployment printed `[FAIL] extraction demonstrably ran` and
+        # exited 1 under the flag argparse described as "pass this against a
+        # deployment with a real extractor". A criterion the run cannot measure is
+        # a usage error, never a verdict about the change.
+        print("error: --require-entities cannot be graded over HTTP — "
+              "GET /v1/sessions/{id} serves a point count but no entity/edge "
+              "counts. Omit --base-url (the in-process rehearsal reads the graph) "
+              "or grade the deployment without this flag.", file=sys.stderr)
         return 2
     if args.sessions_dir is None:
         # A MISSING DEFAULT is not an error — most boxes have no spool, and the

@@ -45,6 +45,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import os
+import sys
 import threading
 import time
 from datetime import UTC, datetime
@@ -2212,6 +2215,37 @@ def test_an_UNUSABLE_base_url_is_a_usage_error(monkeypatch, capsys, tmp_path):
     assert "Traceback" not in err, err
 
 
+def test_REQUIRE_ENTITIES_over_HTTP_is_a_usage_error(monkeypatch, capsys,
+                                                     tmp_path):
+    """A criterion the HTTP surface cannot measure is REFUSED, not failed.
+
+    Review round R (P2): `--require-entities --base-url` could NEVER PASS. The
+    detail body serves a point count and no entity/edge count, so `ok_entities`
+    was False by construction — while argparse described the flag as "pass this
+    against a deployment with a real extractor". A perfect deployment (200 ack
+    inside the window, terminal on its own, one extracted point) printed
+    `[FAIL] extraction demonstrably ran` and exited 1: a criterion FAIL blamed on
+    the change for a measurement the instrument cannot take.
+
+    Mutant: delete the refusal → the run proceeds to the network and reports
+    `unreachable`, so this row reds on the message it requires.
+    """
+    drain = _drain_tool()
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rc = drain.main(["--n", "1", "--base-url", "http://127.0.0.1:1",
+                     "--api-key", "k", "--require-entities"])
+    err = capsys.readouterr().err
+    assert rc == 2, (
+        f"an unmeasurable criterion is a USAGE error, never a verdict: rc={rc}\n{err}")
+    assert "cannot be graded over HTTP" in err, err
+    assert "unreachable" not in err, (
+        "the refusal must come BEFORE any network call, or a usage error is "
+        f"reported as a transport failure: {err}")
+    assert "Traceback" not in err, err
+
+
 
 def test_a_garbled_HTTP_detail_body_is_an_UNREADABLE_RESPONSE():
     """The HTTP transport's own decode site raises the DEDICATED type.
@@ -2405,6 +2439,30 @@ def test_a_GRADED_ack_BREACH_fails_the_run(monkeypatch, capsys, tmp_path):
     assert "VERDICT: PASS" not in out, out
 
 
+def test_the_p95_is_the_NEAREST_RANK_not_a_ROUNDED_one():
+    """`_percentile` must not flatter the issue's headline criterion.
+
+    Review round R (P3): the code used `round()` where nearest-rank is `ceil`, so
+    the reported p95 was one rank LOW for most `n != 50` (measured: 95 of
+    `n = 1..200` differ) — and low is the LENIENT direction. With `n=11`, ten
+    1 ms acks and one 5000 ms ack, the tool reported a p95 of **1 ms**, so
+    `ok_ack` was True and the run printed PASS with a 5 s ack in its own sample.
+
+    Mutant: restore `round(pct / 100 * n)` → this row reds (1 ms, not 5000).
+    """
+    drain = _drain_tool()
+    acks = [0.001] * 10 + [5.0]
+    assert drain._percentile(acks, 95) == 5.0, (
+        "the p95 of 11 samples is the LARGEST one; a rounded rank reports a "
+        f"smaller rank instead: {drain._percentile(acks, 95)}")
+    # The same must hold at EVERY n, not just the one shape that was measured.
+    for n in range(1, 201):
+        vals = [float(i) for i in range(n)]
+        assert drain._percentile(vals, 95) == vals[max(0, math.ceil(0.95 * n) - 1)], (
+            f"nearest-rank mismatch at n={n}")
+    assert drain._percentile([], 95) == 0.0
+
+
 def test_an_OVERSUBSCRIBED_host_is_INCONCLUSIVE_never_PASS(monkeypatch, capsys,
                                                            tmp_path):
     """`ack_graded` is an INPUT: the absolute criterion is not graded on a busy box.
@@ -2430,6 +2488,83 @@ def test_no_extracted_points_fails_the_run(monkeypatch, capsys, tmp_path):
     out = capsys.readouterr().out
     assert rc == 1, f"no extracted point is a criterion FAIL (exit 1): rc={rc}\n{out}"
     assert "[FAIL] extraction demonstrably ran" in out, out
+
+
+def test_the_HTTP_transport_releases_its_client():
+    """`_HttpTransport` must own a `close()`, and `_close` must route to it.
+
+    Review round R (P3): the class had NO `close()` at all — `hasattr` was False —
+    so the deployment run, the only run that talks to real production, left its
+    `httpx.Client` (and its pool) to the garbage collector while the rehearsal's
+    graph handle was released explicitly.
+
+    Mutant: delete `_HttpTransport.close()` → this row reds on the first assertion.
+    """
+    drain = _drain_tool()
+    assert hasattr(drain._HttpTransport, "close"), (
+        "the deployment transport must be releasable, not left to the collector")
+
+    transport = drain._HttpTransport("http://127.0.0.1:1", "k")
+    assert transport._client.is_closed is False
+    drain._close(transport)
+    assert transport._client.is_closed is True, (
+        "`_close()` must release the HTTP client, not only the rehearsal handle")
+
+
+def test_the_rehearsal_ctor_restores_the_db_path_pin_when_it_fails(monkeypatch):
+    """The REAL constructor must undo its environment pin before it raises.
+
+    Review round R (P3): `TORTOISE_DB_PATH` was set BEFORE the one fallible call
+    and nothing restored it, so a `TestClient` that raised left the process
+    pointing at a temp path that was then deleted — every later SDK call in the
+    process read a dead database (measured: the env still held
+    `/tmp/acc14232-…/acc.db` afterwards).
+
+    Mutant: drop the `try/except BaseException` around the pin + client build →
+    the pin survives and this row reds.
+    """
+    drain = _drain_tool()
+
+    class _BadClient:
+        def __init__(self, *_a, **_kw):
+            raise RuntimeError("TestClient blew up")
+
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    monkeypatch.setattr("fastapi.testclient.TestClient", _BadClient)
+    with pytest.raises(RuntimeError, match="blew up"):
+        drain._InProcessTransport("acc14232")
+    assert "TORTOISE_DB_PATH" not in os.environ, (
+        "a failed construction must not leave the environment pointing at a temp "
+        f"path it already deleted: {os.environ.get('TORTOISE_DB_PATH')}")
+
+
+def test_a_rehearsal_ctor_failure_is_a_USAGE_error_not_a_verdict(
+        monkeypatch, capsys, tmp_path):
+    """A rehearsal that cannot start has measured NOTHING, so it exits 2.
+
+    Review round R (P3): the construction was outside every guard, so the failure
+    propagated as a traceback at shell exit **1** — this tool's "a criterion RAN
+    and FAILED" — reporting the CHANGE as broken for an environment defect.
+
+    Mutant: drop the `run()` guard → rc becomes 1 via the traceback.
+    """
+    drain = _drain_tool()
+
+    class _Exploding:
+        def __init__(self, *_a, **_kw):
+            raise RuntimeError("no embedded graph on this box")
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Exploding)
+
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    err = capsys.readouterr().err
+    assert rc == 2, (
+        f"a rehearsal that cannot start has not measured the change: rc={rc}\n{err}")
+    assert "could not start" in err, err
+    assert "Traceback" not in err, err
 
 
 def test_the_JSON_report_carries_the_UNREADABLE_ack_count(monkeypatch, capsys,
@@ -2499,6 +2634,30 @@ def test_a_READABLE_run_reports_the_deferral_as_MEASURABLE(monkeypatch, capsys,
     assert report["require_entities"] is False
 
 
+def test_an_ACCEPTED_ack_with_NO_phase_counts_as_deferred(monkeypatch, capsys,
+                                                          tmp_path):
+    """`deferred_at_ack` is a phase OR `status == "accepted"`; the second half
+    had no witness.
+
+    Review round R (P3): dropping `ack_status == "accepted"` from the expression
+    left 56/56 green, and the head then reported `{n: 0, of: 1}` for an ack whose
+    body said `accepted` while `outcomes[0].deferred_at_ack` was True — the
+    summary contradicting its own per-ack records.
+
+    Mutant: drop `or ack_status == "accepted"` → `n` becomes 0 and this row reds.
+    """
+    drain = _criterion_drain(
+        monkeypatch, tmp_path,
+        ack=lambda _cap: _Resp200({"status": "accepted"}))
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, (rc, captured.err)
+    report = json.loads(captured.out)
+    assert report["deferred_at_ack"]["n"] == 1, report["deferred_at_ack"]
+    assert report["deferred_at_ack"]["of"] == 1, report["deferred_at_ack"]
+    assert report["outcomes"][0]["deferred_at_ack"] is True, report["outcomes"]
+
+
 def test_the_json_report_is_PARSEABLE_when_the_spool_has_junk(monkeypatch, capsys,
                                                               tmp_path):
     """`--json` must emit JSON and nothing else — even on the spool path.
@@ -2527,6 +2686,327 @@ def test_the_json_report_is_PARSEABLE_when_the_spool_has_junk(monkeypatch, capsy
     report = json.loads(captured.out)  # raises if anything else hit stdout
     assert report["n"] == 1, report["n"]
     assert "spooled" in report["corpus"] or "spool" in report["corpus"], report["corpus"]
+    assert "skipped 1 unreadable/empty spool entries" in captured.err, captured.err
+
+
+def test_the_corpus_reader_reads_a_REAL_capture_spool(monkeypatch, capsys,
+                                                     tmp_path):
+    """The documented PRIMARY corpus path must read what the PRODUCT parks.
+
+    Review round R (P2) measured that it could not: a real spool is
+    `entries/<key>.meta.json` + `entries/<key>.turns.jsonl`, and the reader globbed
+    `*.json`, matched only the meta (which carries no conversation), and returned
+    `[]` — so the CLI exited 2 "the corpus is empty — nothing to drain" against
+    three entries written by the product's own `write_spool_entry`. The row that
+    claimed to cover this path hand-wrote `spool/a.json` with a `conversation`
+    key, a shape no producer writes, which is exactly why the hole was invisible.
+
+    Mutants: restore the `rglob("*.json")`-only scan → `n == 0` and exit 2; read
+    the conversation out of the meta instead of the paired log → `n == 0`.
+    """
+    from tortoise.capture_spool import Snapshot, write_spool_entry
+
+    spool = tmp_path / "spool"
+    for i in range(3):
+        write_spool_entry(spool, Snapshot(
+            session_id=f"acc-real-{i}",
+            turns=[{"role": "user", "content": f"capture {i} must ack first"},
+                   {"role": "assistant", "content": f"agreed {i}"}],
+            source="acceptance-14232", machine_id="m1", harness="claude"))
+
+    drain = _criterion_drain(monkeypatch, tmp_path)
+    corpus, skipped = drain._spooled_corpus(spool, 5)
+    assert skipped == 0, skipped
+    assert [c["session_id"] for c in corpus] == [
+        "acc-real-0", "acc-real-1", "acc-real-2"], (
+        "spool order is the producer's `created_at`, oldest first: "
+        f"{[c['session_id'] for c in corpus]}")
+    assert all(len(c["conversation"]) == 2 for c in corpus), corpus
+    # `--n` truncates the CORPUS, oldest first — and the reader stops there rather
+    # than decoding every transcript in the spool (a spool of thousands of parked
+    # captures must not cost thousands of reads to drain fifty).
+    assert [c["session_id"] for c in drain._spooled_corpus(spool, 1)[0]] == [
+        "acc-real-0"]
+
+    rc = drain.main(["--sessions-dir", str(spool), "--n", "5",
+                     "--max-ack-p95", "3600", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, (
+        "a real spool must be drainable, not \"the corpus is empty\": "
+        f"rc={rc} err={captured.err!r}")
+    report = json.loads(captured.out)
+    assert report["n"] == 3, (
+        f"all three parked captures must be read, got {report['n']}: {report['corpus']}")
+    assert report["corpus_skipped"] == 0, report["corpus_skipped"]
+    assert "skipped" not in captured.err, captured.err
+
+
+def test_the_corpus_reader_STOPS_at_n_instead_of_reading_every_transcript(
+        monkeypatch, tmp_path):
+    """The bounded read is a CLAIM, and it had no witness.
+
+    Review cycle 11 (P3): the mutant "read every transcript, then `out[:limit]`"
+    left the whole file green — so the `break` that keeps a spool of thousands of
+    parked captures from costing thousands of transcript reads was untested, while
+    the docstring asserted it. This row counts the calls instead of trusting the
+    `break`'s presence.
+
+    Mutant: drop `if len(out) >= limit: break` and truncate at the end → the reader
+    is called 3 times for a corpus of 1, and this row reds.
+    """
+    from tortoise.capture_spool import Snapshot, write_spool_entry
+
+    spool = tmp_path / "spool"
+    for i in range(3):
+        write_spool_entry(spool, Snapshot(
+            session_id=f"acc-bound-{i}",
+            turns=[{"role": "user", "content": f"bounded capture {i}"}],
+            source="acceptance-14232", machine_id="m1", harness="claude"))
+
+    drain = _drain_tool()
+    import tortoise.capture_spool as _spool_mod
+
+    real = _spool_mod.read_spool_turns
+    calls: list[str] = []
+
+    def _counting(root, session_id):
+        calls.append(session_id)
+        return real(root, session_id)
+
+    monkeypatch.setattr(_spool_mod, "read_spool_turns", _counting)
+    corpus, skipped = drain._spooled_corpus(spool, 1)
+    assert [c["session_id"] for c in corpus] == ["acc-bound-0"], corpus
+    assert skipped == 0, skipped
+    assert calls == ["acc-bound-0"], (
+        "the reader must stop once the corpus is full — it read "
+        f"{len(calls)} transcript(s) for a corpus of 1")
+
+
+def test_an_UNREADABLE_meta_is_COUNTED_even_when_the_corpus_fills_early(
+        monkeypatch, tmp_path):
+    """An unreadable meta must not hide behind the `--n` cutoff.
+
+    Review cycle 11 (P3): the docstring claims an unparseable meta "sorts FIRST —
+    its instant is unknown — so it can never hide behind the cutoff", and sorting
+    it LAST left the whole file green. The existing skip-count row cannot isolate
+    this: it uses a corpus that never fills (n=5 over 2 entries), so the bad entry
+    is reached whatever the order. Only a SMALL `n` makes the order observable.
+
+    Mutant: sort unreadable metas LAST → `skipped` becomes 0 and this row reds.
+    """
+    from tortoise.capture_spool import Snapshot, write_spool_entry
+
+    spool = tmp_path / "spool"
+    for i in range(3):
+        write_spool_entry(spool, Snapshot(
+            session_id=f"acc-meta-{i}",
+            turns=[{"role": "user", "content": f"capture {i}"}],
+            source="acceptance-14232", machine_id="m1", harness="claude"))
+    (spool / "entries" / "zbad.meta.json").write_text("{not json")
+
+    drain = _drain_tool()
+    corpus, skipped = drain._spooled_corpus(spool, 2)
+    assert len(corpus) == 2, corpus
+    assert skipped == 1, (
+        "an unreadable entry must be counted even when `--n` fills before the walk "
+        f"reaches it: skipped={skipped}")
+
+
+def test_an_unimportable_spool_reader_is_a_usage_error(monkeypatch, capsys,
+                                                       tmp_path):
+    """The dependency on the PRODUCT's spool reader is a PRECONDITION.
+
+    Review cycle 11 (P3): the new `from tortoise.capture_spool import
+    read_spool_turns` was unguarded, so on a tree where that module cannot be
+    imported the raw `ImportError` escaped `main()` as a traceback at shell exit 1
+    — this tool's "a criterion RAN and FAILED", the same defect class the
+    transport arms were repaired for. A tree that cannot import the reader it reads
+    a spool with has measured nothing about the deployment.
+
+    Mutant: remove the `except ImportError` arm → rc becomes 1 with a traceback.
+    """
+    from tortoise.capture_spool import Snapshot, write_spool_entry
+
+    spool = tmp_path / "spool"
+    write_spool_entry(spool, Snapshot(
+        session_id="acc-imp", turns=[{"role": "user", "content": "hi"}],
+        source="acceptance-14232", machine_id="m1", harness="claude"))
+
+    drain = _drain_tool()
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # `None` in `sys.modules` makes the import raise `ImportError`, and the import
+    # happens at CALL time (inside `_real_spool_entries`), which is exactly the
+    # window this row needs.
+    monkeypatch.setitem(sys.modules, "tortoise.capture_spool", None)
+
+    rc = drain.main(["--sessions-dir", str(spool), "--n", "1",
+                     "--max-ack-p95", "3600"])
+    err = capsys.readouterr().err
+    assert rc == 2, (
+        f"an unimportable spool reader is a precondition, not a verdict: rc={rc}\n{err}")
+    assert "cannot read the capture spool" in err, err
+    assert "Traceback" not in err, err
+
+
+def test_a_rehearsal_AUTHENTICATE_failure_is_a_USAGE_error_not_a_verdict(
+        monkeypatch, capsys, tmp_path):
+    """An authenticate failure has measured nothing — exit 2, `SystemExit` included.
+
+    Review cycle 11 (P2): the guard was `except Exception`, but `authenticate`'s own
+    seed self-check raises `SystemExit`, a `BaseException` — measured escaping
+    `main()` and producing shell exit **1**, this tool's "a criterion RAN and
+    FAILED". That branch is the documented seed failure ("measured, three
+    attempts"), not hypothetical. Deleting the whole guard also left the module
+    green (65 passed), so the fix had no witness either.
+
+    Mutants: narrow the clause back to `Exception` → the `SystemExit` escapes and rc
+    is 1; delete the guard → rc is 1 via the traceback.
+    """
+    drain = _drain_tool()
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class _Stub:
+        label = "stub"
+        closes = 0
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            # The tool's OWN seed guard, verbatim.
+            raise SystemExit("rehearsal consent seed did not persist: {}")
+
+        def close(self):
+            type(self).closes += 1
+
+        def post_capture(self, _cap):
+            return _Resp({"status": "ok", "extracted": 1, "extraction": None})
+
+        def get_session(self, _sid):
+            return _Resp({"extracted": 1,
+                          "extraction": {"status": "ok", "outcome_known": True}})
+
+        def extraction_evidence(self, sid):
+            return {"measured": True, "points": 1, "session_id": sid}
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    err = capsys.readouterr().err
+    assert rc == 2, (
+        f"an authenticate failure has not measured the change: rc={rc}\n{err}")
+    assert "could not authenticate" in err, err
+    assert "consent seed did not persist" in err, err
+    assert _Stub.closes == 1, _Stub.closes
+
+
+def test_a_NON_STRING_created_at_does_not_crash_the_reader(monkeypatch, tmp_path):
+    """A corrupt-TYPED `created_at` must not become a `TypeError` at exit 1.
+
+    Review cycle 12 (P2): the oldest-first sort compared raw values, so ONE meta
+    hand-edited to `"created_at": 1735689600` raised
+    `TypeError: '<' not supported between instances of 'str' and 'int'` out of
+    `run()`, and only `ImportError` is guarded there — a traceback at shell exit 1,
+    this tool's "a criterion RAN and FAILED". The PRODUCT already defends this exact
+    crash in `capture_spool._age_key` with `str(...)`, recording that a corrupt-typed
+    `updated_at` "crashed `session spool`"; the reader of that spool must not be
+    weaker than its writer.
+
+    Mutant: drop the `str(...)` coercion → this row reds with the `TypeError`.
+    """
+    from tortoise.capture_spool import Snapshot, write_spool_entry
+
+    spool = tmp_path / "spool"
+    for i in range(2):
+        write_spool_entry(spool, Snapshot(
+            session_id=f"acc-type-{i}",
+            turns=[{"role": "user", "content": f"capture {i}"}],
+            source="acceptance-14232", machine_id="m1", harness="claude"))
+    metas = sorted((spool / "entries").glob("*.meta.json"))
+    meta = json.loads(metas[0].read_text())
+    meta["created_at"] = 1735689600  # a corrupt TYPE, not merely a corrupt value
+    metas[0].write_text(json.dumps(meta))
+
+    drain = _drain_tool()
+    corpus, skipped = drain._spooled_corpus(spool, 5)
+    assert len(corpus) == 2, corpus
+    assert skipped == 0, skipped
+
+
+def test_a_KeyboardInterrupt_during_authenticate_is_NOT_swallowed(
+        monkeypatch, tmp_path):
+    """The guard is `(Exception, SystemExit)` — never `BaseException`.
+
+    Review cycle 12 (P3): widening the clause to `except BaseException` left the
+    whole module green (69 passed), so the comment's "a `KeyboardInterrupt` still
+    interrupts" had no witness and a future edit could swallow Ctrl-C into a clean
+    exit 2.
+
+    Mutant: `except BaseException` → the interrupt never reaches the caller and this
+    row reds.
+    """
+    drain = _drain_tool()
+
+    class _Stub:
+        label = "stub"
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            raise KeyboardInterrupt
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+
+    with pytest.raises(KeyboardInterrupt):
+        drain.main(["--n", "1"])
+
+
+def test_the_JSON_report_carries_the_SPOOL_SKIP_count(monkeypatch, capsys,
+                                                      tmp_path):
+    """The skip count must travel in the REPORT, not only on stderr.
+
+    Review round R (P3): `--json` carried no key for the entries the corpus reader
+    could not read, so the one path that reads a real spool reported its
+    unreadable-entry count on stderr alone — a denominator that can shrink with
+    nothing in the machine report saying it did.
+
+    Mutant: drop the `corpus_skipped` key → this row reds (KeyError).
+    """
+    from tortoise.capture_spool import Snapshot, write_spool_entry
+
+    spool = tmp_path / "spool"
+    write_spool_entry(spool, Snapshot(
+        session_id="acc-ok", turns=[{"role": "user", "content": "hi"}],
+        source="acceptance-14232", machine_id="m1", harness="claude"))
+    (spool / "entries" / "deadbeef.meta.json").write_text("{not json")
+
+    drain = _criterion_drain(monkeypatch, tmp_path)
+    rc = drain.main(["--sessions-dir", str(spool), "--n", "5",
+                     "--max-ack-p95", "3600", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, (rc, captured.err)
+    report = json.loads(captured.out)
+    assert report["n"] == 1, report["n"]
+    assert report["corpus_skipped"] == 1, report["corpus_skipped"]
     assert "skipped 1 unreadable/empty spool entries" in captured.err, captured.err
 
 
@@ -2618,3 +3098,26 @@ def test_ENTITIES_present_but_EDGES_absent_fails_the_run(monkeypatch, capsys,
     out = capsys.readouterr().out
     assert rc == 1, f"entities without edges is a FAIL (exit 1): rc={rc}\n{out}"
     assert "[FAIL] extraction demonstrably ran" in out, out
+
+
+def test_ENTITIES_absent_but_edges_present_fails_the_run(monkeypatch, capsys,
+                                                         tmp_path):
+    """`ok_entities`' `entities >= 1` conjunct, in the direction nobody pinned.
+
+    Review round R (P3): `entities: 0, edges: 3` left every row green when the
+    `entities >= 1` conjunct was deleted — the two existing rows use `0/0` and
+    `3/0`, so neither isolates it. In process these counts come from two columns
+    of ONE query, and a `:Entity` count that disagrees with its edge count is
+    exactly the drift a conjunction exists to catch.
+
+    Mutant: drop `(evidence.get("entities") or 0) >= 1` → this row reds (PASS).
+    """
+    drain = _criterion_drain(
+        monkeypatch, tmp_path,
+        evidence=lambda sid: {"measured": True, "points": 1, "entities": 0,
+                              "edges": 3, "session_id": sid})
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600", "--require-entities"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"edges with no entity is a FAIL (exit 1): rc={rc}\n{out}"
+    assert "[FAIL] extraction demonstrably ran" in out, out
+    assert "VERDICT: FAIL" in out, out
