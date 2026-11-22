@@ -1464,8 +1464,29 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `been <ending>` clause supplied their notice. A signal cannot affect routing (it is only
     # computed when NO shape applies), so widening the slot here cannot create a route.
     ("existence_unguarded", re.compile(
-        _EXISTENCE_HEAD
+        "(?:"
+        + _EXISTENCE_HEAD
         + rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        # ⛔ A CLITIC SUBJECT IS ALSO A CUE THAT MUST REPORT (round-8 review, P2, measured):
+        # the copula/perfect shape refuses a clitic-bearing subject on purpose, and the
+        # comment above says the row then "falls through to `_ENDING_SIGNALS`, where the
+        # clitic alternative refuses it and reports" — true only when the question ALSO
+        # carries an existential head. With a bare copula head there is nothing to fall
+        # through TO, so `has the billing's been deprecated` returned NOTHING AT ALL
+        # (no population, no notice) while its parent routed it `ended`: measured, all of
+        # 8 determiners x 4 nouns = 32/32 silent refusals. A row with `been <ending>` in it
+        # is a state cue; this arm is what breaks that silence. It is a SIGNAL arm, not a
+        # shape, so it cannot route anything.
+        + "|"
+        + r"\b(?:has|have|had|is|are|was|were)\s+[^?]{0,40}?['\u2019](?:s|ve|d)"
+        # ⛔ THE WIDE REFUSAL SLOT, NOT THE NARROW WINDOW ONE (round-9 review, P2, measured): the
+        # first cut of this arm used `_EXISTENCE_ADVERB_SLOT` (`already|ever|recently`), so the
+        # adverb class the guard itself refuses on blinded it — `has the billing's been just
+        # deprecated` and `… been only just deprecated` were still refused SILENTLY, one adverb
+        # away from the frame this arm exists for. The row's first arm already uses the wide slot;
+        # this arm now matches it.
+        + rf"\s+been\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
+        + ")"
         + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
     ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
@@ -1714,7 +1735,11 @@ class StateQuestion:
 #: measured). `_EXISTENCE_GUARD`'s contraction class is closed over `'` (U+0027) alone,
 #: while the product routinely receives the typographic forms — `tortoise/extractor_v2.py`
 #: normalises the same inventory before tokenising for exactly that reason, and this
-#: module's own copula lookahead admits `\u2019` beside `'` (one token class, at `:1219`;
+#: module's own copula lookahead admits `\u2019` beside `'` (one token class; the
+#: class is spelled with the escape, so it is the `['’]` suffix of the word slot in
+#: `_COPULA_SUBJECT` — pointed at by NAME rather than by line number, because a line
+#: pointer is invalidated by the next comment inserted above it, which is exactly what
+#: happened to the `:1219` this note used to carry);
 #: the INVENTORY below is what makes the rest of the family reachable at all).
 #: ⛔ ONE CONSTANT, so the test that pins the family cannot drift off it: the pin asserts
 #: THIS tuple and exercises every member, which is what makes a codepoint added to the
