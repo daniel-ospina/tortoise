@@ -602,11 +602,11 @@ NOT_SELECTED = [
     "is the export archived until the merger",
     "is the export archived as the old policy",
     "is the export archived than the old sharepoint",
-    # …and the one spelling the adverb slot above still gives up, PINNED because "silent" is
-    # the claim (measured): `already` as the AUXILIARY with no `been` leaves the participle
-    # ATTRIBUTIVE (`reports already archived` = a noun phrase), and admitting that adverb back is
-    # the round-7 ACTIVE reading two lines down. `main` routed it, so this is a stated recall
-    # loss, not an advertent one.
+    # …and the spelling the adverb slot above still gives up: `already` as the AUXILIARY with
+    # no `been` leaves the participle ATTRIBUTIVE (`reports already archived` = a noun phrase),
+    # and admitting that adverb back is the round-7 ACTIVE reading two lines down. `main` routed
+    # it, so this is a stated recall loss — and it REPORTS (`existence_unguarded`, turn-3 P2),
+    # because a stated recall loss that is silent is #14033 duty (b) itself. See `NOTICE_ONLY`.
     "have any reports already archived",
     "launch event",
     "onboarding flow",
@@ -1175,6 +1175,25 @@ NOT_SELECTED = [
 #: `^which\s+[^?]{0,60}?<ENDING>`) reds instead of quietly annotating 16 content
 #: rows — which is what the round-6 review measured the first version doing.
 NOTICE_ONLY = [
+    # ⛔ `already`/`ever` AS THE AUXILIARY — THE REFUSAL THAT USED TO BE SILENT (turn-3, P2,
+    # measured at `34b339c75d` vs `main` `70fbd1a27d`). The round-7 decision stands (this class
+    # does NOT route: the adverb admits the ACTIVE reading), but the refusal emitted no notice,
+    # so `have any reports already archived` and its siblings were `population=None,
+    # signal=None` while `main` answered every one of them with `ended`/`existence`. A caller
+    # cannot distinguish that from "nothing has ended", which is duty (b). `_ALREADY_EVER_AUX`'s
+    # arm in `existence_unguarded` reports the cue instead, and the arm is a SIGNAL, so the
+    # routing table is untouched — 0 population/shape moves over the pinned corpus (`SELECTED`
+    # + `NOT_SELECTED` + `NOTICE_ONLY`, 321 DISTINCT queries; ⛔ not the 624 a naive walk of the
+    # three lists yields — `SELECTED` holds `(query, population, shape)` tuples, so a recursive
+    # walk counts 204 population/shape TOKENS as rows, and `NOTICE_ONLY` duplicates `NOT_SELECTED`.
+    # A corpus size that cannot be reproduced from the lists is exactly the kind of stale claim
+    # this module's own cost test exists to prevent, so the reproducible number is the one stated).
+    # ⛔ AND THE ACTIVE-VOICE SIBLING IS STILL SILENT ON PURPOSE — `has the partner already
+    # cancelled` / `has legal already retracted` (no existential quantifier, so no ending CUE is
+    # recognised, and they were silent on `main` too). Pinned in `NOT_SELECTED` only, so an arm
+    # widened to "any auxiliary + adverb" would red here instead of annotating a content query.
+    "have any reports already archived",
+    "have any customers ever cancelled",
     # ⛔ THE ONE ROW WHOSE `cue` IS NOT A PREFIX OF THE CALLER'S OWN STRING (round-29
     # review, P3, measured): `cue` is the matched text AFTER normalisation, so this
     # row's cue spells the apostrophe as ASCII. Without it the pin's apostrophe loop
@@ -1641,6 +1660,125 @@ def test_an_INFINITIVE_or_PROGRESSIVE_subject_is_REFUSED_and_REPORTED():
             f"{query!r} moved to {got!r} — the stated silences of the infinitive class "
             f"are not silences any more, so the prose on `_COPULA_SUBJECT` and the "
             f"`_COPULA_LONG_SUBJECT` arm-B note are now wrong")
+
+
+def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
+    """Turn-3 P2 at `34b339c75d` — the class this branch refuses was refused SILENTLY.
+
+    Making the existence window's auxiliary the literal `been` (round 7, the active-reading
+    decision) left `already`/`ever` AS THE AUXILIARY matching no shape at all. Measured on
+    both ends in one call: `main` `70fbd1a27d` answers `have any reports already archived`
+    with `ended`/`existence`; the head answered `population=None, signal=None`. `main`'s
+    answer was the WRONG one (the active reading) and at least visible — silence is
+    indistinguishable from "nothing has ended", which is #14033 duty (b).
+
+    ⛔ THE FIX IS A NOTICE, NOT A ROUTE, and this test holds BOTH directions:
+      * the refused class reports `existence_unguarded` (the cue is recognised, no
+        population is served);
+      * the routing table does not move — the three spellings that routed on the head keep
+        routing, and `has anything ever been retracted` (a `been` frame) still ROUTES, so
+        the arm did not turn a served population into a notice;
+      * the ACTIVE-VOICE sibling stays SILENT on purpose (it carries no existential
+        quantifier, so no ending cue is recognised — and it was silent on `main` too), and
+        so does the ATTRIBUTIVE content lookup whose ending word modifies the quantifier's
+        own noun.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    refused = [
+        "have any reports already archived",
+        "have any reports ever archived",
+        "have any claims already retracted",
+        "have any claims ever retracted",
+        "have any reports already retracted",
+        "have any reports ever withdrawn",
+        "have any customers ever cancelled",
+        "have any customers already cancelled",
+        "have anything already archived",
+    ]
+    for query in refused:
+        got = detect_state_question(query)
+        assert got.population is None, (
+            f"{query!r} routed to the {got.population!r} population — `already`/`ever` in the "
+            f"auxiliary slot admits the ACTIVE reading, which the round-7 decision refuses")
+        assert got.signal == "existence_unguarded", (
+            f"{query!r} was refused but reports {got.signal!r} — `main` ROUTED this class, so "
+            f"a silent refusal is #14033 duty (b): the caller cannot tell it from 'nothing "
+            f"has ended'")
+
+    # the routing table is untouched: a `been` frame, a copula and a `which` row still route
+    for query, population, shape in (
+        ("has anything ever been retracted", "ended", "existence"),
+        ("is the export already archived", "ended", "is_copula"),
+        ("which commitments were withdrawn", "ended", "which_predicate"),
+    ):
+        got = detect_state_question(query)
+        assert (got.population, got.shape) == (population, shape), (
+            f"{query!r} moved to {(got.population, got.shape)!r} — the notice arm cannot route, "
+            f"so a move here means it was wired into the SHAPE table")
+
+    # the two silences the arm must NOT reach, each for its own measured reason
+    for query in (
+        # no existential quantifier -> no ending CUE is recognised, and silent on `main` too
+        "has the partner already cancelled",
+        "has legal already retracted",
+        # the ending word MODIFIES the quantifier's noun; the predicate is `published`
+        "have any reports already archived been published",
+        "have any archived reports been published",
+        # `recently`/`just` are the same refusal class but were silent on `main` as well: the
+        # arm covers `already|ever` ONLY, and widening it is a separate decision with its own
+        # measurement, not a free extrapolation from this one
+        "have any reports recently archived",
+        "have any reports just archived",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal is None, (
+            f"{query!r} moved to {got!r} — it is one of the silences this arm deliberately does "
+            f"not reach, so the note on `_ALREADY_EVER_AUX` is now wrong")
+
+    # ⛔ THE WINDOW BOUND IS A GUARD NOTHING ELSE HOLDS (fresh review, P2, measured): with
+    # `[^?]{0,60}?` mutated to `*?` the whole suite stayed GREEN while 48 of 56 long-gap probes
+    # changed behaviour, i.e. the bound was a claim with no test behind it. Both sides are pinned
+    # here, so a widening reds instead of silently annotating every long question.
+    for query, expected in (
+        # window ~52 chars — inside the bound, so the cue is the question's and it is reported
+        ("have any reports that the finance team reviewed last year already archived",
+         "existence_unguarded"),
+        # window ~69 chars — past the bound; the cue is not the question's own predicate window
+        # any more, so it is NOT reported (and `main` was silent too)
+        ("have any reports that the finance team archived last year before the merger "
+         "already archived", None),
+    ):
+        got = detect_state_question(query)
+        assert got.signal == expected, (
+            f"{query!r} reports {got.signal!r}, not {expected!r} — the `{0,60}` window bound in "
+            f"ARM C is unpinned again")
+
+    # ⛔ THE ARM IS NOT PURELY ADDITIVE, AND THE DIRECTION IT IS NOT IS A NAMING ONE (fresh
+    # review, P2, measured). The signal rows are ordered and this one sits before
+    # `which_modified_noun`, so a COMPOUND question reports the existence notice instead:
+    # `which_modified_noun` -> `existence_unguarded`, cue replaced. The POPULATION must not move —
+    # that is the claim a signal arm can make — so that is the part pinned.
+    compound = "which customer claims has been archived and have any reports already archived"
+    got = detect_state_question(compound)
+    assert got.population is None, (
+        f"{compound!r} routed to the {got.population!r} population — ARM C is a signal arm and "
+        f"cannot serve a population")
+    assert got.signal == "existence_unguarded", (
+        f"{compound!r} reports {got.signal!r} — a compound question with an `already|ever` frame "
+        f"gets the existence notice, which is EARLIER in `_ENDING_SIGNALS` than "
+        f"`which_modified_noun`; if this changed, the ordering note on ARM C is wrong")
+
+    # ⛔ THE ATTRIBUTIVE RESIDUAL, STATED: silent only when the ending word is IMMEDIATELY
+    # followed by `been`. A qualifier in between puts a `_BLOCKED_TAIL` member there and the
+    # notice fires on a content query — the safe direction, and the same shape the pre-existing
+    # `been` arm already reports (`have any reports been archived in Q3 been published`).
+    for query in ("have any reports already archived in Q3 been published",
+                  "have any reports already archived by legal been published"):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal == "existence_unguarded", (
+            f"{query!r} moved to {got!r} — the qualifier residual on ARM C is stated as a NOTICE "
+            f"on a content query; if it changed, that note is wrong")
 
 
 def test_a_contracted_auxiliary_does_not_silence_the_which_modified_noun_row():
