@@ -1616,7 +1616,8 @@ def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
         "`intentional_keep`, or opt the new read out, which needs no grant.")
     assert len(read_sites) == expected, (
         f"{len(read_sites)} seam CALL SITE(s) of `tortoise_fts_query` "
-        f"in {where}, reached from {len(live)} mention(s), but the "
+        f"in {where}, reached from {len(live)} mention(s) "
+        f"({len(resolved)} attributed by the walk, all of them counted), but the "
         f"exemption's recorded reason says {expected} call sites (a discarded "
         "warm-up, and the measured loop) and the grant is owner-granular — a "
         "further read inside the granted owner is exempted with no recorded "
@@ -1669,6 +1670,52 @@ def run(sdk):
         _seam_check_read_sites(2, live, calls, resolved, unresolved,
                                "the synthetic one-binding-two-calls module")
 
+    # ⛔ AND THE ROW'S FAIL-CLOSED HALF, which is the OTHER way it can be defeated.
+    # `not unresolved` is unfalsifiable if every caller passes 0 — and all three
+    # call sites did, so three one-line edits to the CHAIN (send an opaque mention
+    # to `resolved`, stop skipping on `opaque`, or let an opt-out ignore `opaque`)
+    # emptied `unresolved` for good and brought the escape family back GREEN with
+    # the whole suite passing (round-13 review, P2). Driving the row with a
+    # nonzero `unresolved` is what makes it a graded predicate: `expected` is
+    # correct here, so ONLY the admission can raise.
+    with pytest.raises(AssertionError, match="escaped into a binding shape"):
+        _seam_check_read_sites(3, live, calls, resolved, [*unresolved, live[0]],
+                               "the synthetic one-binding-two-calls module")
+    # …and the count must still be right when nothing escaped, or the two halves
+    # would mask each other: a wrong `expected` raises for the COUNT reason.
+    with pytest.raises(AssertionError, match="CALL SITE"):
+        _seam_check_read_sites(1, live, calls, resolved, unresolved,
+                               "the synthetic one-binding-two-calls module")
+
+    # ⛔ AND END-TO-END THROUGH THE CHAIN, which is the half a row-only pin cannot
+    # reach. Three one-line edits to `_seam_live_reads` — sending an opaque mention
+    # to `resolved`, skipping on `fed` alone, or letting an opt-out ignore `opaque`
+    # — each empty `unresolved` for good and bring the whole escape family back
+    # GREEN. A test that hands the row a non-empty `unresolved` by hand cannot see
+    # that; this one makes the chain produce it, so each of those edits reds HERE
+    # (measured: all three, round-13 review, P2).
+    escaped = '''
+def run(sdk):
+    sdk._tortoise_fts_query(query="a", limit=10)
+    sdk._tortoise_fts_query(query="b", limit=10)
+    return sdk._tortoise_fts_query
+'''
+    etree = ast.parse(escaped)
+    ements = [n for n in ast.walk(etree)
+              if isinstance(n, ast.Attribute)
+              and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+    e_live, e_res, e_unres, e_calls = _seam_live_reads(etree, ements)
+    assert (len(e_live), len(e_res), len(e_unres), len(e_calls)) == (3, 2, 1, 2), (
+        "the chain must ADMIT the escaping mention rather than resolve it away: "
+        f"live={len(e_live)} resolved={len(e_res)} "
+        f"unresolved={len(e_unres)} calls={len(e_calls)}")
+    # The call-site count is exactly the recorded reason's TWO here, so ONLY the
+    # admission can red this — which is precisely what a tree with a third,
+    # unfollowable read looks like.
+    with pytest.raises(AssertionError, match="escaped into a binding shape"):
+        _seam_check_read_sites(2, e_live, e_calls, e_res, e_unres,
+                               "the synthetic escape module")
+
 
 def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     """#14278 F1 — the resolver is not vacuous, and it does not free-ride either.
@@ -1703,9 +1750,12 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     eight mechanisms — including the function-boundary stop that marks a
     method-body binding as a LOCAL — could be deleted with the pin byte-identical
     and GREEN (round-12 review, P3). The `with-target`/`ann` rows grade the two
-    modelled forms nothing else reached, `aug`/`lambda-default`/`def-default`/
+    modelled forms nothing else reached; `aug`/`lambda-default`/`def-default`/
     `class-base`/`class-type-param`/`type-stmt-type-param` grade the escape
-    branches, and `method-local` is the row that must stay DEAD.
+    branches; `decorator-def`/`decorator-class`/`class-kwarg`/`match-value` grade
+    the four that were still bare — and the decorator ones are a REAL read, since
+    Python CALLS a decorator (round-13 review, P3); `method-local` is the row that
+    must stay DEAD.
     """
     source = '''
 class SDK:
@@ -1791,6 +1841,25 @@ def typestmttypeparam(sdk):
 class _M:
     def m(self, s):
         _dead_local = s._tortoise_fts_query
+
+def decorated(sdk):
+    @sdk._tortoise_fts_query
+    def _g():
+        pass
+
+def classdecorated(sdk):
+    @sdk._tortoise_fts_query
+    class _K:
+        pass
+
+def classkw(sdk):
+    class _K2(metaclass=sdk._tortoise_fts_query):
+        pass
+
+def matchvalue(sdk):
+    match 1:
+        case sdk._tortoise_fts_query:
+            pass
 '''
     tree = ast.parse(source)
     mentions = [n for n in ast.walk(tree)
@@ -1817,6 +1886,10 @@ class _M:
         (0, True, []),                  # `class _B(SEAM)` base
         (0, True, []),                  # `class _C[T: SEAM]` bound
         (0, True, []),                  # `type _A[T: SEAM] = int`
+        (0, True, []),                  # `@SEAM` on a def: Python CALLS it
+        (0, True, []),                  # `@SEAM` on a class
+        (0, True, []),                  # `class _K2(metaclass=SEAM)`
+        (0, True, []),                  # `case SEAM:` value pattern
         (1, False, ["ann"]),            # `_ann: object = SEAM; _ann(…)`
         (1, False, ["comprehension"]),  # `for _c in [SEAM]: _c(…)`
         (1, False, ["container"]),      # `_reads = [SEAM]; _reads[0](…)`
