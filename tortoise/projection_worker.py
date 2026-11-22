@@ -44,12 +44,14 @@ WHAT THIS MODULE IS NOT
   `tests/test_durability_posture.py` enforces is NARROWER than what that document
   reserves, and deliberately so: it fires on the claim SHAPES its own regexes
   match — four alternations inside a 40-character window (``CLAIM_RE``), and the two
-  predicate forms re-scanned across line breaks (``WRAPPED_CLAIM_RE``). What escapes
-  it is a promise that takes NEITHER of those shapes — the document's own example
-  is a mechanism promise (a managed store "provides AOF durability"), which "does
-  not match it, and is corrected by hand" (``docs/durability-posture.md``). A loss
-  window that names the log DOES take the shape, so it is caught, not excused.
-  Nothing is ever DROPPED to make room — see *BACKPRESSURE* below.
+  predicate forms re-scanned across line breaks (``WRAPPED_CLAIM_RE``). ⛔ So a
+  restatement is caught only when its WORDING is one of those shapes; one that
+  carries the same meaning in a shape they do not match is not caught. The document
+  names that seam rather than leaving it implicit — a mechanism promise is its
+  worked example ("does not match it, and is corrected by hand"), and it says the
+  general binding from a written claim to the system it describes is #5063, i.e.
+  not this gate's to close. Nothing is ever DROPPED to make room — see
+  *BACKPRESSURE* below.
 * **Not the cache fold.** `live_write`'s ``projection.apply`` (record →
   FalkorDB) still runs inline. Deferring the record is safe because the record
   has an independent, always-available reader and a journal it can be re-derived
