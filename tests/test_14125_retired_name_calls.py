@@ -5367,7 +5367,12 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             if isinstance(node, ast.ExceptHandler)
         ]
         assert _covered(_masking) == _expect, (
-            f"masking runs from a PARENT arm to a later CHILD arm and not back ({_label}): "
+            f"{_label}: two rules decide this set, and only ONE of them is masking. MASKING "
+            f"runs from a PARENT arm to a later CHILD arm and never back (a plain `ImportError` "
+            f"still reaches a parent arm below a child one). DROPPING is not limited that way: "
+            f"a family an earlier CHILD arm DROPPED cannot be credited by a later PARENT arm "
+            f"(the family-close), so the four `child dropped…` rows and `same spelling twice` "
+            f"are pinned by THAT rule and not by masking direction: "
             f"{_covered(_masking)} != {_expect}"
         )
 
