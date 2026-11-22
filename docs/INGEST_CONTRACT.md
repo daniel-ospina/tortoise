@@ -395,16 +395,21 @@ That judgement is `out["relation_declarations"]`.
   bullet below), a **different field on a different object**; a client that
   branches on `rule` will never match it against `code` (#14284 review F2).
   `tests/test_relation_guards_14263.py::TestTheContractExampleIsTheEmittedPayload`
-  compares every STABLE field of this block (the ones above, `direction`
-  included on the reversed case it is defined for) to a real emitted payload, so
-  THOSE cannot drift silently — a field ADDED to the payload still needs an
+  compares the nine `STABLE` fields of this block (`outcome`, `predicate`,
+  `from`, `to`, `rule`, `declaredFor`, `declaredBetweenTheseKinds`,
+  `override`, `undo`) to a real emitted payload, so THOSE cannot drift
+  silently — a field ADDED to the payload still needs an
   example line here. That pin is stronger than the compared set: it ALSO asserts
   `set(emitted) - {target, connection, fromId, toId, message} == STABLE`, so a
   field added to the PAYLOAD reds it. What it cannot see is an extra key in THIS
   example block (round-6 review, P3 — the earlier wording claimed the pin checks
   only the compared set, i.e. the exact opposite of what it asserts). The example
   is a FORWARD write, so it carries no `direction` key and the pin additionally
-  asserts that absence.
+  asserts that absence. ⛔ `direction` is therefore NOT compared to a payload by
+  that pin (round-7 review, P3 — the earlier wording read as if it were): the
+  reversed value is pinned BEHAVIOURALLY, by
+  `TestTheJudgedPairFollowsTheDeclaredDirection` and the reversed-rollup row in
+  `TestIngestCarriesTheReport`, never against this example.
 - ⛔ **`declaredFor` is what the predicate IS declared for — never the pair being
   judged.** If it listed this example's own `dev:api -> dev:database` together with
   `outcome: undeclared_pair`, the block would contradict itself (that was the

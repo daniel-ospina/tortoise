@@ -61,14 +61,16 @@ outcome          when                                             reported?
 ``reversed``     the predicate is declared for the reverse pair   always —
                  and not for the pair as asked                    a DIFFERENT
                                                                   state (§2)
-``abstained``    the declarations cannot answer — see the six     never
+``abstained``    the declarations cannot answer — see the seven   never
                  reasons below
 ===============  ===============================================  ============
 
-The six abstention reasons, each with its own stable id so a test (and a
+The seven abstention reasons, each with its own stable id so a test (and a
 future counter) can tell which premise was missing rather than reading one
-label for six facts (§2's no-flattening rule applies to abstentions too):
+label for seven facts (§2's no-flattening rule applies to abstentions too):
 
+``no-predicate``                  no predicate was supplied at all, so the pair
+                                  leg has no subject to judge
 ``predicate-not-declared``        the `#1934`/`#7551` predicate leg already owns
                                   this write; a pair check has no premise
 ``predicate-declares-no-pair``    a declared WORD with no kind pair — a
