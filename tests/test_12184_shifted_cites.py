@@ -2203,13 +2203,16 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # and NOTHING read it — its `sdk.py:28581` sibling was pinned and the neighbour was not, so a
     # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
     # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
-    # 83 -> 90 at the `#14183` re-cut: the seven rows for addresses no arm read - four
-    # present-tense `05-verify.md` D5 addresses (`:28443`, `:28406`, `:28003`, `:28040`, each
-    # `+21` stale after `main`'s `#14260`), and three cites a review OPENED and found on a
-    # comment/`return` line at every head their documents name (`CAPABILITY-PLACEMENT-AUDIT`'s
-    # `tortoise/sdk.py:42507` and `hosted_api.py:49444`, `ENTITY-VERDICT-BANDS`'s
-    # `entities.py:5066` / `:5238`). Every one of the seven is resolved against the tree by the
-    # content arm, so the count is derived rather than asserted.
+    # 83 -> 90 at the `#14183` re-cut: SEVEN rows for cites that were pinned nowhere. ⛔ The
+    # ATTRIBUTION IS DELIBERATELY NOT ENUMERATED HERE, and that is a correction, not an
+    # omission: an earlier cut of this ledger named four `05-verify.md` D5 addresses and four
+    # other tokens as "the seven", and a review MEASURED that none of those eight is a `_PINS`
+    # row at all (one lives in `_REDEFINED_13854`), while the real net `+7` is the
+    # SUBSTRATE-REBUILD-MAP coordinates this re-cut pinned. An attribution that cannot be
+    # re-derived is the unbacked-claim class this file exists to prevent, so the entry keeps
+    # only what IS re-derivable: the count, and the fact that every row is resolved against
+    # the tree by the content arm below `(_PINS` pins `(doc, token, path, line, fragment)`, so a
+    # row whose address rots reds instead of being carried)
     assert len(_PINS) == 90
 
 
