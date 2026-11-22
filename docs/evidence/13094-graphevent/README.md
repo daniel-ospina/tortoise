@@ -212,7 +212,8 @@ may be a feed re-pointing."* `#13083` §6.3 refused to assume it and named the q
 answer, with the refutations executed rather than argued:
 
 1. **A payload-only emit writes NO journal record at all.** `_emit_event` returns before the JSONL
-   half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16203`, contract restated in
+   half when it carries no `point`, no `id`, and no `turns` (`sdk.py:16226`, the `return None` under the
+   comment at `:16224`, contract restated in
    `event_store.append_event`'s own docstring: *"a payload-only emit writes one with no JSONL record
    at all"*). This is not hypothetical: the turn hard-delete lane calls exactly that shape —
    `sdk._emit_event("PointRetracted", _deleted_point_payload(tid))` (`sdk.py:3801`) — and the
