@@ -2430,24 +2430,29 @@ def test_every_availability_probe_re_raises_a_programming_error():
             "locally and a hard refusal in CI that names no door (#14114 class "
             f"2, #14125):\n{rendered}\n\n"
             "Insert the re-raise arm immediately before the broad handler (one "
-            "tuple, or separate `except ImportError: raise` — the required names are "
-            "`(AttributeError, NameError, TypeError)` between them, PLUS `ImportError` "
-            "when the block imports own code INSIDE the `try`, since that is the seam the "
-            "next gate grades; not one line required). ⛔ CHECK WHAT DROPS FIRST, AND WHICH "
-            "GATE YOU ARE IN: if a NARROW arm ABOVE the re-raise already drops the family — "
-            "e.g. `except ModuleNotFoundError: FLAG = False` above a four-name re-raise — "
-            "the drop site is THAT arm, and a LATER re-raise arm cannot recover the name it "
-            "dropped (credit is family-closed against a dropped family, `_covered`). That "
-            "matters where `ImportError` is REQUIRED — a block importing own code inside "
-            "the `try` (the import-seam gate): there, re-raise or delete the EARLIER "
-            "dropping arm. For THIS gate alone `ImportError` is not required, and a "
-            "re-raise arm naming `(AttributeError, NameError, TypeError)` above the broad "
-            "handler DOES clear it (measured, review of PR #14287 cycle 6: the tree holds "
-            "21 root rows that import no own code inside the `try`, 18 of them swallowing) "
-            "— so do not delete such an arm as dead code, and do not re-raise a dropper "
-            "blindly either: on an absent optional/third-party module, re-raising its "
-            "`ModuleNotFoundError` turns a legitimate skip into a collection error (the "
-            "DECLARED RESIDUAL on `_swallows_everything`). Keep the broad arm: an "
+            "tuple, or separate arms — the required names are "
+            "`(AttributeError, NameError, TypeError)`, PLUS `ImportError` when the block "
+            "imports own code INSIDE the `try` (the seam the next gate grades); not one "
+            "line required). ⛔ CHECK WHAT DROPS FIRST: a re-raise arm placed BELOW an "
+            "earlier narrow dropper can NEVER recover the family it dropped — `_covered`'s "
+            "family-close is keyed on ANY family, not only `ImportError` (measured, review "
+            "of PR #14287 cycle 7). So ask WHICH family the earlier arm drops: "
+            "`except ModuleNotFoundError:` withholds `ImportError` and therefore bites only "
+            "where that name is required (a block importing own code inside the `try`); "
+            "`except UnboundLocalError:` withholds `NameError`, and `except AttributeError:` "
+            "or `except TypeError:` withhold names required in EVERY block, so those bite "
+            "anywhere. WHERE THE DROPPED FAMILY IS REQUIRED, re-raise or delete the EARLIER "
+            "dropping arm — adding a second arm below it cannot clear the gate (measured: "
+            "an `except UnboundLocalError: pass` above a four-name re-raise stays RED even "
+            "with an extra three-name re-raise arm beneath it). Where it is NOT required "
+            "(an absent optional/third-party module's `ModuleNotFoundError`, in a block that "
+            "imports no own code inside the `try`), keep the legitimate skip and add the "
+            "re-raise arm for the REMAINING required names immediately above the broad "
+            "handler — that DOES clear this gate (measured, cycles 6-7; the tree holds 21 "
+            "root rows that import no own code inside the `try`, 18 of them swallowing). "
+            "Do not re-raise a dropper blindly either: on an absent optional/third-party "
+            "module it turns a legitimate skip into a collection error (the DECLARED "
+            "RESIDUAL on `_swallows_everything`). Keep the broad arm: an "
             "absent server raises `redis.exceptions.ConnectionError` (a "
             "`RedisError`, NOT an `OSError`), so narrowing to `OSError` would "
             "turn a real skip into an error."
@@ -5360,9 +5365,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         ),
         (
             #: …and a mixed tuple credits only the names the earlier arm neither caught nor
-            #: dropped — the "per-NAME, not per-arm" rule, which nothing else pinned
-            #: (review of #14287, P2-5). `ImportError` is DROPPED by arm 1 and `TypeError` is
-            #: untouched, so a per-ARM credit would take both and a per-NAME credit takes one.
+            #: dropped — the "per-NAME, not per-arm" rule (review of #14287, P2-5).
+            #: `ImportError` is DROPPED by arm 1 and `TypeError` is untouched, so a per-ARM
+            #: credit would take both and a per-NAME credit takes one. ⛔ This row is not the
+            #: rule's ONLY witness: measured with a per-arm variant of the family-close (credit
+            #: the arm only when NONE of its names was dropped), BOTH this row and `child
+            #: dropped, then four-name raise` above go RED — the earlier comment's "which
+            #: nothing else pinned" was false (review of PR #14287 cycle 7).
             "child dropped, then a mixed tuple",
             "except ModuleNotFoundError:\n    _p = None\nexcept (ImportError, TypeError):\n    raise\n",
             {"TypeError"},
