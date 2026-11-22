@@ -850,7 +850,25 @@ _COPULA_SUBJECT = (
     # the tokens below (`is the data all archived`, `has the onboarding flow been
     # retired`, `is the v3 export deprecated`).
     r"where|whereas|after|before|now|what|how|why|has|have|had|is|are|was|were|will|"
-    r"would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
+    r"would|can|could|may|might|must|should|do|does|did|"
+    # ⛔ AND AN INFINITIVE OR PROGRESSIVE COPULA IS A SECOND VERB TOO (review P1 at
+    # `42e0c1a662`, measured). `to be` and `being` were the ONE second-verb form this
+    # lookahead did not name, so the subject swallowed them as noun-phrase words and the
+    # shape ROUTED with the qualifier dropped and `signal=None`:
+    #
+    #   `is the export to be archived`        <- scheduled / FUTURE state
+    #   `is the data being archived`          <- progressive
+    #   `is the export yet to be archived`    <- the OPPOSITE of archived
+    #   `is the export supposed to be archived` / `… going to be …` / `… due to be …`
+    #
+    # All of them serve the whole ended population, which cannot contain a row that is
+    # pending-but-not-yet-ended — so the caller reads a full population as "no", with
+    # `yet to be` answered upside down, and no notice. That is #14033's own defect on the
+    # shape this PR adds. Measured: 240 of 240 templated `<is|are> <subject> <infinitive>
+    # <ending>` probes routed with no signal, and 0 of the pinned routing rows change
+    # under this exclusion (a `to` that is a PREPOSITION rather than an infinitive —
+    # `is the export to Europe archived` — carries no `be`, so it still routes).
+    r"to\s+be|being)(?![-/])\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
     # ⛔ A PREPOSITION IS NOT A SECOND NOUN PHRASE (review P1, measured). `of` was
     # already excluded here — a genitive (`the export of the vendor`) is ONE noun
@@ -1059,8 +1077,19 @@ _WHICH_MODIFIED_NOUN = re.compile(
 #: `is_copula_long_subject`. That leak is a notice on a content question — the safe
 #: direction (a report, never a route) — and it is recorded rather than claimed
 #: closed.
+#: ⛔ AND IT CARRIES TWO ARMS, because the shape can refuse a SHORT subject too (review
+#: P1 at `42e0c1a662`, measured). Arm A is the long subject above. Arm B is the
+#: INFINITIVE OR PROGRESSIVE SUBJECT — `is the export to be archived`, `is the data
+#: being archived` — which the shape's own second-verb lookahead now refuses, and whose
+#: subject is FOUR words or fewer, so arm A's `{5,}` never saw it: measured, both were
+#: SILENT after the exclusion alone, which would have traded one #14033 defect (a route
+#: with the qualifier dropped) for the other one (an unrouted state question that looks
+#: like an honest empty answer). Arm B reports them: a report is advice on a refused
+#: cue, never a route, and the population served stays the relevance read.
 _COPULA_LONG_SUBJECT = re.compile(
     rf"^(?:is|are|was|were)\s+"
+    rf"(?:"
+    # ARM A — the subject runs past the shape's four-word bound.
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     rf"(?!(?:[a-z0-9'’._/-]+\s+){{0,12}}"
     # ⛔ `and`/`or` are NOT in this list: they introduce no finite verb, and a
@@ -1071,7 +1100,20 @@ _COPULA_LONG_SUBJECT = re.compile(
     rf"which|who|whom|whose|where|is|are|was|were|has|have|had|do|does|did|will|"
     rf"would|can|could|may|might|must|should)\b)"
     rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{5,}}"
-    rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b{_BLOCKED_TAIL}"
+    rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
+    rf"|"
+    # ARM B — the subject carries an infinitive or progressive copula, so the ending
+    # participle is inside a scheduled/future (`to be archived`) or ongoing (`being
+    # archived`) verb phrase rather than a state the ended population can answer. The
+    # same subordinator/second-auxiliary negation applies: a clause that SUPPLIES the
+    # predicate is still not this question's.
+    rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
+    rf"(?!.*\b(?:because|that|given|since|when|while|if|unless|which|who|whom|"
+    rf"whose|where)\b)"
+    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{1,5}}(?:to\s+be|being)\s+"
+    rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
+    rf")"
+    rf"{_BLOCKED_TAIL}"
 )
 
 _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (

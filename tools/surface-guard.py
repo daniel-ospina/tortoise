@@ -632,13 +632,26 @@ def main(argv: list[str]) -> int:
             module it imported would be PR-authored — see the `#4828` note above and
             `tests/test_surface_manifest.py::test_the_pinned_gate_imports_only_its_allow_
             listed_modules`. The net that keeps the two copies in step is behavioural:
-            `test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE` drives BOTH
-            drivers against the same duplicated artifact and requires BOTH to refuse.
+            `test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE` and
+            `test_the_duplicate_key_loader_DOES_still_accept_a_merge_key` drive BOTH
+            drivers against the same artifacts and require BOTH to agree — the first
+            version of this copy omitted the merge-tag skip the sibling already had, and
+            the two gates disagreed on a file with no duplicate at all.
             """
 
             def construct_mapping(self, node, deep=False):
+                # ⛔ SKIP THE MERGE TAG, DO NOT FLATTEN BEFORE THE SCAN — the same rule,
+                # and the same two measured reasons, as
+                # `tools/surface_manifest.py::_NoDuplicateKeyLoader`: handing this
+                # pre-scan the raw `<<:` tag makes `construct_object` die with "could not
+                # determine a constructor for the tag 'tag:yaml.org,2002:merge'" on a
+                # file that has no duplicate at all, and flattening FIRST would read the
+                # ordinary `<<: *base` plus an explicit override as a duplicate, which
+                # YAML says it is not. The parent constructor flattens for itself.
                 seen: set = set()
                 for key_node, _value_node in node.value:
+                    if key_node.tag == "tag:yaml.org,2002:merge":
+                        continue
                     try:
                         key = self.construct_object(key_node, deep=deep)
                         hash(key)

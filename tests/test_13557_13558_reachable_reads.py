@@ -387,6 +387,12 @@ SELECTED = [
     ("has the data all been archived", "ended", "is_copula"),
     ("has the reports both been archived", "ended", "is_copula"),
     ("have the claims each been withdrawn", "ended", "is_copula"),
+    # ── a PREPOSITIONAL `to` IS NOT AN INFINITIVE (review P1 at `42e0c1a662`) ───────
+    # The infinitive exclusion added to `_COPULA_SUBJECT` names `to be` — a PHRASE, not
+    # the word `to` — so a `to` that introduces a noun keeps routing. Pinned because the
+    # cheap wrong fix is `to`, which would have killed every `is the export to Europe
+    # archived` question on this shape.
+    ("is the export to Europe archived", "ended", "is_copula"),
 ]
 
 
@@ -904,6 +910,25 @@ NOTICE_ONLY = [
     "is the contract every employee signed archived",
     "is the report each manager reviewed archived",
     "is the dashboard all customers use deprecated",
+    # ── the INFINITIVE / PROGRESSIVE class (review P1 at `42e0c1a662`, measured) ────
+    # `to be` and `being` inside the subject are a SECOND VERB, not noun-phrase words, so
+    # the shape must not route: `is the export to be archived` asks about a scheduled /
+    # future state, `is the data being archived` about one in progress, and `is the export
+    # yet to be archived` is the OPPOSITE of archived. Measured before the fix: all three
+    # served the WHOLE ended population with the qualifier dropped and `signal=None` —
+    # #14033's own defect on the shape this PR adds. They are REPORTED now, through
+    # `is_copula_long_subject` (arm B), because a refused state question that says nothing
+    # is the other half of the same defect.
+    "is the export to be archived",
+    "is the data being archived",
+    "is the export yet to be archived",
+    "is the export supposed to be archived",
+    "is the export going to be archived",
+    "is the export due to be archived",
+    "is the report to be retired",
+    "is the claim being withdrawn",
+    "is the export to be archived by the vendor",
+    "is the export to be archived in Q3",
     # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
     # that is now stated and machine-checked (review at `5b82bcdf03`, P2, measured) ──
     # The PREPOSITIONS `_BLOCKED_TAIL` names are REPORTED on this shape (see the
@@ -961,6 +986,74 @@ def test_none_is_a_full_scan_not_a_question():
     from tortoise.state_intent import detect_state_question
 
     assert detect_state_question(None).population is None
+
+
+def test_an_INFINITIVE_or_PROGRESSIVE_subject_is_REFUSED_and_REPORTED():
+    """Review P1 at `42e0c1a662` — the shape this PR adds was routing a FUTURE state.
+
+    `to be` and `being` inside the subject are a second verb. The subject slot read them
+    as noun-phrase words, so `is the export to be archived` (a SCHEDULED state), `is the
+    data being archived` (one in progress) and — worst — `is the export yet to be
+    archived` (the OPPOSITE of archived) each served the WHOLE ended population with the
+    qualifier dropped and `signal=None`. The ended population cannot contain a row that
+    is pending-but-not-yet-ended, so a caller reads a full answer as "no" and never
+    learns the cue was refused. Measured before the fix: 240 of 240 templated
+    `<is|are> <subject> <infinitive> <ending>` probes routed with no signal.
+
+    ⛔ THE FIX IS A GUARD PLUS A NOTICE, and both halves are asserted here: refusing
+    without reporting trades one #14033 defect (a route with the qualifier dropped) for
+    the other one (an unrouted state question that looks like an honest empty answer).
+    ⛔ AND IT IS `to be`, NOT `to`: the prepositional spelling must keep routing, which is
+    the class the cheap wrong fix (`to`) would have killed.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    refused = [
+        "is the export to be archived",
+        "is the data being archived",
+        "is the export yet to be archived",
+        "is the export supposed to be archived",
+        "is the export going to be archived",
+        "is the export due to be archived",
+        "is the export scheduled to be archived",
+        "is the report to be retired",
+        "is the claim being withdrawn",
+    ]
+    for query in refused:
+        got = detect_state_question(query)
+        assert got.population is None, (
+            f"{query!r} routed to the {got.population!r} population — the infinitive or "
+            f"progressive verb phrase inside the subject was read as a noun phrase, so "
+            f"the question's own tense and qualifier were dropped (#14033 class)")
+        assert got.signal == "is_copula_long_subject", (
+            f"{query!r} was refused but reports {got.signal!r} — a silent refusal is the "
+            f"other half of the #14033 defect: an unrouted state question must be "
+            f"distinguishable from an empty answer")
+
+    # a prepositional `to` introduces a NOUN, not an infinitive: it must keep routing
+    for query in ("is the export to Europe archived", "is the export archived"):
+        got = detect_state_question(query)
+        assert got.population == "ended", (
+            f"{query!r} is a plain state question but no longer routes ({got!r}) — the "
+            f"infinitive guard was widened to the word `to`")
+
+    # ⛔ THE TWO SILENCES THIS FIX LEAVES, STATED AND PINNED (a report that claimed the
+    # class closed would be the drift this branch has already paid for twice):
+    #   * a subordinate clause SUPPLIES the predicate (`is it true that the export is to
+    #     be archived`) — the same content class the existing subordinator guard refuses;
+    #   * a CAUSAL qualifier (`is the plan being retired because of the migration`) is the
+    #     class this module refuses deliberately (see the guard-B note).
+    # Both stay silent, and this test makes that a decision on the record rather than a
+    # discovery for the next reviewer.
+    for query in (
+        "is it true that the export is to be archived",
+        "is the plan being retired because of the migration",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal is None, (
+            f"{query!r} moved to {got!r} — the stated silences of the infinitive class "
+            f"are not silences any more, so the prose on `_COPULA_SUBJECT` and the "
+            f"`_COPULA_LONG_SUBJECT` arm-B note are now wrong")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1168,13 +1261,20 @@ def _the_two_guards():
     pattern = state_intent._COPULA_SUBJECT
     subordinators = re.search(
         r"\(\?!\(\?:\[a-z0-9\]\[a-z0-9[^)]*\)\{1,5\}\("
-        r"(?:\?:)?([a-z|]+)\)", pattern)
+        # ⛔ THE MEMBER CLASS IS NOT `[a-z|]+` ANY MORE (review P1 at `42e0c1a662`): the
+        # second-verb list now also refuses the INFINITIVE (`to\s+be`) and progressive
+        # (`being`) copula, so a single member carries a regex escape. Widening the
+        # capture rather than moving the member out of the list keeps ONE home for the
+        # class — the drift between two copies of a closed list is the failure this
+        # branch has already paid for twice on the preposition class.
+        r"(?:\?:)?([a-z|\\s+]+)\)", pattern)
     second_np = re.search(r"\{0,4\}\(\?!\(\?:([a-z|]+)\)", pattern)
     assert subordinators and second_np, (
         "`_COPULA_SUBJECT` no longer parses into its two alternations — re-derive this "
         "test AND the note it checks against the new pattern, rather than deleting the "
         "check: the note is a claim about exactly these two lists")
-    return (frozenset(subordinators.group(1).split("|")),
+    # `to\s+be` is read back as `to be` so the set holds what a reader would write.
+    return (frozenset(tok.replace("\\s+", " ") for tok in subordinators.group(1).split("|")),
             frozenset(second_np.group(1).split("|")))
 
 

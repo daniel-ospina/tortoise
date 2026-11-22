@@ -1425,6 +1425,40 @@ def test_the_duplicate_key_loader_DOES_still_accept_a_merge_key(tmp_path):
     with pytest.raises(yaml.constructor.ConstructorError, match="duplicate key 'a'"):
         yaml.load("a: 1\na: 2\n", Loader=loader)
 
+    # ⛔ AND THE PINNED GUARD'S OWN COPY MUST AGREE (#14033 review P2, measured). The
+    # guard is base-ref pinned, so it carries a SECOND copy of this loader rather than
+    # importing `tools/surface_manifest.py`; the first cut of that copy omitted the
+    # merge-tag skip added here, and the two gates then DISAGREED on a file with no
+    # duplicate at all — measured on a manifest carrying `<<: *base` plus an explicit
+    # override: the derivation read it, the guard exited 1 with
+    # "could not determine a constructor for the tag 'tag:yaml.org,2002:merge'". A unit
+    # arm over `sm._NoDuplicateKeyLoader` cannot catch that, so drive the REAL guard on
+    # the REAL artifact: a merge-keyed baseline must pass exactly like the plain one.
+    probe = MANIFEST.read_text(encoding="utf-8") + _MERGE_PROBE_BLOCK
+    merge_path = tmp_path / "merge-key.yml"
+    merge_path.write_text(probe, encoding="utf-8")
+    guard = _run("tools/surface-guard.py", "--manifest", str(merge_path))
+    assert guard.returncode == 0, (
+        "the pinned guard refused a manifest that uses a merge key, which the derivation "
+        f"reads — the two copies of the duplicate-check have diverged: {guard.stdout!r} "
+        f"{guard.stderr!r}")
+    assert "tag:yaml.org,2002:merge" not in (guard.stdout + guard.stderr), (
+        "the guard died on the merge tag instead of reading it: "
+        f"{guard.stdout!r} {guard.stderr!r}")
+
+
+#: A merge key plus an explicit override of one merged key (YAML: the explicit key
+#: wins). Appended to the committed baseline so the artifact stays a real manifest —
+#: the guard's own reader must get past the `<<:` tag to grade anything at all.
+_MERGE_PROBE_BLOCK = """
+_parity_probe: &parity_probe
+  probe_key: 1
+  other_key: 2
+_parity_probe_merged:
+  <<: *parity_probe
+  probe_key: 9
+"""
+
 
 def test_the_check_refuses_when_the_ordering_table_is_missing(tmp_path, monkeypatch, capsys):
     sm = _load_manifest_tool()
