@@ -252,15 +252,18 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1140 lines at this head, measured through THIS
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1147 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`.
     "Re-derive it after a prose edit instead of trusting the figure" was advice nothing
-    enforced, and FOUR separate figures have now been carried forward wrong because of it:
+    enforced, and FIVE separate figures have now been carried forward wrong because of it:
     1049 was published while the walk returned 1056, then 1050 while it returned 1063, and
     `#14258`'s own two prose commits took the run to 1066 on `main` while a sibling sentence
     still said 985 — true at `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of
-    #14258, P3) — and the #14282/#14258 merge recorded below moved it again. The number is
-    now a gate, not a note. `#14086` left one blank line inside the run and it silently
+    #14258, P3) — then the #14282/#14258 reconciliation recorded below moved it to 1140, and
+    this head's re-anchor of `main`'s positionally-addressed note (see the `NAMED BY ITS TEXT`
+    note in the block) moved it to 1147. FIVE readings of FIVE different trees, every one of
+    them honest, which is exactly why the number is now a gate rather than a note.
+    `#14086` left one blank line inside the run and it silently
     shrank to 22 until the #14188 repair), AND THE ARMS GRADE
     ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
