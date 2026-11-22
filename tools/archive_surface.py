@@ -435,6 +435,23 @@ def _anchor_violations(
     # is the same class the `block_holds` docstring names, fixed at the writer and not at the gate.
     blob = _blob_following_links(root, sha, source_path)
     if blob is None:
+        # ⛔ ABSENCE AND AN EXHAUSTED BOUND ARE NOT THE SAME ANSWER (round-25 follow-up, P3 —
+        # measured). `_blob_following_links` answers `_UNREADABLE` for BOTH "this path is not in
+        # that commit" and "the link chain exceeds `_LINK_HOPS`", and the sentence below is only
+        # true of the FIRST: on a chain past the bound the commit DOES contain the code, so "the
+        # anchor names a commit that never contained this code" sends the operator to re-anchor a
+        # record that is correct. Round 25 fixed this same conflation in `block_holds` and
+        # `anchor_sha`; this was the third reader of the one datum, still reading it as absence.
+        # The carrier's own presence at the commit is the discriminator: `_git_blob` answers a
+        # symlink's LINK TEXT (never `None`), so a readable carrier plus an unreadable walk means
+        # the BOUND stopped it.
+        if _git_blob(root, sha, source_path) is not None:
+            return [
+                f"{symbol}: {rel}'s block cites {sha}:{source_path}, whose link chain exceeds "
+                f"`_LINK_HOPS` ({_LINK_HOPS}) hops, so the committed body cannot be read: "
+                "shorten the chain (or point the carrier straight at the file) and re-archive. "
+                "⛔ This is NOT a missing anchor and NOT a working-tree difference."
+            ]
         return [
             f"{symbol}: {rel}'s block cites {sha}:{source_path}, which the anchored commit does "
             "NOT hold — the commit IS present in this clone, so its absence is not a fetch gap: "
