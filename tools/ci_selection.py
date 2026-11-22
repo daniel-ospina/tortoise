@@ -3776,7 +3776,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Same #1349/#3332/#3616 silent-drop class as the `tools/` entries above.
              # Pinned by
              # tests/test_ci_selection.py::test_ram_window_census_tool_change_selects_core_not_tier1.
-             "tools/ram_window_census.py")
+             "tools/ram_window_census.py",
+             # #14192: the read-latency harness, and the SAME silent-drop class one tool
+             # over (`tests/test_14192_read_wave_tool.py` is `core`-registered and pins
+             # this file's verdict — the two halves of `_result_id`, and `compare()`'s
+             # refusal to publish `rank_identical` when an arm recorded no ids).
+             # MEASURED before this entry at `5c9cfe540761`:
+             # `--changed-files tools/read_wave_latency.py --event pull_request` ->
+             # `surfaces: []`, `full: false` — `tools/` is in `NON_PYTHON_PREFIXES`, so
+             # the path is filtered out BEFORE the "not matched -> core" fallback and
+             # `select()` takes the docs-only early return. The pin was therefore ABSENT
+             # on the one diff able to re-introduce the defect it exists for: recording
+             # the fused order as `None` for every hit, which is how a verdict that could
+             # never go red shipped in the first place. With the entry: `surfaces:
+             # ['core']` and the file is selected. Pinned by
+             # tests/test_14192_read_wave_tool.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/read_wave_latency.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
