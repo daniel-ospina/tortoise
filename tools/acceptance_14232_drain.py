@@ -227,7 +227,9 @@ class _InProcessTransport:
         """
         from tortoise.billing import apply_limits
         from tortoise.hosted_api import (
-            _get_onboarding_state, _make_sdk, _update_onboarding_state,
+            _get_onboarding_state,
+            _make_sdk,
+            _update_onboarding_state,
         )
 
         registry = _make_sdk(namespace="registry")._get_registry()
@@ -302,7 +304,9 @@ def _percentile(values: list[float], pct: float) -> float:
     ordered = sorted(values)
     # Nearest-rank: with n=50 a p95 must be an OBSERVED value, never a spline
     # through two of them — the claim "p95 ack" has to be a request the run made.
-    idx = min(len(ordered) - 1, max(0, int(round(pct / 100.0 * len(ordered))) - 1))
+    # `round()` already returns an int in Python 3, so no `int()` wrapper
+    # (ruff RUF046): the cast was redundant and read as if a float could arrive.
+    idx = min(len(ordered) - 1, max(0, round(pct / 100.0 * len(ordered)) - 1))
     return ordered[idx]
 
 

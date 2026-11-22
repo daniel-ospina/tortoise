@@ -428,16 +428,20 @@ else:  # pragma: no cover — Python < 3.9
 # The wait-bound refusal's log line and its analytics prop both read ONE closed
 # vocabulary (`read_stages`), so the capture path marks into THAT timeline
 # rather than growing a second instrument that could not publish at all.
-from tortoise.write_verb import (  # noqa: E402 — the ACK's envelope
-    STATUS_ACCEPTED as _STATUS_ACCEPTED,
-    build_write_verb as _build_write_verb,
-)
 from tortoise.read_stages import (  # noqa: E402 — grouped with the capture seam
     STAGE_CAPTURE_EXTRACT,
     STAGE_CAPTURE_GATES,
     STAGE_CAPTURE_TAIL,
     STAGE_CAPTURE_WRITE,
+)
+from tortoise.read_stages import (  # noqa: E402 — grouped with the capture seam
     mark as _mark_capture_stage,
+)
+from tortoise.write_verb import (  # noqa: E402 — the ACK's envelope
+    STATUS_ACCEPTED as _STATUS_ACCEPTED,
+)
+from tortoise.write_verb import (  # noqa: E402 — the ACK's envelope
+    build_write_verb as _build_write_verb,
 )
 
 _CAPTURE_MAX_IN_FLIGHT = max(1, min(_int_env("TORTOISE_CAPTURE_IN_FLIGHT", 8), 16))
@@ -702,7 +706,7 @@ async def _mark_capture_extraction_phase(proj, session_id: str, phase: str,
             return
         await _run_off_loop(_CAPTURE_EXECUTOR, _write_capture_phase,
                             proj, session_id, phase, now)
-    except Exception:  # noqa: BLE001 — bookkeeping on a committed record
+    except Exception:  # bookkeeping on a committed record
         _logger.debug("capture phase write failed (session %s)", session_id,
                       exc_info=True)
 
@@ -21364,7 +21368,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # observe would be pure cost.
     _capture_phase_view = {"phase": "queued", "armed": False}
 
-    async def _extract_capture() -> dict:  # noqa: ANN202 — the extraction lane
+    async def _extract_capture() -> dict:  # the extraction lane
         """The post-record half of a capture: extract, then report what happened.
 
         Runs INLINE on the lanes that do not extract (today's behaviour, today's
@@ -21602,7 +21606,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         return {"extracted": extracted, "meta": meta,
                 "tenant_vocab_warning": tenant_vocab_warning}
 
-    async def _report_capture(_lane_result: dict) -> dict:  # noqa: ANN202
+    async def _report_capture(_lane_result: dict) -> dict:  # the report half
         """Everything the extraction makes reportable, and the receipt (#14232).
 
         Split from `_extract_capture` so the ACK's join window covers ONLY the
@@ -23071,7 +23075,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # would be the one thing worse than answering late (the #2988
                 # doctrine — the bound abandons the AWAIT, never the worker).
                 _joined = await asyncio.wait_for(asyncio.shield(task), _grace)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 _joined = _NO_JOIN
             except asyncio.CancelledError:
                 # The REQUEST went away mid-join. Today that abandoned the
@@ -23135,6 +23139,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # that marker exists).
     from tortoise.capture_spool import (
         UNRECORDED_OUTCOME_KEY as _UNRECORDED_KEY,
+    )
+    from tortoise.capture_spool import (
         UNRECORDED_OUTCOME_VALUE as _UNRECORDED_VALUE,
     )
 
@@ -52174,7 +52180,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 202 tracked files (747 distinct
+# ABSOLUTE line number from 202 tracked files (749 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

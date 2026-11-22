@@ -49,8 +49,9 @@ import time
 import pytest
 
 import tortoise.hosted_api as ha
-from tests.test_hosted_api import TEST_ORG_ID  # noqa: F401 — fixture side effects
-from tests.test_hosted_api import client as client  # noqa: F401 — the fixture
+from tests.test_hosted_api import TEST_ORG_ID  # fixture side effects
+from tests.test_hosted_api import client as client  # the `client` fixture
+
 
 @pytest.fixture(autouse=True)
 def _offline_extractor(monkeypatch):
@@ -590,11 +591,16 @@ def test_the_in_budget_receipt_survives_the_production_deadline(
 
     So this row MEASURES first and only then produces a verdict: the warm-up
     capture (which also pays the mock seam's import/first-call cost, a cost the
-    deadline is not a claim about) is timed end to end, and where that
-    measurement is not comfortably inside the production window the row reports
-    INCONCLUSIVE instead of red. On a host that can carry the claim, the
-    assertion is unchanged and the production constant is still what is
-    exercised.
+    deadline is not a claim about) is timed end to end, and it decides whether
+    the DEFAULT verdict is attributable. On a host that can carry the claim the
+    production deadline is asserted in full. On one that cannot, the row does
+    not SKIP — a skip observes nothing — and it does not claim the deadline
+    verdict either. It asserts what holds on BOTH arms: each body is one of the
+    two documented shapes and never a half-shape, and either way the capture
+    still reaches its terminal record with the in-flight phase cleared. That
+    last leg is what a regression would actually red, and it is load-independent
+    — which is why the row is worth running on every host rather than only on
+    an idle one.
     """
     started = time.monotonic()
     warm = client.post("/v1/sessions", json={
@@ -602,12 +608,9 @@ def test_the_in_budget_receipt_survives_the_production_deadline(
     assert warm.status_code == 200, warm.text
     _drain_tails()
     warm_s = time.monotonic() - started
-    if warm_s > 0.25:  # half the production window: no room left to attribute a miss
-        pytest.skip(
-            "INCONCLUSIVE on this host: a whole offline mock capture measured "
-            f"{warm_s * 1000:.0f} ms against the production {_PRODUCTION_ACK_DEADLINE_S} s "
-            "window, so a missed join here would name the host's load rather than "
-            "the deadline (#5049 rule 1). Not a red, not a pass.")
+    # Half the production window: below this there is room to attribute a miss to
+    # the deadline, above it the miss would name the host.
+    attributable = warm_s <= 0.25
 
     _force_join(monkeypatch, _PRODUCTION_ACK_DEADLINE_S)
     ack_started = time.monotonic()
@@ -615,17 +618,47 @@ def test_the_in_budget_receipt_survives_the_production_deadline(
         "conversation": _CONV, "session_id": "s-14232-prod-window"})
     ack_s = time.monotonic() - ack_started
     assert r.status_code == 200, r.text
-    assert ack_s < _PRODUCTION_ACK_DEADLINE_S, (
-        f"the in-budget receipt must land INSIDE the window it is named for: "
-        f"ack took {ack_s * 1000:.0f} ms of {_PRODUCTION_ACK_DEADLINE_S} s "
-        f"(a warm capture on this host measured {warm_s * 1000:.0f} ms)")
     body = r.json()
-    assert "extraction" not in body, (
-        "the join missed the PRODUCTION 0.5 s deadline on an offline mock "
-        f"capture — that deadline is too tight: {sorted(body)}")
-    assert body["status"] in ("ok", "partial"), body
-    assert body["extracted"] >= 1, body
+    joined = "extraction" not in body
+    if attributable:
+        assert ack_s < _PRODUCTION_ACK_DEADLINE_S, (
+            f"the in-budget receipt must land INSIDE the window it is named for: "
+            f"ack took {ack_s * 1000:.0f} ms of {_PRODUCTION_ACK_DEADLINE_S} s "
+            f"(a warm capture on this host measured {warm_s * 1000:.0f} ms)")
+        assert joined, (
+            "the join missed the PRODUCTION 0.5 s deadline on an offline mock "
+            f"capture — that deadline is too tight: {sorted(body)}")
+    else:
+        # ⛔ NOT A SKIP, because the invariants below hold on BOTH arms and are
+        # worth observing on every host. A miss here cannot be attributed to the
+        # deadline (`#5049` rule 1), so the row does not CLAIM that verdict — but
+        # it still refuses a half-shape: `accepted` may not carry a real count,
+        # a receipt may not carry the ack's block, and the deferred arm must keep
+        # the client's unrecorded-outcome marker (`#12362`).
+        from tortoise.capture_spool import (
+            UNRECORDED_OUTCOME_KEY,
+            UNRECORDED_OUTCOME_VALUE,
+        )
+        if not joined:
+            assert body["status"] == "accepted", body
+            assert body["extracted"] == 0 and body["points"] == [], body
+            assert body["extraction_mode"] is None, body
+            assert body["extraction"]["outcome_known"] is False, body["extraction"]
+            assert body[UNRECORDED_OUTCOME_KEY] == UNRECORDED_OUTCOME_VALUE, body
+    if joined:
+        assert body["status"] in ("ok", "partial"), body
+        assert body["extracted"] >= 1, body
+
+    # ⛔ WHICHEVER ARM RAN, the production window bounds the ANSWER and never the
+    # work: the record must still reach its terminal state. This assertion is
+    # load-independent, and it is the one a regression would actually red.
     _drain_tails()
+    row = _session_row("s-14232-prod-window")
+    assert row and row[0][1] is True, (
+        f"the join deadline must never decide whether the capture COMPLETES — "
+        f"arm={'joined' if joined else 'deferred'}, record={row}")
+    assert row[0][3] is None and row[0][4] is None, (
+        f"the terminal record must clear the in-flight phase: {row}")
 
 
 # ── R4: the in-flight key outlives the tail ──────────────────────────────
@@ -804,15 +837,24 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     # with `{'stage': 'capture_gates', 'stages_ms': {'pre_handler': 24.1}}`.
     # Stubbing the quota read to a constant leaves ONE thing able to cross the
     # bound: the deliberately slow write.
+    #
+    # ⛔ AND IT WAS STILL NOT ENOUGH (measured at the round-4 head, with the stubs
+    # above in place): the row reddened `stage=capture_gates` with
+    # `stages_ms={'pre_handler': 70.5}` — the pre-handler work finished in 70 ms
+    # and the request then sat for the rest of the 0.35 s BEFORE the endpoint
+    # marked `capture_gates`, so a 0.35 s bound is simply shorter than this box's
+    # cold start on a freshly-created graph. A wider margin makes the row
+    # attributable WITHOUT weakening it: the breach still lands inside the write,
+    # because the write is the only leg made to outlast the bound.
     monkeypatch.setattr(ha, "_session_extraction_estimate", lambda *_a, **_kw: 0)
     import tortoise.quota as _quota
     monkeypatch.setattr(_quota, "count_org_usage",
                         lambda *_a, **_kw: 0)
-    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.35)
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 3.0)
     real_write = ha._write_session_and_turns
 
     def _slow_write(*args, **kwargs):
-        time.sleep(0.8)
+        time.sleep(5.0)
         return real_write(*args, **kwargs)
 
     monkeypatch.setattr(ha, "_write_session_and_turns", _slow_write)
@@ -856,7 +898,7 @@ def test_capacity_returns_after_ack_and_completion(client, monkeypatch):
     assert r.status_code == 200, r.text
     _drain_tails()
 
-    assert ha._CAPTURE_IN_FLIGHT == before, (
+    assert before == ha._CAPTURE_IN_FLIGHT, (
         f"capture capacity leaked: was {before}, now {ha._CAPTURE_IN_FLIGHT}")
     assert not ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
 
@@ -889,7 +931,7 @@ def test_a_completion_that_dies_before_submitting_still_returns_capacity(
     assert r.status_code == 200, r.text
     _drain_tails()
 
-    assert ha._CAPTURE_IN_FLIGHT == before, (
+    assert before == ha._CAPTURE_IN_FLIGHT, (
         f"capacity leaked on the no-dispatch arm: {before} -> {ha._CAPTURE_IN_FLIGHT}")
     assert not ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
     row = _session_row("s-14232-no-dispatch")
@@ -919,13 +961,13 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
     """
     import asyncio
 
-    from tortoise.hosted_api import app
     # The shared async seam (#8582/#5049): a wait-bound refusal reaching THIS
     # client is a non-answer (INCONCLUSIVE), never an assertion about the code.
-    from tests.test_capture_loop_responsiveness import (  # noqa: PLC0415
+    from tests.test_capture_loop_responsiveness import (
         _verdict_async_client,
     )
-    from tests.test_hosted_api import TEST_TEAM  # noqa: PLC0415
+    from tests.test_hosted_api import TEST_TEAM
+    from tortoise.hosted_api import app
 
     before = ha._CAPTURE_IN_FLIGHT
     parked = threading.Event()          # the phase write is IN FLIGHT
@@ -969,10 +1011,10 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
                 await task
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001 — the request may surface it
+            except Exception:  # the request may surface it
                 pass
             for _ in range(400):  # the abandoned task's callback settles
-                if ha._CAPTURE_IN_FLIGHT == before and not ha._CAPTURE_SESSIONS:
+                if before == ha._CAPTURE_IN_FLIGHT and not ha._CAPTURE_SESSIONS:
                     break
                 await asyncio.sleep(0.02)
             return ha._CAPTURE_IN_FLIGHT, dict(ha._CAPTURE_SESSIONS)
@@ -991,6 +1033,65 @@ def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
         f"the in-flight session key was never released: {after_sessions} — that "
         f"session id 409s forever")
     assert TEST_TEAM  # the router auth override this client inherits
+
+
+def test_the_slot_guard_keeps_capacity_for_a_bound_WORKER(client):
+    """The OTHER direction of `_capture_slot_finished`'s guard (#3060's ceiling).
+
+    The row above proves the release fires when NO worker was bound — the silent
+    LEAK direction. This one proves the guard's load-bearing half: when a pool
+    thread owns the capture — `_run_capture_bounded` submitted it and bound
+    `worker_done` to that future — the completion coroutine ending must NOT
+    release the capacity out from under it. Releasing there frees a slot a parked
+    thread still occupies, so the ceiling silently admits more concurrent captures
+    than `_CAPTURE_MAX_IN_FLIGHT` allows.
+
+    ⛔ Measured on the shape this closes: dropping the `if not slot.worker_bound():`
+    guard (i.e. `slot.complete_tail(); slot.worker_done()` unconditionally) left
+    BOTH capacity rows green — one finishes the worker first, the other never
+    starts it — so the branch had no row that could red it.
+
+    ⛔ Asserted on the SLOT ACCOUNTING, deliberately not end-to-end: the same
+    property driven through a real POST + a parked extractor spends the record
+    phase's cold lazy init first (a first-capture embedding-model load, measured
+    >90 s in a fresh process on this box), which makes it a test of this machine's
+    model cache rather than of this branch.
+    """
+    before = ha._CAPTURE_IN_FLIGHT
+
+    # (i) a worker IS bound: capacity and the session key survive the tail ending.
+    bound_key = f"{TEST_ORG_ID}:unit:unit-worker-bound"
+    slot = ha._reserve_capture_slot(bound_key)
+    assert before + 1 == ha._CAPTURE_IN_FLIGHT, "the reservation must be held"
+    slot.hand_off()             # the request hands the capture to the worker…
+    slot.tail_pending()         # …the deferred lane holds the SESSION KEY…
+    slot.mark_worker_bound()    # …and `_run_capture_bounded` submitted it
+    slot.release()              # the request's own teardown, at the early ACK
+    ha._capture_slot_finished(slot)   # the completion coroutine ends
+    assert before + 1 == ha._CAPTURE_IN_FLIGHT, (
+        "the completion coroutine must NOT release capacity a parked pool thread "
+        f"still occupies (#3060): {before} -> {ha._CAPTURE_IN_FLIGHT}")
+    assert bound_key in ha._CAPTURE_SESSIONS, (
+        "the session key must outlive the tail too — a same-session retry "
+        f"admitted now would replay over it: {dict(ha._CAPTURE_SESSIONS)}")
+
+    # …and when the worker really reports, everything comes back.
+    slot.worker_done()
+    assert before == ha._CAPTURE_IN_FLIGHT, ha._CAPTURE_IN_FLIGHT
+    assert bound_key not in ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
+
+    # (ii) NO worker was bound: the completion must release both, or the leak is
+    # the silent one (capacity ratchets to the ceiling, the id 409s forever).
+    free_key = f"{TEST_ORG_ID}:unit:unit-no-worker"
+    slot = ha._reserve_capture_slot(free_key)
+    slot.hand_off()
+    slot.tail_pending()
+    slot.release()
+    ha._capture_slot_finished(slot)
+    assert before == ha._CAPTURE_IN_FLIGHT, (
+        f"an unbound completion must release the reservation: {before} -> "
+        f"{ha._CAPTURE_IN_FLIGHT}")
+    assert free_key not in ha._CAPTURE_SESSIONS, ha._CAPTURE_SESSIONS
 
 
 def test_a_retry_in_flight_says_so_on_the_ack_AND_on_the_status_url(

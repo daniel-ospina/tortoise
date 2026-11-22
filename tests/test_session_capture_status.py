@@ -172,7 +172,21 @@ def test_extraction_failed_but_200_status_not_processed(status_client, monkeypat
     The capture stores its turns (so the HTTP status stays 200 — the partial
     write would be hidden by a non-2xx), and BOTH read surfaces must say what
     actually happened to its memory.
+
+    ⛔ WARM THE TENANT-VOCAB MEMO FIRST (measured at the round-4 head, not a new
+    assertion). The mock failure is instant, but `_extract_capture` compiles the
+    tenant vocabulary on its FIRST use in a process (~12 s cold) and that compile
+    sits INSIDE the ACK's join window — so on a cold process the join misses, the
+    deferred `accepted` body answers (its `errors` is empty BY DESIGN: the outcome
+    is not known yet), and this row reds for a start-up cost rather than for the
+    behaviour it grades. Reproduced at that head in isolation, green once any
+    prior capture had warmed the memo. The warm-up is a NORMAL capture (failing
+    only after the patch), so it provisions exactly the state the measured one
+    needs.
     """
+    status_client.post("/v1/sessions", json={
+        "conversation": _CONV, "harness": "claude", "session_id": "s-3520-warmup"})
+
     restore = _v2_failing(monkeypatch)
     r = status_client.post("/v1/sessions", json={
         "conversation": _CONV, "harness": "claude", "session_id": "s-3520-failed"})
