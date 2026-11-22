@@ -268,8 +268,11 @@ def test_the_greeting_constant_is_what_both_renderings_emit():
     sites back to the literal `Hi {name},` — the exact "a greeting constant
     nothing rendered" state the P2 named — left the whole file green
     (103 passed). The constant's value equals the old literal, so the goldens
-    cannot see the difference, and the fallback row uses `Hi there`. Rebinding
-    the constant is therefore the only mutation that reaches it.
+    cannot see the difference, and the fallback row uses `Hi there`. THAT
+    measurement is why this row exists: the both-sites revert now reds it
+    (measured at `3e5f28ff9038`: 1 failed, 140 passed), and rebinding the constant
+    reaches the same render path through the constant itself — two mutations, one
+    gap, which is why a claim that only ONE of them reaches it would be wrong.
     """
     original = cn.GREETING
     try:
