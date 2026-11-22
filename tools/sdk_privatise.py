@@ -1555,7 +1555,7 @@ SWEEP_NAMES = 66
 #: did not happen: the one new shape is the declared one. A plain `cp` handle and a `set[str]`-style
 #: `.update` are the ordinary-word receivers this sweep deliberately leaves alone; `typed
 #: references still pointing at a public name` is **0** on this tree.
-#
+#:
 #: ⛔ THIS RE-CUT MERGED `origin/main` `0467ba32` (base `70fbd1a2`) AND KEPT BOTH BLOCKS ABOVE —
 #: the branch's `(11864, "2a6400518a87775c")` resolution of `10e51693` and `main`'s
 #: `(11861, "f0647020531c078c")` re-pin, each a true measurement of the tree it NAMES — so no
@@ -1572,7 +1572,7 @@ SWEEP_NAMES = 66
 #: they did not PARSE and their residue shapes were silently uncounted. A census of a tree
 #: that does not parse is a reading of a DIFFERENT tree — the same class this block keeps
 #: naming, one layer out. Re-pin only from a tree whose covering suites are green.
-#
+#:
 #: ⛔ THE FOLD OF `origin/main` `588cf7aeb6` (`#14183`) IS A FURTHER TREE, and BOTH blocks above
 #: are kept: each is a true measurement of the tree it NAMES (this branch's `11870` on its own
 #: post-`0467ba32` tree, `main`'s `11861` on `main`'s), and the pair in THIS block is a THIRD
@@ -1583,7 +1583,7 @@ SWEEP_NAMES = 66
 #: **(11863, '4094ef945dae4aea')** — BELOW both parents (11870 here, 11861 on
 #: `main`), which is why the pair is taken from the verb and not from either side:
 #: the fold absorbed rows neither parent's count could predict.
-#
+#:
 #: ⛔ ONE ASSIGNMENT BELOW, unchanged: the fold brought two records and their two pins, and the
 #: dead one is deleted with both records' prose KEPT — a second assignment is what
 #: `tests/test_sdk_privatise_sweep.py`'s one-assignment arm exists to refuse (Python binds the
