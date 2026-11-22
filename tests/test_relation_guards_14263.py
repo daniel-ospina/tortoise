@@ -55,6 +55,7 @@ import contextlib
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -123,6 +124,35 @@ def sdk(tmp_path):
     with contextlib.suppress(Exception), s._live_write_scope("test-cleanup-14263"):
         s._get_proj().g.query("MATCH (n) DETACH DELETE n")
     s.close()
+
+
+# ── per-test endpoint namespace ───────────────────────────────────────────
+#
+# ⛔ The bundles below mint their endpoints by NAME, so a fixed name gives a
+# fixed content-addressed id — and under `TORTOISE_TEST_CARVE_OUT=1` every test
+# shares ONE graph (the epic-#1647 redirect), so a fixed name lets tests (and,
+# worse, two pytest PHASES of one CI job: the `last-failed` fast-fail pre-phase
+# then the full run) collide on the same pair. Measured on #14284 CI shard
+# `test (b)`: `test (b) FAILED … one pair must never carry two live mechanisms
+# (#9750): [(…'dependsOn'), (…'contains')]` and `create_operator: the pair …
+# already carries the 'IMPL' mechanism … cannot also carry 'NAND'` — one test's
+# operator sitting on another's ids. A per-PROCESS random token, rotated per
+# test, makes every run mint fresh endpoints; that is what makes these rows
+# re-runnable rather than first-run-only.
+_PAIR_TOKEN = uuid.uuid4().hex[:8]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_pair_namespace():
+    """Rotate the endpoint namespace per test — and therefore per pytest process."""
+    global _PAIR_TOKEN
+    _PAIR_TOKEN = uuid.uuid4().hex[:8]
+    yield
+
+
+def _uniq(base: str) -> str:
+    """An endpoint name this RUN owns, so its content-addressed id is this run's."""
+    return f"{base} [{_PAIR_TOKEN}]"
 
 
 def _obj(sdk, name, kind):
@@ -847,7 +877,7 @@ class TestIngestCarriesTheReport:
             "from a leg that never reports at all")
         grow = _pair_bundle(reify=True, label="contains")
         grow["entities"].append(
-            {"ref": "oC", "type": "object", "name": "The migration",
+            {"ref": "oC", "type": "object", "name": _uniq("The migration"),
              "objectKind": "dev:issue"})
         grow["connections"][0]["to"] = ["oB", "oC"]
         second = sdk._ingest(grow, granularity="granular")
@@ -1255,9 +1285,9 @@ def _pair_bundle(*, reify: bool, label: str, operator: str = "IMPL",
         conn["direction"] = direction
     return {
         "entities": [
-            {"ref": "oA", "type": "object", "name": "The API spec",
+            {"ref": "oA", "type": "object", "name": _uniq("The API spec"),
              "objectKind": "dev:api"},
-            {"ref": "oB", "type": "object", "name": "The database",
+            {"ref": "oB", "type": "object", "name": _uniq("The database"),
              "objectKind": "dev:database"},
         ],
         "connections": [conn],
@@ -1278,9 +1308,9 @@ def _relation_bundle(predicate: str, *, from_kind: str = "dev:epic",
     """
     return {
         "entities": [
-            {"ref": "e1", "type": "object", "name": "The epic",
+            {"ref": "e1", "type": "object", "name": _uniq("The epic"),
              "objectKind": from_kind},
-            {"ref": "e2", "type": "object", "name": "The issue",
+            {"ref": "e2", "type": "object", "name": _uniq("The issue"),
              "objectKind": to_kind},
         ],
         "connections": [{"ref": "c1", "from": "e1", "to": "e2",
