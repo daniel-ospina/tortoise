@@ -1119,6 +1119,13 @@ NOT_SELECTED = [
     "has anybody reported the vendor has been deprecated",
     "has no one reported the vendor has been deprecated",
     "has no-one reported the vendor has been deprecated",
+    # …and the separator is a CODEPOINT CLASS, not the two spellings that were measured
+    # (follow-up review, P3): U+2011/U+2013/U+2014 and the un-hyphenated `noone` were all
+    # SILENT while the ASCII twin reported — the module already treats apostrophes as an
+    # inventory for exactly this reason, so the dash is one too.
+    "has no‑one reported the vendor has been deprecated",
+    "has no—one reported the vendor has been deprecated",
+    "has noone reported the vendor has been deprecated",
     # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (round-3 review, P3, measured): the
     # refusal lookahead allows `{0,6}` words before `_NONFINITE_COPULA` (`to be|to get|to
     # become|being|getting`, plus up to two modifiers — NOT the three-spelling literal an
@@ -1364,6 +1371,13 @@ NOTICE_ONLY = [
     "has anybody reported the vendor has been deprecated",
     "has no one reported the vendor has been deprecated",
     "has no-one reported the vendor has been deprecated",
+    # …and the separator is a CODEPOINT CLASS, not the two spellings that were measured
+    # (follow-up review, P3): U+2011/U+2013/U+2014 and the un-hyphenated `noone` were all
+    # SILENT while the ASCII twin reported — the module already treats apostrophes as an
+    # inventory for exactly this reason, so the dash is one too.
+    "has no‑one reported the vendor has been deprecated",
+    "has no—one reported the vendor has been deprecated",
+    "has noone reported the vendor has been deprecated",
     # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
     # that is now stated and machine-checked (review at `5b82bcdf03`, P2, measured) ──
     # The PREPOSITIONS `_BLOCKED_TAIL` names are REPORTED on this shape (see the

@@ -553,7 +553,16 @@ _EXISTENCE_HEAD = (
     # defect the list was widened for, one spelling over — which is the argument for widening
     # by CLASS here rather than by the row that was just measured.
     r"\b(?:has|have|had)\s+(?:any|anything|anyone|anybody|someone|somebody|something|"
-    r"everything|everyone|everybody|nobody|nothing|no[\s-]one)\b"
+    # ⛔ AND "TWO SPELLINGS" IS A CLASS, NOT A COUNT (round-14 follow-up review, P3,
+    # measured): the arm shipped as `no[\s-]one`, i.e. U+0020 and U+002D only, so the
+    # typographic hyphens a customer's keyboard or a pasted document actually produce were
+    # still SILENT — `has no‑one reported …` (U+2011), U+2013 and U+2014 all returned
+    # `(None, None)` while the ASCII twin reported, and so did the un-hyphenated `noone`.
+    # That is the same mistake the module already paid for on apostrophes, whose inventory
+    # is an explicit codepoint class rather than "seven handsome codepoints": the separator
+    # here is the same idea, `[\s\u2010-\u2014-]*` — any space, any dash in the
+    # typographic block, or none at all (the `noone` misspelling).
+    r"everything|everyone|everybody|nobody|nothing|no[\s\u2010-\u2014-]*one)\b"
 )
 _EXISTENCE_ADVERB = (
     r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet|"
