@@ -158,11 +158,15 @@ CAPABILITY_CONTROLS = (
     ("adjacency aggregate", "MATCH (e:GraphEvent) RETURN size((e)-->())",
      "cypher:)-->" ),
     ("undirected hop", "MATCH (n:Point) WHERE NOT (n)--() RETURN n", "cypher:)--("),
-    # ⛔ THE INBOUND HOP. `<--(` is what `(a)<--(b)` carries once the node paren is
-    # part of the arm, but `<-` sits EARLIER in the arm order and takes it — so this
-    # row's literal expectation is `cypher:<-`, and it is the row that pins `<-`
-    # (which is why `<-` is not in `ARMS_NO_SNIPPET_CAN_DECIDE`).
-    ("inbound hop", "MATCH (a:Point)<--(b) RETURN a", "cypher:<-"),
+    # ⛔ THE INBOUND HOP is anchored on the node's closing paren (`)<-`), the same
+    # rule as `)--(` / `)-->` below, because the bare `<-` was a FALSE-BLOCK of the
+    # same class the `--` anchoring removed: `e.ts < -1` whitespace-strips to
+    # `s<-1` and `` n.`a<-b` `` unwraps to `a<-b`, so a comparison and a property
+    # NAME both reported a capability reader that walks nothing (#14183 round-14).
+    # The legacy unbracketed `(a)<-r-(b)` is why the arm is anchored on the `)` and
+    # not widened to `<--(`: that spelling carries `)<-` too and would otherwise be
+    # lost from detection.
+    ("inbound hop", "MATCH (a:Point)<--(b) RETURN a", "cypher:)<-"),
     # procedures and algorithms. `apoc.` is the shape the census's own
     # before/after table advertises, so it is the one that must not ship untested.
     ("path procedure",
@@ -177,11 +181,13 @@ CAPABILITY_CONTROLS = (
     # nothing, which is the defect this table exists to end.
     ("typed bounded var-length", "MATCH (a:GraphEvent)-[:IMPL*1..5]->(b)",
      "cypher:*1.."),
-    # ⛔ and the BARE undirected hop. `<-` was declared undecidable on the grounds
+    # ⛔ and the BARE undirected hop. It was once declared undecidable on the grounds
     # that it is "always written `<-[:T]-`, which carries `-[`" — measured FALSE for
-    # `MATCH (a)<--(b)`, the untyped form, which carries no `-[` and is the one `<-`
-    # decides (`#14183` round-6 finding 1, the sibling of the three rows above).
-    ("bare undirected hop", "MATCH (a)<--(b)", "cypher:<-"),
+    # `MATCH (a)<--(b)`, the untyped form, which carries no `-[` and is the one the
+    # inbound arm decides (`#14183` round-6 finding 1). ⚠️ The expected arm is
+    # `)<-`, not `<-`: the arm is node-anchored since round 14 (a bare `<-` also
+    # fired on `e.ts < -1` and on a backticked property name).
+    ("bare undirected hop", "MATCH (a)<--(b)", "cypher:)<-"),
     ("open-ended var-length", "MATCH p=(a)-[:NEXT*..3]->(b)", "cypher:*.."),
     ("shortest path procedure",
      "CALL algo.shortestPath.stream(null, null, {relationshipQuery: 'IMPL'})",
@@ -1539,3 +1545,62 @@ def test_the_noise_stripper_is_the_write_gates_grammar_plus_one_backtick_branch(
         " identifier opens a line comment and a capability pattern after it"
         f" becomes invisible (both sides now {ours!r})")
     assert "-[" in ours and "-[" not in theirs
+
+
+def test_the_arm_set_does_not_fire_on_punctuation_that_walks_nothing():
+    """The arms must not misfile an honest row — the FALSE-BLOCK direction.
+
+    WHY THIS EXISTS. Three arms in this guard's history were contiguous punctuation
+    (``--``, ``<-``, ``size((``) matched against a haystack with ALL whitespace and
+    backtick quoting removed. That normalisation is what closes the false-PASS holes
+    the rows above pin, and it is also what turns punctuation inside ordinary Cypher
+    into an apparent relationship: `$after - -1` becomes ``--1``, `e.ts < -1`
+    becomes ``s<-1``, `` n.`a--b` `` and `` n.`a<-b` `` unwrap to a property NAME
+    carrying the same characters, and `RETURN size((collect(n)))` is a grouping
+    paren with no relationship anywhere.
+
+    WHAT IT WOULD BE FALSE WITHOUT. `readers_report()` derives its verdict from this
+    predicate, so one misfiled row does not merely red a test: it publishes
+    "reader(s) NEED a graph capability — re-open #13094's verdict" over a reader
+    that walks nothing, and reds `test_no_reader_of_the_change_feed_needs_a_graph_
+    capability` with an instruction to reopen a settled verdict. ⚠️ The direction is
+    fail-CLOSED — nothing is smuggled past — which is exactly why it survived: a
+    false PASS is loud and this one is quiet. The arms are therefore anchored on the
+    NODE (`)--(`, `)-->`, `)<-`) rather than on the dashes.
+
+    NON-VACUOUS: each case below returned a `cypher:` arm before its anchoring, and
+    the positive control at the end shows the anchoring did not simply switch the
+    detect side off.
+    """
+    tool = _tool()
+    walks_nothing = (
+        ("a unary minus", "RETURN $after - -1"),
+        ("a comparison", "MATCH (e:GraphEvent) WHERE e.ts < -1 RETURN e"),
+        ("a property name with two hyphens",
+         "MATCH (n) WHERE n.`a--b` = 1 RETURN n"),
+        ("a property name with a wedge",
+         "MATCH (n) WHERE n.`a<-b` = 1 RETURN n"),
+        ("a grouping paren, not a pattern",
+         "RETURN size((collect(n)))"),
+    )
+    misfiled = [
+        f"{label}: {cypher!r} — {tool.graph_capability({'snippets': (cypher,)})!r}"
+        for label, cypher in walks_nothing
+        if tool.graph_capability({"snippets": (cypher,)}) is not None
+    ]
+    assert not misfiled, (
+        "these snippets walk nothing but were filed as capability readers, which"
+        " flips the census verdict and reds the settled-verdict pin:\n  "
+        + "\n  ".join(misfiled))
+
+    # The positive control: the anchoring must not have turned detection off.
+    for cypher, arm in (
+        ("MATCH (a:Point)<--(b) RETURN a", "cypher:)<-"),
+        ("MATCH (a)<-r-(b) RETURN a", "cypher:)<-"),
+        ("MATCH (n:Point) WHERE NOT (n)--() RETURN n", "cypher:)--("),
+        ("MATCH (a)-->(b) RETURN a", "cypher:)-->"),
+        ("MATCH (e:GraphEvent)-[r:TOUCHED]->(p) RETURN p", "cypher:-["),
+    ):
+        assert tool.graph_capability({"snippets": (cypher,)}) == arm, (
+            f"the anchoring lost a real hop: {cypher!r} must still be {arm!r},"
+            f" got {tool.graph_capability({'snippets': (cypher,)})!r}")
