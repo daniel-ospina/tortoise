@@ -44,16 +44,19 @@ WHAT THIS MODULE IS NOT
   `tests/test_durability_posture.py` enforces is NARROWER than what that document
   reserves, and deliberately so: it fires on the claim SHAPES its own regexes
   match — four alternations inside a 40-character window (``CLAIM_RE``), and the two
-  predicate forms re-scanned across line breaks (``WRAPPED_CLAIM_RE``) — while a
-  mechanism promise, a loss window or a verification level stated as a promise
-  "does not match it, and is corrected by hand" (``docs/durability-posture.md``).
+  predicate forms re-scanned across line breaks (``WRAPPED_CLAIM_RE``). What escapes
+  it is a promise that takes NEITHER of those shapes — the document's own example
+  is a mechanism promise (a managed store "provides AOF durability"), which "does
+  not match it, and is corrected by hand" (``docs/durability-posture.md``). A loss
+  window that names the log DOES take the shape, so it is caught, not excused.
   Nothing is ever DROPPED to make room — see *BACKPRESSURE* below.
 * **Not the cache fold.** `live_write`'s ``projection.apply`` (record →
   FalkorDB) still runs inline. Deferring the record is safe because the record
-  has an independent, always-available reader and a journal that heals it; the
-  cache is what the read path actually serves from today, so moving it behind a
-  loop is a **retrieval-freshness** change with its own evidence, not this
-  issue's. The boundary is stated here so it cannot be mistaken for an oversight.
+  has an independent, always-available reader and a journal it can be re-derived
+  from; the cache is what the read path actually serves from today, so moving it
+  behind a loop is a **retrieval-freshness** change with its own evidence, not
+  this issue's. The boundary is stated here so it cannot be mistaken for an
+  oversight.
 * **Not on a read path, ever.** No reader may call :meth:`ProjectionWorker.wait_for_drain`
   (nor its module-level twin :func:`wait_for_drain`); that would re-create exactly the
   coupling this module removes.
