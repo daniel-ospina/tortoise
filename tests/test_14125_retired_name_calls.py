@@ -557,7 +557,14 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
             # nothing below a broad/bare arm can run: it catches whatever is left
             return not _reraises(handler)
         reachable = {name for name in names if not _masked_by(name, caught_earlier)}
-        if reachable & (_BROAD | _RAISED_ALL) and not _reraises(handler):
+        #: ⛔ `_BROAD` IS DELIBERATELY ABSENT FROM THIS TEST, and it used to be here: the term
+        #: read `reachable & (_BROAD | _RAISED_ALL)`, but `_BROAD` can never reach this line —
+        #: the arm above RETURNS for `names & _BROAD`, `reachable ⊆ names`, and `_handler_names`
+        #: yields `{"<bare>"}` only as a SINGLETON, so a broad or bare name is always already gone
+        #: by here. Keeping it read as though masking could leave a broad name behind, which it
+        #: cannot (review of #14287, P3: removing it changed 0 verdicts over 18,278 enumerated
+        #: arm sequences; this is a proof from the two rules, not an empirical coincidence).
+        if reachable & _RAISED_ALL and not _reraises(handler):
             return True
         caught_earlier |= names
     return False
@@ -718,14 +725,19 @@ def _raises_a_skip(exc: ast.expr) -> bool:
 
     ⛔ DECLARED RESIDUAL — the WHOLE MISS CLASS, not just the alias (review of #14287, P3: the
     residual named only the first shape, and the class is wider). This predicate recognises a skip
-    by a PART of its dotted path, so anything that hides the signal in neither a part nor a call
-    argument is CREDITED — a false open in the un-recognised direction. Three shapes, each
-    re-derivable from this tree rather than quoted as a count: (a) an alias to a bare name —
-    `_SKIP = pytest.skip.Exception; raise _SKIP(...)`; (b) a skip whose dotted path carries none of
-    the parts — `_pytest.outcomes.XFailed(...)`, `errors.Skip(...)`; (c) a callee that is itself a
-    bare `Name` — `raise _skip_helpers.make()`. Re-derive the population: walk every
-    `ast.ExceptHandler` whose LAST statement is a `Raise`, and ask which of the three shapes its
-    raised expression spells. 0 in `tests/`+`tools/` at this head, so an alias/parts table is
+    by a PART of its dotted path, so anything that hides the signal from the parts AND RESOLVES TO
+    A SKIP/XFAIL SIGNAL ANYWAY is CREDITED — a false open in the un-recognised direction. Three
+    shapes of that class: (a) an alias to a bare name — `_SKIP = pytest.skip.Exception; raise
+    _SKIP(...)`; (b) a skip whose dotted path carries none of the parts —
+    `_pytest.outcomes.XFailed(...)`, `errors.Skip(...)`; (c) a skip exception bound to a bare
+    identifier — `from pytest import skip as _s; raise _s.Exception(...)`, which is `ast.Name` up
+    to its `.Exception` and matches no part. ⛔ THE RESOLUTION IS PART OF THE SHAPE: "a raise whose
+    callee is a bare `Name`" alone is NOT the shape — that is every `raise ValueError(...)` in the
+    tree (measured 394 at this head), and it is the READING of the name that decides, not its AST
+    form. Re-derive the population: walk every `ast.ExceptHandler` whose LAST statement is a
+    `Raise`, resolve each raised expression against its module scope, and count the ones that
+    resolve to a skip/xfail signal while spelling none of the parts above. 0 in `tests/`+`tools/`
+    at this head, so an alias/parts table is
     deferred until the first live instance, not built ahead of it. ⛔ THE SECTION THAT USED TO BE
     NAMED HERE DOES NOT CARRY THIS MEASUREMENT: `4j-undetriginta` grades the pytest-skip conversion
     over four inline sources and states no population at all, so the citation sent a reader to a
