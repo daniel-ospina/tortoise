@@ -595,15 +595,18 @@ SWEEP_NAMES = 66
 #: duck-typed onboarding seed surfaces (`_OrgSeedSurface` in `hosted_api.py`, `_SdkSeedSurface` in
 #: `onboarding/selfhost.py`) from the PUBLIC doors `create_subject`/`create_edge` to the private
 #: spellings. That record was FALSE in its premise and its measurement, and the rename it licensed
-#: BROKE the product: `onboarding/seed.py` calls `surface.create_subject(...)` and
+#: BROKE the product: `onboarding/seed.py` calls `surface.create_subject_anchor(...)` and
 #: `surface.create_edge(...)` (three sites), neither surface defines `__getattr__`, so every hosted
 #: AND self-hosted seed raised `AttributeError` and the REST seed route 500'd — measured at
 #: `93ada9cece`: `tests/test_onboarding_selfhost_w12.py` alone was **11 failed** (17 passed),
 #: `tests/test_onboarding_seed.py` **2 failed**, and **13** is the total across BOTH files — the
-#: two figures are not additive pieces of one number. The public doors are RESTORED (the surfaces
-#: again declare `create_subject`/`create_edge` and delegate to the SDK's private ones), and the eight
-#: test-double call sites in `tests/test_9572_discriminator_not_clobbered.py` were restored with
-#: them. ⛔ THIS IS THE SHAPE THE BLOCK BELOW FORBIDS, reached anyway: *"the alternative — giving a
+#: two figures are not additive pieces of one number. The doors are PUBLIC again — and the spelling
+#: is ⛔ `create_subject_anchor`, NOT `create_subject`: the latter is the RETIRED SDK method name
+#: (`#12901`), and `hosted_api.py` states the rule beside the door it may not be. So the surfaces
+#: declare `create_subject_anchor`/`create_edge` and delegate inward, and the eight
+#: test-double call sites in `tests/test_9572_discriminator_not_clobbered.py` were re-spelled to
+#: `create_subject_anchor` with the surface, not left on the retired name. ⛔ THIS IS THE SHAPE THE
+#: BLOCK BELOW FORBIDS, reached anyway: *"the alternative — giving a
 #: SURFACE private-looking doors so a name-based sweep stays quiet — is the sweep dictating the
 #: adapter's API"*. A residue count is not a reason to change a published adapter contract, and a
 #: test double renamed in lockstep with the real surface hides exactly this failure
