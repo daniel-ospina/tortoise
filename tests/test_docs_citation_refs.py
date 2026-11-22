@@ -5322,7 +5322,19 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         _d5_pinned_universe(reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
     full_help = reported(0, usage(_D5_LONG_OPTION_FLOOR))
-    assert _d5_pinned_universe(full_help) == _d5_documented_long_options(full_help), (
+    # ⛔ BOTH ARMS NOW RUN THROUGH THE CALL SITE, NOT ONLY THE DERIVATION (#14324, P2 — MEASURED).
+    # The returning arm used to read `assert _d5_pinned_universe(full_help) == …`, and `pytest.skip`
+    # raises `Skipped` — which is NOT an `AssertionError` — so a skip inside the helper made that
+    # assert UNREACHABLE and skipped the WHOLE cell, with the suite exiting 0. That is the very hole
+    # `not_a_skip` exists for, one call site over from where it was being applied. MEASURED at
+    # `7bd8d74f`: the helper's body replaced by an unconditional `pytest.skip(...)` — the banned
+    # "skip on the platform that failed", which also deletes this fix's call-site behaviour — left
+    # `35 passed, 2 skipped` at exit 0 against a baseline of `37 passed`, so a mutant that DELETED
+    # the fix was green. Through `not_a_skip` the same mutant reds this cell by name, and the arm
+    # above pins that a broken derivation stays an `AssertionError` rather than becoming a skip.
+    with pytest.raises(AssertionError, match="broken derivation must not be able to certify"):
+        not_a_skip(_d5_pinned_universe, reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
+    assert not_a_skip(_d5_pinned_universe, full_help) == _d5_documented_long_options(full_help), (
         "a `grep --help` that PUBLISHED a universe must be RETURNED, not skipped — the skip excuses "
         "only the platform that published nothing (#14303)")
 
