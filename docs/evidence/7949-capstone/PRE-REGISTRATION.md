@@ -1460,7 +1460,7 @@ place a machine reads it.
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
   candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:12730-12752`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:15154`, `:15307`).
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:15149`, `:15302`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1887,9 +1887,9 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
 - **Baseline — measured at this branch's head before the guard:** the two `if items:` gates at
   `:13107`/`:13256`, the two fail-open `except` arms at `:13120`/`:13267`, the two result blocks at
-  `:13515`/`:13525`, and `_run_vet_pass`'s call at `:15547`.
+  `:13515`/`:13525`, and `_run_vet_pass`'s call at `:15542`.
 - **New value — measured at this head:** `:13177`/`:13326`, `:13190`/`:13337`, `:13515`/`:13525`,
-  and `:15617`.
+  and `:15612`.
 - **Why every number moves by the SAME delta.** The change wraps `extract_session_v2`'s S2.2
   re-narrate block in a fail-open `try/except`: the `try:` line above the block, the block's own
   62 lines re-indented (a column change, not a content change — all 62 pair 1:1 with new
@@ -1905,7 +1905,7 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **Verified by content, not by arithmetic.** Each re-pointed number was read out of the tree and
   compared with the symbol the document names: `:13177`/`:13326` are the two `if items:` classify
   gates, `:13190`/`:13337` the two fail-open `except` arms, `:13515` `result["classify_later"] = {`,
-  `:13525` `result["vet"] = {`, `:15617` the `= _run_vet_pass(` call.
+  `:13525` `result["vet"] = {`, `:15612` the `= _run_vet_pass(` call.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this
   file — which is why a cite move changes the digest even though no frozen value changed.
@@ -1916,12 +1916,12 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
 - **Baseline — measured on `origin/main` before the merge (`7f0b3bc84`):** the two `if items:` gates
   at `:13177`/`:13326`, the two fail-open `except` arms at `:13190`/`:13337`, the two result blocks at
-  `:13515`/`:13525`, and `_run_vet_pass`'s S2.2 call at `:15617` — exactly the "new value" §10.17
+  `:13515`/`:13525`, and `_run_vet_pass`'s S2.2 call at `:15612` — exactly the "new value" §10.17
   measured for `#11569`.
 - **New value — measured at this head (the `#11534` merge):** the same symbols at `:13706`/`:13859`
   (the two `if items:` gates), `:13719`/`:13870` (the two fail-open `except` arms), the two result
   blocks at `:14048` (closing `:14054`) and `:14058` (closing `:14062`), and `_run_vet_pass`'s S2.2
-  call at `:16234` (the post-S4 union call at `:13835`). `_collect_classify_items` and its extent do
+  call at `:16229` (the post-S4 union call at `:13835`). `_collect_classify_items` and its extent do
   not move: `:11402`, `:11402-11424`.
 - **Why the delta is NOT constant.** `#11534` inserts at several distinct points below §10.17's
   numbers — the S2.2b-ADD gap-fill stage between S2.2 and classify(S2), the
@@ -1931,7 +1931,7 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **Verified by content, not by arithmetic.** `:13706`/`:13859` are the two `if items:` gates (one
   per classify pass), `:13719`/`:13870` are the two fail-open `except` arms whose messages name
   `classify(S2) failed` / `classify(union) failed`, `:14048`/`:14058` open `result["classify_later"]`
-  and `result["vet"]` and close at `:14054`/`:14062`, and `:16234` is
+  and `result["vet"]` and close at `:14054`/`:14062`, and `:16229` is
   `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(`.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
@@ -1944,11 +1944,11 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **Baseline — measured at `25e1c71173cb`, this branch's head before the collision counter:** the two
   `if items:` gates at `:13706`/`:13859`, the two fail-open `except` arms at `:13719`/`:13870`, the
   two result blocks at `:14048` (closing `:14054`) and `:14058` (closing `:14062`), and
-  `_run_vet_pass`'s S2.2 call at `:16234` (the post-S4 union call at `:13835`) — exactly the "new
+  `_run_vet_pass`'s S2.2 call at `:16229` (the post-S4 union call at `:13835`) — exactly the "new
   value" §10.18 measured.
 - **New value — measured at this head:** the same symbols at `:13763`/`:13916` (the two `if items:`
   gates), `:13776`/`:13927` (the two fail-open `except` arms), the two result blocks at `:14105`
-  (closing `:14111`) and `:14115` (closing `:14119`), and `_run_vet_pass`'s S2.2 call at `:16291`
+  (closing `:14111`) and `:14115` (closing `:14119`), and `_run_vet_pass`'s S2.2 call at `:16286`
   (the post-S4 union call at `:13892`). `_collect_classify_items` and its extent do not move:
   `:11402`, `:11402-11424`.
 - **Why this delta IS a constant, and why a constant is the shape that rots unnoticed.** The
@@ -1974,7 +1974,7 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **Verified by content, not by arithmetic.** `:13763`/`:13916` are the two `if items:` gates (one per
   classify pass), `:13776`/`:13927` are the two fail-open `except` arms whose messages name
   `classify(S2) failed` / `classify(union) failed`, `:14105`/`:14115` open
-  `result["classify_later"]` and `result["vet"]` and close at `:14111`/`:14119`, and `:16291` is
+  `result["classify_later"]` and `result["vet"]` and close at `:14111`/`:14119`, and `:16286` is
   `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(`. A pin now reads the NEWEST entry
   against the tree rather than only the live prose, so the next insertion cannot leave this block
   behind silently (`tests/test_7949_capstone_measure.py`,
@@ -2597,7 +2597,7 @@ to answer.
   `:11857-11879` (23 lines, `def` to `return items` — unchanged in size), the two `if items:` gates
   at `:14276`/`:14429` (the S2 pass and the post-S4 pass), the two fail-open `except` arms at
   `:14289`/`:14440`, the two result blocks at `:14640` (closing `:14646`) and `:14650`
-  (closing `:14654`), and `_run_vet_pass`'s S2.2 call at `:16907` and its post-S4 union call at
+  (closing `:14654`), and `_run_vet_pass`'s S2.2 call at `:16834` and its post-S4 union call at
   `:14405`. The `#10360` switch's read-back — the
   `_value_fidelity_judged = _state_value_verbatim_enforced()` assignment — is at `:10536`
   (was `:10508`), and `preregistration.json`'s live `read_back` prose carries that number.
@@ -2606,7 +2606,7 @@ to answer.
   `return items`; `:14276`/`:14429` are the two `if items:` gates; `:14289`/`:14440` are the
   two fail-open `except` arms whose warnings name `classify(S2) failed` / `classify(union)
   failed`; `:14640` opens `result["classify_later"]` and `:14646` closes it (`}`), `:14650` opens
-  `result["vet"]` and `:14654` closes it; `:16907` is
+  `result["vet"]` and `:14654` closes it; `:16834` is
   `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14405` is
   `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:10536` is
   `_value_fidelity_judged = _state_value_verbatim_enforced()`.
@@ -2918,7 +2918,7 @@ to answer.
   numbers by §10.35 — not because they were wrong, but because they were measured at `b6a630d` and
   a later rebase+merge (`bb88463894f5`, onto `main` `ca74f2375ef4`) moved every one of them. The
   three numbers it owns, `:10619`/`:14359`/`:14512`, were correct at that head; §10.35 re-derives
-  them for the shipping tree (`:11451`/`:15196`/`:15349`).
+  them for the shipping tree (`:11451`/`:15191`/`:15344`).
 
 ### 10.34 — §10.33's declared follow-up: `_collect_classify_items`, the fail-open pair, and §9/§11's carriers (2026-11-13, `#12295`)
 
@@ -3063,15 +3063,15 @@ to answer.
   parent's number.
 - **New values — each MEASURED at this entry's own head by opening the line, not by adding an
   offset:** `_collect_classify_items` at `:12820`, its extent `:12820-12842` (`def` to `return
-  items`); the two `if items:` gates at `:15244` (the S2 pass) and `:15397` (the post-S4 pass); the
-  two fail-open `except` arms at `:15257` (`classify(S2) failed`) and `:15408` (`classify(union)
+  items`); the two `if items:` gates at `:15239` (the S2 pass) and `:15392` (the post-S4 pass); the
+  two fail-open `except` arms at `:15252` (`classify(S2) failed`) and `:15403` (`classify(union)
   failed`); and the `#10360` read-back the pin opens,
   `_value_fidelity_judged = _state_value_verbatim_enforced()`, at `:11499`.
 - **Verified by content, not arithmetic.** `:12820` is
   `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:12842` is `return items`;
-  `:15257`/`:15408` are the two `except` arms whose appended warnings literally name `classify(S2)
+  `:15252`/`:15403` are the two `except` arms whose appended warnings literally name `classify(S2)
   failed` / `classify(union) failed` (a THIRD `except Exception as e:  # never block capture (P1)`
-  at `:14955` is the S2.2 arm-restore path and is NOT one of these two, which is why the number is
+  at `:14950` is the S2.2 arm-restore path and is NOT one of these two, which is why the number is
   confirmed by the warning text and not by the `except` line, byte-identical across all three);
   `:11499` carries the receiving variable `_value_fidelity_judged`, not the `def` (`:5841`) and not
   the `armed =` site (`:5931`).
