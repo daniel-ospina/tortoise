@@ -42126,6 +42126,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     # only; never on the billing path). All measured fields must survive
     # the PII filter or the measurement is silently lost.
     "calls", "retries", "prompt_tokens", "completion_tokens",
+    # #14277: the CACHED portion of ``prompt_tokens`` and its complement. The
+    # key names are the ones ``tools/longmem_eval/costing.py`` already prices
+    # on (``_CACHE_KEY``/``_MISS_KEY``); without them the filter strips the
+    # split and every stored row re-prices warm input at the miss rate — the
+    # same silent-loss shape #3359 and #5868 each lost a field to.
+    "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "calls_without_tokens", "deadline_aborts", "by_stage",
     # #3843: the capture_cost row's harness dimension reuses the `harness` key
@@ -43738,6 +43744,13 @@ def _capture_cost_props(session_id: str, meta: dict,
         "prompt_tokens": _normalise_token_count(llm.get("prompt_tokens")) or 0,
         "completion_tokens": (
             _normalise_token_count(llm.get("completion_tokens")) or 0),
+        # #14277: the cache split, on the same normalisation as the counts it
+        # divides (a malformed provider count contributes 0, never a shaped
+        # number).
+        "prompt_cache_hit_tokens": (
+            _normalise_token_count(llm.get("prompt_cache_hit_tokens")) or 0),
+        "prompt_cache_miss_tokens": (
+            _normalise_token_count(llm.get("prompt_cache_miss_tokens")) or 0),
         "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
         "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
         # #3359: a call that returned NO usage block at all (no tokens, no
@@ -51554,7 +51567,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 200 tracked files (744 distinct
+# ABSOLUTE line number from 201 tracked files (746 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
