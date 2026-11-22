@@ -39,6 +39,8 @@ import http.server
 import json
 import os
 import socket
+import subprocess
+import tempfile
 import threading
 import time
 
@@ -1948,6 +1950,43 @@ class TestStopIsAStop:
         finally:
             embed_seam.reset_seam()
 
+    def test_the_retire_wait_is_bounded_and_an_overrun_is_named(
+            self, backing, monkeypatch, caplog):
+        """Review: ``_close_when_idle`` joined UNBOUNDED inside a daemon thread.
+
+        A forward pass that never returns kept the retire thread parked for the
+        life of the process and the retired worker's 432 MB held forever — and
+        silently, because the only code that would have reported it is the code
+        that never ran. The wait is now bounded, and overrunning it is a WARNING
+        rather than silence.
+        """
+        recorder = backing(delay_s=2.0)
+        # Both bounds shrunk: stop() must return while the encode is still in
+        # flight (or it would join it out and never reach _close_when_idle), and
+        # the retire wait must expire before the encode does.
+        monkeypatch.setattr(embed_seam, "_STOP_JOIN_S", 0.05)
+        monkeypatch.setattr(embed_seam, "_RETIRE_JOIN_S", 0.08)
+        try:
+            threads, _outcome = self._start_in_flight(recorder)
+            collector = embed_seam._collector
+            assert collector is not None
+            with caplog.at_level("WARNING"):
+                embed_seam._retire(embed_seam._Retired(recorder, collector))
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and not recorder.closed:
+                    time.sleep(0.01)
+            assert recorder.closed, (
+                "the retired backing was never closed — an overrunning encode "
+                "held its 432 MB for the life of the process")
+            assert any("STILL inside an encode" in record.message
+                       for record in caplog.records), (
+                "the overrun was silent — nothing names a collector that never "
+                "returned from its forward pass")
+            for thread in threads:
+                thread.join(timeout=10)
+        finally:
+            embed_seam.reset_seam()
+
 
 def test_every_seam_lever_is_cleared_between_tests():
     """Review F8: the fixture's lever census cannot miss one again.
@@ -1986,3 +2025,448 @@ def test_reset_seam_leaves_nothing_running(backing):
     after = {t.name for t in threading.enumerate()}
     assert "embed-seam-collector" not in after, (
         "reset_seam left the collector thread running")
+
+
+# ── the configured seam, not an injected one ────────────────────────────────
+
+
+class _BootingBacking(_RecordingBacking):
+    """An encode that first spends time reaching READY, like a cold worker.
+
+    ``boot_s`` is the cold import plus the model load (#13674) and is reported
+    through :meth:`last_startup_ms`; ``encode_s`` is the encode proper.
+    """
+
+    name = "booting"
+
+    def __init__(self, *, boot_s: float, encode_s: float) -> None:
+        super().__init__()
+        self.boot_s = boot_s
+        self.encode_s = encode_s
+        self._last_boot_ms = 0.0
+
+    def encode(self, texts, *, timeout_s=None):
+        started = time.monotonic()
+        time.sleep(self.boot_s)
+        self._last_boot_ms = (time.monotonic() - started) * 1000.0
+        time.sleep(self.encode_s)
+        with self._lock:
+            self.batches.append(list(texts))
+        return [[float(len(t))] + [0.0] * (self.dim - 1) for t in texts]
+
+    def last_startup_ms(self) -> float:
+        return self._last_boot_ms
+
+
+class TestTheConfiguredSeamIsWhatTheRowsDrive:
+    """Review F3: the first batch's counters must not die with the collector.
+
+    ``_collector_for()`` used to be taken BEFORE any backing was resolved, so the
+    collector's very first ``_fire`` called ``active_backing()`` — whose first
+    resolution RETIRES the collector it is running on. The first batch's
+    ``collect_ms``/``wait_ms``/``declines`` landed on an object the module no
+    longer pointed at, so ``/health`` published ``submissions: 0`` immediately
+    after a cold start had served its first batch. Every counter row in this file
+    installs a backing, and ``install_backing`` short-circuits
+    ``active_backing`` — which is exactly why none of them could see it.
+    """
+
+    def test_the_first_coalesced_batch_publishes_its_counters(self, monkeypatch):
+        recorder = _RecordingBacking()
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "200")
+        monkeypatch.setattr(embed_seam, "_construct", lambda _name: recorder)
+
+        results: list = []
+        errors: list = []
+        _join(_pump(2, threading.Barrier(2), results, errors))
+
+        assert not errors, errors
+        assert len(recorder.batches) == 1, (
+            f"the two concurrent queries did not share one batch: {recorder.batches}")
+        latency = embed_seam.seam_status()["latency"]
+        assert latency["batches"] >= 1, (
+            "the first batch's counters were discarded — /health publishes "
+            "'no submissions ever' right after a cold start served them")
+        assert latency["submissions"] == 2, (
+            f"submissions read {latency['submissions']} after two encode_query "
+            "calls — the collector that served them was retired by its own "
+            "_fire resolving the backing")
+
+    def test_a_backing_that_ran_before_the_switch_is_marked_stale_not_null(
+            self, monkeypatch):
+        """Review F7: ``backings[*].latency`` must answer what its docstring says.
+
+        A backing that ran earlier in this process keeps its last distribution —
+        flagged ``latency_stale`` — instead of ``null``. Without it the map could
+        never answer "would the other one be better", which is the only reason it
+        lists all three.
+        """
+        first = _RecordingBacking()
+        second = _RecordingBacking()
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        monkeypatch.setattr(
+            embed_seam, "_construct",
+            lambda name: second if name == embed_seam.BACKING_EXTERNAL else first)
+
+        embed_seam.encode_query("a")
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+        embed_seam.encode_query("b")
+
+        backings = embed_seam.seam_status()["backings"]
+        assert backings["external"]["latency"] is not None
+        assert backings["external"]["latency"]["submissions"] >= 1
+        stale = backings["inprocess"]["latency"]
+        assert stale is not None, (
+            "a backing that served traffic before the switch reports null — the "
+            "per-backing table cannot answer 'would the other one be better'")
+        assert stale["submissions"] >= 1
+        assert backings["inprocess"]["latency_stale"] is True
+
+
+class TestTheTicketBoundIsSizedForTheNextPhase:
+    def test_a_lever_flipped_to_worker_sizes_the_bound_for_the_boot(
+            self, monkeypatch):
+        """Review: the phase sizing asked the OLD backing.
+
+        ``docs/infra-runbook.md`` documents retargeting without a restart, so a
+        lever that now says ``worker`` while the live object is not one is a
+        SUPPORTED path — and the next encode pays the whole boot. Reading only the
+        candidate answered "no boot in flight" about a backing that is no longer
+        the configured one, so the ticket was bounded by the request budget and a
+        healthy boot declined.
+        """
+        embed_seam.install_backing(_RecordingBacking())  # name = "recording"
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setenv(embed_seam.ENV_WORKER_STARTUP_S, "123")
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "0")
+        bound = embed_seam.resolve_ticket_wait_s(1.0)
+        assert bound == pytest.approx(0.0 + 123.0 + 1.0), (
+            f"a lever flipped to worker sized the ticket bound at {bound}s — the "
+            "request budget, not the boot budget, so the first query declines "
+            "during a healthy boot")
+
+
+class TestEncodeMsMeasuresTheEncodeNotTheBoot:
+    def test_a_worker_boot_is_not_charged_to_encode_ms(self, monkeypatch):
+        """Review F4: ``encode_ms`` is the number the switch decision rests on.
+
+        The clock in ``_fire`` starts before the backing is resolved, and a
+        worker's encode begins with ``_ensure_started(600 s)`` — so a cold first
+        sample was the 156.5 s import plus the model load, published as
+        ``encode_ms`` and described in the runbook as "directly comparable across
+        backings". With nearest-rank percentiles the first reading after a switch
+        IS the p95 (``n < 20``), so this is the sample operators actually see.
+        """
+        booty = _BootingBacking(boot_s=0.5, encode_s=0.03)
+        embed_seam.install_backing(booty)
+
+        assert embed_seam.encode_query("a") is not None
+        encode = embed_seam.seam_status()["latency"]["encode_ms"]
+        assert encode["max"] is not None
+        assert encode["max"] < 250.0, (
+            f"encode_ms.max is {encode['max']} ms for a 30 ms encode — the "
+            "worker's boot was charged to the encode, making it incomparable "
+            "across backings")
+        assert encode["max"] >= 10.0, (
+            "encode_ms collapsed to ~0 — the boot was subtracted but the encode "
+            "was not measured")
+
+
+class TestASubmitToAStoppedCollectorIsRefused:
+    def test_a_stopped_collector_never_restarts(self, backing):
+        """Review: ``stop()``'s "nothing fires afterwards" was false for a late submit.
+
+        ``_ensure_thread_unlocked`` cleared ``_stop`` and started a fresh thread on
+        the SAME collector, so a submit on a collector captured before
+        ``reset_seam`` ran a batch through a backing constructed after teardown —
+        one nothing would ever close.
+        """
+        recorder = backing()
+        assert embed_seam.encode_query("a") is not None
+        collector = embed_seam._collector
+        assert collector is not None
+        embed_seam.reset_seam()
+        fired_before = len(recorder.batches)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            collector.submit("late", timeout_s=1.0)
+        assert "cannot be reused" in str(excinfo.value), excinfo.value
+        time.sleep(0.3)
+        assert len(recorder.batches) == fired_before, (
+            "a submit to a stopped collector ENCODED — the stop was not terminal")
+        assert not collector.alive()
+
+
+# ── the worker's reap arms ──────────────────────────────────────────────────
+
+
+class _ReapSpyProc:
+    """A ``Popen`` double that records every kill/wait the seam performs.
+
+    ``exit_code`` is what ``poll()`` reports (``None`` ⇒ still running);
+    ``creates`` is a socket path the child "binds", created on the first poll
+    (the readiness contract). ``wait_raises_first`` makes the FIRST ``wait``
+    raise ``TimeoutExpired``, which is the arm ``close()`` exists for.
+    """
+
+    pid = 4243
+
+    def __init__(self, *, exit_code=None, creates=None,
+                 wait_raises_first=False) -> None:
+        self._exit_code = exit_code
+        self.returncode = exit_code
+        self._creates = creates
+        self._wait_raises_first = wait_raises_first
+        self.kills = 0
+        self.terminates = 0
+        self.waits = 0
+        self.stdin = None
+
+    def poll(self):
+        if self._creates is not None:
+            with contextlib.suppress(OSError):
+                open(self._creates, "w").close()
+            self._creates = None
+        return self._exit_code
+
+    def kill(self) -> None:
+        self.kills += 1
+        self._exit_code = -9
+        self.returncode = -9
+
+    def terminate(self) -> None:
+        self.terminates += 1
+
+    def wait(self, timeout=None):
+        self.waits += 1
+        if self._wait_raises_first and self.waits == 1:
+            raise subprocess.TimeoutExpired("embed_worker", timeout or 0)
+        return self.returncode
+
+
+class TestTheWorkerReapArmsArePinned:
+    """Review F5: ``rg -c TimeoutExpired`` over this file returned 0.
+
+    Three arms reap a child — the failed-startup wait, the start-up timeout's
+    kill+wait, and ``close()``'s terminate→kill→wait — and none of them executed
+    in any row: the start-up rows replace ``_ensure_started`` wholesale, and the
+    real-subprocess row's worker dies on SIGTERM without ever reaching the
+    timeout. Deleting any of the three left the suite green, so a zombie leak (or
+    a 432 MB process surviving teardown) had no detector at all.
+    """
+
+    def test_a_worker_that_exits_during_startup_is_reaped_before_the_raise(
+            self, monkeypatch):
+        proc = _ReapSpyProc(exit_code=1)
+        monkeypatch.setattr(embed_seam.subprocess, "Popen",
+                            lambda *a, **k: proc)
+        worker = embed_seam.WorkerBacking()
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                worker._ensure_started(5.0)
+            assert "exited during start-up" in str(excinfo.value)
+            assert proc.waits >= 1, (
+                "an exited child was never waited for — it stays a zombie, one "
+                "per failed start-up attempt")
+        finally:
+            worker.close()
+
+    def test_a_startup_timeout_kills_and_reaps_the_child(self, monkeypatch):
+        proc = _ReapSpyProc()
+        monkeypatch.setattr(embed_seam.subprocess, "Popen",
+                            lambda *a, **k: proc)
+        worker = embed_seam.WorkerBacking()
+        try:
+            with pytest.raises(TimeoutError):
+                worker._ensure_started(1.0)
+            assert proc.kills == 1, (
+                "a start-up that timed out was not killed — the child keeps "
+                "loading a model nothing is waiting for")
+            assert proc.waits >= 1, (
+                "a SIGKILLed child was never waited for — one zombie per attempt")
+        finally:
+            worker.close()
+
+    def test_close_kills_a_child_that_outlives_terminate(self, monkeypatch):
+        worker = embed_seam.WorkerBacking()
+        proc = _ReapSpyProc(
+            creates=worker.socket_path(), wait_raises_first=True)
+        monkeypatch.setattr(embed_seam.subprocess, "Popen",
+                            lambda *a, **k: proc)
+        worker._ensure_started(2.0)
+        worker.close()
+        assert proc.terminates == 1
+        assert proc.kills == 1, (
+            "terminate() did not end the child and close() did not escalate to "
+            "kill — a 432 MB worker survives teardown")
+        assert proc.waits >= 2, (
+            "the SIGKILL was not reaped (TimeoutExpired must be followed by a "
+            "second wait)")
+
+
+# ── the peer credential, both sides ────────────────────────────────────────
+
+
+class TestTheClientVerifiesItsPeer:
+    def test_a_socket_answered_by_a_foreign_uid_is_refused(self, tmp_path,
+                                                           monkeypatch):
+        """Review: the peer-credential belt was on the wrong side.
+
+        ``_peer_allowed`` runs in the process that BOUND the socket, so it cannot
+        defend against the attack it names — a process that binds the path FIRST
+        and becomes the server, in which case the check that runs on ``accept`` is
+        the attacker's own code. The client must verify whoever is ANSWERING.
+        """
+        path = str(tmp_path / "embed.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(4)
+        monkeypatch.setattr(embed_seam, "_socket_peer_uid",
+                            lambda _conn: os.getuid() + 1)
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                embed_seam._LineJSONClient(path).open_stream(1.0)
+            assert "uid" in str(excinfo.value)
+            assert "foreign process" in str(excinfo.value)
+        finally:
+            server.close()
+
+    def test_the_require_peer_lever_refuses_an_unverifiable_peer(
+            self, monkeypatch):
+        """The fail-open default is selectable, not assumed.
+
+        Unset, an unreadable peer is warned about once and allowed (the private
+        ``0700`` directory is still in force). Set, it is REFUSED — the posture an
+        operator at a shared lever path needs, and the only thing that makes the
+        platform gap a decision instead of an accident.
+        """
+        from tortoise import embed_worker
+
+        ours, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        monkeypatch.setattr(embed_worker, "_peer_uid", lambda _conn: None)
+        monkeypatch.setenv(embed_worker.ENV_WORKER_REQUIRE_PEER, "1")
+        try:
+            assert embed_worker._peer_allowed(ours) is False, (
+                "an unverifiable peer was allowed even though the lever requires "
+                "peer identity")
+        finally:
+            ours.close()
+            peer.close()
+
+    def test_the_accept_loop_consults_the_peer_policy(self, tmp_path,
+                                                      monkeypatch):
+        """Review: the belt's WIRING was unpinned.
+
+        Only ``_peer_allowed``'s decision had a row; deleting the call from
+        ``serve``'s accept loop left the suite green, so the hardening could be
+        removed without a red. Driven through a real socket, once with the policy
+        denying and once with it allowing — the deny run must NOT be served.
+        """
+        from tortoise import embed_worker
+
+        monkeypatch.setattr(embed_worker, "_watch_stdin", lambda _s: None)
+        monkeypatch.setattr(embed_worker, "_watch_parent", lambda _pid, _stop: None)
+        monkeypatch.setattr(embed_worker, "_preload_encoder", lambda: True)
+        monkeypatch.setattr(
+            embed_worker, "_encode", lambda texts: [[1.0] for _ in texts])
+
+        def _ask(path: str) -> bytes:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(5.0)
+            try:
+                client.connect(path)
+                # A refused peer is closed by the server, which a client sees as
+                # a reset rather than an empty answer — both mean "not served".
+                with contextlib.suppress(OSError):
+                    client.sendall(b'{"texts": ["a"]}\n')
+                try:
+                    return client.recv(65536)
+                except OSError:
+                    return b""
+            finally:
+                client.close()
+
+        def _run(path: str, allowed: bool) -> bytes:
+            stop = threading.Event()
+            failures: list = []
+
+            def _serve() -> None:
+                try:
+                    embed_worker.serve(
+                        path, parent_pid=0,
+                        peer_allowed=lambda _conn: allowed, stop=stop)
+                except BaseException as exc:  # recorded by the caller
+                    failures.append(exc)
+
+            thread = threading.Thread(target=_serve, daemon=True)
+            thread.start()
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not os.path.exists(path):
+                time.sleep(0.01)
+            assert os.path.exists(path), "the test worker never bound its socket"
+            answer = _ask(path)
+            stop.set()
+            # Wake the blocked accept so the loop can observe the stop flag.
+            with contextlib.suppress(OSError):
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).close()
+            with contextlib.suppress(OSError):
+                _ask(path)
+            thread.join(timeout=10)
+            assert not failures, failures
+            return answer
+
+        allowed_answer = _run(str(tmp_path / "allowed.sock"), True)
+        assert b"vectors" in allowed_answer, (
+            f"the control run was not served at all ({allowed_answer!r}) — this "
+            "row would pass vacuously")
+
+        denied_answer = _run(str(tmp_path / "denied.sock"), False)
+        assert b"vectors" not in denied_answer, (
+            "a peer the policy REFUSED was served — serve() never consulted the "
+            "peer credential, so the socket could be hijacked by any local user")
+
+
+class TestThePrivateSocketDirectoryLifecycle:
+    def test_a_diagnostics_read_does_not_mint_the_private_directory(self):
+        """Review: ``describe()`` minted a directory that only ``close()`` removed.
+
+        A ``/health`` read on a worker-configured process whose boot never
+        completed therefore left an empty ``tortoise-embed-worker-*`` dir behind
+        for the life of the process. A diagnostic must have no side effect.
+        """
+        worker = embed_seam.WorkerBacking()
+        assert worker.describe()["socket"] is None
+        assert worker._socket_dir is None, (
+            "describe() minted the private socket directory")
+
+    def test_a_directory_named_for_a_dead_pid_is_pruned(self, monkeypatch):
+        """A SIGKILLed process cannot clean up after itself; nothing else did."""
+        root = tempfile.gettempdir()
+        stale = os.path.join(root, "tortoise-embed-worker-999999-stale")
+        os.makedirs(stale, exist_ok=True)
+        monkeypatch.setattr(embed_seam, "_pid_alive",
+                            lambda pid: pid != 999999)
+        worker = embed_seam.WorkerBacking()
+        try:
+            worker.socket_path()
+        finally:
+            worker.close()
+        assert not os.path.exists(stale), (
+            "a socket directory left by a dead worker was never pruned")
+
+    def test_a_close_does_not_remove_a_directory_it_did_not_mint(self):
+        """The close/describe interleave must not re-mint.
+
+        ``close()`` used to clear ``_socket_dir`` at the END, so a ``describe()``
+        in between minted a NEW directory and the ``rmdir`` then removed that one —
+        the path a just-closed worker had bound.
+        """
+        worker = embed_seam.WorkerBacking()
+        minted = worker.socket_path()
+        directory = os.path.dirname(minted)
+        worker.close()
+        assert not os.path.exists(directory)
+        # A second close is a no-op and mints nothing.
+        worker.close()
+        assert worker._socket_dir is None

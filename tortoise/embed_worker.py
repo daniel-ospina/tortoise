@@ -63,6 +63,21 @@ _logger = logging.getLogger(__name__)
 #: write end open in a reparented grandchild, which the pipe alone cannot see.
 _HEARTBEAT_S = 1.0
 
+#: ⛔ MAKE AN UNVERIFIABLE PEER A REFUSAL. ``_peer_allowed`` fails OPEN where the
+#: kernel offers no peer credential, because the private ``0700`` socket directory
+#: is still in force and refusing every request would turn a hardening detail into
+#: an outage. That default is wrong for the one deployment where the directory does
+#: NOT protect the socket — an operator who points the lever at a shared path — so
+#: the posture is selectable rather than assumed (review: the peer check was
+#: fail-open at two points, with the macOS gap acknowledged and unimplemented).
+ENV_WORKER_REQUIRE_PEER = "TORTOISE_EMBED_WORKER_REQUIRE_PEER"
+
+
+def _require_peer() -> bool:
+    """Whether an unverifiable peer must be REFUSED rather than allowed."""
+    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
 
 def _peer_uid(conn: socket.socket) -> int | None:
     """The uid on the other end of ``conn``, or ``None`` if this kernel cannot say.
@@ -114,12 +129,25 @@ def _peer_allowed(conn: socket.socket) -> bool:
     global _peer_credential_note_emitted
     uid = _peer_uid(conn)
     if uid is None:
+        if _require_peer():
+            _logger.warning(
+                "embed worker: REFUSED a connection whose uid this kernel "
+                "cannot report, because %s is set — peer identity is REQUIRED "
+                "(#14186)", ENV_WORKER_REQUIRE_PEER)
+            with contextlib.suppress(OSError):
+                conn.sendall(
+                    (json.dumps({
+                        "error": "peer rejected: this kernel reports no peer "
+                                 "credential and " + ENV_WORKER_REQUIRE_PEER +
+                                 " is set"}) + "\n").encode("utf-8"))
+            return False
         if not _peer_credential_note_emitted:
             _peer_credential_note_emitted = True
             _logger.warning(
                 "embed worker: this platform offers no SO_PEERCRED — peer "
                 "identity is unchecked; reliance is on the private socket "
-                "directory (0700) (#14186)")
+                "directory (0700). Set %s=1 to REFUSE instead (#14186)",
+                ENV_WORKER_REQUIRE_PEER)
         return True
     if uid == os.getuid():
         return True
@@ -289,15 +317,28 @@ def _preload_encoder() -> bool:
         return False
 
 
-def serve(socket_path: str, *, parent_pid: int) -> None:
-    """Run the worker until the parent dies. Blocks."""
-    stop = threading.Event()
+def serve(socket_path: str, *, parent_pid: int,
+          peer_allowed=_peer_allowed,
+          stop: threading.Event | None = None) -> None:
+    """Run the worker until the parent dies. Blocks.
+
+    ``peer_allowed`` and ``stop`` are injectable so the ACCEPT-LOOP WIRING is
+    testable without a second uid: the pre-fix suite pinned
+    :func:`_peer_allowed`'s decision but not that ``serve`` ever consulted it, so
+    deleting the call left every row green (review: the belt's wiring was
+    unpinned).
+    """
+    stop = threading.Event() if stop is None else stop
     threading.Thread(
         target=_watch_stdin, args=(stop,), name="embed-worker-stdin",
         daemon=True).start()
     threading.Thread(
-        target=_watch_parent, args=(parent_pid,), name="embed-worker-parent",
-        daemon=True).start()
+        # ⛔ ``stop`` IS PASSED. It was omitted, so this belt thread died on its
+        # first line with ``TypeError`` and the parent-death check never ran — an
+        # enforcer that looked armed and could not fire (the pipe was still the
+        # primary mechanism, which is why nothing noticed).
+        target=_watch_parent, args=(parent_pid, stop),
+        name="embed-worker-parent", daemon=True).start()
 
     # ⛔ BEFORE the bind, so the socket's existence means READY — see
     # `_preload_encoder`. The two watcher threads above start FIRST on purpose:
@@ -334,7 +375,13 @@ def serve(socket_path: str, *, parent_pid: int) -> None:
             except OSError:
                 break
             try:
-                if not _peer_allowed(conn):
+                if not peer_allowed(conn):
+                    # ⛔ CLOSE a refused connection. Nothing downstream will: the
+                    # accept loop only hands it to ``_serve_connection`` when the
+                    # policy allows it, so without this every refusal leaked one
+                    # file descriptor.
+                    with contextlib.suppress(OSError):
+                        conn.close()
                     continue
                 _serve_connection(conn)
             except Exception:

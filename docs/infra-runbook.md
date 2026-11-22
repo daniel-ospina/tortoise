@@ -1305,7 +1305,9 @@ backing**, and a table that only appeared once you had already switched could no
 other one be better" — the question an operator asks *before* switching. A backing that has not run
 in this process reports `latency: null` and `null` percentiles, **never 0**: "never observed" and
 "cost nothing" are different claims, and a dashboard that cannot tell them apart reads an unwarmed
-process as an infinitely fast one.
+process as an infinitely fast one. A backing that ran EARLIER and was then replaced keeps its last
+observation set with `latency_stale: true` — those samples belong to a collector that has since been
+retired, so read them as "this is what it did last time", not as "this is what it is doing now".
 
 ⛔ **It is REPORTED, never folded into `status`** — the same rule as `embedder`, `capture` and
 `wait_bound_breaches`. A deployment serving identical vectors in-process is not degraded, and a
@@ -1322,7 +1324,9 @@ the block arrives with the SAME key set, every value `null`, plus `error`, and `
 | `TORTOISE_EMBED_MAX_WAIT_MS` | per backing (below) | The query-batching collection window, in ms. |
 | `TORTOISE_EMBED_MAX_BATCH` | `32` | A batch fires early when it reaches this. |
 | `TORTOISE_EMBED_QUERY_TIMEOUT_S` | `30` | The bound on ONE fired request (worker / external round trip). |
-| `TORTOISE_EMBED_WORKER_SOCKET` | a `0700` directory this process mints (`$TMPDIR/tortoise-embed-worker-<pid>-*/embed.sock`) | Where the worker listens. The private directory is not decoration: readiness is the path's EXISTENCE, and a shared directory would let any local user create it first. An explicit path here is honoured verbatim. |
+| `TORTOISE_EMBED_WORKER_SOCKET` | a `0700` directory this process mints (`$TMPDIR/tortoise-embed-worker-<pid>-*/embed.sock`) | Where the worker listens. The private directory is not decoration: readiness is the path's EXISTENCE, and a shared directory would let any local user create it first. An explicit path here is honoured verbatim — and the CLIENT then verifies the answering peer's uid (`SO_PEERCRED`) after `connect`, so an operator-pointed shared path cannot be hijacked by a foreign process either. |
+| `TORTOISE_EMBED_WORKER_STARTUP_S` | `600` | How long a worker may take to become READY (cold import + model load). Never the per-request budget. |
+| `TORTOISE_EMBED_WORKER_REQUIRE_PEER` | unset | Read by the WORKER process. Unset ⇒ a kernel that reports no peer credential (e.g. macOS, whose `LOCAL_PEERCRED` is not implemented here) is WARNED about once and allowed, on the strength of the private directory. Set to `1` ⇒ such a peer is REFUSED, which is the right posture when the socket lives at an operator-supplied shared path. |
 | `TORTOISE_EMBED_WORKER_PYTHON` | the parent's `sys.executable` | The worker must import the SAME tortoise and extras — a different interpreter is a different encoder. |
 | `TORTOISE_EMBED_EXTERNAL_URL` / `_TOKEN` / `_MODEL` | unset | The remote endpoint, an optional `Bearer`, and the model id to ask for. |
 
@@ -1388,8 +1392,10 @@ curl -sS https://api.premiselabs.co/health \
   read declares itself (#2952). If you see `backing: "worker"` next to a live `last_decline`, you are
   on keyword-only reads — roll back or repair; do not wait for it to self-heal.
 - **`encode_ms` per backing is the number the decision rests on.** It is measured around the encode
-  only (not the queue, not `tolist`), so it is directly comparable across backings — which is the
-  only way to answer "did moving this help" with a reading instead of an opinion.
+  only — not the queue, not `tolist`, and **not the boot**: a worker's first request pays the cold
+  import plus the model load, which is start-up, not encode, and charging it here made the first
+  reading after every switch incomparable (and, with nearest-rank percentiles, the published p95
+  while `n < 20`). Compare `encode_ms` across backings; compare `collect_ms` for the window.
 
 ⛔ **`injected: true` means a TEST installed a backing.** It never appears in production; if it does,
 the process is not running the configured encoder and nothing above can be trusted.

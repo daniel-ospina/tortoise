@@ -995,7 +995,7 @@ def _isolated_embed_seam(monkeypatch):
     """#14186: every test starts on the in-process embedder seam.
 
     The seam is PROCESS state (a resolved backing, its collector thread, an
-    optional worker subprocess) plus TEN env levers, so without a reset a test
+    optional worker subprocess) plus ELEVEN env levers, so without a reset a test
     that installs a fake backing or points at a worker would leave the next test
     — and the whole read/write path it exercises — encoding somewhere else. Same
     rationale as ``_fresh_commit_ingest_budget`` above: reset the state, do not
