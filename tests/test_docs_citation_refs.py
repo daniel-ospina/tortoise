@@ -8755,8 +8755,10 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
 #: figure, and then broke that rule in the sentence doing the telling: it claimed the re-taken
 #: range "reads `403 401`", which is its own `381 379` plus `#14260`'s 22-line `sdk.py`
 #: insertion applied a SECOND time. No head on the branch's first-parent line produces that
-#: pair — measured over 25 heads, which read `43 39` or `42 40` — so the figure was the exact
-#: class this PR exists to repair, surviving inside the clause that names it.
+#: pair — every head of `git log --first-parent origin/main..HEAD` reads `43 39` or `42 40` — so
+#: the figure was the exact class this PR exists to repair, surviving inside the clause naming it.
+#: ⛔ The count of heads is deliberately NOT typed: it moves with every merge, and a typed count
+#: is the same rot one layer up.
 #:
 #: ⛔ WHY NOTHING SAW IT: every alternative in `_TYPED_INDEX_NUMSTAT` above keys on the word
 #: `numstat` within a window that cannot cross a backtick, or on a command span quoted
@@ -8845,8 +8847,9 @@ def test_the_cypher_inventory_types_no_numstat_pair_for_a_range_re_taken_here():
 
     NON-VACUITY, MEASURED: the pre-fix sentence is the witness list in the sibling arm below;
     injecting it back into this document reds HERE, and the pair is absent from every head in
-    `git log --first-parent origin/main..HEAD` (measured at this head: 25 heads, `43 39` /
-    `42 40`, never that pair — the figure is arithmetic on a figure, not a measurement).
+    `git log --first-parent origin/main..HEAD` (re-taken at this head: every head on that line
+    reads `43 39` or `42 40`, never that pair — the figure is arithmetic on a figure, not a
+    measurement — and no head count is typed here for the reason the sibling arm's docstring gives).
 
     ⛔ AND THE WITNESS LIST IS NOT THE POPULATION (#14249 review, P1): the first cut of this
     arm's pattern caught only `reads `<pair>``, so the doc's own `printed **`pair`**` style —
