@@ -6995,7 +6995,7 @@ def get_relationships_bounded(
     #: named is submitted. The read's dominant POST-FUSION cost was the
     #: relationships member this wave carries: measured, it was 143.0 ms p50 of
     #: a 162.3 ms read -- 88 % of it
-    #: (`verdict.member_delta.post_relationships` / `baseline_total.p50` in
+    #: (`verdict.member_delta.post_relationships` / `verdict.baseline_total.p50` in
     #: ``docs/evidence/14192-read-wave/ab-full-read.json``) -- and 3 of the
     #: members walk the same operator fan-out independently.
     #: ⛔ No figure here may come from anywhere but that artifact: an earlier cut
@@ -7047,8 +7047,8 @@ def get_relationships_bounded(
         # CONSUMED below: five reads, ONE wave, ``max(read)`` instead of
         # ``sum(read)``. The read this wave shortens is the one whose
         # relationships member measured 143.0 -> 101.2 ms p50 of a
-        # 162.3 -> 118.8 ms whole read (``member_delta.post_relationships`` and
-        # ``baseline_total``/``after_total`` in
+        # 162.3 -> 118.8 ms whole read (``verdict.member_delta.post_relationships``
+        # and ``verdict.baseline_total``/``verdict.after_total`` in
         # ``docs/evidence/14192-read-wave/ab-full-read.json``), and three of the
         # members walk the same operator fan-out independently.
         #
