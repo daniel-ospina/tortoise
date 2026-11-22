@@ -3598,15 +3598,31 @@ def _d5_documented_long_options(completed: subprocess.CompletedProcess) -> set[s
     if len(documented) >= _D5_LONG_OPTION_FLOOR:
         return documented
     if completed.returncode != 0:
+        # ⛔ THE "NOT A TOTAL ABSENCE" CLAUSE IS CONDITIONAL ON THERE BEING SOMETHING TO BE
+        # ABSENT (#14327 review round 3, P3 — MEASURED). The branch fires for 0 <= count < floor,
+        # not 1 <= count, so an UNCONDITIONAL denial that grep publishes none renders "published
+        # only 0 long options … It does not publish NO long options" at count 0 — the same
+        # self-contradiction this message was rewritten to remove, at the other end of its range.
+        # Count 0 is reachable and already driven here: the short-flag-only usage fixture, and a
+        # hostile grep whose `--help` prints nothing.
+        shape = (
+            "BSD grep 2.6.0-FreeBSD prints its `usage:` line on stderr and exits 2, which is read "
+            "above — the stream is not the problem; the list is too short for the floor")
+        if documented:
+            shape += (
+                f". It does not publish NO long options: macOS/BSD grep's usage names "
+                f"`--binary-files`, `--color`, `--context`, … and merely fewer of them than GNU "
+                f"grep — this host documented {len(documented)}")
+        else:
+            shape += (
+                ". This host published none at all, which is the same short-list shape and not a "
+                "stream problem either — a usage line that carries no long options is counted, "
+                "it just cannot reach the floor")
         raise _D5NoDocumentedUniverse(
             f"`grep --help` published only {len(documented)} long options and exited "
             f"{completed.returncode} — its usage lists fewer than {_D5_LONG_OPTION_FLOOR} long "
-            "options, so this host has no documented universe to pin the option set against "
-            "(BSD grep 2.6.0-FreeBSD prints its `usage:` line on stderr and exits 2, which is read "
-            "above — the stream is not the problem; the list is too short for the floor. It does "
-            "not publish NO long options: macOS/BSD grep's usage names `--binary-files`, "
-            "`--color`, `--context`, … and merely fewer of them than GNU grep) "
-            "(#14303 review round 15, P3; #14327 review, P3)")
+            f"options, so this host has no documented universe to pin the option set against "
+            f"({shape}) (#14303 review round 15, P3; #14327 review, P3)")
     raise AssertionError(
         f"only {len(documented)} long options were parsed out of a `grep --help` that exited 0 — "
         "the derivation is broken, and a broken derivation must not be able to certify anything "
@@ -5409,6 +5425,22 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         "a `grep --help` that PUBLISHED a universe must be RETURNED, not skipped — the skip excuses "
         "only the platform that published nothing (#14303)")
 
+    # ⛔ AND THE SKIP MESSAGE MUST NOT REFUTE ITSELF AT EITHER END OF ITS RANGE (#14327 review
+    # round 3, P3 — MEASURED). The branch fires for `0 <= count < floor`, so an UNCONDITIONAL denial
+    # that grep publishes none rendered "published only 0 long options … It does not publish NO
+    # long options" at count 0. Count 0 is reachable twice over — this short-flag-only fixture, and
+    # a hostile grep whose `--help` prints nothing (`/tmp/fx3`, rc 3) — so the clause is now emitted
+    # only when there IS something to be absent, and the zero render is asserted directly rather
+    # than left to the other arm's wording.
+    with pytest.raises(_D5NoDocumentedUniverse) as zero_universe:
+        _d5_documented_long_options(reported(
+            2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    assert "published only 0 long options" in str(zero_universe.value), (
+        "the count-0 skip message must still report the count and the exit code it measured")
+    assert "not publish NO long options" not in str(zero_universe.value), (
+        "at count 0 the message claimed grep does NOT publish no long options — it published none, "
+        "so that clause contradicts the number in the same sentence (#14327 review round 3, P3)")
+
     # ⛔ THE TWO STREAMS ARE JOINED WITH A SEPARATOR, AND THAT SEPARATOR HAS ITS OWN WITNESS (#14303
     # review round 6, P2 — MEASURED). Reading "whichever stream carried it" is not enough when a
     # grep SPLITS a list across both: `(stdout or "") + (stderr or "")` fuses the last name of one
@@ -5799,7 +5831,10 @@ def test_the_version_probe_answers_without_reading_stdin(monkeypatch):
     and below, and `_d5_grade_alias_spelling`, all pass `input=`). The one other grep run that feeds
     neither is `_d5_documented_long_options`'s `grep --help` at the alias cell — harmless, because
     `--help` never reads stdin, and named here rather than left as an unstated exception. The two
-    stubs this probe is driven with (`refuses`, `runs_but_fails`) begin `cat >/dev/null`, so an
+    stubs this probe is driven with (`refuses`, `runs_but_fails`, `version_confused` — three, not
+    two: the last reaches it only through the third exit code. Counting them is not pedantry here,
+    it is the SAME count-vs-enumeration defect this branch fixed for the sibling cell, so it is
+    counted from the source rather than remembered) begin `cat >/dev/null`, so an
     inherited fd 0 made both block until `timeout=60` and raise `TimeoutExpired`, which is NOT an
     `AssertionError`: the cell ERRORS instead of asserting. pytest's DEFAULT `fd` capture points
     fd 0 at `/dev/null`, so the default run cannot expose it; the shape appears with
