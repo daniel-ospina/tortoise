@@ -30,19 +30,24 @@ WHAT THIS MODULE IS NOT
   ``project`` callable — normally ``record_writer.write_live_record``. This
   module chooses *when* a fold runs and never *what* it does, so a fourth write
   door cannot get a fourth answer to "what does this event mean in Postgres".
-* **Not a store.** The queue is in memory and is not durable by design: the
-  journal is the **reconstruction** source for everything queued here, and a
-  process that dies with a non-empty queue loses nothing a replay cannot restore
-  (``tools/record_runner.py apply``). ⛔ Durability is the store's own
-  persistence plus an off-box copy of it (see ``docs/durability-posture.md``),
-  which is the rule that document asks every other file to state and link while
-  it keeps the AUTHORITY itself — this bullet states that rule and no more.
-  `tests/test_durability_posture.py` reds something NARROWER than "no durability
-  statement outside the canonical doc": it fires on the claim SHAPES the document
-  reserves for itself, so a reword that keeps the meaning and drops the shape is
-  outside that gate — the document says so in terms ("the gate matches a CLAIM
-  SHAPE, not durability claims in general"). Nothing is ever DROPPED to make
-  room — see *BACKPRESSURE* below.
+* **Not a store.** The queue is in memory and is not durable by design: every
+  item in it already has its line in the journal, which is the **reconstruction**
+  source for what this loop defers, so a process that dies with a non-empty queue
+  loses no journal line and re-derives the fold (``tools/record_runner.py apply``).
+  ⚠️ What a replay brings back is the ROW: that fold is passed no ``derived``, so a
+  row it CREATES lands ``embedding`` NULL, where the live fold would have derived
+  one. ⛔ In every deployment running a FalkorDB server, durability is the store's
+  own persistence plus an off-box copy of it and NOTHING ELSE
+  (``docs/durability-posture.md``) — the rule that document asks every other file
+  to state and link while it keeps the AUTHORITY itself, and this bullet carries
+  that rule and no authority claim of its own. ⛔ What
+  `tests/test_durability_posture.py` enforces is NARROWER than what that document
+  reserves, and deliberately so: it fires on the claim SHAPES its own regexes
+  match — four alternations inside a 40-character window (``CLAIM_RE``), and the two
+  predicate forms re-scanned across line breaks (``WRAPPED_CLAIM_RE``) — while a
+  mechanism promise, a loss window or a verification level stated as a promise
+  "does not match it, and is corrected by hand" (``docs/durability-posture.md``).
+  Nothing is ever DROPPED to make room — see *BACKPRESSURE* below.
 * **Not the cache fold.** `live_write`'s ``projection.apply`` (record →
   FalkorDB) still runs inline. Deferring the record is safe because the record
   has an independent, always-available reader and a journal that heals it; the
