@@ -25,7 +25,10 @@ import time
 
 import numpy as np
 
-from . import embed_gate  # #5008: the S5 EMBED gate (which rows earn a vector)
+from . import (
+    embed_gate,  # #5008: the S5 EMBED gate (which rows earn a vector)
+    embed_seam,  # #14186: the ONE embedder seam (inprocess|worker|external)
+)
 from .env_truthy import env_flag  # #4097: the declared truthy contract
 from .exceptions import FAILURE_KINDS, EmbedderUnavailableError  # #4861: the REQUIRED contract
 from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
@@ -2090,8 +2093,15 @@ def compute_embeddings(
     """
     if not texts:
         return []
-    model = EmbeddingModel.get()
-    if model is None:
+    # ⛔ #14186: only the IN-PROCESS backing needs the local model resolved here.
+    # It is the same singleton the seam's in-process backing will use, and the
+    # unavailability check below must keep the exact pre-#14186 shape (one
+    # ``get()``, one skip note, ``[None] * n``) so nothing about the default
+    # posture moved. A worker or external backing carries its OWN encoder, so
+    # demanding a local one would make the seam unable to move the embedder out
+    # of this process at all — the whole point of the issue.
+    if (embed_seam.resolve_backing() == embed_seam.BACKING_INPROCESS
+            and EmbeddingModel.get() is None):
         _note_embed_skip(len(texts))
         return [None] * len(texts)
     try:
@@ -2100,15 +2110,38 @@ def compute_embeddings(
         return [None] * len(texts)
     try:
         _t0 = time.perf_counter()
-        ensure_embed_threads()
-        vecs = model.encode(truncated)
-    except Exception:
+        # ⛔ #14186: the encode now goes through the seam. For the in-process
+        # backing this is byte-for-byte the pre-#14186 call (the backing does
+        # ``EmbeddingModel.get()`` + ``ensure_embed_threads()`` +
+        # ``model.encode(list)`` with no kwargs, which is what stood here), so
+        # the default posture and every existing double keep working. A worker
+        # or external backing answers from its own encoder and ``model`` is
+        # never consulted.
+        vecs = embed_seam.encode_texts(truncated)
+    except Exception as exc:
         # An encode that RAISED produced no model work, so it is counted as
         # ``skipped`` rather than silently counted as neither — otherwise the
         # figure (0 calls, 0 skipped) is indistinguishable from "no encode was
         # ever attempted", which is exactly the ambiguity ``skipped`` exists to
         # remove (#4488 failure-mode table).
         _note_embed_skip(len(texts))
+        # ⛔ #5275 STILL BINDS ON THE WRITE PATH (#14186 review F2). Before the
+        # seam, ``EmbeddingModel.get()`` was this path's only exit and it returns
+        # through ``_unavailable``, which RAISES in an armed process. A worker or
+        # external backing never calls ``get()`` at all, so an armed process whose
+        # worker or endpoint is dead fell through to a silent ``[None] * n``: no
+        # vectors stored and NO refusal named — the #2985 shape this PR closes on
+        # the READ path, left open here. Name it in the same terms.
+        # The in-process backing is deliberately unchanged: its absence exit
+        # already reaches ``_unavailable`` through ``get()`` above, so routing a
+        # plain encode failure through it would move behaviour no finding covers.
+        if embed_seam.resolve_backing() != embed_seam.BACKING_INPROCESS:
+            EmbeddingModel._unavailable(
+                context=(
+                    f"write: the embed seam declined on the "
+                    f"{embed_seam.resolve_backing()} backing "
+                    f"({type(exc).__name__}: {exc})")[:400],
+                kind=EmbeddingModel.absent_reason())
         return [None] * len(texts)
     # ⛔ The measurement call sits OUTSIDE every value-guarding ``try``: a
     # measurement fault must never discard a batch of successfully computed
@@ -2118,7 +2151,13 @@ def compute_embeddings(
     if vecs is None or len(vecs) != len(texts):
         return [None] * len(texts)
     try:
-        return [vec.tolist() for vec in vecs]
+        # ⛔ ``vector_to_list``, not ``vec.tolist()`` (#14186): the seam returns
+        # plain float lists, and ``.tolist()`` on a list raises ``AttributeError``
+        # — inside THIS try, whose handler returns ``[None] * n``. That would
+        # discard a whole batch of successfully computed vectors, the same
+        # fail-open shape as above. Accepting both shapes is strictly safer than
+        # requiring the one a given encoder happens to return.
+        return [embed_seam.vector_to_list(vec) for vec in vecs]
     except Exception:
         return [None] * len(texts)
 

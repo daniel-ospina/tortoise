@@ -8507,6 +8507,64 @@ def _embedder_health() -> dict:
         return {**dict.fromkeys(_EMBEDDER_HEALTH_KEYS), "error": str(exc)[:200]}
     return {key: status.get(key) for key in _EMBEDDER_HEALTH_KEYS}
 
+#: #14186 — the keys `/health`'s `embed_seam` block must carry. Declared as a
+#: tuple for the same reason ``_EMBEDDER_HEALTH_KEYS`` is: the DEGRADED arm has
+#: to publish the SAME shape as the healthy one, and an ad-hoc short dict is how
+#: a dashboard gets a ``KeyError`` on exactly the path it is reading (PLUS
+#: ``error`` on the degraded arm — an extra key cannot ``KeyError`` a consumer, a
+#: missing one can).
+_EMBED_SEAM_HEALTH_KEYS = (
+    "backing", "max_wait_ms", "max_batch", "timeout_s", "last_decline",
+    "last_decline_age_s", "injected", "backing_state", "latency", "backings",
+)
+
+
+def _embed_seam_health() -> dict:
+    """#14186: which backing encodes, its bound, and its measured p50/p95.
+
+    Two questions this answers that nothing else on ``/health`` can:
+
+    * **Where does the encode run, right now?** ``backing`` is
+      ``inprocess`` / ``worker`` / ``external`` — the configured choice, so a
+      rollout that intended to move the embedder off the request path is
+      verifyable from outside the process instead of inferred from a latency
+      graph. ``backing_state`` carries the backing's own evidence (the worker's
+      pid and liveness, or the external endpoint's URL) so "worker" is not
+      merely a claim about a string.
+    * **Did batching help, and at what tail cost?** ``latency`` carries the
+      submission/batch/coalesced counts and the **p50/p95** of the collection
+      WAIT and the ENCODE. ⛔ TWO different waits are published and only ONE of
+      them is the bound's proof: ``latency.collect_ms`` is dequeue→fire, the
+      window-attributable wait that ``max_wait_ms`` bounds (bar one scheduling
+      quantum), so ``collect_ms.p95`` next to ``max_wait_ms`` is the reading that
+      answers "is the hard max-wait actually hard". ``latency.wait_ms`` is
+      submission→fire — END-TO-END latency — and it also carries however long a
+      ticket queued behind an in-flight encode, so it is NOT bounded by the
+      window: on the 0 ms ``inprocess`` default every non-zero ``wait_ms``
+      "exceeds" the published bound on a perfectly healthy process (review F5).
+    * ``backings`` lists **all three** with their windows, selected or not. The
+      issue's indicator is p50/p95 **per backing**, and a table that only shows
+      the one already chosen cannot answer "would the other be better" — the
+      question an operator asks before switching.
+
+    ⛔ NEVER RAISES, collects no I/O (#2850): ``seam_status()`` reads process
+    memory and a percentile over a bounded reservoir. It does not spawn a
+    worker, open a socket or call the encoder, so this handler stays as cheap as
+    the embedder block beside it.
+
+    Reported, never folded into ``status``: a deployment serving identical
+    vectors in-process is not degraded, and a ``worker`` backing is not a
+    verdict on health either — the CALLER-facing contract for an unavailable
+    dense leg is ``#2952``'s per-read declaration, which is unchanged.
+    """
+    try:
+        from tortoise.embed_seam import seam_status
+
+        status = seam_status()
+    except Exception as exc:  # a health path must always answer
+        return {**dict.fromkeys(_EMBED_SEAM_HEALTH_KEYS), "error": str(exc)[:200]}
+    return {key: status.get(key) for key in _EMBED_SEAM_HEALTH_KEYS}
+
 
 @app.get("/health")
 async def health():
@@ -8786,7 +8844,19 @@ async def health():
             # "hybrid retrieval is OFF in production" claim could only be
             # re-measured by a human with a shell on the box. Reported, never
             # folded into `status`: see `_embedder_health`'s docstring.
-            "embedder": _embedder_health()}
+            "embedder": _embedder_health(),
+            # #14186: the embedder SEAM — which backing is serving the encodes,
+            # the collection window it applies, and the p50/p95 the current
+            # backing actually measured (plus the same, empty, for the backings
+            # not selected). Its OWN key rather than more fields on `embedder`:
+            # that block's key set is pinned exactly by
+            # `test_13674_embedder_load_bound_and_reclaim` (an operator's
+            # `jq .embedder.<key>` is a contract), and the seam answers a
+            # DIFFERENT question — "where does the encode run, and is batching
+            # helping" rather than "can the dense leg run at all". Reported,
+            # never folded into `status`: a backing that is merely batched is not
+            # a degraded deployment.
+            "embed_seam": _embed_seam_health()}
 
 
 @app.get("/health/ready")

@@ -10638,6 +10638,13 @@ ROWED_BY_THIS_FOLD = (
     # file nobody listed has no `durations:` row and nothing reds (#14086 cycle-3 review, F1).
     "test_10893_capture_off_loop.py",
     "test_10893_pre_handler_parts.py",
+    # #14186 — a file this fold ADDED and registered on `core`/`api`/`eval`. It is
+    # listed here for the reason every row above states: the ENTRY-RULE pin
+    # iterates this EXPLICIT tuple, so a file nobody listed can ship rowless and
+    # nothing reds. Its `durations:` row exists (the PR's review F1 asked for it
+    # after `--integrity` stayed green over the missing REGISTRATION itself, the
+    # #13854 shape — a file in no surface is never selected at all).
+    "test_14186_embedder_seam_batching.py",
 )
 
 

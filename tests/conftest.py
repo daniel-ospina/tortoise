@@ -990,6 +990,39 @@ def _fresh_default_row_mint_window():
     _DEFAULT_ROW_MINT_RETRY.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_embed_seam(monkeypatch):
+    """#14186: every test starts on the in-process embedder seam.
+
+    The seam is PROCESS state (a resolved backing, its collector thread, an
+    optional worker subprocess) plus ELEVEN env levers, so without a reset a test
+    that installs a fake backing or points at a worker would leave the next test
+    — and the whole read/write path it exercises — encoding somewhere else. Same
+    rationale as ``_fresh_commit_ingest_budget`` above: reset the state, do not
+    change the defaults.
+
+    ⛔ It also CLEARS the levers, and that half is load-bearing: a leaked
+    ``TORTOISE_EMBED_BACKING=worker`` makes every later test's ``compute_embeddings``
+    skip the local-model availability check and try to spawn a process, which
+    would present as a scatter of unrelated failures rather than one.
+
+    ⛔ THE LIST IS NOT SPELLED HERE (review F8). It is
+    :data:`tortoise.embed_seam.SEAM_ENV_LEVERS`, the module's own census, so a
+    lever added there is cleared here automatically — the hand-written tuple this
+    replaced had missed ``ENV_WORKER_STARTUP_S``, and a shell that exported it
+    made ``test_a_real_worker_starts_answers_and_dies_with_its_stdin`` depend on
+    the ambient environment. One row in the seam's suite pins that census against
+    the module's ``ENV_*`` constants, so the tuple cannot drift either.
+    """
+    from tortoise import embed_seam
+
+    for name in embed_seam.SEAM_ENV_LEVERS:
+        monkeypatch.delenv(name, raising=False)
+    embed_seam.reset_seam()
+    yield
+    embed_seam.reset_seam()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _fresh_capture_spool():
     """#3963: start every pytest SESSION with a fresh capture spool.
