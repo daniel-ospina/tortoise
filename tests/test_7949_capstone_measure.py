@@ -6809,6 +6809,20 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("14792", "if not edus:"),
             ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
+        # ⛔ THE VET LIST GATE IS WRITTEN TWICE IN THE PROBE, and only one copy had a
+        # reader (#14269 review round 2). `_IDLE_CITES["vet"]` (:1847) and the
+        # `_pass_ran` docstring (:1888) both name `if vet_enabled and embed_list:`;
+        # the docstring's copy wraps the phrase onto one line and the number onto the
+        # next, so a ONE-LINE-SCOPED row cannot reach it — but THIS copy carries the
+        # phrase and the number on the SAME line, so it can, and it is the number that
+        # rots when `extractor_v2.py` moves. Measured non-vacuity: mutating either
+        # copy's `:17970` to a wrong number leaves every other pin green, so without
+        # this row the second site is ungraded. The phrase is the full clause, not
+        # `pass is gated on the LIST`, because that shorter form also matches the
+        # CLASSIFY paragraph one entry below and `len(hits) != 1` would red.
+        ("probes/capstone_measure.py", "pass is gated on the LIST — `if vet_enabled and embed_list:`", (
+            ("17970", "if vet_enabled and embed_list:"),
+        )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
             ("14823", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
