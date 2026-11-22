@@ -1478,15 +1478,16 @@ def _still_carried_why(prefix: str, head_carrier: str, *, base_carried_code: boo
     """
 
     held = (
-        "the base's code for it was a `.pyi` stub, a stub holds no runtime statements, and this "
-        "tree still holds that carrier"
+        "its only code was a `.pyi` stub and this tree still holds that carrier"
         if base_carried_code
         else "no file the base held for it carried a statement"
     )
+    # ⛔ NOT "drop the flag" — the caller already appends that sentence to every `waives nothing`
+    # row, and a second copy read as two instructions at the end of one line.
     return (
         f"{prefix} and this tree STILL CARRIES it (`{head_carrier or 'a stub carrier'}`), which "
-        f"holds no runtime statements: {held}, so nothing was removed for the waiver to waive — "
-        "a stub-only module's only code IS the stub (#12402), so drop the flag"
+        f"holds no runtime statements — {held}, so nothing was removed for the waiver to waive "
+        "and no record is missing (#12402)"
     )
 
 
