@@ -264,10 +264,12 @@ def _residue_block() -> str:
     the block) moved it to 1147, correcting that note's own mis-quoted ending — it called a
     PREFIX of the sentence its close — moved it to 1152, and correcting that note's FALSE account
     of how the second address rotted, plus an unreproducible "18 of the last 20" count in the
-    same block, moved it to 1165. ⛔ "THIS sentence", NOT "a sibling sentence" (cycle 2, P3): at
-    `04afeb811d` the only occurrence of the 985 reading in the tree was THIS sentence
-    (`git grep -n "985 lines" 04afeb811d` returns exactly one hit), so a sibling never published
-    it. Every one of those readings was an honest
+    same block, moved it to 1163, and the correction that follows — naming THIS sentence rather
+    than "a sibling sentence" — took it the rest of the way, to the figure this docstring opens
+    with. ⛔ "THIS sentence", NOT "a sibling sentence" (cycle 2, P3): at `04afeb811d` the only
+    occurrence of the 985 reading in the tree was THIS sentence (`git grep -n "985 lines"
+    04afeb811d` returns exactly one hit), so a sibling never published it. Every one of those
+    readings was an honest
     attempt at the number the sentence asks for, which is exactly why the number is now a gate
     rather than a note. ⛔ AND NO TOTAL IS ASSERTED HERE: the readings are listed above and their
     count is left to the history, because counting a prose enumeration in this same block is the
@@ -1609,9 +1611,11 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     THAT line the one that reds: it was an assertion whose value cannot vary — the round's
     own rule 2, a catch not attributable to the guard it claims to prove. A superset assert
     carries both facts and stays reachable: delete any key and it names the rev that went
-    missing, empty the map and that same line reds naming every rev in `expected` — ELEVEN
-    of them since the union below, not the six this sentence used to claim
-    (#14282 review cycle 3, P3: the six was written before `expected` gained `OWN_PINS`).
+    missing, empty the map and that same line reds naming every rev in `expected` — the fixed
+    tuple UNION `OWN_PINS`. ⛔ ITS SIZE IS DERIVED, NEVER TYPED (#14282 review cycle 2, P3, the
+    same class the map's own note repairs): this sentence published a figure — "the six", then
+    "ELEVEN" — and each went stale the moment `OWN_PINS` gained a key, because no arm grades a
+    size restated in prose. A reader who needs the population's size reads `expected`.
 
     ⛔ AND THAT UNION IS THE MERGE ITSELF (#14282 merged with #14258), WHICH IS WHY THE FIGURE
     CHANGED FROM A FIXED ONE TO A DERIVED ONE. #14258 independently added two `OWN_PINS` keys,
@@ -1673,7 +1677,7 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
         # every entry whose source is a ref NAME is excused; the sha sources are graded by both
         # assertions below. ⛔ THESE COUNTS ARE NOT TYPED (#14282 review cycle 2, P3): the split
         # was published as "FIVE … SEVEN of … ELEVEN … the remaining FOUR" and nothing graded it —
-        # mutating those five numerals left the whole suite green — so the population is named by
+        # mutating that split's numerals left the whole suite green — so the population is named by
         # TEXT and its SIZE comes from the map, which is the only form that survives an entry
         # being added.
         # ⛔ THE PREDICATE IS A HEX PREFIX, CASE-INSENSITIVE AND UNBOUNDED — NOT
