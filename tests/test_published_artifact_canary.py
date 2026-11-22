@@ -2531,6 +2531,141 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
     assert "exit_code=2" in output, output
 
 
+def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
+    """The LOG is what a reader sees first; it must be able to answer PASS / FAIL / crash.
+
+    MEASURED 2026-11-22 (run 44995025534). `--json` sends the verdict to a FILE, and this
+    step printed nothing to stdout — while the runner echoes the whole run script above in
+    bold cyan, which reads exactly like output. A reader of `gh run view --log` therefore
+    concluded "no verdict line was printed, so the step died BEFORE it could publish" about
+    a run whose `verdict.json` said `FAIL`: the published artifact was broken and the
+    DETECTOR was blamed. The artifact download resolves it, but that is a second step
+    nobody knows to take, and the misread is the whole failure mode this workflow exists
+    to end (a red nobody can read is a red nobody sees, #12660).
+
+    ⛔ Executed, not grepped: the stub interpreter writes the payload the tool writes, and
+    what the STEP then prints is the assertion. A grep for a `cat` would stay green while
+    the line printed a variable that is never set.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
+    )
+    run = next(
+        step["run"]
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if "published_artifact_canary" in str(step.get("run", ""))
+    )
+
+    def execute(stub_body: str) -> tuple[int, str]:
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        python_stub = bindir / "python"
+        # As in `test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding`:
+        # the step PARSES the verdict with `python -c`, so the stub must behave like the
+        # interpreter for `-c`/`-` and like the canary only for a script path.
+        python_stub.write_text(
+            f'#!/bin/sh\ncase "$1" in\n  -c|-) exec "$REAL_PYTHON" "$@" ;;\nesac\n{stub_body}\n'
+        )
+        python_stub.chmod(0o755)
+        runner_temp = tmp_path / "runner"
+        runner_temp.mkdir(exist_ok=True)
+        out = tmp_path / "github_output"
+        out.write_text("")
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "REAL_PYTHON": sys.executable,
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_OUTPUT": str(out),
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
+        }
+        completed = subprocess.run(
+            ["bash", "-c", run], cwd=str(REPO_ROOT), env=env, capture_output=True, text=True
+        )
+        return completed.returncode, completed.stdout + completed.stderr
+
+    # (a) a FAIL verdict: the verdict VALUE must reach the log, or the log cannot be read.
+    rc, printed = execute('printf \'{"verdict": "FAIL", "exit_code": 1, "arms": []}\\n\'; exit 1')
+    assert rc == 1, printed
+    assert "FAIL" in printed, (
+        "the canary reached a FAIL verdict and printed nothing readable — the log says "
+        "no more about the artifact than a crashed run does, which is the state in which "
+        "a broken published artifact gets diagnosed as a detector fault (#12660)"
+    )
+
+    # (b) the interpreter dies before the tool can report: the log must SAY so, and must
+    #     not show a fabricated verdict.
+    rc, printed = execute("exit 1")
+    assert rc == 2, printed
+    assert printed.strip(), "a run with no verdict printed nothing at all — unreadable"
+    assert '"verdict"' not in printed, (
+        "a run that wrote no verdict file still printed verdict JSON: the log now claims "
+        "a reading that does not exist"
+    )
+
+
+def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
+    """The release-finding summary EXECUTED the artifact names it was naming (#12660).
+
+    MEASURED 2026-11-22 on run 44995025534 (`EXIT_CODE: 1`), the very run whose second
+    failing arm was `client-published — tortoise-client is not resolvable on the index`.
+    The branch's prose was written in double quotes, so the backticks around
+    `publish-pypi.yml` and `tortoise-client` were COMMAND SUBSTITUTION: the run log carried
+
+        /home/runner/work/_temp/…sh: line 22: publish-pypi.yml: command not found
+        /home/runner/work/_temp/…sh: line 22: tortoise-client: command not found
+
+    and the summary a human acts on read `… (version bump → tag → ) and  is published` —
+    the instruction to cut an irreversible release, with the workflow to run and the
+    artifact to publish MISSING. Mangled, not missing, which is why no assertion saw it.
+
+    ⛔ Executed, not grepped: the block is run under `bash -e` exactly as the runner runs
+    it, so any future prose that shells out fails here as a nonzero exit or a stderr line,
+    whatever spelling it uses. No shellcheck, no vocabulary pin.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "release-artifact-canary.yml").read_text()
+    )
+    steps = {step.get("name"): step for step in workflow["jobs"]["report"]["steps"]}
+    run = steps["What a red here means"]["run"]
+    # The runner substitutes `${{ … }}` before bash sees it; a GitHub expression left in a
+    # shell script is a `bad substitution`, so do the substitution the runner does.
+    run = re.sub(r"\$\{\{\s*needs\.canary\.result\s*\}\}", "failure", run)
+
+    def summarise(exit_code: str) -> tuple[int, str, str]:
+        summary = tmp_path / f"summary-{exit_code or 'absent'}.md"
+        env = {
+            **os.environ,
+            "EXIT_CODE": exit_code,
+            "GITHUB_STEP_SUMMARY": str(summary),
+        }
+        completed = subprocess.run(
+            ["bash", "-e", "-c", run], cwd=str(REPO_ROOT), env=env, capture_output=True, text=True
+        )
+        return completed.returncode, completed.stderr, summary.read_text()
+
+    for exit_code in ("0", "1", "2", ""):
+        rc, stderr, _ = summarise(exit_code)
+        assert rc == 0, f"EXIT_CODE={exit_code!r}: the alarm step failed to run: {stderr}"
+        assert stderr == "", (
+            f"EXIT_CODE={exit_code!r}: the alarm step EXECUTED part of its own prose — "
+            f"the summary it writes is mangled: {stderr}"
+        )
+
+    # The property the corruption destroyed: the only branch that orders an irreversible
+    # release NAMES the workflow to run and the artifact to publish.
+    _, _, release_summary = summarise("1")
+    assert "publish-pypi.yml" in release_summary and "tortoise-client" in release_summary, (
+        "the release-finding summary no longer names the workflow and the artifact — it "
+        f"read: {release_summary!r}"
+    )
+
+
 def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):
     """`splitlines()[-1:]` interpolates a one-element LIST, so the arm detail — rendered
     verbatim in the step summary and the `--json` payload — read

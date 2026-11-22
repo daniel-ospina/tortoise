@@ -147,6 +147,23 @@ jobs:
             echo "::warning::published-artifact-canary exited 1 WITHOUT publishing a FAIL verdict — classifying as a DETECTOR fault (exit 2), not a release call"
             rc=2
           fi
+          # ⛔ THE LOG MUST ANSWER THE QUESTION THE LOG INVITES (measured 2026-11-22).
+          # `--json` sends the verdict to a FILE, so this step's own stdout carried NO
+          # verdict at all — while the runner echoes the whole run script above in bold
+          # cyan (`\x1b[36;1m`), which reads exactly like output. A reader of
+          # `gh run view --log` therefore concluded "no verdict line was printed, so the
+          # canary died before it could publish one" about a run whose verdict.json said
+          # FAIL: the artifact was broken and the detector was blamed. The artifact
+          # download resolves it, but the log is what everyone reads first, so print the
+          # reading (and say so when there is none) instead of leaving the two
+          # indistinguishable. Pinned by
+          # `test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read`.
+          if [ -s "$RUNNER_TEMP/canary/verdict.json" ]; then
+            echo "published-artifact-canary exit_code=$rc published_fail=$published_fail — the verdict.json the exit code was derived from:"
+            cat "$RUNNER_TEMP/canary/verdict.json"
+          else
+            echo "published-artifact-canary wrote NO verdict file — a DETECTOR fault, not a release call (exit_code=$rc)"
+          fi
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit "$rc"
       # `always()` — not `failure()` — so this step is still considered when the JOB is
@@ -270,7 +287,13 @@ jobs:
               echo
               echo "The published PyPI artifact failed the documented steps. No change in"
               echo "this repo fixes it: it clears when a release lands (version bump → tag →"
-              echo "`publish-pypi.yml`) and `tortoise-client` is published. See #12363."
+              # ⛔ NO BACKTICKS: inside these double quotes they are COMMAND SUBSTITUTION,
+              # so the two artifact names this branch exists to name were EXECUTED — the
+              # run printed "line 22: publish-pypi.yml: command not found" twice and the
+              # summary reached the human as "… → ) and  is published" (measured on
+              # run 44995025534, the release finding for a client-published arm that
+              # IS the tortoise-client 404).
+              echo "the publish-pypi.yml workflow) and tortoise-client is published. See #12363."
             fi
             echo
             echo "canary result=${{ needs.canary.result }} exit_code=${EXIT_CODE:-none}"
