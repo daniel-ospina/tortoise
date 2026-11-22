@@ -18238,9 +18238,16 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ Pairing is POSITIONAL and DELIBERATELY one-way: the row states the live triads first
     # and then quotes the REFUTED ones (`+2416`/`+2416`/`+3077`, `+366`/`+366`/`+467`) as
     # history, so a refuted triad has no live subtraction to evaluate against — the arm grades
-    # every triad that HAS one and never the quoted ones, and `len(_triads) >= len(_diffs)` is
-    # asserted so a reordering that drops a live subtractand reds instead of silently pairing
-    # a refuted triad with it.
+    # every triad that HAS one and never the quoted ones. ⛔ AND `len(_triads) >= len(_diffs)`
+    # closes ONE direction only — a live pair whose result triad is GONE (`diffs > triads`) —
+    # NOT the other, which was CLAIMED here and is FALSE (#14183 review, P3, MEASURED): drop a
+    # live subtraction group while its result triad stays and the selection reports
+    # `1 passed`, because the surviving triad is then simply UNGRADED and its derivation is
+    # absent rather than contradicted. So the residue is stated as a residue: this arm
+    # catches a drift of EITHER side of a pair it can see, and cannot see a pair whose
+    # subtraction was deleted. No count is typed to close it — a count here is the head-bound
+    # figure this row forbids, and the refuted triads make "how many should there be"
+    # undecidable from the text alone.
     _diffs = re.findall(r"\((\d+)−(\d+), (\d+)−(\d+), (\d+)−(\d+)", text)
     _triads = re.findall(r"`(\+\d+)` / `(\+\d+)` / `(\+\d+)`", text)
     assert _diffs, (
