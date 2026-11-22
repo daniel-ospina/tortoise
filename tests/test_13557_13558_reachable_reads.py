@@ -1094,6 +1094,15 @@ NOT_SELECTED = [
     # all seven rows red; narrow arm B alone and five red (silence); drop the comma and one
     # reds. Measured, not asserted.
     "is the export being very archived",
+    # ⛔ ONE TOKEN DECIDED WHETHER THE CALLER WAS TOLD (round-13 review, P2, measured). The
+    # copula branch's ONLY notice arm was anchored `^(?:is|are|was|were)\s+`, while the
+    # refusal accepts a CONTRACTED head (`(?:n['’]t)?`) — so `isn't the export being archived`
+    # answered `(None, None, None)`: refused, `signal=None`, no payload — SILENCE, on the very
+    # defect #14033 exists to close, while its uncontracted twin reported
+    # `is_copula_long_subject`. These rows FAIL at `3088fd8d6a` (silent there) and report here.
+    "isn't the export being archived",
+    "isn't the export being very very very archived",
+    "aren't the claims being withdrawn",
     "is the export to be very archived",
     "is the export being no longer archived",
     "is the export being almost archived",
@@ -1320,6 +1329,15 @@ NOTICE_ONLY = [
     # …the ADVERB-CLASS rows from the frame-aware guard's shared slot (round-12 review,
     # P1): refused AND reported, so they stand in both lists.
     "is the export being very archived",
+    # ⛔ ONE TOKEN DECIDED WHETHER THE CALLER WAS TOLD (round-13 review, P2, measured). The
+    # copula branch's ONLY notice arm was anchored `^(?:is|are|was|were)\s+`, while the
+    # refusal accepts a CONTRACTED head (`(?:n['’]t)?`) — so `isn't the export being archived`
+    # answered `(None, None, None)`: refused, `signal=None`, no payload — SILENCE, on the very
+    # defect #14033 exists to close, while its uncontracted twin reported
+    # `is_copula_long_subject`. These rows FAIL at `3088fd8d6a` (silent there) and report here.
+    "isn't the export being archived",
+    "isn't the export being very very very archived",
+    "aren't the claims being withdrawn",
     "is the export to be very archived",
     "is the export being no longer archived",
     "is the export being almost archived",
