@@ -1148,6 +1148,9 @@ NOT_SELECTED = [
     "is the export been archived",
     "is the report been reviewed archived",
     "is the export still been archived",
+    "isn't the export been archived",
+    "aren't the claims been archived",
+    "wasn't the report been archived",
 ]
 
 
@@ -1430,11 +1433,17 @@ NOTICE_ONLY = [
     # but a cue reaching no answer and saying nothing is the mechanism this module forbids, so
     # they report `existence_unguarded` now. ⛔ SCOPED TO THE COPULA HEADS: letting the same
     # alternative take `has|have|had` made it PREEMPT `which_modified_noun` on
-    # `which customer claims has been archived` (this signal row is first in `_ENDING_SIGNALS`),
-    # which the suite caught — so `<aux> … been` is deliberately NOT in that arm.
+    # `which customer claims has been archived` (this row is evaluated BEFORE that one,
+    # index 6 of 9 vs 7 of 9), which the suite caught — so `<aux> … been` is deliberately
+    # NOT in that arm. The CONTRACTED copulas (`isn't`, `aren't`, `wasn't`, `weren't`) ARE:
+    # they are the same head, and their absence left 108 of 108 contracted rows silent
+    # (round-32 review, P2), pinned below.
     "is the export been archived",
     "is the report been reviewed archived",
     "is the export still been archived",
+    "isn't the export been archived",
+    "aren't the claims been archived",
+    "wasn't the report been archived",
 ]
 
 assert set(NOTICE_ONLY) <= set(NOT_SELECTED), (
