@@ -3495,3 +3495,76 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
             "_embedder_engine_kick_allowed() block (an `else:`/`elif:` inversion "
             "or a moved call both look guarded by indentation alone) — the SDK "
             "kick ignores the embed backing again")
+
+
+# ── the expansion pass states the cost it actually pays ─────────────────────
+class TestTheExpansionPassStatesItsTrueCost:
+    """The comment above the expansion encode is where an operator reads the cost
+    of arming ``TORTOISE_ENTITY_KEY_DENSE``, so it must not claim a benefit the
+    call ORDER makes impossible (review P3).
+
+    The pass is gated on ``raw_results["vector"]`` — the read's primary dense
+    result — so that encode has already RETURNED (``_tortoise_fts_query`` blocks
+    inside ``_Collector.submit`` until ``_fire`` sets the ticket) when this pass
+    runs. The collector is then idle, this ticket opens its own window, and the
+    read pays a SECOND round trip on ``worker``/``external``. The comment used to
+    say the opposite ("ride the SAME batch as the primary query embed above"),
+    which would have an operator conclude that arming the lever costs no extra
+    round trip once the seam is on a remote backing.
+
+    Source-level on purpose, the same technique this file already uses for the
+    engine-init wiring: no assertion in the suite depends on the sentence, so a
+    behavioural row cannot see it and only the text can be pinned.
+    """
+
+    @staticmethod
+    def _comment_block_above_the_expansion_encode() -> str:
+        import inspect
+
+        from tortoise import sdk as sdk_module
+
+        source = inspect.getsource(sdk_module.TortoiseSDK._entity_key_dense_pass)
+        needle = "_embed_seam.encode_query(composed)"
+        assert source.count(needle) == 1, (
+            f"expected ONE expansion encode call site, found "
+            f"{source.count(needle)} — the pin below reads the comment block "
+            f"above the first, so a second call site stays unchecked")
+        call = source.index(needle)
+        # Drop the partial CALL line: `source[:call]` ends mid-line at the
+        # needle, and its last fragment is code, not a comment.
+        head = source[:call].rsplit("\n", 1)[0]
+        block: list[str] = []
+        for line in reversed(head.splitlines()):
+            stripped = line.strip()
+            if not stripped.startswith("#"):
+                break
+            block.append(stripped)
+        assert block, (
+            "no comment sits directly above the expansion encode — the cost of "
+            "the second round trip is undocumented at the call site")
+        return "\n".join(reversed(block))
+
+    def test_the_expansion_comment_does_not_claim_the_primaries_batch(self):
+        """REDDENING MUTANT: restore "so it can ride the SAME batch as the primary
+        query embed above rather than paying a second round trip" — the claim the
+        call order makes impossible. Every other row in this suite stays green
+        under that mutant (nothing asserts on the sentence), which is why the
+        text itself is pinned."""
+        block = self._comment_block_above_the_expansion_encode()
+        lowered = block.lower()
+        assert "same batch" not in lowered, (
+            "the expansion encode's comment claims the SAME batch as the "
+            "primary query embed — impossible: the pass is gated on that leg's "
+            "rows, so the primary encode has already returned and its batch "
+            "fired. State the second round trip instead")
+
+    def test_the_expansion_comment_states_the_second_round_trip(self):
+        """REDDENING MUTANT: delete the cost sentence entirely (e.g. leave only
+        "one composed string, one vector"), which would hide the second round
+        trip rather than misstate it — the same operator cost, silently."""
+        block = self._comment_block_above_the_expansion_encode()
+        assert "second round trip" in block.lower(), (
+            "the expansion encode's comment no longer states that this read pays "
+            "a SECOND round trip on a remote backing — an operator arming "
+            "TORTOISE_ENTITY_KEY_DENSE then has nothing at the call site telling "
+            "them the encode is not free")

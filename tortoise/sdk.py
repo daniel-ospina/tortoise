@@ -49620,10 +49620,10 @@ class TortoiseSDK:
             if model is None:
                 return None
         try:
-            # THE bounded extra embed: one composed string, one vector. Routed
-            # through the seam's coalescer so it can ride the SAME batch as the
-            # primary query embed above rather than paying a second round trip
-            # (#14186).
+            # THE bounded extra embed: one string, one vector — and on a remote
+            # backing a SECOND round trip for this read: the primary encode above
+            # has RETURNED, so this opens its own batch. What the seam buys is
+            # coalescing with OTHER readers' tickets, not that batch (#14186).
             expanded_vec = _embed_seam.encode_query(composed)
             if expanded_vec is None:
                 return None
