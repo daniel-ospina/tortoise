@@ -1631,8 +1631,10 @@ def test_a_window_wholly_held_at_plan_time_names_the_PIN_not_the_read():
     five-file set) while the report said "2 node(s) are held by an in-flight READ … re-run
     when those reads finish" for a window that was half PINNED. That remedy does not
     converge: a re-run re-asks the same pin at the same budget and stops in the same place.
-    The comment at `cache_evictor.py:1160` claims this arm "cannot disagree" with the
-    last-hop one, which is exactly what this row pins.
+    The comment at `cache_evictor.py:1313-1314` states that the same pin-before-lease
+    ordering governs the `if not local:` arm above, so the two cannot disagree about the
+    same both-holds condition — and `:1165-1167` states the parallel with gate 6 and with
+    the last-hop arm. That pin-before-lease order is what this row pins.
     """
     from tortoise.cache_evictor import ReadLeases
 
@@ -1723,7 +1725,7 @@ def test_a_DRY_RUN_pass_that_plans_clears_an_earlier_pin_hold():
 def test_a_window_wholly_unanswerable_at_plan_time_names_the_UNANSWERABLE_pin():
     """The plan-time `pin-unanswerable` arm — the last branch of the carry-out with no row.
 
-    ⛔ One word at `cache_evictor.py:1170` (`"pin-unanswerable"` -> `"pinned"`) left all 211
+    ⛔ One word at `cache_evictor.py:1171` (`"pin-unanswerable"` -> `"pinned"`) left all 211
     tests in the five covering files GREEN while the shipped report said "0 node(s) are
     PINNED … unpin some of them" for a window whose predicate RAISED for every node: the
     `unpin` remedy both `pin-unanswerable` message arms exist to withhold, on the CLI's own
@@ -1765,7 +1767,7 @@ def test_a_window_wholly_unanswerable_at_plan_time_names_the_UNANSWERABLE_pin():
 def test_a_plan_time_window_holding_BOTH_pin_states_names_the_UNANSWERABLE_one():
     """The plan-time precedence, when a window holds a pinned node AND an unanswerable one.
 
-    ⛔ Swapping the two arms at `cache_evictor.py:1170` (asking `pinned` before
+    ⛔ Swapping the two arms at `cache_evictor.py:1170-1173` (asking `pinned` before
     `pin-unanswerable`) left all 211 tests green, while the report offered `unpin` for the
     nodes nothing established as pinned. ⛔ THE ARM ORDER IS OBSERVABLE WITH UNANSWERABLE
     HOLDS ALONE, which is why that same swap also reds the wholly-unanswerable row beside
@@ -1854,7 +1856,7 @@ def test_a_SATURATED_window_that_stops_at_the_DELETE_statement_names_the_UNANSWE
     """The BREAK arm's precedence — the exit only a SATURATED window reaches.
 
     ⛔ THE THIRD EXIT HAD NO ROW, and it is the one that ENDS the loop. Swapping the
-    ternary at `cache_evictor.py:1315` — the arm a pass takes when `window >= after_nodes`
+    `if`/`elif` arms at `cache_evictor.py:1315-1320` — the arm a pass takes when `window >= after_nodes`
     AND nothing was left unasked — left the whole suite green: a saturated window then
     reported "N node(s) are PINNED … unpin some of them" for a window whose binding hold
     was a predicate that RAISED, i.e. exactly the remedy this file says cannot clear it.
@@ -1875,7 +1877,7 @@ def test_a_SATURATED_window_that_stops_at_the_DELETE_statement_names_the_UNANSWE
 
     ⛔ AND `max_passes=6` IS DELIBERATE: the loop has to leave through the BREAK, not by
     running out of passes — a pass-budget exit takes the carried diagnosis instead and
-    grades the site the row above already covers, so it would pass without the ternary
+    grades the site the row above already covers, so it would pass without the arms
     under test. `passes == 4` is what proves the break fired — it is a fact about this
     scenario's window arithmetic (`cache_evictor.py:1021` growth, `:998` budget), so a
     change to the window policy must RE-MEASURE it, never delete the assertion.
