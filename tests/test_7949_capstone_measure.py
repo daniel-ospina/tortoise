@@ -18261,46 +18261,139 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # phrase-assertion stayed green. D5's rule is that a figure carries the head it was READ
     # at, so the membership carries one too — and the named head is then MEASURED, not
     # trusted, against its own immutable blob.
+    # ⛔ THE MEMBERSHIP IS DECIDED BY REFS THAT ALWAYS EXIST, AND THE NAMED HEAD IS ITS
+    # PROVENANCE (#14260 fix lane, finding 3 — MEASURED). The cut above read ONE thing: the
+    # NAMED head's object. That is fail-OPEN in the exact case it was written for — `git show
+    # <sha>:<path>` returns rc=128 both when that head does not carry the target and when the
+    # object is simply ABSENT, so any hex string satisfied it (measured:
+    # `git show deadbeefcafe:<doc>` → rc 128 → the old `pass`). It is also INERT where it
+    # matters most: `.mergify.yml` squashes (`merge_method: squash`), so a feature-branch sha is
+    # unreachable from `main` the moment this lands — the arm would then grade nothing, forever,
+    # on the one tree it is supposed to protect.
+    # So the enforcement is THREE readings, each from something that survives the merge, and the
+    # named head is checked only when its object happens to be present (it is never the thing
+    # that DECIDES):
+    #   (1) this checkout's own copy of the document carries the I7 re-point's TARGET — always
+    #       readable, and it cannot invert: the target merges WITH the document;
+    #   (2) the live `git diff --numstat <base>...HEAD` membership, from a ref that always
+    #       exists (`origin/main`, then `main`), which is the only home of "is it in THIS
+    #       diff" — and the base's own copy must NOT already carry the target, or the re-point
+    #       is not this diff's;
+    #   (3) the merged-state reading: once `HEAD` is an ancestor of the base the diff is EMPTY
+    #       by construction, and the sentence is history — that is a MEASUREMENT of the state,
+    #       not a skip (this is what keeps the arm honest on `main` instead of inert).
+    # ⛔ AND THE NAMED HEAD IS PROVENANCE, NEVER THE DECIDER (#14260 fix lane, finding 3). It
+    # is graded where its object is present (a wrong head still reds), but it cannot make the
+    # arm green on its own: satisfying that half no longer proves anything the readings below do
+    # not, and the arm no longer carries its claim THROUGH a sha that a squash merge discards.
+    # The residual is stated rather than implied — a sha naming no object is indistinguishable
+    # from one this clone cannot reach, so its existence is ungraded wherever the object is
+    # absent. That is the trade the review prescribed: a typed sha that DECIDES is what made the
+    # arm inert on `main`, which is worse than prose that is merely unverifiable.
+    # ⛔ NOTHING MEASURED IS STILL NOT A PASS, except on a `--depth 1` clone where the base ref
+    # and every older head are absent by CONSTRUCTION (`git rev-parse --is-shallow-repository`),
+    # so absence there is the clone's shape and never read as a pass.
+    _MEMBER_DOC = ("docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md")
+    _I7_TARGET = "hosted_api.py:15449-15526"
     _member = re.search(
-        r"IS in this diff at the head this was read at \(`(?P<head>[0-9a-f]{7,40})`\), "
+        r"IS in this diff at the head this was read at \(`(?P<head>[0-9a-f]{40})`\), "
         r"by its PAIR", text)
+    _measured: list[str] = []
     if _member is None:
         failures.append(
             "D5 no longer states `04-plan.md`'s membership AS OF A NAMED HEAD and by its "
             "PAIR — the spelling this arm reads is 'IS in this diff at the head this was "
-            "read at (`<sha>`), by its PAIR'. Re-derive the sentence and name the head you "
-            "read the numstat at; a headless 'at this head' inverts the moment this branch "
+            "read at (`<full 40-char sha>`), by its PAIR'. Re-derive the sentence and name "
+            "the FULL head you read the numstat at (a prefix is ambiguous about WHICH "
+            "object it names, and this is the one sha in the row that is provenance rather "
+            "than a line number); a headless 'at this head' inverts the moment this branch "
             "merges and is refused by the next assertion (#14260 fix lane, finding 1)")
     else:
         _member_head = _member.group("head")
         _member_blob = subprocess.run(
-            ["git", "show", f"{_member_head}:docs/epics/2026-11-04-7949-extractor-v4-"
-                             f"capstone/04-plan.md"],
+            ["git", "show", f"{_member_head}:{_MEMBER_DOC}"],
             cwd=_REPO, capture_output=True, text=True)
-        if _member_blob.returncode != 0:
-            # ⛔ THE COVERAGE LIMIT IS STATED, NOT IMPLIED: CI checks this repo out at
-            # `fetch-depth: 1`, where an older head is absent by construction, so this half
-            # SKIPS there. An absent object is UNMEASURED, never a pass — the phrase arms
-            # above and below still hold, and the blob is re-checkable on any full clone.
-            pass
-        else:
+        if _member_blob.returncode == 0:
+            _measured.append(f"the named head `{_member_head}`")
             # The claim is that this document carries the I7 RE-POINT at that head. Its
             # target is what makes the file's membership real, and it is read out of the
             # immutable blob rather than out of the reader's tree.
-            if "hosted_api.py:15449-15526" not in _member_blob.stdout:
+            if _I7_TARGET not in _member_blob.stdout:
                 failures.append(
                     f"D5 says `04-plan.md` IS in this diff by its PAIR at the head it "
                     f"names (`{_member_head}`), but that head's copy does not carry the "
                     f"I7 re-point's target — so the named head is not the head this was "
                     f"measured at. Re-derive the head and the range together "
-                    f"(#14260 fix lane, finding 1)")
+                    f"(#14260 fix lane, finding 3)")
+    # (1) ALWAYS MEASURABLE, AND IT CANNOT INVERT ON MERGE.
+    _head_copy = (_REPO / _MEMBER_DOC).read_text(encoding="utf-8")
+    if _I7_TARGET not in _head_copy:
+        failures.append(
+            f"this checkout's `{_MEMBER_DOC}` does not carry the I7 re-point's target "
+            f"({_I7_TARGET}) — the document is the thing that makes `04-plan.md`'s "
+            f"membership real, so a copy without the range cannot be 'in this diff by its "
+            f"PAIR'. Re-derive the range by content (#14260 fix lane, finding 3)")
+
+    def _git(*argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *argv], cwd=_REPO, capture_output=True, text=True)
+
+    # (2)/(3) THE "IN THIS DIFF" HALF, FROM A BASE REF THAT ALWAYS EXISTS.
+    _base = next(
+        (ref for ref in ("origin/main", "main")
+         if _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0),
+        None)
+    if _base is None:
+        # STATED, NOT IMPLIED: a `--depth 1` clone has no base ref, so this half is
+        # UNMEASURED there rather than green (see the fabrication guard below).
+        pass
+    elif _git("merge-base", "--is-ancestor", "HEAD", _base).returncode == 0:
+        # (3) THE MERGED STATE. `HEAD` is on/behind the base, so `<base>...HEAD` is empty by
+        # construction and the sentence's membership is history — measured, not skipped.
+        _measured.append(f"the merged state (`HEAD` is an ancestor of `{_base}`)")
+    else:
+        _numstat = _git("diff", "--numstat", f"{_base}...HEAD", "--", _MEMBER_DOC)
+        if _numstat.returncode != 0:
+            pass  # unreadable diff is UNMEASURED, never a pass (see the guard below)
+        else:
+            _measured.append(f"the live `{_base}...HEAD` numstat")
+            if not _numstat.stdout.strip():
+                failures.append(
+                    f"D5 says `04-plan.md` IS in this diff by its PAIR, but "
+                    f"`git diff --numstat {_base}...HEAD -- {_MEMBER_DOC}` is EMPTY — so at "
+                    f"the head you are running, that file carries no re-point of this "
+                    f"diff. Either the re-point was dropped, or the sentence no longer "
+                    f"describes this head. Re-derive the membership (#14260 fix lane, "
+                    f"finding 3)")
+            else:
+                _base_copy = _git("show", f"{_base}:{_MEMBER_DOC}")
+                if _base_copy.returncode == 0 and _I7_TARGET in _base_copy.stdout:
+                    failures.append(
+                        f"D5 calls the I7 range a re-point of THIS diff, but `{_base}`'s "
+                        f"own `{_MEMBER_DOC}` already carries {_I7_TARGET} — so the range "
+                        f"is not this diff's, and the membership names a base that already "
+                        f"agrees with it (#14260 fix lane, finding 3)")
+    # ⛔ NOTHING MEASURED IS NOT A PASS (#14260 fix lane, finding 3). The fabrication hole this
+    # closes was MEASURED: `deadbeefcafe` took the old `pass` branch, so any hex string satisfied
+    # the arm. The one exemption is a `--depth 1` clone, where the base ref and every older head
+    # are absent by CONSTRUCTION — there, half (1) above is still graded and the absence is the
+    # clone's shape rather than an unproven claim.
+    if not _measured:
+        _shallow = _git("rev-parse", "--is-shallow-repository").stdout.strip() == "true"
+        if not _shallow:
+            failures.append(
+                f"D5's `04-plan.md` membership could not be MEASURED at all: the named head's "
+                f"object is absent, no `origin/main`/`main` ref resolves, and this is not a "
+                f"shallow clone — so the named head is unverifiable here (a fabricated sha is "
+                f"indistinguishable from a pruned one). Name a head that exists and is "
+                f"readable, or run the check on a clone that carries the base ref "
+                f"(#14260 fix lane, finding 3)")
     assert "IS in this diff at this head, by its PAIR" not in text, (
         "D5 has gone back to stating `04-plan.md`'s membership WITHOUT the head it was read "
         "at ('at this head, by its PAIR'). That spelling is true only until this branch "
         "merges: `origin/main...HEAD` for that file is EMPTY afterwards, so the membership "
         "becomes false while a phrase-assertion over it stays green — the class the block's "
         "own rule forbids ('a phrase-only assertion was green over the old claim, re-landed, "
-        "and was green again'). Name the head (#14260 fix lane, finding 1)")
+        "and was green again'). Name the FULL head (#14260 fix lane, finding 1)")
     # and the chimera is refused, not merely absent from the message above
     # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
     # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
