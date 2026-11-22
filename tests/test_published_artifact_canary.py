@@ -1881,11 +1881,18 @@ def test_the_pre_upload_gate_step_EXITS_with_the_tool_VERDICT(tmp_path):
 
     ⚠️ STATED BOUND (#12422 round-20 review, P3): `set +e` ALONE, with the tool invocation
     still last, is NOT caught here and does not need to be — with the verdict as the block's
-    last command, `set +e` cannot swallow it, and this harness runs the block under
-    `bash -c` without `-e`, so errexit is not in play either way. The dangerous form is
-    `set +e` PLUS a trailing command that returns 0, which is the row above. This paragraph
-    used to claim the pin closed `set +e` flatly, which measured FALSE (`72 passed` with
-    `set +e` inserted after `set -o pipefail`).
+    last command, `set +e` cannot swallow it. That paragraph used to claim the pin closed
+    `set +e` flatly, which measured FALSE (`72 passed` with `set +e` inserted after
+    `set -o pipefail`).
+
+    ⛔ THE HARNESS NOW RUNS THE RUNNER'S SHELL (#14314 review cycle 10, P2, MEASURED). It
+    used to run this block under plain `bash -c` while the runner runs `bash -e {0}`, so a
+    step the real shell ABORTS still reported a clean exit here: inserting
+    `grep -q 'sdist' /dev/null` before the tool invocation left this test `1 passed`
+    (`bash -c` rc=0) while `bash -e` returns rc=1 — i.e. the real `build` job reds and blocks
+    an irreversible release, on a step that never consulted the canary, and this pin said
+    nothing. It takes its argv from `_RUNNER_SHELL`, the same constant the canary harnesses
+    use, so no harness that executes a workflow `run:` block can drift to a laxer shell.
     """
     import subprocess
 
@@ -1918,7 +1925,7 @@ def test_the_pre_upload_gate_step_EXITS_with_the_tool_VERDICT(tmp_path):
             "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
         }
         return subprocess.run(
-            ["bash", "-c", run], cwd=str(cwd), env=env, capture_output=True, text=True
+            [*_RUNNER_SHELL, run], cwd=str(cwd), env=env, capture_output=True, text=True
         ).returncode
 
     assert execute(0) == 0, "a PASSING wheel failed the pre-upload step (a false block)"
@@ -2749,6 +2756,7 @@ def _strip_shell_comments(script: str) -> str:
     out: list[str] = []
     quote: str | None = None  # None | "'" | '"'
     at_word_start = True
+    arith = 0  # >0 while inside a `$(( … ))`; an integer count of the OPEN paren depth
     heredocs: list[tuple[str, bool]] = []  # (delimiter, terminator ignores leading tabs)
     i = 0
     while i < len(script):
@@ -2785,6 +2793,28 @@ def _strip_shell_comments(script: str) -> str:
             if newline == -1:
                 break
             i = newline  # keep the newline itself; it ends the comment
+            continue
+        # ⛔ NO HEREDOC OPENS INSIDE `$(( … ))` (review cycle 10, P2, MEASURED). Arithmetic
+        # `<<` is a SHIFT, not an operator: `echo $(( 1 << 2 ))` matched the operator branch
+        # with delimiter `2`, queued a body that never terminates, and swallowed the rest of
+        # the block VERBATIM — so every later line, real comments included, was scanned as
+        # code. Measured: `echo $(( 1 << 2 ))` / `echo ok  # see `some-tool`` reported BOTH
+        # lines, redding prose a human wrote as a comment. That is the false-POSITIVE
+        # direction (never a silent pass), but it reds the alarm block this pin exists to
+        # protect, and it is the same family as the `<<<` over-block one branch below. The
+        # `$((` itself is still reported by `_executable_prose_lines` — arithmetic expansion
+        # IS execution (`$(( $(cmd) ))` runs a command) — only the phantom BODY is refused.
+        if quote is None and script.startswith("$((", i):
+            out.append("$((")
+            arith, at_word_start, i = 2, False, i + 3
+            continue
+        if arith:
+            out.append(ch)
+            if ch == "(":
+                arith += 1
+            elif ch == ")":
+                arith -= 1
+            i += 1
             continue
         # `<<` opens a heredoc (`<<<` is a here-STRING — no body — so it must not match).
         # Read the operator and its delimiter as CODE, and queue the body for the newline.
@@ -2842,7 +2872,18 @@ def _strip_shell_comments(script: str) -> str:
                     end = len(script) if newline == -1 else newline + 1
                     out.append(script[i:end])
                     i = end
-                    if (line.lstrip("\t") if strip_tabs else line).rstrip("\r") == delimiter:
+                    # ⛔ THE TERMINATOR MATCHES EXACTLY, AS BASH MATCHES IT (review cycle 10,
+                    # P2, MEASURED). This used to normalise a trailing `\r` away, which is
+                    # MORE PERMISSIVE than the shell: measured on
+                    # `cat <<EOF` / `benign` / `EOF\r` / `# $(printf LEAK)` / `EOF`, bash
+                    # prints `# LEAK` — it did NOT accept `EOF\r` as the terminator, so the
+                    # `#` line is still BODY and still expands — while the lexer closed the
+                    # body at `EOF\r`, dropped the next line as a comment, and returned `[]`.
+                    # A silent pass, which is the one direction this file never accepts. A
+                    # CR-bearing terminator is now a body line, exactly as it is for bash; the
+                    # cost when a CRLF workflow is ever added is the false POSITIVE direction
+                    # (the body runs on to EOF), which is visible and rewordable.
+                    if (line.lstrip("\t") if strip_tabs else line) == delimiter:
                         break
             at_word_start = True
             continue
@@ -2924,12 +2965,17 @@ def _executable_prose_lines(script: str) -> list[str]:
 
 
 def _assert_no_executable_prose(script: str) -> None:
-    """The alarm block's obligation: no backtick, no command substitution, in CODE OR PROSE."""
+    """The obligation for every block it is applied to: no backtick, no `$(`, in CODE OR PROSE.
+
+    ⛔ `BLOCK`, NOT `alarm block` (review cycle 10, P2 advisory): this helper now runs over every
+    `run:` block in `release-artifact-canary.yml`, so a message naming one step would send the
+    next reader to the wrong place in the workflow they are holding.
+    """
     offending = _executable_prose_lines(script)
     assert not offending, (
-        "the alarm block's ECHOED text now contains a backtick or a command substitution: "
-        "inside its double-quoted echoes those EXECUTE and corrupt the summary silently, "
-        "which is the #12660 defect. Prose names must be plain text. Offending line(s):\n"
+        "this run: block's ECHOED text now contains a backtick or a command substitution: "
+        "inside double-quoted echoes those EXECUTE and corrupt the output silently, which is "
+        "the #12660 defect. Prose names must be plain text. Offending line(s):\n"
         + "\n".join(offending)
     )
 
@@ -3010,6 +3056,28 @@ def test_the_alarm_step_RUNS_without_executing_its_own_prose(tmp_path):
     # (measured in `_strip_shell_comments`'s docstring). `_strip_shell_comments` reads quote
     # state instead, so the continuation line is scanned.
     _assert_no_executable_prose(run)
+
+    # ⛔ AND THE CLASS IS CLOSED FOR EVERY BLOCK IN THE FILE, NOT ONE (review cycle 10, P2
+    # advisory, MEASURED green at this head). The obligation above is about executing PROSE,
+    # and prose lives in every `run:` block — this PR itself adds two new `echo` lines to the
+    # `canary` step. Asserting it for `What a red here means` alone leaves a backticked name
+    # added to any other block executing silently, with nothing red. Scanning all five costs
+    # one loop and is green today, so the pin covers the class instead of one instance of it.
+    all_blocks = [
+        (f"{job_name}/{step.get('name', '?')}", step["run"])
+        for job_name, job in workflow["jobs"].items()
+        for step in job.get("steps", [])
+        if step.get("run")
+    ]
+    assert len(all_blocks) >= 5, (
+        "this pin is supposed to cover every `run:` block in the canary workflow; it found "
+        f"only {len(all_blocks)} ({[name for name, _ in all_blocks]})"
+    )
+    for block_name, block in all_blocks:
+        try:
+            _assert_no_executable_prose(block)
+        except AssertionError as exc:
+            pytest.fail(f"the `{block_name}` block executes its own prose: {exc}")
 
     # The property the corruption destroyed: the only branch that orders an irreversible
     # release NAMES the workflow to run and the artifact to publish.
@@ -3136,6 +3204,28 @@ def test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body():
         f"{_executable_prose_lines(tabbed)!r}"
     )
 
+    # ⛔ THE TERMINATOR IS MATCHED THE WAY BASH MATCHES IT — EXACTLY (review cycle 10, P2,
+    # MEASURED). The lexer used to strip a trailing `\r` before comparing, which is MORE
+    # PERMISSIVE than the shell. bash does NOT accept `EOF\r` as the terminator, so the
+    # `#`-leading line after it is still BODY and still expands:
+    #
+    #     $ printf 'cat <<EOF\nbenign\nEOF\r\n# $(printf CRLEAK)\nEOF\n' > /tmp/cr
+    #     $ bash -e /tmp/cr        ->  benign / EOF / # CRLEAK      rc 0
+    #
+    # …while the lexer closed the body at `EOF\r`, dropped the next line as a COMMENT, and
+    # returned `[]` — a silent pass over an executing substitution. Pinned from both sides.
+    cr_script = "cat <<EOF\nbenign\nEOF\r\n# $(printf CRLEAK)\nEOF\n"
+    cr_ran = subprocess.run(["bash", "-e", "-c", cr_script], capture_output=True, text=True)
+    assert cr_ran.returncode == 0, cr_ran.stderr
+    assert "# CRLEAK" in cr_ran.stdout, (
+        "bash ACCEPTED `EOF\\r` as the terminator, so this no longer reproduces the hole it "
+        f"guards: stdout={cr_ran.stdout!r}"
+    )
+    assert _executable_prose_lines(cr_script) == ["# $(printf CRLEAK)"], (
+        "a `\\r`-suffixed terminator closed the body, so the line bash still EXPANDS was "
+        f"dropped as a comment: {_executable_prose_lines(cr_script)!r}"
+    )
+
 
 def test_the_prose_pin_sees_a_heredoc_operator_SPLICED_by_a_backslash_newline():
     """A backslash+newline pair is DELETED before tokenizing, so the operator can be SPLIT.
@@ -3222,6 +3312,24 @@ def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
 
     # An escaped `$(` is inert for the same reason, and costs no special case.
     assert _executable_prose_lines('echo "(tag -> \\$(printf X))"\n') == []
+
+    # ⛔ AND ARITHMETIC `<<` IS NOT AN OPERATOR (review cycle 10, P2, MEASURED). `$(( 1 << 2 ))`
+    # matched the heredoc branch with delimiter `2`, queued a body that never terminates, and
+    # swallowed the REST OF THE BLOCK verbatim — so the real comment after it was scanned as
+    # code. Measured before the fix: both lines reported, redding prose a human wrote as a
+    # comment (the false-POSITIVE direction, but it reds the alarm block this pin protects).
+    # The arithmetic line itself is STILL reported: `$((` contains `$(`, and `$(( $(cmd) ))`
+    # genuinely executes — only the phantom BODY is refused.
+    arith = "echo $(( 1 << 2 ))\necho ok  # see `some-tool` and $(cmd)\n"
+    arith_ran = subprocess.run(["bash", "-e", "-c", arith], capture_output=True, text=True)
+    assert arith_ran.stdout == "4\nok\n", (
+        "bash does not treat this as a shift, so this no longer reproduces the phantom-body "
+        f"shape: stdout={arith_ran.stdout!r} stderr={arith_ran.stderr!r}"
+    )
+    assert _executable_prose_lines(arith) == ["echo $(( 1 << 2 ))"], (
+        "arithmetic `<<` opened a phantom heredoc body and swallowed the rest of the block — "
+        f"the real comment after it was scanned as code: {_executable_prose_lines(arith)!r}"
+    )
 
 
 def test_the_prose_pin_sees_a_dollar_paren_SPLICED_across_a_backslash_newline():
