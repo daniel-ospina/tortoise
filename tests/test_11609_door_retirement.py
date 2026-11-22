@@ -1182,8 +1182,8 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         titles and reference labels (r12) — which is why the rule is opacity, not
     #:         parsing. The declared price is the over-block, and it is stated as the rule
     #:         actually is — the trigger is the SOURCE, not the render, so a NOTE loses its
-    #:         replacement credit if its block contains a `<` at all. ⛔ MEASURED, four of the
-    #:         spellings: an inline tag/comment (`<br>`), an AUTOLINK (`<https://…>`,
+    #:         replacement credit if its block contains a `<` at all. ⛔ MEASURED and pinned
+    #:         per spelling: an inline tag/comment (`<br>`), an AUTOLINK (`<https://…>`,
     #:         `<ops@…>`) — markdown, not a tag — a code span carrying `<` (`` `<graph.id>` ``),
     #:         and a BACKSLASH-escaped `<`. The last three are text a reader genuinely sees, so
     #:         this is a FALSE RED on correct prose; that is the deliberate fail-closed trade,
