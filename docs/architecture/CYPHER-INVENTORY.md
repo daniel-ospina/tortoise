@@ -97,29 +97,29 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,640 occurrences of the door predicate across 111 files
+1,644 occurrences of the door predicate across 112 files
 2,377 occurrences of the verb predicate across 149 files   (upper-bound shape, see below)
 
-1,640  regex door-pattern occurrences
+1,644  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,586  occurrences on a line carrying a door CALL          [measured]
+= 1,590  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,586  AST door calls
+= 1,590  AST door calls
 = 1324  classified Cypher statements + 266 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (307 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (308 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 307 files>` → **1,640** across **111** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,646 / 112**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,640 / 111 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 308 files>` → **1,644** across **112** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,650 / 113**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,644 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 307 files>` → **2,364** across **148** files, while the tool
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 308 files>` → **2,364** across **148** files, while the tool
 reports 2,377 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
@@ -977,8 +977,8 @@ gains **two** more (its durable-mark read and its compare-and-swap write), so
 `non_cypher_door_calls` 262→**266**, `files_scanned` 307→**308** and `ast_door_calls` 1586→**1590**
 (= 1324 + 266). `sites` **1324**, `files` **102**, `unresolved` **105**, `candidates` **588**,
 `partial` **320** and every shape are unchanged — nothing this merge adds is a Cypher statement, so
-the migration metric §0 is about does not move at all. §1's `rg` reconciliation is re-measured at this tree (door **1,640 / 111** whole-text, verb
-**2,377 / 149**, bare **1,646 / 112**), and Appendix A is regenerated with `--markdown` at this head
+the migration metric §0 is about does not move at all. §1's `rg` reconciliation is re-measured at this tree (door **1,644 / 112** whole-text, verb
+**2,377 / 149**, bare **1,650 / 113**), and Appendix A is regenerated with `--markdown` at this head
 — the two new files' six rows are in it, so a reader can resolve every one.
 
 <!-- cypher-inventory:sites = 1324 -->
