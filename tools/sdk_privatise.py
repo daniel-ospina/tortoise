@@ -1178,6 +1178,17 @@ SWEEP_NAMES = 66
 #: the `11835` row/digest pair inherited from `main` (`891187f5a4636487`), and `--repin` ON
 #: THAT TREE prints `11843` / `6aed5368ffa10513`, which its successor `27cd81d55ebd` then re-pinned. So the example is a REAL instance of the rule, not "the wrong
 #: EXAMPLE"; what was wrong was reading its pair against `2c0d66e2ec`, where pin and tree agree.
+#: ⛔ THOSE TWO PAIRS ARE DELIBERATELY NOT IN THE GRADED SPELLING, and the narrowing is recorded
+#: here so a later editor cannot read it as an accident and "restore" it — which is what the re-cut
+#: that merged `origin/main` `0467ba329d` had to do, when the graded spelling of this very sentence
+#: reddened `test_a_revs_published_own_pin_is_the_pin_that_rev_commits`. Graded means the pair is
+#: bound to the nearest preceding backticked rev, and NEITHER rev can be mapped: `27cd81d55ebd` is
+#: in NO advertised ref at all, and `8889f1140105` is reachable only from a local branch
+#: (`refs/pull/14086/head` contains neither), so an `OWN_PINS` entry would have to name a refspec
+#: that cannot be fetched — a lie in the map, which is worse than an ungraded sentence. What is
+#: missing is a FETCHABLE rev to grade against, not a measurement: both pairs are still true of the
+#: trees they name, and `test_the_own_pin_map_matches_each_revs_own_tree` keeps grading every entry
+#: that IS mapped.
 #: (Two lanes restored this block concurrently, which is why the rule is stated once, above.)
 #: ⛔ AND THE GROUND RULE FOR EVERY BLOCK IN THIS RUN: all blocks above are KEPT, because each is a
 #: true measurement of the tree it NAMES — including the ones no tree on this branch prints any more,
