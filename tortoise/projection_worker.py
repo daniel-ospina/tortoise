@@ -657,7 +657,9 @@ class ProjectionWorker:
             cond = self._cond
             if cond is not self._cond or not self._inherited():
                 continue      # a peer reset it in between; nothing left to do
-            self._reset_for_fork_locked()
+            snapshot = self._reset_for_fork_locked()
+            if snapshot is not None:
+                self._publish(snapshot)
             return
 
     def _inherited(self) -> bool:
@@ -680,7 +682,7 @@ class ProjectionWorker:
         """
         return self._cond_pid != os.getpid()
 
-    def _reset_for_fork_locked(self) -> None:
+    def _reset_for_fork_locked(self) -> tuple[int, int, int, int]:
         """Replace the state another process left behind, WITHOUT holding any lock.
 
         ⛔ THE NAME IS THE ONE THING HERE THAT IS NOT LITERAL: it is
@@ -714,31 +716,27 @@ class ProjectionWorker:
           for exactly the same reason (cycle 4, P2-1);
         * the PUBLISH SEQUENCE AND EPOCH, since the numbers mean nothing across
           processes — and the EPOCH bump is what makes a SNAPSHOT FROM THE PARENT
-          unmatchable, so a reset snapshot may never be applied here.
-
-        ⛔ **THE RESET DOES NOT PUBLISH, AND THAT IS THE FIX FOR ROUND 9'S P2.**
-        An earlier revision published the reset's own snapshot from this path,
-        which is reached by EVERY entry point — including the READ paths
-        ``stats()``, ``oldest_pending_seconds()`` (the scrape callback) and
-        ``wait_for_drain()``. Publishing there reaches
-        ``monitoring.record_projection_queue_state`` → ``Gauge.set`` →
-        ``prometheus_client``'s ``MutexValue.set``, which takes **a third lock
-        that no hook of ours can replace** — an inherited ``threading.Lock`` whose
-        owner did not survive the ``fork()``. ``_emit``'s ``contextlib.suppress``
-        cannot help: a blocked lock is not an exception, so the child would hang
-        FOREVER, silently, on a health read. Replacing ``_publish_lock`` moves the
-        wedge one layer down rather than removing it, which is what the previous
-        text claimed it removed.
-
-        ⛔ THE COST, DECLARED RATHER THAN HIDDEN: a forked child's exported gauges
-        keep the PARENT's last values until the child's first write or fold, and
-        that publish carries the new EPOCH, so it lands (a parent snapshot cannot
-        override it). A child that only ever READS therefore reads gauges that are
-        stale — and ``stats()`` is the authoritative reading there, because it is
-        computed from this object rather than from the metric backend. Moving the
-        republish off the write path was the pre-``#14185`` behaviour; it is
-        restored here deliberately, because an unbounded hang on a read is worse
-        than a stale gauge on a child that never writes.
+          unmatchable;
+        * **THE THIRD PARTY'S LOCKS TOO**, one layer down: ``prometheus_client``
+          gives every metric family a ``_lock`` and every ``MutexValue`` its own,
+          plain ``threading.Lock``s a child inherits from a peer that did not
+          survive the ``fork()``. ``set``, ``inc``, ``get``, ``labels`` and
+          ``collect`` all take one, and a blocked lock is not an exception, so the
+          suppression in ``_emit`` cannot save the child. The reset therefore also
+          calls ``monitoring.ensure_projection_metrics_fork_safe()``, which replaces
+          them — the SAME reasoning as the two above, applied to the lock nobody
+          here owns. ⛔ This is what makes the publish below safe, and it is the part
+          an earlier revision of this fix left out: dropping the publish from the
+          read path only moved the wedge onto the write and the collect paths
+          (measured: the child blocked in ``MutexValue.set`` from ``submit`` and in
+          ``MutexValue.get`` from ``projection_worker_gauges()``);
+        * the PUBLISH SNAPSHOT, which this method RETURNS rather than applying:
+          the publish is a foreign call (cycle 4, P2-2) and the caller makes it
+          once the reset has returned — after the prometheus locks above are
+          valid, so it cannot wedge. A child that only ever reads is exactly the
+          case the republish exists for (cycle 3, P2-2: a preforked child must not
+          advertise the parent's permanent backlog), so it is NOT deferred to the
+          first write.
         """
         self._cond = threading.Condition()
         self._cond_pid = os.getpid()
@@ -756,6 +754,7 @@ class ProjectionWorker:
         self._published_seq = 0
         self._publish_epoch += 1
         self._closed = False
+        return self._stamp_locked()
 
     # ── the loop ───────────────────────────────────────────────────────────
 

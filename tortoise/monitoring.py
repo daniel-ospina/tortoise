@@ -1044,6 +1044,92 @@ def _live_oldest_pending_seconds() -> float:
 
 PROJECTION_OLDEST_PENDING_SECONDS.set_function(_live_oldest_pending_seconds)
 
+#: The families whose locks must be replaced in a forked child — see
+#: :func:`ensure_projection_metrics_fork_safe`.
+_PROJECTION_METRIC_FAMILIES = (
+    PROJECTION_QUEUE_DEPTH,
+    PROJECTION_PENDING_POSITIONS,
+    PROJECTION_OLDEST_PENDING_SECONDS,
+    PROJECTION_WORKER_FAILURE_COUNT,
+    PROJECTION_INLINE_FALLBACK_COUNT,
+)
+
+#: The pid these families' locks were last made valid for. A mismatch means this
+#: process is a forked child and inherited them.
+_PROJECTION_METRICS_PID = os.getpid()
+
+
+def _lock_holders(family) -> list:
+    """Every object under *family* that carries one of prometheus_client's locks.
+
+    TWO kinds, and both are inherited across ``fork()``:
+
+    * the FAMILY's own ``_lock`` — taken by ``Counter.labels()`` and by
+      ``_multi_samples()`` while a labelled family is collected;
+    * each ``MutexValue``'s ``_lock`` — taken by ``set``/``inc``/``get``, so it is
+      what a publish AND a collect touch.
+    """
+    holders = [family, *getattr(family, "_metrics", {}).values()]
+    values = [getattr(h, "_value", None) for h in holders]
+    return holders + [v for v in values if v is not None]
+
+
+def ensure_projection_metrics_fork_safe() -> bool:
+    """Replace prometheus_client's inherited locks after a ``fork()`` (#14222).
+
+    ⛔ ``prometheus_client`` IS NOT FORK-SAFE, and this is the whole finding: every
+    ``MutexValue`` and every metric family owns a plain ``threading.Lock``. A child
+    that forked while a PEER THREAD held one inherits a lock with no owner, so the
+    child's next ``set``/``inc``/``get``/``labels``/``collect`` blocks FOREVER — and
+    ``contextlib.suppress`` cannot help, because a blocked lock is not an exception.
+    Measured on ``prometheus-client`` 0.26.0 with a peer holding
+    ``PROJECTION_QUEUE_DEPTH._value._lock`` at ``fork()``: the child blocked in
+    ``values.py``'s ``MutexValue.set`` from the ACK path and in ``get`` from
+    ``projection_worker_gauges()`` (a health read).
+
+    So the projection worker's own fork reset replaces the two locks it OWNS, and
+    this replaces the THIRD PARTY's — the same reasoning, one layer down, which is
+    what the earlier revision of this fix got wrong: dropping the publish from the
+    read path only moved the wedge onto the write and collect paths.
+
+    ⛔ PRIVATE ATTRIBUTES, deliberately and with the guard stated: ``_lock``,
+    ``_value`` and ``_metrics`` are what ``metrics.py``/``values.py`` use in 0.26.0.
+    Every attribute is read with ``getattr`` so a future release that renames one
+    degrades to "no replacement here" instead of raising inside an ACK or a
+    scrape. ``tests/test_14185_projection_worker.py`` pins the replacement by
+    HOLDING a lock across the reset, so a rename reds a test rather than silently
+    restoring the wedge.
+
+    Only the LOCKS are replaced: the inherited VALUES are left alone, because the
+    fork reset republishes them from the child's own state (and a read-only child's
+    stale values are a declared residual of the worker's, not this function's).
+
+    RETURNS whether this call replaced anything (``False`` = already valid here).
+    """
+    global _PROJECTION_METRICS_PID
+    pid = os.getpid()
+    if pid == _PROJECTION_METRICS_PID:
+        return False
+    seen: set = set()
+    replaced = 0
+    for family in _PROJECTION_METRIC_FAMILIES:
+        for holder in _lock_holders(family):
+            if id(holder) in seen:
+                continue
+            seen.add(id(holder))
+            lock = getattr(holder, "_lock", None)
+            if lock is None:
+                continue
+            try:
+                fresh = type(lock)()
+            except Exception:      # noqa: BLE001, RUF100
+                fresh = threading.Lock()
+            holder._lock = fresh
+            replaced += 1
+    _PROJECTION_METRICS_PID = pid
+    return replaced > 0
+
+
 #: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
 #:
 #: The counter above is CUMULATIVE since process start and is never reset — that
@@ -3073,9 +3159,9 @@ def record_projection_queue_state(*, depth: int, pending_positions: int) -> None
     wedge. Depths and positions stay event-published because they do not drift
     with time.
     """
+    ensure_projection_metrics_fork_safe()
     PROJECTION_QUEUE_DEPTH.set(depth)
     PROJECTION_PENDING_POSITIONS.set(pending_positions)
-
 
 def record_projection_worker_failure(reason: str) -> None:
     """Count one DEFERRED record projection that did not write a row (#14185).
@@ -3095,11 +3181,13 @@ def record_projection_worker_failure(reason: str) -> None:
     because an armed refusal still writes no row, so this is the only surface that
     can see a deferred fold that did not land (#14222 review cycles 2 and 3).
     """
+    ensure_projection_metrics_fork_safe()
     PROJECTION_WORKER_FAILURE_COUNT.labels(reason=reason).inc()
 
 
 def projection_worker_failure_counts() -> dict[str, int]:
     """In-process snapshot of ``PROJECTION_WORKER_FAILURE_COUNT`` (#14185)."""
+    ensure_projection_metrics_fork_safe()
     return _collect_by_label(PROJECTION_WORKER_FAILURE_COUNT, "reason")
 
 
@@ -3116,11 +3204,13 @@ def record_projection_inline_fallback(reason: str) -> None:
     That is why it gets its own counter instead of riding the write-failure
     family, whose non-zero means a row is missing.
     """
+    ensure_projection_metrics_fork_safe()
     PROJECTION_INLINE_FALLBACK_COUNT.labels(reason=reason).inc()
 
 
 def projection_inline_fallback_counts() -> dict[str, int]:
     """In-process snapshot of ``PROJECTION_INLINE_FALLBACK_COUNT`` (#14185)."""
+    ensure_projection_metrics_fork_safe()
     return _collect_by_label(PROJECTION_INLINE_FALLBACK_COUNT, "reason")
 
 
@@ -3133,6 +3223,7 @@ def projection_worker_gauges() -> dict[str, float]:
     ``_collect_by_label`` does: a ``Gauge`` exports ``…_created`` beside its
     value, and reading the wrong sample would report a timestamp as a depth.
     """
+    ensure_projection_metrics_fork_safe()
     out: dict[str, float] = {}
     for key, metric in (
         ("queue_depth", PROJECTION_QUEUE_DEPTH),
