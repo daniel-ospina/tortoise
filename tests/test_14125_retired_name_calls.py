@@ -474,34 +474,17 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     instances, and a module-keyed allowance would be machinery for a population that does
     not exist.
 
-    ⛔ BUT UNGRADED INSTANCES OF THE FAMILY DO EXIST, and a lane must measure rather than
-    trust a count (two successive drafts of this paragraph undercounted them and one cited
-    a line number from the wrong tree — review of #14160, cycles 12-13). The shape is: a
-    module-level `try:` whose body imports OWN code and whose `ImportError`-family arm
-    drops. At the time of writing there are ten across `tests/` + `tools/` (six in scripts
-    under `tools/`, four in `tests/conftest.py` around the `tortoise.abuse` tracker
-    imports), and NONE is admitted as a probe root, which is why the census is silent about
-    them. Re-derive the population with this function's own inputs — `_imports_own_code(block)`
-    and a handler for which `_swallows_everything` is true — before quoting a number or
-    adding the first allowance; a future widening that admits module-body own-code `try`s
-    meets this rule first. Charging it is the fail-closed direction (a false red on a latent shape is
-    recoverable; a rename hidden behind an `ImportError` arm is not).
-
-    ⛔ NEITHER REPAIR THE GATES PRINT APPLIES TO THIS SHAPE, and a lane must not read this
-    paragraph as "run the printed fix": re-raising `ImportError` turns the legitimate skip
-    into a collection error (the rule stated above `_RAISED`), and hoisting
-    `from tortoise.embeddings import …` above the `try` makes the module unimportable when
-    the extra is absent — the same error, earlier. The first live instance needs a
-    module-keyed allowance naming the extra-gated module, which is why it is deferred
-    rather than guessed at. Re-read this paragraph before adding one.
-
-    ⛔ AND IT IS ORDER-BLIND, which is a FALSE-RED residual, not a fail-open one: a
-    dropping arm BELOW a re-raising arm that already handles the same names can never run,
-    yet it is counted here. `_covered` is the order-aware predicate; this one answers
-    "could any arm in this block drop it", which is the question `swallows` asks when it is
-    used to decide whether a block is hiding something at all. 0 instances in the tree
-    (review of #14160, cycles 10-12); making it as precise as `_covered` is deferred, and
-    the direction it errs in is the recoverable one.
+    ⛔ AND THERE ARE UNGRADED INSTANCES OF THE FAMILY, so do NOT quote a number from
+    memory: three successive drafts of this paragraph carried a wrong count, a wrong scope
+    word and a citation from the wrong tree (review of #14160, cycles 12-14). The family is
+    "an own-code import dropped by an `ImportError`-family arm"; instances of it exist in
+    `tests/` and `tools/`, none of them is a probe root, and that is why the census is
+    silent about them. Re-derive the population from the census's own inputs before adding
+    an allowance: a block for which `_imports_own_code` holds, whose arm names
+    `ImportError`/`ModuleNotFoundError` (or is bare), and for which `_reraises` is false —
+    NOT `_swallows_everything`, which also charges broad-`Exception` drops and therefore
+    matches far more, including graded roots. A future widening that admits own-code `try`s
+    outside the probe roots meets this rule first.
 
     Whether the handler re-raises is part of the question, not a separate one:
     the property is *"the programming error never reaches the caller"*, and a
