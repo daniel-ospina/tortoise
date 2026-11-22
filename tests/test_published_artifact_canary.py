@@ -2629,7 +2629,10 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         if "published_artifact_canary" in str(step.get("run", ""))
     )
 
-    def execute(stub_body: str) -> tuple[int, str]:
+    def execute(stub_body: str, *, close_stdout: bool = False) -> tuple[int, str, str]:
+        # ⛔ THE ANNOTATION SAID `tuple[int, str]` OVER A THREE-VALUE RETURN (review cycle 16,
+        # P3): every caller unpacks `rc, printed, published`. Corrected here rather than left
+        # as a fourth small lie in a file whose subject is claims that match their measurement.
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
         python_stub = bindir / "python"
@@ -2673,6 +2676,10 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
             env=env,
             capture_output=True,
             text=True,
+            # case (e) closes the step's own stdout in the child, AFTER the pipe is set up and
+            # BEFORE the exec — the state a closed or EPIPE'd stdout presents to the block, and
+            # the only way to make the display `echo` fail deterministically.
+            preexec_fn=(lambda: os.close(1)) if close_stdout else None,
         )
         return completed.returncode, completed.stdout + completed.stderr, out.read_text()
 
@@ -2788,6 +2795,28 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
         f"about a run whose verdict.json is right there — {printed!r}"
     )
     assert published.strip() == "exit_code=0", published
+
+    # (e) ⛔ AND THE DISPLAY CANNOT COST THE SEVERITY SIGNAL (#14314 cycle 16, P2, MEASURED).
+    # The workflow's comment calls the write-before-display ordering defence in depth against "a
+    # future display line that fails for a reason `|| true` does not cover (a failing `echo` on a
+    # closed or EPIPE'd stdout)" — and then said that ordering was "not something the test can
+    # falsify today". A mutation pass falsified THAT in three lines: moving the display above the
+    # `$GITHUB_OUTPUT` write left all 114 tests GREEN (the `|| true` on the `cat` keeps the guard
+    # mutant green, correctly), yet under `bash -e` with fd 1 closed the two orders differ
+    # deterministically — sink `exit_code=1` at this head, EMPTY with the display moved up. That
+    # is the cycle-1 P1 (the step aborts AND the severity signal is gone, so the alert and the
+    # round-18 gate read a signal that was never written) surviving in the one state the suite
+    # could not reach. This case reaches it: the display `echo` dies on EBADF exactly as it would
+    # on EPIPE, and the assertion is on the SINK, not on the exit code (both orders exit 1 here).
+    rc, printed, published = execute(
+        'printf \'{"verdict": "FAIL", "exit_code": 1, "arms": []}\\n\'; exit 1',
+        close_stdout=True,
+    )
+    assert published.strip() == "exit_code=1", (
+        "a display that DIED took the severity signal with it: `exit_code=` was not in the sink, "
+        "so the order-dependent P1 (display above the write) is live and only a closed stdout "
+        f"can see it — rc={rc}, sink={published!r}"
+    )
 
 
 def _strip_shell_comments(script: str) -> str:
@@ -3698,6 +3727,21 @@ def test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not():
         "bash does not treat this as a shift, so this no longer reproduces the phantom-body "
         f"shape: stdout={arith_ran.stdout!r} stderr={arith_ran.stderr!r}"
     )
+    # ⛔ AND THE COMMAND SPELLING GETS ITS OWN ROW (review cycle 16, P3, MEASURED): the
+    # `cmd_arith` suppression was load-bearing but pinned only indirectly, through the
+    # `#`-inside-`((` fixture — so neutralising it for `<<` reddened an UNRELATED row. This one
+    # names the behaviour: with the guard gone, `(( x = 1 << 2 ))` queues a phantom body with
+    # delimiter `2` and the real comment after it is reported as code.
+    arith_cmd = "(( x = 1 << 2 ))\necho ok  # `tick`\n"
+    cmd_ran = subprocess.run([*_RUNNER_SHELL, arith_cmd], capture_output=True, text=True)
+    assert cmd_ran.returncode == 0 and "ok" in cmd_ran.stdout, (
+        f"bash does not treat `(( … << … ))` as a shift here: {cmd_ran.stdout!r} / {cmd_ran.stderr!r}"
+    )
+    assert _executable_prose_lines(arith_cmd) == [], (
+        "an arithmetic COMMAND opened a phantom heredoc body and read a real comment as code: "
+        f"{_executable_prose_lines(arith_cmd)!r}"
+    )
+
     assert _executable_prose_lines(arith) == ["echo $(( 1 << 2 ))"], (
         "arithmetic `<<` opened a phantom heredoc body and swallowed the rest of the block — "
         f"the real comment after it was scanned as code: {_executable_prose_lines(arith)!r}"

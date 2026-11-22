@@ -186,8 +186,15 @@ jobs:
           # future display line that fails for a reason `|| true` does not cover (a failing
           # `echo` on a closed or EPIPE'd stdout) still cannot cost the severity signal,
           # which is the only thing the alert and the round-18 gate read. So: the guard is
-          # pinned by a mutant (remove `|| true` -> case (c) reds); the ordering is a stated
-          # invariant, not something the test can falsify today.
+          # pinned by a mutant (remove `|| true` -> case (c) reds), and the ORDERING is
+          # pinned too, by case (e) of `test_the_canary_step_PRINTS_its_verdict_so_the_log_
+          # can_be_read`: it runs this block with fd 1 CLOSED, so the display `echo` fails
+          # exactly as a closed or EPIPE'd stdout does, and asserts the severity signal is
+          # already in the sink. Moving the display above this write makes case (e) red
+          # (measured: sink `exit_code=1` vs EMPTY). ⛔ This paragraph used to call the
+          # ordering "not something the test can falsify today" — that was FALSE, as a
+          # mutation pass showed by closing fd 1 in three lines; the sentence is corrected
+          # rather than deleted because it is the sentence a reader would trust.
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           if [ -s "$RUNNER_TEMP/canary/verdict.json" ]; then
             # ⛔ THE HEADER STATES ONLY WHAT IS TRUE ON EVERY PATH (review cycle 15, P2,
