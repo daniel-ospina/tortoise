@@ -680,6 +680,16 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     machinery is deferred and this paragraph is the record. Re-read it before adding the
     first live instance.
 
+    ⛔ AND ITS HANDLER-INTERNAL SIBLING, declared in the same breath (review of PR #14287
+    cycle 9): the handler-only view has a second hole with the same root — a handler whose
+    LAST statement is a `raise`, but which exits earlier through an unconditional
+    `return`/`break`/`continue`, is credited as coverage and the block is never charged:
+    `except (AttributeError, ImportError, NameError, TypeError): return True` followed by
+    `raise` rows as `covered` = those four names with `swallows=False`, so both gates stay
+    GREEN over a probe that swallows the rename. 0 instances in `tests/`+`tools/` today.
+    Filed with the nested-`try` hole above as #14333, which is where the fix belongs (both
+    need more of the tree than this predicate receives).
+
     A trailing bare `raise` keeps the anti-`except ImportError: return False`
     property: the clause is only coverage if it actually propagates.
     """
@@ -2212,9 +2222,9 @@ def _imports_own_code(block: ast.Try) -> bool:
     nested-try descent, `tests/test_hnsw_vector_index.py:48`, whose own import sits in the
     graded nested row at `:52` and is fully covered, so **0** live instances are affected).
     The repair for that shape is to hoist the import out of the nested `try`; the gate cannot
-    ask for it until this walk descends. Filed as its own finding rather than repaired here,
-    because fixing it moves `own_import` on a graded row and so changes the census figures
-    the repair texts quote.
+    ask for it until this walk descends. Filed with the handler-internal dead-`raise` sibling
+    (declared on `_reraises`) as **#14333**, rather than repaired here, because fixing it moves
+    `own_import` on a graded row and so changes the census figures the repair texts quote.
     """
     stack: list[ast.stmt] = list(block.body)
     while stack:
@@ -5230,10 +5240,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #: F4). Deleting `reachable = {name for name in names if not _masked_by(...)}` leaves
     #: every OTHER masking row green, but NOT all for one reason, and an earlier cut of this
     #: comment said they all reached their expectation "through `dropped_family`" — which
-    #: `child raised, then parent raised` falsifies, measured. The five rows that have a
-    #: DROPPING arm are emptied by the FAMILY-CLOSE instead (`dropped_family`); that row has
-    #: NO dropping arm at all, so `dropped_family` is empty and nothing in it is ever a
-    #: candidate for removal either way. The ONLY shape whose ANSWER changes is
+    #: `child raised, then parent raised` falsifies, measured. The rows in this table that have
+    #: a DROPPING arm — five of the six — are emptied by the FAMILY-CLOSE instead
+    #: (`dropped_family`); that row has NO dropping arm at all, so `dropped_family` is empty
+    #: and nothing in it is ever a candidate for removal either way. (The three `_alias_order`
+    #: rows above hold the same shape and behave the same way; this sentence is scoped to the
+    #: table on purpose — review of PR #14287 cycle 9 measured eight such rows across the whole
+    #: test, and the earlier "every OTHER masking row" read as a count over all nine.) The ONLY shape whose ANSWER changes is
     #: parent-then-child with BOTH arms re-raising: nothing is dropped, so `dropped_family`
     #: is empty and the earlier parent arm's containment is the whole guard. It cannot
     #: change a gate verdict (a child spelling satisfies neither `_required_names` nor the
