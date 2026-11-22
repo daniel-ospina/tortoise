@@ -2612,10 +2612,22 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
     # because the round-18 `::warning::` line above it already made "printed something at
     # all" true. A log line whose only value is telling a reader that nothing was measured
     # has to be pinned by what it says.
-    assert "NO verdict file" in printed, (
+    assert "NO verdict (empty or absent verdict.json)" in printed, (
         "the crash log does not say the verdict file was never written — a reader is left "
         "to infer it from a warning about the exit code, which is the inverse inference "
         f"that started #12660: {printed!r}"
+    )
+    # ⛔ AND THE LINE MUST DESCRIBE THE STATE THAT IS ON DISK (review cycle 3, P3, MEASURED).
+    # The redirection in the step (`--json > "$RUNNER_TEMP/canary/verdict.json"`) is done by
+    # the SHELL before the tool is exec'd, so an interpreter-level crash leaves the file
+    # PRESENT and 0 bytes — not absent. The old wording ("wrote NO verdict file") was true
+    # for no reachable state of this step and contradicted the uploaded artifact; this
+    # assertion pins the fixture to the state the line describes.
+    killed = tmp_path / "runner" / "canary" / "verdict.json"
+    assert killed.exists() and killed.stat().st_size == 0, (
+        "the fixture no longer reproduces the state the no-verdict line describes: the "
+        f"crash must leave verdict.json present-and-empty, got {killed!r} "
+        f"exists={killed.exists()}"
     )
     assert '"verdict"' not in printed, (
         "a run that wrote no verdict file still printed verdict JSON: the log now claims "

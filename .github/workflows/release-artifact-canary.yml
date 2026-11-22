@@ -174,7 +174,14 @@ jobs:
             # `|| true`: printing the reading must never be able to change the reading.
             cat "$RUNNER_TEMP/canary/verdict.json" || true
           else
-            echo "published-artifact-canary wrote NO verdict file — nothing was measured (exit_code=$rc)"
+            # ⛔ "NO verdict FILE" was one case too broad (review cycle 3, P3, MEASURED): the
+            # redirection above (`--json > "$RUNNER_TEMP/canary/verdict.json"`) is performed
+            # by the SHELL before the tool is exec'd, so on a crash the file EXISTS and is
+            # 0 bytes (`verdict.json exists: True size: 0`). A human who downloads the
+            # artifact therefore sees verdict.json present and the log telling them it is
+            # absent — the same class of unfollowable log this change exists to end. `-s`
+            # is a test for CONTENT, so the line describes what it can actually observe.
+            echo "published-artifact-canary wrote NO verdict (empty or absent verdict.json) — nothing was measured (exit_code=$rc)"
           fi
           exit "$rc"
       # `always()` — not `failure()` — so this step is still considered when the JOB is
