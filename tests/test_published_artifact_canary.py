@@ -36,6 +36,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # kills. This constant is the ONE spelling: every harness that executes a workflow `run:`
 # block takes its argv from here, so the flags cannot drift apart again. (A harness that
 # runs a SYNTHETIC script of its own, not a workflow block, is free to choose its own shell.)
+# ⛔ ONE STATED EXCEPTION (fresh-context review, P3):
+# `test_the_wheel_arity_guard_REFUSES_zero_and_two_wheels_by_RUNNING_it` (`:1990`) lifts a
+# workflow block VERBATIM and runs it as `bash -e <script-path>` — a PATH, not `-c` — so its
+# argv cannot come from this constant. It spells the runner's flags itself, and nothing reds
+# if they drift. Named here rather than left as an unstated hole in the sentence above.
 _RUNNER_SHELL = ("bash", "-e", "-c")
 
 
@@ -2478,8 +2483,10 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
     ⛔ AND WHAT THIS HARNESS DOES *NOT* MEASURE, stated because this docstring claimed it
     (fresh-context review, P3, MEASURED): the errexit-ORDERING discrimination — a display
     write aborting the step under `-e` — is NOT what these three cases test. Measured, they
-    pass under BOTH shells (swapping `_RUNNER_SHELL` to `bash -c` still gives the whole file
-    green), and under the cycle-1 mutant too, because no command on their crash path is
+    pass under `bash -c` as well; what reds on a swap is the VALUE pin for `_RUNNER_SHELL`'s
+    own flags in `test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read` (`:2599`),
+    not these cases. They pass under the cycle-1 mutant too, because no command on their
+    crash path is
     unguarded (the tool is invoked `… || rc=$?`). The `-e` discrimination for that mutant
     lives in the sibling `test_the_pre_upload_gate_step_EXITS_with_the_tool_VERDICT`, which
     reds under `bash -e` and is green under `bash -c`. This harness's three cases pin the
@@ -3082,7 +3089,12 @@ def _assert_no_executable_prose(script: str) -> None:
         "(`eval`, `trap … EXIT`, `sh -c` all execute it — measured); this gate is deliberately "
         "conservative there (`_strip_shell_comments`, DELIBERATE CONSERVATIVE EDGE), so a red "
         "on a single-quoted spelling asks you to REWORD the line rather than hunt for a "
-        "corruption this gate can see. Offending line(s):\n" + "\n".join(offending)
+        "corruption this gate can see. "
+        "⛔ AND A QUOTED-DELIMITER HEREDOC BODY (`<<'EOF'`) IS A THIRD INERT REGION "
+        "(fresh-context review, P3, MEASURED): bash expands nothing inside it and prints it "
+        "byte-for-byte, so a red there is the same conservative edge with the same remedy — "
+        "REWORD it; do not go hunting for the double-quoted echo that does not exist. "
+        "Offending line(s):\n" + "\n".join(offending)
     )
 
 
