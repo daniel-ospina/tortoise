@@ -83,9 +83,10 @@ document back to pin addresses — is the per-row pass the review recommended as
 NOT done here.
 ⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
 (`record_serve.py:468` is in THIS revision's group above; `projection/__init__.py:14647` is in neither list, so it is at the pin),
-and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. ⚠️ **Four
-rows are re-pointed at THIS head and say so nowhere else — rows 2b, 7, 7b and §2.4's `:Session` reader row (the one
-carrying the `:912` arm)**: every `session_schema`/`hosted_api`
+and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. ⚠️ **Five
+rows are re-pointed at THIS head and say so nowhere else — rows 2b, 7, 7b, §2.4's `:Session` reader row (the one
+carrying the `:912` arm) and §2.4's `list_sessions` row (the LIST endpoint, re-pointed with its six inner
+addresses)**: every `session_schema`/`hosted_api`
 address they carry was re-derived against this tree, so read them here and never at the pin, where those numbers
 open on something other than the queries the rows quote — a docstring, a comment block, a dict literal, a
 backup-sweep guard. They are named by ROW
