@@ -5277,7 +5277,7 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
             f"  --opt-{'a' * n} <x>" for n in range(1, count + 1))
 
     def not_a_skip(fn, *args):
-        """Call `fn`, turning a `pytest.skip` into a FAILURE.
+        """Call `fn`, turning a `pytest.skip`/`pytest.xfail` into a FAILURE.
 
         ⛔ THE SKIP IS THE LAUNDERING HOLE (#14303 review round 5, P2 — MEASURED). `pytest.skip`
         raises `Skipped`, which is NOT an `AssertionError`, so it escapes every `pytest.raises`
@@ -5287,15 +5287,46 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         `36 passed, 1 skipped` (exit 0) against a baseline of `37 passed`. `pytest.fail` raises
         `Failed`, which is not an `AssertionError` either, so it escapes the `pytest.raises` and
         reds the cell.
+
+        ⛔ AND THE IMPERATIVE `pytest.xfail` IS THE SAME HOLE WITH A DIFFERENT REPORT (#14328 review,
+        P3 — MEASURED, pre-existing). `XFailed` subclasses `Failed`, so it is neither `Skipped` nor
+        `AssertionError`: it escaped this arm, and it escaped the `pytest.raises(pytest.skip.Exception)`
+        witness the silent-grep arm used to be — which THIS change replaced with the
+        outcome-enumerating form that pins the exception KIND instead. The cell was then
+        merely reported `xfailed` — exit 0. MEASURED at `16e6afbf`: the helper's body replaced by
+        `pytest.xfail(...)` left `35 passed, 2 xfailed` at exit 0, the same deletion-the-fix
+        signature as the skip. An `xfail` raised by the HELPER is caught here; one raised on the
+        silent-grep arm is caught by that arm's own kind assertion, not here. `pytest.xfail()` is
+        never how a platform fact is declared, and `pytest.mark.xfail` (a decorator, not a raise) is
+        unaffected.
+
+        ⛔ EVERY CALL TO `_d5_documented_long_options` / `_d5_pinned_universe` IN THIS CELL GOES
+        THROUGH THIS HELPER — the ONE exception being the silent-grep arm, which calls
+        `_d5_pinned_universe` bare ON PURPOSE because witnessing the skip is its entire job (and it
+        pins the exception KIND in return). Nothing else may be bare (#14328 review round 2, P2 —
+        MEASURED). FOUR call sites used to be, not three: the floor-40 arm, the stderr arm, and BOTH
+        sides of the comparison below — its LHS `_d5_pinned_universe(full_help)` is the #14324 site
+        this PR is named after, and an earlier draft of this sentence omitted it.
+        `_d5_pinned_universe` calls `_d5_documented_long_options`, so a
+        `pytest.skip`/`pytest.xfail` anywhere in that chain reaches the FLOOR-40 arm FIRST — every
+        other arm, including the call-site pins this cell exists for, then never runs. MEASURED at
+        `6f1c9a5bb3` on THIS cell alone (`-k documented_universe_floor`) with
+        `_d5_documented_long_options` replaced by `lambda c: pytest.skip(...)`: `1 skipped in 0.03s`,
+        **exit 0**; with `lambda c: pytest.xfail(...)`: `1 xfailed`, **exit 0**. The WHOLE FILE reads
+        `35 passed, 2 skipped` / `35 passed, 2 xfailed` for the same mutants, because the
+        count-reader cell's own `_d5_pinned_universe(completed)` skips with it — that bare call must
+        STAY, since a BSD box has to be able to skip that cell. So the invariant is load-bearing, not
+        decorative: a new bare call anywhere in THIS cell re-opens the exact hole the cell closes.
         """
         try:
             return fn(*args)
-        except pytest.skip.Exception as exc:  # the shape under test
+        except (pytest.skip.Exception, pytest.xfail.Exception) as exc:  # the shapes under test
             pytest.fail(
-                "the derivation SKIPPED where it must RAISE — a skip makes every assertion below "
-                f"it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
+                "the derivation SKIPPED/XFAILED where it must RAISE — a skip makes every assertion "
+                f"below it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
 
-    assert len(_d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
+    assert len(not_a_skip(
+        _d5_documented_long_options, reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
         _D5_LONG_OPTION_FLOOR), (
         "a successful `grep --help` carrying exactly the floor's worth of long options must be a "
         "universe, or the floor is not a floor (#14303 review, P2)")
@@ -5304,8 +5335,9 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     # ⛔ THE STDERR HALF, READ RATHER THAN TOLERATED: a FAILED `--help` whose usage still yields the
     # floor is a universe, which is the whole point of dropping `check=True`. This arm is the
     # mutant-killer for "parse `stdout` only": with `completed.stdout` alone it raises.
-    assert len(_d5_documented_long_options(
-        reported(2, usage(_D5_LONG_OPTION_FLOOR)))) == _D5_LONG_OPTION_FLOOR, (
+    assert len(not_a_skip(
+        _d5_documented_long_options, reported(
+            2, usage(_D5_LONG_OPTION_FLOOR)))) == _D5_LONG_OPTION_FLOOR, (
         "a `--help` that exited non-zero but PUBLISHED a full option list on stderr must still be "
         "read — BSD grep's usage goes to stderr, and ignoring that stream is what made this cell "
         "unrunnable on macOS (#14303 review, P2)")
@@ -5317,12 +5349,53 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     # converts "no universe published" into `pytest.skip`, so replacing that skip with a bare `raise`
     # left this file at `37 passed` and only a BSD-grep box would ever have noticed. That is the same
     # P2-whose-fix-has-no-call-site-witness shape this PR catalogues, so it is pinned in both
-    # directions: a silent grep SKIPS, a real universe is RETURNED.
-    with pytest.raises(pytest.skip.Exception):
+    # directions: a silent grep SKIPS, a real universe is RETURNED — and the exception KIND is the
+    # datum, so an `XFailed` cannot pass for a `Skipped` here (#14328 review, P3 — MEASURED).
+    try:
         _d5_pinned_universe(reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    except (pytest.skip.Exception, pytest.xfail.Exception, pytest.fail.Exception) as outcome:
+        # ⛔ A TERMINAL SIGNAL IS NOT A VERDICT, SO THE ARM CATCHES ONLY THE OUTCOMES IT PINS (#14328
+        # review, P3 — MEASURED). This arm pins the exception KIND, so it must catch the pytest
+        # OUTCOMES and nothing else. An earlier form in this PR caught `BaseException` and re-raised a
+        # hand-written `(KeyboardInterrupt, SystemExit)` tuple, and its comment said that had restored
+        # the propagation the removed `pytest.raises(pytest.skip.Exception)` arm gave. It had not:
+        # `pytest.exit()` raises `_pytest.outcomes.Exit`, which subclasses `Exception` and NOT
+        # `SystemExit`, so it was still swallowed into an `AssertionError` claiming the platform branch
+        # misbehaved. MEASURED on THIS cell alone (`-k documented_universe_floor`; the selection
+        # matters, see below) with the mutant `pytest.exit("MUTANT-exit", returncode=7)`: that run
+        # reported `AssertionError: the platform-fact branch must SKIP with `Skipped`, not raise
+        # Exit` and CONTINUED to the next cell at exit 1, where the pre-fix `pytest.raises` shape
+        # aborted with the caller's exit code — 7 for that mutant, and 2 for a bare
+        # `pytest.exit("…")`, which is what a `returncode=None` becomes; it aborts either way. Run
+        # the WHOLE file instead and that same shape aborts at exit 7 rather than continuing,
+        # because the count-reader cell above calls `_d5_pinned_universe(completed)` bare — the one
+        # bare call that must STAY — and it reaches the mutant first.
+        # Enumerating the three outcomes this cell
+        # can legitimately see removes both the hole and the tuple: Ctrl-C, `SystemExit`, `pytest.exit`
+        # and a genuine bug in the helper all propagate untouched, and there is no re-raise arm for the
+        # next editor to keep in sync.
+        assert type(outcome) is pytest.skip.Exception, (
+            f"the platform-fact branch must SKIP with `Skipped`, not raise "
+            f"{type(outcome).__name__} — a `pytest.xfail()` is reported as xfailed and exits 0, so "
+            "it launders this cell exactly like a skip does (#14328)")
+    else:
+        pytest.fail("a silent grep must SKIP the cell, and it returned instead")
     full_help = reported(0, usage(_D5_LONG_OPTION_FLOOR))
-    assert _d5_pinned_universe(full_help) == _d5_documented_long_options(full_help), (
+    # ⛔ BOTH ARMS NOW RUN THROUGH THE CALL SITE, NOT ONLY THE DERIVATION (#14324, P2 — MEASURED).
+    # The returning arm used to read `assert _d5_pinned_universe(full_help) == …`, and `pytest.skip`
+    # raises `Skipped` — which is NOT an `AssertionError` — so a skip inside the helper made that
+    # assert UNREACHABLE and skipped the WHOLE cell, with the suite exiting 0. That is the very hole
+    # `not_a_skip` exists for, one call site over from where it was being applied. MEASURED at
+    # `7bd8d74f`: the helper's body replaced by an unconditional `pytest.skip(...)` — the banned
+    # "skip on the platform that failed", which also deletes this fix's call-site behaviour — left
+    # `35 passed, 2 skipped` at exit 0 against a baseline of `37 passed`, so a mutant that DELETED
+    # the fix was green. Through `not_a_skip` the same mutant reds this cell by name, and the arm
+    # above pins that a broken derivation stays an `AssertionError` rather than becoming a skip.
+    with pytest.raises(AssertionError, match="broken derivation must not be able to certify"):
+        not_a_skip(_d5_pinned_universe, reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
+    assert not_a_skip(_d5_pinned_universe, full_help) == not_a_skip(
+        _d5_documented_long_options, full_help), (
         "a `grep --help` that PUBLISHED a universe must be RETURNED, not skipped — the skip excuses "
         "only the platform that published nothing (#14303)")
 
