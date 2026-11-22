@@ -324,9 +324,10 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
       now" would then state a fact nothing checked.
 
     So the reason names WHAT WAS OBSERVED:
-    ``record_no_outcome`` (the callable answered nothing),
-    ``projection_refused`` (an armed refusal — nothing was written), and the
-    raise arm's ``projection_raised`` is minted by the caller.
+    ``record_no_outcome`` (the callable answered nothing — or answered a value
+    whose outcome could not be READ, which is the same fact: nothing was
+    observed), ``projection_refused`` (an armed refusal — nothing was written),
+    and the raise arm's ``projection_raised`` is minted by the caller.
     `no_durable_journal` is NOT a failure: it is the seam's healthy decline for a
     lane with no journal by design (#9231), and the gate here already refuses to
     queue a non-durable log.
