@@ -4,9 +4,12 @@ Two artifacts, both from `tools/read_wave_latency.py` (added by this issue). The
 answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** and
 **a rank-identity verdict**.
 
-> Every number in the **two result tables** below is copied from the two JSONs in
-> this directory, not from an earlier run. If a number is not in a JSON here, it
-> is not claimed here. ⚠️ The FIRST table is the exception and is not a results
+> Every number in the **two result tables** below is either a **cell** of the two
+> JSONs in this directory or **arithmetic on named cells** of them — never from
+> an earlier run. The percentages and the mean delta are that arithmetic, not
+> leaves of either JSON (`−26.8 %` = `total_delta_p50_ms / baseline_total.p50`,
+> `−21.4 %` = `total_delta_p95_ms / baseline_total.p95`, `−26.3 ms` = the mean's
+> `old_ms − new_ms`). ⚠️ The FIRST table is the exception and is not a results
 > table: it carries the corpus and provenance. `2000` Points and seed `42` are
 > cells of `ab-full-read.json` (both its `baseline` and `after` arms); `5000`
 > operator edges is a harness INPUT that appears in NEITHER JSON (`grep -c 5000`
@@ -14,8 +17,9 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 >
 > ⛔ **That rule governs the TABLES. Figures in the prose are a different class,
 > and this file has drifted on exactly that boundary before** — so the rule is
-> **every prose figure names its source where it stands**, and these are the
-> sources in use:
+> **every prose figure names its source where it stands.** These are the classes
+> its sources fall into; it is a MAP, not a closed inventory, so a figure that is
+> a code constant or a derivation says so where it stands:
 >
 > - the `159 ms` / `231 ms` / `167 ms` bullet pair under "Result —
 >   `ab-full-read.json`" (NOT under "What the first measurement found", whose
@@ -25,7 +29,7 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 > - the `26,463` / `14,732` character counts are **git** artifacts, not JSON
 >   cells: the Q2-crit statement's length before and after `7d276aa07a`, readable
 >   with `git show 5c9cfe5407:tortoise/search_engine.py` vs
->   `git show 7d276aa07a:…`.
+>   `git show 7d276aa07a:tortoise/search_engine.py`.
 > - `retrieval 1199 ms` is the **named external production record** in the
 >   paragraph below (`grep -c 1199` over both JSONs is `0` — it is not ours).
 > - `embed_get` bimodal `0 ms / ~330 ms`, and the `−68.6` / `−48.4` / `−43.5 ms`
@@ -36,6 +40,10 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 >   artifact cell: it is produced by an instrumented stub graph in
 >   `test_every_wave_read_is_visible_to_the_capture_counter`, and it measures the
 >   capture counter, not latency.
+> - **code constants** are read out of the code they name, not out of a JSON:
+>   `VARIANCE_SUM_MIN` `1e-154` / `VARIANCE_SUM_MAX` `1e102`
+>   (`tortoise/search_engine.py:5792-5793`), the `5.24`–`5.26` band that `_grid()`
+>   constructs in the test file, and the `≤120-row` fusion pool.
 >
 > ⚠️ Earlier cuts of this note twice claimed a stronger form — that every number
 > was an artifact cell, then that no other *performance* figure was outside the
