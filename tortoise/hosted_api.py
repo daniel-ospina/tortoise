@@ -873,9 +873,17 @@ def _capture_tail_failed(task, proj, session_id, state) -> None:
         except Exception:  # pragma: no cover — pool shut down
             _logger.exception(
                 "capture phase clear submit failed (session %s)", session_id)
-    elif (state is not None and state.get("attempted")
+    elif (not cancelled and state is not None and state.get("attempted")
             and not state.get("finalized")):
         # ⛔ AND ON THE ARM THAT DID NOT RAISE EITHER (#14232 review, round 2).
+        # `not cancelled` is load-bearing, not defensive: `exc` is None on a
+        # cancelled task (it is only read when the task did not cancel), so
+        # without it this arm fires beside `_capture_abandoned_marker` and a
+        # cancellation submits TWO graph writes where the contract above says it
+        # writes the marker alone (measured: the probe recorded
+        # `['_capture_abandoned_marker', '_clear_capture_phase']`). The clear
+        # exists for the tail that finished WITHOUT an outcome; cancellation
+        # already has its terminal writer.
         # The terminal `capture_ok` SET is non-fatal: a graph hiccup becomes a
         # receipt warning, so a tail can finish NORMALLY with `finalized` still
         # False — nothing recorded, nothing running, and the phase it wrote still
@@ -52233,7 +52241,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 202 tracked files (749 distinct
+# ABSOLUTE line number from 202 tracked files (748 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
