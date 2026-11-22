@@ -3360,7 +3360,9 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
 #: 'grep'`), taking every citation guard in it down with the cells that need grep; and it ran
 #: outside any pytest item, so a `grep` that blocked on PATH hung collection instead of failing it.
 #: Deferred, the blast radius is the cells that grep, MEASURED with a `grep` on PATH that exits 3
-#: for every call (so no probe can answer): **nine** cells fail and the other **24** still pass.
+#: for every call (so no probe can answer): **nine** cells fail and the other **25** still pass
+#: (9 of the 34 cells at this head — the count is re-derived, not remembered, whenever a cell is added
+#: to this file).
 #: The nine are the SEVEN `test_the_d5_count_reader_*` cells that consult the option universe, plus
 #: `test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have` and
 #: `test_the_D5_row_types_no_verdict_about_the_head_being_merged` — and SIX of the nine report the
@@ -3369,7 +3371,8 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
 #: their own messages), so "inherits the probe" is true of six, not of nine.
 #: `test_the_d5_count_reader_does_not_describe_itself_as_complete` still PASSES: it greps this file's
 #: source TEXT and never reaches the universe. What the import-time probe did instead was abort
-#: COLLECTION, so 0 of the 33 ran — that is the difference the laziness buys, not a count of 9.
+#: COLLECTION, so NONE of the file's cells ran — that is the difference the laziness buys, not a
+#: count of 9.
 #: A binary that is MISSING outright raises `OSError` from `subprocess` before this function can say
 #: anything (pinned by
 #: `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`). Cached because the probe
@@ -3384,7 +3387,8 @@ def _d5_undocumented_long_options(grep: str = "grep") -> frozenset[str]:
     can drive the derivation. Without it the only witness was the alias cell's
     `rederived == _d5_undocumented_long_options()`, and on GNU grep >= 3.12 — the platform CI runs —
     BOTH sides of that comparison are `frozenset()`. A mutant that hardcodes `return frozenset()`
-    therefore leaves CI green (`10 passed` under the 3.12 shim) and reds only on a <= 3.11 box, so
+    therefore leaves CI green (at head `35b7769e`, `-k "d5 or D5 or undocumented"` under the 3.12
+    shim reported `10 passed`) and reds only on a <= 3.11 box, so
     the exact regression this derivation exists to prevent (a remembered table coming back, the
     #14027 false PASS of an unread blank-class prescription) was unguarded where it mattered most.
     `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer` now drives it with a
@@ -5196,7 +5200,7 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     # namespace at CALL time (its own docstring), and it is the SOLE caller of
     # `_d5_undocumented_long_options`. Patching the allowance as well pinned NOTHING — the universe
     # is replaced whole, so that function cannot be reached inside this window (MEASURED: a raising
-    # sentinel in its place leaves this file `33 passed`). A second input that no assertion can
+    # sentinel in its place leaves this file `34 passed`). A second input that no assertion can
     # attribute to the behaviour it claims to guard is dead weight (agent-infra#3442 rule 3), so it
     # is gone rather than explained away.
     snapshots = (
@@ -5355,27 +5359,60 @@ def test_the_allowance_is_not_derived_at_import(tmp_path: Path):
     **all 33 cells green** on any box that HAS grep, and only a grep-less box ever notices — which
     is exactly the platform this file is least often run on.
 
-    ⛔ MEASURED IN A CHILD INTERPRETER, not in-process: this module's own import has already
-    happened by the time any cell runs, so an in-process check could never observe it. The child gets
-    a `PATH` that holds no `grep` at all — the box the docstring describes — and must BOTH import
-    successfully AND leave the allowance underived (`currsize == 0`). The two halves catch different
-    regressions: the first reds an eager probe that RAISES in the child, the second reds one that
-    derives without raising (e.g. after a `PATH` fallback), and together they are the difference
-    between "deferred" and "merely not yet called".
+    ⛔ MEASURED IN CHILD INTERPRETERS, not in-process: this module's own import has already happened
+    by the time any cell runs, so an in-process check could never observe it. TWO children, because
+    the two observable consequences are different and either one alone is escapable:
+
+      (a) **the spawn.** The child's `PATH` puts a `grep` that RECORDS that it ran first. An
+          import-time probe that RAISES is caught by (b), but one that SWALLOWS its error — a
+          module-level `try: … except Exception: pass` — leaves `currsize == 0` exactly as a lazy
+          file does (a cache does not record a raising call) while genuinely spawning grep at
+          import. That is the shape that HANGS collection behind a blocking `grep`, so the marker
+          is what decides: it must not exist after the import. Inferring "no spawn" from "the child
+          did not raise" is what the previous round's cell did, and it could not see this shape.
+      (b) **the no-grep box.** A `PATH` with no `grep` at all — the box the docstring describes —
+          must import successfully AND leave the allowance underived (`currsize == 0`).
+
+    (a) fails a spawn, (b) fails a raise or a derivation; neither alone is sufficient.
     """
-    grep_free = tmp_path / "no-grep-on-this-path"
-    grep_free.mkdir()
-    driver = (
+    source = str(Path(__file__).resolve())
+    import_probe = (
         "import importlib.util, sys\n"
-        f"source = {str(Path(__file__).resolve())!r}\n"
+        f"source = {source!r}\n"
         "spec = importlib.util.spec_from_file_location('d5_import_probe', source)\n"
         "mod = importlib.util.module_from_spec(spec)\n"
         "sys.modules['d5_import_probe'] = mod\n"
         "spec.loader.exec_module(mod)\n"
         "print('IMPORT-OK', mod._d5_undocumented_long_options.cache_info().currsize)\n"
     )
+
+    # (a) A `grep` that RECORDS its own invocation. The ordinary PATH stays behind it so the stub's
+    # own `sh` and `touch` still resolve, and nothing else can shadow the recording grep.
+    spy_dir = tmp_path / "spy-bin"
+    spy_dir.mkdir()
+    marker = tmp_path / "grep-was-spawned"
+    spy = spy_dir / "grep"
+    spy.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
+    spy.chmod(0o755)
+    spy_run = subprocess.run(
+        [sys.executable, "-c", import_probe],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ,
+             "PATH": spy_dir.as_posix() + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")},
+    )
+    assert spy_run.returncode == 0, (
+        "importing this module with a `grep` on PATH must SUCCEED (#14138): "
+        f"rc={spy_run.returncode} stderr={spy_run.stderr.strip()[-500:]!r}")
+    assert not marker.exists(), (
+        "`grep` was SPAWNED AT IMPORT TIME — the derivation must stay lazy, or a `grep` that blocks "
+        "on PATH hangs COLLECTION of this whole file instead of failing one cell (#14138); the "
+        f"recording stub left {marker.name} behind, so a probe ran during import")
+
+    # (b) …and a box with NO `grep` at all must still import, with the allowance underived.
+    grep_free = tmp_path / "no-grep-on-this-path"
+    grep_free.mkdir()
     done = subprocess.run(
-        [sys.executable, "-c", driver],
+        [sys.executable, "-c", import_probe],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "PATH": str(grep_free)},
     )
