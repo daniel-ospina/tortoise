@@ -327,7 +327,7 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
        typo'd reads OFF (:func:`tortoise.env_truthy.env_flag`), which keeps every
        unarmed deployment byte-identical to the pre-#14185 inline fold. The flag
        is asked HERE as well as in :func:`projection_worker.submit` because it is
-       the CHEAPEST test of the six — a bare env read — so asking it before
+       the CHEAPEST test of the seven — a bare env read — so asking it before
        condition 5 stops the default (loop off) deployment paying an uncached
        `record_writer.record_dsn()` parse per write for a fold it was never going
        to defer (#14222 review, finding 8). The conjunction is unchanged.

@@ -967,10 +967,15 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   inline, so the row is still written and only the latency is lost).
 #:   ⛔ **NOT EVERY INLINE FOLD IS COUNTED HERE, and the difference is the point**
 #:   (round-14 review, P3): the STRUCTURAL arms fold inline on every write at any
-#:   depth and move no counter at all — `live_write._submitted_to_worker` returns
-#:   `False` at the `journal_skipped or record_sink is not None or not durable`
-#:   gate and at the `tenant is None` gate, both BEFORE any queue or counter is
-#:   touched (⛔ cited by TEXT, not by `file:line`: three citations here were five
+#:   depth and move no counter at all — those are FIVE of the SEVEN conditions
+#:   `live_write._submitted_to_worker` tests, and two of the five are named here:
+#:   the function returns `False` at the `journal_skipped or record_sink is not
+#:   None or not durable` gate and at the `tenant is None` gate, both BEFORE any
+#:   queue or counter is touched. The other three structural returns are the
+#:   UNIMPORTABLE loop (`except` around the import) and the two SWITCHES. ⛔ FIVE
+#:   OF SEVEN, not "these two": this block used to stop at the two gates, which
+#:   left a reader believing a zeroed counter meant nothing had folded inline
+#:   (⛔ cited by TEXT, not by `file:line`: three citations here were five
 #:   lines off in round 14 — the numbers rot the moment a docstring above them
 #:   grows, the gate's text does not) (measured: armed loop, durable journal, no
 #:   carried tenant → `folded inline: True`, counter unchanged `{}`). Those are not queue
