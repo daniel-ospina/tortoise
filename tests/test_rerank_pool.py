@@ -1580,6 +1580,51 @@ def _seam_live_reads(tree, seam_mentions):
     return live, resolved, unresolved, list(calls.values())
 
 
+def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
+    """The grant's count row, as a function so a synthetic tree can grade IT.
+
+    ⛔ THE ROW ITSELF IS THE MECHANISM THAT CLOSES THE FAIL-OPEN, so grading the
+    counts it reads (above) is not enough: swapping its `read_sites` for `live`
+    put the arm back to counting mentions and left every pin green — the same
+    "what was unpinned" class round-11 raised. Extracted from the arm so the
+    synthetic pin drives the SAME predicate and sees it RED for a count it must
+    reject, instead of a second copy of the arithmetic that can drift.
+
+    ⛔ MENTIONS ARE NOT ASSERTED. A mention that reads nothing is not a read, so
+    a `len(live)` row would false-block a correct tree — a live mention bound and
+    left unused beside the two that are actually called.
+
+    ⛔ AND THE CALL-SITE ROW ALONE IS A FAIL-OPEN, which is why it does not stand
+    alone. A mention that ESCAPED into a shape the walk cannot follow adds no call
+    of its own, so replacing `len(live) == expected` with this row (rather than
+    ADDING it) silently stopped grading the whole escape family: measured at
+    `93178a6495`, `type _A = SEAM`, `return SEAM` and `except SEAM as _e` inside
+    the granted owner each left `read_sites == expected` and the arm GREEN
+    (round-12 review, P2). An unattributable mention may be a read, so it is never
+    something this row may ignore — `not unresolved` is the second half of the
+    same property, and it does not re-introduce the mention-count false block
+    (one binding feeding both reads is `live == 1, read_sites == 2,
+    unresolved == 0`, which stays GREEN).
+    """
+    read_sites = {id(call) for call in calls}
+    assert not unresolved, (
+        f"{len(unresolved)} seam mention(s) of `tortoise_fts_query` in {where} "
+        "escaped into a binding shape the walk cannot follow, so their reads "
+        "CANNOT be counted — an unresolvable mention may be a read, and this "
+        f"row may not report a tree where {expected} call sites are visible but "
+        "another read may be hiding. Re-derive the comment in "
+        "`intentional_keep`, or opt the new read out, which needs no grant.")
+    assert len(read_sites) == expected, (
+        f"{len(read_sites)} seam CALL SITE(s) of `tortoise_fts_query` "
+        f"in {where}, reached from {len(live)} mention(s), but the "
+        f"exemption's recorded reason says {expected} call sites (a discarded "
+        "warm-up, and the measured loop) and the grant is owner-granular — a "
+        "further read inside the granted owner is exempted with no recorded "
+        "reason. Re-derive the comment in `intentional_keep`, or opt the new "
+        "read out, which needs no grant.")
+    return read_sites
+
+
 def test_the_grant_grader_counts_CALL_SITES_across_ONE_mention():
     """#14278 (round 9, F1-B) — one binding driven twice is ONE mention, TWO reads.
 
@@ -1614,6 +1659,15 @@ def run(sdk):
         "this shape is exactly why the arm asserts BOTH counts — the mention "
         "count alone cannot see the second call, and the recorded reason "
         "counts call sites")
+    # ⛔ AND THE ROW'S OWN PREDICATE, not only the counts it reads. `expected=3`
+    # holds for this shape and the pre-fix verdict (`2`, the mention count) must
+    # RAISE — so replacing the row's `read_sites` with `live` reds HERE instead of
+    # silently restoring the fail-open.
+    _seam_check_read_sites(3, live, calls, resolved, unresolved,
+                           "the synthetic one-binding-two-calls module")
+    with pytest.raises(AssertionError, match="CALL SITE"):
+        _seam_check_read_sites(2, live, calls, resolved, unresolved,
+                               "the synthetic one-binding-two-calls module")
 
 
 def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
@@ -2269,32 +2323,13 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # 2 and the arm passed with THREE call sites inside the granted owner (round-11
     # review, P2 — the remaining half of round 9's F1-B). Distinct by identity, so a
     # mention and the call that consumes it are not double-counted.
-    # `_seam_live_reads` already dedupes by node id — a call reached from two
-    # mentions is one call site, because the reason's unit is the site, not the
-    # walk's paths — and the set is kept here because the COUNT is what this row
-    # means. The mention count is deliberately NOT asserted: a mention that reads
-    # nothing is not a read, so asserting it would false-block a correct tree (a
-    # live mention bound and left unused beside the two that are called).
-    # ⛔ AND THE CALL-SITE ROW ALONE IS A FAIL-OPEN, which is why it does not stand
-    # alone. A mention that ESCAPED into a shape the walk cannot follow adds no
-    # call of its own, so replacing `len(live) == 2` with this row (rather than
-    # ADDING it) silently stopped grading the whole escape family: measured at
-    # `93178a6495`, `type _A = SEAM`, `return SEAM` and `except SEAM as _e` inside
-    # the granted owner each left `sites == 2` and the arm GREEN (round-12 review,
-    # P2). An unattributable mention may be a read, so it is never something this
-    # row may ignore — `not unresolved` is the second half of the same property.
-    read_sites = {id(call) for call in seam_calls}
-    assert len(read_sites) == 2 and not unresolved, (
-        f"{len(read_sites)} seam CALL SITE(s) of `tortoise_fts_query` in "
-        f"tools/read_wave_latency.py, reached from {len(live)} mention(s) "
-        f"({len(resolved)} the walk attributed to a call, {len(unresolved)} it "
-        "had to COUNT because the binding escaped into a shape it cannot "
-        "follow — an unresolvable mention may be a read, so it is never "
-        "skipped), but the exemption's recorded reason says TWO call sites (a "
-        "discarded warm-up, and the measured loop) and the grant is "
-        "owner-granular — a further read inside the granted owner is exempted "
-        "with no recorded reason. Re-derive the comment in `intentional_keep`, "
-        "or opt the new read out, which needs no grant.")
+    # The row lives in `_seam_check_read_sites` so the synthetic pin grades that
+    # predicate itself (a lenient row is otherwise only detectable by mutating the
+    # tool, which no test does). That function also carries the round-12 property
+    # this arm needed: a call-site count alone leaves the ESCAPE family ungraded,
+    # so the row refuses an `unresolved` mention as well.
+    _seam_check_read_sites(2, live, seam_calls, resolved, unresolved,
+                           "tools/read_wave_latency.py")
     owners = {(_enclosing(m).name if _enclosing(m) else None) for m in live}
     assert owners == {"run"}, (
         "the exempted reads are not all inside `run`, the only owner the grant "
