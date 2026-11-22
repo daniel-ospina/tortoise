@@ -365,7 +365,19 @@ async def get_point(point_id: str):
 
 @router.get("/search", response_model=list[PointResponse], dependencies=[Depends(_require_key)])
 async def search(q: str, limit: int = Query(10, ge=1, le=100)):
-    """Hybrid search (registry: GET /v1/search)."""
+    """Hybrid search (registry: GET /v1/search).
+
+    ⛔ CARRIES NO ``state_question``, AND THAT IS DECLARED RATHER THAN FORGOTTEN
+    (#14033 review, P3). The state-cue recogniser runs INSIDE
+    ``_tortoise_fts_query``, so this route routes a state question exactly as the
+    hosted one does — but it passes no ``_state_route_out`` sink and its reply is
+    the bare row list, so a DECLINED state question here is byte-identical to an
+    honest "nothing has ended". ``state_intent.ROUTING_NOTE`` (served on every
+    deployment) says so and names the private SDK sink as the only way to read it
+    here; ``config/surface-manifest.yml``'s ``state_question`` row records the
+    omission. Adding the field would change this response's shape (a list), which
+    is a public-API decision, not a review fix.
+    """
     sdk = _sdk()
     try:
         # Registry-aligned hybrid search (tortoise_search → tortoise_fts_query):
