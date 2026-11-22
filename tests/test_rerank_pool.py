@@ -1349,7 +1349,8 @@ def _seam_opaque_values(node):
     deadness claim about an evaluated annotation is A), and it is why the pin
     carries BOTH a module-scope row (``ann-module`` — the evaluated shape the
     escape exists for) and a function-local one (``ann-only`` — the shape it
-    over-blocks). Before this fix all three shapes returned
+    over-blocks). Before this fix all three annotation POSITIONS (four rows, since
+    the ``AnnAssign`` position is graded at both scopes) returned
     ``calls=0, opaque=False``, read as PROVABLY DEAD — the exact direction this
     function exists to forbid (round-18 review).
 
@@ -1831,12 +1832,18 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     (measured at `62fb081200`); `ann-module`/`ann-only`/`ann-param`/`ret-ann`
     grade the four ANNOTATION escapes added for round 18 — a mention there
     reaches no call, so reading it as provably dead is the fail-open the
-    enumeration forbids. `ann-module` is deliberately the only one whose
-    annotation Python actually evaluates and stores; `ann-only` is its
-    function-local counterpart, which PEP 526 does not evaluate — the pin carries
-    it because the over-block is the accepted cost of a walk with no scope model,
-    so neither shape can be silently re-guarded (round-19 review: a
-    scope-sensitive skip left every row green).
+    enumeration forbids. Which of them Python EVALUATES is not uniform, which is
+    why the `AnnAssign` position is graded at BOTH scopes: `ann-module`,
+    `ann-param` and `ret-ann` are all evaluated — measured at 3.12.3,
+    `def f(_x: 1/0)` and `def f() -> 1/0` both raise at def time and land in
+    `f.__annotations__` — while `ann-only` is a function-local `AnnAssign`, which
+    PEP 526 neither evaluates nor stores (`def f(): x: 1/0` does not raise;
+    `locals()` is empty). The local case is carried as an accepted OVER-block
+    because this walk has no scope model. ⛔ AND IT IS THE SCOPE THAT WAS ALREADY
+    COVERED: at `6f52c22` the pin had NO module-scope `AnnAssign` row at all
+    (`git show 6f52c22:tests/test_rerank_pool.py | grep -c _bare_module` → `0`),
+    so the scope whose escape prevents the fail-open was the ungraded one —
+    `ann-module` closes it.
 
     ⛔ AND EVERY BRANCH OF THE TWO ENUMERATIONS HAS A ROW, because a pin cannot be
     a tripwire for a binding kind it never exercises: measured at `93178a6495`,
