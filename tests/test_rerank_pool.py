@@ -1567,10 +1567,10 @@ def _seam_opts_out(call) -> bool:
 def _seam_live_reads(tree, seam_mentions):
     """The grant's grader: (live mentions, resolved, unresolved, distinct calls).
 
-    ⛔ TWO COUNTS, BECAUSE THE TWO RECORDS COUNT DIFFERENT THINGS. `live` is the
+    ⛔ TWO COUNTS, BECAUSE THE TWO UNITS DIFFER. `live` is the
     CENSUS's unit — the mentions an owner-granular grant would absorb — and
-    `calls` is the RECORDED REASON's: the exemption's comment counts CALL SITES
-    ("TWO call sites": a discarded warm-up, and the measured loop). One binding
+    `calls` is the READ's: the tool issues one discarded warm-up and one
+    per-query measurement loop. One binding
     driven twice is ONE mention and TWO reads, so a grader asserting mentions
     alone left three reads in the tool with the row GREEN — measured at
     `7d18f1c824` on `_w = SEAM; _w(…); _w(…)`: mentions 2, distinct calls 3
@@ -1639,15 +1639,16 @@ def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
         f"{len(read_sites)} seam CALL SITE(s) of `tortoise_fts_query` "
         f"in {where}, reached from {len(live)} mention(s) "
         f"({len(resolved)} attributed by the walk, all of them counted), but the "
-        f"exemption's recorded reason says {expected} call sites (a discarded "
-        "warm-up, and the measured loop) and the grant is owner-granular — a "
+        f"read count this row is CALLED with says {expected!r} (the tool issues a "
+        "discarded warm-up and a per-query measurement loop) and the grant is "
+        "owner-granular — a "
         "further read inside the granted owner is exempted with no recorded "
-        "reason. ⛔ RE-DERIVING THE COMMENT ALONE CANNOT CLEAR THIS RED: this "
+        "reason. ⛔ RE-DERIVING A COMMENT ALONE CANNOT CLEAR THIS RED: this "
         "assert compares the tree against the expected count it is CALLED "
         f"with ({expected!r}, a literal at the call site) and never reads "
-        "`intentional_keep`. So the two fixes are (a) re-derive BOTH the "
-        "comment in `intentional_keep` AND that literal, or (b) opt the new "
-        "read out, which needs no grant and no re-derivation.")
+        "`intentional_keep`. So the two fixes are (a) re-derive BOTH that "
+        "literal AND the grant's recorded ground in `intentional_keep`, or (b) "
+        "opt the new read out, which needs no grant and no re-derivation.")
     return read_sites
 
 
@@ -2406,16 +2407,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     assert len(seen_external) >= 12, (
         f"the derived census saw only {sorted(seen_external)} — the trees moved")
 
-    # ⛔ THE GRANT'S RECORDED REASON IS GRADED, not merely written down (#14278
-    # F2). The two claims that justify `read_wave_latency.py`'s PERMANENT
-    # exemption — TWO call sites, ONE of them the per-query loop carrying
-    # `leg_trace` — are also a COVERAGE property: the grant names the OWNER
-    # (`run`), so a third read added inside it inherits the exemption with no
-    # recorded reason, and nothing else in this file would notice. (Measured
-    # before this arm existed: the comment said "twice", which reads as two
-    # EXECUTIONS while the loop executes once per query — a wrong count in the
-    # one place the grant's reason lives.) If this reds, the reason and the tool
-    # disagree: re-derive the comment above, do not delete this arm.
+    # ⛔ THE GRANT'S GROUND IS GRADED, not merely written down (#14278
+    # F2). The grant names the OWNER (`run`), so a read added inside it inherits
+    # the exemption with no recorded reason, and the tool's own shape — a
+    # discarded warm-up plus a per-query loop, the latter carrying `leg_trace` —
+    # is a COVERAGE property: a third read inside the owner inherits the
+    # exemption silently and nothing else in this file would notice. (Measured
+    # before this arm existed: an earlier comment said "twice", which reads as
+    # two EXECUTIONS while the loop executes once per query.) ⛔ NOTE WHAT THIS
+    # ARM IS *NOT* FOR: the door pin main landed (`tests/test_14192_read_wave_tool.py`,
+    # `test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags`) already
+    # detects a third reach — including spellings this AST walk declares as its
+    # residual (`getattr`, a computed name) — and it pins every read's owner to
+    # the literal `"run"`. This arm grades the GRANT instead: it reads
+    # `intentional_keep` rather than hardcoding an owner, so a grant the census
+    # ACCEPTS is not false-blocked here. If this reds, the grant and the tool
+    # disagree: re-derive this row's literal and the grant's ground above, do not
+    # delete this arm.
     harness = _ast.parse((root / "tools" / "read_wave_latency.py").read_text())
     harness_parent = {id(child): parent for parent in _ast.walk(harness)
                       for child in _ast.iter_child_nodes(parent)}
@@ -2497,15 +2505,18 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # row with `['_warm', 'run'] == {'run'}`, and the message was then simply
     # false (measured at `d4729e151f`). Reading the grant keeps exactly what the
     # row is FOR — a live read outside EVERY granted owner still reds — and stops
-    # it asserting a fact the reason it cites does not state.
+    # it asserting a fact the grant does not state.
     # ⛔ THIS ROW'S MESSAGE NAMES THE DIRECTION IT CAN ACTUALLY FIRE IN. The census
     # above already reds a live read outside every granted owner, so by the time
     # this row is reached `owners ⊆ granted_owners` holds; a non-empty `live`
     # makes the sets EQUAL, and the only mode left is a grant naming an owner
     # with NO live read (round-21/22 mutation pass, measured: moving the warm-up
     # into a `_warm` helper WITHOUT widening the grant reds the CENSUS, not this
-    # row; moving it AND widening the grant is green, which is the re-cut this
-    # row must not false-block). The old message
+    # row; moving it AND widening the grant is green for THIS row and the census.
+    # ⛔ But that re-cut is NOT green for the suite: main's door pin
+    # (`tests/test_14192_read_wave_tool.py::test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags`)
+    # asserts every read's owner is the literal `"run"` and knows nothing about
+    # this grant, so it REDS on `_warm` — such a re-cut needs BOTH edits). The old message
     # claimed "the exempted reads are not all inside an owner the grant names"
     # — false in that mode, which is the same prose-contradicts-code defect this
     # PR exists to close, in the same arm where `d4729e151f` fixed its sibling.
