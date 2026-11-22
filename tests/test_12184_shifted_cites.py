@@ -1738,24 +1738,24 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
 
     WHAT IT GRADES. (1) Every pair in `_PIN_EOF_PAIRS` is still a census pair — a dropped or re-pointed cite
     must re-derive this table rather than leave it describing a population the document no longer has.
-    (2) The header NAMES each of them at the address it writes, somewhere inside the non-comparable
-    BLOCK — the graded region runs from `that are NOT comparable` to the pin line-count sentence's
-    `past the pin's copy of its file`, which is WIDER than the enumeration sentence.
-    ⛔ WHICH ARM CATCHES WHAT — an earlier cut of this docstring got it wrong TWICE, so both halves are
-    pinned to a measurement here:
-    · a cite RE-POINTED elsewhere in the document leaves this region's text untouched, so arm 2 stays
-      green and it is ARM 1 that reds (the pair leaves the census population, so the static table now
-      describes a pair the document no longer writes — verified on a mutated body: re-pointing the
-      document's own `mcp_server.py:11590` spelling gives `unnamed = []` and `orphan =
-      [(…mcp_server.py, 11590)]`). Ten of the twelve are caught this way; the two that also carry a
-      one-token spelling inside the region red both arms.
-    · arm 2 reds when the REGION names none of the three accepted forms for a pair. Because the region
-      is wider than the sentence, that is NOT "the enumeration stopped naming it": the block writes
-      `hosted_api.py:51607` three times — twice in the sentence, once in the pin-count paragraph — so
-      stripping BOTH sentence spellings still leaves `unnamed = []` (measured on a mutated body).
-    ⛔ And it is NOT "the only place the twelve are written": `mcp_server.py`'s `:11590` alone also
-    appears at five other sites in this document, outside the graded region — which is why arm 2 grades
-    a REGION and never claims uniqueness across the prose at large. (3) The published
+    (2) The header NAMES each of them at the address it writes, somewhere inside the graded region —
+    the two anchors are quoted here EXACTLY as the code finds them: `that are NOT comparable` to
+    `past the pin's copy of its file`.
+    ⛔ WHICH ARM CATCHES WHAT — by MECHANISM, not by paraphrasing which sentence those anchors land in.
+    An earlier cut of this paragraph paraphrased them three times and was wrong each time, because the
+    anchor strings do not sit where a reader assumes (one of them closes the sentence AFTER the
+    enumeration):
+    · arm 1 reds on a cite RE-POINTED elsewhere in the document — the pair leaves the census population
+      and the static table becomes an orphan. Arm 2 cannot see that, because the region text is
+      untouched. Ten of the twelve pairs are that case; the two that also carry a one-token spelling
+      inside the region red both arms.
+    · arm 2 reds when the REGION carries none of the three accepted forms for a pair. A pair may
+      therefore be missing from the enumeration sentence and still satisfy this arm, provided the region
+      writes it somewhere else — which is why this arm must never be described as grading "the
+      enumeration".
+    ⛔ And it is NOT "the only place the twelve are written": `11590` alone also appears at five sites
+    outside the region, so this arm grades a REGION and never claims uniqueness across the prose.
+    (3) The published
     counts agree with the table: comparable + non-comparable == the pairs the file measures, and the four
     pinned `wc -l` values are the ones the header states for those files.
 
@@ -1882,11 +1882,17 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     # ⛔ THE SKIP IS NAMED, never silent (#14038 review cycle 7, P2 — pre-existing, and the same class
     # as the failed-diff arm below). Every arm in this function that needs `origin/main`'s BLOBS is
     # gated on `_main_readable`, which goes False when any of them would not render — and a gate with
-    # no excuse reports green without measuring. The ONLY legitimate cause is an ABSENT `origin/main`:
+    # no excuse reports green without measuring. The COMMON legitimate cause is an ABSENT `origin/main`:
     # the `test` job checks out at the default `fetch-depth: 1`, so the ref does not exist there and
-    # these arms cannot run. If the ref RESOLVES and a blob still would not read, the cause is a
-    # readable tree failing to render a path it carries — a defect in this arm, not an environment
-    # fact — so that state reds instead of skipping.
+    # these arms cannot run. That state skips.
+    # ⛔ If the ref RESOLVES and a blob still would not read, the arm must not report green — the four
+    # main-side claims would be green WITHOUT MEASURING. It must not claim ONE cause either: this state
+    # has TWO and the arm cannot tell them apart. (a) `_pin_blob_lines`'s own tri-state classifies it a
+    # CANNOT-RUN fact about this checkout — a blobless/partial clone whose lazy fetch failed, or a corrupt
+    # object — which no change to the diff can fix. (b) A readable tree failing to render a path `ls-tree`
+    # lists IS a defect in this arm. Excusing (a) would also excuse (b), i.e. the false PASS this guard
+    # exists to prevent, so the state REDS — and the message names BOTH causes and how to tell them apart
+    # rather than asserting the arm is broken.
     if not _main_readable:
         _main_ref = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
@@ -1895,9 +1901,13 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             "`origin/main` RESOLVES ("
             f"{_main_ref.stdout.strip()[:12]}) but one of its blobs would not render, so every "
             "main-side arm here — the file lengths, the absent-at-main count, the provenance pair "
-            "and the write measurement — reported green WITHOUT MEASURING. The only excused cause "
-            "is an ABSENT `origin/main` (a `fetch-depth: 1` checkout), never a readable tree that "
-            "failed to read."
+            "and the write measurement — reported green WITHOUT MEASURING. TWO causes are possible "
+            "and this arm cannot distinguish them: (a) THIS CHECKOUT cannot render blobs — a "
+            "blobless/partial clone whose lazy fetch failed, or a corrupt object (`_pin_blob_lines` "
+            "classifies that as a cannot-run fact about the checkout, not a verdict on the PR): fetch "
+            "the blobs and re-run; or (b) the tree is readable and a path `ls-tree` lists will not "
+            "render — a defect in this arm. The only excused state remains an ABSENT `origin/main` "
+            "(a `fetch-depth: 1` checkout), never green over an unmeasured claim."
         )
     if _main_readable:
         _measured_absent = sum(1 for _path, _line in _PIN_EOF_PAIRS if _line > _main_sizes[_path])
