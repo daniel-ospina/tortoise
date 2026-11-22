@@ -526,10 +526,17 @@ def _declared_endpoint_locals(
 def _core_kind_names() -> frozenset[str]:
     """The bare CORE kind names, or an empty set if the registry is unreadable.
 
-    Read lazily and defensively, like every other pack read in this module: this
-    is a scope guard, so an unreadable registry must widen nothing — the empty
-    answer keeps the FORMER behaviour (every local half admitted) rather than
-    abstaining on writes the packs do speak about.
+    Read lazily and defensively, like every other pack read in this module: a
+    scope guard must not raise into a write. ⛔ **The empty fallback is the WIDER
+    one, and that is the documented direction, not an oversight (round-4 review,
+    P3).** An empty set means no name is recognised as a CORE kind, so every
+    namespaced declaration's local half is admitted — the scope test then judges
+    a bare-core-kind pair it would otherwise silence (the round-3 P1 defect
+    comes back as NOISE, a false ``undeclared_pair`` report), and no write is
+    ever refused either way. Narrowing instead would turn an unreadable registry
+    into silence on writes the packs DO speak about, which is the failure this
+    module's fail-open rule forbids. Unreachable while ``pack_registry`` imports
+    at all: ``CORE_ALIASED_KINDS`` is a module-level constant.
     """
     try:
         from tortoise.pack_registry import CORE_ALIASED_KINDS
@@ -658,18 +665,21 @@ def relation_pair_verdict(
     def _speaks(kind: object, label: object) -> bool:
         """Does this endpoint use an in-scope spelling? (see the helper above)
 
-        The FULL spelling always counts; the LOCAL half counts only when the
-        given kind is itself BARE, because a namespaced kind's local half is not
-        the caller's token and comparing it would equate ``dev:issue`` with a
-        bare ``issue`` that a different namespace may declare (the
-        ``_kind_equivalent`` rule this module already states).
+        One comparison, on the FULL spelling this caller gave (or the node's own
+        LABEL): the scope set already holds every declared spelling verbatim plus
+        the bare spellings the packs themselves declare (``Subject``), so a bare
+        asked kind is compared whole and a namespaced kind is compared whole.
+
+        ⛔ There is deliberately NO local-half fold here (round-4 review, P3): a
+        namespaced kind's local half is not the caller's token, and folding it
+        would equate ``dev:issue`` with a bare ``issue`` another namespace may
+        declare — the very ``_kind_equivalent`` rule this module states. (The
+        fold that DOES exist is ``_declared_endpoint_locals``' admission of a
+        namespaced declaration's local half for BARE asks, and only for names no
+        CORE kind owns.)
         """
-        if isinstance(kind, str):
-            asked = kind.strip()
-            if asked in in_scope:
-                return True
-            if asked and ":" not in asked and _local(asked) in in_scope:
-                return True
+        if isinstance(kind, str) and kind.strip() in in_scope:
+            return True
         return isinstance(label, str) and label in in_scope
 
     if not (_speaks(from_kind, from_label) or _speaks(to_kind, to_label)):
