@@ -149,7 +149,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:58099`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # those three (`sdk.py:58099`, `search_engine.py`'s two then-current spellings) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
@@ -659,9 +659,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "138 of this document's 234",
+        "136 of this document's 234",
         "dedupes the **345** as-written spellings to 234 — **111**",
-        "345 written spellings → 234 pairs → 111 collisions → 138 drifters of the 234",
+        "345 written spellings → 234 pairs → 111 collisions → 136 drifters of the 234",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1181,6 +1181,8 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/sdk.py", 58966): 56415,
     ("tortoise/sdk.py", 61999): 56415,
     ("tortoise/sdk.py", 62019): 56415,
+    ("tortoise/search_engine.py", 7153): 7071,
+    ("tortoise/search_engine.py", 7184): 7071,
     ("tortoise/search_engine.py", 7560): 7071,
     ("tortoise/search_engine.py", 7562): 7071,
     ("tortoise/hosted_api.py", 50935): 49851,
