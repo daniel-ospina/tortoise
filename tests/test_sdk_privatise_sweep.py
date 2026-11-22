@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1321 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1325 lines at this head, measured through THIS function's own
     walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
     moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
     what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
@@ -2072,6 +2072,21 @@ def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
         "it, or a rev published with another tree's pair passes in that spelling — which is the "
         "defect the widening exists for. Findings found: "
         f"{sorted(rev for rev, _r, _d in claims)}")
+    # ⛔ AND EVERY `OWN_PINS` KEY MUST BE REACHED BY SOME CLAUSE (#14282 review cycle 5, P3). The
+    # loop below grades each CLAIM against the map, so a key no clause attributes to is graded by
+    # NOTHING — and `_own_pin_claims` attributes a clause to the nearest backticked hex token
+    # BEFORE it, so a parenthetical naming another rev between a rev and its clause silently
+    # re-attributes the clause and orphans the first rev's entry. MEASURED: with `... 705 s BEFORE
+    # `5e83c2a2f6`` written between `10e51693f1` and its own clause, DELETING the `10e51693f1` map
+    # key left every arm GREEN while deleting `5e83c2a2f6` reded. This assertion is the one that
+    # names the dropped key.
+    orphans = sorted(set(OWN_PINS) - {rev for rev, _rows, _digest in claims})
+    assert not orphans, (
+        f"`OWN_PINS` carr{'ies' if len(orphans) == 1 else 'y'} {orphans} but NO clause in the "
+        "block attributes a published pair to it — the entry is graded by nothing, so a wrong "
+        "pair recorded under it would pass. Either the block dropped that rev's clause, or an "
+        "edit put ANOTHER backticked rev between it and its clause (`_own_pin_claims` attributes "
+        "to the nearest preceding token). Fix the block, not this map")
     for rev, rows, digest in claims:
         assert rev in OWN_PINS, (
             f"the block publishes `{rev}`'s own pin, but `{rev}` is not in `OWN_PINS`, so "

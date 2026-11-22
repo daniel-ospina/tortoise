@@ -1307,12 +1307,16 @@ SWEEP_NAMES = 66
 #: passing as prose. `5e83c2a2f6` — `main`'s own tree at this branch's PRE-REBASE base point: the
 #: PRE-REBASE head's parent, NOT the branch's base point, the branch having been rebased onto a
 #: later `main` afterwards. Its `--repin` prints the re-cut figure. Its own pin is
-#: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair; by
-#: committer time it is 64 s after `94d75667dc` (stated with its own evidence above) and 705 s
-#: BEFORE `5e83c2a2f6` — so a bare "64 s later" beside this sentence named the wrong antecedent,
-#: and the reader who checked it found a contradiction instead of a fact.
-#: Its own pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already
-#: moved under it, so the pair was committed to a tree it was not a reading of.
+#: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair. Its own
+#: pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already moved under it, so
+#: the pair was committed to a tree it was not a reading of. ⛔ AND THE INTERVAL COMES AFTER THE
+#: CLAUSE, NEVER BETWEEN THE REV AND IT (#14282 review cycle 5, P3): `_own_pin_claims` attributes a
+#: clause to the nearest backticked hex token BEFORE it, so writing `... 705 s BEFORE
+#: `5e83c2a2f6`` here — between this rev and its own clause — attributed the clause to
+#: `5e83c2a2f6` and left `10e51693f1`'s map entry graded by NOTHING (measured: deleting that key
+#: left every arm green). By committer time it is 64 s after `94d75667dc` (stated with its own
+#: evidence above) and 705 s BEFORE `5e83c2a2f6`, so the bare "64 s later" an earlier cut wrote
+#: named the wrong antecedent.
 #: `efe5605e976a` — this branch's PRE-REBASE head, named as what it is and NOT as a relative
 #: "THIS tree": its own `--repin` prints the re-cut pair, so the MEASUREMENT was true and only its
 #: ADDRESS was stale. Its own pin is `(11858, "a1552662bf07a10b")`, the pair it COMMITS.
