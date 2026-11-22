@@ -1174,21 +1174,34 @@ SWEEP_NAMES = 66
 #: then drew the wrong conclusion from it. The `(11835, "891187f5a4636487")` PAIR is committed at
 #: `2c0d66e2ec` and that tree does measure it — both true, and both beside the point: the
 #: illustration's claim is that a tree can PIN 11835 and MEASURE 11843, and the tree that does is
-#: the MERGE `8889f1140105` — it commits the `11835` row/digest pair inherited from `main`
-#: (`891187f5a4636487`), and `--repin` ON THAT TREE prints `11843` / `6aed5368ffa10513`, which its
-#: successor `27cd81d55ebd` then re-pinned. So the example is a REAL instance of the rule, not "the wrong
-#: EXAMPLE"; what was wrong was reading its pair against `2c0d66e2ec`, where pin and tree agree.
-#: ⛔ THOSE TWO PAIRS ARE DELIBERATELY NOT IN THE GRADED SPELLING, and the narrowing is recorded
-#: here so a later editor cannot read it as an accident and "restore" it — which is what the re-cut
-#: that merged `origin/main` `0467ba329d` had to do, when the graded spelling of this very sentence
-#: reddened `test_a_revs_published_own_pin_is_the_pin_that_rev_commits`. Graded means the pair is
-#: bound to the nearest preceding backticked rev, and NEITHER rev can be mapped: `27cd81d55ebd` is
-#: in NO advertised ref at all, and `8889f1140105` is reachable only from a local branch
-#: (`refs/pull/14086/head` contains neither), so an `OWN_PINS` entry would have to name a refspec
-#: that cannot be fetched — a lie in the map, which is worse than an ungraded sentence. What is
-#: missing is a FETCHABLE rev to grade against, not a measurement: both pairs are still true of the
-#: trees they name, and `test_the_own_pin_map_matches_each_revs_own_tree` keeps grading every entry
-#: that IS mapped.
+#: the MERGE `8889f1140105` — it commits `(11835, "891187f5a4636487")` inherited from `main` — and
+#: `--repin` ON THAT TREE prints `11843` / `6aed5368ffa10513`, which its successor `27cd81d55ebd`
+#: commits `(11843, "6aed5368ffa10513")`: it re-pinned to the pair its own tree measures. So the
+#: example is a REAL instance of the rule, not "the wrong EXAMPLE"; what was wrong was reading its
+#: pair against `2c0d66e2ec`, where pin and tree agree.
+#: ⛔ BOTH PAIRS ARE GRADED, and the grading SURVIVES A MEASURED FETCH TEST. An earlier cut of this
+#: re-cut concluded the opposite — that an `OWN_PINS` entry "would have to name a refspec that cannot
+#: be fetched — a lie in the map" — and wrote the pairs in an ungraded spelling. THAT IS FALSE, and
+#: it was falsified the cheap way: a sha WANT is answered for both revs from a clone holding neither
+#: object — `git fetch --dry-run --depth=1 https://github.com/daniel-ospina/tortoise.git <sha>`
+#: prints `* branch <sha> -> FETCH_HEAD` for `8889f1140105677add2c7c4dd60d0c8c5080ea26` and for
+#: `27cd81d55ebd42948c27051d821df970bbc0ba2f`, while the NEGATIVE CONTROL — the same command with an
+#: invented sha — prints `fatal: remote error: upload-pack: not our ref`. So "unreachable from any
+#: advertised ref" (TRUE: `27cd81d55ebd` sits in no ref at all, `8889f1140105`'s only ref is a local
+#: branch, and `refs/pull/14086/head` contains neither) is NOT the claim "not want-able by sha",
+#: and `_ARM_REFSPECS` grades the print-a-usable-remedy property, not reachability. Both revs
+#: therefore sit in `OWN_PINS` with the pair each commits, and in `_ARM_REFSPECS` as full-sha wants.
+#: ⛔ THE ONE REAL CAVEAT IS DURABILITY, NOT FETCHABILITY: an unadvertised sha is subject to the
+#: server's GC, so a re-arm can stop resolving where a branch-backed rev never would — a reason to
+#: keep the pairs TRUE, never to leave them ungraded (review of PR 14183: the ungraded spelling WAS
+#: the P2, and this block is the record of both attempts).
+#: ⛔ AND THE HAZARD THAT MADE THE NARROWING LOOK NECESSARY, recorded because it is real and it
+#: bites: `_BACKTICKED_REV_RE` matches ANY backticked hex token, so the 16-character DIGEST
+#: `891187f5a4636487` is itself a candidate rev, and the binding rule is "the NEAREST backticked
+#: token before the claim". That is why this sentence names `8889f1140105` immediately before the
+#: word `commits`: written the other way round the claim binds to whatever hex sits closest — the
+#: defect that reddened `test_a_revs_published_own_pin_is_the_pin_that_rev_commits` in the first
+#: re-cut. Re-word the ORDER, never the map.
 #: (Two lanes restored this block concurrently, which is why the rule is stated once, above.)
 #: ⛔ AND THE GROUND RULE FOR EVERY BLOCK IN THIS RUN: all blocks above are KEPT, because each is a
 #: true measurement of the tree it NAMES — including the ones no tree on this branch prints any more,
