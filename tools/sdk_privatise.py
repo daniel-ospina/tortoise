@@ -1171,8 +1171,11 @@ SWEEP_NAMES = 66
 #: passing as prose. `5e83c2a2f6` — `main`'s own tree at this branch's PRE-REBASE base point: the
 #: PRE-REBASE head's parent, NOT the branch's base point, the branch having been rebased onto a
 #: later `main` afterwards. Its `--repin` prints the re-cut figure. Its own pin is
-#: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair 64 s
-#: later. Its own pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already
+#: `(11858, "a1552662bf07a10b")`. `10e51693f1` — the squash that committed that stale pair. (No
+#: interval is typed here: it is 64 s after `94d75667dc`, which is stated with its own evidence
+#: above, and 705 s BEFORE `5e83c2a2f6` — so a bare "64 s later" beside this sentence named the
+#: wrong antecedent, and the reader who checked it found a contradiction instead of a fact.) Its
+#: own pin is `(11858, "a1552662bf07a10b")` too, and by then the row set had already
 #: moved under it, so the pair was committed to a tree it was not a reading of.
 #: `efe5605e976a` — this branch's PRE-REBASE head, named as what it is and NOT as a relative
 #: "THIS tree": its own `--repin` prints the re-cut pair, so the MEASUREMENT was true and only its
@@ -1203,7 +1206,8 @@ SWEEP_NAMES = 66
 #: wrote that address positionally and it was CORRECT where it wrote it — the merge inserted the
 #: `#14258` reconciliation paragraph between the note and the sentence, so it now names a different
 #: record. ⛔ AND THE FIRST FORM OF THIS NOTE ALSO CLAIMED THE "below" HALF HAD ROTTED, WHICH IS
-#: FALSE AND WAS MEASURED (#14282 review, P3): the paragraph immediately BELOW the note is
+#: FALSE AND WAS MEASURED (#14282 review, P3): the paragraph `main`'s "below" named — the one
+#: that OPENS `RE-PINNED FROM `main`'s DRIFT AGAIN` — is
 #: byte-identical on `origin/main` and here, compared line for line — nothing was inserted under it,
 #: so its "below" reading survived the merge untouched. What actually happened is that the
 #: `(11858 …) → (11861 …)` re-cut this branch publishes sits ABOVE the note, separating the note

@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1165 lines at this head, measured through THIS
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1169 lines at this head, measured through THIS
     function's own walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`.
     "Re-derive it after a prose edit instead of trusting the figure" was advice nothing
     enforced, and the figure has been carried forward wrong repeatedly because of it:
