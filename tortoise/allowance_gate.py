@@ -2057,6 +2057,19 @@ def read_dimension(dimension: str, org_id: str) -> MeterReading | None:
         return None
     if reading is None or reading is ABSENT:
         return None
+    if not isinstance(reading, MeterReading):
+        # The SAME type gate the gating path carries (see `_enforce_each_dimension`):
+        # a meter returning anything else — a bare number, a SimpleNamespace missing
+        # a field — reaches `_stale` below and escapes as a bare `AttributeError`,
+        # which contradicts this function's own "never raises for a meter failure"
+        # and loses the `no-reading` reason the notices exist to log (#14038 review,
+        # P3: measured with the `graph_storage` meter replaced by
+        # `lambda org: 90.0` — `read_dimension` raised instead of returning None).
+        _logger.warning(
+            "allowance read (no refusal): team=%s dimension=%s meter returned "
+            "%s, not a reading — reporting NO reading",
+            org_id, dim.dimension, type(reading).__name__)
+        return None
     if _stale(reading, dim):
         _logger.warning(
             "allowance read (no refusal): team=%s dimension=%s has a reading "
