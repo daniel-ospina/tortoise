@@ -1648,9 +1648,11 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # `_truncation_out`) and reds on any other keyword — `kind`, `pool_size`,
         # `order_by`, `claim_class`, `_elevated_timeout_ms`, an opt-out like
         # `_rerank_candidates=False` — on any positional argument, on a splat, on a third
-        # mention of the read anywhere in the file, and on the `leg_trace` out-sink moving
-        # off the measured read. Out-sinks (`read_status_out`, `_truncation_out`) are
-        # instruments, not levers, which is why they are allowed: the door names them too.
+        # (or aliased, or string-named) reach of the read anywhere in the file, on the
+        # measured read's page OR its `leg_trace` not feeding the artifact, and on an
+        # `os.environ` write of a rerank gate ("which arm was in force" is not recorded —
+        # see the issue linked from that pin). Out-sinks (`read_status_out`,
+        # `_truncation_out`) are instruments, not levers: the door names them too.
         "tools/read_wave_latency.py": frozenset({"run"}),
     }
     seen_external: set[str] = set()

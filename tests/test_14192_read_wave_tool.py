@@ -172,12 +172,24 @@ def test_a_tool_only_diff_selects_this_pin():
 
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
 _HOSTED = _REPO_ROOT / "tortoise" / "hosted_api.py"
+_RERANK = _REPO_ROOT / "tortoise" / "rerank.py"
 _READ_NAMES = ("tortoise_fts_query", "_tortoise_fts_query")
 
 
 def _read_calls(tree: ast.AST) -> list[ast.Call]:
     return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in _READ_NAMES]
+
+
+def _str_constants(tree: ast.AST) -> dict[str, str]:
+    """Every name bound to a string LITERAL anywhere in the file, module or local scope."""
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            out.setdefault(node.targets[0].id, node.value.value)
+    return out
 
 
 def _door_read_contract() -> set[str]:
@@ -231,6 +243,20 @@ def _door_read_contract() -> set[str]:
     return allowed
 
 
+def _rerank_env_names() -> set[str]:
+    """The env gates that change WHICH rows the read returns, read off `rerank.py`."""
+    tree = ast.parse(_RERANK.read_text())
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+                and node.value.value.startswith("TORTOISE_")):
+            names.add(node.value.value)
+    assert {"TORTOISE_FUSED_RERANK", "TORTOISE_FUSED_RERANK_POOL"} <= names, sorted(names)
+    return names
+
+
 def _enclosing(node: ast.AST, parents: dict[int, ast.AST]) -> ast.AST | None:
     return parents.get(id(node))
 
@@ -255,15 +281,23 @@ def _in_loop(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
     return False
 
 
-def _str_constants(tree: ast.AST) -> dict[str, str]:
-    """Every name bound to a string LITERAL anywhere in the file, module or local scope."""
-    out: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
-            out.setdefault(node.targets[0].id, node.value.value)
-    return out
+def _names_in(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _artifact_entries(run_def: ast.AST) -> dict[str, ast.AST]:
+    """The `"key": value` pairs of the per-query artifact dict `run()` appends."""
+    for node in ast.walk(run_def):
+        if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "append"
+                and node.args and isinstance(node.args[0], ast.Dict)):
+            keys = [k.value for k in node.args[0].keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            if "legs" in keys and "order" in keys:
+                return {k.value: v for k, v in zip(
+                    [k for k in node.args[0].keys], node.args[0].values, strict=True)
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    raise AssertionError("run() no longer appends a per-query artifact dict with "
+                         "`legs` and `order` — this pin is stale")
 
 
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
@@ -280,30 +314,45 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     A grant can only say "this file MAY run the lever", so the mirror is asserted here
     instead of assumed, against the door's OWN call site (``_door_read_contract``):
     every keyword must be one the door names (plus the ``leg_trace`` out-sink), every
-    argument must be a keyword (a positional one is invisible to a kwargs check), and
-    the measured read must be the one that collects ``leg_trace``.
+    argument must be a keyword (a positional one is invisible to a kwargs check), the
+    measured read must be the one inside the loop, its page must be the ``order`` list
+    the artifact reports, its trace must be the one the ``legs`` table is built from,
+    and no env write may arm a rerank gate the artifact does not record.
 
-    ⛔ EVERY MENTION OF THE READ IN THIS FILE IS CENSUSED, not just the two calls: a
-    bound-method alias (``_read = sdk._tortoise_fts_query`` then ``_read(…)``) and a
-    ``getattr(sdk, "_tortoise_fts_query")`` both left a lexer that only read
-    ``Call.func`` green with a lever-carrying third read (measured), and a bare
-    attribute mention with no call at all would be invisible to the census as well.
-    ``getattr``/``setattr`` with the read's name — as a literal OR as a name bound to
-    one — is refused too. Residual, stated rather than implied: a name COMPUTED at
-    runtime (``"".join(…)``, a parameter) cannot be resolved statically, so the pin
-    bounds the static reaches, not every conceivable dynamic one.
+    ⛔ EVERY STATIC REACH IS CENSUSED, not just the two calls: a bound-method alias
+    (``_read = sdk._tortoise_fts_query``), a string LITERAL naming the read
+    (``sdk.__getattribute__("_tortoise_fts_query")``, ``operator.methodcaller(...)``,
+    ``vars(type(sdk))[...]``), a name BOUND to that literal, and a bare attribute
+    mention with no call all left earlier shapes of this pin green while carrying a
+    lever (each measured). Residual, stated rather than implied: a name COMPUTED at
+    runtime (``"".join(…)``, a parameter) cannot be resolved statically, so this pin
+    bounds the static reaches. ⛔ The env-write half is one-sided on purpose: the
+    harness does not RECORD which arm of `TORTOISE_FUSED_RERANK` was in force, so a
+    baseline/after pair could straddle the gate and `compare()` would still call them
+    comparable — tracked as #14289, not asserted here.
     """
     tree = ast.parse(_TOOL.read_text())
     parents: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[id(child)] = node
-
     consts = _str_constants(tree)
-    read_names = set(_READ_NAMES) | {v for v in consts.values() if v in _READ_NAMES}
-    mentions = [n for n in ast.walk(tree)
-                if (isinstance(n, ast.Attribute) and n.attr in read_names)
-                or (isinstance(n, ast.Name) and n.id in read_names)]
+
+    def _resolved(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return consts.get(node.id)  # a literal bound to a name, in ANY scope
+        return None  # e.g. a parameter — not statically knowable here, see the docstring
+
+    def _is_read_ref(node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute) and node.attr in _READ_NAMES:
+            return True
+        if isinstance(node, ast.Name) and _resolved(node) in _READ_NAMES:
+            return True
+        return isinstance(node, ast.Constant) and node.value in _READ_NAMES
+
+    mentions = [n for n in ast.walk(tree) if _is_read_ref(n)]
     calls = _read_calls(tree)
     # Anti-vacuity: TWO mentions, both calls, both the reads this pin is about (the
     # warm-up and the per-query measurement), and both inside `run()`.
@@ -312,22 +361,15 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         "warm-up and the per-query one")
     assert len(mentions) == 2, (
         f"the tool MENTIONS the read {len(mentions)} times but calls it {len(calls)} — an "
-        f"alias or a `getattr` reference is unaccounted for: "
+        f"alias, a string reference or a `getattr` is unaccounted for: "
         f"{[(ast.unparse(m), m.lineno) for m in mentions]}")
     assert all(_owner(m, parents) == "run" for m in mentions), (
         f"the read is mentioned outside `run()`: "
         f"{[(_owner(m, parents), m.lineno) for m in mentions]}")
-    def _resolved(node: ast.AST) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.Name):
-            return consts.get(node.id)  # a literal bound to a name, in ANY scope
-        return None  # e.g. a parameter — not statically knowable here, see the docstring
-
     indirect = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                 and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
                 in ("getattr", "setattr")
-                and len(n.args) >= 2 and _resolved(n.args[1]) in read_names]
+                and len(n.args) >= 2 and _resolved(n.args[1]) in _READ_NAMES]
     assert not indirect, (
         f"the tool reaches the read through {indirect[0].func.id}() by name — that bypasses "
         "every check in this pin")
@@ -353,25 +395,57 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             f"only {sorted(allowed - {'leg_trace'})}, and each of these changes WHICH rows "
             "survive `limit`, so a mirror that names one times a reader the product does "
             "not run (and hides the page permutation the verdict exists to catch)")
-    # Identity, not a count: the WARM-UP must not collect the trace, and the measured
-    # read must collect it into a list that `run()` actually ITERATES — a discarded sink
-    # leaves every `legs` table in the artifact silently empty (`leg_trace=[]`, or a
-    # `_throwaway` nobody loops over, both read as "a trace was collected").
-    lt = next((k for k in measured.keywords if k.arg == "leg_trace"), None)
-    assert lt is not None, (
-        f"the measured read (line {measured.lineno}) collects no `leg_trace` — the "
-        "artifact's per-query `legs` table would be empty")
-    assert isinstance(lt.value, ast.Name), (
-        f"the measured read collects `leg_trace` into {ast.unparse(lt.value)} — the pin "
-        "cannot tell whether `run()` ever reads it, so a discarded sink would pass")
-    run_defs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and n.name == "run"]
-    assert len(run_defs) == 1, f"tools/read_wave_latency.py defines `run` {len(run_defs)}×"
-    assert any(isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension))
-               and lt.value.id in {x.id for x in ast.walk(n.iter) if isinstance(x, ast.Name)}
-               for n in ast.walk(run_defs[0])), (
-        f"`{lt.value.id}` is handed to the read as `leg_trace` but `run()` never iterates "
-        "it — a discarded sink leaves the artifact's `legs` table empty")
     assert "leg_trace" not in {k.arg for k in warm.keywords if k.arg}, (
         f"the warm-up (line {warm.lineno}) collects a `leg_trace` — its result is "
         "discarded, so that trace is not the measurement")
+
+    # ⛔ THE MEASURED READ MUST FEED THE ARTIFACT, both halves of it: its page is the
+    # `order` list the rank-identity verdict reads, and its trace is what the `legs`
+    # table is built from. Counting keyword names (or iterating the sink somewhere)
+    # was not enough — `results` discarded, `leg_trace=[]`, and a `_throwaway` looped
+    # over by a dead `for` all stayed green while the artifact lost the measurement.
+    run_defs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == "run"]
+    assert len(run_defs) == 1, f"tools/read_wave_latency.py defines `run` {len(run_defs)}×"
+    holder = parents.get(id(measured))
+    while holder is not None and not isinstance(holder, ast.Assign):
+        holder = parents.get(id(holder))
+    assert isinstance(holder, ast.Assign) and len(holder.targets) == 1 \
+        and isinstance(holder.targets[0], ast.Name), (
+        f"the measured read (line {measured.lineno}) is not assigned to a name — the pin "
+        "cannot follow its page into the artifact")
+    page_var = holder.targets[0].id
+    lt = next((k for k in measured.keywords if k.arg == "leg_trace"), None)
+    assert lt is not None and isinstance(lt.value, ast.Name), (
+        f"the measured read (line {measured.lineno}) collects `leg_trace` into "
+        f"{ast.unparse(lt.value) if lt else 'nothing'} — the pin cannot follow its trace "
+        "into the artifact, so a discarded sink would pass")
+    trace_var = lt.value.id
+    entries = _artifact_entries(run_defs[0])
+    for key, var, what in (("order", page_var, "page"), ("legs", trace_var, "trace")):
+        value = entries[key]
+        assert isinstance(value, ast.ListComp), (
+            f"the artifact's `{key}` is {ast.unparse(value)} — this pin follows a "
+            f"comprehension over the measured {what}")
+        assert any(var in _names_in(g.iter) for g in value.generators), (
+            f"the artifact's `{key}` is not built from `{var}`, the measured read's "
+            f"{what} — the verdict would report on something else: {ast.unparse(value)}")
+
+    # ⛔ No env write may arm a rerank gate: `run()` already mutates `os.environ`, so
+    # this is a plausible edit, and the artifact does not record which arm was in force.
+    env_names = _rerank_env_names()
+    armed = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+                and getattr(node.value, "attr", None) == "environ"
+                and _resolved(node.slice) in env_names):
+            armed.append((node.lineno, _resolved(node.slice)))
+        if (isinstance(node, ast.Call)
+                and getattr(node.func, "attr", None) in ("setdefault", "update", "pop")
+                and getattr(getattr(node.func, "value", None), "attr", None) == "environ"
+                and node.args and _resolved(node.args[0]) in env_names):
+            armed.append((node.lineno, _resolved(node.args[0])))
+    assert not armed, (
+        f"the harness writes the rerank gate(s) {armed} — the artifact does not record "
+        "which arm was in force, so a baseline/after pair could straddle the gate and "
+        "`compare()` would still call it comparable")
