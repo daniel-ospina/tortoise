@@ -2569,10 +2569,15 @@ class TestToolIdentity:
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
 
-        # 54 = the served writer census (29 live + 25 retired shims) at this head:
+        # 56 = the served writer census (19 live + 37 retired shims) at this head,
+        # MEASURED from this list rather than subtracted from the previous number:
         # #11609 lane B moved the advertised number and left the served one larger
         # than 43; lane C then retired SEVEN advertised writers into its containers
-        # (still served, #3883) and added FIVE writing containers (+5 served, -2 live).
+        # (still served, #3883) and added FIVE writing containers (+5 served, -2 live);
+        # lane P7 retired five advertised writers and registered four targets, two of
+        # which write, so the SERVED census rose 54 -> 56 while the LIVE half fell
+        # 20 -> 19 (the sibling arm below states that pair, and this header used to
+        # read `54 / 29 live / 25 retired` — refuted by the assert four lines down).
         # Pinned here so the derived loop below can never pass by covering nothing.
         assert len(writers) == 56, writers
         for name in ("tortoise_index_files", "tortoise_dream",

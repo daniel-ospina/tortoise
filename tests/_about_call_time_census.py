@@ -392,8 +392,9 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
     (
         "tortoise/resident_pin.py",
         "_closure_for",
-        "the SAME closure read one entry over — `resolve()`'s per-key arm carries "
-        "its own copy of the query, so each walk is stated separately. Same ground, "
+        "the SAME closure read one entry over — `pin()`'s per-key probe calls it "
+        "(`resident_pin.py`: `fresh_reading = _closure_for(...)`), so each walk is "
+        "stated separately. Same ground, "
         "same limits: it RETURNS neighbour identity only (`id(m)`, "
         "`m.{key_prop}`), never `type(r)` or an edge property, and no endpoint "
         "exclusion is claimed (a multi-labelled `:Point:Object` target makes both "

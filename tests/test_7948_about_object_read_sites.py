@@ -2631,11 +2631,17 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     included — accepts the COUNT the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
 #     over the derived population), because a figure restated in prose rots: this
 #     sentence still read 63/340 = 18.5 % after the table grew.
-#     Depth still trades both ways — at a UNIFORM 2 hops nine legitimate rows
-#     false-red (seven if the `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e.
-#     only the global budget is lowered) — and every true attribution beyond 3
-#     belongs to a reader named in `_DISTANCE_EXCEPTIONS`, with the code fact
-#     that earns each. ⚠️ This is why the bound is pinned on BOTH sides: the
+#     Depth still trades both ways — at that SAME 2026-11-03 measurement a UNIFORM 2
+#     hops left nine legitimate rows false-red (seven if the
+#     `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e. only the global budget is
+#     lowered) — and every true attribution beyond 3 belonged to a reader named in
+#     `_DISTANCE_EXCEPTIONS`, with the code fact that earns each. ⛔ DATED ON PURPOSE,
+#     and the pair is left as measured rather than re-cut: the numbers no longer
+#     reproduce at this head (`#13899` alone moved the door occurrences 31 -> 21, and
+#     this file's fourth exception moves the exceptions' worth), so they are HISTORY
+#     for the decision they record, and the LIVE figures are the arm's own — a lane
+#     that re-measures at HEAD and finds no discrimination there has not refuted it.
+#     ⚠️ This is why the bound is pinned on BOTH sides: the
 #     acceptance count is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
 #     predicate cannot quietly go permissive again.
@@ -2667,13 +2673,20 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: column this note carried before the scope fix (2026-10-24 at `d07c9e99e`) was
 #: `24/34/43/52` — SUPERSEDED, quoted only so an older figure met elsewhere reads
 #: as superseded rather than as a contradiction of this one. The SHIPPED predicate
-#: — the `_DISTANCE_EXCEPTIONS` budgets applied — accepts 36, i.e. the exceptions
-#: are worth exactly the 34 -> 36 above, stated separately so neither figure hides
-#: the other. Every one of the 31 true attributions is within 3 hops except the
-#: readers named in `_DISTANCE_EXCEPTIONS`. (Counts, not percentages, on purpose:
-#: this file's own rule is that a rate restated against a fixed denominator rots
-#: on the next table growth — a sentence two screens up still read `63/340 =
-#: 18.5 %` after the table grew. The denominator is 19 rows x 22 doors here.)
+#: — the `_DISTANCE_EXCEPTIONS` budgets applied — accepted 36 AT THAT
+#: MEASUREMENT, i.e. the exceptions were worth exactly the 34 -> 36 above, stated
+#: separately so neither figure hides the other; at that measurement every one of
+#: the 31 true attributions was within 3 hops except the readers named in
+#: `_DISTANCE_EXCEPTIONS`. (Counts, not percentages, on purpose: this file's own
+#: rule is that a rate restated against a fixed denominator rots on the next table
+#: growth — a sentence two screens up still read `63/340 = 18.5 %` after the table
+#: grew. The denominator at that measurement was 19 rows x 22 doors.)
+#: ⛔ **EVERY FIGURE IN THIS PARAGRAPH IS THE 2026-11-03 MEASUREMENT, NOT A CLAIM
+#: ABOUT THIS HEAD.** Re-derived at `#14249`'s head the same sweep accepts 27 of
+#: 270 pairs (18 rows x 15 doors) and the exceptions are worth 21 -> 27 — the table
+#: has been re-cut twice since, and `#13899` alone moved the door occurrences
+#: 31 -> 21. The pin below is the live figure; this paragraph is the evidence for a
+#: decision (the rejected uniform-2 bound), so it is dated rather than re-counted.
 #: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
 #: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
 #: and justified the tighter number with three substitutions it said stayed green
@@ -3454,7 +3467,12 @@ _ACCEPTED_PAIRS_AT_THIS_HEAD = 36
 #: looser predicate — no door was added to any row's own reach cell.
 #: ⛔ 17 -> 4 on 2026-10-24, with the pair count above and for the same reason: a
 #: row's accepted set was measured over collision hops as well as references, so
-#: the old 17 counted the defect too. Rows 2 and 17 now lead at 4 accepted doors.
+#: the old 17 counted the defect too. ⚠️ The ceiling stays 4 (it is the tripwire
+#: this note describes) while the MEASURED worst row is 3 at this head — rows 2 and
+#: 17 each accept three of the table's doors (`MCP tortoise_recall`,
+#: `MCP tortoise_search`, `SDK search_knowledge`), not four. The earlier wording
+#: here said they "lead at 4", which the measurement refutes; the number is a
+#: BOUND, so the pin is left where the accepted count says it belongs.
 _WORST_ROW_AT_THIS_HEAD = 4
 
 

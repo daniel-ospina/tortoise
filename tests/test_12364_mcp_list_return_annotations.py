@@ -351,7 +351,7 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     #     → pairs 28 → 25 (`25 > 24` GREEN), checked 11 → 11 (`>= 11` GREEN), 11 + 14 ==
     #     25 (tautology, GREEN), `checked > 0` GREEN. Every guard passes over a registry
     #     three rows short. The mirror case IS caught: three pass-throughs going
-    #     unrecognised answer checked=7 and red this floor.
+    #     unrecognised answer checked=8 and red this floor.
     #     So the `pairs` floor's 4-row margin is bought by THIS floor's 0 slack for the
     #     PASS-THROUGH term ONLY; the reshaping term carries no pin, and closing it needs
     #     a third floor (`reshaped >= N`) that a comment-only pass may not invent — a
