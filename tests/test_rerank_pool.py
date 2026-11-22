@@ -2427,8 +2427,15 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # owner to the literal `"run"`. ⛔ BUT NOT ALL OF THEM: a name COMPUTED at
     # runtime (`_nm = "_tortoise_" + "fts_query"; getattr(sdk, _nm)(…)`) is
     # GREEN in main's pin and GREEN here — main's pin declares it its own
-    # "computed at runtime" residual (`tests/test_14192_read_wave_tool.py:539`),
-    # and this walk returns the same 2 live / 2 calls. That spelling is therefore
+    # "computed at runtime" residual, in the docstring of the pin itself
+    # (`test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags`), and
+    # this walk returns the same 2 live / 2 calls. ⛔ NO LINE NUMBER IS CITED HERE
+    # ON PURPOSE: an earlier cut of this note pointed at an offset in this other
+    # file that resolved to a different owner entirely — the orphaned-attribution
+    # class this same commit closes elsewhere. Naming the owner survives a rebase;
+    # an offset does not, and that one was already wrong at the head it was
+    # written at.
+    # That spelling is therefore
     # covered by NEITHER pin, and it is named here rather than listed as detected
     # so the lane that closes it does not read it as closed. This arm otherwise
     # grades the GRANT: it reads
