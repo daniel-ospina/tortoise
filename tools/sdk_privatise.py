@@ -1120,7 +1120,20 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
-SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
+#: ⛔ RE-PINNED → (11861, "f0647020531c078c") BY MEASUREMENT, and the 11858 pair FALSIFIED AT ITS
+#: OWN COMMIT. `surface-guard` was RED on PR #14220 at `b7ce9f086c` with `observed: (11861,
+#: f0647020531c078c)` / `pinned: (11858, a1552662bf07a10b)`, and the pin's own base commit
+#: `10e51693f1` — the ONLY commit that ever set 11858 — measures `(11861, "f0647020531c078c")`
+#: by this same code when its tree is extracted and graded (`git archive 10e51693f1 | tar -x -C
+#: <dir>`; run `sdk_privatise.rename_map(rev=SWEEP_BASE)` + `edits_for` over `py_files()`), so the
+#: delta is not attributable to any tree reachable from it and the paragraph above's claim that
+#: 11858 was re-measured cannot be reproduced. ⛔ THE BRANCH'S OWN CONTRIBUTION IS MEASURED ZERO:
+#: the residue SET at `b7ce9f086c`'s ancestor `d2b5f83a0a` and at PR #14220's head digest
+#: IDENTICALLY (`f0647020531c078c`, 11861 rows, row-for-row diff empty) — `git diff`
+#: `d2b5f83a0a..HEAD` adds no `.query`/`.update`/`.delete` receiver — so this re-pin carries the pin to
+#: a value measured on the tree that ships, and neither introduces nor hides a row here. The pin is
+#: a WHOLE-TREE census and moves with unrelated merges; re-derive it, never inherit it.
+SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

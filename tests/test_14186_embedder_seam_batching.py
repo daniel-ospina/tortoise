@@ -2852,11 +2852,27 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
 
     @pytest.fixture
     def cold_model(self, monkeypatch):
-        """A genuinely cold singleton, so "already warm" cannot mask the gate."""
+        """A genuinely cold singleton, so "already warm" cannot mask the gate.
+
+        ⛔ "COLD" IS THREE LATCHES, NOT TWO. Clearing `_instance` and
+        `_warm_up_started` left `_last_failure_kind` alone, and that latch is
+        process-global: any earlier row that drove a local load in a venv without
+        the `embeddings` extra records the DESIGNED ABSENCE (`not_installed`), and
+        `await_write_ready_reason` answers that — before it can kick anything — for
+        the rest of the process. Measured: the rows in this class pass alone and
+        `test_the_in_process_backing_still_kicks_the_load` fails when
+        `TestTheRequiredEmbedderFlagBindsOnARemoteBacking` runs first, because its
+        SDK read latched `not_installed`. So the fixture states the whole premise.
+        """
         from tortoise.embeddings import EmbeddingModel
 
         monkeypatch.setattr(EmbeddingModel, "_instance", None, raising=False)
         monkeypatch.setattr(EmbeddingModel, "_warm_up_started", False,
+                            raising=False)
+        monkeypatch.setattr(EmbeddingModel, "_warm_up_thread", None, raising=False)
+        monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", None,
+                            raising=False)
+        monkeypatch.setattr(EmbeddingModel, "_last_failed_at", None,
                             raising=False)
         kicked: list[tuple] = []
         monkeypatch.setattr(
@@ -2900,6 +2916,62 @@ class TestTheReadinessBoundsKnowWhereTheEncoderLives:
         assert EmbeddingModel.await_write_ready_reason(0.05) is None, (
             "a WARM worker backing declined a bounded write — every derived "
             "fold would store no vector for the life of the process")
+        assert cold_model == []
+
+    def test_the_REACHABLE_funnel_declines_without_kicking_the_local_load(
+            self, cold_model, monkeypatch):
+        """The row the P1 named: the FUNNEL, not only the readiness predicate (review P1).
+
+        ``bounded=True`` is what the derived-entity folds pass, so the first bounded
+        write after a deploy is the call an operator actually pays. At the reviewed
+        head `encode_for_row` handed it to `await_write_ready_reason` with no backing
+        check, which kicked a 432 MB LOCAL load in a process whose encoder is the
+        worker — and then declined the row blaming a cold local embedder.
+        """
+        from tortoise import monitoring
+        from tortoise.embeddings import BOUNDED_SCOPE_GRAPH_FOLD, encode_for_row
+
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+        label = f"{BOUNDED_SCOPE_GRAPH_FOLD}:backing_cold"
+        before = monitoring.derived_embed_decline_counts().get(label, 0)
+
+        assert encode_for_row("a derived row", None, bounded=True) is None, (
+            "a bounded write while the backing boots must DECLINE — it must not "
+            "block on a worker boot it did not choose to pay")
+        assert cold_model == [], (
+            "the FUNNEL kicked a LOCAL 432 MB load with the encoder served "
+            f"elsewhere: {cold_model}")
+        after = monitoring.derived_embed_decline_counts().get(label, 0)
+        assert after == before + 1, (
+            "the decline was not counted on the derived-embed channel, so an "
+            "operator cannot see the rows the dense leg is missing")
+
+    def test_the_REACHABLE_funnel_ENCODES_when_the_worker_is_warm(
+            self, cold_model, monkeypatch):
+        """The other half: a WARM worker must not lose the vector for good.
+
+        Declining on the LEVER alone answered `backing_cold` for a warm worker too,
+        so every derived fold would have stored no vector for the LIFE of the
+        process rather than for one boot.
+        """
+        from tortoise import embeddings as embeddings_module
+        from tortoise.embeddings import encode_for_row
+
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: False)
+        encoded: list[tuple[str, int | None]] = []
+        monkeypatch.setattr(
+            embeddings_module, "encode_for_store",
+            lambda content, expected_dim: (
+                encoded.append((content, expected_dim)) or [0.5] * 4))
+
+        assert encode_for_row("a derived row", 4, bounded=True) == [0.5] * 4, (
+            "a WARM worker backing stored no vector for the row — every derived "
+            "fold would lose its vector for the life of the process")
+        assert encoded == [("a derived row", 4)], (
+            "the funnel declined instead of encoding through the seam: "
+            f"{encoded!r}")
         assert cold_model == []
 
     def test_the_boot_predicate_reads_the_backing_not_the_lever(self, monkeypatch):
