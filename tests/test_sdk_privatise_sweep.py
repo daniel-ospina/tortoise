@@ -252,7 +252,7 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1046 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1053 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair), AND THE ARMS GRADE
     ALL OF IT
@@ -1716,3 +1716,49 @@ def test_the_parent_pair_attribution_is_only_ever_quoted_as_falsified():
             "an UNREFUTED `same pair as the parent` claim is the round-14 defect: the pair one "
             "rev commits is not its parent's, so the claim is only honest where the block itself "
             "calls it wrong")
+
+
+#: An `--check` EXIT-0 claim bound to a pair: "`--check` exits 0 at this head on the SAME pair".
+#:
+#: ⛔ WRITTEN BY THE COMMIT THAT CUT THE PIN IT VOUCHES FOR (PR #14268 review, P2). `git log -S
+#: 'exits 0 at this head on the SAME pair'` names `10e51693f1` — the commit this block calls "the
+#: tree that cut 11858" — and on ITS OWN tree `--check` exits **1**: observed
+#: `(11861, "f0647020531c078c")` against its own `(11858, "a1552662bf07a10b")`, re-measured for
+#: this fix in a detached worktree of that commit. So the sentence is the class this whole chain
+#: exists to stop — a claim about the gate's state that measurement falsifies — and the paragraph
+#: that refutes it two lines lower does not discharge it: a reader takes the affirmative sentence.
+#: What is charged is the SHAPE (an exit-0 verdict bound to a pair), not one spelling of it, and
+#: only where the block does not itself mark it wrong — the same discipline as the
+#: `same pair as the parent` arm above.
+_EXIT0_BOUND_TO_PAIR = re.compile(
+    r"(?i)\bexits?\s+0\b[^.\"]{0,80}?\b(?:SAME|same)\s+pair\b"
+    r"|\b(?:SAME|same)\s+pair\b[^.\"]{0,80}?\bexits?\s+0\b")
+
+
+def _exit0_pair_claims(flow: str) -> list[str]:
+    """An exit-0 claim bound to a pair, UNLESS the block refutes it in place."""
+    return [flow[m.start():m.end()] for m in _EXIT0_BOUND_TO_PAIR.finditer(flow)
+            if not _refuted(flow, m.start())]
+
+
+def test_an_exit_0_claim_bound_to_a_pair_is_only_ever_quoted_as_falsified():
+    """PR #14268 review P2: a measurably-false `--check` exit-0 claim, standing in situ.
+
+    Measured on the PRE-FIX block: the sentence was present and `_refuted` was False, i.e. this
+    arm is RED before the fix and green after — it grades the defect, not the fix's own wording.
+    """
+    block = _residue_block()
+    hits = list(_EXIT0_BOUND_TO_PAIR.finditer(block))
+    assert hits, (
+        "non-vacuity: the block still RECORDS the falsified exit-0 claim it replaced — deleting "
+        "the sentence instead of marking it would make this arm grade nothing")
+    assert not _exit0_pair_claims(block), (
+        "an UNREFUTED `--check` exits-0 claim bound to a pair is the P2 this arm was added for: "
+        f"the tree that wrote it exits 1 on it: {_exit0_pair_claims(block)[0]!r}")
+    # ⛔ THE MUTATION: the exact pre-fix wording (`10e51693f1`'s, per `git log -S`), handed to the
+    # detector directly so the arm is seen to CHARGE it whatever the current prose says.
+    pre_fix = ("`--check`\n#: exits 0 at this head on the SAME pair, so 11858 is re-measured on "
+               "the tree that carries them,\n#: not carried forward.")
+    assert _exit0_pair_claims(pre_fix), (
+        "the pre-fix sentence must be CHARGED — a detector that cannot see the defect it was "
+        "written for is vacuous")

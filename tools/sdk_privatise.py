@@ -1118,8 +1118,13 @@ SWEEP_NAMES = 66
 #: contributes no row here either — nor do the sibling commits merged after it (all on this
 #: branch's census file, and named by log rather than counted here, because a count restated in this
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
-#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
-#: not carried forward.
+#: was believed to exit 0 at this head on the SAME pair — measured FALSE, and by the tree that
+#: WROTE this sentence: `10e51693f1` carries the `11858` pin in its own `SWEEP_RESIDUE`, and
+#: `--check` on a detached worktree of it (`git log -S` names it as the only commit that ever wrote
+#: this clause) exits **1**, observed `(11861, "f0647020531c078c")` against that pin. So 11858 was
+#: CARRIED FORWARD, never re-measured, which is the recurrence the re-cut below replaces with a
+#: reading; the belief is kept here, marked, rather than deleted, so the next lane cannot restore it
+#: as evidence.
 #: ⛔ RE-CUT → (11861, "f0647020531c078c"). NOT this branch's rows, and not `main`'s either —
 #: the 11858 pair above is not reproducible from the tree that recorded it. Measured THREE ways,
 #: each a run rather than an argument:
@@ -1129,9 +1134,11 @@ SWEEP_NAMES = 66
 #:     `--check` exits 1 THERE, against its own 11858 pin. So the 11858 did not reproduce at its own
 #:     commit, and no tree since has ever derived it: this re-cut absorbs rows that predate every
 #:     commit this PR adds;
-#:   * this PR's ONLY tracked source change is `tests/test_14125_retired_name_calls.py`, and putting
-#:     `origin/main`'s version of that one file back leaves the pair byte-identical — 0 rows. So the
-#:     census's own contribution to this pin is ZERO, measured, not assumed from the file list.
+#:   * this PR's tracked source changes are THREE files — `tests/test_14125_retired_name_calls.py`,
+#:     `tests/test_sdk_privatise_sweep.py` and this one's prose — and putting `origin/main`'s version
+#:     of ALL THREE back leaves the pair byte-identical — 0 rows. So this PR's own contribution to
+#:     this pin is ZERO, measured over the whole diff, not assumed from a file list and not scoped
+#:     to the one file whose rows could move.
 #: The row NAMES are unchanged (856 rows) on every tree measured above, but two of their COUNTS
 #: moved, so the DIGEST necessarily moved too (`f0647020531c078c` vs the pinned `a1552662bf07a10b`) —
 #: that is what reds `--check`, and it is why a count-only attribution is unsafe here: a bare
