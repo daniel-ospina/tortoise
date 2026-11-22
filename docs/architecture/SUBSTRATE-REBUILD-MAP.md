@@ -208,7 +208,9 @@ each module, at `4f68a2aa7`): `fanout` **2** · `source_identity` **4** ·
 `embeddings` **14** · `vet_gate` **1** — its one importer is
 `extractor_v2.py:157` (`from . import vet_gate as _vet_gate`, a module-level
 import beside `value_gate`), which is what reaches
-`vet_gate.vet_candidates` at `extractor_v2.py:8464`. That importer is L3's
+`vet_gate.vet_candidates` at `extractor_v2.py:8464` (⛔ as-of the PIN — §5's numbers below are
+`measured_at_commit`'s by rule, while at HEAD the same call is `:14498`, so re-pointing this one names
+two heads in a single paragraph; `e87d8108c0` did exactly that, `#14183` final review). That importer is L3's
 declared family (§3), so the single inbound edge is inside one lane rather than
 across the dependency graph: a `vet_gate` interface change is L3's business.
 The leaves created by the merged lanes are still leaves. **The contention
