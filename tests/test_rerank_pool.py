@@ -31,6 +31,7 @@ import inspect
 import sys
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -1275,25 +1276,106 @@ def test_search_sessions_re_owns_the_order_and_does_NOT_pay_for_a_rerank(sdk, mo
         f"PRE-rerank score and slices (loads={loads})")
 
 
-def _seam_read_calls(tree, mention) -> list:
-    """Every call `mention` can REACH in `tree`, following value flow to a fixpoint.
+class _SeamFlow(NamedTuple):
+    """What the value-flow walk attributed, and whether it had to give up.
+
+    ``calls``  — every ``ast.Call`` the mention can reach: the READS.
+    ``opaque`` — the mention (or a name carrying it) flows out through a binding
+                 shape this walk does NOT model, so **deadness is not proven**.
+                 A caller that skips an opaque mention reports a live read as
+                 dead, which is #14278 F1's fail-open — so it must count it.
+    """
+
+    calls: list
+    opaque: bool
+
+
+def _seam_modelled_binding(node):
+    """``(values, targets)`` for a name-binding form this walk MODELS, else None.
+
+    A closed enumeration of the shapes a seam read actually takes: plain
+    assignment (the ``_opt = SEAM`` hop), an annotation, a ``for`` target
+    (``for fn in (SEAM,): fn(…)``), a comprehension target, a ``with … as``
+    target and a walrus. Every form NOT listed here is caught by
+    ``_seam_opaque_values``, so a spelling nobody thought of fails closed instead
+    of being read as "provably dead" (#14278 F1).
+    """
+    if isinstance(node, ast.Assign):
+        return [node.value], list(node.targets)
+    if isinstance(node, ast.AnnAssign):
+        return ([node.value] if node.value is not None else []), [node.target]
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [node.iter], [node.target]
+    if isinstance(node, ast.comprehension):
+        return [node.iter], [node.target]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        values, targets = [], []
+        for item in node.items:
+            values.append(item.context_expr)
+            targets.append(item.optional_vars)
+        return values, targets
+    if isinstance(node, ast.NamedExpr):
+        return [node.value], [node.target]
+    return None
+
+
+def _seam_opaque_values(node):
+    """Value positions of a binder this walk does NOT model (#14278 F1).
+
+    Python's remaining value-binding forms, closed: an augmented assignment, a
+    value escaping its function (``return``/``yield``), a parameter default or a
+    decorator, a class base/keyword, and a ``match`` subject. When the mention
+    reaches one of these the walk cannot say what happens to it — so "no call
+    found" is NOT deadness and the caller must fail closed.
+
+    ``kw_defaults`` may hold ``None`` for a required keyword-only parameter; the
+    walk treats ``None`` as an expression it does not carry.
+    """
+    if isinstance(node, ast.AugAssign):
+        return [node.value]
+    if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)):
+        return [node.value]
+    if isinstance(node, ast.Lambda):
+        return [*node.args.defaults, *node.args.kw_defaults]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [*node.decorator_list, *node.args.defaults,
+                *node.args.kw_defaults]
+    if isinstance(node, ast.ClassDef):
+        return [*node.decorator_list, *node.bases,
+                *(k.value for k in node.keywords)]
+    if isinstance(node, ast.Match):
+        return [node.subject]
+    return []
+
+
+def _seam_read_calls(tree, mention) -> _SeamFlow:
+    """Every call `mention` can REACH in `tree`, plus whether the walk gave up.
 
     ⛔ DEADNESS MUST BE PROVEN, never inferred from a shape this resolver does not
     model (#14278 F1). A mention reaches a call through more shapes than a direct
     call or a one-hop `Name` binding: a container (`_reads = [SEAM]` then
     `_reads[0](…)`), a subscript or attribute dispatch, a second alias hop
-    (`_n = _m`), or being handed to something as an argument. Measured at head
-    `59e701977a`: the one-hop form skipped the container and two-hop mutants, so
-    both stayed GREEN — an undocumented read inheriting a PERMANENT exemption,
-    which is the exact failure the arm this feeds exists to catch.
+    (`_n = _m`), a `for`/comprehension/`with … as` target, a walrus, or being
+    handed to something as an argument. Measured at head `59e701977a`: the
+    one-hop form skipped the container and two-hop mutants, so both stayed GREEN —
+    an undocumented read inheriting a PERMANENT exemption, which is the exact
+    failure the arm this feeds exists to catch.
 
     So the carriers are the mention plus every name bound to an expression that
     CARRIES it (assignment RHS, container element, subscript or attribute
-    target), closed to a fixpoint; a call is a read when its CALLEE or one of its
-    ARGUMENTS carries a carrier. A call boundary stops the RHS walk — `results =
-    SEAM(…)` carries the call's RESULT, not the seam (that call is its own row) —
-    so ordinary result plumbing cannot make a name a carrier. `[]` therefore means
-    *no call in this file can reach the mention*, i.e. provably dead.
+    target, loop/comprehension/with target, walrus value), closed to a fixpoint; a
+    call is a read when its CALLEE or one of its ARGUMENTS carries a carrier. A
+    call boundary stops the RHS walk — `results = SEAM(…)` carries the call's
+    RESULT, not the seam (that call is its own row) — so ordinary result plumbing
+    cannot make a name a carrier.
+
+    ⛔ AND `calls == []` ALONE IS NOT DEADNESS. `59e701977a`'s one-hop walk learnt
+    to follow four shapes and still read every untaught shape as dead: measured at
+    `96b93db293`, a third read written as `for _fn in (SEAM,): _fn(…)` inside the
+    granted owner yielded `[]` and the arm stayed GREEN on three reads (round-9
+    review, P2). So a mention that reaches a binding form this walk does not model
+    is returned with ``opaque=True``, and the caller must count it as a read. The
+    only verdict that means "provably dead" is ``calls == [] and not opaque``.
     """
     carriers: set = set()
 
@@ -1301,6 +1383,8 @@ def _seam_read_calls(tree, mention) -> list:
         stack = [expr]
         while stack:
             node = stack.pop()
+            if node is None:
+                continue
             if node is mention:
                 return True
             if isinstance(node, ast.Name) and node.id in carriers:
@@ -1314,13 +1398,15 @@ def _seam_read_calls(tree, mention) -> list:
     while grown:
         grown = False
         for node in ast.walk(tree):
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            parts = _seam_modelled_binding(node)
+            if parts is None:
                 continue
-            if not _carries(node.value):
+            values, targets = parts
+            if not any(_carries(value) for value in values):
                 continue
-            targets = (node.targets if isinstance(node, ast.Assign)
-                       else [node.target])
             for target in targets:
+                if target is None:
+                    continue
                 for sub in ast.walk(target):
                     # ⛔ `add`, never `update`: `.update(` is an ordinary-word
                     # receiver the SDK residue sweep counts, and a test-only diff
@@ -1330,14 +1416,18 @@ def _seam_read_calls(tree, mention) -> list:
                         grown = True
 
     reads: list = []
+    opaque = False
     for node in ast.walk(tree):
+        if _seam_modelled_binding(node) is None and any(
+                _carries(value) for value in _seam_opaque_values(node)):
+            opaque = True
         if not isinstance(node, ast.Call):
             continue
         if _carries(node.func) or any(
                 _carries(arg) for arg in
                 (*node.args, *(k.value for k in node.keywords))):
             reads.append(node)
-    return reads
+    return _SeamFlow(calls=reads, opaque=opaque)
 
 
 def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
@@ -1351,6 +1441,13 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     must stay dead, or the count silently absorbs a read that went missing. So
     each shape is pinned here by the query its fed call carries, and the synthetic
     module is not in any census tree.
+
+    ⛔ AND THE SHAPES NOBODY TAUGHT IT. The `escapes` mention below is bound by no
+    modelled form at all (`return SEAM`), so the walk cannot say what happens to
+    it. It must come back `opaque=True` and be COUNTED as a read by the arm: at
+    `96b93db293` an untaught spelling (`for _fn in (SEAM,): _fn(…)`) returned `[]`
+    and the arm stayed green on three reads (round-9 review). Graded in both
+    directions so neither "skip it as dead" nor "call everything dead" can pass.
     """
     source = '''
 class SDK:
@@ -1366,9 +1463,18 @@ def run(sdk):
     _m = sdk._tortoise_fts_query
     _n = _m
     _n(query="two-hop", limit=10)
+    for _fn in (sdk._tortoise_fts_query,):
+        _fn(query="for-target", limit=10)
+    [_c(query="comprehension", limit=10)
+     for _c in [sdk._tortoise_fts_query]]
+    if (_w := sdk._tortoise_fts_query):
+        _w(query="walrus", limit=10)
 
 def dead(sdk):
     _dead = sdk._tortoise_fts_query
+
+def escapes(sdk):
+    return sdk._tortoise_fts_query
 '''
     tree = ast.parse(source)
     mentions = [n for n in ast.walk(tree)
@@ -1376,16 +1482,20 @@ def dead(sdk):
                 and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
     observed = []
     for mention in mentions:
-        fed = _seam_read_calls(tree, mention)
-        observed.append((len(fed), sorted(
-            k.value.value for call in fed for k in call.keywords
+        flow = _seam_read_calls(tree, mention)
+        observed.append((len(flow.calls), flow.opaque, sorted(
+            k.value.value for call in flow.calls for k in call.keywords
             if k.arg == "query" and isinstance(k.value, ast.Constant))))
     assert sorted(observed) == [
-        (0, []),                    # the dead binding: provably no call
-        (1, ["container"]),         # `_reads = [SEAM]; _reads[0](…)`
-        (1, ["one-hop"]),           # `_opt = SEAM; _opt(…)`
-        (1, ["two-hop"]),           # `_n = _m; _n(…)`
-        (1, ["warm"]),              # the direct call
+        (0, False, []),                 # the dead binding: provably no call
+        (0, True, []),                  # untaught shape: NOT provably dead
+        (1, False, ["comprehension"]),  # `for _c in [SEAM]: _c(…)`
+        (1, False, ["container"]),      # `_reads = [SEAM]; _reads[0](…)`
+        (1, False, ["for-target"]),     # `for _fn in (SEAM,): _fn(…)`
+        (1, False, ["one-hop"]),        # `_opt = SEAM; _opt(…)`
+        (1, False, ["two-hop"]),        # `_n = _m; _n(…)`
+        (1, False, ["walrus"]),         # `if (_w := SEAM): _w(…)`
+        (1, False, ["warm"]),           # the direct call
     ], f"the resolver mis-graded a shape: {sorted(observed)}"
 
 
@@ -1868,21 +1978,29 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                                     "_tortoise_fts_query")]
     # ⛔ RESOLVE THE ALIAS, and count only what is actually a READ. A mention can
     # feed a call (`sdk._tortoise_fts_query(…)`), reach one through a binding, a
-    # container or a second hop, or read nothing at all (a dead binding). Those
-    # cases must NOT share a verdict: the census records a row for every mention,
-    # but what the grant's reason claims is READS — a dead binding is not one, and
-    # a read that opts out needs no grant at all. `_seam_read_calls` follows the
-    # value flow to a fixpoint so that "no fed call" means PROVEN dead, never
-    # "a shape this resolver does not model" (#14278 F1: a one-hop resolver read
-    # the container and two-hop mutants as dead, so a third undocumented read was
+    # container, a loop/comprehension/`with` target, a walrus or a second hop, or
+    # read nothing at all (a dead binding). Those cases must NOT share a verdict:
+    # the census records a row for every mention, but what the grant's reason
+    # claims is READS — a dead binding is not one, and a read that opts out needs
+    # no grant at all. `_seam_read_calls` follows the value flow to a fixpoint so
+    # that "no fed call" means PROVEN dead (#14278 F1: a one-hop resolver read the
+    # container and two-hop mutants as dead, so a third undocumented read was
     # exempted with the arm GREEN).
+    # ⛔ AND "NO FED CALL" IS ONLY DEAD WHEN THE WALK COULD FOLLOW THE MENTION. A
+    # mention bound by a shape the walk does not model comes back `opaque`, and it
+    # must be COUNTED, not skipped: at `96b93db293` a third read spelled
+    # `for _fn in (SEAM,): _fn(…)` returned `[]`, was skipped as "provably dead",
+    # and the arm passed with three reads inside the granted owner (round-9
+    # review, P2). Skipping an opaque mention IS the fail-open this arm exists to
+    # catch, so the count row fires instead and names its own remedy.
     live: list = []
     seam_calls: list = []
     for mention in seam_mentions:
-        fed = _seam_read_calls(harness, mention)
-        if not fed:
-            continue        # provably dead: no call in this file can reach it
-        if all(_opted_out(c) for c in fed):
+        flow = _seam_read_calls(harness, mention)
+        fed = flow.calls
+        if not fed and not flow.opaque:
+            continue        # PROVEN dead: nothing here can reach a call
+        if fed and all(_opted_out(c) for c in fed):
             continue        # the census's sanctioned alternative, no grant needed
         live.append(mention)
         seam_calls.extend(fed)
