@@ -3742,18 +3742,20 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         # zero-hop door, which is the exact confusion the sibling arm above
         # (`if distance is None:` → "is not found within the … search cap") was written
         # to prevent.
+        # ⚠️ NO `assert ... is not None` HERE, ON PURPOSE (`#14249` review, mutation
+        # attribution rule 3). Every door in `exception_doors` belongs to a
+        # customer-callable row — `assert exception_doors` above refuses a budget for a
+        # reader no such row names — and `assert not broken` above ALREADY refused any
+        # door of a customer-callable row that is unresolved at the cap, with the same
+        # "UNVERIFIED here, not wrong" wording. So a `None` cannot reach this line, and
+        # an assertion for it would be a clause no mutation can red: it would read as
+        # coverage of the `or 0` hazard while supplying none (measured: dropping
+        # `_DISTANCE_SEARCH_CAP` 12 -> 3 reds at the `broken` arm, and a None-clause's
+        # message never appears). `max()` over a list holding a `None` raises
+        # `TypeError` instead, so if either arm above is ever weakened this line fails
+        # LOUDLY and attributably rather than inventing a zero-hop door.
         distances = [_door_distance(door, exception_reader) for door in exception_doors]
-        unresolved = sum(1 for distance in distances if distance is None)
-        assert not unresolved, (
-            f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]`: {unresolved} of "
-            f"{len(distances)} door(s) are not found within the "
-            f"{_DISTANCE_SEARCH_CAP}-hop search cap, so they are UNVERIFIED here — this "
-            "arm cannot tell 'no chain' from 'a chain longer than it looked'. Raise "
-            "`_DISTANCE_SEARCH_CAP` (and re-derive the pinned figures) or shorten the "
-            "chain. ⛔ A `_DISTANCE_EXCEPTIONS` entry cannot help: it raises the reader's "
-            "BUDGET, and the search stops at the cap before any budget is consulted."
-        )
-        deepest = max(d for d in distances if d is not None)
+        deepest = max(distances)
         assert deepest == exception_budget, (
             f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]` budgets {exception_budget} "
             f"references, but its deepest door needs {deepest} — the entry must state the "
