@@ -5087,12 +5087,14 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
     version decides it.
     """
     def grep_probe(spelling: str) -> subprocess.CompletedProcess:
-        ran = subprocess.run(["grep", "-c", spelling, "^[+-]$"], input=_D5_GREP_PROBE,
-                             capture_output=True, text=True, timeout=60)
-        assert ran.returncode in (0, 1, 2), (
-            f"`grep -c {spelling} '^[+-]$'` exited {ran.returncode} — neither a count (0/1) nor an "
-            f"invalid option (2), so this probe decides nothing ({ran.stderr.strip()!r})")
-        return ran
+        # ⛔ NO rc ALLOW-LIST HERE (#14138 mutation review, P3 — MEASURED). A guard of the shape
+        # `rc in (0, 1, 2)` used to sit on the next line and no mutant could red it: every spelling
+        # below also goes through `_d5_grep_runs_long_option` (via the universe), which RAISES on a
+        # third code first, with a better message. A row that cannot be attributed to the behaviour
+        # it claims to guard is dead weight (agent-infra#3442 rule 3), so it is gone rather than
+        # explained away.
+        return subprocess.run(["grep", "-c", spelling, "^[+-]$"], input=_D5_GREP_PROBE,
+                              capture_output=True, text=True, timeout=60)
 
     alias_spellings = ("--unix-byte-offsets", "--u", "--un", "--uni", "--unix")
 
@@ -5115,10 +5117,11 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
         f"{sorted(rederived)} "
         "— the universe must follow the binary, and grep has no undocumented alias this reader "
         "may add without a candidate entry and this cell (#14138)")
-    assert set(_d5_undocumented_long_options()) <= set(_D5_UNDOCUMENTED_ALIAS_CANDIDATES), (
-        f"{sorted(set(_d5_undocumented_long_options()) - set(_D5_UNDOCUMENTED_ALIAS_CANDIDATES))} "
-        "is in the allowance but is not a declared candidate — an allowance member with no "
-        "measurement behind it (#14138)")
+    # ⛔ AND `allowance ⊆ candidates` IS NOT A SECOND GUARD: `rederived` is built by FILTERING the
+    # candidate tuple, so the assertion above already entails it and no mutant can red it first
+    # (#14138 mutation review, P3 — MEASURED: an allowance containing a non-candidate reds the row
+    # above, never here). Deleting a row that can never be the one that fires is rule 3, not a
+    # weakening — the membership claim it made is in the message above, by name.
 
     # Every spelling the alias answers to, on the LIVE grep: READ where grep runs it (and it counts
     # this class `2`), DECLINED where grep refuses it.
@@ -5190,7 +5193,11 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
         "fail-closed and needs its own treatment (#14027, MEASURED)")
     assert "--fixed-regexp" not in _d5_all_long_options(), (
         "`--fixed-regexp` would make `--fixed-` falsely ambiguous against `--fixed-strings`, and "
-        "grep ACCEPTS `--fixed-` (measured) — the alias must stay out of the universe")
+        "grep ACCEPTS `--fixed-` (measured) — the alias must stay out of the universe, which means "
+        "it must also stay out of `_D5_UNDOCUMENTED_ALIAS_CANDIDATES`: the candidate list is the "
+        "only door into the measured allowance, so a candidate entry for it reds HERE first "
+        "(#14027; #14138 mutation review, P3 — the separate candidate-membership row was deleted "
+        "because this one always fires before it)")
     assert _d5_long_option_candidates("--fixed-") == ["--fixed-strings"], (
         "`--fixed-` abbreviates `--fixed-strings` and nothing else in the universe — the reason "
         "`--fixed-regexp` may not be added (#14027)")
@@ -5198,9 +5205,6 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS(monkeypa
         "`--fixed-regexp` is `-F`: a LITERAL pattern, which counts `0` of this class on the probe "
         "(measured), so declining it cannot hide a blank-class prescription — that measurement is "
         "what makes the exclusion safe (#14027)")
-    assert "--fixed-regexp" not in _D5_UNDOCUMENTED_ALIAS_CANDIDATES, (
-        "`--fixed-regexp` must never become an unsigned candidate: its exclusion is semantic and "
-        "the candidate list is the only door into the measured allowance (#14138)")
 
 
 def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_path: Path):
@@ -5209,11 +5213,13 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     ⛔ THE FAIL-OPEN ARM (#14138). The allowance is what keeps a prescription in the alias spelling
     visible, so a probe that answered `False` whenever it was confused would EMPTY it — a second
     blank-class prescription goes unread and nothing reds. grep exits 2 for an invalid option and
-    0/1 for a real count, so this cell drives FIVE stub greps: one that COUNTS, one that REFUSES the
+    0/1 for a real count, so this cell drives SIX stub greps: one that COUNTS, one that REFUSES the
     alias (and answers `--count` normally), one that answers a THIRD code, one that is BROKEN for
-    every spelling, and one that answers `--count` with rc 0 and NO OUTPUT — the last two must raise
-    on the CONTROL run (a bare rc 2 is grep's generic error code, and a wrapper that swallows stdin
-    prints nothing), because reading either as "refused" empties the allowance just the same.
+    every spelling, one that answers `--count` with rc 0 and NO OUTPUT, and one that PRINTS the
+    count but still fails the run (rc 2 with stdout `2`). The last three must raise on the CONTROL
+    run — a bare rc 2 is grep's generic error code, a wrapper that swallows stdin prints nothing,
+    and a wrapper that counts and then fails is not a refusal either — because reading any of them
+    as "refused" empties the allowance just the same.
     """
 
     def stub(name: str, body: str) -> str:
@@ -5232,6 +5238,7 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     broken = stub("grep-broken", 'cat >/dev/null; echo "grep: (standard input): Bad file '
                                  'descriptor" >&2; exit 2')
     silent = stub("grep-silent", "cat >/dev/null; exit 0")
+    counts_then_fails = stub("grep-counts-then-fails", "cat >/dev/null; echo 2; exit 2")
     assert _d5_grep_runs_long_option("--unix-byte-offsets", accepts) is True, (
         "a stub grep that counts (`2`, exit 0) must read as ACCEPTED — anything else empties the "
         "allowance on a grep that runs the spelling (#14138)")
@@ -5253,6 +5260,13 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     # `stdout` half of the control leaves every other stub green, which is why this arm exists.
     with pytest.raises(AssertionError, match="control probe"):
         _d5_grep_runs_long_option("--unix-byte-offsets", silent)
+    # ⛔ AND THE CONTROL'S EXIT-CODE HALF HAS ITS OWN WITNESS (#14138 mutation review, P3 — MEASURED).
+    # Without this stub the `returncode not in (0, 1)` clause of the control is INERT: every other
+    # stub that gets past the stdout check answers rc 0/1, so deleting the rc clause left all 33
+    # cells green. This one prints the count and still exits 2, which only the rc clause catches —
+    # a grep that reports a count and then fails is not a grep that refused the spelling.
+    with pytest.raises(AssertionError, match="control probe"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", counts_then_fails)
     # …and a binary that is not there at all is a NON-ANSWER too, which is why it is pinned rather
     # than left to `subprocess` to raise something nobody counted on: the allowance must never be
     # emptied by a probe that could not run (#14138 review, P3).
