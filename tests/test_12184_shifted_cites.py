@@ -2424,8 +2424,8 @@ def test_the_redefined_13854_table_length_is_the_figure_the_document_publishes()
     drift from the document again; the document states the table's length, not the population
     above it, because a range address is one row.
     """
-    assert len(_REDEFINED_13854) == 33, (
-        f"`_REDEFINED_13854` carries {len(_REDEFINED_13854)} rows, not the 33 the audit document "
+    assert len(_REDEFINED_13854) == 35, (
+        f"`_REDEFINED_13854` carries {len(_REDEFINED_13854)} rows, not the 35 the audit document "
         "publishes — update the document's figure in the same change, and re-derive every new "
         "row by content rather than by a delta."
     )
@@ -2800,6 +2800,9 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     ("sdk.py:58987", "tortoise/sdk.py", 58987, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
     ("sdk.py:20162-20165", "tortoise/sdk.py", 20165, "\"AND coalesce(n.is_episodic, false) <> true \")", 2),
     ("sdk.py:20170", "tortoise/sdk.py", 20170, "_stamp_capture_provenance(", 2),
+    ("hosted_api.py:21337-21339", "tortoise/hosted_api.py", 21339,
+     "\"(n:Point) WHERE n.eventId IS NULL AND coalesce(n.is_episodic,false) <> true \")", 2),
+    ("hosted_api.py:21344", "tortoise/hosted_api.py", 21344, "_stamp_capture_provenance(", 2),
     ("sdk.py:58336-58360", "tortoise/sdk.py", 58338, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
     ("sdk.py:58338-58360", "tortoise/sdk.py", 58338, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
     ("sdk.py:58338", "tortoise/sdk.py", 58338, "\"s.turn_count, s.actor_user_id, s.harness, \"", 8),
