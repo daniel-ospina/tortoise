@@ -2523,6 +2523,16 @@ surfaces:
   # `core` entry alone would never run on the handler change that can reorder
   # the positional columns. (The #2938/#3154 dual-registration convention.)
   - test_session_capture_status.py
+  # #14232: the ACK/complete split. Its subjects are `api`-class: the handler pair
+  # (`hosted_api._extract_capture` / `_report_capture`) and the endpoints the
+  # module drives live in tortoise/hosted_api.py (an EXACT `api` source match), so
+  # an api-only diff must run this guard. DUAL-REGISTERED with `core` for the same
+  # reason as its neighbour above (a named-surface match REPLACES the `core`
+  # fallback): the phase vocabulary and `session_extraction_status` live in
+  # tortoise/session_projection.py, which matches no SOURCE_PATTERNS entry.
+  # ⛔ An unregistered file is not merely an `--integrity` red — NO job selects it,
+  # so the guard silently stops existing on the very change it pins.
+  - test_14232_ingest_ack_split.py
   # #3540 ruling B: the consolidated source-management tool's handlers live in
   # `tortoise/mcp_server.py` + `tortoise/hosted_api.py`; the guard must run on
   # the surface change it guards.
@@ -9035,6 +9045,12 @@ surfaces:
   # matches no SOURCE_PATTERNS entry, so a declaration-only change selects
   # `core` via the `tortoise/` fallback.
   - test_session_capture_status.py
+  # #14232: the `core` half of the dual registration documented at the `api`
+  # entry — the extraction-phase vocabulary and `session_extraction_status`, the
+  # ONE derivation all three read surfaces call, live in
+  # tortoise/session_projection.py, which matches no SOURCE_PATTERNS entry and so
+  # selects `core` via the `tortoise/` fallback.
+  - test_14232_ingest_ack_split.py
   # #6151: the weight mechanisms live in `tortoise/weights.py`, which matches no
   # SOURCE_PATTERNS entry — so a weights.py change selects `core` via the
   # `tortoise/` fallback and, until now, ran NONE of the three tests that guard

@@ -102,6 +102,27 @@ SESSION_EXTRACTION_STATES: tuple[str, ...] = (
     "stored-extraction-failed",
 )
 
+#: #14232: the IN-FLIGHT axis — what a capture that has not reached an outcome
+#: yet is DOING. Declared SEPARATELY from :data:`SESSION_EXTRACTION_STATES` and
+#: published as a qualifier BESIDE it, which is this module's own recorded
+#: pattern for a state the outcome set cannot express: *"the 'stored, outcome
+#: unrecorded' state is carried by the `outcome_known` qualifier BESIDE the set,
+#: not inside it"* (#3520). The outcome set stays exactly three members.
+#:
+#: ``queued`` — accepted, and the record says so, but no worker has started yet
+#: (the pool is busy). ``extracting`` — a worker is inside the model call.
+#: TERMINAL is deliberately NOT a member: it is the moment the phase is cleared
+#: in the SAME statement that records `capture_ok`, and the outcome set above
+#: answers from then on. A phase therefore never has to mean "done" and a done
+#: session never carries one.
+#:
+#: ⛔ The document-pack surface (`#14219`) needs the same two first members for
+#: its per-file status, which is why this lives in the dependency-free module
+#: rather than beside the capture handler. `embedded`/`indexed` are NOT declared
+#: here: nothing on the session path produces them, and a member no producer can
+#: emit is vocabulary a reader would group on and never see.
+SESSION_EXTRACTION_PHASES: tuple[str, ...] = ("queued", "extracting")
+
 #: #3892 / #4258: the extractor lanes that mean "no extraction was ATTEMPTED".
 #: A keyless capture (`none`) and the team's extraction off-switch
 #: (`disabled`) both record `capture_ok=False` on the Session — but nothing
@@ -116,6 +137,7 @@ SESSION_STORE_ONLY_LANES: tuple[str, ...] = ("none", "disabled")
 
 def session_extraction_status(
     capture_ok: bool | None, capture_extractor: str | None,
+    *, phase: str | None = None, phase_at: str | None = None,
 ) -> dict:
     """The server-resolved per-session extraction status (#3520).
 
@@ -135,7 +157,14 @@ def session_extraction_status(
       ``stored``;
     * ``capture_ok is None`` -> ``stored`` with ``outcome_known False``.
 
-    ``outcome_known`` is the pinned qualifier: ``capture_ok IS NOT NULL``.
+    ``outcome_known`` is the pinned qualifier: ``capture_ok IS NOT NULL`` **and
+    no extraction is in flight** (#14232). The second half is what keeps the
+    answer about THIS capture on a #2335 TRUE retry: that lane re-extracts a
+    session whose record already carries `capture_ok = False` and writes the
+    in-flight phase, so without it the same read would report "the outcome is
+    known" for a capture that is running right now — and the phase would be
+    suppressed too, leaving the retry invisible on every read surface while the
+    ACK that triggered it says `outcome_known: false`.
     It is what carries the "stored, outcome UNRECORDED" case — a
     commit-created / budget-hold / demo-seeded / longmem-ingest session was
     written by a driver that never records an extraction outcome, so a naive
@@ -150,7 +179,10 @@ def session_extraction_status(
     the status because the status alone cannot say WHY a session was not
     processed; the pair is what a reader needs.
     """
-    outcome_known = capture_ok is not None
+    # ⛔ A live phase means the outcome is NOT known yet, whatever the record's
+    # `capture_ok` says — the retry lane keeps the previous attempt's `False`
+    # there (measured: the record-phase MERGE never touches `capture_ok`).
+    outcome_known = capture_ok is not None and not phase
     if capture_ok is True:
         status = "stored-and-processed"
     elif capture_ok is False:
@@ -163,11 +195,28 @@ def session_extraction_status(
     assert status in SESSION_EXTRACTION_STATES, (
         f"extraction status {status!r} is outside the declared vocabulary "
         f"{SESSION_EXTRACTION_STATES}")
-    return {
+    block = {
         "status": status,
         "extractor": capture_extractor,
         "outcome_known": outcome_known,
     }
+    # #14232: the in-flight phase, published whenever the record carries one.
+    # ⛔ ABSENT, never `None`: three surfaces pin this block's exact key set for a
+    # terminal session (`set(row["extraction"]) == {"status", "extractor",
+    # "outcome_known"}`, tests/test_session_capture_status.py), and that pin is
+    # #3520's — it holds because the phase is CLEARED in the same statement that
+    # records the outcome, so a terminal row simply has none to publish.
+    # ⛔ Not `capture_ok is None and phase`: that suppressed the phase on the
+    # #2335 retry lane (whose record keeps the prior attempt's `False`), which is
+    # the one lane where a reader MOST needs to see that extraction is running.
+    if phase:
+        assert phase in SESSION_EXTRACTION_PHASES, (
+            f"extraction phase {phase!r} is outside the declared vocabulary "
+            f"{SESSION_EXTRACTION_PHASES}")
+        block["phase"] = phase
+        if phase_at is not None:
+            block["phase_at"] = phase_at
+    return block
 
 #: What `GET /v1/sessions/{id}` serves: the list projection plus the detail-only
 #: fields (the turn/point lists and the session source).

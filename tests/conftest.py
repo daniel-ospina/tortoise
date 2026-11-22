@@ -2172,6 +2172,39 @@ from tests._verdict import (  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _capture_ack_window_is_deterministic(monkeypatch):
+    """#14232: the suite pins the IN-BUDGET capture, never the deferral.
+
+    The handler joins the extraction for at most ``_CAPTURE_ACK_DEADLINE_S``
+    (0.5 s in production, anchored on arrival and clamped to half the transport
+    bound) and answers with the
+    async `accepted` receipt when the join misses. Whether the join misses on a
+    given run is a question about MACHINE LOAD — the offline `MockModel` seam's
+    whole capture measured 0.008 s to 0.95 s on one host depending on the test
+    that preceded it — so leaving the production window in place would make every
+    pre-existing "the POST body reports what was extracted" assertion a wall-clock
+    race. `#5049` rule 1 forbids exactly that: a deadline expiry may not produce a
+    verdict about the code under test.
+
+    So the window is opened for the whole suite (still clamped by the transport
+    bound, which is 10 s, so the join is effectively unbounded here), and the
+    deferral is exercised WHERE IT IS THE PROPERTY — `tests/test_14232_ingest_ack_split.py`
+    commutes this same value to 0 for the ack-path tests. Nothing in the product
+    reads this constant differently; it is the test substrate that must not race.
+    """
+    module = sys.modules.get("tortoise.hosted_api")
+    if module is not None:
+        monkeypatch.setattr(module, "_CAPTURE_ACK_DEADLINE_S", 30.0)
+        # A tail left pending by a torn-down loop can never run again (its loop is
+        # gone), so holding a strong reference to it only makes the registry lie
+        # about what is live.
+        module._CAPTURE_TAIL_TASKS.clear()
+    yield
+    if module is not None:
+        module._CAPTURE_TAIL_TASKS.clear()
+
+
+@pytest.fixture(autouse=True)
 def _process_global_isolation(monkeypatch):
     """#5049 rule 4: reset declared process globals + ambient env per test."""
     reset_process_globals()
