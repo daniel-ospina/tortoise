@@ -972,6 +972,15 @@ NOT_SELECTED = [
     # twin was refused. Refused now, and reported through `existence_unguarded`.
     "has anyone reported v3 hasn't been deprecated",
     "has anyone complained billing hasn't been deprecated",
+    # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (fresh review, P3, measured): the
+    # refusal lookahead allows `{0,6}` words before `to be|being|getting`, so a SUBJECT-LESS
+    # question is refused — but arm B's reporter required `{1,5}`, so these four came back
+    # `population=None, signal=None, payload=None` (SILENT) while each ROUTED at the delta's
+    # base. Refusing is right; going silent is not. Pinned in BOTH lists.
+    "is being archived",
+    "is to be archived",
+    "is getting archived",
+    "was being retired",
 ]
 
 
@@ -1147,6 +1156,12 @@ NOTICE_ONLY = [
     # this is a LIST decision rather than that guard's participle bound. Excluding them
     # WOULD report them (measured: 5 probes flip, 0 pinned rows move) — a recall widening
     # with its own review, deliberately not made inside a claim correction.
+    # ⛔ the zero-word subject of a non-finite copula — refused AND reported (see the note
+    # in `NOT_SELECTED`); arm B's lower bound is zero for exactly these four.
+    "is being archived",
+    "is to be archived",
+    "is getting archived",
+    "was being retired",
 ]
 
 assert set(NOTICE_ONLY) <= set(NOT_SELECTED), (
@@ -1636,9 +1651,15 @@ def test_the_repetition_bound_is_not_NARROWER_than_the_bound_it_replaced():
     matters everywhere in this module: a question the guard no longer matches is ROUTED
     to the whole ended population with the caller's predicate dropped and `signal=None`.
 
-    Asserted at the GUARD-REGEX level on purpose: the full detector's 60-character window
-    dominates for a ten-adverb sentence, so a `detect_state_question` row would be vacuous
-    here — the shape would decline for the window's reason, not the bound's.
+    Asserted at the GUARD-REGEX level on purpose, and the consequence is stated honestly
+    rather than overstated: the full detector's 60-character window dominates for a sentence
+    this long, so END-TO-END the bound is UNOBSERVABLE at both `{0,8}` and `{0,10}` — measured
+    across 5 heads x 6 adverbials x n=0..13 (420 probes), 0 differences in `detect_state_question`.
+    What this pin holds is the FRAGMENT's property: the guard must not be narrowed below the
+    bound it replaced, because the bound is what keeps a long adverb run from opening the hole
+    the guard exists to close, and a future shorter head or a wider window would make it
+    reachable. It does NOT claim a routing change, and neither does the module comment this
+    mirrors — an earlier cut of both said "ROUTED", which the measurement did not support.
     """
     import re
 
@@ -1649,8 +1670,9 @@ def test_the_repetition_bound_is_not_NARROWER_than_the_bound_it_replaced():
         probe = "the vendor has " + "very " * n + "been deprecated"
         assert guard.match(probe) is None, (
             f"{n} adverbials did NOT match the refusal guard ({probe!r}) — the bound is "
-            f"narrower than the ten-token bound it replaced, so this spelling ROUTES and "
-            f"drops the caller's predicate silently")
+            f"narrower than the ten-token bound it replaced. This is the guard FRAGMENT, not "
+            f"a route claim: end-to-end the 60-char window dominates at this length, so the "
+            f"narrowing is unobservable today and becomes a route the moment that changes")
     assert guard.match("the vendor has " + "very " * 12 + "been deprecated") is not None, (
         "the bound is unbounded — a count bound still has to keep the window from "
         "swallowing a whole clause")
@@ -3720,10 +3742,30 @@ def test_the_asyndetic_gap_is_blind_to_neither_a_contraction_nor_a_measured_adve
             f"{query!r} ROUTED (population={got.population!r}, signal={got.signal!r}) — "
             f"the apostrophe {_ap!r} is not U+0027, and a class closed over one codepoint "
             f"is not closed over the family the caller sends")
-    assert len(_APOSTROPHES) >= 7, (
-        f"the normaliser's inventory shrank to {len(_APOSTROPHES)} codepoints "
-        f"({_APOSTROPHES!r}) — `\u2019` alone is what the product sends, and the six "
-        f"beside it were measured as the same hijack")
+    # ⛔ AND THE INVENTORY IS PINNED AGAINST THE SENDER'S TABLE, NOT AGAINST ITSELF (fresh
+    # review, P1, measured). The first cut asserted `len(_APOSTROPHES) >= 7` and looped over
+    # that same tuple, so it was TAUTOLOGICAL about coverage: the seven handsome codepoints
+    # passed while the EIGHTEEN `tortoise/extractor_v2.py` also folds (`\u201a \u201b \u02b9
+    # \u2032 \u2035 \u00b4 \u02c8 \u05f3 \uff02 \ua78c …`) each still routed the whole
+    # ended population with the caller's predicate dropped and `signal=None`. A pin that reads
+    # the tuple it pins cannot see that the tuple is incomplete — the only failure this class
+    # has. So the assertion is PARITY with the table the sender normalises with: a codepoint
+    # added upstream reds HERE rather than quietly re-opening the hijack.
+    from tortoise.extractor_v2 import _APOSTROPHES as _SENDER_INVENTORY
+
+    _sender = {chr(codepoint) for codepoint in _SENDER_INVENTORY}
+    _missing = _sender - set(_APOSTROPHES)
+    assert not _missing, (
+        f"the sender folds {len(_sender)} apostrophe codepoints and this normaliser covers "
+        f"{len(_APOSTROPHES)} — missing {sorted(hex(ord(c)) for c in _missing)}. Each of "
+        f"those still ROUTES the whole ended population with the caller's predicate dropped "
+        f"and `signal=None`, which is the defect the normaliser exists to close")
+    for _codepoint in _sender:
+        _probe = f"have any users reported the vendor hasn{_codepoint}t been deprecated"
+        _got = detect_state_question(_probe)
+        assert _got.population is None and _got.signal, (
+            f"{_probe!r} ROUTED (population={_got.population!r}, signal={_got.signal!r}) — "
+            f"this codepoint IS in the sender's inventory, so it reaches this module")
     # ⛔ AND THE CLITIC SPELLINGS (`'s`, `'ve`, `'d`) — the commonest English form of
     # exactly these auxiliaries, and all of them routed before the clitic pattern.
     for query in (

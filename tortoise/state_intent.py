@@ -576,8 +576,11 @@ _EXISTENCE_HELPER = (
     # ten is a NARROWING of this guard, not a widening — and narrowing it is the dangerous
     # direction, because a question the guard no longer matches is ROUTED to the whole ended
     # population with the caller's predicate dropped and `signal=None` (the #14033 hijack).
-    # Measured: at `{0,8}` a nine- and a ten-adverb question ROUTED while the previous head
-    # refused both (the guard-regex level, so the 60-char window does not confound it):
+    # Measured at the guard-regex level (so the 60-char window does not confound it): at
+    # `{0,8}` a nine- and a ten-adverb question FAILED TO MATCH the guard while the previous
+    # head matched both. ⚠️ END-TO-END THIS IS UNOBSERVABLE: the window dominates at that
+    # length, so `detect_state_question` answers identically at both bounds (420 probes, 0
+    # diffs) — the bound is a guard property, not a route claim:
     #     n=8  prev_refuses=True   {0,8}_refuses=True
     #     n=9  prev_refuses=True   {0,8}_refuses=False   <- the narrowing
     #     n=10 prev_refuses=True   {0,8}_refuses=False   <- the narrowing
@@ -681,10 +684,11 @@ _CONTRACTED_AUX = (
 #:   `is the export to eventually be archived`   <- ONE adverb splits `to be`
 #:   `is the export to get archived` / `… to become archived`
 #:
-#: One home, two consumers (`_COPULA_SUBJECT`'s refusal lookahead and `_COPULA_LONG_SUBJECT`'s
-#: arm B), because fixing the refusal without widening the report trades a wrong route for a
-#: silent drop — measured: with only the refusal side widened, `is the export getting archived`
-#: came back `signal=None`.
+#: One home, two consumers — `_COPULA_INFINITIVE_REFUSAL` (the `is|are|was|were` branch's own
+#: refusal lookahead; it is NOT in the shared `_COPULA_SUBJECT`, which the perfect branch also
+#: uses — see that constant) and `_COPULA_LONG_SUBJECT`'s arm B — because fixing the refusal
+#: without widening the report trades a wrong route for a silent drop: measured, with only the
+#: refusal side widened, `is the export getting archived` came back `signal=None`.
 #: ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: the `to <adverb> <verb>` window is bounded
 #: to TWO adverbs (a third puts the phrase outside the subject's own word bound anyway), and a
 #: non-finite verb this list does not name (`to wind up archived`) still routes — a closed list is
@@ -1339,10 +1343,21 @@ _COPULA_LONG_SUBJECT = re.compile(
     # archived`) verb phrase rather than a state the ended population can answer. The
     # same subordinator/second-auxiliary negation applies: a clause that SUPPLIES the
     # predicate is still not this question's.
+    # ⛔ THE LOWER BOUND IS ZERO, NOT ONE (fresh review, P3, measured): the REFUSAL
+    # lookahead (`_COPULA_INFINITIVE_REFUSAL`) allows `{0,6}` words before the non-finite
+    # verb, so with `{1,5}` here the ZERO-word endpoint — a SUBJECT-LESS non-finite question —
+    # was refused with NO report, which is the silence this module's contract forbids and the
+    # exact reason arm B exists. Measured at the delta's base these ROUTED (`ended / is_copula`)
+    # and at the head they were `population=None, signal=None, payload=None`:
+    #   `is being archived` / `is to be archived` / `is getting archived` / `was being retired`
+    # Enumerated class 4 auxiliaries x 6 non-finite forms x 5 endings = 120 rows, all silent.
+    # The verdict (refuse) is right — a scheduled or progressive state must not be served —
+    # but the report must survive it. Measured after widening: 0 population changes across
+    # 34,560 probes, 56 rows gain `is_copula_long_subject` (exactly the zero-word class).
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     rf"(?!.*\b(?:because|that|given|since|when|while|if|unless|which|who|whom|"
     rf"whose|where)\b)"
-    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{1,5}}{_NONFINITE_COPULA}\s+"
+    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{0,5}}{_NONFINITE_COPULA}\s+"
     rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
     rf")"
     rf"{_BLOCKED_TAIL}"
@@ -1653,12 +1668,31 @@ class StateQuestion:
 #: measured). `_EXISTENCE_GUARD`'s contraction class is closed over `'` (U+0027) alone,
 #: while the product routinely receives the typographic forms — `tortoise/extractor_v2.py`
 #: normalises the same inventory before tokenising for exactly that reason, and this
-#: module's own token classes admit `\u2019` beside `'` in eleven places.
+#: module's own token classes admit `\u2019` beside `'` in eighteen places.
 #: ⛔ ONE CONSTANT, so the test that pins the family cannot drift off it: the pin asserts
 #: THIS tuple and exercises every member, which is what makes a codepoint added to the
 #: normaliser without being pinned a RED instead of a silent gap (the round-27 fix shipped
 #: with 4 of these 7 exercised, i.e. three silently droppable).
-_APOSTROPHES = ("\u2019", "\u2018", "\u02bc", "\u055a", "\u02be", "\u02bf", "\uff07")
+#: ⛔ THE INVENTORY IS `extractor_v2`'s, NOT SEVEN HANDSOME CODEPOINTS (fresh review, P1,
+#: measured). The first cut of this constant carried the seven that read nicely and its
+#: docstring claimed parity with `tortoise/extractor_v2.py` — which normalises TWENTY-FIVE.
+#: Measured: the eighteen it left out (`\u201a \u201b \u02b9 \u0323 … \u00b4 \uff02 \ua78c`)
+#: each still ROUTED the whole ended population with the caller's predicate dropped and
+#: `signal=None`, i.e. the defect this constant exists to close, eighteen spellings over,
+#: while the pin derived from the constant itself stayed green — a pin that reads the same
+#: tuple it pins can never see the tuple is incomplete.
+#: The set below is `extractor_v2._APOSTROPHES`' keys verbatim, and
+#: `tests/test_13557_13558_reachable_reads.py` asserts PARITY against that table (not
+#: against this tuple), so the two cannot drift and a codepoint added upstream reds here.
+#: ⛔ Why a copy rather than an import: this module carries no project imports on purpose
+#: (it is the pure detector several layers call), so the coupling is held by the parity
+#: test instead of by an import edge.
+_APOSTROPHES = (
+    "\u2018", "\u2019", "\u201a", "\u201b", "\u02bc", "\u02b9", "\u2032", "\u2035",
+    "\uff07", "\u00b4", "\u02be", "\u02bf", "\u02c8", "\u055a", "\u05f3", "\uff02",
+    "\ua78c", "\u02bb", "\u02bd", "\u02c0", "\u02c1", "\u02ca", "\u02cb", "\u02cc",
+    "\u02d0",
+)
 
 
 def detect_state_question(text: str | None) -> StateQuestion:
