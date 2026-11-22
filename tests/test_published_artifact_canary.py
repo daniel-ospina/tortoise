@@ -3072,13 +3072,17 @@ def _assert_no_executable_prose(script: str) -> None:
     """
     offending = _executable_prose_lines(script)
     assert not offending, (
-        "this run: block's ECHOED text now contains a backtick or a command substitution: "
-        "inside double-quoted echoes those EXECUTE and corrupt the output silently, which is "
-        "the #12660 defect. ⛔ INSIDE A SINGLE-QUOTED SPAN an unescaped token is INERT — this "
-        "gate is deliberately conservative there (`_strip_shell_comments`, DELIBERATE "
-        "CONSERVATIVE EDGE), so a red on a single-quoted spelling asks you to REWORD the "
-        "line; it does not report a corruption. Prose names must be plain text. "
-        "Offending line(s):\n" + "\n".join(offending)
+        "this run: block contains a backtick or a command substitution. "
+        "⛔ IN PROSE inside double quotes those EXECUTE and corrupt the output silently "
+        "(#12660) — reword the names as plain text. "
+        "⛔ IN CODE this gate refuses the construct OUTRIGHT (the rule is `no backtick, no "
+        "$(`, in CODE OR PROSE`) — rewrite the line without one; nothing was corrupted, the "
+        "construct is simply not allowed in these blocks. "
+        "⛔ AN UNESCAPED TOKEN IN A SINGLE-QUOTED SPAN is inert UNLESS that text is RE-PARSED "
+        "(`eval`, `trap … EXIT`, `sh -c` all execute it — measured); this gate is deliberately "
+        "conservative there (`_strip_shell_comments`, DELIBERATE CONSERVATIVE EDGE), so a red "
+        "on a single-quoted spelling asks you to REWORD the line rather than hunt for a "
+        "corruption this gate can see. Offending line(s):\n" + "\n".join(offending)
     )
 
 
