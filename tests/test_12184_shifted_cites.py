@@ -199,13 +199,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # as two code spans" correction (#13991 review P2-A) shifted every one of them by +2, and this
     # PR's own edits above them shifted all four again — which is why this block states the
     # MEASUREMENT and not a delta:
-    #   :139  the drift header's non-comparable enumeration, which names this address among the ten
+    #   :142  the drift header's non-comparable enumeration, which names this address among the twelve
     #         that resolve past the pin's copy of their file (added by #13998; see the count above);
-    #   :203  the header trio above — main's site, the one this row was created for;
-    #   :222  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    #   :206  the header trio above — main's site, the one this row was created for;
+    #   :225  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :647  the same branch's §2.5 provenance sentence, `:11280` -> `:11590`.
+    #   :650  the same branch's §2.5 provenance sentence, `:11280` -> `:11590`.
     # Re-derive with `grep -n '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
     # trusting this list on a later head: a line number in prose is exactly the claim this file pins
     # for the document, and it drifts the same way.
