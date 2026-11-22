@@ -601,8 +601,15 @@ _EXISTENCE_HELPER = (
 #: the same string was refused. Refusal-side widening cannot create a route: it can only over-refuse,
 #: which the canonical relative-clause rows below measure.
 _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
-#: The refusal-side slot: ANY adverbial the guard's own class knows, one of them.
-_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+)?"
+#: The refusal-side slot: ANY adverbial the guard's own class knows, INCLUDING the multi-word ones.
+#: ⛔ THE REPETITION IS THE POINT (round-3 review, P2, measured): the class carries the LEADING
+#: words of four multi-word adverbials (`no longer`, `to date`, `of late`, `at last`) precisely so a
+#: token-per-iteration gap can consume them, and a slot bounded to ONE token could not — measured,
+#: `have any users reported it has been no longer deprecated and been withdrawn` still ROUTED with
+#: the caller's predicate dropped while the same adverbial BEFORE `been` was refused. The bound is
+#: 3 (a multi-word adverbial is 2 tokens, plus headroom), and it is REFUSAL-SIDE: it can only add a
+#: refusal, never a route.
+_EXISTENCE_REFUSAL_ADVERB_SLOT = rf"(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}"
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
