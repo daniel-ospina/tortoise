@@ -2139,10 +2139,10 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     point is a WIDENING rather than a retirement — and **#12434**'s `:Document`
     retirement prose in `tortoise/mcp_server.py:4543`, the seventh, whose point IS
     a retirement — and **#12915**'s (`#4282` Phase 2, lane B) `record_decision`
-    docstring at `tortoise/sdk.py:37568` and `_file_human_approval`'s `:37610`
+    docstring at `tortoise/sdk.py:37621` and `_file_human_approval`'s `:37663`
     (the `:4382` address both copies carried is DELETED, as are `:36687,36718` in the document's copy and `:36676,36718` here,
     re-measured: `mcp_server.py:4448` is the `# prop named "error"` comment (not blank), the prose is at `:4543`;
-    the two `:Document` docstring lines are `:37568` / `:37610`), the eighth, whose `Args:` block for
+    the two `:Document` docstring lines are `:37621` / `:37663`), the eighth, whose `Args:` block for
     `artifact_id` names the retired label to state the D10 rule — and **#13447**'s
     `tortoise/derived_embedding.py:3`, the ninth: the seam module's opening paragraph
     spells the five labels it spans, which is prose naming the retired label to state a
