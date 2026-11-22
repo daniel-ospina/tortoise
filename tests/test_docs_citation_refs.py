@@ -3246,9 +3246,11 @@ _ARG_TAKING_LONG_FLAGS = frozenset({
 #: `_comment_block_above` scopes a prose guard to the comment run above its anchor, so a description
 #: sitting between a constant and its set would be read as that constant's (#14027 review, P3).
 #:
-#: ⛔ IT IS HERE BECAUSE GREP RUNS IT, AND LEAVING IT OUT LOST A REAL COUNT
-#: (#14027 review round 2, P2 — MEASURED). `grep --help` never mentions `--unix-byte-offsets`, but
-#: grep accepts it — and every prefix of it, `--u`/`--un`/`--uni`/`--unix` — as the obsolete `-u`
+#: ⛔ IT IS HERE BECAUSE THE READER MUST READ IT, AND LEAVING IT OUT LOST A REAL COUNT
+#: (#14027 review round 2, P2 — MEASURED on GNU grep **3.11**, and the version matters: 3.12 removed
+#: the alias outright — see `test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS`
+#: and #14306 review F3). `grep --help` never mentions `--unix-byte-offsets`, but grep 3.11 accepts
+#: it — and every prefix of it, `--u`/`--un`/`--uni`/`--unix` — as the obsolete `-u`
 #: (`warning: --unix-byte-offsets (-u) is obsolete`), and `grep -c --unix-byte-offsets '^[+-]$'`
 #: really counts the blank class (`2`). Declined as unknown, a SECOND blank-class prescription in
 #: that spelling sat invisible beside the one that was read — the false PASS this cell exists to
@@ -4881,6 +4883,186 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             "carried an instrument that does not count this class (#13995 review round 11, P2)")
 
 
+#: The floor below which a parsed `grep --help` option list is not a universe. GNU grep 3.11
+#: publishes **48** long options (MEASURED 2026-11-22), so this is a "the parser or grep's help
+#: layout broke" floor, not a description of any one grep — which is why it is named once here
+#: beside the reason it exists rather than spelled inline in the cell (#14306 review F1, P1).
+_D5_LONG_OPTION_FLOOR = 40
+
+#: The stderr wordings with which a grep says it does not KNOW an option spelling.
+#: ⛔ THE TOLERANCE IS SCOPED TO THE CAUSE, NOT TO THE EXIT CODE (#14306 review F2, P1 — MEASURED
+#: on GNU grep 3.11): `grep -c --definitely-not-an-option '^[+-]$'` exits 2 with `grep:
+#: unrecognized option …`, while `grep -c --fixed-regexp '^[+-]$' /tmp` ALSO exits 2 but with
+#: `grep: /tmp: Is a directory`. Same exit code, opposite meaning — only the first is a platform
+#: fact this file may tolerate.
+_D5_GREP_OPTION_REFUSAL_MARKERS = (
+    "unrecognized option", "invalid option", "illegal option", "ambiguous",
+)
+
+
+class _D5NoDocumentedUniverse(RuntimeError):
+    """This grep published no parsable usage, so there is no option universe to pin against.
+
+    ⛔ IT IS A BROKEN READ, NOT A VERDICT, AT THE POINT OF DECISION (#14306 review F1, P1). The
+    cell used to `pytest.skip` on `len(documented) < 40`, and `pytest.skip` RAISES — so the
+    `>= 40` floor beneath it could never run, and the floor's RED failure mode became a GREEN
+    skip. The skip is legitimate for exactly one cause (this grep published no usage at all: BSD
+    grep writes it to stderr and exits 2); a `--help` that SUCCEEDED and parsed too little is our
+    derivation breaking, and that raises `AssertionError` from `_d5_documented_long_options`.
+    """
+
+
+def _d5_documented_long_options(
+        completed: subprocess.CompletedProcess) -> set[str]:
+    """The long options `grep --help` published, or `_D5NoDocumentedUniverse` if it published none.
+
+    ⛔ THE `>= 40` FLOOR MUST BE ABLE TO FIRE (#14306 review F1, P1 — the inert-enforcer shape).
+    The discriminator is the EXIT CODE, which is what separates the two cases the count alone
+    confuses:
+      * `--help` FAILED (rc != 0) and yielded too few options — this grep answers its usage on
+        another stream or not at all (BSD grep 2.6.0-FreeBSD: usage on stderr, rc 2), so it has
+        no documented universe here and there is nothing to pin `_D5_ALL_LONG_OPTIONS` against;
+      * `--help` SUCCEEDED (rc 0) and yielded too few options — our regex or grep's help layout
+        broke, and a broken derivation must not be able to certify anything.
+    An exotic grep that exits 0 with a short usage now OVER-BLOCKS rather than skipping silently;
+    that is the direction this file's own ruling picks (`OVER-BLOCK … outranks a false PASS`,
+    #13802 review P1), and it is visible, unlike a green skip.
+    """
+    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)",
+                                (completed.stdout or "") + (completed.stderr or "")))
+    if len(documented) >= _D5_LONG_OPTION_FLOOR:
+        return documented
+    if completed.returncode != 0:
+        raise _D5NoDocumentedUniverse(
+            f"`grep --help` published only {len(documented)} long options and exited "
+            f"{completed.returncode}: this grep answers its usage on another stream or not at "
+            "all (BSD grep 2.6.0-FreeBSD writes usage to stderr and exits 2), so there is no "
+            "documented universe here to pin `_D5_ALL_LONG_OPTIONS` against (#14027, #14306 F1)")
+    raise AssertionError(
+        f"only {len(documented)} long options were parsed out of a `grep --help` that exited 0 — "
+        "the derivation is broken, and a broken derivation must not be able to certify anything "
+        "(#14027, #14306 review F1, P1)")
+
+
+def _d5_grep_declined_the_spelling(
+        completed: subprocess.CompletedProcess, spelling: str) -> bool:
+    """`True` only when grep's own stderr says it does not know THIS spelling of an option.
+
+    ⛔ "rc not in (0, 1)" IS NOT THE QUESTION (#14306 review F2, P1 — MEASURED). Two spellings
+    this cell measures were refused with rc 2 by GNU grep 3.11 for OPPOSITE reasons: an option
+    grep does not implement (`unrecognized option`), and a broken probe (`Is a directory`). The
+    first is a platform fact the cell tolerates; the second must red with its diagnostic.
+    Requiring the message to NAME the spelling is what keeps a refusal of one option from
+    licensing another.
+
+    ⛔ THE EXIT CODE IS HALF THE PREDICATE, NOT THE CALLER'S BUSINESS. A grep that RAN the
+    spelling exits 0 (or 1, "no match"); it has not declined anything, whatever an unrelated
+    warning happens to say on stderr. Keeping that check here means the predicate answers its own
+    question, so a future caller cannot read a successful run as a refusal.
+    """
+    stderr = completed.stderr or ""
+    return (
+        completed.returncode not in (0, 1)
+        and spelling in stderr
+        and any(marker in stderr for marker in _D5_GREP_OPTION_REFUSAL_MARKERS))
+
+
+def _d5_measured_or_declined_conflict(
+        measured: dict[str, str], declined: dict[str, str]) -> str | None:
+    """Why this partition of grep's verdicts cannot describe ONE grep, or `None` when it can.
+
+    ⛔ A DECLINED SPELLING IS RECORDED, NOT DROPPED (#14306 review F2, P1). `--unix-byte-offsets`
+    and `--u` are two spellings of ONE option (`-u`), so a grep must either run both or know
+    neither; a verdict for only one of them means `--u` was measured against some OTHER option,
+    which is the false PASS this cell exists to refuse. Recording `declined` also means the
+    omission is STATED in the evidence rather than inferred from a bare `continue`.
+    """
+    unix_spellings = {"--unix-byte-offsets", "--u"}
+    if unix_spellings <= set(measured) or unix_spellings <= set(declined):
+        return None
+    return (
+        f"`--unix-byte-offsets` and `--u` are two spellings of ONE option, so this grep must "
+        f"either run both (measured: {sorted(measured)}) or know neither (declined: "
+        f"{sorted(declined)}) — a verdict for only one of them means `--u` was measured against "
+        f"some other option (#14306 review F2, P1)")
+
+
+def test_the_d5_universe_floor_reds_a_broken_derivation_and_skips_only_a_silent_grep():
+    """The `>= 40` floor is REACHABLE: a `--help` that succeeded and parsed too little REDS.
+
+    ⛔ THIS IS THE GUARD #14306 REVIEW F1 (P1) FOUND DEAD. `pytest.skip` raises, so the cell's
+    `if len(documented) < 40: skip` made the `assert len(documented) >= 40` below it unreachable
+    and moved the floor's failure mode from RED to SKIP — GREEN on the rail — which also made the
+    PR body's "the `>= 40` floor is unchanged" false. The boundary below is the mutant that
+    distinguishes them: rc 0 with one option short of the floor must RAISE, while a grep whose
+    `--help` FAILED (rc 2, usage on stderr — BSD grep's shape) has no universe at all and is the
+    only case the skip may excuse.
+    """
+    def reported(returncode: int, text: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["grep", "--help"], returncode=returncode,
+            stdout=text if returncode == 0 else "", stderr="" if returncode == 0 else text)
+
+    def usage(count: int) -> str:
+        return "Usage: grep [OPTION]... PATTERNS [FILE]...\n" + "\n".join(
+            f"  --opt-{'a' * n} <x>" for n in range(1, count + 1))
+
+    assert len(_d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
+        _D5_LONG_OPTION_FLOOR), (
+        "a successful `--help` carrying exactly the floor's worth of long options must be a "
+        "universe, or the floor is not a floor (#14306 review F1)")
+    with pytest.raises(AssertionError, match="broken derivation must not be able to certify"):
+        _d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
+    with pytest.raises(_D5NoDocumentedUniverse, match="exited 2"):
+        _d5_documented_long_options(reported(
+            2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+
+
+def test_the_d5_grep_portability_tolerance_covers_a_REFUSAL_and_nothing_else():
+    """The per-spelling tolerance is scoped to grep SAYING it does not know the option.
+
+    ⛔ #14306 REVIEW F2 (P1) — the first cut skipped on `returncode not in (0, 1)`, which is true
+    of BOTH a portability gap and a broken measurement, so a genuine measurement failure was
+    reported as "not portable" and stayed GREEN. The cases below are the ones measured on GNU grep
+    3.11: a refusal NAMES the spelling, while `grep: /tmp: Is a directory` names nothing and must
+    not be read as "not portable".
+    """
+    def ran(returncode: int, stderr: str) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(args=["grep"], returncode=returncode,
+                                           stdout="", stderr=stderr)
+
+    assert _d5_grep_declined_the_spelling(
+        ran(2, "grep: unrecognized option '--unix-byte-offsets'\n"), "--unix-byte-offsets"), (
+        "a grep that says it does not recognise the spelling is the platform case the tolerance "
+        "exists for — reading it as a failure reds macOS for a grep that cannot answer")
+    assert _d5_grep_declined_the_spelling(
+        ran(2, "grep: unrecognized option '--fixed-regexp'\n"), "--fixed-regexp")
+    assert _d5_grep_declined_the_spelling(
+        ran(2, "grep: option '--u' is ambiguous; possibilities: '--unrestricted'\n"), "--u"), (
+        "an ABBREVIATION grep refuses to resolve is the same platform fact: grep will not run it")
+    assert not _d5_grep_declined_the_spelling(
+        ran(2, "grep: /tmp: Is a directory\n"), "--fixed-regexp"), (
+        "a MEASUREMENT failure (rc 2, a message that names no option) is not a portability gap: "
+        "reading it as one is the silent wrong answer F2 names (#14027 reddened here before)")
+    assert not _d5_grep_declined_the_spelling(
+        ran(2, "grep: unrecognized option '--fixed-regexp'\n"), "--unix-byte-offsets"), (
+        "a refusal of ONE spelling must not license another: the tolerance is per spelling")
+    assert not _d5_grep_declined_the_spelling(
+        ran(0, "grep: unrecognized option '--u'\n"), "--u"), (
+        "a grep that RAN the spelling (rc 0) has not declined it, whatever an unrelated warning "
+        "says — the exit code still separates 'did not run it' from 'ran it and counted wrong'")
+
+    assert _d5_measured_or_declined_conflict(
+        {"--unix-byte-offsets": "2", "--u": "2"}, {}) is None
+    assert _d5_measured_or_declined_conflict(
+        {}, {"--unix-byte-offsets": "rc 2", "--u": "rc 2"}) is None
+    conflict = _d5_measured_or_declined_conflict(
+        {"--u": "2"}, {"--unix-byte-offsets": "rc 2"})
+    assert conflict is not None and "--u" in conflict, (
+        "a verdict for only ONE of the two `-u` spellings means `--u` was measured against some "
+        "other option; the partition must red rather than let the omission pass as measured")
+
+
 def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     r"""`_D5_ALL_LONG_OPTIONS` matches `grep --help`, and not through the argument-taking oracle.
 
@@ -4907,21 +5089,25 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
     """
     # ⛔ `grep --help` IS ITSELF NOT PORTABLE (MEASURED 2026-11-22). BSD grep 2.6.0-FreeBSD writes
     # its usage to STDERR and exits **2**, so `check=True` raised `CalledProcessError` and this cell
-    # could never run on macOS at all. GNU grep answers on stdout with exit 0. The universe is derived
-    # from whichever stream carries the option list, and a grep that documents nothing parsable here
-    # SKIPS rather than failing — because the pin cannot be checked against a universe this grep
-    # does not publish. The `>= 40` floor stays: it is what stops a broken parser certifying anything.
+    # could never run on macOS at all; GNU grep answers on stdout with exit 0. The universe is
+    # derived from whichever stream carries the option list (`_d5_documented_long_options`), and a
+    # grep that published no usage at all SKIPS rather than failing, because the pin cannot be
+    # checked against a universe this grep does not publish (#14027).
+    # ⛔ BUT THE `>= 40` FLOOR MUST STAY REACHABLE, AND IN THE FIRST CUT OF THIS FIX IT WAS NOT
+    # (#14306 review F1, P1 — THE INERT-ENFORCER SHAPE). `pytest.skip` RAISES, so
+    # `if len(documented) < 40: pytest.skip(...)` made the `assert len(documented) >= 40` below it
+    # unreachable: the floor's failure mode moved from RED to SKIP, which on the rail is GREEN — and
+    # the PR body's "the `>= 40` floor … is unchanged" was false. The discriminator is the EXIT
+    # CODE, not the count: a grep whose `--help` FAILED published no usage (skip — a platform fact),
+    # while a `--help` that SUCCEEDED and still yielded fewer than 40 options is our parser or
+    # grep's help layout breaking (RED). The floor now lives in `_d5_documented_long_options` and is
+    # pinned by `test_the_d5_universe_floor_reds_a_broken_derivation_and_skips_only_a_silent_grep`,
+    # so a revert to skip-then-assert reds a test rather than quietly certifying nothing.
     completed = subprocess.run(["grep", "--help"], capture_output=True, text=True)
-    help_text = completed.stdout + completed.stderr
-    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", help_text))
-    if len(documented) < 40:
-        pytest.skip(
-            f"`grep --help` published only {len(documented)} long options on this grep "
-            f"(rc {completed.returncode}); BSD grep writes usage to stderr and exits 2, so there is "
-            "no documented universe to pin `_D5_ALL_LONG_OPTIONS` against on this platform (#14027)")
-    assert len(documented) >= 40, (
-        f"only {len(documented)} long options were parsed out of `grep --help` — the derivation "
-        "is broken, and a broken derivation must not be able to certify anything")
+    try:
+        documented = _d5_documented_long_options(completed)
+    except _D5NoDocumentedUniverse as _no_universe:
+        pytest.skip(str(_no_universe))
     # ⛔ THE UNDOCUMENTED ALLOWANCE IS EXACTLY THE SPELLING THIS READER MUST SEE, AND IT IS PINNED
     # (#14027 review round 2, P2 — MEASURED). `grep --help` is silent about `--unix-byte-offsets`
     # while grep runs it, so the set is `documented` PLUS that one spelling; a second undocumented
@@ -4949,12 +5135,19 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
 
 
 def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
-    r"""The declared undocumented allowance is exactly one spelling, and it is the one grep RUNS.
+    r"""The declared undocumented allowance is exactly one spelling: the obsolete `-u` alias.
 
-    ⛔ BOTH DIRECTIONS MEASURED ON GNU grep 3.11 (#14027 review round 2, P2 and P3):
-      * `--unix-byte-offsets` (`-u`) is absent from `grep --help` and ACCEPTED by grep — at every
-        prefix, `--u`/`--un`/`--uni`/`--unix` — and `grep -c --unix-byte-offsets '^[+-]$'` really
-        counts the blank class (`2` on the probe). Declined as unknown, a SECOND blank-class
+    ⛔ IT IS THE READER'S ALLOWANCE, NOT GREP'S VERDICT (#14306 review F3, P2). On GNU grep **3.11**
+    the `-u` alias is accepted and counts the blank class; GNU grep **3.12** (2025-04-10) REMOVED it
+    outright after a warning-only no-op since **3.7** — so "grep RUNS it" is a statement about ONE
+    grep, never a portable one. What the READER must accept is version-independent and asserted
+    unconditionally here; what the installed grep does is MEASURED in the cell body below.
+    ⛔ BOTH DIRECTIONS MEASURED ON GNU grep **3.11** (#14027 review round 2, P2 and P3) — and 3.11 is
+    not "grep", which is the defect the first cut of this fix reintroduced in its own
+    justification:
+      * `--unix-byte-offsets` (`-u`) is absent from `grep --help` and ACCEPTED by grep 3.11 — at
+        every prefix, `--u`/`--un`/`--uni`/`--unix` — and `grep -c --unix-byte-offsets '^[+-]$'`
+        really counts the blank class (`2` on the probe). Declined as unknown, a SECOND blank-class
         prescription in that spelling sat invisible beside the one that was read: the false PASS
         this whole cell exists to refuse. It is IN the universe, and the "exactly one" arm now
         counts two prescriptions for such a document.
@@ -4977,7 +5170,17 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
     # `-u` spelling, and the result was FOURTEEN red jobs across every shard collecting this file.
     # `-u`/`--unix-byte-offsets` is not a portable option:
     #   * `grep (BSD grep, GNU compatible) 2.6.0-FreeBSD` (macOS) ACCEPTS it — `2` printed, rc 0;
-    #   * GNU grep REMOVED it (obsolete since 3.8) — the Ubuntu CI runner REFUSES it, rc 2.
+    #   * GNU grep REMOVED it in **3.12** (released 2025-04-10; a warning-only no-op since **3.7**),
+    #     so a runner on 3.12+ REFUSES it with `unrecognized option`, rc 2.
+    # ⛔ THOSE VERSION NUMBERS ARE MEASURED, NOT REMEMBERED (#14306 review F3, P2). The first cut of
+    # this comment said "obsolete since 3.8", which is off by a major version step — the same defect
+    # this PR exists to fix (a figure taken on one grep and labelled as another) reappearing inside
+    # its own justification. Read at the primary source: grep-3.12's release announcement
+    # (savannah.gnu.org/news/?id=10753, 2025-04-10) — "the `--unix-byte-offsets (-u)` option is
+    # gone", after becoming a warning-only no-op in 3.7. Verified on this box too: GNU grep 3.11
+    # still runs BOTH spellings (`2` printed, rc 0, plus `warning: --unix-byte-offsets (-u) is
+    # obsolete`), which is why a 3.11 box cannot reproduce the runner's refusal at all — and why
+    # grep's verdict has to be MEASURED rather than read out of a comment.
     # The prose above attributes these measurements to "GNU grep 3.11", and THAT is what hid the
     # defect: the numbers were taken on BSD grep and labelled GNU. So the verdict is now asked of the
     # grep IN FRONT OF US — a spelling that grep does not run is simply not measured, rather than
@@ -4989,32 +5192,55 @@ def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
                                  capture_output=True, text=True)
         for accepted in ("--unix-byte-offsets", "--u", "--fixed-regexp")
     }
-    # ⛔ MEASURE PER SPELLING, AND ONLY WHAT THIS GREP CAN ANSWER. The three spellings are NOT
-    # equally portable, and the two greps we actually run disagree in OPPOSITE directions
-    # (MEASURED 2026-11-22, `main` `70fbd1a27dd5`):
-    #   * BSD grep 2.6.0-FreeBSD (macOS) runs `-u`/`--unix-byte-offsets` and `--u`, but REFUSES
-    #     `--fixed-regexp`, and its `grep --help` exits 2;
-    #   * GNU grep on the Ubuntu runner documents/accepts `--fixed-regexp`, but REMOVED `-u`
-    #     (obsolete since 3.8) — which is why this file reddened FOURTEEN jobs on CI.
-    # Fixing either direction by asserting one grep's behaviour broke the other, so each arm below
-    # is measured against the grep in front of us and a spelling that grep does not run is simply
-    # not measured here. This test's SUBJECT is the reader; grep's verdict is the justification.
-    measured = {}
+    # ⛔ MEASURE PER SPELLING, AND ONLY WHAT THIS GREP CAN ANSWER — BUT "WHICH GREP IS THIS" IS NOT
+    # THE SAME QUESTION AS "rc NOT IN (0, 1)" (#14306 review F2, P1 — MEASURED ON GNU grep 3.11).
+    # The first cut of this fix read `if ran.returncode not in (0, 1): continue`, and that predicate
+    # cannot tell a PORTABILITY GAP from a BROKEN MEASUREMENT — the two cases it must separate:
+    #     grep -c --definitely-not-an-option '^[+-]$'  ->  rc 2, `grep: unrecognized option …`
+    #     grep -c --fixed-regexp '^[+-]$' /tmp         ->  rc 2, `grep: /tmp: Is a directory`
+    # Both took the same silent `continue`, so a genuine measurement failure was reported as "not
+    # portable" and stayed GREEN — the false PASS this file's rulings refuse (#14027 reddened on
+    # exactly that diagnostic before this fix). The tolerance is now scoped to the ONE cause that is
+    # a platform fact — grep's own stderr naming THIS spelling as one it does not know
+    # (`_d5_grep_declined_the_spelling`) — and every other non-0/1 code REDS with its diagnostic.
+    # ⛔ A DECLINED SPELLING IS RECORDED, NOT DROPPED (#14306 review F2, P1). `declined` keeps the
+    # per-spelling reason, so the omission is STATED rather than inferred from a `continue`, and
+    # `_d5_measured_or_declined_conflict` asserts the two `-u` spellings are answered CONSISTENTLY:
+    # they name ONE option, so a grep must run both or know neither, and `--u` counting `2` while
+    # `--unix-byte-offsets` is refused would mean `--u` was measured against some OTHER option. On a
+    # platform that declines `-u` those two verdicts cannot be measured at all — there is nothing to
+    # check — and the arms that still discriminate there are the reader's, asserted unconditionally
+    # above and below. This test's SUBJECT is the reader; grep's verdict is the justification.
+    measured: dict[str, str] = {}
+    declined: dict[str, str] = {}
     for accepted, expected in (("--unix-byte-offsets", "2"), ("--u", "2"), ("--fixed-regexp", "0")):
         ran = ran_by_spelling[accepted]
         if ran.returncode not in (0, 1):
-            continue  # this grep does not run the spelling; there is no count to check
+            if not _d5_grep_declined_the_spelling(ran, accepted):
+                raise AssertionError(
+                    f"`grep -c {accepted} '^[+-]$'` exited {ran.returncode} on the declared probe "
+                    f"with a message that does not name `{accepted}` as an option this grep does "
+                    f"not know ({ran.stderr.strip()!r}) — that is a MEASUREMENT FAILURE, not a "
+                    "platform that lacks the spelling, so it fails closed with its diagnostic "
+                    "rather than being reported as `not portable` (#14306 review F2, P1)")
+            declined[accepted] = ran.stderr.strip()
+            continue
         assert ran.stdout.strip() == expected, (
             f"`grep -c {accepted} '^[+-]$'` printed {ran.stdout.strip()!r} on the probe "
             f"({expected!r} expected) — `--unix-byte-offsets`/`--u` must count THIS class for the "
             "false-PASS argument to hold, and `--fixed-regexp` must count NOTHING for its exclusion "
             f"to be safe (#14027, MEASURED on {ran.args[2]})")
         measured[accepted] = ran.stdout.strip()
+    _conflict = _d5_measured_or_declined_conflict(measured, declined)
+    assert _conflict is None, (
+        f"{_conflict} — the verdicts collected here must describe ONE grep; a verdict for only one "
+        "of the two `-u` spellings is the false PASS this cell exists to refuse (#14306 review F2)")
     if not measured:
         pytest.skip(
             "this grep runs NONE of the three spellings this cell measures "
-            "(`--unix-byte-offsets`, `--u`, `--fixed-regexp`), so no acceptance exists to check; "
-            "the reader's own behaviour is asserted unconditionally above and below (#14027)")
+            f"(`--unix-byte-offsets`, `--u`, `--fixed-regexp`; declined: {sorted(declined)}), so no "
+            "acceptance exists to check; the reader's own behaviour is asserted unconditionally "
+            "above and below (#14027)")
 
     assert {"--unix-byte-offsets"} == set(_D5_UNDOCUMENTED_LONG_OPTIONS), (
         "the undocumented allowance is a DECLARED set of the spellings THIS READER accepts although "
