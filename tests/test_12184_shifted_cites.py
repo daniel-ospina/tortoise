@@ -457,7 +457,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2921`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37904`'): 1,
     # 3, not 2: the whole-node walk's address is written BARE at three sites — the header's pair
-    # (`sdk.py:37904`/`:37927`), the proximity paragraph's "they are `:37883` and `:37906` now", and
+    # (`sdk.py:37904`/`:37927`), the proximity paragraph's "they are `:37904` and `:37927` now", and
     # §2.5's distance paragraph ("23 lines below at `:37927`", re-derived from the stale `:37751`).
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37927`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37927` |'): 1,
@@ -1225,7 +1225,7 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/search_engine.py", 7201): 7071,
     ("tortoise/search_engine.py", 7577): 7071,
     ("tortoise/search_engine.py", 7579): 7071,
-    ("tortoise/hosted_api.py", 50935): 49851,
+    ("tortoise/hosted_api.py", 51493): 49851,
     ("tortoise/mcp_server.py", 11590): 11466,
 }
 #: The split's three published sentences. Each is matched on the header's emphasis-stripped body, like every
