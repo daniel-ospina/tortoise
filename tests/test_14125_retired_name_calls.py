@@ -598,9 +598,12 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     (parent masks child) but DROPPING is not: `except ModuleNotFoundError: FLAG = False`
     followed by `except (AttributeError, NameError, TypeError, ImportError): raise` left the
     move/rename swallowed by arm 1 while arm 2 credited `ImportError`, which is the ONE name
-    both gates test — green in both over #14125 class 2 verbatim. Measured: 278 of 30,930
-    enumerated arm sequences leaked, all this single root (review of #14287, P1-1). So the
-    credit set is also family-closed against what has already been DROPPED.
+    both gates test — green in both over #14125 class 2 verbatim (review of #14287, P1-1;
+    the row `child dropped, then parent raise` below is the witness). ⛔ NO ARM-SEQUENCE
+    COUNT IS QUOTED HERE ON PURPOSE: an earlier cut said "278 of 30,930" and no committed
+    artifact reproduces either figure, so it was a number to be taken on trust in a comment
+    that itself warns against exactly that. The witness is the row, which is executable. So
+    the credit set is also family-closed against what has already been DROPPED.
     """
     out: set[str] = set()
     caught_earlier: set[str] = set()
@@ -5103,9 +5106,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         )
 
     #: ⛔ `_covered`'s MASKING FILTER itself, which no row could red (review of PR #14287,
-    #: F4). Every other masking row reaches its expectation through `dropped_family`
-    #: (an earlier arm that DROPS), so deleting `reachable = {name for name in names if
-    #: not _masked_by(...)}` left them all green. The ONLY shape whose answer changes is
+    #: F4). Deleting `reachable = {name for name in names if not _masked_by(...)}` leaves
+    #: every OTHER masking row green, but NOT all for one reason, and an earlier cut of this
+    #: comment said they all reached their expectation "through `dropped_family`" — which
+    #: `child raised, then parent raised` falsifies, measured. The five rows that have a
+    #: DROPPING arm are emptied by the FAMILY-CLOSE instead (`dropped_family`); that row has
+    #: NO dropping arm at all, so `dropped_family` is empty and nothing in it is ever a
+    #: candidate for removal either way. The ONLY shape whose ANSWER changes is
     #: parent-then-child with BOTH arms re-raising: nothing is dropped, so `dropped_family`
     #: is empty and the earlier parent arm's containment is the whole guard. It cannot
     #: change a gate verdict (a child spelling satisfies neither `_required_names` nor the
@@ -5168,8 +5175,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         ),
         (
             #: A DROPPED child family blocks a later PARENT arm's credit for it — masking is
-            #: one-way, dropping is not (review of #14287, P1-1: 278 of 30,930 enumerated
-            #: arm sequences leaked through this single root).
+            #: one-way, dropping is not (review of #14287, P1-1).
             "child dropped, then four-name raise",
             "except ModuleNotFoundError:\n    _p = None\nexcept (AttributeError, NameError, "
             "TypeError, ImportError):\n    raise\n",
