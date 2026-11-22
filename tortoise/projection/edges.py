@@ -3154,12 +3154,12 @@ class _EdgeHandlers:
                 f"Unknown predicate: {predicate}"
                 f". This writer mints the STRUCTURAL edges ONTOLOGY §3.2/§3.3 "
                 f"declare and nothing else: {', '.join(sorted(valid_predicates))}"
-                f". For a DOMAIN verb the packs declare (``blocks``, "
-                f"``contains``, ``fixes``, ``addresses`` …) use "
-                f"``create_operator(op_type=..., label=<verb>)`` or "
-                f"``create_direct_edge(op_type, from_id, to_id, label=<verb>)`` "
+                f". For a DOMAIN verb the packs declare (blocks, "
+                f"contains, fixes, addresses …) use "
+                f"create_operator(op_type=..., label=<verb>) or "
+                f"create_direct_edge(op_type, from_id, to_id, label=<verb>) "
                 f"— those record the verb as the Layer-3 label, which is where a "
-                f"pack's ``ontology.relations[].predicate`` lives (#7852)."
+                f"pack's ontology.relations[].predicate lives (#7852)."
             )
         # Resolve endpoints via index-backed labeled lookups (issue #327).
         # Source OR-set: id | eventId | url ; target OR-set: id | eventId —

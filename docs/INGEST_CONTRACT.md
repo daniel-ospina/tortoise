@@ -460,14 +460,24 @@ That judgement is `out["relation_declarations"]`.
   (`bidirectional`/`unidirectional`) and that value is deliberately NOT published
   (round-5 review, F1; corrected by round-4 review, F3, which found the earlier
   wording describing a payload the code no longer emits).
-- **A resubmission that mints nothing reports nothing — and the ABSORB arm is
-  not that case.** The operator route's exact-dedup arm writes no edge, so it
-  carries no fresh judgement — the same reason `ids["connections"]` is stable
-  across a retry. ⛔ The **partial-absorb** arm DOES write: it completes an
-  existing operator's input set with one edge per target it did not already
-  hold, so it judges exactly those newly wired targets and reports them like any
-  other write (round-5 review, P1 — this bullet previously claimed the arm
-  "writes no edge", which was false and left a caller growing an operator
+- **A resubmission that mints nothing is not automatically a resubmission that
+  reports nothing — it depends on whether a DOOR ran, and the ABSORB arm is a
+  third case.** The operator route's exact-dedup arm writes no edge and calls no
+  door, so it carries no fresh judgement — the same reason `ids["connections"]` is
+  stable across a retry. ⛔ The **direct-edge** route is the opposite:
+  `_create_direct_edge` runs on every attempt and judges the pair whether or not
+  the MERGE created anything, so a `reify: false` connection that dedups
+  (`deduped: true`, `created.connections` unchanged) still carries its entry —
+  which is what makes `relation_declarations` STABLE across a retry, the same
+  property the `ids["connections"]` descriptor has. Read the payload as "the pairs
+  this pass JUDGED", never as "the pairs this pass wrote": on the direct route the
+  two differ exactly on a dedup hit (round-8 review, P3 — this bullet previously
+  stated the absolute "a resubmission that mints nothing reports nothing", which
+  the direct route contradicts). ⛔ And the **partial-absorb** arm DOES write: it
+  completes an existing operator's input set with one edge per target it did not
+  already hold, so it judges exactly those newly wired targets and reports them
+  like any other write (round-5 review, P1 — this bullet previously claimed the
+  arm "writes no edge", which was false and left a caller growing an operator
   uninformed about the pair it had just created).
 - **`warnings[].code` keeps the REVERSED and UNDECLARED states DISTINCT.**
   A per-connection warning carries `code: "reversed_relation_pair"` when the
