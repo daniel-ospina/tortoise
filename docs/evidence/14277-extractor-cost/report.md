@@ -56,7 +56,7 @@ rows: 122 (failed: 0)
 
 ### the first measured document — NOT a cold prefix
 
-`docs/retrospectives/2026-08-25-11-06-14.md` (439 tokens). **83.3% of this item's prompt tokens were served from the provider cache** (29,568 hit of 35,512), so this row is where the run resumed, not a cold one — a truly cold prefix was NOT observed (limit 3).
+`docs/retrospectives/2026-08-25-11-06-14.md` (439 tokens). **83.3% of this item's prompt tokens were served from the provider cache** (29,568 hit of 35,512), so this row is not a cold reading — the prefix was already warm when it was measured, whether from a sibling call or from an earlier run (limit 3) — a truly cold prefix was NOT observed.
 
 | stage | prompt | completion | cache hit |
 |---|---|---|---|

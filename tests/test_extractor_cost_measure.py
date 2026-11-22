@@ -368,12 +368,18 @@ def test_the_first_measured_document_is_labelled_a_resume_not_a_cold_prefix():
     """The section used to be titled "the true cold call (first document,
     before any prefix cached)" over a row that is 83% cache HITS.
 
-    The provider's prefix cache outlives a process and this measurement is
-    resumable (`measurements.jsonl` accumulates across runs), so the cold
-    arm's first document is where the FILE resumed, not a cold baseline — the
-    bundle therefore contains no true-cold datum, and a heading that says
-    otherwise presents a measurement artifact as the cold reading (#14277
-    review, finding 2). The heading is the claim, so the heading is pinned.
+    The provider's prefix cache outlives a single call and six workers run
+    concurrently against the same per-stage system prompts, so the cold arm's
+    first document was already 83% cached when it was measured — the bundle
+    therefore contains no true-cold datum, and a heading that says otherwise
+    presents a measurement artifact as the cold reading (#14277 review, finding
+    2). The heading is the claim, so the heading is pinned.
+
+    ⛔ Do NOT explain the warmth as a RESUME. `run_measurement` skips rows
+    already in `_existing_rows(out)`, so a resumed row is never re-measured,
+    and every committed row's `measured_at` falls inside one 23-minute window —
+    nothing in this bundle is a re-entry into an earlier run, and asserting
+    that it is would be a provenance claim the data refutes.
     """
     report = m.report_from_rows(m.load_rows(_EVIDENCE / "measurements.jsonl"))
     fc = report["first_call"]

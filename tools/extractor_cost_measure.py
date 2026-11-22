@@ -1080,17 +1080,23 @@ def render(report: dict) -> str:
         prompts = sum(b["prompt"] for b in fc["stages"].values())
         share = (hits / prompts) if prompts else 0.0
         # ⛔ NOT a cold-prefix reading, and the heading says so. The provider's
-        # prefix cache outlives a process and this measurement is resumable,
-        # so the cold arm's first document already carried a warm prefix from
-        # the earlier runs. Calling it "the true cold call" presented a
-        # measurement artifact as the cold baseline (#14277 review, finding 2).
+        # prefix cache outlives a single call, and six workers run concurrently
+        # against the same per-stage system prompts, so the cold arm's first
+        # document already carried a warm prefix. Calling it "the true cold
+        # call" presented a measurement artifact as the cold baseline (#14277
+        # review, finding 2). ⛔ Do NOT attribute the warmth to a RESUMED run:
+        # `run_measurement` skips rows already in `_existing_rows(out)`, so a
+        # resumed row is never re-measured, and every committed row's
+        # `measured_at` falls inside one 23-minute window — nothing in this
+        # bundle is a re-entry into an earlier run.
         add("### the first measured document — NOT a cold prefix")
         add("")
         add(f"`{fc['id']}` ({fc['item_tokens']:,} tokens). **{share:.1%} of this "
             f"item's prompt tokens were served from the provider cache** "
-            f"({hits:,} hit of {prompts:,}), so this row is where the run "
-            f"resumed, not a cold one — a truly cold prefix was NOT observed "
-            f"(limit 3).")
+            f"({hits:,} hit of {prompts:,}), so this row is not a cold "
+            f"reading — the prefix was already warm when it was measured, "
+            f"whether from a sibling call or from an earlier run (limit 3) — "
+            f"a truly cold prefix was NOT observed.")
         add("")
         add("| stage | prompt | completion | cache hit |")
         add("|---|---|---|---|")

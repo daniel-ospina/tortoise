@@ -85,13 +85,17 @@ measurement.
 3. **The cache arms are a ladder, not two points — and NO TRULY COLD PREFIX
    WAS OBSERVED.** Within an arm the per-stage system prompt is already a
    cached prefix from the second item onward. ⛔ The provider's prefix cache
-   outlives a process and the run is resumable (`measurements.jsonl`
-   accumulates across runs), so even the cold arm's FIRST item was **83.3%
-   cached** (29,568 hit of 35,512 prompt tokens): its row is in the report,
-   labelled for what it is, not called a cold reading. The cold arm's steady
-   state (sys prompt warm, document body cold) is the realistic production
-   figure. The warm arm measures a perfect replay, which is the upper bound of
-   the lever and the value content-hash dedup would collect.
+   outlives a single call, and the six workers run concurrently against the
+   same per-stage system prompts, so even the cold arm's FIRST item was
+   **83.3% cached** (29,568 hit of 35,512 prompt tokens). That row is not a
+   cold reading — the prefix was already warm when it was measured — and the
+   bundle cannot tell whether it was warmed by a sibling call or by an earlier
+   run (every row's `measured_at` falls inside one 23-minute window, so
+   nothing in it is a re-entry). It is labelled for what it is, not called a
+   cold reading. The cold arm's steady state (sys prompt warm, document body
+   cold) is the realistic production figure. The warm arm measures a perfect
+   replay, which is the upper bound of the lever and the value content-hash
+   dedup would collect.
 4. **Rates are `#14275`'s own quoted figures.** The repo's reprice map
    (`tools/longmem_eval/costing.py`) carries different, lower rates; the report
    states both and picks neither, because picking is a pricing decision this
