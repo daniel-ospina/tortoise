@@ -3315,15 +3315,17 @@ def _d5_grep_verdict(ran: subprocess.CompletedProcess, name: str, grep: str = "g
         # states at the top — a third exit code is an ERROR, not a refusal — is applied here to the
         # probe as well, so both runs of this discriminator answer only in `{0, 1, 2}`-terms.
         #
-        # ⛔ AND IT MUST NOT INHERIT STDIN (#14327 review, P2 — MEASURED). This is the only `grep`
-        # `subprocess.run` in this file that feeds no `input=` (compare the count runs above/below
-        # and `_d5_grade_alias_spelling`), while the stubs it is driven with begin `cat >/dev/null`
-        # — so with an inherited fd 0 those stubs block until `timeout=60` and raise
-        # `TimeoutExpired`, which is NOT an `AssertionError`: the cell ERRORS instead of asserting
-        # on any box whose fd 0 is a tty or an open pipe. pytest's default `fd` capture builds
-        # `in_=False`, so a developer running this file by hand hits it; CI's fd 0 is `/dev/null`,
-        # which is why this survived there. MEASURED with the `grep-refuses` stub body at a 2 s
-        # bound: `sleep 4 | <stub> --unix-byte-offsets --version` -> rc 124 (no answer), and the
+        # ⛔ AND IT MUST NOT INHERIT STDIN (#14327 review, P2 — MEASURED; the masking mechanism
+        # corrected in round 2, P3 — MEASURED, it is capture rather than CI's fd 0). The stubs this
+        # arm is driven with begin `cat >/dev/null`, so with a READABLE inherited fd 0 they block
+        # until `timeout=60` and raise `TimeoutExpired`, which is NOT an `AssertionError`: the cell
+        # ERRORS instead of asserting. What masks it is pytest's DEFAULT `fd` capture, which points
+        # fd 0 at `/dev/null` — so the default run cannot see it, and the shape appears only with
+        # `--capture=no` / `-s`, or outside pytest entirely. MEASURED: with the kwarg deleted, the
+        # default-capture run of this cell still PASSES (no hang), and the same run under `-s`
+        # raises `TimeoutExpired` after 65.93 s — which is why the reproduction carries `-s`.
+        # MEASURED with the `grep-refuses` stub body at a 2 s bound: `sleep 4 | <stub>
+        # --unix-byte-offsets --version` -> rc 124 (no answer), and the
         # same run `< /dev/null` -> rc 2, the answer this arm expects.
         recognized = subprocess.run([grep, name, "--version"], capture_output=True, text=True,
                                     stdin=subprocess.DEVNULL, timeout=60)
@@ -5650,13 +5652,16 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     ⛔ THE FAIL-OPEN ARM (#14138). The allowance is what keeps a prescription in the alias spelling
     visible, so a probe that answered `False` whenever it was confused would EMPTY it — a second
     blank-class prescription goes unread and nothing reds. grep exits 2 for an invalid option and
-    0/1 for a real count, so this cell drives EIGHT stub greps: one that COUNTS, one that REFUSES
+    0/1 for a real count, so this cell drives NINE stub greps: one that COUNTS, one that REFUSES
     the alias (and answers `--count` normally), one that answers a THIRD code, one that is BROKEN
     for every spelling, one that answers `--count` with rc 0 and NO OUTPUT, one that PRINTS the
     count but still fails the run (rc 2 with stdout `2`), one that answers a REAL count and
-    exits 1 — grep RAN the spelling and selected nothing, which is an ANSWER, not a refusal — and
+    exits 1 — grep RAN the spelling and selected nothing, which is an ANSWER, not a refusal —
     one that RUNS the alias but fails THOSE invocations while answering `--version`, which is a
-    NON-ANSWER and must not be read as a refusal either.
+    NON-ANSWER and must not be read as a refusal either, and one that refuses the spelling on the
+    count run but answers a THIRD code to `--version`, so the probe's OWN non-answer is graded the
+    way the count run's is (#14327 review round 2, P3 — the count said EIGHT and the enumeration
+    omitted this last arm, i.e. the PR's load-bearing new witness went undescribed).
     The `broken`, `silent` and `counts_then_fails` stubs must raise on the CONTROL run — a bare
     rc 2 is grep's generic error code, a wrapper that swallows stdin prints nothing, and a wrapper
     that counts and then fails is not a refusal either — because reading any of them as "refused"
@@ -5789,12 +5794,16 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
 def test_the_version_probe_answers_without_reading_stdin(monkeypatch):
     """The `--version` probe feeds NOBODY its fd 0, because the stubs it drives `cat` (#14327 review, P2).
 
-    ⛔ MEASURED ON THE SHAPE THIS CLOSES. `_d5_grep_verdict`'s `--version` probe was the only `grep`
-    `subprocess.run` in this file with neither `input=` nor `stdin=` — and the two stubs it is now
-    driven with (`refuses`, `runs_but_fails`) begin `cat >/dev/null`, so an inherited fd 0 made both
-    block until `timeout=60` and raise `TimeoutExpired`, which is NOT an `AssertionError`: the cell
-    ERRORS instead of asserting. Under pytest's default `fd` capture fd 0 is not redirected, so this
-    fires on any box whose fd 0 is a tty or an open pipe — CI's `/dev/null` is why it survived there.
+    ⛔ MEASURED ON THE SHAPE THIS CLOSES. `_d5_grep_verdict`'s `--version` probe fed no `input=` and
+    no `stdin=`, unlike every other COUNT/ALIAS run the discriminator drives (the count runs above
+    and below, and `_d5_grade_alias_spelling`, all pass `input=`). The one other grep run that feeds
+    neither is `_d5_documented_long_options`'s `grep --help` at the alias cell — harmless, because
+    `--help` never reads stdin, and named here rather than left as an unstated exception. The two
+    stubs this probe is driven with (`refuses`, `runs_but_fails`) begin `cat >/dev/null`, so an
+    inherited fd 0 made both block until `timeout=60` and raise `TimeoutExpired`, which is NOT an
+    `AssertionError`: the cell ERRORS instead of asserting. pytest's DEFAULT `fd` capture points
+    fd 0 at `/dev/null`, so the default run cannot expose it; the shape appears with
+    `--capture=no` / `-s`, or outside pytest — which is why the reproduction carries `-s`.
     MEASURED with the `refuses` stub body at a 2 s bound: inherited stdin -> rc 124, `< /dev/null`
     -> rc 2.
 
