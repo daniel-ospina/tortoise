@@ -113,8 +113,14 @@ def _produced_outcomes() -> set[str]:
 
 @pytest.fixture
 def sdk(tmp_path):
-    """A private embedded graph — the pair leg needs a real graph only to read
-    the two endpoints' kinds, and an embedded store serves that."""
+    """A graph of THIS test's namespace — never assume it is private.
+
+    The pair leg needs a real graph only to read the two endpoints' kinds, and an
+    embedded store serves that in a URI-less run. ⛔ But "private" is the false
+    premise that produced four CI failures: a URI-set lane redirects `tmp_path`
+    to the shared container graph (see the teardown note below), so two tests can
+    share one graph. That is why every endpoint is minted through `_uniq`.
+    """
     events = tmp_path / "events"
     events.mkdir()
     s = TortoiseSDK(str(tmp_path / "pairs.db"), namespace=TEST_GRAPH,
