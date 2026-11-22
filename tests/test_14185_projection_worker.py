@@ -1374,6 +1374,63 @@ def test_the_fork_hook_replaces_prometheus_locks_before_the_METRICS_SCRAPE():
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
+def test_the_fork_hook_replaces_the_REGISTRY_lock_the_scrape_takes_FIRST():
+    """⛔ #14222 review round 12, P3: `registry.collect()` takes the REGISTRY's own
+    lock BEFORE it iterates a single collector.
+
+    The repair replaced the locks of the five projection families, which covers
+    every family this module's exposure path touches — but
+    `CollectorRegistry.collect()` opens with `with self._lock:` (a lock that is
+    neither a family's nor a `MutexValue`'s) to copy `_collector_to_names`, so a
+    child that forked while a peer held the REGISTRY lock blocked on the scrape's
+    FIRST statement and never reached a family at all. The family repair was
+    irrelevant to that wedge, which is why the registry lock is now replaced in the
+    same pass.
+
+    Forked probe, in-suite: the parent's peer thread HOLDS `REGISTRY._lock` across
+    the `fork()`; the child must produce the exposition. ⛔ WITH THE REGISTRY
+    REPLACEMENT REMOVED the child blocks in `registry.collect()` until its own alarm
+    fires and reports exit **4**, so this leg reds on that mutant while the
+    family-level leg stays GREEN — that separation is the point of a second leg.
+    """
+    registry = monitoring.REGISTRY
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with registry._lock:
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold, name="registry-lock-holder", daemon=True)
+    holder.start()
+    assert holding.wait(5), "the peer never took the registry lock"
+
+    pid = os.fork()
+    if pid == 0:                                   # ── child ──
+        code = 3
+        try:
+            signal.alarm(10)
+            monitoring.generate_latest()           # `registry.collect()` first
+            code = 0
+        except BaseException:                      # noqa: BLE001, RUF100
+            code = 4
+        finally:
+            os._exit(code)                         # never unwind into pytest
+
+    release.set()
+    holder.join(5)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+        "the forked child could not produce the /metrics exposition: "
+        f"exited={os.WIFEXITED(status)} status="
+        f"{os.WEXITSTATUS(status) if os.WIFEXITED(status) else 'signalled'} — it "
+        "blocked in `registry.collect()` on the registry lock its peer held at "
+        "fork(), before any family lock was touched")
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")   # fork() with peers
 def test_the_fork_reset_does_not_wait_on_the_lock_it_REPLACES(armed):
     """⛔ #14222 review cycle 5, ISSUE 4: decide BEFORE you take the lock.
 

@@ -25,7 +25,7 @@ from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
-from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram, generate_latest
 
 # #9494: the loaded-module snapshot. Imported HERE (not lazily) because the
 # observation must be taken when the process is still young — this module is
@@ -1112,6 +1112,15 @@ def ensure_projection_metrics_fork_safe() -> bool:
     fork reset republishes them from the child's own state (and a read-only child's
     stale values are a declared residual of the worker's, not this function's).
 
+    ⛔ THE DEFAULT REGISTRY'S OWN LOCK IS REPLACED TOO (round-12 review, P3), and it
+    is in this list rather than the call sites' for a structural reason:
+    ``registry.collect()`` opens with ``with self._lock:`` **before** it iterates a
+    single collector, so a child that forked while a peer held the REGISTRY lock
+    blocked on the scrape's FIRST statement — before any family's lock was touched,
+    which makes the family repair irrelevant to that wedge. The registry holds it
+    only to copy a dict, so replacing it loses nothing, and the replacement is the
+    same defensive shape as the families above.
+
     RETURNS whether this call replaced anything (``False`` = already valid here).
     """
     global _PROJECTION_METRICS_PID
@@ -1134,6 +1143,21 @@ def ensure_projection_metrics_fork_safe() -> bool:
                 fresh = threading.Lock()
             holder._lock = fresh
             replaced += 1
+    registry_lock = getattr(REGISTRY, "_lock", None)
+    if registry_lock is not None:
+        # ⛔ THE FALLBACK IS NOT DECORATION (round-12 review, and this lane's own
+        # leg caught it): `type(lock)()` raises `TypeError: cannot create
+        # '_thread.lock' instances` for the raw lock `threading.Lock()` returns, so
+        # the families loop's `threading.Lock()` fallback is what actually builds
+        # every fresh lock. A registry block WITHOUT that fallback swallows the
+        # TypeError and replaces nothing — which is exactly the state the new leg
+        # red-lined before this line existed.
+        try:
+            fresh_registry_lock = type(registry_lock)()
+        except Exception:      # noqa: BLE001, RUF100
+            fresh_registry_lock = threading.Lock()
+        REGISTRY._lock = fresh_registry_lock
+        replaced += 1
     _PROJECTION_METRICS_PID = pid
     return replaced > 0
 
@@ -1164,12 +1188,14 @@ if hasattr(os, "register_at_fork"):        # pragma: no branch - platform
     # today `test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang`
     # simulates the fork by moving the pid, which the hook cannot see.
     #
-    # ⛔ Residual, stated rather than hidden: ONLY the projection families are
-    # repaired. A child forked while a peer held a lock on some OTHER family's
-    # `MutexValue` can still block in `generate_latest`. Making the whole registry
-    # fork-safe means rebuilding every metric, which would fork-bomb the values an
-    # operator is watching; the scoped fix is what keeps the families this module
-    # documents honest, and the hook is what makes it hold on every path.
+    # ⛔ Residual, stated rather than hidden: the REGISTRY lock above and the five
+    # projection families are repaired, which covers every lock this module's own
+    # exposure path takes. What is NOT repaired is any OTHER family's lock — a child
+    # forked while a peer mutated some unrelated metric can still block when
+    # `generate_latest` walks to THAT family (the registry walk itself no longer
+    # blocks, because its lock was replaced). Rebuilding every metric in the
+    # registry would fork-bomb the values an operator is watching, so the scope stays
+    # the families this module documents plus the registry they are read through.
     os.register_at_fork(after_in_child=ensure_projection_metrics_fork_safe)
 
 
