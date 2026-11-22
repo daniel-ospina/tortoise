@@ -677,14 +677,21 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
 #:
 #: ⛔ EVERY MEMBER HERE IS GRADED BY A ROW IN `4j-quinvicesimus`, because a member nothing can
 #: raise is a rule that cannot fail closed. This set originally also carried "skipif", which
-#: NOTHING CAN RAISE: `pytest.skipif` is a decorator, and `pytest.skipif.Exception` does not
-#: exist (measured: `AttributeError`), so no raise of it is spellable and its membership could
-#: never decide anything. Removed rather than left as a plausible-looking rule.
+#: NOTHING CAN RAISE — and not for the reason an earlier cut of this paragraph gave ("`pytest.skipif`
+#: is a decorator"): `pytest.skipif` does not exist AT ALL on this tree (`hasattr(pytest, "skipif")`
+#: is False, measured), because `skipif` is a MARKER and `pytest.mark.skipif` is the decorator, so
+#: there is no `pytest.skipif.Exception` to raise and the membership could never decide anything.
+#: Removed rather than left as a plausible-looking rule.
 #: The retained spellings each have a live raiser, measured on this tree:
 #: `pytest.skip.Exception` / `_pytest.outcomes.skip.Exception` (part "skip"),
 #: `pytest.xfail.Exception` / `_pytest.outcomes.xfail.Exception` (part "xfail"),
-#: `_pytest.outcomes.Skipped` (part "Skipped"), `unittest.SkipTest` (part "SkipTest", raised as
-#: a BARE name, which is what grades `_raises_a_skip`'s `ast.Name` tail).
+#: `_pytest.outcomes.Skipped` (part "Skipped"), `unittest.SkipTest` (part "SkipTest").
+#: ⛔ THE TWO ARMS ARE GRADED SEPARATELY, and the difference is easy to get wrong (an earlier cut
+#: of this paragraph attributed the `ast.Name` tail to `unittest.SkipTest`, which does not reach it):
+#: every `*.<attr>` spelling above answers on the ATTRIBUTE loop, and only a raise whose callee is
+#: a BARE identifier — `raise SkipTest("no engine")` — reaches the `ast.Name` tail at the end of
+#: `_raises_a_skip`. `unittest.SkipTest` therefore grades the "SkipTest" MEMBER, not the tail; the
+#: tail is what the bare-name row of `4j-quinvicesimus` grades.
 _SKIP_RAISE_PARTS = frozenset({"skip", "xfail", "Skipped", "SkipTest"})
 
 
