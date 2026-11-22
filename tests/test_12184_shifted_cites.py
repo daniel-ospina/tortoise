@@ -2096,7 +2096,7 @@ def test_the_subject_binding_range_ends_on_the_docstrings_closing_delimiter() ->
     # would derive a DIFFERENT function's docstring and then report the TARGET's span (measured at
     # `#14269`: that mutant stayed GREEN). And a `next(...)` with no default raises `StopIteration`
     # with no message the moment the anchor is gone, pre-empting this arm's own reporting — the
-    # rule this repo records at `tests/test_7949_capstone_measure.py:8025-8029` (agent-infra#3442
+    # rule this repo records at `tests/test_7949_capstone_measure.py:8041-8046` (agent-infra#3442
     # rule 2). Both are message-producing asserts now, so every mutant is attributable.
     defs = [
         i
