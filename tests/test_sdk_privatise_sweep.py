@@ -252,18 +252,16 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1213 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1185 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
-    line inside the run and it silently shrank to 22 until the #14188 repair; and PR #14258's own
-    two prose commits grew it to 1066 while this sentence still said 985, which was true at
-    `04afeb811d` and 1010 at `main` `70fbd1a27dd5` — review of #14258, P3; this re-cut's
+    line inside the run and it silently shrank to 22 until the #14188 repair; this re-cut's
     restoration of the branch's dropped blocks took the merged run to 1079, a peer's prose to 1084,
     dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
     rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
-    blocks and added the re-measure note — to 1122; and the `#14183` + `#14220` reconciliation
-    (`integration/14183-14220`), which keeps BOTH sides' blocks at each of its two merges and adds
-    the integration tree's own note at each, to 1192 and then 1213), AND THE ARMS GRADE
-    ALL OF IT
+    blocks and added the re-measure note — to 1122; `origin/main`'s own copy of this sentence read
+    1066 at its head (`#14258`'s two prose commits grew it from 985 at `04afeb811d`, 1010 at
+    `main` `70fbd1a27dd5` — review of #14258, P3), and KEEPING BOTH SIDES here, at the second
+    merge with `main`, makes the run 1185), AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
@@ -386,13 +384,6 @@ _ARM_REFSPECS: dict[str, str] = {
     # checks it where it does — on the SOURCE.
     "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
     "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
-    # ⛔ The erratum block's two revs, added by the `#14183` + `#14220` reconciliation. Neither is
-    # an ancestor of `main` (they belong to the `#14012` lane's history), so neither has a REF to
-    # source; both are wanted by FULL SHA, which `git fetch --dry-run origin "+<sha>:refs/pi/…"`
-    # resolved for each (measured from THIS clone, not assumed) — a sha-want fetches one commit's
-    # trees rather than deepening `main`.
-    "8889f1140105": "+8889f1140105677add2c7c4dd60d0c8c5080ea26:refs/pi/8889f1140105",
-    "27cd81d55ebd": "+27cd81d55ebd42948c27051d821df970bbc0ba2f:refs/pi/27cd81d55ebd",
 }
 
 
@@ -1719,15 +1710,6 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # after the squash, and its content never landed.
     "10e51693f166": (11858, "a1552662bf07a10b"),
     "0351fe856942": (11858, "a1552662bf07a10b"),
-    # ⛔ THE ERRATUM BLOCK'S TWO REVS, folded in by the `#14183` + `#14220` reconciliation. They were
-    # published on the `#14183` branch alone, whose copy of `_OWN_PIN_CLAIM_RE` was the NARROW `Its
-    # own pin[…]is` spelling — so the `commits (11835, …)` clause was UNGRADED there — and keeping
-    # that block while taking MAIN's widened regex is what made the claim graded for the first time.
-    # Both pairs are MEASURED, not copied from the prose: `git show
-    # <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'` reads them off the rev itself, and the
-    # premise arm above re-derives every entry wherever the objects exist.
-    "8889f1140105": (11835, "891187f5a4636487"),
-    "27cd81d55ebd": (11843, "6aed5368ffa10513"),
 }
 
 

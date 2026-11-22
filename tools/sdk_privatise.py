@@ -1174,10 +1174,9 @@ SWEEP_NAMES = 66
 #: then drew the wrong conclusion from it. The `(11835, "891187f5a4636487")` PAIR is committed at
 #: `2c0d66e2ec` and that tree does measure it — both true, and both beside the point: the
 #: illustration's claim is that a tree can PIN 11835 and MEASURE 11843, and the tree that does is
-#: the MERGE `27cd81d55ebd` re-pinned the base of — `8889f1140105`, which commits
-#: `(11835, "891187f5a4636487")` (inherited from `main`); `--repin` ON THAT TREE prints
-#: `(11843, "6aed5368ffa10513")`. `27cd81d55ebd` re-pinned it afterwards, and its own pin is
-#: `(11843, "6aed5368ffa10513")`. So the example is a REAL instance of the rule, not "the wrong
+#: the MERGE `8889f1140105` — it commits
+#: the `11835` row/digest pair inherited from `main` (`891187f5a4636487`), and `--repin` ON
+#: THAT TREE prints `11843` / `6aed5368ffa10513`, which its successor `27cd81d55ebd` then re-pinned. So the example is a REAL instance of the rule, not "the wrong
 #: EXAMPLE"; what was wrong was reading its pair against `2c0d66e2ec`, where pin and tree agree.
 #: (Two lanes restored this block concurrently, which is why the rule is stated once, above.)
 #: ⛔ AND THE GROUND RULE FOR EVERY BLOCK IN THIS RUN: all blocks above are KEPT, because each is a
@@ -1223,6 +1222,16 @@ SWEEP_NAMES = 66
 #: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
 #: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
 #: not carried forward.
+#: ⛔ MERGED `origin/main` `10e51693` INTO THIS BRANCH AND KEPT BOTH SIDES' BLOCKS ABOVE — each is a
+#: true measurement of the tree it NAMES, which is the ground rule of this run, so neither side is
+#: dropped to make the conflict go away. THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE, because
+#: that tree is a THIRD tree: the two parents pinned `(11860, "267dce26b4191743")` (this branch) and
+#: `(11858, "a1552662bf07a10b")` (`origin/main` `10e51693`'s own re-cut), and `--repin` ON THIS
+#: RESOLUTION prints `(11864, "2a6400518a87775c")` — FOUR MORE than this branch's parent, none of
+#: which is the branch's own +3 end-proof rows, so the four arrived with `origin/main`'s commits and
+#: an inheritance of either parent's line would have been wrong in both directions. Arithmetic
+#: across the parents is a CROSS-CHECK here, never the evidence. `--check` exits 0 on this
+#: resolution with `typed references still pointing at a public name: 0`.
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, AND THIS TIME THE MEASUREMENT WAS TAKEN ON A BASE THAT
 #: HAD ALREADY MOVED UNDER IT — the one failure a pin cannot see from inside, because the reading
@@ -1279,58 +1288,13 @@ SWEEP_NAMES = 66
 #: NEW row SHAPE — is not what happened here. Re-measured on the MERGED tree with `--repin`,
 #: never carried from the pair quoted above by arithmetic: `(11861, "f0647020531c078c")`, and
 #: `--check` exits 0 on it.
-#: ⛔ MERGED `origin/main` `10e51693` INTO THIS BRANCH AND KEPT BOTH SIDES' BLOCKS ABOVE — each is a
-#: true measurement of the tree it NAMES, which is the ground rule of this run, so neither side is
-#: dropped to make the conflict go away. THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE, because
-#: that tree is a THIRD tree: the two parents pinned `(11860, "267dce26b4191743")` (this branch) and
-#: `(11858, "a1552662bf07a10b")` (`origin/main` `10e51693`'s own re-cut), and `--repin` ON THIS
-#: RESOLUTION prints `(11864, "2a6400518a87775c")` — FOUR MORE than this branch's parent, none of
-#: which is the branch's own +3 end-proof rows, so the four arrived with `origin/main`'s commits and
-#: an inheritance of either parent's line would have been wrong in both directions. Arithmetic
-#: across the parents is a CROSS-CHECK here, never the evidence. `--check` exits 0 on this
-#: resolution with `typed references still pointing at a public name: 0`.
-#:
-#: ⛔ RECONCILED HERE WITH `#14220` — TWO CLEAN, MUTUALLY CONFLICTING PRs ON ONE INTEGRATION
-#: TREE (`integration/14183-14220`), and this is the point where that tree's own pin is taken.
-#: The order was `#14183` first (the smaller, settle-first side: 33 files against 38, and its
-#: prose is the one both sides edit), then `#14220`. Neither side's line is carried: the two
-#: parents pin `(11861, "f0647020531c078c")` (`origin/main` `0467ba329d73`) and
-#: `(11864, "2a6400518a87775c")` (the `#14183` branch tip), and `--repin` ON THIS RESOLUTION
-#: prints `(11864, "2a6400518a87775c")`. Arithmetic across the parents is a CROSS-CHECK here,
-#: never the evidence — the evidence is `--repin`'s output on the tree that lands, and
-#: `--check` exits 0 on it with `typed references still pointing at a public name: 0`.
-#: ⛔ EVERY BLOCK ABOVE IS KEPT, both sides', because each is a true measurement of the tree it
-#: NAMES — including both sides' final lines, which are two different trees and neither of which
-#: is this one.
-#:
-#: ⛔ RE-PINNED → (11861, "f0647020531c078c") BY MEASUREMENT, and the 11858 pair FALSIFIED AT ITS
-#: OWN COMMIT. `surface-guard` was RED on PR #14220 at `b7ce9f086c` with `observed: (11861,
-#: f0647020531c078c)` / `pinned: (11858, a1552662bf07a10b)`, and the pin's own base commit
-#: `10e51693f1` — the ONLY commit that ever set 11858 — measures `(11861, "f0647020531c078c")`
-#: by this same code when its tree is extracted and graded (`git archive 10e51693f1 | tar -x -C
-#: <dir>`; run `sdk_privatise.rename_map(rev=SWEEP_BASE)` + `edits_for` over `py_files()`), so the
-#: delta is not attributable to any tree reachable from it and the paragraph above's claim that
-#: 11858 was re-measured cannot be reproduced. ⛔ THE BRANCH'S OWN CONTRIBUTION IS MEASURED ZERO:
-#: the residue SET at `b7ce9f086c`'s ancestor `d2b5f83a0a` and at PR #14220's head digest
-#: IDENTICALLY (`f0647020531c078c`, 11861 rows, row-for-row diff empty) — `git diff`
-#: `d2b5f83a0a..HEAD` adds no `.query`/`.update`/`.delete` receiver — so this re-pin carries the pin to
-#: a value measured on the tree that ships, and neither introduces nor hides a row here. The pin is
-#: a WHOLE-TREE census and moves with unrelated merges; re-derive it, never inherit it.
-#:
-#: ⛔ AND `#14220` IS NOW MERGED INTO THE SAME INTEGRATION TREE (`integration/14183-14220`, the
-#: second and last half of the reconciliation), so this pin is taken on THAT tree — a THIRD one, not
-#: either parent's. Its own branch pins `(11861, "f0647020531c078c")`; the tree this branch resolved
-#: pins `(11864, "2a6400518a87775c")` — UNCHANGED from the first merge, so `#14220` contributes ZERO
-#: untyped receivers of its own, which is a measurement and not an inheritance. `--check` exits 0 on it with
-#: `typed references still pointing at a public name: 0`. ⛔ BOTH sides' blocks above are KEPT again,
-#: for the reason the note above already states.
-#:
-#: ⛔ RE-MERGED AT `#14220`'s NEW TIP (`6317eaf3eaa1`), which had itself merged `origin/main`
-#: (`10f56067d67f`) while this reconciliation was running — so the tree this pin is taken on is a
-#: FOURTH one, and the pin is `--repin`'s output on it rather than either parent's line. Its tip
-#: pins `(11861, "f0647020531c078c")`; this resolution pins `(11864, "2a6400518a87775c")`, unchanged
-#: across every merge in this branch, because none of the three parent tips adds an untyped
-#: receiver of its own. Arithmetic is a CROSS-CHECK here, never the evidence.
+#: ⛔ RE-MEASURED ON THIS MERGE RESOLUTION: `--repin` on the FULLY RESOLVED tree prints
+#: `(11864, "2a6400518a87775c")` — this branch's parent pair, and three above `origin/main`'s
+#: (`(11861, …)`). ⛔ AND AN EARLIER READING OF THIS SAME RESOLUTION PRINTED 11854, which is
+#: TEN LOW: it was taken while two conflicting test files still carried conflict markers, so
+#: they did not PARSE and their residue shapes were silently uncounted. A census of a tree
+#: that does not parse is a reading of a DIFFERENT tree — the same class this block keeps
+#: naming, one layer out. Re-pin only from a tree whose covering suites are green.
 SWEEP_RESIDUE = (11864, "2a6400518a87775c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
