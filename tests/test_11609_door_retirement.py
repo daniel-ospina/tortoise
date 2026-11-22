@@ -1163,15 +1163,17 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         so it is judged as a NOTE, i.e. rejected unless its block also names the
     #:         replacement (#14237 r8 review P2: an earlier wording said such a call "is
     #:         therefore accepted", which is FALSE for a bare instruction);
-    #:       * an HTML block is treated as OPAQUE: its visible text is EMPTY, so EVERY mention
-    #:         inside one reds — R2 has no text to match, and R1 reds a call form as it does
-    #:         anywhere else (measured, r11 review P2: nothing survives in an HTML block, so an
-    #:         earlier wording that offered ``an R1 call form`` as an escape was wrong). Inside
-    #:         a PARAGRAPH, an inline HTML tag is likewise a BLOCK BOUNDARY. Guessing what a
-    #:         browser displays (a tag strip) was measured to FAIL OPEN three rounds running
-    #:         (#14237 r10 P1, r11 P1) — a `<script>`/`<style>` body, a comment after a `>`, or
-    #:         a `display:none` span satisfied R2 while a reader never sees it. The over-block
-    #:         is the declared price.
+    #:       * ANY block whose inline source contains a `<` is OPAQUE (visible text empty), in
+    #:         the paragraph path, the table-CELL path and the HTML-block path alike: ONE rule,
+    #:         applied where all three read it. So every mention in such a block reds — R2 has
+    #:         no text to match and R1 reds a call form as it does anywhere else (measured: an
+    #:         earlier wording offered ``an R1 call form`` as an escape; nothing survives).
+    #:         Approximating "what a browser displays" from the source failed OPEN FOUR rounds
+    #:         running — the tag strip (r10), an inline `<script>`/`<style>`/`display:none`
+    #:         body (r11), and raw-slice segmentation that re-admitted image alt text, link
+    #:         titles and reference labels (r12) — which is why the rule is opacity, not
+    #:         parsing. The declared price is the over-block: a NOTE that contains any inline
+    #:         tag, or a code span containing `<`, loses its replacement credit.
     #:   (b) * a replacement that appears ONLY where a reader cannot see it — an HTML comment, a
     #:         link destination, a link-reference definition — does NOT count (#14237 r8/r9
     #:         reviews), because the body R2 reads is the block's VISIBLE text;
@@ -1310,7 +1312,19 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 continue
             if token.type != "inline":
                 continue
-            shown = cls._inline_text(token)
+            # ⛔ ONE RULE FOR "VISIBLE", APPLIED IN ONE PLACE (#14237 r10, r11 and r12 reviews).
+            # A block whose inline source contains a `<` is OPAQUE: its visible text is EMPTY.
+            # Deciding which inline container renders is HTML semantics, and every attempt to
+            # approximate it from the source failed OPEN somewhere new — the tag strip (r10),
+            # the inline `<script>`/`<style>`/`display:none` body (r11), and the raw-slice
+            # segmentation (r11) that re-admitted image ALT text, link TITLES and reference
+            # LABELS. Opaque is the fail-CLOSED direction: a mention in such a block cannot be
+            # cleared by anything, so it reds unless the block itself is a bare note with no
+            # markup at all. The over-block (a note containing any inline tag) is declared.
+            # Otherwise `_inline_text` reads the RENDERED text from the token's children, which
+            # already excludes image alt text (an `image` token's own children are not walked),
+            # link destinations and `html_inline`.
+            shown = "" if "<" in token.content else cls._inline_text(token)
             if row_cursor is not None:
                 cell = token.content
                 at = text.find(cell, row_cursor)
@@ -1322,29 +1336,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 found.append((at, end, shown))
                 continue
             if token.map:
-                begin, finish = off(token.map[0]), off(token.map[1])
-                source = text[begin:finish]
-                if "<" in source:
-                    # ⛔ INLINE HTML IS A BLOCK BOUNDARY (#14237 r11 review P1). Keeping one
-                    # block and reading its text children let an inline `<script>`/`<style>`
-                    # body — or a `display:none` span — satisfy R2 for a mention a reader
-                    # does see (measured: all three ACCEPTED). Guessing which inline containers
-                    # render is HTML semantics again, so a TAG SPAN is opaque and everything
-                    # around it is its own block: the successor must be named in the SAME
-                    # segment, which is the fail-closed direction and is declared.
-                    cursor = 0
-                    for tag in re.finditer(r"<[^>]*>", source):
-                        if tag.start() > cursor:
-                            seg = source[cursor:tag.start()]
-                            found.append((begin + cursor, begin + tag.start(),
-                                          re.sub(r"\]\([^)]*\)", " ", seg)))
-                        cursor = tag.end()
-                    if cursor < len(source):
-                        seg = source[cursor:]
-                        found.append((begin + cursor, finish,
-                                      re.sub(r"\]\([^)]*\)", " ", seg)))
-                    continue
-                found.append((begin, finish, shown))
+                found.append((off(token.map[0]), off(token.map[1]), shown))
         return found
 
     @classmethod
@@ -1926,6 +1918,45 @@ class TestEveryReaderNamesTheLiveListingDoor:
         text = '```tortoise_graph_overview\nCall tortoise_list_graphs for names\n```\n'
         assert self.notes_missing_replacement(text), (
             "a fence's language tag was counted as a shown replacement")
+
+    @pytest.mark.parametrize("cell", [
+        '<script>var d = "tortoise_graph_overview";</script>',
+        '<style>/* tortoise_graph_overview */</style>',
+        '<span style="display:none">tortoise_graph_overview</span>',
+        '<span title="tortoise_graph_overview">i</span>',
+    ], ids=["script", "style", "display-none", "attribute"])
+    def test_a_TABLE_CELL_is_opaque_too(self, cell):
+        """#14237 r12 review P1 — the cell path missed the rule the paragraph path had.
+
+        ⛔ MEASURED: the same three strings the inline-HTML row pins as invisible in a
+        PARAGRAPH were ACCEPTED in a table cell, because the cell branch read the token's text
+        children before the HTML question was asked — so a script body, a style body, a
+        `display:none` span or a tag ATTRIBUTE in a cell cleared a dead-end mention. There is
+        now ONE rule ("a `<` in the block's inline source makes it opaque"), applied where both
+        paths read it, so the cell cannot drift from the paragraph again.
+        """
+        text = f"| a | Call tortoise_list_graphs for names {cell} |\n| --- | --- |\n"
+        assert self.notes_missing_replacement(text), (
+            f"a table cell's invisible {cell!r} satisfied R2")
+
+    @pytest.mark.parametrize("hidden", [
+        "![tortoise_graph_overview](x.png) <br>",
+        "[x][tortoise_graph_overview] <br>\n\n[tortoise_graph_overview]: https://x.invalid",
+        '[x](https://a.invalid/(y) "tortoise_graph_overview") <b>x</b>',
+        "`<graph.id>` here. ![tortoise_graph_overview](x.png)",
+    ], ids=["image-alt", "ref-label", "link-title", "fake-tag-in-code-span"])
+    def test_a_markup_hidden_replacement_does_not_count(self, hidden):
+        """#14237 r12 review P1 — a raw-slice segmentation re-admitted hidden text.
+
+        ⛔ MEASURED at the r11 head: once a paragraph contained ANY `<` it was split into RAW
+        source slices with only `](...)` stripped, so an image ALT, a link TITLE and a reference
+        LABEL — none displayed — satisfied R2, and even a `<graph.id>` inside a code span
+        flipped the paragraph onto that path. One rule replaced it: a `<` makes the block
+        OPAQUE, so nothing in it can clear a mention.
+        """
+        text = f"Call tortoise_list_graphs for names. {hidden}\n"
+        assert self.notes_missing_replacement(text), (
+            f"a hidden replacement satisfied R2: {hidden!r}")
 
     def test_a_fenced_mention_cannot_borrow_the_note_above_it(self):
         """The r5 shape: a fence is its OWN block, and that is pinned STRUCTURALLY.
