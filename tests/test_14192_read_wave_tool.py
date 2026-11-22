@@ -13,6 +13,7 @@ arm's ids did not record. Origin: #14192 review (reviewer C).
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -167,3 +168,64 @@ def test_a_tool_only_diff_selects_this_pin():
         "a diff to tools/read_wave_latency.py no longer selects its own pins — the "
         "`CORE_ALSO` entry was dropped or the prefix behaviour changed"
     )
+
+
+def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
+    """The harness must time the read the PRODUCT runs — and name no lever at all.
+
+    `tests/test_rerank_pool.py`'s census refuses an un-opted-out site in `tools/`
+    unless it is on its `intentional_keep` list, and this file is granted on the
+    ground that it is a MIRROR of the shipped door: it measures
+    ``TortoiseSDK._tortoise_fts_query`` — what ``/v1/search`` and the MCP
+    ``tortoise_search`` call — and its verdict is the ORDERED id list, so a
+    rerank-free reader would time a door the product never opens and would hide
+    the very page permutation the rank-identity check exists to catch.
+
+    A grant can only say "this file MAY run the lever", so the mirror is asserted
+    here instead of assumed: the shipped door passes NO read lever (they are the
+    private keyword-only switches, or the terminal-inclusion selector), so neither
+    may these calls — an opt-out added to "stabilise" the measurement would red
+    this pin rather than quietly change what was measured. Parsed from the source
+    so an alias or a wrapper is not invisible: every call site in the file must be
+    one of the two inside ``run()``.
+    """
+    tree = ast.parse(_TOOL.read_text())
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    def _owner(node: ast.AST) -> str:
+        parent = parents.get(id(node))
+        while parent is not None:
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return parent.name
+            parent = parents.get(id(parent))
+        return "<module>"
+
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None))
+             in ("tortoise_fts_query", "_tortoise_fts_query")]
+    # Anti-vacuity: the two reads this pin is about (the warm-up and the per-query
+    # measurement), and they must both live in `run()`.
+    assert len(calls) == 2, (
+        f"tools/read_wave_latency.py holds {len(calls)} read calls — this pin knows "
+        "the warm-up and the per-query one")
+    assert sorted(_owner(c) for c in calls) == ["run", "run"], (
+        f"a read call sits outside `run()`: {[(_owner(c), c.lineno) for c in calls]}")
+    traced = 0
+    for call in calls:
+        named = {k.arg: k.value for k in call.keywords if k.arg is not None}
+        levers = sorted(n for n in named if n.startswith("_") or n == "include_terminal")
+        assert not levers, (
+            f"line {call.lineno} hands {levers} to the read — the shipped door names no "
+            "lever, so this harness must not either: an opt-out here measures a reader "
+            "`/v1/search` does not run, and hides the page permutation the verdict checks")
+        assert not any(k.arg is None for k in call.keywords), (
+            f"line {call.lineno} splats a mapping into the read, so which levers it "
+            "carries is invisible to this pin")
+        if "leg_trace" in named:
+            traced += 1
+    assert traced == 1, (
+        f"{traced} of the two reads collect a `leg_trace` — the per-query read declares "
+        "the legs it measured from that trace, and the warm-up is the one that does not")

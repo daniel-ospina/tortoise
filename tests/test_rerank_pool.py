@@ -1631,6 +1631,21 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # the gate were armed). The only sub-pool read this file issues is the
         # width-1 WARM-UP, whose result is discarded.
         "tools/miss_rate_m5.py": frozenset({"query"}),
+        # ⛔ A MIRROR of the SHIPPED DOOR, not a diagnostic with its own read: this
+        # harness exists to time the real product read (``/v1/search`` and the MCP
+        # ``tortoise_search``, i.e. ``TortoiseSDK._tortoise_fts_query``) and to prove
+        # the fused ranking did not move — its own docstring records that the
+        # ORDERED ids are the verdict, because ``rrf_fusion`` is rank-based, so a
+        # scheduling change that merely permutes a page has changed the product.
+        # Opting it out would measure the latency of a reader the product never runs,
+        # and with the gate armed the re-picked page is exactly what the
+        # rank-identity check exists to catch — the same ground
+        # `window_quality_m2.py` and `tools/miss_rate_m5.py` hold.
+        # ⛔ AND THE MIRROR IS ASSERTED, not declared: the shipped door passes NO
+        # lever flags at all, and `tests/test_14192_read_wave_tool.py::
+        # test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags` reds if a
+        # lever (or an opt-out) is added to either of its two reads.
+        "tools/read_wave_latency.py": frozenset({"run"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
