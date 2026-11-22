@@ -2699,6 +2699,17 @@ def _strip_shell_comments(script: str) -> str:
     outside single quotes. Everything else is returned verbatim, including `#` inside an
     echo (`See #12363`) and `${EXIT_CODE:-…}`.
 
+    ⛔ THE SAME RULE BREAKS DOWN IN A HEREDOC BODY, WHICH IS WHY IT IS LEXED SEPARATELY
+    (review cycle 8b). A heredoc body is COPIED into the command, not parsed as shell: a
+    `#`-leading body line is NOT a comment, and an unquoted delimiter still EXPANDS. So
+    `cat <<EOF` / `# $(printf HIDDEN)` / `EOF` PRINTS `# HIDDEN` while a quote-aware comment
+    lexer drops the body line and reports nothing — the identical silent pass as R1, one
+    region over (measured; pinned by
+    `test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body`). The body is therefore
+    copied VERBATIM up to and including its terminator line (`<<-` matches the terminator
+    with leading tabs stripped, and quoting the delimiter is not modelled — a quoted
+    delimiter's body is inert at runtime but is still scanned).
+
     ⛔ DELIBERATE CONSERVATIVE EDGE, stated so it is not read as completeness: `$(` and a
     backtick inside a SINGLE-quoted span are inert at runtime but still flagged, because
     this filter does not model single-quote spans as removable. That direction is a false
@@ -2708,6 +2719,7 @@ def _strip_shell_comments(script: str) -> str:
     out: list[str] = []
     quote: str | None = None  # None | "'" | '"'
     at_word_start = True
+    heredocs: list[tuple[str, bool]] = []  # (delimiter, terminator ignores leading tabs)
     i = 0
     while i < len(script):
         ch = script[i]
@@ -2739,6 +2751,46 @@ def _strip_shell_comments(script: str) -> str:
             if newline == -1:
                 break
             i = newline  # keep the newline itself; it ends the comment
+            continue
+        # `<<` opens a heredoc (`<<<` is a here-STRING — no body — so it must not match).
+        # Read the operator and its delimiter as CODE, and queue the body for the newline.
+        if ch == "<" and script.startswith("<<", i) and not script.startswith("<<<", i):
+            j = i + 2
+            strip_tabs = script.startswith("-", j)
+            j += 1 if strip_tabs else 0
+            while j < len(script) and script[j] in " \t":
+                j += 1
+            if j < len(script) and script[j] in "'\"":
+                closer = script.find(script[j], j + 1)
+                end = len(script) if closer == -1 else closer + 1
+                delimiter, j = script[j + 1 : end - 1], end
+            else:
+                start = j
+                while j < len(script) and script[j] not in " \t\n;|&)":
+                    j += 2 if script[j] == "\\" else 1
+                delimiter = script[start:j].replace("\\", "")
+            if delimiter:
+                heredocs.append((delimiter, strip_tabs))
+            out.append(script[i:j])
+            at_word_start = False
+            i = j
+            continue
+        # The pending heredoc bodies start AFTER this newline and run to their terminators.
+        # They are copied verbatim — deliberately NOT comment-stripped.
+        if ch == "\n" and heredocs:
+            out.append(ch)
+            i += 1
+            while heredocs:
+                delimiter, strip_tabs = heredocs.pop(0)
+                while i < len(script):
+                    newline = script.find("\n", i)
+                    line = script[i:] if newline == -1 else script[i:newline]
+                    end = len(script) if newline == -1 else newline + 1
+                    out.append(script[i:end])
+                    i = end
+                    if (line.lstrip("\t") if strip_tabs else line).rstrip("\r") == delimiter:
+                        break
+            at_word_start = True
             continue
         out.append(ch)
         if ch in "'\"":
@@ -2894,6 +2946,58 @@ def test_the_prose_pin_catches_a_substitution_on_a_COMMENT_LOOKING_continuation(
     # ⛔ AND THE FIX SEES IT: the continuation is quoted text, so it is scanned, not dropped.
     with pytest.raises(AssertionError, match="command substitution"):
         _assert_no_executable_prose(injected)
+
+
+def test_the_prose_pin_catches_a_substitution_in_a_HEREDOC_body():
+    """A heredoc body is CODE, not comment text — the R1 silent pass one region over.
+
+    `_strip_shell_comments` drops a `#` at a word start OUTSIDE any quote, because that is
+    what the shell does for a COMMENT. A heredoc body is the region where the two diverge:
+    the body is copied into the command, so a `#`-leading body line is not a comment and an
+    unquoted delimiter still expands. Measured before the fix — the substitution RAN while
+    `_executable_prose_lines` returned `[]`, i.e. the pin passed over an executing line:
+
+        $ bash -e -c 'cat <<EOF
+        # $(printf HIDDEN_BY_HEREDOC)
+        EOF'
+        # HIDDEN_BY_HEREDOC          rc 0
+
+    Pinned from both sides: the premise is EXECUTED (not asserted from prose), the body line
+    is what the pin reports, and lexing resumes after the terminator so the comment exemption
+    this file relies on is not traded away for the fix.
+    """
+    script = "cat <<EOF\n# $(printf HIDDEN_BY_HEREDOC)\nEOF\n"
+
+    # PREMISE, executed rather than claimed: the body line really does run.
+    ran = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True)
+    assert ran.returncode == 0, ran.stderr
+    assert "HIDDEN_BY_HEREDOC" in ran.stdout, (
+        "the heredoc body did NOT expand, so this test no longer reproduces the hole it "
+        f"guards: stdout={ran.stdout!r}"
+    )
+
+    # THE FIX: the body line is scanned, and its own text is what the pin reports.
+    offending = _executable_prose_lines(script)
+    assert offending and "$(printf HIDDEN_BY_HEREDOC)" in offending[0], (
+        f"the pin did not see the heredoc body's substitution; it saw {offending!r}"
+    )
+    with pytest.raises(AssertionError, match="command substitution"):
+        _assert_no_executable_prose(script)
+
+    # ⛔ NOT a blanket "everything after `<<` is code": the body ENDS at its terminator, so a
+    # real comment after it is still exempt. This documents backticks in comments, and a fix
+    # that swallowed the rest of the block would red the alarm block it is meant to protect.
+    assert _executable_prose_lines(script + "echo ok  # see `some-tool`\n") == [
+        "# $(printf HIDDEN_BY_HEREDOC)"
+    ], "lexing did not resume normal comment handling after the heredoc terminator"
+
+    # `<<-` terminates on a TAB-indented delimiter; missing it would swallow the rest of the
+    # script as body text and hide every later line from the pin.
+    tabbed = "cat <<-EOF\n\t# $(printf TAB_HEREDOC)\n\tEOF\necho ok  # `tick`\n"
+    assert _executable_prose_lines(tabbed) == ["\t# $(printf TAB_HEREDOC)"], (
+        "a `<<-` heredoc must end on a tab-indented terminator: "
+        f"{_executable_prose_lines(tabbed)!r}"
+    )
 
 
 def test_the_pip_failure_detail_is_the_LAST_stderr_LINE_not_a_list_repr(tmp_path):
