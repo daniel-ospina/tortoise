@@ -416,6 +416,11 @@ _ARM_REFSPECS: dict[str, str] = {
     # sha is subject to the server's GC, so a re-arm can stop resolving; the pairs stay graded.
     "8889f1140105": "+8889f1140105677add2c7c4dd60d0c8c5080ea26:refs/pi/8889f1140105",
     "27cd81d55ebd": "+27cd81d55ebd42948c27051d821df970bbc0ba2f:refs/pi/27cd81d55ebd",
+    # `1b0db0489408` is an ANCESTOR of `origin/main` (measured: `git merge-base --is-ancestor
+    # 1b0db0489408 origin/main` exits 0), so an advertised ref DOES carry it — but the full-sha
+    # want is kept for the same reason as its neighbours above: it does not depend on how deep the
+    # clone checked out, and the FORM is what this map grades.
+    "1b0db0489408": "+1b0db0489408e1e817688f83cef0d7c1ee33be5d:refs/pi/1b0db0489408",
     # `8889f1140105` is a MERGE on a deleted feature branch, so no depth-1 REF arms it — but a sha
     # want does, measured from a clone holding neither object: `git fetch --dry-run --depth=1
     # https://github.com/daniel-ospina/tortoise.git 8889f1140105677add2c7c4dd60d0c8c5080ea26` →
@@ -1932,7 +1937,16 @@ def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
 # prose arms. So the block is graded against `OWN_PINS`, an object-FREE map, and the map is
 # graded against each rev's committed pin by the premise arm that follows it.
 _OWN_PIN_CLAIM_RE = re.compile(
-    r"(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits)[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+    r"(?i:(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits))[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+#: ⛔ THE PHRASE IS `(?i:…)` BECAUSE THE BLOCK WRITES IT IN CAPITALS WHERE IT EMPHASISES (#14282
+#: review cycle 6, P1, measured). This block's own convention is to set the operative verb in caps
+#: — `origin/main` `1b0db0489408` **COMMITS** `(11843, "6aed5368ffa10513")` — and a case-sensitive
+#: pattern silently skipped that clause while BOTH new guards passed: parity saw 8 clauses and 8
+#: claims (the clause was invisible to the loose pattern too, because it carries the same phrase),
+#: and the orphan arm saw no missing key because the rev was never in `OWN_PINS` either. So a wrong
+#: pair typed into that clause would have passed everything. Scoped to the PHRASE, deliberately:
+#: the digest class stays `[0-9a-f]{16}` lowercase, so a capitalised HEX DIGEST is still a RED (the
+#: uppercase-digest mutant measures `8 == 9`).
 #: How many clauses the pattern must match is NOT typed: it is counted off the block below.
 #: ⛔ THE WRAP IS GRADED HERE BECAUSE A RE-WRAP SILENTLY DISARMS THIS ARM (#14282 review cycle 4,
 #: P1, measured). The pattern was `Its own pin[\s#:]+is` — it tolerated a wrap between `pin` and
@@ -1943,7 +1957,7 @@ _OWN_PIN_CLAIM_RE = re.compile(
 #: ANY of those word boundaries, AND the parity assertion below makes a silent drop impossible
 #: however the sentence is wrapped next.
 _OWN_PIN_CLAUSE_TEXT_RE = re.compile(
-    r"(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits)[\s#:]*`\(")
+    r"(?i:(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits))[\s#:]*`\(")
 #: ⛔ THE PARITY PARTNER IS DELIBERATELY LOOSER THAN `_OWN_PIN_CLAIM_RE` IN EXACTLY ONE DIMENSION: it
 #: stops after the OPENING BACKTICKED PAREN, so it does not grade the pair's CONTENTS. It therefore
 #: catches a failure the matcher's own tolerances cannot — a PAIR that was wrapped or malformed (the
@@ -2012,6 +2026,15 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # `891187f5a4636487` is itself a backtick-hex candidate, so a reordering binds the pair to it.
     "10e51693f166": (11858, "a1552662bf07a10b"),
     "0351fe856942": (11858, "a1552662bf07a10b"),
+    # ⛔ THE CAPS-SPELLING CLAUSE, WHICH BOTH GUARDS WERE BLIND TO (#14282 review cycle 6, P1). The
+    # block writes `origin/main` `1b0db0489408` **COMMITS** `(11843, "6aed5368ffa10513")` — in
+    # capitals, its own emphasis convention. Every pattern here keyed on a lowercase `commits`, so
+    # that clause was invisible to the matcher AND to the parity partner (which looks for the same
+    # phrase), and this map lacked the key, so the orphan arm had nothing to report either: three
+    # guards, one silent hole. The phrase is `(?i:…)` now, and this entry is what makes the clause
+    # gradeable. Pair verified the way every other entry is
+    # (`git show 1b0db0489408:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`).
+    "1b0db0489408": (11843, "6aed5368ffa10513"),
     # ⛔ THE RUN-5 ILLUSTRATION'S TWO REVS (review of PR 14183, P2). The `#:` block publishes the
     # merge `8889f1140105` as committing `(11835, "891187f5a4636487")` while its own tree measures
     # `11843`, and `27cd81d55ebd` as re-pinning to that measured pair. Both pairs are true
