@@ -1993,9 +1993,14 @@ filter and does not silence it.) ⛔ THE CLOSED LIST IS THE AUTHORITY, NOT THIS
 SENTENCE: `_retrieval_knobs` in `tortoise/sdk.py`, and a name given here — a
 non-default `threshold`, `min_confidence`, `order_by`, `relationship_filter`,
 `traversal_path`, `pool_size`, `time_aware` — is an EXAMPLE of it, never the
-set. Only THREE parameters sit OUTSIDE it: they change WHICH rows a read
+set. Three arguments sit outside it and they change WHICH rows a read
 returns rather than asking for a filtered read, because the POPULATION applies
-them — `kind`, `entity_type`, `limit` — so none silences the notice. The
+them — `kind`, `entity_type`, `limit` — so none silences the notice. ⛔ AND TWO
+OTHER ARGUMENTS SIT OUTSIDE THE LIST AND DO SILENCE IT: `include_terminal=True`
+and an explicit `ended_scope=`. Each one picks a scope the caller has already
+chosen, so the cue is not seen-and-unapplied and no notice is owed — which is
+why "only three sit outside the list" is false of the guard that actually runs.
+The
 filter and the population are different answers: send the question ALONE to
 get the population or the report. (The
 hosted `GET /v1/search` route below takes only the question and `limit`,

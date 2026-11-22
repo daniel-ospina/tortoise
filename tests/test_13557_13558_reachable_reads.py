@@ -3177,11 +3177,26 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     # `test_a_retrieval_knob_suppresses_the_notice_too` drives `kind=` and reads the
     # sink). Without this carve-out the sentence tells a caller who narrowed by `kind`
     # that they silenced a report that in fact still fires.
-    assert _re.search(r"Only THREE parameters sit OUTSIDE it", _doc_flat), (
+    assert _re.search(
+        r"Three arguments sit outside it and they change WHICH rows a read returns",
+        _doc_flat), (
         "the SERVED description dropped the `kind`/`entity_type`/`limit` carve-out, so "
         "the general \"A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE "
         "REPORT\" reads as covering arguments that do NOT silence it (#14033 "
         "round-16 review, third residual)")
+    # ⛔ AND THE TWO THAT DO SILENCE IT WITHOUT BEING KNOBS (#14140 re-cut review,
+    # P2 — the sentence said "Only THREE parameters sit OUTSIDE it … so none
+    # silences the notice", while `sdk.py`'s guard reads `not ended_scope and not
+    # include_terminal and not [k for k in _retrieval_knobs() if k != "query"]`.
+    # Neither name is a member of `_retrieval_knobs()`, so BOTH sit outside the
+    # list AND silence it: the served text named no silencer at all, and a caller
+    # passing `include_terminal=True` was told a cue report had fired that the
+    # guard had already suppressed).
+    for _silencer in ("include_terminal=True", "ended_scope="):
+        assert _re.search(_re.escape(_silencer), _doc_flat), (
+            f"the SERVED description does not name `{_silencer}`, which sits outside "
+            "`_retrieval_knobs()` and suppresses the notice in the guard — a caller "
+            "then believes the cue report fires when it does not")
     for _name in ("kind", "entity_type", "limit"):
         assert _re.search(rf"`{_name}`", _doc_flat), (
             f"the carve-out no longer names `{_name}`, so a caller who narrowed by it "
