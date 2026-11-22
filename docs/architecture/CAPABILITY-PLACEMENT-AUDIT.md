@@ -109,7 +109,7 @@ exists at `ccb49741b2ec` — and **the thirteen that are NOT comparable are addr
 them this branch's own, the thirteenth moved past the pin by `main`'s `#14169` and re-pointed here — each
 named at the address this document writes for it: `sdk.py:57951`, `:58099` (the `entity_type="event"` FTS call), `:58315`/`:58317` (the session-detail
 read's `proj.g.query(` call and its column list), `sdk.py:58966` (the `:Source` traversal), `:61999`/`:62019` (the `:Meta` read and
-its `_config_reset_state` delegate), `search_engine.py`'s `:7170`/`:7201` (§2.5's operator-expansion leg — the subquery preview and
+its `_config_reset_state` delegate), `search_engine.py`'s `:7170`/`:7201` (§2.1's operator-expansion leg — the subquery preview and
 the `COUNT` that follows it) and `:7577`/`:7579`, `mcp_server.py`'s `:11590` (the `:Tag` traversal §2.5's row
 quotes — the ONE of the thirteen that `main` moved, not this branch), and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid`
 condition) — every one of their written lines sits past the pin's copy of its file

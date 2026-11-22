@@ -1184,7 +1184,7 @@ _PIN_COMMIT = "ccb49741b2ec"
 #: by arithmetic on its own four figures (224 + 10 == 234 and 131 + 7 == 138 both held).
 #:
 #: ⛔ THE SAME CLASS RECURRED ONE ROUND LATER, which is why membership is now DERIVED rather than trusted to
-#: this table: this branch's re-point of §2.5's operator-expansion rows `:6837`/`:6891` → `:7170`/`:7201` moved
+#: this table: this branch's re-point of §2.1's operator-expansion rows `:6837`/`:6891` → `:7170`/`:7201` moved
 #: both pairs past the pin's 7,071-line `search_engine.py` (that code moved under `#14224`/`#14262`) — and NOTHING reddened, for the identical
 #: reason the `#14246` finding names (`test_the_comparability_split_names_every_pair_past_the_pins_eof` buys
 #: its `expected_comparable` from THIS dict, so a table left untouched by the editing commit re-derives the
@@ -1333,6 +1333,27 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
         f"the drift sentence names `of those {drift.group(4)} pairs` while the split counts "
         f"{len(_PIN_EOF_PAIRS)} non-comparable pairs"
     )
+    # (4) the comparable DRIFT NUMERATOR is graded too — and until this it was the only figure in the
+    # sentence no assertion read (review at `bda80ef812`, finding P2): `group(2)`, `group(3)` and
+    # `group(4)` were each asserted while `group(1)` was not, so mutating `128` -> `129` in the document
+    # left this whole file green. The relation is DERIVED, not a second literal: the header publishes the
+    # total drifter count one sentence earlier (`N written spellings → P pairs → C collisions → D drifters
+    # of the M`), and the two halves it writes here must add up to it — comparable drifters plus
+    # non-comparable drifters equals the total, so one half is the total minus the other.
+    _total_sentence = _QUADRUPLE.search(body)
+    assert _total_sentence is not None, (
+        "the header no longer publishes the `N written spellings → P pairs → C collisions → D drifters of "
+        "the M` sentence, so the comparable drift numerator has no total to add up to — re-point "
+        "`_QUADRUPLE` against how it is written now, do not drop this arm"
+    )
+    _total_drifters = int(_total_sentence.group(4))
+    assert int(drift.group(1)) == _total_drifters - drifters_incomparable, (
+        f"the split says {drift.group(1)} of the {comparable_denominator} comparable pairs drift, but the "
+        f"header's own total is {_total_drifters} drifters and it calls {drifters_incomparable} of the "
+        f"non-comparable pairs drifters — so the comparable half must be "
+        f"{_total_drifters - drifters_incomparable}. The two halves add up to the total; re-measure the "
+        "split, do not adjust the total to it."
+    )
     # The pinned `wc -l` values ARE the membership rule, so the header has to state the one for every file a
     # non-comparable pair lives in — the pin-side fact a reader checks, and the entry `#14246` was missing.
     for (path, _line), pin_lines in _PIN_EOF_PAIRS.items():
@@ -1442,7 +1463,7 @@ def test_the_split_membership_is_derived_from_the_pins_own_line_counts() -> None
     table's `wc -l` values against the header's PROSE, which states the same numbers — so both sides of
     that comparison are hand-maintained literals, and a commit that re-points a cite across the boundary
     without editing the table re-derives the stale split from itself and stays green. That is not a
-    hypothesis: this branch's re-point moved §2.5's `search_engine.py:6837`/`:6891` → `:7170`/`:7201`, both
+    hypothesis: this branch's re-point moved §2.1's `search_engine.py:6837`/`:6891` → `:7170`/`:7201`, both
     past the pin's 7,071-line copy, and the whole suite passed — the second occurrence of the class
     `#14246`'s review named ("nothing DERIVED it"). The header's own rule is a `wc -l` on the pin's blob,
     so this arm runs it: every resolved pair whose line exceeds that file's pin-side length must be in the
@@ -2783,3 +2804,41 @@ def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
             f"{path}:{line} is the anchor pinned for {token!r}, which covers {start}-{end} — a range row "
             "whose anchor sits outside its own range resolves nothing the row quotes."
         )
+
+
+def test_a_def_range_pin_ends_on_the_docstring_its_prose_names() -> None:
+    """A `def … — docstring CLOSING` span pins BOTH ends, not only its start (review at `bda80ef812`).
+
+    ⛔ WHY. `_PINS` grades the fragment at a range token's START line, and the sibling arm above only asks
+    that an anchor sit INSIDE the span — so `:7582-7596` could be re-pointed to `:7582-7595` with the whole
+    file green (MEASURED pre-fix: that mutation, applied consistently to the document and both pin tables,
+    left 32 passed). The document's own sentence is what makes the END checkable: it names the span as
+    "the `def` through its docstring's CLOSING triple-quote". The end is therefore DERIVED here from the
+    source's own docstring delimiters rather than re-typed, so an insert that moves the closer reds this
+    arm instead of silently leaving the published `:N` stating a line nothing reads.
+    """
+    checked = 0
+    for _doc, token, src_path, _line, fragment in _PINS:
+        span = re.search(r":(\d+)-(\d+)$", token.rstrip("`"))
+        if span is None or not fragment.startswith("def "):
+            continue
+        start, end = int(span.group(1)), int(span.group(2))
+        src = (REPO / src_path).read_text(encoding="utf-8").splitlines()
+        _open = next((n for n in range(start, end) if '\"\"\"' in src[n - 1]), None)
+        assert _open is not None, (
+            f"{src_path}:{start} is pinned as {token!r} ('{fragment}') but no docstring opens between "
+            f"{start} and {end} — the row states a `def … docstring CLOSING` span, so the span must start "
+            "at a definition that has one."
+        )
+        _closer = next(
+            (n for n in range(_open + 1, end + 2) if src[n - 1].strip() == '\"\"\"'), None)
+        assert _closer == end, (
+            f"{token!r} names the docstring's closing quote as {end}, but {src_path}'s docstring opened "
+            f"at {_open} closes at {_closer} — so the END of the span is not the line the document says "
+            "it is. Re-derive the range from the source, do not adjust the sentence to the number."
+        )
+        checked += 1
+    assert checked, (
+        "no `def`-anchored range pin was graded — the arm is vacuous, which is how the END of "
+        "`:7582-7596` stayed unread."
+    )
