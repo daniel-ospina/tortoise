@@ -1104,13 +1104,13 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: and an instruction glued with one shared a "sentence" and the instruction again
     #: passed on its neighbour's word. It is measured by its own case below, not asserted.
     #:
-    #: **OVERRIDES:** sentence segmenters do NOT split at `;` — PySBD, NLTK Punkt and
-    #: sentencex all treat `.`/`?`/`!` as the terminators, and a 2024 survey of the class
-    #: measures that the tools it evaluated "generally do not split at colons or
-    #: semicolons". This guard splits, deliberately: its unit is not a SENTENCE, it is the
-    #: CLAIM a reader acts on, and `;` is where this document starts a second, independent
-    #: one. Bounding a sentence would re-open the exact hole the assertion exists to
-    #: close, so the narrower unit wins over the standard one here.
+    #: **OVERRIDES:** the industry default for sentence segmentation does NOT treat `;` as a
+    #: terminator — NLTK Punkt decides `sentbreak` on tokens ending in `.`/`?`/`!` only, and a
+    #: 2024 survey of the class measures that the tools it evaluated "generally do not split at
+    #: colons or semicolons". This guard splits, deliberately: its unit is not a SENTENCE, it is
+    #: the CLAIM a reader acts on, and `;` is where this document starts a second, independent
+    #: one. Bounding a sentence would re-open the exact hole the assertion exists to close, so
+    #: the narrower unit wins over the standard one here.
     #:
     #: A terminator followed by CLOSING/MARKUP characters is still a terminator (#14237
     #: round-2 review P2, widened by round 3): `(?=\s)` alone missed the `.` in
@@ -1123,15 +1123,17 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: character that cannot start a sentence, and only up to whitespace, so this can only
     #: ADD boundaries (never cut a sentence a plain terminator already cut in two).
     #:
-    #: ⚠️ DECLARED RESIDUAL, the OVER-BLOCK side (#14237 F2, rung-2 note) — stated, not
-    #: tuned: `[.!?](?=\s)` also cuts at `e.g.`, `v3.5` and `§5.3`, so a sentence carrying
-    #: one of those is read as ending there. That direction is FAIL-CLOSED for this guard:
-    #: a cut can only SHRINK the segment a mention sits in, so it can drop that mention's
-    #: label and red it — it can never hand an unlabelled instruction a neighbour's word.
-    #: Both guarded mentions at this head hold no such token, so nothing reds today
-    #: (`test_an_abbreviation_oversplit_is_the_declared_fail_closed_side` measures the
-    #: direction). Not hand-tuned: an abbreviation/version table is the kind of guess that
-    #: grows a second, subtler hole in exchange for a false red it cannot hide.
+    #: ⚠️ DECLARED RESIDUAL — the over-block side, stated not tuned (#14237 round-1 review,
+    #: finding 2's rung-2 note). `(?=\s)` means an ABBREVIATION whose dot is followed by a
+    #: space (`e.g.`, `i.e.`, `etc.`) still ends a "sentence", so a correct mention in the
+    #: same real sentence can be cut away from its label and the guard REDS on a doc that
+    #: is right. That direction is the one this guard is allowed to be wrong in: a spurious
+    #: boundary can only SHORTEN a segment, and a shorter segment can only MISS a label
+    #: (false red), never INHERIT one from the wrong clause (false green). The numeric forms
+    #: the review named alongside it do NOT split, and that is measured rather than assumed:
+    #: `3.5`, `§5.3` and `v3.5` carry no whitespace after the dot, so the `(?=\s)` lookahead
+    #: already excludes them — the residual is abbreviation-with-space, nothing wider.
+    #: `test_a_spurious_split_can_only_over_block_never_fail_open` pins both halves.
     SENTENCE_BREAK = re.compile(
         r"[.!?\u2026][\"'\u2019\u201d)\]_`*>]*(?=\s)"       # ends a sentence, maybe `.**`
         r"|;[ \t]*"                                       # ends a CLAUSE
@@ -1184,33 +1186,6 @@ class TestEveryReaderNamesTheLiveListingDoor:
             "the INSTRUCTION shares a ±window with the note's 'retired' but not a "
             "sentence — a window-based guard would call this labelled")
 
-    def test_an_abbreviation_oversplit_is_the_declared_fail_closed_side(self):
-        """The DECLARED RESIDUAL, measured rather than promised (#14237 F2 rung-2 note).
-
-        `[.!?](?=\\s)` also cuts at `e.g.` / `v3.5` / `§5.3`. This pins which way that
-        error points: the cut SHRINKS the segment a mention sits in, so a LABELLED
-        mention can lose the word that labels it and REDS. An over-split can never hand
-        an unlabelled instruction a neighbour's word — which is why it is a stated
-        residual (fail-closed, visible as a false red) and not a fail-open hole.
-        """
-        with_abbrev = (
-            "Call `tortoise_list_graphs(graph_id=x)`, e.g. to read one graph — the "
-            "door is retired.\n")
-        without_abbrev = with_abbrev.replace("e.g. ", "")
-        mention = with_abbrev.index("`tortoise_list_graphs")
-        label = with_abbrev.index("`tortoise_list_graphs") + 26
-
-        assert "retire" in self.sentence_around(
-            without_abbrev, label, label + 10).lower(), (
-            "control: this sentence DOES label the mention it carries")
-        assert "retire" not in self.sentence_around(
-            with_abbrev, label, label + 10).lower(), (
-            "the residual, measured: the cut at 'e.g.' puts 'retired' in a separate "
-            "segment, so a CORRECTLY labelled mention reds — fail-closed, and the "
-            "reason this is declared rather than hand-tuned")
-        assert mention < label, (
-            "and the mention is the FIRST half of the cut, so nothing here could have "
-            "borrowed a label from the other side — over-splits only ever remove words")
 
     def test_a_table_cell_is_its_own_sentence(self):
         """A markdown row has no terminator, so cell scoping is what keeps a note
@@ -1271,6 +1246,46 @@ class TestEveryReaderNamesTheLiveListingDoor:
             text, instruction, instruction + 20).lower(), (
             "an ellipsis ended the note and the next instruction still inherited its "
             "'retired'")
+
+    def test_a_spurious_split_can_only_over_block_never_fail_open(self):
+        r"""The declared residual is BOUNDED, and it errs in the safe direction.
+
+        `(?=\s)` splits after an abbreviation (`e.g.`, `i.e.`), which can cut a correct
+        mention away from its own label and RED a right doc — the over-block direction the
+        guard is allowed to be wrong in. What it can never do is hand an instruction a
+        label from the clause beside it. The numeric forms the review grouped with these
+        do not split at all, because their dot is not followed by whitespace; that half is
+        the one that would silently WIDEN the over-block surface, so it is pinned too.
+        """
+        # OVER-BLOCK: the label sits before the abbreviation, the mention after it, so the
+        # mention loses its own sentence's label and the guard reds a correctly-labelled
+        # line. That is the wrong direction to be wrong in, and it is the bounded one.
+        labelled = ("The old door retired forward into `tortoise_graph_overview`, e.g. in "
+                    "wave seven, and `tortoise_list_graphs` is called only by legacy code.")
+        mention = labelled.index("`tortoise_list_graphs`")
+        segment = self.sentence_around(labelled, mention, mention + 20)
+        assert "retired" in labelled.lower(), "the fixture lost its label"
+        assert "retired" not in segment.lower(), (
+            "the abbreviation did not end a \"sentence\" — this residual no longer exists, "
+            "so the declaration above is stale rather than wrong")
+        # NOT fail-open: the same split can never hand an INSTRUCTION its neighbour's
+        # label, because the spurious boundary only ever SHORTENS the segment.
+        instruction_text = ("The old door retired in wave seven, e.g. the listing door, and "
+                            "call `tortoise_list_graphs` for names.")
+        call = instruction_text.index("call `tortoise_list_graphs") + 6
+        assert "retire" not in self.sentence_around(
+            instruction_text, call, call + 20).lower(), (
+            "a spurious boundary let an instruction inherit a label from the clause next "
+            "to it — that is the fail-open direction, and no abbreviation may buy it")
+
+        for numeric in ("3.5", "\u00a75.3", "v3.5"):
+            text = (f"A graph at {numeric} points still lists its graphs via "
+                    "`tortoise_list_graphs`.")
+            mention = text.index("`tortoise_list_graphs`")
+            assert "A graph at" in self.sentence_around(
+                text, mention, mention + 20), (
+                f"{numeric!r} was treated as a terminator: the dot is not followed by "
+                "whitespace, so nothing should have split there")
 
     def test_a_promise_to_retire_is_not_a_label(self):
         """`retires` / `will retire` is a PROMISE, not a label (#14237 r3 review, P2).
