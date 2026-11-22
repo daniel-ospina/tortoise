@@ -662,6 +662,7 @@ def _bind_target_names(target: ast.AST) -> set[str]:
 
 _NAMESPACE_CALLS = frozenset({"globals", "locals", "vars"})
 _SETATTR_SPELLINGS = frozenset({"setattr"})
+_MAPPING_MUTATORS = frozenset({"update", "setdefault"})
 _PARTIAL_SPELLINGS = frozenset({"partial"})
 
 
@@ -680,11 +681,14 @@ def _string_keys_of(node: ast.AST | None,
     while `_str_constants` exists precisely to resolve "a name whose statically possible
     value is a string" for every other consumer in this file.
     """
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return {node.value}
-    if isinstance(node, ast.Name):
-        return set(consts.get(node.id, frozenset()))
-    return set()
+    if node is None:
+        return set()
+    # ⛔ THE KEY IS RESOLVED LIKE ANY OTHER STATIC STRING (#14326 review F3, MEASURED
+    # GREEN): `setattr(_bi, "pr" + "int", getattr)` is a LITERAL-ONLY `+` — the file already
+    # argues (round 9) that nothing is computed at runtime there — so the key goes through
+    # `_possible_strings`, the SAME resolver every other consumer uses, rather than a second
+    # Constant/Name matcher that drifts from it.
+    return set(_possible_strings(node, consts))
 
 
 def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) -> bool:
@@ -698,8 +702,16 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
         return node.attr == "__dict__"
     if isinstance(node, ast.Name):
         return node.id in namespaces
-    return (isinstance(node, ast.Call)
-            and getattr(node.func, "id", None) in _NAMESPACE_CALLS)
+    if not isinstance(node, ast.Call):
+        return False
+    _fn = getattr(node.func, "id", None)
+    if _fn in _NAMESPACE_CALLS:
+        return True
+    # ⛔ `getattr(x, "__dict__")` IS THE MAPPING (#14326 review F1a, MEASURED GREEN): the
+    # resolved spelling of `x.__dict__`, which this predicate already accepts.
+    return bool(_fn == "getattr" and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "__dict__")
 
 
 def _is_setattr_like(value: ast.AST) -> bool:
@@ -754,6 +766,13 @@ def _namespace_rebind_names(node: ast.AST, consts: dict[str, frozenset[str]],
         if callee & (_SETATTR_SPELLINGS | launderers):
             if len(node.args) >= 2:
                 out |= _string_keys_of(node.args[1], consts)
+            elif any(isinstance(arg, ast.Starred) for arg in node.args):
+                # ⛔ A SPLAT'S ARITY AND POSITION ARE NOT STATICALLY KNOWABLE — FAIL CLOSED
+                # (#14326 review F2, MEASURED GREEN): `setattr(*[_bi, "print", getattr])` is
+                # ONE `Starred` arg, so `len(args) >= 2` is False and the arm never fired.
+                # This file's own rule for splats is this polarity (`_name_reaching_operands`).
+                for arg in node.args:
+                    out |= _string_keys_of(arg, consts)
         elif (isinstance(node.func, ast.Call)
                 and _callee_names_of(node.func.func) & _PARTIAL_SPELLINGS
                 and node.func.args
@@ -761,13 +780,25 @@ def _namespace_rebind_names(node: ast.AST, consts: dict[str, frozenset[str]],
             if node.args:
                 out |= _string_keys_of(node.args[0], consts)
         # `<ns>.update({"<name>": …})` and `<ns>.__setitem__("<name>", …)`.
-        elif "update" in callee and _is_namespace_expr(node.func.value, namespaces):
-            if node.args and isinstance(node.args[0], ast.Dict):
-                for key in node.args[0].keys:
-                    out |= _string_keys_of(key, consts)
-        elif ("__setitem__" in callee and node.args
-                and _is_namespace_expr(node.func.value, namespaces)):
-            out |= _string_keys_of(node.args[0], consts)
+        elif callee & _MAPPING_MUTATORS and _is_namespace_expr(node.func.value, namespaces):
+            # ⛔ `setdefault` SETS WHEN THE KEY IS ABSENT (#14326 review F1c, MEASURED GREEN):
+            # it was outside the closed `{update}` list even on a proper namespace receiver —
+            # and unlike `update({…})` it takes the key POSITIONALLY.
+            if node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.Dict):
+                    for key in arg.keys:
+                        out |= _string_keys_of(key, consts)
+                else:
+                    out |= _string_keys_of(arg, consts)
+        elif "__setitem__" in callee and node.args:
+            # ⛔ THE UNBOUND SPELLING PUTS THE NAMESPACE IN arg0 (#14326 review F1b, MEASURED
+            # GREEN): `dict.__setitem__(builtins.__dict__, "print", getattr)` has receiver
+            # `dict`, so a receiver-position test alone never sees the namespace.
+            if _is_namespace_expr(node.func.value, namespaces):
+                out |= _string_keys_of(node.args[0], consts)
+            elif len(node.args) >= 2 and _is_namespace_expr(node.args[0], namespaces):
+                out |= _string_keys_of(node.args[1], consts)
     elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
             and _is_namespace_expr(node.value, namespaces):
         out |= _string_keys_of(node.slice, consts)
@@ -4542,6 +4573,36 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "`__setitem__` spelling of the namespace store": (
             '    globals().__setitem__("print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ AND THE RESOLVED RECEIVER, THE UNBOUND SPELLING, THE SPLAT AND THE `+` KEY
+        # (#14326 review cycle 3 at `1a1e6a47`, EACH MEASURED GREEN through the predicate
+        # and at runtime — the rebind is what made the reach execute): each is the same
+        # root one resolution further out, and each is closed by the resolver rather than by
+        # another constant-match.
+        "`getattr(x, \"__dict__\")` RECEIVER": (
+            '    import builtins\n'
+            '    getattr(builtins, "__dict__")["print"] = getattr\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "UNBOUND `dict.__setitem__(<ns>, …)`": (
+            '    import builtins\n'
+            '    dict.__setitem__(builtins.__dict__, "print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "`setdefault` on the NAMESPACE (positional key)": (
+            '    import builtins\n'
+            '    builtins.__dict__.setdefault("print", getattr)\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "SPLATTED `setattr(*[…])` argument list": (
+            '    import builtins as _bi\n'
+            '    setattr(*[_bi, "print", getattr])\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "literal-only `+` KEY in a `setattr`": (
+            '    import builtins as _bi\n'
+            '    setattr(_bi, "pr" + "int", getattr)\n'
             '    print(sdk, "_tortoise_fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         # ⛔ THE REMAINING BIND FORMS AND DELIVERY SPELLINGS (#14326 round 7, EACH MEASURED
