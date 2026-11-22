@@ -98,7 +98,9 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
    ``if``, and it was the one this paragraph omitted; it recurses into the same
    residual — an inline fold can overtake an earlier queued position — so a reader
    told "three families" would not have looked for it. The PR's own test counts
-   the same five declines by gate text:
+   the same seven conditions as five GATE STATEMENTS (the fused one covers three
+   of the seven, and the test's five INCLUDE the two switches, so its set is not
+   this paragraph's five structural conditions):
    ``tests/test_14185_projection_worker.py::test_a_queue_fault_folds_inline_instead_of_breaking_the_write``.
    ⛔ The four correctness arms are not two, which this paragraph used to imply — a
    reader who took ``tenant is None`` + ``record_sink`` as the whole family would
@@ -166,10 +168,15 @@ before it could queue, e.g. ``thread.start()`` under thread exhaustion).
 
 WHAT MAKES A WRITE DEFERRABLE AT ALL
 ====================================
-Seven conditions, all of them the caller's (`live_write`), because only the
-chokepoint holds the facts. FIVE are structural — the four that are CORRECTNESS
-rather than configuration, plus an UNIMPORTABLE loop — and the other two are the
-SWITCHES (the loop flag and the record's own DSN):
+SEVEN conditions, all of them the caller's (`live_write`), because only the
+chokepoint holds the facts. ⛔ SEVEN, not six (review cycle 10, P1): FIVE are
+STRUCTURAL and the other TWO are the SWITCHES. Of the five structural, FOUR are
+CORRECTNESS rather than configuration, and the fifth is the UNIMPORTABLE loop —
+the ``except`` around ``from . import projection_worker`` — which folds inline on
+every write at any depth and moves **no counter**, so it is invisible in
+``inline_fallbacks{}``. The four correctness arms follow; the unimportable loop
+is stated at the end of this section rather than numbered with them, and the two
+switches are stated after that.
 
 * ⛔ **A record-only write is never deferred** (``journal_skipped``, #14002).
   On a cut-over graph there is no journal line — the record's own commit IS the
@@ -397,10 +404,10 @@ def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
         # carrying the seam's healthy token with no readable `applied` was counted
         # as a LOSS. `live_write` has no such divergence, and the reason is NOT
         # that it reads the token independently of `applied`: its gate at
-        # live_write.py:745 is `not getattr(outcome, "applied", False) and not
+        # live_write.py:748 is `not getattr(outcome, "applied", False) and not
         # _is_durable_decline(outcome)`, so a `False` DEFAULT makes an ABSENT
         # attribute FALSY, that write enters the falsy branch, and the decline is
-        # consulted there (`:746`). With `applied=True` the decline is never read at
+        # consulted there (`:749`). With `applied=True` the decline is never read at
         # all — which is exactly why this arm had to look before it answered.
         # Latent today (both doors answer `RecordWrite | None`), and fail-closed in
         # the wrong direction — a false loss count, never a lost row.
@@ -1291,7 +1298,9 @@ def oldest_pending_seconds() -> float:
 
 
 def wait_for_drain(timeout: float | None = None) -> bool:
-    """⛔ Tests and shutdown only — see :meth:`ProjectionWorker.wait_for_drain`."""
+    """⛔ Tests, shutdown, and a BOUNDED operator tool — see
+    :meth:`ProjectionWorker.wait_for_drain` for the same rule and the third caller
+    (``tools/claim_dense_leg_13732.py``)."""
     return worker().wait_for_drain(timeout)
 
 
