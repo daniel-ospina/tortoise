@@ -524,3 +524,31 @@ def test_a_warm_only_render_does_not_name_one_arm_twice():
         f"one arm was measured, so its share is named once; got {share_lines[0]}")
     assert share_lines[0].count("%") == 1, (
         f"the same measurement must not be quoted twice; got {share_lines[0]}")
+
+
+def test_a_cold_only_render_invents_no_warm_arm():
+    """#14295 review, P3: the mirror of the warm-only case. `--arms` is free-form,
+    and `cost['warm_hit_ratio']` falls back to 0.0 when no warm row exists — so a
+    `--arms cold` bundle rendered `**50.0%** (cold arm) · 0.0% (warm arm)` and a
+    lever paragraph about "the warm arm's measured 0.0% hit share": a measurement
+    attributed to an arm the bundle never ran. Both clauses are now guarded on the
+    warm arm being present, which is also what the warm-only guard's rationale
+    ("only where there are two arms to compare") promises.
+    """
+    rows = [_row(arm="cold") for _ in range(3)]
+    report = m.report_from_rows(rows)
+    assert list(report["arms"]) == ["cold"]
+    assert "warm" not in report.get("costs", {}).get("arm", "")
+
+    text = m.report_markdown(report)
+    assert "0.0% (warm arm)" not in text, (
+        "a cold-only bundle has no warm arm; quoting its 0.0 fallback as a "
+        "measured share attributes a measurement to an arm that never ran")
+    assert "(warm arm)" not in text
+    share_lines = [ln for ln in text.splitlines()
+                   if "Measured cache-hit share" in ln]
+    assert len(share_lines) == 1, share_lines
+    assert "(cold arm)" in share_lines[0]
+    # the two-arm bundle is unaffected: guarded, not deleted
+    both = m.report_from_rows(rows + [_row(arm="warm") for _ in range(3)])
+    assert "(warm arm)" in m.report_markdown(both)

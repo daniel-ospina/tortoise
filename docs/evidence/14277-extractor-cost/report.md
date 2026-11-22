@@ -80,7 +80,7 @@ Tokens per median document: **64,799** measured vs **15,859** modelled (#14275's
 
 Peak rates (`#14275`'s own: \$0.30/M in, \$1.20/M out, \$0.006/M cache hit). Off-peak in the JSON.
 
-**How big the cache lever actually is.** A PERFECT replay (every prompt token a cache hit, which no real workload achieves) prices the median document at \$0.0199 — 42% below the fully-cold \$0.0341, and the warm arm's measured 64.6% hit share reaches 0.0249. The lever is real but SECOND-ORDER, because it only discounts the input side and the output side is now the larger half of the bill.
+**How big the cache lever actually is.** A PERFECT replay (every prompt token a cache hit, which no real workload achieves) prices the median document at \$0.0199 — 42% below the fully-cold \$0.0341. The warm arm's measured 64.6% hit share reaches 0.0249. The lever is real but SECOND-ORDER, because it only discounts the input side and the output side is now the larger half of the bill.
 
 | item | modelled \$ (off-peak) | measured-cold \$ | measured-cached \$ |
 |---|---|---|---|

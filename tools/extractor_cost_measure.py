@@ -1187,13 +1187,16 @@ def render_cost(report: dict) -> str:
     add = lines.append
     add("## Cost: modelled vs measured")
     add("")
-    # ⛔ The second clause is the WARM arm's figure, so it is printed only when the
-    # rows were NOT read from the warm arm: on a `--arms warm` bundle the two
-    # figures are the same measurement, and printing it twice read as if two arms
-    # had been measured (`75.0% (warm arm) · 75.0% (warm arm)`).
+    # ⛔ Both warm-arm figures are guarded on the warm arm being PRESENT, because
+    # `--arms` is free-form (`--arms cold` is supported, and `--arms warm` was
+    # fixed above): `warm_hit_ratio` falls back to 0.0 when no warm row exists, so
+    # an unguarded clause would report "0.0% (warm arm)" — a measurement attributed
+    # to an arm the bundle never ran, which is the same defect one level down from
+    # the double-naming this block was given a guard for.
     row_arm = cost.get("arm", "cold")
+    has_warm = "warm" in (report.get("arms") or {})
     share = f"**{cost['hit_ratio']:.1%}** ({row_arm} arm)"
-    if row_arm != "warm":
+    if has_warm and row_arm != "warm":
         share += f" · {cost['warm_hit_ratio']:.1%} (warm arm)"
     add(f"Measured cache-hit share of prompt tokens: "
         f"{share}. "
@@ -1226,11 +1229,15 @@ def render_cost(report: dict) -> str:
         f"prompt token a cache hit, which no real workload achieves) prices "
         f"the median document at ${ceiling:.4f} — "
         f"{(1 - ceiling / cold) * 100:.0f}% below the fully-cold "
-        f"${cold:.4f}, and the warm arm's measured "
-        f"{cost['warm_hit_ratio']:.1%} hit share reaches "
-        f"{_item_cost(median_row['measured_in'], median_row['measured_out'], cost['warm_hit_ratio'], ISSUE_RATES['peak']):.4f}. "
-        f"The lever is real but SECOND-ORDER, because it only discounts the "
-        f"input side and the output side is now the larger half of the bill.")
+        f"${cold:.4f}."
+        # the warm-arm half needs a warm arm to point at; on a cold-only bundle
+        # `warm_hit_ratio` is the 0.0 fallback, not a reading.
+        + (f" The warm arm's measured {cost['warm_hit_ratio']:.1%} hit share "
+           f"reaches "
+           f"{_item_cost(median_row['measured_in'], median_row['measured_out'], cost['warm_hit_ratio'], ISSUE_RATES['peak']):.4f}."
+           if has_warm else "")
+        + " The lever is real but SECOND-ORDER, because it only discounts the "
+        "input side and the output side is now the larger half of the bill.")
     add("")
     add("| item | modelled $ (off-peak) | measured-cold $ | measured-cached $ |")
     add("|---|---|---|---|")
