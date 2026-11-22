@@ -1375,6 +1375,22 @@ def test_the_check_REFUSES_a_baseline_that_carries_a_key_TWICE(tmp_path, monkeyp
     out = capsys.readouterr().out
     assert "::error::" in out and "duplicate key" in out, out
 
+    # ⛔ THE SECOND DRIVER GRADES THE SAME ARTIFACT (#14033 review P2). tools/surface-guard.py
+    # reads the frozen baseline itself — it is PINNED TO THE BASE REF and therefore keeps its
+    # OWN copy of the refusal rather than importing tools/surface_manifest.py (a module it
+    # imported would be PR-authored; see test_the_pinned_gate_imports_only_its_allow_listed_
+    # modules). That duplication is what let the first fix land on one copy only: the guard
+    # still read with `yaml.safe_load` and printed "The manifest CLAIMS an approval" off
+    # whichever `approval_status:` line came LAST in a file that carries the key twice. The
+    # net that keeps the copies in step is this arm — drive BOTH drivers at the same artifact.
+    guard = _run("tools/surface-guard.py", "--manifest", str(path))
+    assert guard.returncode == 1, (
+        "tools/surface-guard.py read a baseline carrying a duplicate top-level key and "
+        "reported on one of them — it then grades a value the artifact contradicts "
+        f"(rc={guard.returncode}, out={guard.stdout!r}, err={guard.stderr!r})")
+    assert "duplicate key" in guard.stdout, (
+        f"the guard refused, but not for the duplicate key: {guard.stdout!r}")
+
     # the repair path still opens it, or nobody can fix it
     doc = sm._read_manifest(check_provenance=False)
     assert doc.get("cut_at_commit"), doc.get("cut_at_commit")
@@ -8767,3 +8783,35 @@ def test_the_shrink_refusal_PRINTS_the_route(checker, tmp_path, monkeypatch):
     )
     assert "archive/MANIFEST.json" in out, f"the freeze route must be named: {out}"
     assert "RETIRED_SDK_METHODS" in out, f"the sdk map route must be named: {out}"
+
+
+def test_the_ROUTE_BLOCK_is_absent_when_nothing_was_DROPPED(checker, tmp_path, monkeypatch):
+    """Round-18 review, P3: the block keyed on the shrink ARM, not on a DROPPED row.
+
+    `_shrink_problems` also carries the tail's `--allow-surface-shrink … waives nothing` rows,
+    which are not dropped rows: measured, a stale waiver printed "Account for the row(s) above
+    reported as dropped by exactly one of:" followed by three archive/map routes, none of which
+    can clear a waiver whose remedy is to drop the flag — sending the operator to write an entry
+    for a row that never left.
+
+    Mutation: `if _needs_a_record:` -> `if _shrink_problems:` -> RED (the header appears).
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    problem = (
+        "`--allow-surface-shrink tortoise_ghost` waives nothing: the base ref's baseline still "
+        "carries it"
+    )
+    monkeypatch.setattr(
+        sm, "shrink_report", lambda *a, **k: ([problem], "origin/main (merge base abc)", True)
+    )
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="origin/main")
+
+    assert rc == 1, out
+    assert problem in out, out
+    assert "reported as dropped by exactly one of" not in out, (
+        "a stale waiver is not a dropped row: its remedy is to drop the flag, and no archive "
+        f"route can clear it: {out}"
+    )
