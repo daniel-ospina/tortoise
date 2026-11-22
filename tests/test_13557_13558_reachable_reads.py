@@ -483,6 +483,7 @@ def test_a_state_question_selects_its_population(query, population, shape):
 #: commitment with "due this week" dropped. Each one is pinned here so that
 #: regression cannot come back quietly.
 NOT_SELECTED = [
+    "have any users reported the vendor hasn’t been deprecated",
     # ⛔ THE REFUSAL-SIDE SLOT'S ROWS (round-3 review, P1, measured): members of the guard's own
     # adverb class (`just`, `only`, and the multi-word `no longer`/`to date`) were not in the
     # lookaheads' slot, so they blinded both and these ROUTED the whole ended population with the
@@ -992,6 +993,11 @@ NOT_SELECTED = [
 #: `^which\s+[^?]{0,60}?<ENDING>`) reds instead of quietly annotating 16 content
 #: rows — which is what the round-6 review measured the first version doing.
 NOTICE_ONLY = [
+    # ⛔ THE ONE ROW WHOSE `cue` IS NOT A PREFIX OF THE CALLER'S OWN STRING (round-29
+    # review, P3, measured): `cue` is the matched text AFTER normalisation, so this
+    # row's cue spells the apostrophe as ASCII. Without it the pin's apostrophe loop
+    # was exercised by zero inputs — reverting the normalisation left it green.
+    "have any users reported the vendor hasn’t been deprecated",
     # an appended CONSTRAINT the population cannot apply
     "have any claims been retracted in Q3",
     "have any of our bookings been cancelled by the venue",
@@ -3885,3 +3891,41 @@ def test_a_bare_noun_clitic_reports_instead_of_being_served_by_the_copula_shape(
     for query in ("is the export archived", "is all the data archived",
                   "is it archived", "is the export no longer archived"):
         assert detect_state_question(query).population == "ended", query
+
+
+def test_a_possessive_subject_is_not_read_as_an_auxiliary_clitic():
+    """The copula subject may carry a POSSESSIVE `'s`; only `'s been` is the auxiliary.
+
+    ⛔ THE EXCLUSION THAT CLOSED THE BARE-NOUN CLITIC BROKE THIS CLASS (round-29 review,
+    P1, measured): applying `(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)` to EVERY subject word
+    refused `is the board's decision archived`, `is Q3's report archived` and
+    `is O'Brien's claim retracted` — 800 of 800 rows in a 4-head x 2-det x 20-subject x
+    5-participle population — and did it SILENTLY (`signal=None`, so not even a notice).
+    Those are the multi-word subjects the slot was widened to admit. The exclusion is now
+    anchored on the following `been`, which is what distinguishes the auxiliary reading
+    (`billing's been deprecated`) from a possessive (`the board's decision is archived`).
+    """
+    from tortoise.state_intent import detect_state_question
+
+    for query in (
+        "is the board's decision archived",
+        "is the vendor’s team archived",
+        "is Q3's report archived",
+        "is O'Brien's claim retracted",
+        "is last year's report superseded",
+        "is the team's plan archived",
+        "is the search index's owner retracted",
+    ):
+        got = detect_state_question(query)
+        assert got.population == "ended", (
+            f"{query!r} is NOT served ({got.population!r}, shape={got.shape!r}) — its "
+            f"subject carries a POSSESSIVE, not an auxiliary clitic, and refusing it "
+            f"silently is the same defect this file pins in the other direction")
+    # …and the auxiliary reading stays refused, so this pin cannot be satisfied by
+    # widening the slot back.
+    for query in (
+        "have any users reported billing's been deprecated",
+        "have any users said v3's been deprecated",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None and got.signal, query

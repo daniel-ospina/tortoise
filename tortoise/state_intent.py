@@ -1178,8 +1178,20 @@ _COPULA_SUBJECT = (
     # consults it. Excluding the clitic here lets the row fall through to
     # `_ENDING_SIGNALS`, where the clitic alternative refuses it and reports.
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
-    r"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)"
-    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)"
+    # ⛔ ONLY THE AUXILIARY READING, NOT EVERY POSSESSIVE (round-29 review, P1, measured):
+    # the first cut of this exclusion was `(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b)` at EVERY
+    # subject word, which refused the whole POSSESSIVE-SUBJECT class — `is the board's
+    # decision archived`, `is Q3's report archived`, `is O'Brien's claim retracted` — 800
+    # of 800 rows in a 4-head × 2-det × 20-subject × 5-participle population, SILENTLY
+    # (`signal=None`, so not even a notice). Those are exactly the multi-word subjects this
+    # slot was widened to admit, and `HEAD~1` served them. The clitic that matters is the
+    # one on the FINAL word that IS the auxiliary (`billing's been`), so the exclusion is
+    # anchored on the following `been`.
+    # ⚠️ A "guard only the last word" rewrite (`(?:word\s+){0,3}(?!clitic)word`) LEAKS: the
+    # regex backtracks the clitic word into the leading group and `is billing's been
+    # deprecated` routes again (48 of 96 measured). The `\s+been` form is what closes it.
+    r"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\s+been\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\s+been\b)"
     r"[a-z0-9][a-z0-9'’._/-]*){0,3}"
     r"|(?:i|you|he|she|it|we|they|there)(?![-/])"
     r")"
@@ -1663,7 +1675,6 @@ class StateQuestion:
     is shown `hasn't`. That is deliberate — the cue is what the PATTERN saw — but a
     caller comparing it against their own string will not find it, so the contract
     says so here rather than leaving the difference to be discovered.
-    population instead of asserting one.
     """
     population: str | None = None
     shape: str | None = None
