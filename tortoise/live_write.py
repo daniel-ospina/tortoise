@@ -565,7 +565,19 @@ def write(event: Mapping[str, Any], *,
     callable. The SDK door is the example of the CORRECT shape: it passes
     ``tenant=self._record_tenant`` and ``project=self._write_record_projection``,
     which reads the same attribute, so one request's decision and its allocation
-    cannot be about two graphs. Removing that argument (the conclusion #13345
+    agree. ⛔ AND THE SCOPE OF THAT AGREEMENT IS THE SDK'S LIFETIME, NOT THIS CODE
+    (#14222 review, finding 2): the attribute is read TWICE, so a shared SDK
+    re-bound between the two reads — which a deferred fold widens from one call
+    frame to the queue's lag — would decide on one graph and allocate on another.
+    It cannot happen today because a per-request SDK is the rule
+    (``hosted_api._make_sdk`` builds a fresh one and caches nothing, and
+    `_bind_record_tenant`'s docstring names the cached-SDK shape that would break
+    it), and the residual is stated where the deferral is decided
+    (``projection_worker.PendingProjection``), together with why the pair is not
+    threaded through the ``project`` protocol every door and every double
+    implements. Closing it properly is #14002's two-read window, not a wording
+    change here; this paragraph exists so the next reader does not read the
+    agreement as a property of the seam. Removing that argument (the conclusion #13345
     P3-2 originally reached — it was true then) makes the decision resolve the
     AMBIENT tenant while the seam allocates for the door's own pair: the append is
     skipped for graph A while the row is allocated on graph B — #9192's
