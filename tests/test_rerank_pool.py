@@ -1420,20 +1420,35 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
     _rerank_candidates=False); return _o`` was skipped as "all opted out" while
     ``opaque`` was True).
 
-    ⛔ KNOWN OVER-BLOCK, deliberately accepted. The carrier set is FILE-scoped and
-    keyed on bare names, so binding a mention to a name that the file already uses
-    for something else widens what the walk attributes: `for q in (SEAM,): pass`
-    where `run` already loops `for q in queries:` makes every `q`-rooted call look
-    like a read (round-10 review, P3). That reds a CORRECT tree, which the
-    fail-open/fail-closed doctrine rates B rather than A — the opposite defect
-    from the one this resolver exists to catch, and the direction the gate must
-    err in. It is not repaired by a name-rebinding heuristic here: a file-scoped
-    walk cannot tell the two `q`s apart without a scope model, and a cheap guess
-    would re-open the fail-open. The count row does NOT detect this: the
-    colliding name makes unrelated calls look ATTRIBUTED, so `resolved` is
-    overstated and `unresolved` is `0` — the red shows as a plain call-site
-    count mismatch with no named cause, not as an unresolved-mention count
-    (round-12 review, P3).
+    ⛔ KNOWN RESIDUAL: FILE-SCOPED BARE-NAME CARRIERS, and it cuts BOTH WAYS. The
+    carrier set is keyed on bare names, so a name the file already uses for
+    something else is attributed to the mention — and the count assertion is a
+    TOTAL (`len(reads) == 2`), not a set, so the residual produces two different
+    defects:
+
+    (a) OVER-ATTRIBUTION blocks a correct tree. `for q in (SEAM,): pass` where
+        `run` already loops `for q in queries:` makes every `q`-rooted call look
+        like a read (round-10 review, P3). The doctrine rates a false block B and
+        this is the direction the gate must err in, so it is accepted.
+    (b) ⛔ THE SAME COLLISION ALSO FAILS OPEN, and that is NOT covered: an
+        unattributed same-named call elsewhere in the file can STAND IN for a read
+        that has gone missing. Measured: replace the warm-up with a dead
+        `_search = SEAM` and add a module-level
+        `def _first(_search, q): return _search(query=q, limit=1)` — one real read
+        remains inside `run`, the grant's recorded reason ("TWO") is false, and the
+        count still reads `2`, so the arm is GREEN. `unresolved` is `0` throughout;
+        the count row cannot see this at all.
+
+    It is not repaired here: a file-scoped walk cannot tell the two `q`s apart
+    without a scope model, and a cheap guess would re-open the (b) class that
+    `_seam_opaque_values` exists to close. ⛔ AND THE RED'S ROUTE DEPENDS ON WHERE
+    THE COLLIDING NAME LANDS — in a modelled binder it is `resolved` (plain
+    call-site count mismatch, no named cause; round-12 review, P3), in an escape
+    shape it makes the mention `opaque` and the red becomes the unresolved row with
+    a message that names an escape (measured: `_m` collides with the tool's own
+    comprehension target at `:336`, `unresolved == 1`). Neither route names the
+    collision, so the message is a DIRECTION, not a diagnosis: find the spurious
+    mention by walking `_seam_read_calls`, not by reading it.
     """
     carriers: set = set()
     parent = {id(child): node for node in ast.walk(tree)
