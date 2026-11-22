@@ -544,8 +544,16 @@ _EXISTENCE_HEAD = (
     # `has somebody reported the vendor has been deprecated` came back `population=None,
     # signal=None` while `has someone reported …` reported `existence_unguarded`. Measured
     # across 26 predications x 14 subjects x 19 auxiliaries.
-    r"\b(?:has|have|had)\s+(?:any|anything|anyone|someone|somebody|something|"
-    r"everything|everyone|everybody|nobody|nothing)\b"
+    # ⛔ `anybody` AND THE TWO-WORD `no one` WERE STILL MISSING (round-14 review, P2, measured):
+    # the round-13 widening added five spellings and left out `anybody`, the exact synonym of
+    # the `anyone`/`somebody` pair it had just made report — so
+    # `has anybody reported the vendor has been deprecated` was SILENT while
+    # `has somebody reported …` reported. `no one` / `no-one` were silent for the same reason:
+    # the gap consumes ONE token, so a two-word quantifier matched neither half. The same
+    # defect the list was widened for, one spelling over — which is the argument for widening
+    # by CLASS here rather than by the row that was just measured.
+    r"\b(?:has|have|had)\s+(?:any|anything|anyone|anybody|someone|somebody|something|"
+    r"everything|everyone|everybody|nobody|nothing|no[\s-]one)\b"
 )
 _EXISTENCE_ADVERB = (
     r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet|"

@@ -1111,6 +1111,14 @@ NOT_SELECTED = [
     "is the export being, in fact, archived",
     "hasn't the billing's been deprecated",
     "has somebody reported the vendor has been deprecated",
+    # …and the two spellings the round-13 widening of `_EXISTENCE_HEAD` still left out
+    # (round-14 review, P2, measured): `anybody` is the exact synonym of the
+    # `anyone`/`somebody` pair that widening had just made report, and the gap consumes ONE
+    # token so a two-word `no one` matched neither half. All three were SILENT at
+    # `cb30c1a6b6` while `has somebody reported …` reported `existence_unguarded`.
+    "has anybody reported the vendor has been deprecated",
+    "has no one reported the vendor has been deprecated",
+    "has no-one reported the vendor has been deprecated",
     # ⛔ THE ZERO-WORD SUBJECT OF A NON-FINITE COPULA (round-3 review, P3, measured): the
     # refusal lookahead allows `{0,6}` words before `_NONFINITE_COPULA` (`to be|to get|to
     # become|being|getting`, plus up to two modifiers — NOT the three-spelling literal an
@@ -1348,6 +1356,14 @@ NOTICE_ONLY = [
     "is the export being, in fact, archived",
     "hasn't the billing's been deprecated",
     "has somebody reported the vendor has been deprecated",
+    # …and the two spellings the round-13 widening of `_EXISTENCE_HEAD` still left out
+    # (round-14 review, P2, measured): `anybody` is the exact synonym of the
+    # `anyone`/`somebody` pair that widening had just made report, and the gap consumes ONE
+    # token so a two-word `no one` matched neither half. All three were SILENT at
+    # `cb30c1a6b6` while `has somebody reported …` reported `existence_unguarded`.
+    "has anybody reported the vendor has been deprecated",
+    "has no one reported the vendor has been deprecated",
+    "has no-one reported the vendor has been deprecated",
     # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
     # that is now stated and machine-checked (review at `5b82bcdf03`, P2, measured) ──
     # The PREPOSITIONS `_BLOCKED_TAIL` names are REPORTED on this shape (see the
