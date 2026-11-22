@@ -2436,8 +2436,12 @@ def _unarmed_from_rows(
     over the REAL TREE's rows — never one over a SYNTHETIC row population — which is why a
     shape BOTH gates passed could have no red row anywhere (review of PR #14287, F1's second
     half; corrected in cycle 2, whose review measured the two real-tree gate witnesses on
-    `origin/main`'s copy, `_unarmed_probe_blocks()` at :2239 and
-    `_probe_blocks_with_an_uncovered_import_seam()` at :2269).
+    `origin/main`'s copy — the CALL SITES of `_unarmed_probe_blocks()` and
+    `_probe_blocks_with_an_uncovered_import_seam()` inside the two gate tests, named as
+    symbols on purpose: this file records the class where a bare line citation drifts at the
+    next insertion and then points at unrelated code, and review cycle 10 reported these two
+    numbers as stale when the calls were exactly there, which is the same false positive from
+    the other side).
     """
     return tuple(
         (rel, lineno)
