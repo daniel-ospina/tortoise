@@ -536,7 +536,20 @@ _BLOCKED_TAIL = (
 #: span, still routes. That row is pinned in the routing table, so a blanket widening
 #: of this guard reds instead of quietly costing it.
 
-_EXISTENCE_HEAD = (
+_EXISTENCE_AUX = (
+    # ⛔ THE CONTRACTED HEADS ARE ABSENT HERE ON PURPOSE, AND THAT IS A SHAPE-SIDE DECISION
+    # (round-33 review, P2, measured): this constant is the head of `_EXISTENCE_PREFIX`, i.e. it
+    # ROUTES, so widening it to `hasn't|haven't|hadn't` would move the routing surface. The
+    # round-32 review measured what the omission costs on the NOTICE side — 30 of 30
+    # `{hasn't,haven't,hadn't} x {anyone,anybody,someone,nobody,no one} x {reported the vendor has
+    # been deprecated, reported it has been archived}` rows were SILENT while every uncontracted
+    # twin reported `existence_unguarded` — so the contraction is admitted by the NOTICE arm
+    # (`_EXISTENCE_HEAD_NOTICE` below), not by this one. Two homes for one class is what this
+    # module keeps paying for, so the quantifier list is shared: `_EXISTENCE_QUANTIFIERS` is used
+    # by both heads and neither re-types it.
+    r"\b(?:has|have|had)"
+)
+_EXISTENCE_QUANTIFIERS = (
     # ⛔ AND THE QUANTIFIER LIST IS AN ENUMERATION, WHICH IS THE POINT (review, P3, measured —
     # pre-existing, and fixed here because this block is being rewritten and the class is
     # otherwise treated as closed): `somebody`, `everyone`, `everybody`, `nobody` and `nothing`
@@ -552,7 +565,7 @@ _EXISTENCE_HEAD = (
     # the gap consumes ONE token, so a two-word quantifier matched neither half. The same
     # defect the list was widened for, one spelling over — which is the argument for widening
     # by CLASS here rather than by the row that was just measured.
-    r"\b(?:has|have|had)\s+(?:any|anything|anyone|anybody|someone|somebody|something|"
+    r"(?:any|anything|anyone|anybody|someone|somebody|something|"
     # ⛔ AND "TWO SPELLINGS" IS A CLASS, NOT A COUNT (round-14 follow-up review, P3,
     # measured): the arm shipped as `no[\s-]one`, i.e. U+0020 and U+002D only, so the
     # typographic hyphens a customer's keyboard or a pasted document actually produce were
@@ -564,6 +577,11 @@ _EXISTENCE_HEAD = (
     # typographic block, or none at all (the `noone` misspelling).
     r"everything|everyone|everybody|nobody|nothing|no[\s\u2010-\u2014-]*one)\b"
 )
+_EXISTENCE_HEAD = _EXISTENCE_AUX + r"\s+" + _EXISTENCE_QUANTIFIERS
+#: The NOTICE arm's head: the same two classes with the contracted auxiliary admitted. It is a
+#: SIGNAL-side head, so it cannot route; keeping it derived means the quantifier list still has
+#: one home (the round-32 review measured 30 of 30 contracted frames SILENT without it).
+_EXISTENCE_HEAD_NOTICE = _EXISTENCE_AUX + r"(?:n['\u2019]t)?\s+" + _EXISTENCE_QUANTIFIERS
 _EXISTENCE_ADVERB = (
     r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet|"
     # ⛔ THE `-ly` CLASS IS NOT THE ADVERB CLASS (round-24 review, P1, measured):
@@ -1647,7 +1665,7 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # computed when NO shape applies), so widening the slot here cannot create a route.
     ("existence_unguarded", re.compile(
         "(?:"
-        + _EXISTENCE_HEAD
+        + _EXISTENCE_HEAD_NOTICE
         + rf"[^?]{{0,60}}?\bbeen\s+{_EXISTENCE_REFUSAL_ADVERB_SLOT}(?:{_ENDING_WORDS})\b"
         # ⛔ A CLITIC SUBJECT IS ALSO A CUE THAT MUST REPORT (round-8 review, P2, measured):
         # the copula/perfect shape refuses a clitic-bearing subject on purpose, and the

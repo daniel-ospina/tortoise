@@ -1151,6 +1151,17 @@ NOT_SELECTED = [
     "isn't the export been archived",
     "aren't the claims been archived",
     "wasn't the report been archived",
+    # …the CONTRACTED QUANTIFIER FRAME (round-33 review, P2, measured): the notice arm's head was
+    # `_EXISTENCE_HEAD`, whose auxiliary is uncontracted — and it is uncontracted ON PURPOSE
+    # (that constant is the head of `_EXISTENCE_PREFIX`, i.e. it ROUTES). So the 30-row class
+    # `{hasn't,haven't,hadn't} x {anyone,anybody,someone,nobody,no one} x {reported the vendor has
+    # been deprecated, reported it has been archived}` was SILENT while every uncontracted twin
+    # reported. The notice arm now takes a head that admits the contraction, derived from the
+    # SAME `_EXISTENCE_AUX` + `_EXISTENCE_QUANTIFIERS`, so the quantifier list still has one home
+    # and the shape-side pattern is byte-identical (asserted, not hoped).
+    "hasn't anyone reported the vendor has been deprecated",
+    "haven't any users said it has been archived",
+    "hadn't anybody reported it has been archived",
 ]
 
 
@@ -1444,6 +1455,11 @@ NOTICE_ONLY = [
     "isn't the export been archived",
     "aren't the claims been archived",
     "wasn't the report been archived",
+    # …and the CONTRACTED QUANTIFIER FRAME rows (round-33 review, P2 — see the block beside
+    # their `NOT_SELECTED` pins).
+    "hasn't anyone reported the vendor has been deprecated",
+    "haven't any users said it has been archived",
+    "hadn't anybody reported it has been archived",
 ]
 
 assert set(NOTICE_ONLY) <= set(NOT_SELECTED), (
@@ -1453,6 +1469,33 @@ assert set(NOTICE_ONLY) <= set(NOT_SELECTED), (
     f"(`signal is None`), so promoting one into `NOT_SELECTED` would have reddened the "
     f"suite on a correct answer. Difference: {sorted(set(NOTICE_ONLY) - set(NOT_SELECTED))}"
 )
+
+
+def test_the_contraction_is_admitted_by_the_NOTICE_head_and_never_by_the_SHAPE_head():
+    """One class, two heads, and the split is the claim (round-33 review, P2).
+
+    `_EXISTENCE_HEAD` is the head of `_EXISTENCE_PREFIX`, i.e. it ROUTES, so admitting a
+    contracted auxiliary there would move the routing surface — which is why the contracted
+    quantifier frame (`hasn't anyone reported the vendor has been deprecated`) was silent for
+    all 30 measured rows instead of being fixed by widening that constant. The NOTICE arm takes
+    `_EXISTENCE_HEAD_NOTICE`, the same two classes with `n['\u2019]t` admitted; it is a signal
+    head and cannot route.
+
+    This pins the SPLIT itself, because the behaviour rows below can only show that the notice
+    fires — not that the shape-side pattern stayed as it was.
+    """
+    import re
+
+    from tortoise.state_intent import _EXISTENCE_HEAD, _EXISTENCE_HEAD_NOTICE
+
+    contracted = "hasn't anyone reported the vendor has been deprecated"
+    assert not re.search(_EXISTENCE_HEAD, contracted), (
+        "the SHAPE head now admits a contracted auxiliary — that is a routing change, not a "
+        "notice widening; it needs its own measurement against `which_modified_noun` "
+        "preemption and its own pins")
+    assert re.search(_EXISTENCE_HEAD_NOTICE, contracted), (
+        "the NOTICE head no longer admits the contracted auxiliary — the 30-row silent class "
+        "this exists for is open again")
 
 
 @pytest.mark.parametrize("query", NOT_SELECTED)
