@@ -1121,8 +1121,13 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: reader holding a sentence-segmentation library's documentation finds the ruling instead
     #: of an accident.
     #:
-    #: ⛔ AND A SECOND, NARROWER DEPARTURE: A TABLE **CELL** IS TREATED AS A BLOCK. The GFM
-    #: tables extension makes the table a leaf block and states that block-level elements
+    #: ⛔ A SECOND, NARROWER DEPARTURE, and it carries the marker for the same reason.
+    #: **OVERRIDES:** the GFM spec's leaf block for a table is the ROW, and its own block model
+    #: forbids block-level elements inside a cell — this guard's unit is the CELL. A ROW is what
+    #: `blocks()` emitted first, and it is unmarked prose no longer: measured, the ROW re-entered
+    #: the round-2 fail-open (see below), so a reader holding the GFM spec who "tidies" the unit
+    #: back to the spec's ROW would silently restore it. A TABLE **CELL** IS TREATED AS A BLOCK.
+    #: The GFM tables extension makes the table a leaf block and states that block-level elements
     #: cannot occur inside a cell (read from the GFM spec's block model), so a spec-faithful
     #: unit would be the ROW — and a ROW is what `blocks()` emitted first. Measured: with the
     #: row as the unit, a migration note in one cell cleared a BARE instruction in the next
