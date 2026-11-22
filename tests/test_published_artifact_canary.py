@@ -2873,7 +2873,7 @@ def _strip_shell_comments(script: str) -> str:
     quote: str | None = None  # None | "'" | '"'
     at_word_start = True
     arith = 0  # >0 while inside a `$(( … ))`; an integer count of the OPEN paren depth
-    brace = 0  # >0 while inside an unquoted `${ … }` parameter expansion
+    brace_quotes: list[str | None] = []  # one entry per open `${ … }`: its inner quote state
     cmd_arith = 0  # >0 while inside an unquoted `(( … ))` arithmetic COMMAND
     heredocs: list[tuple[str, bool]] = []  # (delimiter, terminator ignores leading tabs)
     i = 0
@@ -2921,16 +2921,37 @@ def _strip_shell_comments(script: str) -> str:
         #   $ bash -e -c '(( x = 1 # $(touch /tmp/lexran) ))'     → arithmetic error, marker CREATED
         #
         # …and `_executable_prose_lines` returned `[]` for all three. The expansion is read as
-        # a WORD here (verbatim, so a `$( )` inside it is still scanned), and the comment test
-        # below is suppressed while any of these nestings is open.
+        # a WORD here — each `${` level carrying its OWN inner quote state — so a `$( )` inside
+        # it is still scanned, and the comment test below is suppressed while it is open.
         if ch == "$" and script.startswith("${", i):
             out.append("${")
-            brace, at_word_start, i = brace + 1, False, i + 2
+            brace_quotes.append(None)
+            at_word_start, i = False, i + 2
             continue
-        if brace:
+        # ⛔ A QUOTED `}` DOES NOT CLOSE THE EXPANSION (review cycle 18, P1, MEASURED — a
+        # fail-open introduced by the FIRST version of this branch, which kept a bare depth
+        # counter). bash quotes the inside of `${x:-word}`, so `"` opens a quote there and a
+        # `}` between the quotes is literal — the expansion is still open and a substitution
+        # after it RUNS. A depth counter closed on that `}`, dropped to top level, and the real
+        # code was then stripped as a comment: `[]` over an executing line, again. Measured,
+        # marker created by the substitution:
+        #
+        #   $ bash -e -c 'echo ${x:-"} # $(touch /tmp/M1)"}'   → '} #', M1 CREATED
+        #   $ bash -e -c 'echo ${x:-"} # `touch /tmp/M2`"}'    → '} #', M2 CREATED
+        #
+        # …both `[]` before this branch learned the level's quote state. The state is pushed on
+        # `${` and popped only on an UNQUOTED `}`; a backslash pair is consumed by the escape
+        # branch above, so an escaped `}` cannot pop it either.
+        if brace_quotes:
             out.append(ch)
-            if ch == "}":
-                brace -= 1
+            inner = brace_quotes[-1]
+            if inner:
+                if ch == inner:
+                    brace_quotes[-1] = None
+            elif ch in "'\"":
+                brace_quotes[-1] = ch
+            elif ch == "}":
+                brace_quotes.pop()
             i += 1
             continue
         if (
@@ -3539,6 +3560,11 @@ def test_the_prose_pin_does_not_read_a_hash_inside_an_EXPANSION_as_a_comment(tmp
         "nested expansion": "echo ${a:-${b:-x # $(touch %s)}}",
         "backtick in expansion": "echo ${y:-a # `touch %s`}",
         "arithmetic command": "(( x = 1 # $(touch %s) ))",
+        # ⛔ A QUOTED `}` DOES NOT CLOSE THE EXPANSION (review cycle 18, P1, MEASURED). The first
+        # version of the `${` branch counted depth and closed on that `}`, which bash does NOT
+        # treat as the closer — so the rest of the line was stripped as a comment and the
+        # substitution ran unpinned. This case is what regress-guards the per-level quote state.
+        "quoted brace in expansion": 'echo ${y:-"} # $(touch %s)"}',
     }
     for label, template in scripts.items():
         marker = tmp_path / f"marker-{label.replace(' ', '-')}"
