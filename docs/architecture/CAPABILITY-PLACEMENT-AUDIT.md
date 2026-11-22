@@ -121,11 +121,11 @@ named at the address this document writes for it: `sdk.py:58119`, `:58120` (the 
 read's `proj.g.query(` call and its column list), `sdk.py:58987` (the `:Source` traversal), `:62020`/`:62040` (the `:Meta` read and
 its `_config_reset_state` delegate), `search_engine.py`'s `:7170`/`:7201` (the operator-expansion
 leg's preview and its COUNT) and `:7577`/`:7579`, `mcp_server.py`'s `:11590` (the `:Tag` traversal §2.5's row
-quotes — the ONE of the thirteen that `main` moved, not this branch), and `hosted_api.py`'s `:51493` (the `s.actor_user_id = $uid`
+quotes — the ONE of the thirteen that `main` moved, not this branch), and `hosted_api.py`'s `:51506` (the `s.actor_user_id = $uid`
 condition) — every one of their written lines sits past the pin's copy of its file
 (`git show ccb49741b2ec:tortoise/sdk.py | wc -l` -> `56415`; `…/search_engine.py` -> `7071`; `…/mcp_server.py` -> `11466`; `…/hosted_api.py` -> `49851`), so all thirteen
 were re-derived at a head the pin predates. So the drift is **123 of the 215 comparable, plus eight of those thirteen pairs** (the
-five that do not exist at `main` either are `sdk.py`'s `:62020`/`:62040`, `hosted_api.py`'s `:51493` and
+five that do not exist at `main` either are `sdk.py`'s `:62020`/`:62040`, `hosted_api.py`'s `:51506` and
 `search_engine.py`'s `:7577`/`:7579`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **What "drift" counts, stated so the numerator is checkable rather than agreed with**: a pair DRIFTS when the address the document writes does not hold the fragment it quotes for it at the head being compared — the pin's line and the head's line are the WITNESS, not the rule. Where the two disagree the pair counts, and the rule is why: comparing the two lines would call "unchanged" a citation that opens the wrong line merely because both heads left that line as they found it. ⛔ **No pair's VERDICT is taken from this sentence (#14269 review, P1 — MEASURED at three heads)**: whether a pair drifts is a property of the head being compared, and this page states the rule, never the membership. The measurement the rule would give for one pair, taken at each head the reader might actually use: at the pin `ccb49741b2ec` and at `main` `ae54df166d`, `record_reconcile.py` line 533 holds `MATCH (n:{label}) RETURN properties(n)` and line 582 is BLANK — so the fragment does NOT sit where the document writes it, and the pair DRIFTS at the head the numerator is stated against; at this branch's head line 533 is `wanted = tuple(NODE_TABLES) if labels is None else tuple(labels)` and the fragment has moved to 582. The same pair, two opposite verdicts, because the head changed — which is exactly why the verdict is not typed here as a fact about "the" citation. **That is the whole point: whether a pair drifts is a property of the head being compared, the two lines are read there, and no page can state the membership.** The commands are the ones this file already uses: `git show <head>:<path> | sed -n '<N>p'` for each side of the pair, compared text for text. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
@@ -611,7 +611,7 @@ MIXED set, and precision here is the point — it is not one claim:
   the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:25253`) and in the
   session-detail endpoint's OWN point lookup, which has no `CONTAINS` walk either
   (`hosted_api.py:25611-25630`, `s.turn_count, s.actor_user_id, s.harness,` at `:25614`), a filter
-  in the **LIST** endpoint's own conditions (`hosted_api.py:51493`, `s.actor_user_id = $uid`) and carries its own `:Session` index
+  in the **LIST** endpoint's own conditions (`hosted_api.py:51506`, `s.actor_user_id = $uid`) and carries its own `:Session` index
   (`projection/__init__.py:21185`) — sibling, filter, index, and no walk, so `none` like its neighbours;
   `entity_links_attempted` is a sibling column of the entity-link walk
   (`session_schema.py:936-937`); `value_nodes_created` and `value_nodes_held` are BOTH named by the commit-path

@@ -1236,7 +1236,7 @@ _PIN_EOF_PAIRS: dict[tuple[str, int], int] = {
     ("tortoise/search_engine.py", 7201): 7071,
     ("tortoise/search_engine.py", 7577): 7071,
     ("tortoise/search_engine.py", 7579): 7071,
-    ("tortoise/hosted_api.py", 51493): 49851,
+    ("tortoise/hosted_api.py", 51506): 49851,
     ("tortoise/mcp_server.py", 11590): 11466,
 }
 #: The FRAGMENT each non-comparable pair is written to name, at the line the document writes for it.
@@ -1271,7 +1271,7 @@ _NONCOMPARABLE_FRAGMENTS: dict[tuple[str, int], str] = {
     ("tortoise/search_engine.py", 7577): "MATCH (n:Point)-[r:aboutSubject]->(:Subject) RETURN count(r) AS c",
     ("tortoise/search_engine.py", 7579): "MATCH (m:Event)-[r2:aboutSubject]->(:Subject) RETURN count(r2) AS c",
     ("tortoise/mcp_server.py", 11590): "MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)",
-    ("tortoise/hosted_api.py", 51493): "s.actor_user_id = $uid",
+    ("tortoise/hosted_api.py", 51506): "s.actor_user_id = $uid",
 }
 #: The split's three published sentences. Each is matched on the header's emphasis-stripped body, like every
 #: other figure pattern in this file, and each group is graded as a NUMBER (`_as_int`), so an edition may
