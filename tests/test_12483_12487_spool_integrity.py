@@ -350,6 +350,11 @@ def test_the_two_legs_no_longer_disagree_DESTRUCTIVELY_on_non_utf8(tmp_path):
     stated in the PR (retention is the only disposition that cannot lose the
     bytes from this seat), but the DESTRUCTION is gone.
 
+    ⚠️ WHAT THIS EXERCISES: the PYTHON leg only. The Pi leg's half of the pair —
+    including its `unreadableBytes` term in `spoolSaturated` — is pinned in
+    `tortoise/pi-hooks/tortoise-capture.test.ts` (#14347 review F5), so the two
+    legs' claims are covered on the leg that owns each of them.
+
     MUTATION THAT REDS THIS: put non-UTF-8 back on the corrupt path -> the meta
     and its log are gone.
     """
