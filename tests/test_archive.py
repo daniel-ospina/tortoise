@@ -4643,3 +4643,53 @@ def test_a_chain_BEYOND_the_HOP_BOUND_names_the_BOUND_not_a_working_tree_diff(tr
     assert "the working tree differs from every commit" not in message, (
         f"a clean tree must not be told it differs from every commit: {message}"
     )
+
+
+def test_a_chain_past_the_BOUND_at_the_ANCHOR_is_not_reported_as_a_MISSING_commit(
+    tree: Path,
+) -> None:
+    """Round-25 follow-up, P3 — the CHECK side of the same datum the writer row above measures.
+
+    `_blob_following_links` answers `_UNREADABLE` (`None`) for TWO different facts: "this path is
+    not in that commit" and "the link chain exceeds `_LINK_HOPS`". `_anchor_violations` read the
+    second as the first and printed "the anchor names a commit that never contained this code" —
+    a FALSE stated fact, measured on a commit that does hold the code through a 9-link chain
+    (`_git_blob` at the carrier is not `None`; the walk is what stopped). Round 25 fixed this same
+    conflation in `block_holds` and `anchor_sha`; this was the third reader of the one datum. The
+    verdict is RED either way (fail closed), so nothing in the suite could see it — only the
+    sentence an operator acts on was wrong, and following it means re-anchoring a correct record.
+
+    Mutation: read `_UNREADABLE` as absence again (drop the `_git_blob`-presence branch) -> RED
+    here, on both the "names the bound" and the "does not claim absence" assertions.
+    """
+    _chain(tree, arch._LINK_HOPS + 1)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tree, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    # premises: the carrier IS at that commit, and the walk is what answers None
+    assert arch._git_blob(tree, sha, "tortoise/x/__init__.py") is not None, (
+        "the fixture must hold the carrier at the anchor, or this measures the absence branch"
+    )
+    assert arch._blob_following_links(tree, sha, "tortoise/x/__init__.py") is arch._UNREADABLE, (
+        "the fixture must exceed the bound, or it measures a resolvable chain"
+    )
+    body = (tree / "tortoise" / "x" / "__init__.py").read_text(encoding="utf-8")
+    entry = {
+        "kind": arch.MODULE,
+        "symbol": "tortoise.x",
+        "archived_at": sha,
+        "archived_from": "tortoise/x/__init__.py",
+    }
+
+    problems = arch._anchor_violations(
+        tree, "tortoise.x", "archive/mod/tortoise/x.py", entry, "tortoise/x/__init__.py", body
+    )
+
+    assert problems, "an unreadable walk must still RED (fail closed), never pass silently"
+    assert any("_LINK_HOPS" in problem for problem in problems), (
+        f"the row must name the bound it hit: {problems}"
+    )
+    assert not any("never contained this code" in problem for problem in problems), (
+        f"a commit that holds the code through a long chain must not be called an absent anchor: "
+        f"{problems}"
+    )
