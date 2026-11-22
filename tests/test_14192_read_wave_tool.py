@@ -312,6 +312,17 @@ def _door_read_contract() -> set[str]:
     for call in door_calls:
         allowed |= {k.arg for k in call.keywords if k.arg is not None}
         allowed |= set(positional[:len(call.args)])  # positional → the read's own names
+    # ⛔ THE `named_levers` BACKSTOP RUNS *FIRST* (#14281 review F4, measured). It used to
+    # sit BELOW the equality, where it could never fire: the equality pins `allowed` to a
+    # four-name literal, so `allowed & bool_levers` is non-empty only for a class the
+    # equality already reds — measured, adding `include_terminal=False` to the door reds at
+    # the equality and NEVER here, and a `_rerank_candidates` door change was reported by
+    # the equality's "re-derive" text instead of this one's "the door already names a
+    # lever" diagnosis. Ordered this way, each assertion reports its own class.
+    named_levers = allowed & bool_levers
+    assert not named_levers, (
+        f"the door itself already names {sorted(named_levers)} — the mirror cannot be "
+        "distinguished from a lever-carrying reader; re-derive this contract")
     # ⛔ THE DERIVATION IS ITSELF PINNED TO A LITERAL (#14281 review P2, measured). The
     # checks below are DERIVED, so they cannot see the door MOVING: `named_levers` is an
     # intersection with `bool_levers`, which holds only bool-defaulted parameters, so of
@@ -322,20 +333,16 @@ def _door_read_contract() -> set[str]:
     # GREEN — the door widened the allow-list, which is the one direction that matters,
     # because the harness is then free to name the new lever and keep passing.
     #
-    # This is the fail-closed backstop the `named_levers` message already claims to be
-    # ("re-derive this contract"): a door change now reds REGARDLESS of the parameter's
-    # type or default, and the red says to re-derive rather than silently widening. The
-    # accepted cost is a FALSE RED on a door change that adds a kwarg without meaning to
-    # — cheap and loud, against a silent widening that no diff class would ever surface.
+    # This is the fail-closed backstop for every lever the intersection cannot see: a door
+    # change now reds REGARDLESS of the parameter's type or default, and the red says to
+    # re-derive rather than silently widening. The accepted cost is a FALSE RED on a door
+    # change that adds a kwarg without meaning to — cheap and loud, against a silent
+    # widening that no diff class would ever surface.
     assert allowed == _EXPECTED_DOOR_ARGS, (
         f"`hosted_api.py::search` now hands the read {sorted(allowed)}, not "
         f"{sorted(_EXPECTED_DOOR_ARGS)} — re-derive this contract and the harness's "
         "allowed arguments together, deliberately: an added keyword here WIDENS what the "
         "mirror may name, so a silent door change would let a lever in without a red")
-    named_levers = allowed & bool_levers
-    assert not named_levers, (
-        f"the door itself already names {sorted(named_levers)} — the mirror cannot be "
-        "distinguished from a lever-carrying reader; re-derive this contract")
     # `leg_trace` is an out-sink (the harness reads the legs it measured from it); it is
     # NOT a lever — nothing about which rows survive `limit` depends on it.
     allowed.add("leg_trace")
@@ -586,6 +593,70 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     return hits
 
 
+def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[int]:
+    """Lines that mutate the RECORDED entries through an ALIAS of a `per_query` element.
+
+    ⛔ MEASURED GREEN before this guard (#14281 review F2), and every one of them leaves
+    `run()` returning pages the pin never inspected while `compare()` reads exactly them:
+
+        pq = per_query[-1]; pq["order"].sort()
+        pq["order"] = sorted(pq["order"], key=str)
+        for _pq in per_query: _pq["order"].sort()
+        for _pq in per_query: _pq["order"] = sorted(_pq["order"], key=str)
+
+    `_mutated_after`'s `"per_query" in receiver` clause covers a LITERAL receiver
+    (`per_query[-1]["order"].sort()`, measured RED) and cannot see a NAME bound to an
+    element — which is exactly why the sentence that used to stand here ("in-place
+    mutation of `per_query` is already covered … only the REBIND was open") was FALSE.
+    It is now the assertion below instead of a claim: an unmeasured sentence in a guard's
+    own evidence base is the same defect class as an unmeasured assertion.
+    """
+    element_names: set[str] = set()
+    for node in ast.walk(run_def):
+        # ⛔ ONLY the two shapes that name the ELEMENT ITSELF: `pq = per_query[-1]` and a
+        # STATEMENT-LEVEL `for _pq in per_query:`. A name bound to a DERIVED collection
+        # (`stage_table = {… for pq in per_query}`, or any comprehension) is not the
+        # element, and treating it as one false-reds ordinary report-building code —
+        # measured: the first cut of this guard red the real tool at
+        # `tools/read_wave_latency.py:328,332`, which build the artifact dict itself.
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target: ast.AST = node.targets[0]
+            value: ast.AST = node.value
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            target, value = node.target, node.value
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            target, value = node.target, node.iter
+        else:
+            continue
+        if not isinstance(target, ast.Name):
+            continue
+        names = _names_in(value)
+        if "per_query" not in names:
+            continue
+        if isinstance(node, (ast.For, ast.AsyncFor)) or isinstance(value, ast.Subscript):
+            element_names.add(target.id)
+    if not element_names:
+        return []
+    hits: list[int] = []
+    for node in ast.walk(run_def):
+        if getattr(node, "lineno", -1) <= after_lineno:
+            continue
+        touched = False
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in _MUTATORS:
+            touched = bool(_names_in(node.func.value) & element_names)
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            touched = bool(_names_in(node.value) & element_names)
+        elif isinstance(node, ast.Assign):
+            touched = bool(set().union(*(_names_in(t) for t in node.targets))
+                           & element_names)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            touched = bool(_names_in(node.target) & element_names)
+        if touched:
+            hits.append(node.lineno)
+    return hits
+
+
 def _is_exactly(node: ast.AST, var: str) -> bool:
     """`var`, or a transparent `list(var)` / `tuple(var)` — nothing derived, nothing else."""
     if isinstance(node, ast.Name):
@@ -625,6 +696,19 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     hand the mapping over is to change it. Residual, stated rather than implied: a helper
     that reaches `os.environ` inside its own body is not followed (the tool has none).
 
+    ⛔ AND THE OTHER STATIC SPELLINGS OF THE SAME OBJECT (#14281 review F1, measured):
+    `_aliases_of` walks `Assign`/`AnnAssign`/`NamedExpr` only, so an IMPORT binding was
+    not a name at all — and `getattr(os, "environ")` is a `Call`, not an `Attribute`.
+    Both were GREEN against a genuinely flipped gate:
+
+        from os import environ; environ["TORTOISE_FUSED_RERANK"] = "1"
+        from os import environ as env; env["TORTOISE_FUSED_RERANK"] = "1"
+        getattr(os, "environ")["TORTOISE_FUSED_RERANK"] = "1"
+
+    `from os import environ` is the IDIOMATIC spelling, so this is not an exotic shape —
+    it is the one a reader reaches for. Import bindings are now resolved, and a `getattr`
+    whose name argument is the literal `"environ"` is treated as the mapping itself.
+
     The only exemption is the module-level setup pops of the two API variables — the
     harness removes them BEFORE building the SDK so it measures the embedded graph. The
     exemption is scoped: the same `pop` inside `run()` is a mutation like any other.
@@ -642,10 +726,27 @@ def _environ_mutations(tree: ast.AST, parents: dict[int, ast.AST]) -> list[int]:
     env_alias: set[str] = set()
     env_alias = _aliases_of(
         tree, lambda v: _mentions_mapping(v) or bool(_names_in(v) & env_alias))
+    # ⛔ AND THE OTHER STATIC SPELLING: `from os import environ` / `... as env`. An
+    # `ImportFrom` binds the name WITHOUT any `Assign` node, so neither `_aliases_of` nor
+    # the predicate above can see it — measured GREEN against a genuinely flipped
+    # `TORTOISE_FUSED_RERANK` gate. It is the IDIOMATIC spelling, so it is the shape a
+    # reader reaches for first, not an exotic one.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "os":
+            for spec in node.names:
+                if spec.name == "environ":
+                    env_alias.add(spec.asname or "environ")
 
-    def _is_environ(node: ast.AST) -> bool:
-        return ((isinstance(node, ast.Attribute) and node.attr == "environ")
-                or (isinstance(node, ast.Name) and node.id in env_alias))
+    def _is_environ(node: ast.AST | None) -> bool:
+        if isinstance(node, ast.Attribute):
+            return node.attr == "environ"
+        if isinstance(node, ast.Name):
+            return node.id in env_alias
+        return (isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "environ")
 
     # ⛔ A BOUND METHOD IS THE SAME POINTER: `_set = os.environ.__setitem__` then
     # `_set(...)`, and `_pop = os.environ.pop` then `_pop(...)`, were both measured green.
@@ -867,6 +968,89 @@ def test_a_PURE_READ_in_a_log_line_is_NOT_a_handed_mutation() -> None:
         assert _hits(caught), (
             f"{caught.strip()!r} must stay RED — the page IS handed to a call that may "
             "mutate it, and stopping at pure reads must not disable that")
+def test_an_IMPORTED_or_GETATTR__environ_is_still_the_mapping() -> None:
+    """Every STATIC spelling of `os.environ` is the mapping (#14281 review F1).
+
+    ⛔ MEASURED GREEN before this fix, each against a genuinely flipped
+    `TORTOISE_FUSED_RERANK` gate — which the artifact does not record (#14289), so a
+    baseline/after pair straddling it still compares as "comparable":
+
+        from os import environ; environ["TORTOISE_FUSED_RERANK"] = "1"
+        from os import environ as env; env["TORTOISE_FUSED_RERANK"] = "1"
+        getattr(os, "environ")["TORTOISE_FUSED_RERANK"] = "1"
+
+    `_aliases_of` walks `Assign`/`AnnAssign`/`NamedExpr` only, so an `ImportFrom` bound
+    the name without ever creating a node it looks at; and `getattr(os, "environ")` is a
+    `Call`, not an `Attribute`. `from os import environ` is the IDIOMATIC spelling, so
+    this is the shape a reader reaches for first — not an exotic one.
+    """
+    cases = {
+        "plain import": (
+            "from os import environ\n"
+            'environ["TORTOISE_FUSED_RERANK"] = "1"\n'),
+        "aliased import": (
+            "from os import environ as env\n"
+            'env["TORTOISE_FUSED_RERANK"] = "1"\n'),
+        "getattr": (
+            "import os\n"
+            'getattr(os, "environ")["TORTOISE_FUSED_RERANK"] = "1"\n'),
+    }
+    for label, src in cases.items():
+        tree = ast.parse(src)
+        parents: dict[int, ast.AST] = {
+            id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        assert _environ_mutations(tree, parents), (
+            f"[{label}] GREEN — the env guard does not resolve this spelling of "
+            "`os.environ`, so the fused-rerank gate can be flipped inside `run()` and "
+            "the artifact would not record which arm was in force")
+
+
+def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
+    """The recorded `per_query` entries are watched through element aliases (#14281 F2).
+
+    ⛔ MEASURED GREEN before this guard; every shape below leaves `run()` returning a page
+    the pin never inspected, and `compare()` reads exactly it:
+
+        pq = per_query[-1]; pq["order"].sort()
+        pq["order"] = sorted(pq["order"], key=str)
+        for _pq in per_query: _pq["order"].sort()
+
+    `_mutated_after`'s `"per_query" in receiver` clause matches a LITERAL receiver
+    (`per_query[-1]["order"].sort()` is RED — the control) and cannot see a name bound to
+    an element. The comment that used to claim this half was "already covered" was false;
+    this pins the assertion that replaced it.
+    """
+    cases = {
+        "element alias, in-place sort": (
+            'pq = per_query[-1]\npq["order"].sort()\n'),
+        "element alias, reassigned": (
+            'pq = per_query[-1]\npq["order"] = sorted(pq["order"], key=str)\n'),
+        "loop target, in-place sort": (
+            'for _pq in per_query:\n    _pq["order"].sort()\n'),
+    }
+    for label, body in cases.items():
+        src = "def run():\n    per_query.append({})\n" + "".join(
+            "    " + line + "\n" for line in body.splitlines())
+        run_def = ast.parse(src).body[0]
+        append = next(n for n in ast.walk(run_def) if isinstance(n, ast.Call)
+                      and getattr(n.func, "attr", None) == "append")
+        hits = _per_query_element_mutations(run_def, append.lineno)
+        assert hits, (
+            f"[{label}] GREEN — a recorded `per_query` entry is re-ordered through an "
+            "alias after it was appended, so the returned report carries a page the pin "
+            "never inspected")
+
+    # CONTROL, so a future reader can tell the literal spelling is still covered by
+    # `_mutated_after` and is not what this guard exists for.
+    ctrl = ast.parse(
+        "def run():\n    per_query.append({})\n    per_query[-1][\"order\"].sort()\n").body[0]
+    ctrl_append = next(n for n in ast.walk(ctrl) if isinstance(n, ast.Call)
+                       and getattr(n.func, "attr", None) == "append")
+    ctrl_hits = _mutated_after(ctrl, "results", 0, ctrl_append)
+    assert ctrl_hits, (
+        "the LITERAL `per_query[-1][\"order\"].sort()` is no longer caught by "
+        "`_mutated_after` — the clause that comment names as the coverage for this "
+        "class has been dropped, and the guard above is now standing alone")
 
 
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
@@ -941,6 +1125,22 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             return True
         return isinstance(node, ast.Constant) and node.value in _READ_NAMES
 
+    # ⛔ ⛔ `indirect` IS EVALUATED *BEFORE* THE MENTIONS CENSUS (#14281 review F3). It used
+    # to sit after it, where it was DEAD: every node satisfying `indirect` is also
+    # `_is_read_ref`-true (a `Constant` in `_READ_NAMES`, or a `Name` bound to one), so the
+    # census at `len(mentions) == 2` always red first — measured three ways, all of them
+    # red at the census: `getattr(...)` replacing the warm-up, `getattr(...)` added
+    # alongside, and a bound-method alias. The class was covered, so nothing was a false
+    # PASS; but an assertion that can never be the failing row reads to the next lane as an
+    # independent guard, and it is not one. First, it fires with its own diagnosis.
+    indirect = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+                in ("getattr", "setattr")
+                and len(n.args) >= 2 and _resolved(n.args[1]) in _READ_NAMES]
+    assert not indirect, (
+        f"the tool reaches the read through {indirect[0].func.id}() by name — that bypasses "
+        "every check in this pin")
+
     mentions = [n for n in ast.walk(tree) if _is_read_ref(n)]
     calls = _read_calls(tree)
     # Anti-vacuity: TWO mentions, both calls, both the reads this pin is about (the
@@ -955,13 +1155,6 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     assert all(_owner(m, parents) == "run" for m in mentions), (
         f"the read is mentioned outside `run()`: "
         f"{[(_owner(m, parents), m.lineno) for m in mentions]}")
-    indirect = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
-                in ("getattr", "setattr")
-                and len(n.args) >= 2 and _resolved(n.args[1]) in _READ_NAMES]
-    assert not indirect, (
-        f"the tool reaches the read through {indirect[0].func.id}() by name — that bypasses "
-        "every check in this pin")
 
     allowed = _door_read_contract()
     looped = [c for c in calls if _in_loop(c, parents)]
@@ -1094,13 +1287,23 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     # re-orders every page after the pin's last look and still read GREEN on this head,
     # while `run()` returns (and `compare()` reads) the re-ordered pages. That is exactly
     # the expensive direction the docstring names, one level out from `results`, and it was
-    # undeclared as a residual. In-place mutation of `per_query` is already covered by
-    # `_mutated_after`'s `"per_query" in receiver` clause; only the REBIND was open.
+    # undeclared as a residual.
+    # ⛔ AND MUTATING AN ELEMENT THROUGH AN ALIAS — the half this comment used to claim was
+    # already covered (`"per_query" in receiver`) and was NOT (#14281 review F2, measured):
+    # `pq = per_query[-1]; pq["order"].sort()` and `for _pq in per_query: …` were both
+    # GREEN, because the clause matches a literal receiver and cannot see a name bound to
+    # an element. Both halves are now assertions; neither is a sentence.
     per_query_rebinds = _rebound_after(run_defs[0], "per_query", artifact_append.lineno)
     assert not per_query_rebinds, (
         f"`per_query` is rebound at line(s) {per_query_rebinds} after the artifact dict is "
         "appended — a re-sorted/reversed copy would reach the returned report while every "
         "page the pin inspected was the measured one")
+    element_mutations = _per_query_element_mutations(run_defs[0], artifact_append.lineno)
+    assert not element_mutations, (
+        f"line(s) {element_mutations} mutate a RECORDED entry through an alias of a "
+        "`per_query` element after it was appended — the returned report would carry a "
+        "page the pin never inspected (a literal receiver is covered by `_mutated_after`; "
+        "this is the aliased spelling, e.g. `pq = per_query[-1]; pq[\"order\"].sort()`)")
 
     # ⛔ No `os.environ` mutation ANYWHERE (except the module-level setup pops): reports
     # `git_sha`/`db_uri`/`points`/
