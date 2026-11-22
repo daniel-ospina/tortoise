@@ -5304,8 +5304,10 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         THROUGH THIS HELPER — the ONE exception being the silent-grep arm, which calls
         `_d5_pinned_universe` bare ON PURPOSE because witnessing the skip is its entire job (and it
         pins the exception KIND in return). Nothing else may be bare (#14328 review round 2, P2 —
-        MEASURED). Three sites used to be: the floor-40 arm, the stderr arm, and the RHS of the
-        comparison below. `_d5_pinned_universe` calls `_d5_documented_long_options`, so a
+        MEASURED). FOUR call sites used to be, not three: the floor-40 arm, the stderr arm, and BOTH
+        sides of the comparison below — its LHS `_d5_pinned_universe(full_help)` is the #14324 site
+        this PR is named after, and an earlier draft of this sentence omitted it.
+        `_d5_pinned_universe` calls `_d5_documented_long_options`, so a
         `pytest.skip`/`pytest.xfail` anywhere in that chain reaches the FLOOR-40 arm FIRST — every
         other arm, including the call-site pins this cell exists for, then never runs. MEASURED at
         `6f1c9a5bb3` on THIS cell alone (`-k documented_universe_floor`) with
@@ -5360,10 +5362,15 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         # the propagation the removed `pytest.raises(pytest.skip.Exception)` arm gave. It had not:
         # `pytest.exit()` raises `_pytest.outcomes.Exit`, which subclasses `Exception` and NOT
         # `SystemExit`, so it was still swallowed into an `AssertionError` claiming the platform branch
-        # misbehaved. MEASURED with the mutant `pytest.exit("MUTANT-exit", returncode=7)`: that run
-        # reported `AssertionError: Exit` and CONTINUED to the next cell at exit 1, where the pre-fix
-        # `pytest.raises` shape aborted with the caller's exit code — 7 for that mutant, and 2 for a
-        # bare `pytest.exit("…")`, which is what a `returncode=None` becomes; it aborts either way.
+        # misbehaved. MEASURED on THIS cell alone (`-k documented_universe_floor`; the selection
+        # matters, see below) with the mutant `pytest.exit("MUTANT-exit", returncode=7)`: that run
+        # reported `AssertionError: the platform-fact branch must SKIP with `Skipped`, not raise
+        # Exit` and CONTINUED to the next cell at exit 1, where the pre-fix `pytest.raises` shape
+        # aborted with the caller's exit code — 7 for that mutant, and 2 for a bare
+        # `pytest.exit("…")`, which is what a `returncode=None` becomes; it aborts either way. Run
+        # the WHOLE file instead and that same shape aborts at exit 7 rather than continuing,
+        # because the count-reader cell above calls `_d5_pinned_universe(completed)` bare — the one
+        # bare call that must STAY — and it reaches the mutant first.
         # Enumerating the three outcomes this cell
         # can legitimately see removes both the hole and the tuple: Ctrl-C, `SystemExit`, `pytest.exit`
         # and a genuine bug in the helper all propagate untouched, and there is no re-raise arm for the
