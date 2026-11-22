@@ -386,7 +386,10 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
         "neighbour exists and who it is, never what the referent says. ⛔ No endpoint "
         "exclusion is claimed: a multi-labelled `:Point:Object` target puts both ends "
         "of an `aboutObject` on `Point`, and this walk DOES traverse it (measured)",
-        ("OPTIONAL MATCH (n)--(m:{label})",),
+        (
+            "OPTIONAL MATCH (n)--(m:{label})",
+            'collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",',
+        ),
         1,
     ),
     (
@@ -399,7 +402,10 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
         "`m.{key_prop}`), never `type(r)` or an edge property, and no endpoint "
         "exclusion is claimed (a multi-labelled `:Point:Object` target makes both "
         "ends `Point`, and the walk traverses that `aboutObject` edge)",
-        ("OPTIONAL MATCH (n)--(m:{label})",),
+        (
+            "OPTIONAL MATCH (n)--(m:{label})",
+            'collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",',
+        ),
         1,
 
     ),
