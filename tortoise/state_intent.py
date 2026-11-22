@@ -700,20 +700,23 @@ _EXISTENCE_ADVERB_SLOT = r"(?:(?:already|ever|recently)\s+)?"
 #: measured): the sentence above first said "SIX or SEVEN", and the one below said "beyond eight
 #: adverbials … both bounds answer identically". Both halves were measurably false — the slot
 #: allows EIGHT, so the n=6,7,8 rows report; the silent band is n=9,10; and the two bounds agree
-#: again only at n>=11, where the 60-character window dominates BOTH. Probed on
-#: `have any it has been <n x just> deprecated and been withdrawn` against a `{0,8}` copy: head
-#: and copy identical for n=1..8 and n>=11, different at n=9,10. The `_EXISTENCE_HELPER` note
-#: ~60 lines above already states nine/ten for the same class, so this file carried two boundaries
-#: for one measurement until now.
+#: again only at n>=11 — ⛔ WHERE THE LIMIT IS THE SLOT ITSELF, NOT THE 60-CHARACTER WINDOW (turn-5
+#: review, P2, measured: a `{0,12}` copy reports n=11 AND n=12, which no window limitation could
+#: produce, while a `[^?]{0,300}` window copy with the slot left at `{0,10}` is still silent there).
+#: Probed on `have any it has been <n x just> deprecated and been withdrawn` against a `{0,8}`
+#: copy: head and copy identical for n=1..8 and n>=11, different at n=9,10. The `_EXISTENCE_HELPER`
+#: note ~60 lines above already states nine/ten for the same class, so this file carried two
+#: boundaries for one measurement until now.
 #: ⛔ AND THE "10 diffs over 78 probes" THAT STOOD HERE DOES NOT RE-DERIVE (round-35 review, P3,
 #: measured): the two shapes it names — the relative-clause and `we have been tracking` twins —
 #: cannot differ at ANY run length, because their fixed prefix already fills the `[^?]{0,60}`
 #: window, so the count is at most 8 on the grid as described. What DOES re-derive, and is what the
 #: two load-bearing claims need, is the shape of the difference: every diff is a silence ->
 #: `existence_unguarded` transition at **n=9,10 only**, and **0 population/shape moves** — the
-#: widening is refusal-side and cannot route. Beyond ten adverbials the 60-character window
-#: dominates and both bounds answer identically, which is the same end-to-end caveat the helper's
-#: own note states.
+#: widening is refusal-side and cannot route. Beyond ten tokens BOTH bounds answer identically —
+#: and that is the SLOT's edge, not the window's: the window sits BEFORE `been` and never bounds
+#: this run (measured, see the paragraph above), so the helper's own note is the only place the
+#: window's end-to-end caveat belongs.
 #: ⛔ AND THE WIDENING IT PAID FOR OVER-REFUSED THE SAME SPELLING INSIDE A RELATIVE CLAUSE
 #: (round-6 review, P2, measured — this lane's own regression, caught by a fresh reviewer): with
 #: `{0,8}` a RELATIVE clause whose own participle is an ENDING word was refused instead of routed,
@@ -1874,8 +1877,13 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # SILENT: `haven't any reports already archived`, `haven’t any reports ever archived`,
         # `hasn’t anything already archived` and `hadn’t any claims already retracted` all returned
         # `population=None, signal=None` while their uncontracted twins reported, and the whole
-        # suite stayed GREEN either way (0 moves over the 369-query pinned corpus), i.e. the gap was
-        # unobservable from inside the tests. That is the module's own round-32 lesson (a contracted
+        # suite stayed GREEN either way (0 moves over the pinned corpus), i.e. the gap was
+        # unobservable from inside the tests — and the corpus size is DERIVED, never quoted here
+        # (turn-5 review, P3): the three lists yield a distinct-query count, a leaf-walk count and a
+        # tuple-token count that all differ, so any single number printed at this spot is one of
+        # three measures and drifts with every review round. The sibling test file states the same
+        # rule; count them there if the number is what you need.
+        # That is the module's own round-32 lesson (a contracted
         # head could not reach its own notice, the worst direction) one arm over: the arm is a
         # SIGNAL arm, so :data:`_EXISTENCE_HEAD_NOTICE` — the same two classes with the contraction
         # admitted, derived so the quantifier list keeps one home — is the head it should have taken
