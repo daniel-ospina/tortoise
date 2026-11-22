@@ -1668,7 +1668,8 @@ class StateQuestion:
 #: measured). `_EXISTENCE_GUARD`'s contraction class is closed over `'` (U+0027) alone,
 #: while the product routinely receives the typographic forms — `tortoise/extractor_v2.py`
 #: normalises the same inventory before tokenising for exactly that reason, and this
-#: module's own token classes admit `\u2019` beside `'` in eighteen places.
+#: module's own copula lookahead admits `\u2019` beside `'` (one token class, at `:1219`;
+#: the INVENTORY below is what makes the rest of the family reachable at all).
 #: ⛔ ONE CONSTANT, so the test that pins the family cannot drift off it: the pin asserts
 #: THIS tuple and exercises every member, which is what makes a codepoint added to the
 #: normaliser without being pinned a RED instead of a silent gap (the round-27 fix shipped
@@ -1676,7 +1677,7 @@ class StateQuestion:
 #: ⛔ THE INVENTORY IS `extractor_v2`'s, NOT SEVEN HANDSOME CODEPOINTS (fresh review, P1,
 #: measured). The first cut of this constant carried the seven that read nicely and its
 #: docstring claimed parity with `tortoise/extractor_v2.py` — which normalises TWENTY-FIVE.
-#: Measured: the eighteen it left out (`\u201a \u201b \u02b9 \u0323 … \u00b4 \uff02 \ua78c`)
+#: Measured: the eighteen it left out (`\u201a \u201b \u02b9 … \u00b4 \uff02 \ua78c`)
 #: each still ROUTED the whole ended population with the caller's predicate dropped and
 #: `signal=None`, i.e. the defect this constant exists to close, eighteen spellings over,
 #: while the pin derived from the constant itself stayed green — a pin that reads the same
