@@ -3929,3 +3929,46 @@ def test_a_possessive_subject_is_not_read_as_an_auxiliary_clitic():
     ):
         got = detect_state_question(query)
         assert got.population is None and got.signal, query
+
+
+def test_an_adverb_between_the_clitic_and_been_does_not_reopen_the_hijack():
+    """`billing's JUST been deprecated` — the interruption must not restore the hijack.
+
+    ⛔ THE ADJACENCY ANCHOR WAS DEFEATED BY ONE ADVERB (round-30 review, P1, measured):
+    `\\s+been\\b` only excluded a clitic IMMEDIATELY followed by `been`, so
+    `has billing's just been deprecated` was admitted to the copula subject slot — whose
+    word class accepts the literal `been` — and the row served the whole ended population
+    with the caller's predicate dropped and `signal=None`. Over a 37,800-row clitic
+    population, 17,568 rows newly routed and 1,296 that had been refused WITH a notice
+    (`is_copula_long_subject`) became silent. The gap now tolerates up to three adverbial
+    words, and `been` is forbidden as a subject word.
+
+    ⚠️ STATED RESIDUAL, measured and NOT closed here: the PLAIN interrogative spelling
+    (`has billing's just been deprecated`, with no caller predicate) is now SILENT rather
+    than served — but it must never be served by re-widening this slot, because the same
+    slot is what the hijack frame below relies on to be refused. Recorded in
+    `daniel-ospina/tortoise#14292` beside the other contracted-head shapes.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    # THE HIJACK FRAME: must be refused AND report, never served.
+    for query in (
+        "have any users reported billing's just been deprecated",
+        "has anyone complained the vendor's recently been deprecated",
+        "have any users reported the team's just been retired",
+        "have any users said the plan's very recently been superseded",
+        "have any users reported billing's never been deprecated",
+    ):
+        got = detect_state_question(query)
+        assert got.population is None, (
+            f"{query!r} served {got.population!r} — an ADVERB between the clitic and "
+            f"`been` re-opened the asyndetic hijack")
+        assert got.signal, (
+            f"{query!r} is refused but reports nothing (signal={got.signal!r}) — a silent "
+            f"drop is the direction this module rates worst")
+        assert missed_route_payload(got) is not None, query
+    # …and the STATEMENTS that must not be swallowed by the same slot stay unrouted.
+    for query in ("has billing's just been deprecated",
+                  "has the vendor's recently been deprecated"):
+        assert detect_state_question(query).population is None, (
+            f"{query!r} is now served — that direction re-opens the hijack above")

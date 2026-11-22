@@ -1189,10 +1189,21 @@ _COPULA_SUBJECT = (
     # anchored on the following `been`.
     # ⚠️ A "guard only the last word" rewrite (`(?:word\s+){0,3}(?!clitic)word`) LEAKS: the
     # regex backtracks the clitic word into the leading group and `is billing's been
-    # deprecated` routes again (48 of 96 measured). The `\s+been` form is what closes it.
-    r"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\s+been\b)"
-    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\s+been\b)"
-    r"[a-z0-9][a-z0-9'’._/-]*){0,3}"
+    # deprecated` routes again (48 of 96 measured).
+    # ⛔ AND THE ANCHOR CANNOT BE ADJACENT (round-30 review, P1, measured): `\s+been\b`
+    # was defeated by ONE ADVERB — `has billing's just been deprecated`,
+    # `has the vendor's recently been deprecated`, `is the board's very recently been
+    # deprecated` all served the ended population with the caller's predicate dropped and
+    # `signal=None`, because the interruption let the row into this slot, whose word class
+    # accepts the literal `been`. Over a 37,800-row clitic population, 17,568 rows newly
+    # routed and 1,296 that had been refused WITH a notice (`is_copula_long_subject`)
+    # became silent. So the gap between the clitic and `been` tolerates up to three
+    # adverbial words, and `been` itself is FORBIDDEN as a subject word — that is what
+    # stops the slot from swallowing the whole clause.
+    r"(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+[a-z-]+){0,3}[,\s]+been\b)"
+    r"(?!been\b)[a-z0-9][a-z0-9'’._/-]*"
+    r"(?:\s+(?![a-z0-9'’._/-]*['’](?:s|ve|d)\b(?:[,\s]+[a-z-]+){0,3}[,\s]+been\b)"
+    r"(?!been\b)[a-z0-9][a-z0-9'’._/-]*){0,3}"
     r"|(?:i|you|he|she|it|we|they|there)(?![-/])"
     r")"
 )
