@@ -18228,6 +18228,40 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "land means the figure and its derivation have come apart; re-derive both ends by "
         "content instead of editing one of them (#14183 review, cycle 7, P3)")
 
+    # ⛔ AND THE ROW'S SECOND SPELLING OF THE SAME IDENTITY (#14183 review, cycle 11, P2 —
+    # MEASURED): the offsets are ALSO stated as a triad of results beside the three
+    # subtractions that produce them — "**`+2975` / `+2975` / `+3681`** (22094−19119,
+    # 22052−19077, 29142−25461)" — and the `a + b = c` census above CANNOT see that shape.
+    # Measured before this arm existed: `+2975` -> `+2976` (operands untouched) and
+    # `29142−25461` -> `29142−25471` (results untouched) EACH left the whole D5 selection
+    # GREEN, so the same drift the addition arm closes was still reachable one spelling over.
+    # ⛔ Pairing is POSITIONAL and DELIBERATELY one-way: the row states the live triads first
+    # and then quotes the REFUTED ones (`+2416`/`+2416`/`+3077`, `+366`/`+366`/`+467`) as
+    # history, so a refuted triad has no live subtraction to evaluate against — the arm grades
+    # every triad that HAS one and never the quoted ones, and `len(_triads) >= len(_diffs)` is
+    # asserted so a reordering that drops a live subtractand reds instead of silently pairing
+    # a refuted triad with it.
+    _diffs = re.findall(r"\((\d+)−(\d+), (\d+)−(\d+), (\d+)−(\d+)", text)
+    _triads = re.findall(r"`(\+\d+)` / `(\+\d+)` / `(\+\d+)`", text)
+    assert _diffs, (
+        "D5 no longer states the offset-vs-subtraction triad in the shape this pin reads "
+        "(the pair `**`+N` / `+N` / `+N`**` beside `(a−b, c−d, e−f)`) — re-derive the row and "
+        "update the pin rather than dropping it")
+    assert len(_triads) >= len(_diffs), (
+        f"D5 states {len(_diffs)} live subtraction triad(s) but only {len(_triads)} result "
+        "triad(s) — the pairing is positional, so a triad that lost its result would be graded "
+        "against a refuted one; re-derive the row")
+    _bad_diffs = [
+        (list(triad), list(diff))
+        for diff, triad in zip(_diffs, _triads)
+        if [int(diff[i]) - int(diff[i + 1]) for i in (0, 2, 4)]
+        != [int(x.lstrip("+")) for x in triad]]
+    assert not _bad_diffs, (
+        f"D5 states an offset triad that does not evaluate against the subtraction beside it: "
+        f"{_bad_diffs} — the row states BOTH an operand pair and its result, so a drift of "
+        "either side means the figure and its derivation have come apart; re-derive both, never "
+        "edit one (#14183 review, cycle 11, P2)")
+
     triple = _D5_TRIPLE_RE.search(text)
     if triple is None:
         failures.append(
