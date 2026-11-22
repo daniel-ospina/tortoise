@@ -281,7 +281,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- three re-derived addresses that had NO pin at all, so a `+1` mutation left 441 tests green
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
     # the guard set is per-token, and an unlisted token is coverage the file only APPEARED to have.
-    ("docs/00_index.md", "`sdk.py:28581` at this head", "tortoise/sdk.py", 28581, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/00_index.md", "`sdk.py:28655` at this head", "tortoise/sdk.py", 28655, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
     # ⛔ #14087 review round 7 (P3): the SAME `00_index.md:118` line writes a SECOND present-tense
     # this-head address — `the bullet is entity_verdict.py:43` — and no arm read it. Its sibling
     # (`sdk.py:28581`, the row above) was pinned, which is exactly how an unpinned neighbour hides:
@@ -289,7 +289,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # re-point or a rotation of `entity_verdict.py` under it would have moved the address with every
     # arm green. One ROW per SITE, never one row per STRING.
     (_INDEX, "`entity_verdict.py:43`", _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
-    ("docs/architecture/ENTITY-VERDICT-BANDS.md", "(`sdk.py:28581`), so any non-NULL", "tortoise/sdk.py", 28581, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", "(`sdk.py:28655`), so any non-NULL", "tortoise/sdk.py", 28655, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
     ("docs/architecture/ENTITY-VERDICT-BANDS.md", "called at `sdk.py:28945`", "tortoise/sdk.py", 28945, "result = apply_entity_merge("),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
     # ⛔ The branch's `+147` to `hosted_backup.py` moved `def _index_has_is_operator()` from
@@ -499,12 +499,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
-    ('docs/00_index.md', '`sdk.py:28581` at this head'): 1,
+    ('docs/00_index.md', '`sdk.py:28655` at this head'): 1,
     # ⛔ #14087 review round 7: the pin row added for the SAME line's other present-tense address.
     # Occurs ONCE in the document (`grep -o 'entity_verdict\.py:43' docs/00_index.md | wc -l` -> 1), so a
     # second site must not appear unannounced.
     ('docs/00_index.md', '`entity_verdict.py:43`'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28581`), so any non-NULL'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28655`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28945`'): 1,
     ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2683'): 1,
     # #14043 review, finding 3: the four addresses this revision writes at THIS head. ONE site each
