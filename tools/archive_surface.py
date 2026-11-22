@@ -1135,12 +1135,9 @@ def _init_carries_a_body(text: str) -> bool:
     # Still only TOP-LEVEL: a `def`/`class`/`if` whose own body is `pass` is a statement, and a
     # `.pyi` stub's `def f() -> int: ...` is a FunctionDef.
     _effectful = (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr)
-    # ⛔ A LONE `X = 1` IS NOT CODE EITHER (round-19 review, P2 — measured). Asking the language rule
-    # of EXPRESSION statements left the neighbouring spelling wide open: a module truncated to
-    # `X = 1` (or `X: int`) was "content", so 40 functions left the product with every arm green and
-    # no record — a cheaper laundering than any spelling round 17 closed. A binding whose value is
-    # absent or a bare constant/name carries nothing a caller reaches; `__all__ = [...]`, a
-    # call-valued or comprehension-valued binding still does, so they stay.
+    # ⛔ THE RULE STOPS AT EXPRESSION STATEMENTS — a BINDING is content, by decision (round-20
+    # review, P2-4). An earlier draft of this comment claimed the binding rule as adopted; it is
+    # DECLINED, and the reason is in `_inert` below. Do not read this block as a closed hole.
     def _inert(node: ast.stmt) -> bool:
         if isinstance(node, ast.Pass):
             return True
@@ -1155,7 +1152,13 @@ def _init_carries_a_body(text: str) -> bool:
         # plus eleven fixtures depend on it being content. A module that keeps ONE binding is a
         # module that still resolves; the 40 functions are lost, and the shrink gate grades
         # SYMBOLS, not proportions. Widening it here would false-block every constants-only module.
-        # Not adopted: the shape is real, the proposed rule is not the way (filed as a note).
+        # Not adopted. ⚠️ The residual is REAL and NOT closed: a module reduced to `X = 1`,
+        # `X: int`, `import os` or `class X: pass` — and the newer variant where the emptied
+        # module's only surviving carrier is a file created in the same commit holding an unrelated
+        # statement — is graded green with the body in no file under `archive/`. The rule this
+        # function implements is a per-SYMBOL existence test, not a proportion test, so closing it
+        # needs a different arm (e.g. "the surviving carrier must carry the base's top-level
+        # names"), not another inertness spelling. Recommended over adopting it blind here.
         return False
 
     body = [node for node in body if not _inert(node)]
@@ -1179,6 +1182,38 @@ def _modules_with_a_body(paths, read) -> set[str]:
                 continue
         out.add(module_name(path))
     return out
+
+
+def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
+    """The commit's text for *path*, following a SYMLINK to its target in the same commit.
+
+    ⛔ THE CARRIER SETS READ RAW BLOBS (round-20 review, P1 — measured). `_content_or_link` fixed the
+    per-carrier question, but `_modules_with_a_body` still called `_git_blob`, which returns the
+    LINK TEXT for mode `120000`. So a package whose `__init__.py` was a symlink to the module's real
+    code never entered `base_modules` at all — and deleting the package AND the link target was
+    GREEN in every arm with the body in no file under `archive/`, i.e. the central promise broken by
+    choosing a FILENAME (`alias.py` → RED, `x/__init__.py` → GREEN).
+
+    ⛔ ONE LEVEL ONLY, AND A CYCLE ANSWERS THE PEER'S LINK TEXT — not `None`, which an earlier
+    draft of this docstring claimed before it was measured (round-20 VGATE). A self-loop resolves
+    to the file's own link text and a two-cycle to the other link's, both of which parse as inert
+    expressions: the module simply does not enter the carrier set, exactly as it did before this
+    function existed. That is the SAFE direction — the set answers "did this carrier hold a body",
+    and a link loop holds no code. A chain (`x/__init__.py` → `a_link.py` → `real.py`) keeps its
+    attribution on the FINAL file, which still reds as its own `MODULE REMOVED`, so the body is
+    never silently lost; only the package name stops being blamed.
+    """
+    text = _git_blob(root, sha, path)
+    if text is None:
+        return None
+    code, out = _git(root, "ls-tree", sha, "--", path)
+    if code != 0 or not out.strip():
+        return text
+    if not out.split(None, 1)[0].startswith("120"):
+        return text
+    target = (Path(path).parent / text.strip()).as_posix()
+    resolved = _git_blob(root, sha, target)
+    return resolved if resolved is not None else None
 
 
 def _content_or_link(root: Path, sha: str, path: str, source: str | None) -> bool:
@@ -1750,7 +1785,11 @@ def shrink_violations(
     # that left even though its package still resolves through a surviving sibling (review F2 —
     # `tortoise/__init__.py` is 406 lines of the public API, and the ancestor expansion that
     # used to cancel it graded that deletion green).
-    base_modules = _modules_with_a_body(base_paths, lambda path: _git_blob(root, sha, path))
+    # ⛔ AND THE SET THE ARMS ITERATE USES THE SAME READER (round-20 P1, measured): a symlinked
+    # carrier must be graded by its TARGET's text, or the module never enters `base_modules`.
+    base_modules = _modules_with_a_body(
+        base_paths, lambda path: _blob_following_links(root, sha, path)
+    )
     # ⛔ ONE CARRIER SET PER MODULE, asked ONCE and about the WHOLE SET (round-23 review, F1).
     # "Did the base carry this module's code?" is a question about the module's carriers, and a
     # module can have three of them; answering it from one path cancelled a real removal. The two
@@ -1910,8 +1949,43 @@ def shrink_violations(
         # SHIPS the pairing — `tortoise/projection.py` beside `tortoise/projection/__init__.py`).
         # Arm 1 was fixed for exactly this in round 23 (`base_body_modules`); the fix went to the
         # sibling gate and not to the shared question, so the arm one gate over kept the defect.
+        # ⛔ ASK THE SAME KIND OF BODY ON BOTH SIDES (round-20 P1 — a regression this branch
+        # introduced, fixed properly here). The first cut gated on `base_body_modules` while the
+        # head test skips `.pyi` by design, so an UNCHANGED stub-only module graded `MODULE BODY
+        # REMOVED` (a false block, whose route then reds as `REAPPEARED`); gating on
+        # `base_runtime_body_modules` then silenced the MIXED shape (a bodyless `w.py` shim keeping
+        # the name alive while the module's only code — a `w/__init__.pyi` — is deleted), because a
+        # stub-only base never supplies a runtime body. So: whatever KIND carried it at the base is
+        # the kind the head must still carry (the stub half and the runtime half are each measured
+        # by a row; the "runtime appeared" case is answered once, above, not twice).
         if module not in base_body_modules:
-            continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
+            continue  # nothing left the product
+        if module not in base_runtime_body_modules:
+            base = module.replace(".", "/")
+            still_stubbed = any(
+                (text := _file_text(root, candidate)) is not None
+                and _init_carries_a_body(text)
+                for candidate in (f"{base}.pyi", f"{base}/__init__.pyi")
+            )
+            if still_stubbed:
+                continue  # a stub-only module whose stub is still there: nothing left
+            # No "a runtime body appeared at the head" test here: if one had, the call at the top
+            # of this arm would already have continued (`_head_carries_runtime_body` is the same
+            # question with the same arguments), so a branch for it can never be reached — measured
+            # by the round-20 VGATE, which removed it and stayed green.
+            key = (MODULE, module)
+            if key in working or key in waivers:
+                if key in waivers:
+                    used.add(key)
+                continue
+            out.append(
+                f"{module}: MODULE REMOVED — {base_label} carries it as a `.pyi` STUB and this "
+                "tree does not, and `archive/MANIFEST.json` has no `module` entry for it. A stub "
+                "under the shipped package is importable surface and is the module's only code "
+                f"when nothing else carries it (#12402). {MODULE_ROUTE} (the file was "
+                f"{base}.pyi or {base}/__init__.pyi)"
+            )
+            continue
         key = (MODULE, module)
         # HOW this tree's module file stopped carrying code: the stub spelling, or the body-less
         # `.py` this branch was written for. Computed BEFORE the `key in working` branch so the
@@ -2636,7 +2710,12 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
                     ast.parse(other_source, filename=str(other_path))
             except (OSError, SyntaxError):
                 continue
-            if other.endswith(".pyi") or _init_carries_a_body(other_source):
+            # ⛔ CONTENT FOR EVERY SPELLING, INCLUDING `.pyi` (round-20 review, P2 — measured).
+            # The suffix arm accepted an EMPTY stub here, so `archive module` froze a 0-char block
+            # that `file_violations` then red while `shrink_violations` stayed green — the state the
+            # resolved-carrier fix closes, one walk over. A real stub is a `FunctionDef`, so the
+            # content rule keeps it.
+            if _init_carries_a_body(other_source):
                 rel, path, source = other, other_path, other_source
                 break
         else:

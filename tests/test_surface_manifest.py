@@ -8661,3 +8661,25 @@ def test_the_route_block_covers_EVERY_no_record_KIND(checker, tmp_path, monkeypa
     assert "reported as dropped by exactly one of" in out, (
         f"a `no-record` row needs the freeze route whatever its wording: {out}"
     )
+
+
+def test_NEITHER_copy_of_the_stated_reason_predicate_takes_a_BLANK_rendering() -> None:
+    """P3 (round-20): the surface copy of the waiver-reason test lacked the blank-rendering set.
+
+    `_stated_reason` and `archive_surface._is_a_stated_reason` are two copies of ONE rule, and the
+    archive copy learned (round-19) that the Hangul fillers and `U+2800` pass every
+    `unicodedata` category test while rendering as nothing. The surface copy was left behind, so
+    `--allow-archive-shrink-reason $'\\u3164'` was refused by `check --base-ref` and accepted here —
+    the two-definitions-of-one-rule shape this file keeps removing, and a waiver minted with no
+    stated reason.
+
+    Mutation: drop `_BLANK_RENDERING` from either copy -> RED here.
+    """
+    from tools import archive_surface as arch
+    from tools import surface_manifest as sm
+
+    for blank in ("\u200b", "\u200e", "\ufeff", "\u3164", "\uffa0", "\u115f", "\u2800"):
+        assert not sm._stated_reason(blank), f"{blank!r} must not be a stated reason"
+        assert not arch._is_a_stated_reason(blank), f"{blank!r} must not be a stated reason"
+    assert sm._stated_reason("superseded by the v2 client")
+    assert arch._is_a_stated_reason("superseded by the v2 client")

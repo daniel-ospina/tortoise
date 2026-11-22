@@ -2429,6 +2429,10 @@ def _recorded_approvals(doc: dict) -> list[tuple[str, str]]:
 # raise `KeyError: 'module'`).
 ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
 
+# Code points that pass every category test and still render as nothing (round-19 P3, round-20 P3).
+_BLANK_RENDERING = frozenset("\u115f\u1160\u3164\uffa0\u2800")
+
+
 def _stated_reason(text: str) -> bool:
     """Does *text* say something a reader can read? — the surface tool's copy of the rule.
 
@@ -2439,10 +2443,15 @@ def _stated_reason(text: str) -> bool:
     """
     import unicodedata
 
+    # ⛔ THE SAME DENY-SET AS `archive_surface._is_a_stated_reason` (round-20 review, P3 — measured):
+    # this copy was left behind when the archive one learned them, so the Hangul fillers and
+    # `U+2800` passed HERE while being refused THERE — the "two definitions of one rule" shape this
+    # file keeps having to remove, one predicate over.
     return any(
-        not ch.isspace() and unicodedata.category(ch) not in {"Cc", "Cf", "Zs", "Zl", "Zp"}
-        for ch in text
-    )
+        not ch.isspace()
+        and unicodedata.category(ch) not in {"Cc", "Cf", "Zs", "Zl", "Zp"}
+        and ch not in _BLANK_RENDERING
+        for ch in text)
 
 
 REMOVAL_WAYS = (

@@ -3816,7 +3816,14 @@ def test_a_package_stub_module_is_reported_AND_has_a_runnable_route(tree: Path) 
     assert entry["archived_from"] == "tortoise/pp/__init__.pyi", entry
 
 
-@pytest.mark.parametrize("reason", ["\u200b", "\u200e", "\ufeff", "\u00a0", "", "   "])
+# ⛔ THE BLANK-RENDERING SET IS NOW IN BOTH COPIES, SO IT IS PINNED IN BOTH (round-20 P3). The
+# Hangul fillers and `U+2800` pass every `unicodedata` CATEGORY test and still render as nothing;
+# `surface_manifest._stated_reason` lacked them while this copy had them, so one rule graded two
+# ways by which tool asked. Mutation: drop `_BLANK_RENDERING` from either copy -> RED here.
+@pytest.mark.parametrize(
+    "reason",
+    ["\u200b", "\u200e", "\ufeff", "\u00a0", "", "   ", "\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"],
+)
 def test_an_INVISIBLE_character_is_not_a_stated_reason(tree: Path, reason: str) -> None:
     """P2: `str.strip()` is not the question "does this say something a reader can read?".
 
@@ -3945,10 +3952,14 @@ def test_a_SYMLINKED_module_carrier_is_not_read_as_its_link_text(tree: Path) -> 
     )
 
 
-def test_a_module_truncated_to_a_bare_ASSIGNMENT_is_CONTENT_by_the_stated_rule(
+def test_a_module_truncated_to_a_bare_ASSIGNMENT_is_CONTENT_by_DECISION(
     tree: Path,
 ) -> None:
     """DECLINED finding, pinned so the next lane does not adopt it blind (round-19 P2).
+
+    The old name said "by the stated rule", which was FALSE for the README as it then read — round-20
+    review measured the contradiction and the README now states this rule explicitly, with an
+    `OVERRIDES:` line naming the default it departs from.
 
     The review proposed grading `X = 1` (and `X: int`) as inert, so a module truncated to one
     assignment is a removal. Measured, that contradicts the archive's own stated test — "the name
@@ -4070,3 +4081,81 @@ def test_a_ZWSP_waiver_reason_is_refused_by_the_CLI(tree: Path, reason: str) -> 
         ]
     )
     assert rc == 2, f"a waiver whose reason renders as nothing is not a stated reason (rc={rc})"
+
+
+def test_an_UNCHANGED_pyi_only_module_is_not_a_removal(tree: Path) -> None:
+    """P1 REGRESSION (round-20): the head-side carrier set skipped `.pyi`, so a stub-only module
+    that did not change graded `MODULE BODY REMOVED`.
+
+    Measured before the fix: base == head == `{"tortoise/s.pyi": "def api() -> int: ...\\n"}` ->
+    `['tortoise.s: MODULE BODY REMOVED — … carries none (empty, whitespace, comments or a bare
+    docstring)']` — a false block on a tree where nothing changed, asserting a false fact about a
+    file holding a `def`, and its printed route (`archive module tortoise.s`) freezes the live stub
+    so `surface_violations` then reds it as `REAPPEARED`: no green state.
+
+    The arm asks for a RUNTIME body at the base (`base_runtime_body_modules`), which a stub-only
+    module never supplies.
+
+    Mutation: gate arm 1b on `base_body_modules` -> RED here.
+    """
+    (tree / "tortoise" / "s.pyi").write_text("def api() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/s.pyi")
+    # a SECOND commit that does not touch the stub at all, so base and head differ by a commit and
+    # the module is byte-identical on both sides (the shape the regression graded RED)
+    (tree / "tortoise" / "unrelated.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/unrelated.py")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "a stub-only module that did not change is not a removal"
+    )
+
+
+def test_a_SYMLINKED_package_init_whose_TARGET_is_deleted_is_a_removal(tree: Path) -> None:
+    """P1 (round-20): the CARRIER SETS read raw blobs, so a symlinked `__init__.py` was invisible.
+
+    Measured: `tortoise/x/__init__.py` -> symlink to `../../shared/impl.py`, then one commit deletes
+    the package AND the target. `_git_blob` returned the LINK TEXT for the base carrier,
+    `_modules_with_a_body` parsed it as an inert expression, so the module never entered
+    `base_modules` — every arm green, the body in no file under `archive/` and none at head. The
+    answer depended on the FILENAME (`alias.py` -> RED, `x/__init__.py` -> GREEN).
+
+    Mutation: read the base carriers with `_git_blob` -> RED here.
+    """
+    (tree / "shared").mkdir()
+    (tree / "shared" / "impl.py").write_text("def handler():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../../shared/impl.py")
+    _commit(tree, "shared/impl.py", "tortoise/x/__init__.py")
+    subprocess.run(["git", "rm", "-r", "-q", "tortoise/x", "shared/impl.py"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.x:") and "REMOVED" in p for p in problems), (
+        f"the module's code is in no file under archive/ and none at head: {problems}"
+    )
+
+
+def test_an_EMPTY_pyi_sibling_does_not_rescue_a_bodyless_module(tree: Path) -> None:
+    """P2 (round-20): the writer's OTHER-CARRIER walk exempted `.pyi` from the content test by
+    SUFFIX, so an EMPTY stub let the writer freeze a 0-char block.
+
+    Measured before the fix: `tortoise/c.py` holding `\"\"\"Scaffolding.\"\"\"` plus an empty
+    `tortoise/c.pyi` -> `archive module tortoise.c` SUCCEEDED, recording
+    `archived_from = tortoise/c.pyi` and `sha256` of `b""`; `shrink_violations` was `[]` (the row
+    is credited on EXISTENCE) while only `file_violations` red the "EMPTY frozen block" — a record
+    the writer itself refuses to accept, whose only clear is deleting it, i.e. no route that keeps
+    it. The same walk already applies the content rule to `.py`, so the suffix was the whole bug.
+
+    The module's only body-carrier here is the scaffolding `.py`, so the correct answer is the
+    refusal that names the restore route; the empty stub must not stand in as the source of record.
+
+    Mutation: reinstate the `other.endswith(".pyi") or` arm -> RED here.
+    """
+    (tree / "tortoise" / "c.py").write_text('"""Scaffolding."""\n', encoding="utf-8")
+    (tree / "tortoise" / "c.pyi").write_text("", encoding="utf-8")
+    _commit(tree, "tortoise/c.py")
+
+    with pytest.raises(arch.ArchiveRefused) as refused:
+        arch._module_source(tree, "tortoise.c")
+    assert "carries no body" in str(refused.value)
+    assert "git checkout" in str(refused.value), "the refusal must name a route that works"

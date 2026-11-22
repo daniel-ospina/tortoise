@@ -243,11 +243,23 @@ that carries statements IS a removal even though the package name still resolves
 surviving sibling, because the code that answered as that package's front door left. The SAME
 rule grades every module file, not just an `__init__.py`: a module whose file survives with its
 body gone — truncated to nothing, reduced to a docstring, reduced to a bare no-op (`pass`,
-`...`, `None`, or any other expression statement with no effect: a statement is content only if
-it calls, awaits, yields or binds a `:=`), replaced by a `.pyi` stub, or rewritten to text
-that no longer parses — is a removal too, because the name no longer resolves to any code,
-and a comparison over paths cannot see it. It is part
-of the `surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2),
+`...`, `None`, or any other top-level expression statement that neither calls, awaits, yields
+nor binds a `:=`), replaced by a `.pyi` stub, or rewritten to text that no longer parses — is a
+removal too, because the name no longer resolves to any code, and a comparison over paths cannot
+see it.
+
+> **OVERRIDES:** the "a statement is content only if it calls, awaits, yields or binds" default —
+> for a BINDING, an `import` and a `def`/`class` the answer is CONTENT even when the binding's value
+> is a bare constant. A module truncated to `X = 1` (or `X: int`, `import os`, `class X: pass`)
+> still EXPORTS a name a caller reaches (`from mod import X`), so "the name no longer resolves to
+> any code" is false for it; grading it a removal false-blocks every constants-only module (12 rows
+> measure this). The shrink gate grades per-symbol EXISTENCE, not proportions — so a body reduced to
+> one binding is a residual this arm does not see, deliberately, and closing it needs a different
+> check rather than another inertness spelling. This arm grades ONE file shape at a time; a body
+> replaced by a file CREATED in the same commit holding an unrelated statement is the same residual
+> by a different route, and it is likewise not closed here.
+
+This check runs as part of the `surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2),
 never a quiet pass. If the deletion is already recorded somewhere this gate cannot read, state
 it: `--allow-archive-shrink module:<dotted.path> --allow-archive-shrink-reason <why>` (a
 local-shell record — CI passes no waiver, see "Restoring a removed symbol" below).
