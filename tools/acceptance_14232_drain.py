@@ -721,7 +721,9 @@ def run(args) -> int:
         "refusals": refusals,
         "accepted": accepted,
         "terminal": len(terminals),
-        "deferred_at_ack": {"n": deferred, "of": accepted},
+        "deferred_at_ack": {"n": deferred, "of": accepted,
+                            "unreadable": unreadable_acks,
+                            "measurable": bool(accepted) and not unreadable_acks},
         "stuck": stuck,
         "extraction_evidence": evidence,
         "outcomes": outcomes,
@@ -755,6 +757,16 @@ def run(args) -> int:
 
     if args.json:
         print(json.dumps(report, indent=2))
+        # ⛔ THE MACHINE REPORT MUST CARRY THE HONESTY TOO (review round O, P2):
+        # `--json` is the documented acceptance mode, and the unreadable branch used
+        # to live only in the human block below — so the JSON said
+        # `deferred_at_ack: {n: 0, of: 1}` about an ack body it never read. The key
+        # is in the report; this line keeps it visible to a reader of the log as
+        # well, on the same stream the preamble uses.
+        if unreadable_acks:
+            _say(f"  · deferred at ack: NOT MEASURABLE — {unreadable_acks} ack "
+                 f"body/bodies would not decode, so this run cannot say whether "
+                 f"the split deferred")
     else:
         print()
         if ack_graded:
@@ -783,6 +795,13 @@ def run(args) -> int:
             print(f"  · deferred at ack: NOT MEASURABLE — {unreadable_acks} ack "
                   f"body/bodies would not decode, so this run cannot say whether "
                   f"the split deferred")
+        elif not accepted:
+            # ⛔ ZERO ACCEPTED ACKS IS NOT "every session finished inside the
+            # budget" (review round O, P3): on a refusal-only run — the 504 run
+            # this tool exists to detect — that sentence described a population of
+            # zero, and the same class of claim the unreadable arm above refuses.
+            print("  · deferred at ack: NOT MEASURABLE — no accepted ack "
+                  "(0/0), so there is no deferral share to report")
         else:
             print(f"  · deferred at ack: {deferred}/{accepted} "
                   f"({'the ack returned before extraction finished' if deferred

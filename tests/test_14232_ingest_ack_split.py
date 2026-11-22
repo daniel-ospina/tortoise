@@ -44,6 +44,7 @@ by patching `_capture_ack_grace_s`, so no test asserts anything through a sleep.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from datetime import UTC, datetime
@@ -2246,3 +2247,200 @@ def test_a_garbled_HTTP_detail_body_is_an_UNREADABLE_RESPONSE():
     assert drain._is_unreadable_body(ValueError("a criterion bug")) is False, (
         "the classifier must stay narrow: only the decode sites raise the "
         "dedicated type")
+
+
+# ── The four criterion INPUTS, each with a negative witness ───────────────────
+# Round O (P2) measured that only `ok_points` was pinned as an input to `_verdict`:
+# forcing `ok_refusal`, `ok_terminal`, `ok_ack` or `oversubscribed` left the WHOLE
+# FILE green, so a regression in any of them would ship a false PASS. These rows
+# drive `run()` end to end and assert the VERDICT and the exit code each input
+# produces — a False criterion FAILs (1), and an ungraded ack criterion is
+# INCONCLUSIVE at 0, never PASS.
+
+def _criterion_drain(monkeypatch, tmp_path, *, ack=None, session=None,
+                     evidence=None, load=0.1):
+    """Drive `run()` with the four criteria satisfied unless overridden."""
+    drain = _drain_tool()
+
+    class _Resp:
+        def __init__(self, code, body):
+            self.status_code = code
+            self._body = body
+            self.text = str(body)
+
+        def json(self):
+            return self._body
+
+    ok_ack = ack or (lambda _cap: _Resp(200, {"status": "ok", "extracted": 1,
+                                              "extraction": None}))
+    ok_session = session or (lambda _sid: _Resp(
+        200, {"extracted": 1,
+              "extraction": {"status": "ok", "outcome_known": True}}))
+    ok_evidence = evidence or (lambda sid: {"measured": True, "points": 1,
+                                            "session_id": sid})
+
+    class _Stub:
+        label = "stub"
+        closes = 0
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def authenticate(self, _org):
+            pass
+
+        def close(self):
+            type(self).closes += 1
+
+        def post_capture(self, cap):
+            return ok_ack(cap)
+
+        def get_session(self, sid):
+            return ok_session(sid)
+
+        def extraction_evidence(self, sid):
+            return ok_evidence(sid)
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_CAPTURE_SPOOL_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(drain.os, "getloadavg", lambda: (load, load, load))
+    monkeypatch.setattr(drain, "_InProcessTransport", _Stub)
+    return drain
+
+
+def test_a_REFUSAL_fails_the_run(monkeypatch, capsys, tmp_path):
+    """`ok_refusal` is an INPUT: a 504 must FAIL, not be counted and passed.
+
+    Mutant: `ok_refusal = True` → this row reds (before it, that mutant left every
+    row in the file GREEN — measured, round O).
+    """
+    drain = _criterion_drain(
+        monkeypatch, tmp_path,
+        ack=lambda _cap: _Resp504())
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"a refusal is a criterion FAIL (exit 1): rc={rc}\n{out}"
+    assert "[FAIL] zero refusals" in out, out
+    assert "VERDICT: FAIL" in out, out
+
+
+class _Resp504:
+    status_code = 504
+    text = '{"stage": "capture_gates"}'
+
+    def json(self):
+        return {"stage": "capture_gates", "stages_ms": {"capture_gates": 900}}
+
+
+def test_a_STUCK_session_fails_the_run(monkeypatch, capsys, tmp_path):
+    """`ok_terminal` is an INPUT: a session that never terminates must FAIL.
+
+    Mutant: `ok_terminal = True` → this row reds (GREEN file-wide before, round O).
+    """
+    drain = _criterion_drain(
+        monkeypatch, tmp_path,
+        session=lambda _sid: _Resp200({"extracted": 1,
+                                       "extraction": {"outcome_known": False,
+                                                      "phase": "extracting"}}))
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600",
+                     "--terminal-timeout", "0.2"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"a stuck session is a criterion FAIL (exit 1): rc={rc}\n{out}"
+    assert "[FAIL] terminal on its own" in out, out
+    assert "VERDICT: FAIL" in out, out
+
+
+class _Resp200:
+    def __init__(self, body):
+        self.status_code = 200
+        self._body = body
+        self.text = str(body)
+
+    def json(self):
+        return self._body
+
+
+def test_a_GRADED_ack_BREACH_fails_the_run(monkeypatch, capsys, tmp_path):
+    """`ok_ack` is an INPUT, and a breach must FAIL — never PASS, never exit 0.
+
+    This is round 5's F1 in its living form (`[FAIL] ack p95` beside `VERDICT:
+    PASS` at exit 0). Mutant: `ok_ack = True` → this row reds (GREEN file-wide
+    before, round O).
+    """
+    drain = _criterion_drain(monkeypatch, tmp_path)
+    rc = drain.main(["--n", "1", "--max-ack-p95", "0.000001"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"a graded breach is a FAIL (exit 1): rc={rc}\n{out}"
+    assert "[FAIL] ack p95" in out, out
+    assert "VERDICT: PASS" not in out, out
+
+
+def test_an_OVERSUBSCRIBED_host_is_INCONCLUSIVE_never_PASS(monkeypatch, capsys,
+                                                           tmp_path):
+    """`ack_graded` is an INPUT: the absolute criterion is not graded on a busy box.
+
+    #5049 rule 1 — a deadline expiry is evidence about the machine. Mutant:
+    `oversubscribed = False` → this row reds (GREEN file-wide before, round O).
+    """
+    drain = _criterion_drain(monkeypatch, tmp_path, load=999.0)
+    rc = drain.main(["--n", "1", "--max-ack-p95", "0.000001"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"INCONCLUSIVE exits 0 (the change is not what failed): {rc}\n{out}"
+    assert "VERDICT: INCONCLUSIVE" in out, out
+    assert "VERDICT: PASS" not in out, out
+    assert "[FAIL] ack p95" not in out, out
+
+
+def test_no_extracted_points_fails_the_run(monkeypatch, capsys, tmp_path):
+    """`ok_points` is an INPUT too — the round-8 "can never PASS" mirror image."""
+    drain = _criterion_drain(
+        monkeypatch, tmp_path,
+        evidence=lambda sid: {"measured": True, "points": 0, "session_id": sid})
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    out = capsys.readouterr().out
+    assert rc == 1, f"no extracted point is a criterion FAIL (exit 1): rc={rc}\n{out}"
+    assert "[FAIL] extraction demonstrably ran" in out, out
+
+
+def test_the_JSON_report_carries_the_UNREADABLE_ack_count(monkeypatch, capsys,
+                                                          tmp_path):
+    """`--json` is the documented acceptance mode, so the honest arm must be in it.
+
+    Round O (P2): `NOT MEASURABLE` lived only in the human block, so the machine
+    report still stated `deferred_at_ack: {n: 0, of: 1}` for an ack body it never
+    read. The summary now carries `unreadable`, and this row pins it under
+    `--json`.
+    """
+    class _Garbled:
+        status_code = 200
+        text = "not json"
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    drain = _criterion_drain(monkeypatch, tmp_path,
+                             ack=lambda _cap: _Garbled())
+    rc = drain.main(["--n", "1", "--max-ack-p95", "3600", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, rc
+    report = json.loads(captured.out)
+    assert report["deferred_at_ack"]["unreadable"] == 1, report["deferred_at_ack"]
+    assert report["deferred_at_ack"]["n"] == 0
+    assert "NOT MEASURABLE" in captured.err, captured.err
+
+
+def test_a_refusal_ONLY_run_does_not_claim_a_deferral_measurement(monkeypatch,
+                                                                  capsys,
+                                                                  tmp_path):
+    """0 accepted acks is `NOT MEASURABLE`, not "every session finished in budget".
+
+    Round O (P3): the 504 run — the defect this tool exists to detect — printed
+    "extraction finished inside the budget on every session" over a population of
+    zero.
+    """
+    drain = _criterion_drain(monkeypatch, tmp_path, ack=lambda _cap: _Resp504())
+    drain.main(["--n", "1", "--max-ack-p95", "3600"])
+    out = capsys.readouterr().out
+    assert "extraction finished inside the budget" not in out, out
+    assert "NOT MEASURABLE" in out and "0/0" in out, out
