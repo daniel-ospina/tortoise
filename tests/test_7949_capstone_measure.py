@@ -18262,6 +18262,28 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "either side means the figure and its derivation have come apart; re-derive both, never "
         "edit one (#14183 review, cycle 11, P2)")
 
+    # ⛔ AND THE SUBTRACTAND IS THE ROW'S OWN CURRENT ANCHOR (#14183 review, cycle 12, P3 —
+    # MEASURED). The identity alone accepts a COORDINATED edit: `22094−19119` -> `22095−19120`
+    # keeps the difference, so the triad still evaluates — and the row then names a line the
+    # tree does not carry while its own `at THIS head` triple names the right one, i.e. two
+    # answers for one statement on one line. Measured before this arm: that edit (and the same
+    # edit on `22052−19077` or `29142−25461`) left the WHOLE covering set GREEN (554 passed).
+    # The row's live subtraction triples are built FROM the anchors its `at THIS head` clause
+    # states — the new-column triple and the old-column one share their a-side — so the
+    # a-side must BE those anchors, which are graded separately by `_D5_CURRENT_CLAIMS`.
+    _triple_match = _D5_TRIPLE_RE.search(text)
+    if _triple_match is not None:
+        _anchors = [int(_triple_match.group(s)) for s in ("a", "b", "c")]
+        _bad_subtractands = [
+            list(d) for d in _diffs
+            if [int(d[i]) for i in (0, 2, 4)] != _anchors]
+        assert not _bad_subtractands, (
+            f"D5's subtraction triples take their a-side from anchors the row does not state "
+            f"as current ({_bad_subtractands} vs {_anchors}) — a coordinated edit that moves "
+            "both operands keeps the difference but names a line the tree does not carry, so "
+            "the row would hand a reader two answers for one statement; re-derive the pair "
+            "from the row's own `at THIS head` anchors (#14183 review, cycle 12, P3)")
+
     triple = _D5_TRIPLE_RE.search(text)
     if triple is None:
         failures.append(
