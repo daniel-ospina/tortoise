@@ -1725,6 +1725,18 @@ def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
     assert claims, (
         "non-vacuity: the block still publishes at least one rev's OWN pin — deleting the "
         "sentence is not the fix for a wrong pair")
+    # ⛔ THE `commits` SPELLING MUST BE FOUND, not merely tolerated (#14258 review, P3 and the
+    # mutation-attribution rule). Widening `_OWN_PIN_CLAIM_RE` ADDED an assertion surface — two
+    # block clauses that were ungraded became graded — and without this arm REVERTING the
+    # widening left the suite GREEN (measured: the pre-widening regex finds only `d523c9be8c`,
+    # which is in `OWN_PINS`, so every assertion below passes over a surface that no longer
+    # grades the clause it was widened for). A covered row that nothing holds covered is the
+    # shape this file rejects, so the coverage itself is asserted here.
+    assert {"10e51693f166", "0351fe856942"} <= {rev for rev, _rows, _digest in claims}, (
+        "the `commits (N, \"digest\")` spelling must be GRADED: `_OWN_PIN_CLAIM_RE` has to match "
+        "it, or a rev published with another tree's pair passes in that spelling — which is the "
+        "defect the widening exists for. Findings found: "
+        f"{sorted(rev for rev, _r, _d in claims)}")
     for rev, rows, digest in claims:
         assert rev in OWN_PINS, (
             f"the block publishes `{rev}`'s own pin, but `{rev}` is not in `OWN_PINS`, so "
