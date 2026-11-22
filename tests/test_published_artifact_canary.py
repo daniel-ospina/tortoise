@@ -2472,7 +2472,7 @@ def test_the_tool_imports_only_the_STANDARD_LIBRARY():
 
 
 def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_path):
-    """Runs the canary step's OWN shell, twice, with a stub interpreter.
+    """Runs the canary step's OWN shell, four times, with a stub interpreter.
 
     ⛔ `OWN shell` IS LOAD-BEARING, and it was FALSE when this harness was first written:
     it ran the block under plain `bash -c` while the runner runs `bash -e {0}` (review
@@ -2490,8 +2490,9 @@ def test_an_INTERPRETER_level_failure_is_not_published_as_a_release_finding(tmp_
     unguarded (the tool is invoked `… || rc=$?`). The `-e` discrimination for that mutant
     lives in the sibling `test_the_pre_upload_gate_step_EXITS_with_the_tool_VERDICT`, which
     reds under `bash -e` and is green under `bash -c`. This harness's four cases pin the
-    exit-code CLASSIFIER — a crash publishes 2, a genuine FAIL publishes 1, a compact
-    payload is the same report — so do not read it as the errexit pin: the load-bearing
+    exit-code CLASSIFIER — (a) a crash publishes 2, (b) a genuine FAIL publishes 1,
+    (c) a compact payload is the same report, (d) an UNKNOWN verdict never orders an
+    upload — so do not read it as the errexit pin: the load-bearing
     `|| true`/ordering guarantee would then look doubly covered when it is covered once.
 
     exit 1 is the irreversible instruction ("the published artifact is broken — cut a

@@ -190,7 +190,14 @@ jobs:
           # invariant, not something the test can falsify today.
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           if [ -s "$RUNNER_TEMP/canary/verdict.json" ]; then
-            echo "published-artifact-canary exit_code=$rc published_fail=$published_fail — the verdict.json the exit code was derived from:"
+            # ⛔ THE HEADER STATES ONLY WHAT IS TRUE ON EVERY PATH (review cycle 15, P2,
+            # MEASURED). It used to say "the verdict.json the exit code was derived from",
+            # which holds only on the `rc=1` + `verdict=FAIL` path: on a PASS run the code
+            # came from the tool's own exit, and on the retag path it came from the
+            # CLASSIFIER because the JSON could not be read — where this line then also
+            # dangled a colon over the `cat` failure on stderr. Naming the file (and the
+            # two values the reader needs) is true in all three states.
+            echo "published-artifact-canary exit_code=$rc published_fail=$published_fail — the verdict.json this step read:"
             # `|| true`: printing the reading must never be able to change the reading.
             cat "$RUNNER_TEMP/canary/verdict.json" || true
           else
