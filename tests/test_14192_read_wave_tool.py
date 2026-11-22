@@ -857,7 +857,19 @@ def _mapping_keys_of(node: ast.AST | None,
                     else _string_keys_of(key, consts))
         return out
     if isinstance(node, ast.Call) and _callee_names_of(node.func) & _DICT_SPELLINGS:
-        return _mapping_keys_in_keywords(node, consts)
+        # ⛔ AND ITS POSITIONAL DISPLAY (#14326 review cycle 3, MEASURED GREEN at
+        # `8e4ffbc5a0`: `builtins.__dict__.update(dict({"print": getattr}))` rebinds
+        # `print` and the pin stayed at `m=2 c=2 i=0` while the read executed — the
+        # keyword half above was resolved, the display handed to the SAME call was not, so
+        # the verdict was decided by which argument slot the mapping arrived in).
+        # ONLY A DISPLAY is taken: a pair ITERABLE stays the stated residual below, because
+        # `_string_keys_of` over a list of pairs credits the values too — `dict([("leg",
+        # "print")])` would drop `print` from the allow-lists and false-red.
+        out = _mapping_keys_in_keywords(node, consts)
+        for arg in node.args:
+            if isinstance(arg, ast.Dict):
+                out |= _mapping_keys_of(arg, consts)
+        return out
     # a static string handed over bare — `setdefault("print", …)`, `setdefault(_p, …)`
     return _string_keys_of(node, consts)
 
@@ -4819,6 +4831,16 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "`update(dict(<name>=…))` CALL-built mapping": (
             '    import builtins\n'
             '    builtins.__dict__.update(dict(print=getattr))\n'
+            '    print(sdk, "_tortoise_fts_query")'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ AND THE SAME `dict(…)` CALL WITH ITS MAPPING **POSITIONALLY** (#14326 review
+        # cycle 3, MEASURED GREEN at `8e4ffbc5a0`: `pin_refuses=False`, `m=2 c=2 i=0` with the
+        # read executing). The keyword half of a `dict(…)` was resolved and its positional
+        # display was not, so the verdict was decided by the argument SLOT the mapping
+        # arrived in — the `dict(<name>=…)` row directly above cannot red this one.
+        "`update(dict({…}))` POSITIONAL display": (
+            '    import builtins\n'
+            '    builtins.__dict__.update(dict({"print": getattr}))\n'
             '    print(sdk, "_tortoise_fts_query")'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
         "`update(**{…})` SPREAD mapping": (
