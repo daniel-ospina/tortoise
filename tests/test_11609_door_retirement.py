@@ -127,6 +127,7 @@ from __future__ import annotations
 import html
 import inspect
 import re
+import string
 from collections import Counter
 from typing import ClassVar
 
@@ -1174,9 +1175,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         therefore accepted", which is FALSE for a bare instruction);
     #:       * ANY block whose inline source contains a `<` is OPAQUE (visible text empty), in
     #:         the paragraph path, the table-CELL path and the HTML-block path alike: ONE rule,
-    #:         applied where all FOUR read it — `retired_call_forms` (R1), `notes_missing_
-    #:         replacement` (R2), and `_entity_only_mentions`, the fourth reader, which judges
-    #:         an ENTITY-spelled mention on the block's decoded SOURCE precisely because an
+    #:         applied where all FIVE read it — `retired_call_forms` (R1, its raw arm and its
+    #:         rendered arm), `notes_missing_replacement` (R2, ditto), and
+    #:         `_entity_only_mentions`, the spelling-variant reader, which judges a mention on
+    #:         the block's decoded SOURCE and on the block's RENDERED text precisely because an
     #:         opaque block has no visible text at all. So every mention in such a block reds —
     #:         R2 has no text to match and R1 reds a call form as it does anywhere else
     #:         (measured: an earlier wording offered ``an R1 call form`` as an escape; nothing
@@ -1188,6 +1190,15 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #:         opaque block reds (r10), so the intersection of the two fixes was the one gap.
     #:         The rows below pin it per shape, because the sentence is the contract a reader
     #:         trusts and it may not describe itself more widely than it behaves.
+    #:         ⛔ AND THE COUNT ABOVE WAS THE NEXT ESCAPE (#14237 r16, measured): "all FOUR" was
+    #:         itself a blast radius wider than the behaviour, because R1 judges CALL FORM in
+    #:         the raw source only — so `Call tortoise_list_graphs\\(x=1\\) for names. Use
+    #:         tortoise_graph_overview(...)` returned `R1 [] R2 []` (ACCEPTED) while the reader
+    #:         sees a copyable call, and `tortoise\\_list\\_graphs` — markdown's backslash
+    #:         escape, the OTHER way to spell a name — was invisible to every reader: a dead
+    #:         end in that spelling was ACCEPTED where the plain one reds. R1 now judges call
+    #:         form in the RENDERED text too, and discovery reads the rendered text as well as
+    #:         the decoded source, so the verdict depends on neither spelling mechanism.
     #:         Approximating "what a browser displays" from the source failed OPEN FOUR rounds
     #:         running — the tag strip (r10), an inline `<script>`/`<style>`/`display:none`
     #:         body (r11), and raw-slice segmentation that re-admitted image alt text, link
@@ -1300,7 +1311,7 @@ class TestEveryReaderNamesTheLiveListingDoor:
         return cls.CALL_FORM.match(text, at) is not None
 
     @staticmethod
-    def _inline_text(token) -> str:
+    def _inline_text(token, *, breaks: str = " ") -> str:
         """What the reader SEES of an inline token: text and inline code only.
 
         Deliberately excludes `html_inline` (a comment is not displayed) and link/image
@@ -1308,13 +1319,20 @@ class TestEveryReaderNamesTheLiveListingDoor:
         whole of R2's "a replacement the reader can see": it closes the HTML-comment case and
         the link-target case, and — because link-reference definitions produce no visible
         text at all — the r9 review's reference-link P1 (#14237 r8/r9 reviews).
+
+        ⛔ `breaks` IS A PARAMETER BECAUSE THE TWO RULES NEED OPPOSITE ANSWERS (#14237 r16).
+        R2 asks "does this BLOCK name the replacement", and this doc hard-wraps at ~80
+        columns, so a hard-wrapped line must JOIN and a break there is a space. R1 asks "is
+        the name immediately followed by `(`", where a break before the bracket is declared
+        NOT to be a call — with a space it would become one, and the guard would red a
+        wrapped sentence it accepts today. So R1 passes `"\\n"` and R2 keeps the default.
         """
         parts: list[str] = []
         for child in token.children or []:
             if child.type in ("text", "code_inline", "text_special"):
                 parts.append(child.content)
             elif child.type in ("softbreak", "hardbreak"):
-                parts.append(" ")
+                parts.append(breaks)
         return "".join(parts)
 
     @classmethod
@@ -1331,13 +1349,50 @@ class TestEveryReaderNamesTheLiveListingDoor:
         Table cells need their own offsets because the parser gives every cell in a row the
         ROW's line map; each cell's own source (`token.content`) is therefore located in the
         row text, in order, which is exact because the parser has already removed the pipes.
+
+        This is the THREE-field projection of `_unit_records`, which is the one parse walk:
+        the guard asks three questions of a unit (what is VISIBLE, what the SOURCE decodes to,
+        and what the RENDERER emits) and they are answered in one place so they cannot
+        disagree — the failure mode of every earlier round that answered one of them twice.
+        """
+        return [(start, end, body) for start, end, body, _shown, _rendered, _html
+                in cls._unit_records(text)]
+
+    @classmethod
+    def _unit_records(cls, text: str) -> list[tuple[int, int, str, str, str, bool]]:
+        """``(start, end, body, shown, rendered, is_html)`` for every judged unit.
+
+        `body` — the VISIBLE text. The only text R2's replacement credit may read, so a
+        replacement hidden in an HTML comment, a link destination or a link title cannot
+        clear a mention. Empty for an opaque block.
+
+        `shown` — the unit's DECODED SOURCE (`_decoded_source`). What DISCOVERY reads, because
+        it still holds the containers `body` excludes: a mention in image alt text, a link
+        destination or a title reds for the PLAIN spelling (the raw scan sees it), so the
+        ENTITY spelling of the same mention has to be discoverable in the same text (#14237
+        r14, measured).
+
+        `rendered` — what the RENDERER emits: `&`-references decoded by the parser, BACKSLASH
+        ESCAPES resolved by the parser, code spans left LITERAL, and a line break preserved as
+        a newline. This is the text a reader copies a command out of, so R1 judges call form
+        here as well as in the raw source (#14237 r16, measured fail-open: `name\\(x=1\\)`
+        renders as a call and no reader saw it).
+
+        `is_html` — whether the unit is an `html_block`, whose source is HTML rather than
+        markdown and therefore needs the other decode.
         """
         starts = cls._line_starts(text)
 
         def off(line_no: int) -> int:
             return starts[line_no] if line_no < len(starts) else len(text)
 
-        found: list[tuple[int, int, str]] = []
+        found: list[tuple[int, int, str, str, str, bool]] = []
+
+        def record(begin: int, finish: int, body: str, rendered: str, is_html: bool) -> None:
+            found.append((begin, finish, body,
+                          cls._decoded_source(text[begin:finish], permissive_html=is_html),
+                          rendered, is_html))
+
         row_cursor: int | None = None
         row_spans: list[tuple[int, int]] = []
         for token in cls.MD.parse(text):
@@ -1356,6 +1411,9 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 # `class` attribute. `token.content` is the code a reader sees, so a fence
                 # ````tortoise_graph_overview` cannot satisfy R2 for its own body.
                 body = token.content if token.type == "fence" else text[begin:finish]
+                # A fence's content and a code block's source are shown LITERALLY: no escape
+                # resolution, because a backslash inside code is a character the reader sees.
+                rendered = token.content if token.type == "fence" else text[begin:finish]
                 if token.type == "html_block":
                     # ⛔ AN HTML BLOCK IS OPAQUE, never tag-stripped (#14237 r10 review P1).
                     # A tag strip is a hand-written HTML guess and it is WRONG in the fail-OPEN
@@ -1366,7 +1424,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
                     # Nothing in the block counts as shown, so every mention inside it must be
                     # in R1 call form or it reds. Fail-CLOSED, and declared as a bound.
                     body = ""
-                found.append((begin, finish, body))
+                    # An HTML block is passed through RAW, so the browser's HTML5 decode is its
+                    # rendering — that is `shown`, and `\\(` is not an escape in HTML at all.
+                    rendered = cls._decoded_source(text[begin:finish], permissive_html=True)
+                record(begin, finish, body, rendered, token.type == "html_block")
                 continue
             if token.type != "inline":
                 continue
@@ -1382,7 +1443,8 @@ class TestEveryReaderNamesTheLiveListingDoor:
             # Otherwise `_inline_text` reads the RENDERED text from the token's children, which
             # already excludes image alt text (an `image` token's own children are not walked),
             # link destinations and `html_inline`.
-            shown = "" if "<" in token.content else cls._inline_text(token)
+            body = "" if "<" in token.content else cls._inline_text(token)
+            rendered = cls._inline_text(token, breaks="\n")
             if row_cursor is not None:
                 cell = token.content
                 span = row_spans.pop(0) if row_spans else None
@@ -1397,10 +1459,10 @@ class TestEveryReaderNamesTheLiveListingDoor:
                 else:
                     at, end = row_cursor, row_cursor
                 row_cursor = max(end, row_cursor)
-                found.append((at, end, shown))
+                record(at, end, body, rendered, False)
                 continue
             if token.map:
-                found.append((off(token.map[0]), off(token.map[1]), shown))
+                record(off(token.map[0]), off(token.map[1]), body, rendered, False)
         return found
 
     @staticmethod
@@ -1419,18 +1481,25 @@ class TestEveryReaderNamesTheLiveListingDoor:
         one that needs a DIFFERENT decode (see `_decoded_source`). `blocks()` already
         distinguishes it — it reports an opaque empty body for it — but the reason is not
         recoverable from the body alone: an inline `<br>` also makes a block opaque.
+
+        Derived from `_unit_records`'s own `is_html` field (#14237 r16), so there is ONE parse
+        walk and the two readings of the tree cannot drift apart. `_unblocked_spans` uses it
+        to ask which gap units the parser refused to place at all.
         """
-        starts = cls._line_starts(text)
+        return {(start, end)
+                for start, end, _body, _shown, _rendered, is_html in cls._unit_records(text)
+                if is_html and end > start}
 
-        def off(line_no: int) -> int:
-            return starts[line_no] if line_no < len(starts) else len(text)
+    #: CommonMark's BACKSLASH ESCAPE: a `\` before ASCII punctuation renders as the punctuation
+    #: itself. Used ONLY for the GAP units (`_unblocked_spans`), which have no parser token to
+    #: read — every unit that does have one takes its rendered text from the parser, which
+    #: applies this rule everywhere EXCEPT inside code spans, where a backslash is literal.
+    ESCAPE = re.compile(r"\\([" + re.escape(string.punctuation) + r"])")
 
-        spans: set[tuple[int, int]] = set()
-        for token in cls.MD.parse(text):
-            if token.type == "html_block" and token.map:
-                stop = token.map[1] if token.map[1] is not None else len(text)
-                spans.add((off(token.map[0]), off(stop)))
-        return spans
+    @classmethod
+    def _escape_resolution(cls, source: str) -> str:
+        """The source with markdown's backslash escapes resolved (see `ESCAPE`)."""
+        return cls.ESCAPE.sub(r"\1", source)
 
     #: The CommonMark character-reference rule, and ONLY it: `&`, an optional `#`/`#x`, and a
     #: TERMINATING `;`. ⛔ SEMICOLON-STRICT ON PURPOSE. `html.unescape` implements HTML5, which
@@ -1453,6 +1522,14 @@ class TestEveryReaderNamesTheLiveListingDoor:
         terminator. Using ONE decode for both is what produced both r14 findings — the
         permissive one invented a mention in markdown text, and the visible-body one could
         not see a real mention in a container the body excludes.
+
+        ⛔ THIS IS THE SOURCE DECODE, AND IT DELIBERATELY RESOLVES ONLY REFERENCES. Markdown's
+        OTHER spelling mechanism is the backslash escape (`\\_`, `\\(`), which the INLINE
+        PARSER resolves — and only outside code spans, where a backslash is literal. So the
+        escape spelling is read from the parser's own output (`_unit_records`'s `rendered`),
+        never approximated here: a source-level escape strip would red
+        `` `name\\(x=1\\)` `` inside a code span, where the reader sees the backslashes.
+        ``_escape_resolution`` exists only for the GAP units, which have no parser output at all.
         """
         if permissive_html:
             return html.unescape(raw)
@@ -1553,59 +1630,115 @@ class TestEveryReaderNamesTheLiveListingDoor:
         so a mention there can never be cleared by anything — the same fail-closed verdict
         the plain spelling already gets.
 
-        Returns ``(name, block_start, body, call_end)`` where `call_end` is the end offset
-        in the block's judged text of the first occurrence written in CALL form, or -1.
-        Reporting the block's START line is deliberate — the source offset of a decoded
-        character does not exist.
+        Returns ``(name, block_start, body, call_end)`` where `call_end` is the end offset of
+        a CALL-FORM occurrence in one of the two judged texts, or -1. Only its SIGN is the
+        contract every caller uses (`>= 0` = a call form was seen); the offset itself is
+        meaningful only within the text that produced it. Reporting the block's START line is
+        deliberate — the source offset of a decoded character does not exist.
+
+        ⛔ MARKDOWN'S OTHER SPELLING MECHANISM (#14237 r16, measured fail-open, same class as
+        r10-r15). A character reference is not the only way the source can say one thing and
+        the reader see another: a BACKSLASH ESCAPE does the same (`tortoise\\_list\\_graphs`
+        renders as the retired name, `name\\(x=1\\)` renders as a copyable call). Measured at
+        the r15 head: `The tool tortoise\\_list\\_graphs lists names.` returned BOTH rules empty
+        — ACCEPTED — while the plain spelling of the very same sentence is a dead end, and
+        `Call tortoise_list_graphs\\(x=1\\) for names. Use tortoise_graph_overview(...)`
+        returned both empty too, while `Call tortoise_list_graphs(x=1) …` reds R1. The escape
+        is resolved by the PARSER, so the text a reader copies from is now read from the
+        parser's own output (`_unit_records`'s `rendered`) instead of being approximated on
+        the source — which is why an escaped bracket inside a CODE SPAN stays literal and is
+        correctly not a call. This reader is therefore no longer "entity only"; the name is
+        kept because every review round in this file's prose refers to it by that name, and
+        the docstring, not the identifier, is the contract.
         """
         found: list[tuple[str, int, str, int]] = []
-        raw_html = cls._raw_html_block_spans(text)
         # ONE ordered unit list: every leaf block, plus the source the parser placed in none
-        # of them. `sort` keeps the reports in SOURCE order, which is what makes the entity
+        # of them. `sort` keeps the reports in SOURCE order, which is what makes this
         # reader's output comparable, line for line, with the raw scan's.
-        units = list(cls.blocks(text))
-        units += [(start, stop, "") for start, stop in cls._unblocked_spans(text)]
+        units = [(start, end, body, shown, rendered)
+                 for start, end, body, shown, rendered, _is_html in cls._unit_records(text)]
+        for start, stop in cls._unblocked_spans(text):
+            raw = text[start:stop]
+            # A GAP renders NOTHING, so there is no parser output to read; its `rendered` is
+            # its source with BOTH spelling mechanisms resolved, which is the closest
+            # counterpart of what the renderer would make of that source.
+            units.append((start, stop, "",
+                          cls._decoded_source(raw, permissive_html=False),
+                          cls._decoded_source(cls._escape_resolution(raw),
+                                              permissive_html=False)))
         units.sort(key=lambda unit: (unit[0], unit[1]))
-        for begin, finish, body in units:
+        for begin, finish, body, shown, rendered in units:
             raw = text[begin:finish]
-            if "&" not in raw:
+            # `&` and `\` are markdown's TWO spelling mechanisms, and the only ways the source
+            # can differ from the text the reader sees while a retired name is on screen. A
+            # unit carrying neither cannot hide a spelling-variant mention.
+            if "&" not in raw and "\\" not in raw:
                 continue
-            # WHAT THIS UNIT'S MENTIONS ARE JUDGED ON: its DECODED SOURCE — every block,
-            # visible body or not. `name_hits(raw)` already judges the WHOLE source,
-            # including the containers `body` excludes, so this reader judges the decoded
-            # form of that same text; anything narrower makes the verdict depend on the
-            # SPELLING (#14237 r14, measured). Decoding is the block's own language's rule
-            # (`_decoded_source`), never one permissive decode for both.
-            shown = cls._decoded_source(
-                raw, permissive_html=(begin, finish) in raw_html)
-            # `found` still carries `body`, never `shown`: R2's replacement credit reads the
-            # VISIBLE text, so a replacement hidden in an HTML comment, a link destination or
-            # a link title cannot clear a mention (the r11/r12 rule this change preserves).
-            for name, call_end in cls._excess_entity_mentions(raw, shown):
+            # ONE entry per (name, unit): every arm below can discover the same door, and two
+            # entries for one mention would report it twice.
+            calls: dict[str, int] = {}
+            # WHAT THIS UNIT'S MENTIONS ARE JUDGED ON, and it takes TWO texts (#14237 r14, r16).
+            # `shown` (the DECODED SOURCE) is where a spelling-variant name is DISCOVERED,
+            # because it still holds the containers `body` excludes — image alt text, a link's
+            # destination and title — where the PLAIN spelling reds (the raw scan sees it) so
+            # the other spelling must not clear it. `rendered` (the parser's own output) is
+            # where a spelling-variant CALL is JUDGED, because only the renderer resolves an
+            # escape and knows a code span keeps it literal.
+            for judged in (shown, rendered):
+                for name, call_end in cls._excess_mentions(raw, judged):
+                    calls[name] = call_end if call_end >= 0 else calls.get(name, -1)
+            # ⛔ A *PLAIN* NAME WHOSE CALL FORM IS SPELLED WITH AN ESCAPE OR A REFERENCE
+            # (#14237 r16, measured fail-open): `Call tortoise_list_graphs\\(x=1\\) for
+            # names. Use tortoise_graph_overview(...)` returned R1 empty — the NAME is plain,
+            # so the excess count above sees nothing — while a reader sees a copyable call to
+            # the retired door. R1 is "a name in call form may not appear at all", so the
+            # judgement is taken from the rendered text for EVERY name, not only the ones
+            # whose own spelling is unusual. A name the raw scan ALREADY reds as a call inside
+            # this unit is skipped: R1 reports it at its own line and a second entry would
+            # report one mention twice.
+            raw_calls = {name for name, _start, end in cls.name_hits(raw)
+                         if cls.is_call_form(raw, end)}
+            for name, call_end in cls._rendered_call_forms(rendered):
+                if name in raw_calls:
+                    continue
+                if calls.get(name, -1) < 0:
+                    calls[name] = call_end
+            for name, call_end in calls.items():
+                # `found` still carries `body`, never `shown`: R2's replacement credit reads the
+                # VISIBLE text, so a replacement hidden in an HTML comment, a link destination
+                # or a link title cannot clear a mention (the r11/r12 rule this preserves).
                 found.append((name, begin, body, call_end))
         return found
 
     @classmethod
-    def _excess_entity_mentions(cls, raw: str, shown: str) -> list[tuple[str, int]]:
-        """Names the DECODED text carries MORE often than the raw one — i.e. entity-spelled.
+    def _rendered_call_forms(cls, rendered: str) -> list[tuple[str, int]]:
+        """Every retired name the RENDERED text shows in CALL form, as ``(name, end)``."""
+        return [(name, end) for name, _start, end in cls.name_hits(rendered)
+                if cls.is_call_form(rendered, end)]
 
-        A count, not `name in raw`: a unit may carry a plain mention AND an entity-spelled
+    @classmethod
+    def _excess_mentions(cls, raw: str, judged: str) -> list[tuple[str, int]]:
+        """Names the JUDGED text carries MORE often than the raw one — i.e. spelled differently.
+
+        A count, not `name in raw`: a unit may carry a plain mention AND a spelling-variant
         occurrence of the same door, and the excess is order-independent. Whole-token on both
-        sides, so neither a preceding nor a following plain mention can hide the entity one.
+        sides, so neither a preceding nor a following plain mention can hide the other
+        spelling. Called twice per unit — once with the decoded SOURCE (discovery) and once
+        with the RENDERED text (escapes) — because a name can be spelled unusually in either.
         Returns ``(name, call_end)``; `call_end` is the end offset of the first occurrence
-        written in CALL form within `shown`, or -1.
+        written in CALL form within `judged`, or -1.
         """
         raw_counts: dict[str, int] = {}
         for name, _start, _end in cls.name_hits(raw):
             raw_counts[name] = raw_counts.get(name, 0) + 1
         ends_by_name: dict[str, list[int]] = {}
-        for name, _start, end in cls.name_hits(shown):
+        for name, _start, end in cls.name_hits(judged):
             ends_by_name.setdefault(name, []).append(end)
         excess: list[tuple[str, int]] = []
         for name, ends in ends_by_name.items():
             if len(ends) <= raw_counts.get(name, 0):
                 continue
-            excess.append((name, next((e for e in ends if cls.is_call_form(shown, e)), -1)))
+            excess.append((name, next((e for e in ends if cls.is_call_form(judged, e)), -1)))
         return excess
 
     @classmethod
@@ -2624,6 +2757,107 @@ class TestEveryReaderNamesTheLiveListingDoor:
         assert not self.notes_missing_replacement(text), (
             "a call form was graded a dead end as well: "
             f"{self.notes_missing_replacement(text)}")
+
+    @pytest.mark.parametrize("name,bracket_open,bracket_close", [
+        # The NAME is plain and only the BRACKET is spelled unusually: the excess count above
+        # sees nothing (both counts are 1), so this is the arm that needs the RENDERED text.
+        ("tortoise_list_graphs", "&#40;", "&#41;"),
+        ("tortoise_list_graphs", r"\(", r"\)"),
+        # …and both mechanisms at once, plus markdown's other name spelling.
+        ("&#116;ortoise_list_graphs", r"\(", r"\)"),
+        (r"tortoise\_list\_graphs", "(", ")"),
+    ], ids=["entity-bracket", "escaped-bracket",
+            "entity-name-and-bracket", "escaped-name"])
+    def test_a_CALL_spelled_with_an_escape_or_a_reference_is_still_a_call(
+            self, name, bracket_open, bracket_close):
+        """⛔ MEASURED FAIL-OPEN (#14237 r16): R1 read call form in the RAW source only.
+
+        The reader sees `tortoise_list_graphs(x=1)` in every row below — markdown's inline
+        parser resolves `&#40;` and `\\(` to `(` — so R1's rule ("a retired name written as a
+        CALL may not appear at all; no prose talks it back in") applies. It did not fire: at
+        the r15 head `Call tortoise_list_graphs\\(x=1\\) for names. Use
+        tortoise_graph_overview(section="graphs") instead.` returned `R1 [] R2 []` and was
+        ACCEPTED, while the same sentence with plain brackets reds R1. The block NAMES the
+        replacement in every row on purpose: that is the exact condition under which the
+        escape spelling was accepted (R2 cleared it as a note).
+
+        ⛔ THE NAME HALF IS NOT A CASUAL EXTRA. `tortoise\\_list\\_graphs` is how a doc author
+        writes that name when they want literal underscores, and it RENDERS as the door, so
+        the name spelling and the bracket spelling are two halves of one property.
+        """
+        replacement = 'Use tortoise_graph_overview(section="graphs") instead.'
+        text = f"Call {name}{bracket_open}x=1{bracket_close} for names. {replacement}\n"
+        assert self.retired_call_forms(text) == ["tortoise_list_graphs:1"], (
+            f"a copyable call to the retired door was accepted: {text!r} -> "
+            f"{self.retired_call_forms(text)}")
+        assert self.notes_missing_replacement(text) == [], (
+            "a call form was graded a dead end as well: "
+            f"{self.notes_missing_replacement(text)}")
+
+    @pytest.mark.parametrize("plain,variant", [
+        ("The tool tortoise_list_graphs lists names.",
+         "The tool tortoise\\_list\\_graphs lists names."),
+        ("Call tortoise_list_graphs(x=1) for names.",
+         "Call tortoise\\_list\\_graphs(x=1) for names."),
+    ], ids=["dead-end", "call"])
+    def test_the_ESCAPE_spelling_is_judged_like_the_plain_one(self, plain, variant):
+        """⛔ MEASURED FAIL-OPEN (#14237 r16): a backslash-escaped NAME was invisible.
+
+        `name_hits` scans the raw source, where `tortoise\\_list\\_graphs` is not a whole token
+        of the retired name at all, and the entity reader decoded references only — so BOTH
+        rules returned empty: a dead end in that spelling was ACCEPTED where the plain one is
+        reported, and a call in that spelling was ACCEPTED where the plain one reds R1. The
+        escape is resolved by the parser, so the rendered text is read instead.
+
+        ⛔ EXACT EQUALITY of the reports, not "both non-empty": the reports' text is what a
+        reader is handed, so a disagreement in placement is the same defect one layer in (the
+        r14/r15 rule, applied to the second spelling mechanism).
+        """
+        rules = (self.retired_call_forms, self.notes_missing_replacement)
+        plain_hits = {rule.__name__: rule(plain + "\n") for rule in rules}
+        variant_hits = {rule.__name__: rule(variant + "\n") for rule in rules}
+        assert any(plain_hits.values()), (
+            "NEITHER rule reports the PLAIN spelling, so this row would prove nothing: "
+            f"{plain!r}")
+        assert variant_hits == plain_hits, (
+            f"the verdict depends on the SPELLING of the same mention: {variant!r} gave "
+            f"{variant_hits}, {plain!r} gave {plain_hits}")
+
+    def test_a_wrapped_bracket_is_still_not_a_call(self):
+        """The declared bound, pinned where the r16 fix could have broken it.
+
+        A retired name followed by a NEWLINE then `(` is NOT a call, and the guard accepts it
+        when its block names the replacement. Reading the RENDERED text would have silently
+        reversed that, because `_inline_text`'s DEFAULT renders a softbreak as a SPACE — the
+        wrapped bracket would have become a call and this correct paragraph would have gone
+        red. That is why `_inline_text` takes `breaks` and R1 passes `"\\n"`. Reverting it to
+        the default reds exactly this row.
+        """
+        text = ("Call tortoise_list_graphs\n(x=1) for names. "
+                'Use tortoise_graph_overview(section="graphs") instead.\n')
+        assert self.retired_call_forms(text) == [], (
+            "a HARD-WRAPPED bracket was read as a call: "
+            f"{self.retired_call_forms(text)}")
+        assert self.notes_missing_replacement(text) == [], (
+            f"a note naming its replacement was reported: {self.notes_missing_replacement(text)}")
+
+    def test_a_code_span_keeps_its_backslash_so_it_is_not_a_call(self):
+        """Why the escape is read from the PARSER and not stripped from the source.
+
+        Inside a code span markdown does NOT resolve escapes, so a reader sees
+        `tortoise\\_list\\_graphs\\(x=1\\)` WITH its backslashes: it is not a copyable call, and
+        the guard accepts it when the block names the replacement. A source-level escape strip
+        (the cheap way to close r16) would red this correct paragraph — which is why the
+        rendered text comes from the parser's own children and `_escape_resolution` is used
+        only for the gap units, which have no parser output.
+        """
+        text = (r"Use `tortoise_list_graphs\(x=1\)` verbatim: "
+                'tortoise_graph_overview(section="graphs").\n')
+        assert self.retired_call_forms(text) == [], (
+            "a backslash inside a CODE SPAN was resolved, inventing a call: "
+            f"{self.retired_call_forms(text)}")
+        assert self.notes_missing_replacement(text) == [], (
+            f"a note naming its replacement was reported: {self.notes_missing_replacement(text)}")
 
     def test_a_semicolon_less_reference_is_LITERAL_in_markdown_text(self):
         """The other direction: the permissive decode INVENTED a mention in markdown text.
