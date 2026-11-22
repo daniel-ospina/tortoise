@@ -1430,10 +1430,10 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
     err in. It is not repaired by a name-rebinding heuristic here: a file-scoped
     walk cannot tell the two `q`s apart without a scope model, and a cheap guess
     would re-open the fail-open. The count row does NOT detect this: the
-    colliding name makes unrelated calls look ATTRIBUTED, so the red it raises
-    reports them as resolved reads (round-11 review, P3). What it does report is
-    how many mentions it could not attribute, which is why the over-block shows as
-    a plain count mismatch rather than a named cause.
+    colliding name makes unrelated calls look ATTRIBUTED, so `resolved` is
+    overstated and `unresolved` is `0` — the red shows as a plain call-site
+    count mismatch with no named cause, not as an unresolved-mention count
+    (round-12 review, P3).
     """
     carriers: set = set()
     parent = {id(child): node for node in ast.walk(tree)
@@ -1515,6 +1515,11 @@ def _seam_read_calls(tree, mention) -> _SeamFlow:
     # STRING (`getattr(_Tbl, "seamfn")`), so letting a found read suppress the
     # admission hides a second, unattributed read on the same binding — the exact
     # shape the opt-out paragraph above condemns (round-11 review, P2).
+    # ⛔ ITS KNOWN COST, accepted: a class-bound mention whose every ATTRIBUTED
+    # call opted out is still counted, because the escape is precisely the read no
+    # opt-out can cover (round-12 review, P3). That is an over-block (B) against the
+    # escape it prevents from being exempted (A), and the caller's message no
+    # longer calls the counted sites "un-opted-out", so the red stays truthful.
     return _SeamFlow(calls=reads, opaque=opaque or class_bound)
 
 
@@ -1637,10 +1642,16 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     `while grown` fixpoint left every row green); `except-as` needs the ``except``
     clause's exception TYPE treated as an escape, because Python CALLS it; and
     `type-alias`, `match-subject`, `type-param` and `class-dead` grade the
-    enumerations and the class-body admission ADDED for round 10 — without them
-    deleting `ast.TypeAlias`, the `ast.Match` opener or the `class_bound`
-    admission left the pin green, so those fixes were graded nowhere (round-11
-    review, P3).
+    enumerations and the class-body admission ADDED for round 10.
+
+    ⛔ AND EVERY BRANCH OF THE TWO ENUMERATIONS HAS A ROW, because a pin cannot be
+    a tripwire for a binding kind it never exercises: measured at `93178a6495`,
+    eight mechanisms — including the function-boundary stop that marks a
+    method-body binding as a LOCAL — could be deleted with the pin byte-identical
+    and GREEN (round-12 review, P3). The `with-target`/`ann` rows grade the two
+    modelled forms nothing else reached, `aug`/`lambda-default`/`def-default`/
+    `class-base`/`class-type-param`/`type-stmt-type-param` grade the escape
+    branches, and `method-local` is the row that must stay DEAD.
     """
     source = '''
 class SDK:
@@ -1692,6 +1703,40 @@ def classbodydead(sdk):
 
 def generic[T: sdk._tortoise_fts_query]():
     pass
+
+def with_target(sdk):
+    with sdk._tortoise_fts_query as _v:
+        _v(query="with-target", limit=10)
+
+def annassign(sdk):
+    _ann: object = sdk._tortoise_fts_query
+    _ann(query="ann", limit=10)
+
+def augassign(sdk):
+    _acc = []
+    _acc += [sdk._tortoise_fts_query]
+
+def lambdadefault(sdk):
+    _lam = lambda _x=sdk._tortoise_fts_query: _x
+
+def funcdefault(sdk):
+    def _g(_x=sdk._tortoise_fts_query):
+        return _x
+
+def classbase(sdk):
+    class _B(sdk._tortoise_fts_query):
+        pass
+
+def classtypeparam(sdk):
+    class _C[T: sdk._tortoise_fts_query]:
+        pass
+
+def typestmttypeparam(sdk):
+    type _A[T: sdk._tortoise_fts_query] = int
+
+class _M:
+    def m(self, s):
+        _dead_local = s._tortoise_fts_query
 '''
     tree = ast.parse(source)
     mentions = [n for n in ast.walk(tree)
@@ -1705,12 +1750,20 @@ def generic[T: sdk._tortoise_fts_query]():
             if k.arg == "query" and isinstance(k.value, ast.Constant))))
     assert sorted(observed) == [
         (0, False, []),                 # the dead binding: provably no call
+        (0, False, []),                 # `method-local`: a class METHOD's local
         (0, True, []),                  # `return SEAM`: NOT provably dead
         (0, True, []),                  # `except SEAM as e`: Python CALLS it
         (0, True, []),                  # `type _T = SEAM`
         (0, True, []),                  # `match SEAM:` subject
         (0, True, []),                  # dead name bound in a CLASS body
         (0, True, []),                  # PEP 695 `def f[T: SEAM]()` bound
+        (0, True, []),                  # `_acc += [SEAM]`
+        (0, True, []),                  # `lambda _x=SEAM: …` default
+        (0, True, []),                  # `def _g(_x=SEAM)` default
+        (0, True, []),                  # `class _B(SEAM)` base
+        (0, True, []),                  # `class _C[T: SEAM]` bound
+        (0, True, []),                  # `type _A[T: SEAM] = int`
+        (1, False, ["ann"]),            # `_ann: object = SEAM; _ann(…)`
         (1, False, ["comprehension"]),  # `for _c in [SEAM]: _c(…)`
         (1, False, ["container"]),      # `_reads = [SEAM]; _reads[0](…)`
         (1, False, ["for-target"]),     # `for _fn in (SEAM,): _fn(…)`
@@ -1718,6 +1771,7 @@ def generic[T: sdk._tortoise_fts_query]():
         (1, False, ["two-hop"]),        # `_n = _m` ABOVE `_m = SEAM`
         (1, False, ["walrus"]),         # `if (_w := SEAM): _w(…)`
         (1, False, ["warm"]),           # the direct call
+        (1, False, ["with-target"]),    # `with SEAM as _v: _v(…)`
         (1, True, ["class-attr"]),      # `class _Tbl: f = SEAM; _Tbl.f(…)`
     ], f"the resolver mis-graded a shape: {sorted(observed)}"
 
@@ -2219,17 +2273,26 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # means. The mention count is deliberately NOT asserted: a mention that reads
     # nothing is not a read, so asserting it would false-block a correct tree (a
     # live mention bound and left unused beside the two that are called).
+    # ⛔ AND THE CALL-SITE ROW ALONE IS A FAIL-OPEN, which is why it does not stand
+    # alone. A mention that ESCAPED into a shape the walk cannot follow adds no
+    # call of its own, so replacing `len(live) == 2` with this row (rather than
+    # ADDING it) silently stopped grading the whole escape family: measured at
+    # `93178a6495`, `type _A = SEAM`, `return SEAM` and `except SEAM as _e` inside
+    # the granted owner each left `sites == 2` and the arm GREEN (round-12 review,
+    # P2). An unattributable mention may be a read, so it is never something this
+    # row may ignore — `not unresolved` is the second half of the same property.
     read_sites = {id(call) for call in seam_calls}
-    assert len(read_sites) == 2, (
-        f"{len(read_sites)} un-opted-out seam CALL SITE(s) of `tortoise_fts_query` "
-        f"in tools/read_wave_latency.py, reached from {len(live)} mention(s) "
-        f"({len(resolved)} attributed by the walk, {len(unresolved)} COUNTED "
-        "because the binding could not be followed — an unresolvable mention is "
-        "not a dead one), but the exemption's recorded reason says TWO (a "
+    assert len(read_sites) == 2 and not unresolved, (
+        f"{len(read_sites)} seam CALL SITE(s) of `tortoise_fts_query` in "
+        f"tools/read_wave_latency.py, reached from {len(live)} mention(s) "
+        f"({len(resolved)} the walk attributed to a call, {len(unresolved)} it "
+        "had to COUNT because the binding escaped into a shape it cannot "
+        "follow — an unresolvable mention may be a read, so it is never "
+        "skipped), but the exemption's recorded reason says TWO call sites (a "
         "discarded warm-up, and the measured loop) and the grant is "
         "owner-granular — a further read inside the granted owner is exempted "
-        "with no recorded reason. Re-derive the comment in `intentional_keep`, or "
-        "opt the new read out, which needs no grant.")
+        "with no recorded reason. Re-derive the comment in `intentional_keep`, "
+        "or opt the new read out, which needs no grant.")
     owners = {(_enclosing(m).name if _enclosing(m) else None) for m in live}
     assert owners == {"run"}, (
         "the exempted reads are not all inside `run`, the only owner the grant "
