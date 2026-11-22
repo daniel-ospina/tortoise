@@ -2589,8 +2589,8 @@ def test_the_redefined_13854_table_length_is_the_figure_the_document_publishes()
     pins the POPULATION so a row cannot be dropped quietly, and the document's own figure must
     equal it, so neither side can move alone.
     """
-    assert len(_REDEFINED_13854) == 35, (
-        f"`_REDEFINED_13854` carries {len(_REDEFINED_13854)} rows, not 35 — a row was added or "
+    assert len(_REDEFINED_13854) == 36, (
+        f"`_REDEFINED_13854` carries {len(_REDEFINED_13854)} rows, not 36 — a row was added or "
         "dropped. Re-derive every new row by content rather than by a delta."
     )
     published = _published_table_length()
@@ -2977,7 +2977,14 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     ('sdk.py:58317-58339', "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
     ('sdk.py:58317', "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 8),
     ("sdk.py:4265-4268", "tortoise/sdk.py", 4265, "\"s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL \"", 3),
-    ("sdk.py:4399-4406", "tortoise/sdk.py", 4404, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 2),
+    ("sdk.py:4399-4406", "tortoise/sdk.py", 4404, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 1),
+    # ⛔ The §7 paragraph's OWN cite, widened from `-4406` to `-4411` (#14249 review, P2): the
+    # sentence beside it names `_prior_mark_index(_prior[0][0], _prior[0][1])` (`:4408-4409`) and
+    # `_split_graph_turn_ids` (`:4410-4411`), both OUTSIDE the old range — a range that resolves
+    # onto the right file while landing on the query, not the code the claim is about. Kept as
+    # its own row so BOTH spellings stay load-bearing: `-4406` survives at `:1118`, where the
+    # claim really is about the `RETURN` the range ends on.
+    ("sdk.py:4399-4411", "tortoise/sdk.py", 4404, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 1),
     ("sdk.py:2898", "tortoise/sdk.py", 2898, "\"SET s.capture_redactions=$redactions \"", 1),
     ('sdk.py:31533', "tortoise/sdk.py", 31533, "\"MATCH (t:Tag) \"", 1),
     ('sdk.py:31551', "tortoise/sdk.py", 31551, "\"MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) \"", 1),

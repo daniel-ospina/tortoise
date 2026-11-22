@@ -8764,16 +8764,55 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
 #: code spans earlier, and the verb is `reads` — absent from that pattern's class. So the
 #: sentence was GREEN in every arm of the file this doc's figures are graded by.
 #:
-#: DECLARED SCOPE: this reads a typed PAIR behind a `range`/`numstat` noun and a present-tense
-#: verb. It does NOT grade every pair this doc types — a pair stated per-hunk beside the
-#: command that prints it (the form §7 uses for `3 1`) is a claim about a DIFF, which no test
-#: can re-derive from a prose page at the merge. Narrow, and it does not describe itself as
-#: complete: the residual is a paraphrase whose noun or verb is outside both lists.
+#: ⛔ THE FIRST CUT OF THIS PATTERN COULD NOT SEE THE DOCUMENT'S OWN HOUSE STYLE, and the
+#: witness list below was written in the one spelling it happened to catch (#14249 review,
+#: P1). Three independent escapes, each verified against the live document:
+#:   * `printed` — the past tense is how every pair in this doc is introduced (`…` printed
+#:     **`381 379`**`), and `prints?` matches `print`/`prints`, never `printed`;
+#:   * `[^`]` — refusing to cross a BACKTICK also refuses to cross the RANGE the sentence
+#:     names (`the same range `origin/main...HEAD` re-taken here …`), i.e. the commonest
+#:     phrasing of the claim;
+#:   * `\s*` before the pair — refuses the doc's bold form (`printed **`403 401`**`).
+#: A defect written the way this file writes figures missed on all three at once, so the
+#: guard was green over precisely the spellings it exists to catch.
+#:
+#: DECLARED SCOPE: this reads a typed PAIR behind a `range`/`numstat` noun and a verb, within
+#: one line. The ONE exemption is a pair that IS a fenced command's own printed result
+#: (`_TYPED_NUMSTAT_AS_COMMAND_RESULT`) — the form §1/§7 use legitimately for `3 1`, which is
+#: a claim about a DIFF and not a carried figure. It does NOT grade every pair the doc types:
+#: the residual is a paraphrase whose noun or verb is outside both lists, or a pair whose
+#: fenced command sits further than the window (160 chars). Narrow, and it does not describe
+#: itself as complete.
 _TYPED_RETAKEN_NUMSTAT = re.compile(
-    r"(?:\brange\b|\bnumstat\b)[^`]{0,140}?"
-    r"(?:reads?|prints?|print|returns?|reports?|shows?|gives?|lists?|names?|->|\u2192)"
-    r"\s*`\d+\s+\d+`"
+    r"(?:\brange\b|\bnumstat\b).{0,160}?"
+    r"(?:reads?|read|prints?|print|printed|returns?|returned|reports?|reported"
+    r"|shows?|shown|gives?|given|lists?|named?|names?|->|\u2192|=>)"
+    r"\s*\*{0,2}`\d+\s+\d+`"
 )
+
+#: A pair that is the PRINTED RESULT OF A FENCED COMMAND is a claim about a diff, not a carried
+#: figure — the one form §1/§7 type legitimately. The exemption is anchored at the pair, so it
+#: never excuses a bare figure: `the numstat printed `3 1`` has no fenced command in front of it
+#: and is still graded as a typed pair.
+_TYPED_NUMSTAT_AS_COMMAND_RESULT = re.compile(
+    r"`[^`]*\b(?:numstat\b|--stat\b|git diff\b)[^`]*`\s*"
+    r"(?:(?:->|\u2192|=>)|(?:prints?|printed|reads?|read|gives?|given|returns?))?\s*\*{0,2}$"
+)
+
+
+def _typed_retaken_numstat_pairs(text: str) -> list[str]:
+    """Typed `range`/`numstat` pairs, minus the ones a fenced command printed.
+
+    Split out so BOTH the document arm and the witness arm grade the same predicate: a second
+    copy of "is this a carried figure" is how the two directions drift apart.
+    """
+    bad: list[str] = []
+    for match in _TYPED_RETAKEN_NUMSTAT.finditer(text):
+        body = match.group(0)
+        if _TYPED_NUMSTAT_AS_COMMAND_RESULT.search(text[:match.start() + body.rfind("`", 0, len(body) - 1)]):
+            continue
+        bad.append(body)
+    return bad
 
 
 def test_the_cypher_inventory_types_no_numstat_pair_for_a_range_re_taken_here():
@@ -8788,9 +8827,15 @@ def test_the_cypher_inventory_types_no_numstat_pair_for_a_range_re_taken_here():
     injecting it back into this document reds HERE, and the pair is absent from every head in
     `git log --first-parent origin/main..HEAD` (measured at this head: 25 heads, `43 39` /
     `42 40`, never that pair — the figure is arithmetic on a figure, not a measurement).
+
+    ⛔ AND THE WITNESS LIST IS NOT THE POPULATION (#14249 review, P1): the first cut of this
+    arm's pattern caught only `reads `<pair>``, so the doc's own `printed **`pair`**` style —
+    and any claim naming the range in a code span — walked through. The five spellings below
+    are the escapes that review measured, and they are graded through the SAME predicate the
+    document arm uses.
     """
     doc = (DOCS / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
-    typed = [m.group(0) for m in _TYPED_RETAKEN_NUMSTAT.finditer(doc)]
+    typed = _typed_retaken_numstat_pairs(doc)
     assert not typed, (
         "CYPHER-INVENTORY.md TYPES a numstat pair for a range it says is re-taken here "
         f"({typed[0]!r}). A numstat is head-bound: state the command and let the reader "
@@ -8814,10 +8859,16 @@ def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
         "the same range RE-TAKEN at this head prints `43 39`",
         "the numstat reads `3 1` at this head",
         "the range -> `2 0`",
+        # ⛔ the three escapes measured at #14249's review (P1): past tense, a fenced RANGE,
+        # and the doc's bold pair — each missed by the first cut of the pattern.
+        "the same range re-taken here printed `403 401`",
+        "the same range `origin/main...HEAD` re-taken here reads `403 401`",
+        "the same range `70fbd1a27d...HEAD` re-taken here printed **`403 401`**",
+        "the numstat printed `403 401`",
     ):
-        assert _TYPED_RETAKEN_NUMSTAT.search(_typed), (
+        assert _typed_retaken_numstat_pairs(_typed), (
             f"the re-taken-numstat detector does not see {_typed!r} — that spelling of a "
-            "head-bound pair walks through green (#14249 review, P2)")
+            "head-bound pair walks through green (#14249 review, P1)")
     for _allowed in (
         # the repaired clause: the RULE, with no figure typed for it
         "so the three-dot form collapses to two-dot, and the range is RE-TAKEN at the head "
@@ -8826,11 +8877,18 @@ def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
         "an earlier cut of this clause typed a pair for the re-taken range, and it was the "
         "`381 379` above plus `#14260`'s 22-line `sdk.py` insertion applied a SECOND time",
         "NO figure is typed here; a numstat is head-bound",
-        # the per-hunk form §7 uses for `3 1`: the command's span closes before the pair
+        # the per-hunk form §7 uses for `3 1`: the pair IS that fenced command's own printed
+        # result, which is what `_TYPED_NUMSTAT_AS_COMMAND_RESULT` exempts — NOT "the command's
+        # span closes before the pair", the first cut's rationale, which was wrong: the old
+        # pattern allowed this string only because it could not cross a backtick at all.
         "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
         "-> `3 1`)",
+        # the historical form the document actually uses: command span, then `printed`, then
+        # the bolded pair. Legitimate — the command is named beside the figure.
+        "`git diff --numstat 70fbd1a27d 689d21b7e4c1 -- docs/architecture/CYPHER-INVENTORY.md` "
+        "printed **`381 379`** at the head this paragraph was written for",
     ):
-        assert not _TYPED_RETAKEN_NUMSTAT.search(_allowed), (
+        assert not _typed_retaken_numstat_pairs(_allowed), (
             f"the re-taken-numstat detector REFUSES {_allowed!r}, which types no current "
             "pair — refusing a retraction is the same defect in the other direction")
 
