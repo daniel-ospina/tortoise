@@ -8017,9 +8017,15 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # prints exactly those pairs). An earlier cut of this comment collapsed the middle hop and
     # credited `:28067` -> `:28178` to `#13724`, which never touched `:28067` — the same class
     # of defect as the premise it replaced, one layer down (`#13746` re-review, P1). So D5 still
-    # prints `:28067` six times and it is still not what the clause says. The live value — and
-    # the one the pin row above asserts — is `:28395`. (`:28358`/`:28359` are the `def` and signature lines, which is a
-    # different statement again; this comment used to conflate all three.)
+    # prints `:28067` six times and it is still not what the clause says. The live value is
+    # DERIVED below from the source, never typed here — at this head it is `:28602` (the arm's
+    # failure message prints it). The `def` is `:28565` and its signature continuation `:28566`,
+    # which is a different statement again; this comment used to conflate all three, and its
+    # `:28395` value became a fourth: `:28395` is `continue`, in the paging loop, not the filter.
+    # ⛔ An earlier cut of this sentence called `:28358`/`:28359` the `def`/signature pair — they
+    # are a `WHERE` clause and an `AND` fragment inside the belief query opening at `:28355`
+    # (`#14269` review, P3: the correction above made that parenthetical the ONLY artifact still
+    # naming the wrong pair).
     # MEASURED (#13589 review, at that head — the clause reads `sdk.py:28395` here): deleting
     # the clause's own "sits at `sdk.py:28178`" left the row GREEN. The sentence is therefore
     # read WHOLE, with its number DERIVED from the source, so both halves are graded: a source move the document did not follow reds, and a document re-point the source did not make reds.
