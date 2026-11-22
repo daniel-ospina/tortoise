@@ -173,7 +173,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # first line, not the `g.query(` call above it — at THIS head the call is `:11589` and the
     # literal `:11590`; at the head that row was written for they were `:11280` / `:11281`, and
     # `#14169` moved both together (its siblings in the same paragraph follow the same
-    # convention — `sdk.py:31533` is the literal while `:31532` is the `rows = proj.g.query(` call).
+    # convention — `sdk.py:31554` is the literal while `:31553` is the `rows = proj.g.query(` call;
+    # ⛔ RE-DERIVED at `#14269`: this clause read `:31533`/`:31532`, which was true at
+    # `origin/main` and FALSE once this branch re-pointed the row below by `#14260`'s `+21` —
+    # the re-point is what made the comment disagree with the pin it explains, and no arm
+    # reads comments, so it was silent).
     (_AUDIT, "`mcp_server.py:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
     # (`` `mcp_server.py:5250`/`:8515`/`:11590` ``), and the §2.5 token above cannot see a bare
