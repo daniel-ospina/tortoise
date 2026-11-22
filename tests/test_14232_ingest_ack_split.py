@@ -76,6 +76,14 @@ _CONV = [
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
+#: The window the DEPLOYED handler uses (`hosted_api._CAPTURE_ACK_DEADLINE_S`).
+#: Named here as a literal on purpose: the suite's autouse fixture opens the
+#: module constant to 30 s (so no pre-existing assertion races a deadline), which
+#: means "the production value" is not readable from the module during a test —
+#: and a row that claims to exercise it must pin the number it claims to exercise.
+_PRODUCTION_ACK_DEADLINE_S = 0.5
+
+
 def _force_ack(monkeypatch):
     """Force the ACK path: the join window is zero, so completion cannot arrive.
 
@@ -126,6 +134,11 @@ def _session_row(session_id: str) -> list:
         "RETURN s.id, s.capture_ok, s.capture_extractor, "
         "       s.capture_extraction_phase, s.capture_extraction_phase_at",
         params={"sid": session_id}).result_set
+
+
+def _key_held(session_id: str) -> bool:
+    """Is this session's in-flight key held? (the registry key is namespaced)"""
+    return any(k.endswith(":" + session_id) for k in ha._CAPTURE_SESSIONS)
 
 
 def _non_turn_points(session_id: str) -> int:
@@ -346,8 +359,25 @@ def test_a_raised_completion_does_NOT_write_the_marker(client, monkeypatch):
     (`test_hosted_api.py::TestSessionActorStamp2600`'s raise-shape (ii) pins that
     a re-POST of a raise-shaped session must not re-extract). Widening the marker
     to failures would turn every failed extraction into a retry-eligible record.
+
+    ⛔ THE SESSION MUST EXIST FOR THIS ROW TO DISCRIMINATE (review round 4). An
+    earlier version of this test passed a session id that was never created and
+    asserted `not _session_row(...)`; `_capture_abandoned_marker` is a
+    `MATCH … SET`, which cannot create a row, so the assertion was true under the
+    very mutant it named (`if (cancelled and …` → `if (state is not None …`).
+    An assertion whose value cannot vary under its mutant reads as coverage it
+    does not have (`agent-infra#3442` rule 3). The row below writes a REAL
+    `:Session` carrying a live phase first, so the widened guard would be caught
+    here writing `capture_ok=false`.
     """
     session_id = "s-14232-raised"
+    # A real row, with the in-flight phase set as the deferred lane sets it.
+    _proj().g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.capture_extraction_phase='extracting', "
+        "    s.capture_extraction_phase_at='2026-11-21T00:00:00Z'",
+        params={"sid": session_id})
+    assert _session_row(session_id), "precondition: the session row must exist"
 
     class _Failed:
         def cancelled(self) -> bool:
@@ -358,11 +388,18 @@ def test_a_raised_completion_does_NOT_write_the_marker(client, monkeypatch):
 
     state = {"attempted": True, "finalized": False, "lane": "v2"}
     ha._capture_tail_failed(_Failed(), _proj(), session_id, state)
-    # No dispatch was scheduled — the marker is the observable.
-    time.sleep(0.05)
-    assert not _session_row(session_id), (
-        "a raised tail must not mint a marker for a session that does not exist; "
-        "and for a real one it must leave capture_ok NULL")
+    # Both writes the raise arm makes are submitted off the loop, so wait for
+    # the observable rather than for a sleep.
+    deadline = time.monotonic() + 15
+    row = _session_row(session_id)
+    while time.monotonic() < deadline and not (row and row[0][3] is None):
+        time.sleep(0.02)
+        row = _session_row(session_id)
+    assert row[0][1] is None, (
+        "a raised tail must leave capture_ok NULL — writing it would turn every "
+        f"failed extraction into a #2335 TRUE-retry, got {row[0][1]!r}")
+    assert row[0][3] is None, (
+        f"…and must retire the in-flight phase, got {row[0][3]!r}")
 
 
 def test_a_raised_completion_retires_the_phase_but_leaves_the_outcome_unrecorded(
@@ -543,22 +580,45 @@ def test_the_in_budget_receipt_survives_the_production_deadline(
     body. `_force_join` pins the deadline to the production value and leaves
     `_capture_ack_grace_s` real, so the join has to land on its own merits.
 
-    The warm-up capture is not decoration: the first capture in a process pays
-    the mock seam's import/first-call cost, and that cost is not what the
-    deadline is a claim about. Measured with the window at 0.5 s the local mock
-    capture completes in single-digit milliseconds, two orders of magnitude
-    inside the deadline — so a red here means the deadline is genuinely too
-    tight on this host, which is the finding.
+    ⛔ THE DEADLINE IS NOT THE ONLY CLOCK IN THIS ROW, and round 4 measured the
+    consequence: pinning the production 0.5 s while asserting that gates + write
+    + extraction fit inside it makes the red UNAttributable, because the same
+    seam is documented in `tests/conftest.py:2150` as taking **0.008 s … 0.95 s**
+    on one host depending on what ran before it — `0.95 s > 0.5 s`. A red would
+    then assert a product conclusion ("that deadline is too tight") from a host
+    event, which `#5049` rule 1 forbids.
+
+    So this row MEASURES first and only then produces a verdict: the warm-up
+    capture (which also pays the mock seam's import/first-call cost, a cost the
+    deadline is not a claim about) is timed end to end, and where that
+    measurement is not comfortably inside the production window the row reports
+    INCONCLUSIVE instead of red. On a host that can carry the claim, the
+    assertion is unchanged and the production constant is still what is
+    exercised.
     """
+    started = time.monotonic()
     warm = client.post("/v1/sessions", json={
         "conversation": _CONV, "session_id": "s-14232-prod-window-warm"})
     assert warm.status_code == 200, warm.text
     _drain_tails()
+    warm_s = time.monotonic() - started
+    if warm_s > 0.25:  # half the production window: no room left to attribute a miss
+        pytest.skip(
+            "INCONCLUSIVE on this host: a whole offline mock capture measured "
+            f"{warm_s * 1000:.0f} ms against the production {_PRODUCTION_ACK_DEADLINE_S} s "
+            "window, so a missed join here would name the host's load rather than "
+            "the deadline (#5049 rule 1). Not a red, not a pass.")
 
-    _force_join(monkeypatch, 0.5)
+    _force_join(monkeypatch, _PRODUCTION_ACK_DEADLINE_S)
+    ack_started = time.monotonic()
     r = client.post("/v1/sessions", json={
         "conversation": _CONV, "session_id": "s-14232-prod-window"})
+    ack_s = time.monotonic() - ack_started
     assert r.status_code == 200, r.text
+    assert ack_s < _PRODUCTION_ACK_DEADLINE_S, (
+        f"the in-budget receipt must land INSIDE the window it is named for: "
+        f"ack took {ack_s * 1000:.0f} ms of {_PRODUCTION_ACK_DEADLINE_S} s "
+        f"(a warm capture on this host measured {warm_s * 1000:.0f} ms)")
     body = r.json()
     assert "extraction" not in body, (
         "the join missed the PRODUCTION 0.5 s deadline on an offline mock "
@@ -575,9 +635,7 @@ def test_a_same_session_repost_during_the_tail_is_refused(client, monkeypatch):
 
     The ACK is served while the tail still owns the capture. A second POST for the
     same session in that window used to be admitted and replayed a 200 with 0
-    extracted, for a capture whose only real attempt could then fail. The gate is
-    the `_CaptureSlot` session key, which the completion reports on — delete
-    `slot.tail_pending()` and this test gets a 200 replay instead of a 409.
+    extracted, for a capture whose only real attempt could then fail.
     """
     _force_ack(monkeypatch)
     session_id = "s-14232-in-flight"
@@ -600,6 +658,78 @@ def test_a_same_session_repost_during_the_tail_is_refused(client, monkeypatch):
         "conversation": _CONV, "session_id": session_id})
     assert third.status_code == 200, third.text
     assert third.json()["extraction_mode"] == "replayed", third.json()
+
+
+def test_a_same_session_repost_during_the_REPORT_half_is_refused(
+        client, monkeypatch):
+    """`#3129`'s actual residual window, which only `tail_pending()` protects.
+
+    ⛔ Review round 4 measured that the row ABOVE cannot red on the mutant it used
+    to name. It parks the MODEL CALL, so at the moment of the second POST
+    `_CaptureSlot._done` is still False and `_release_session`'s
+    `if self._handed_off and not (self._done and self._request_done): return`
+    refuses the pop on its own — `hand_off()` alone already yields the 409, and
+    deleting `tail_pending()` changes nothing.
+
+    The window `tail_pending()` exists for is the NEXT one: extraction has
+    RETURNED (`worker_done` ran, `_done` is True, `_request_done` is True because
+    the ACK went out immediately) while `_report_capture` is still writing the
+    provenance stamp / entity links / `capture_ok`. In that window only
+    `_tail_done` still holds the key — and a retry admitted there would read
+    `capture_ok = NULL` and replay a 200 over a tail that is still running.
+
+    So this row parks the REPORT half (`read_stages.mark` at the
+    `STAGE_CAPTURE_TAIL` mark, the first thing `_report_capture` does after the
+    model call) and holds the second POST in that exact window. Delete
+    `slot.tail_pending()` and this row gets a 200 replay instead of the 409.
+    """
+    _force_ack(monkeypatch)
+    session_id = "s-14232-report-window"
+    real_mark = ha._mark_capture_stage
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _parked_mark(stage, *args, **kwargs):
+        real_mark(stage, *args, **kwargs)
+        if stage == ha.STAGE_CAPTURE_TAIL:
+            entered.set()
+            assert release.wait(30.0), "test never released the report half"
+
+    monkeypatch.setattr(ha, "_mark_capture_stage", _parked_mark)
+    try:
+        first = client.post("/v1/sessions", json={
+            "conversation": _CONV, "session_id": session_id})
+        assert first.status_code == 200, first.text
+        assert entered.wait(30.0), (
+            "the tail never reached the REPORT half — the window this row is "
+            "about does not exist")
+        # Precondition, and the whole reason this row discriminates: the worker
+        # is DONE (`_done`) and the request is DONE, so only `_tail_done` holds
+        # the key.
+        assert _key_held(session_id), (
+            "the session key must still be held while the REPORT half runs — the "
+            f"in-flight registry is {ha._CAPTURE_SESSIONS}")
+
+        second = client.post("/v1/sessions", json={
+            "conversation": _CONV, "session_id": session_id})
+        assert second.status_code == 409, (
+            "a retry during the REPORT half must be refused: the extraction has "
+            "returned but the outcome is not written yet, so a replay would "
+            f"answer over a live tail — got {second.status_code} {second.text}")
+        assert "already in flight" in second.text, second.text
+    finally:
+        release.set()
+    _drain_tails()
+
+    # …and the key IS released once the completion reports (the row above would
+    # also pass with a key that is never released at all).
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and _key_held(session_id):
+        time.sleep(0.02)
+    assert not _key_held(session_id), (
+        "the completion must release the session key: a key that outlives the "
+        f"tail refuses every later capture of this session forever: "
+        f"{ha._CAPTURE_SESSIONS}")
 
 
 # ── R5: the phase, and the stage the next 504 will name ──────────────────
@@ -662,6 +792,22 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     """
     from tortoise.session_projection import SESSION_EXTRACTION_PHASES  # noqa: F401
 
+    # ⛔ THE GATES PHASE MUST BE CHEAP FOR THIS ROW TO BE ATTRIBUTABLE (#5049
+    # rule 1, `tests/conftest.py`'s own fixture docstring). The bound below is
+    # 0.35 s and the write is made to overrun it; the gates phase runs FIRST, and
+    # on an un-stubbed tree it contains `count_org_usage(org, "points")` — a
+    # FULL-GRAPH scan (`hosted_api.py:20796`, which this PR's plan calls out as
+    # pre-existing and out of scope). When that scan alone exceeds 0.35 s the
+    # refusal correctly names `capture_gates` and the row reds — for a reason
+    # that is about the host, not about the `capture_write` mark it exists to
+    # pin. Measured (review round 4, at the parent head): 4 failed / 1 passed
+    # with `{'stage': 'capture_gates', 'stages_ms': {'pre_handler': 24.1}}`.
+    # Stubbing the quota read to a constant leaves ONE thing able to cross the
+    # bound: the deliberately slow write.
+    monkeypatch.setattr(ha, "_session_extraction_estimate", lambda *_a, **_kw: 0)
+    import tortoise.quota as _quota
+    monkeypatch.setattr(_quota, "count_org_usage",
+                        lambda *_a, **_kw: 0)
     monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.35)
     real_write = ha._write_session_and_turns
 
