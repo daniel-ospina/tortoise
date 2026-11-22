@@ -1824,9 +1824,19 @@ def test_the_ALREADY_EVER_auxiliary_is_REFUSED_and_REPORTED():
         f"instead of staying silent (measured: n=11/12 flip to `existence_unguarded` at "
         f"`[^?]{{0,120}}?`, and `*?` reports through n=20), so the note above is stale: "
         f"{_refusal.pattern[:200]!r}")
+    # ⛔ AND THE MESSAGE MUST NOT NAME THE WRONG ARMS (turn-5 review, P3, measured): this
+    # assertion is reached only when the two arms ABOVE did not fire, and `existence_unguarded`
+    # holds MORE windows than those two — widening the COPULA arm (`[^?]{0,40}?`, further down
+    # the same pattern) to `{0,300}?` trips it while neither named arm changed, so the old
+    # message blamed two arms that were untouched. It reds in the fail-closed direction either
+    # way (measured: `1 failed, 410 passed`), but a message that misdirects costs the next lane
+    # the diagnosis, so it now says what it can actually see — ANY wide window in this row.
     assert "[^?]{0,300}" not in _refusal.pattern and "[^?]{0,300}" not in _si._EXISTENCE_WINDOW, (
-        "a wide window is in one of these two arms — measured: it routes or reports at n>=11, "
-        "which is exactly the trade this contract forbids")
+        "a wide window is in `existence_unguarded` (or in `_EXISTENCE_WINDOW`) — this row carries "
+        "more windows than the refusal arm and ARM C (the copula arms have their own), and ANY of "
+        "them widened to `{0,300}` lets an over-long run route or report at n>=11, which is exactly "
+        "the trade this contract forbids. Identify which one from the pattern diff, not from this "
+        "message")
     for query in (
         "have any it has been just only already no longer in fact very recently deprecated and "
         "been withdrawn",
