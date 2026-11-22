@@ -1759,40 +1759,56 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # `_dead = sdk._tortoise_fts_query` in its place kept the arm GREEN (the dead
     # mention satisfied the count), and an ALIASED read that opts out reddened it
     # (census-sanctioned, so a false block).
-    def _fed_calls(mention) -> list:
+    # ⛔ TO A FIXED POINT, and FAIL CLOSED — because `fed == []` was answering TWO
+    # questions. Resolving ONE hop made `_a = sdk._tortoise_fts_query; _b = _a;
+    # _b(…)` resolve to NO call, so the arm read a THIRD read inside `run` as
+    # "reads nothing" and stayed GREEN while the grant's "TWO" was false
+    # (measured at round 6's head). Comparable resolvers close alias chains to a
+    # fixed point rather than scanning single assignments, and treat a value whose
+    # sink they cannot follow as unresolved rather than dead — so a mention is
+    # skipped only when its bindings are PROVABLY never called (or it is a bare
+    # expression statement); anything else counts as a read.
+    def _bound_names(mention) -> set:
+        """Every name the mention flows into, transitively (`_b = _a` chains)."""
+        assignments = [(node.targets if isinstance(node, _ast.Assign)
+                        else [node.target], node.value)
+                       for node in _ast.walk(harness)
+                       if isinstance(node, (_ast.Assign, _ast.AnnAssign))]
+        names: set = set()
+        changed = True
+        while changed:
+            changed = False
+            for targets, value in assignments:
+                if not (value is mention or (isinstance(value, _ast.Name)
+                                            and value.id in names)):
+                    continue
+                for target in targets:
+                    # ⛔ `add`, never `update`: `.update(` is one of the ordinary-word
+                    # receiver shapes the SDK residue sweep counts, and a set built
+                    # with it moves `sweep_residue` by one on a test-only diff.
+                    if isinstance(target, _ast.Name) and target.id not in names:
+                        names.add(target.id)
+                        changed = True
+        return names
+
+    def _fed_calls(mention, names) -> list:
         """Every call this mention reaches, directly or through a bound alias."""
-        direct = [c for c in _ast.walk(harness)
-                  if isinstance(c, _ast.Call)
-                  and (c.func is mention or mention in c.args
-                       or any(mention is k.value for k in c.keywords))]
-        if direct:
-            return direct
-        alias_names: set = set()
-        for node in _ast.walk(harness):
-            if not isinstance(node, (_ast.Assign, _ast.AnnAssign)):
-                continue
-            if node.value is not mention:
-                continue
-            targets = (node.targets if isinstance(node, _ast.Assign)
-                       else [node.target])
-            for target in targets:
-                # ⛔ `add`, never `update`: `.update(` is one of the ordinary-word
-                # receiver shapes the SDK residue sweep counts, and a set built
-                # with it moves `sweep_residue` by one on a test-only diff.
-                if isinstance(target, _ast.Name):
-                    alias_names.add(target.id)
         return [c for c in _ast.walk(harness)
                 if isinstance(c, _ast.Call)
-                and isinstance(c.func, _ast.Name)
-                and c.func.id in alias_names]
+                and (c.func is mention or mention in c.args
+                     or any(mention is k.value for k in c.keywords)
+                     or (isinstance(c.func, _ast.Name) and c.func.id in names))]
 
     live: list = []
     seam_calls: list = []
     for mention in seam_mentions:
-        fed = _fed_calls(mention)
-        if not fed:
-            continue        # a mention that reads nothing is not a read
-        if all(_opted_out(c) for c in fed):
+        names = _bound_names(mention)
+        fed = _fed_calls(mention, names)
+        if not fed and (names
+                        or isinstance(harness_parent.get(id(mention)),
+                                      _ast.Expr)):
+            continue        # provably not a read: a dead binding, or a bare statement
+        if fed and all(_opted_out(c) for c in fed):
             continue        # the census's sanctioned alternative, no grant needed
         live.append(mention)
         seam_calls.extend(fed)
