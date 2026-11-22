@@ -252,13 +252,17 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1122 lines at this head, measured through THIS function's own
-    walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
-    line inside the run and it silently shrank to 22 until the #14188 repair; this re-cut's
-    restoration of the branch's dropped blocks took the merged run to 1079, a peer's prose to 1084,
-    dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
-    rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
-    blocks and added the re-measure note — to 1122), AND THE ARMS GRADE ALL OF IT
+    ⛔ ITS EXTENT IS THE ENTIRE RUN, AND THE ARMS GRADE ALL OF IT. ⛔ NO NUMBER IS STATED HERE, and that is
+    deliberate (#14038 review, two P3s): the extent moves on every fold that touches `tools/`,
+    `tests/` or `docs/` — it has been measured at several different lengths on the same day, and each
+    attempt to name one rotted before the next fold was even reviewed, the second one inside the very
+    sentence claiming it was not typed. A published number that nothing re-derives is the defect class
+    this repo has spent a dozen commits closing; the answer here is to publish none. What makes the arms
+    fail is not a length literal but THREE PHRASE ANCHORS pinned at three different depths in the run,
+    so a truncation anywhere above the pin reds one of them. ⛔ AND THE HAZARD IS MEASURED, NOT
+    HYPOTHETICAL (`main`, #14188): `#14086` left ONE BLANK LINE inside the run and it silently shrank
+    to a fraction of itself until the #14188 repair — which is exactly why the extent is graded by
+    anchors and by the reflow arm below, and why no figure is published to rot.
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
@@ -272,7 +276,22 @@ def _residue_block() -> str:
     every arm's grading surface.
     """
     lines = (ROOT / "tools" / "sdk_privatise.py").read_text(encoding="utf-8").splitlines()
-    pin = next(i for i, line in enumerate(lines) if line.startswith("SWEEP_RESIDUE = ("))
+    # ⛔ EXACTLY ONE ASSIGNMENT, ASSERTED HERE (#14038 review, P1). The block above states the rule
+    # in its own words — "THIS RECORD CARRIES NO ASSIGNMENT, deliberately … ONE assignment, at the
+    # end of the records, cannot be shadowed by a second re-cut" — and a merge that folds two
+    # sides each carrying a record also carries BOTH assignments. Python binds the LAST one, so
+    # the file still imports the right pin, while this walk anchored on the FIRST and every arm
+    # below graded only the prose above that first pin, silently losing the newest records. The
+    # extent pin in `test_the_residue_block_is_a_real_block_and_publishes_its_addresses` cannot
+    # see this: its anchors all sit ABOVE the first pin, so the truncation is invisible to it.
+    # Anchoring on the single assignment makes a re-kept duplicate a RED here instead.
+    pins = [i for i, line in enumerate(lines) if line.startswith("SWEEP_RESIDUE = (")]
+    assert len(pins) == 1, (
+        f"tools/sdk_privatise.py carries {len(pins)} `SWEEP_RESIDUE = (` assignments, at lines "
+        f"{[n + 1 for n in pins]}; the block requires exactly ONE, at the end of the records. "
+        "Delete the dead assignment(s) and keep their `#:` prose — otherwise this walk grades "
+        "only the prose above the FIRST pin and every arm below is grading less than it claims")
+    pin = pins[0]
     start = pin
     while start and lines[start - 1].lstrip().startswith("#:"):
         start -= 1

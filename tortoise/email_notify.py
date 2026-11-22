@@ -563,27 +563,30 @@ def _onboarding_from() -> str:
     return _env("RESEND_ONBOARDING_FROM_EMAIL") or ONBOARDING_FROM_DEFAULT
 
 
-async def _send_onboarding_attempt(email: str, greeting: str,
-                                   org_id: str) -> dict:
-    """One attempt + one 0.5s retry on transient-only. Raises only into the
-    caller's retry loop via the returned status — never leaks exceptions."""
-    html_body = _onboarding_html(greeting, ONBOARDING_BOOK_URL)
-    text_body = _onboarding_text(greeting, ONBOARDING_BOOK_URL)
+async def _send_rendered(to: str, subject: str, html_body: str, text_body: str,
+                         *, idempotency_key: str, label: str,
+                         from_addr: str | None = None,
+                         timeout: float = 15.0) -> dict:
+    """THE send posture, in one place: one POST, one 0.5s transient retry, and a
+    refunded budget slot on failure. Never raises.
+
+    ⛔ Shared, not copied (#14038 review, P3). The onboarding offer and the
+    capacity notice carried the same 25-line body, differing only in copy,
+    sender, timeout and label — so the next fix to the #1138 reserve/refund rule
+    or to the retry predicate would have landed in one and not the other, and the
+    notice path three months from now would double-spend a slot on exactly the
+    failure the other half had learned to refund.
+    """
     last_err: Exception | None = None
     for attempt in (0, 1):
         try:
             result = await _send_resend(
-                email, ONBOARDING_SUBJECT, html_body, text_body,
-                idempotency_key=f"onboarding:{org_id}",
-                from_addr=_onboarding_from(),
-                # Awaited inside the provisioning request — bounded so a slow
-                # provider can never stretch the edge fn's retry deadline.
-                timeout=3.0,
-            )
+                to, subject, html_body, text_body,
+                idempotency_key=idempotency_key, from_addr=from_addr,
+                timeout=timeout)
             message_id = (result or {}).get("id")
-            logger.info(
-                "email notify: onboarding offer accepted by provider "
-                "(team %s, msg %s)", org_id, message_id)
+            logger.info("email notify: %s accepted by provider (msg %s)",
+                        label, message_id)
             return {"status": "sent", "message_id": message_id}
         except Exception as e:  # noqa: BLE001, RUF100
             last_err = e
@@ -591,11 +594,25 @@ async def _send_onboarding_attempt(email: str, greeting: str,
                 await asyncio.sleep(0.5)
                 continue
             break
-    logger.warning(
-        "email notify: onboarding offer email failed for team %s (%s)",
-        org_id, redact_safe(last_err))
+    logger.warning("email notify: %s failed (%s)",
+                   label, redact_safe(last_err))
     refund_send_slot()  # #1138: provider rejected/failed the POST — free the slot
     return {"status": "failed"}
+
+
+async def _send_onboarding_attempt(email: str, greeting: str,
+                                   org_id: str) -> dict:
+    """The onboarding offer's render + send, through the shared posture."""
+    return await _send_rendered(
+        email, ONBOARDING_SUBJECT,
+        _onboarding_html(greeting, ONBOARDING_BOOK_URL),
+        _onboarding_text(greeting, ONBOARDING_BOOK_URL),
+        idempotency_key=f"onboarding:{org_id}",
+        label=f"onboarding offer (team {org_id})",
+        from_addr=_onboarding_from(),
+        # Awaited inside the provisioning request — bounded so a slow provider
+        # can never stretch the edge fn's retry deadline.
+        timeout=3.0)
 
 
 async def send_onboarding_offer_email(email: str,
@@ -626,6 +643,58 @@ async def send_onboarding_offer_email(email: str,
 
     greeting = _onboarding_greeting_name(display_name, email, org_name)
     return await _send_onboarding_attempt(email, greeting, org_id)
+
+
+# ── Shared sender for a caller that owns its own copy (#13998) ─────────────
+# The capacity notices (`tortoise.capacity_notice`) render their own approved
+# copy and own their own ledger; they must NOT open a second Resend path. This
+# is the one send primitive they use, and it carries the same posture as the
+# onboarding profile above: the shared budget slot is reserved before the POST
+# and refunded on a failed one, one 0.5s transient retry, an Idempotency-Key so
+# a replay collapses at the provider, and secrets are redacted in every log.
+async def send_notice_email(to: str, subject: str, html_body: str,
+                            text_body: str, *, idempotency_key: str,
+                            label: str = "notice",
+                            timeout: float = 15.0) -> dict:
+    """Send (AWAITED) one rendered transactional email. NEVER raises.
+
+    Returns ``{"status": "sent", "message_id": …}`` on provider accept,
+    ``{"status": "skipped", "reason": …}`` (channel unconfigured, or the shared
+    send budget is spent) or ``{"status": "failed"}`` (provider rejected after
+    one 0.5s transient retry).
+
+    AWAITED, not backgrounded: the caller stamps its own durable marker on
+    ``sent`` (send-then-stamp), so an unawaited send would stamp a marker for a
+    delivery that may never have happened.
+    """
+    api_key = _env("RESEND_API_KEY")
+    if _skip_channel("resend", api_key):
+        return {"status": "skipped", "reason": "channel-unconfigured"}
+    reason = reserve_send_slot()
+    if reason is not None:
+        # ⛔ NO RECIPIENT ADDRESS IN THIS LINE EITHER: it is the third arm of the
+        # same posture (accept, fail, skip), and the first two were already
+        # stripped of it — the mailbox CLASS is named by the notice's rung logs,
+        # which say "which rung", never "which mailbox" (#14038 review, P2).
+        logger.warning(
+            "email notify: %s SKIPPED — send budget exhausted (%s)",
+            label, reason)
+        return {"status": "skipped", "reason": reason}
+    return await _send_rendered(
+        to, subject, html_body, text_body, idempotency_key=idempotency_key,
+        label=f"{label} email", timeout=timeout)
+
+
+def recipient_first_name(display_name: str | None, email: str | None,
+                         org_name: str | None) -> str:
+    """Public name for the #2406 greeting heuristic (cosmetic-only).
+
+    Exposed because a second caller now needs the SAME heuristic: the capacity
+    notices greet an account's billing email, which is a mailbox — "Hi Info"
+    reads worse than "Hi there", and a second implementation of the fallback is
+    how two emails from one product start greeting the same person differently.
+    """
+    return _onboarding_greeting_name(display_name, email, org_name)
 
 
 async def drain_pending_sends(timeout: float = 2.0) -> None:

@@ -262,6 +262,7 @@ __all__ = [
     "carry_resolved_allowances",
     "clear_cache_fold_denial",
     "enforce_allowances",
+    "read_dimension",
     "reset_signal_state_for_tests",
     "unarmed_served_counts",
 ]
@@ -2002,6 +2003,81 @@ def enforce_allowances(
         if _published:
             _CACHE_FOLD_DENIED.set(None)
         raise
+
+
+def read_dimension(dimension: str, org_id: str) -> MeterReading | None:
+    """ONE declared dimension's metered reading for ``org_id`` — READ-ONLY.
+
+    The gate's own instrument, exposed for a consumer that must agree with the
+    gate WITHOUT gating anything: the capacity notices (#13998) report
+    "{n}% of the capacity included in your plan", and a second meter there would
+    be a second answer to one question — the disagreement that notice exists to
+    make impossible.
+
+    ⛔ NOT A GATING API. It never refuses, never raises for a meter failure, and
+    never signals: a caller that must not guess gets ``None`` and says so. It
+    also cannot be used to bypass a cap — enforcement stays in
+    :func:`enforce_allowances` and reads the meters through its own path.
+
+    ⛔ THE DIMENSION'S OWN AGE BOUND APPLIES (:func:`_stale`), because a reading
+    the gate itself will not act on must not be reported as a figure either. A
+    stale gauge describes a graph that may no longer exist — the gate treats it as
+    UNARMED (#13102 P0-1) — and a customer-facing notice built on it would state
+    "you are at 100 %" from a number nobody can defend, on a one-shot send that
+    cannot be corrected (#14038 review, P2: measured — a 5-day-old 110 MB reading
+    against a 102 MB allowance produced a 100 % notice while the gate's own
+    `_stale` verdict was True). An unterminated/unparseable `measured_at` counts
+    as stale, the same rule `_stale` applies.
+
+    ``None`` means NO USABLE READING, and it deliberately folds three states that
+    a *gating* decision must keep apart (``ABSENT`` — nobody has measured this
+    window yet / a meter fault / a dimension with no meter). A consumer that
+    needs the distinction asks the meter itself; one that must not guess does not
+    need it, because all three mean "do not state a figure".
+
+    Raises ``KeyError`` for an undeclared dimension name — the same loud failure
+    ``_dimension`` gives at import, so a typo cannot silently read nothing.
+    """
+    declared = {dim.dimension: dim for dim in DIMENSIONS}
+    dim = declared[dimension]
+    meter = dim.meter
+    if meter is None:
+        return None
+    try:
+        reading = meter(org_id)
+    except MeterUnavailable as e:
+        _logger.warning(
+            "allowance read (no refusal): team=%s dimension=%s has no usable "
+            "reading (%s)", org_id, dim.dimension, e)
+        return None
+    except Exception:
+        _logger.warning(
+            "allowance read (no refusal): team=%s dimension=%s meter raised",
+            org_id, dim.dimension, exc_info=True)
+        return None
+    if reading is None or reading is ABSENT:
+        return None
+    if not isinstance(reading, MeterReading):
+        # The SAME type gate the gating path carries (see `_enforce_each_dimension`):
+        # a meter returning anything else — a bare number, a SimpleNamespace missing
+        # a field — reaches `_stale` below and escapes as a bare `AttributeError`,
+        # which contradicts this function's own "never raises for a meter failure"
+        # and loses the `no-reading` reason the notices exist to log (#14038 review,
+        # P3: measured with the `graph_storage` meter replaced by
+        # `lambda org: 90.0` — `read_dimension` raised instead of returning None).
+        _logger.warning(
+            "allowance read (no refusal): team=%s dimension=%s meter returned "
+            "%s, not a reading — reporting NO reading",
+            org_id, dim.dimension, type(reading).__name__)
+        return None
+    if _stale(reading, dim):
+        _logger.warning(
+            "allowance read (no refusal): team=%s dimension=%s has a reading "
+            "older than its %ss bound (measured_at=%r) — reporting NO reading",
+            org_id, dim.dimension, dim.stale_after_seconds,
+            reading.measured_at)
+        return None
+    return reading
 
 
 def _enforce_each_dimension(
