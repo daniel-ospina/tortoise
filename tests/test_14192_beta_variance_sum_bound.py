@@ -544,7 +544,7 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     # inside the contested ``OR`` arm, so a row failing the presence checks
     # ahead of it … never evaluates it" — and NOTHING recomputed that ordinal:
     # measured at `07fd752374`, rewriting `third` to `fourth` in either copy
-    # left this whole file green (79 passed). It is the same ungraded-figure
+    # left this whole file green (7 passed). It is the same ungraded-figure
     # class the offsets and the ``CASE WHEN`` numerals above were closed for,
     # and it rots in the direction that matters — INSERTING a conjunct ahead of
     # the guard is exactly the edit that changes how many rows pay the 8 while
