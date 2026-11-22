@@ -9665,7 +9665,8 @@ class TestSearchOffloadConcurrency:
                 loop_thread = threading.main_thread().name
                 assert loop_thread not in encoded_on, (
                     f"a query encode ran on the EVENT LOOP thread ({loop_thread}) — "
-                    f"the read offload (#1676/#10602) is gone: {list(zip(encoded_on, batch_sizes))}")
+                    f"the read offload (#1676/#10602) is gone: "
+                    f"threads={encoded_on} batch_sizes={batch_sizes}")
                 # And the loop stayed responsive throughout the encode window:
                 # ~0.5 s of encode per search at a 5 ms tick is ~100 ticks, so 20
                 # is a floor that a loop-blocking encode (0 ticks during the
