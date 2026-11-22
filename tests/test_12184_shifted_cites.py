@@ -1284,7 +1284,10 @@ def _names_pair(region: str, path: str, line: int) -> bool:
     """
     filename = path.rsplit("/", 1)[-1]
     for form in (f"`{path}:{line}`", f"`{filename}:{line}`", f"{path}:{line}"):
-        if form in region:
+        # ⛔ THE WHOLE-PATH FORMS NEED THE SAME BOUNDARY: an unanchored substring accepted
+        # `other/tortoise/mcp_server.py:<n>` and `nottortoise/...`, the identical "a longer path that
+        # ENDS with this one" hole the bare-sibling arm was just fixed for (measured).
+        if re.search(rf"(?<![\w./-]){re.escape(form)}(?![\w.-])", region):
             return True
     bare = f"`:{line}`"
     start = 0
