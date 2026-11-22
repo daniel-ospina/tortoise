@@ -37,6 +37,7 @@ from __future__ import annotations
 import contextlib
 import http.server
 import json
+import logging
 import math
 import os
 import socket
@@ -666,10 +667,33 @@ class TestConfiguration:
         if raw == "":
             # An EMPTY value is "unset" by convention, not an error: an operator
             # clearing the lever gets the default and needs no warning.
+            # ⛔ The comment is only a claim until it is asserted (review finding):
+            # the `""` arm used to check the resolved value alone, so dropping
+            # `_env_float`'s `not raw.strip()` guard — making a blank lever warn —
+            # left this row GREEN while the documented convention had silently
+            # changed. No WARNING naming the lever may be emitted here.
             assert resolved == embed_seam.DEFAULT_MAX_WAIT_MS
+            assert not [
+                record for record in caplog.records
+                if record.levelno >= logging.WARNING
+                and embed_seam.ENV_MAX_WAIT_MS in record.getMessage()
+            ], (
+                "a BLANK lever is 'unset' by convention and must not warn; "
+                f"got {[r.getMessage() for r in caplog.records]}")
         else:
             assert resolved == embed_seam.DEFAULT_MAX_WAIT_MS
-            assert caplog.records, f"{raw!r} was accepted without a warning"
+            warned = [
+                record.getMessage() for record in caplog.records
+                if record.levelno >= logging.WARNING
+            ]
+            assert warned, f"{raw!r} was accepted without a warning"
+            # …and the warning NAMES the lever and the value it refused, which is
+            # the whole point of it (`assert caplog.records` alone would be
+            # satisfied by any unrelated warning).
+            assert any(embed_seam.ENV_MAX_WAIT_MS in message and raw in message
+                       for message in warned), (
+                f"the refusal must name {embed_seam.ENV_MAX_WAIT_MS} and {raw!r}: "
+                f"{warned}")
 
     def test_a_non_finite_window_cannot_park_a_ticket(self, monkeypatch):
         """The CONSEQUENCE of the P1, not just its parse: a bound stays a bound.
@@ -2743,6 +2767,69 @@ class TestTheClientVerifiesItsPeer:
         assert b"vectors" not in denied_answer, (
             "a peer the policy REFUSED was served — serve() never consulted the "
             "peer credential, so the socket could be hijacked by any local user")
+
+    def test_a_silent_peer_cannot_park_the_accept_loop(self, tmp_path,
+                                                       monkeypatch):
+        """Review F4 — ONE peer that sends nothing must not own the worker.
+
+        ``serve`` accepts AND serves on a single thread, and ``_serve_connection``
+        read on a blocking socket with no timeout at all: a same-uid peer that
+        connected and then sent nothing parked the accept loop for the life of
+        the worker. Every later ``WorkerBacking.encode`` then connected, sent and
+        hit its own client timeout — ``encode_failed`` / ``last_decline`` on every
+        query while ``describe()`` kept reporting ``worker_alive: true``. The
+        peer-credential belt cannot help here: this shape binds nothing.
+
+        ⛔ Driven through ``serve()`` with a SHORT injected bound (0.5 s), so the
+        row measures the WIRING (that the loop ever leaves the parked read)
+        rather than the constant, and the silent connection is still OPEN when the
+        second client is answered.
+        """
+        from tortoise import embed_worker
+
+        monkeypatch.setattr(embed_worker, "_watch_stdin", lambda _s: None)
+        monkeypatch.setattr(embed_worker, "_watch_parent", lambda _pid, _stop: None)
+        monkeypatch.setattr(embed_worker, "_preload_encoder", lambda: True)
+        monkeypatch.setattr(
+            embed_worker, "_encode", lambda texts: [[1.0] for _ in texts])
+
+        path = str(tmp_path / "parked.sock")
+        stop = threading.Event()
+        failures: list = []
+
+        def _serve() -> None:
+            try:
+                embed_worker.serve(path, parent_pid=0, stop=stop,
+                                   read_timeout=0.5)
+            except BaseException as exc:  # recorded by the caller
+                failures.append(exc)
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not os.path.exists(path):
+            time.sleep(0.01)
+        assert os.path.exists(path), "the test worker never bound its socket"
+
+        silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        silent.settimeout(5.0)
+        try:
+            silent.connect(path)  # connected, and nothing is ever sent
+            answer = embed_seam._LineJSONClient(path).request(
+                {"texts": ["a", "bb"]}, timeout_s=5.0)
+            assert answer["vectors"] == [[1.0], [1.0]], (
+                "the worker stopped serving while one silent peer held a "
+                f"connection open: {answer}")
+        finally:
+            silent.close()
+            stop.set()
+            # Wake the blocked accept so the loop can observe the stop flag.
+            with contextlib.suppress(OSError):
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                probe.connect(path)
+                probe.close()
+            thread.join(timeout=10)
+            assert not failures, failures
 
 
 class TestThePrivateSocketDirectoryLifecycle:

@@ -63,6 +63,24 @@ _logger = logging.getLogger(__name__)
 #: write end open in a reparented grandchild, which the pipe alone cannot see.
 _HEARTBEAT_S = 1.0
 
+#: ⛔ HOW LONG A PEER MAY TAKE TO SEND ITS WHOLE REQUEST LINE. The accept loop is
+#: SINGLE-THREADED (`serve` calls ``_serve_connection`` synchronously), and
+#: ``_serve_connection`` used to read on a blocking socket with no timeout at
+#: all — so one peer that passed the uid check and then sent NOTHING parked the
+#: accept loop for the life of the worker (review F4). Every later
+#: ``WorkerBacking.encode`` then connected, sent, and hit its own client timeout:
+#: ``encode_failed`` / ``last_decline`` on every query while ``describe()`` kept
+#: reporting ``worker_alive: true``. The peer-credential belt was added against a
+#: process that BINDS the path first; this shape defeats it without binding
+#: anything, and ``listen(16)`` backlogs rather than protects.
+#:
+#: The bound covers the READ only and is cleared before the encode, because the
+#: thing it must not do is impose a deadline on the model pass (a cold forward
+#: pass over a full batch is legitimately slower than this). 30 s is the client's
+#: own request timeout, so a peer this bound drops had already been given up on
+#: from the other end.
+_REQUEST_READ_TIMEOUT_S = 30.0
+
 #: ⛔ MAKE AN UNVERIFIABLE PEER A REFUSAL. ``_peer_allowed`` fails OPEN where the
 #: kernel offers no peer credential, because the private ``0700`` socket directory
 #: is still in force and refusing every request would turn a hardening detail into
@@ -231,18 +249,36 @@ def _encode(texts: list[str]) -> list[list[float]]:
     return rows
 
 
-def _serve_connection(conn: socket.socket) -> None:
+def _serve_connection(conn: socket.socket,
+                      read_timeout: float = _REQUEST_READ_TIMEOUT_S) -> None:
     """Answer one request on ``conn``, then close it.
 
     One request per connection (the seam's client opens a connection per
     request). Reading until a newline rather than until EOF is what lets the
     client keep the connection half-open for the response; a request larger than
     the cap is refused rather than buffered without limit.
+
+    ⛔ THE READ IS BOUNDED AND THE ENCODE IS NOT. ``read_timeout`` bounds the
+    wait for the request LINE (a peer that connects and then sends nothing must
+    not park the single-threaded accept loop — review F4); it is cleared before
+    ``_encode`` so a legitimately slow forward pass is never killed by it, and
+    the connection is closed on expiry.
     """
     buffer = b""
     with conn:
+        try:
+            conn.settimeout(read_timeout)
+        except OSError:  # pragma: no cover — a closed socket, nothing to serve
+            return
         while b"\n" not in buffer:
-            chunk = conn.recv(65536)
+            try:
+                chunk = conn.recv(65536)
+            except TimeoutError:
+                _logger.warning(
+                    "embed worker: peer sent no request line in %.1f s; closing "
+                    "the connection rather than parking the accept loop",
+                    read_timeout)
+                return
             if not chunk:
                 return
             buffer += chunk
@@ -250,6 +286,10 @@ def _serve_connection(conn: socket.socket) -> None:
                 conn.sendall(
                     b'{"error": "request exceeded 64 MiB without a newline"}\n')
                 return
+        # The line is complete — the encode below runs on whatever clock it
+        # needs, not on the peer's read bound.
+        with contextlib.suppress(OSError):
+            conn.settimeout(None)
         line, _, _rest = buffer.partition(b"\n")
         try:
             request = json.loads(line.decode("utf-8"))
@@ -353,7 +393,8 @@ def _bind_ready_path(socket_path: str) -> str:
 
 def serve(socket_path: str, *, parent_pid: int,
           peer_allowed=_peer_allowed,
-          stop: threading.Event | None = None) -> None:
+          stop: threading.Event | None = None,
+          read_timeout: float = _REQUEST_READ_TIMEOUT_S) -> None:
     """Run the worker until the parent dies. Blocks.
 
     ``peer_allowed`` and ``stop`` are injectable so the ACCEPT-LOOP WIRING is
@@ -361,6 +402,11 @@ def serve(socket_path: str, *, parent_pid: int,
     :func:`_peer_allowed`'s decision but not that ``serve`` ever consulted it, so
     deleting the call left every row green (review: the belt's wiring was
     unpinned).
+
+    ``read_timeout`` is injectable for the same reason and for the same class of
+    defect: it is the bound that stops ONE silent peer from parking this
+    single-threaded loop forever (review F4), and a bound nothing can drive is a
+    bound nothing has observed.
     """
     stop = threading.Event() if stop is None else stop
     threading.Thread(
@@ -415,7 +461,7 @@ def serve(socket_path: str, *, parent_pid: int,
                     with contextlib.suppress(OSError):
                         conn.close()
                     continue
-                _serve_connection(conn)
+                _serve_connection(conn, read_timeout)
             except Exception:
                 _logger.warning("embed worker: connection failed", exc_info=True)
     finally:

@@ -2581,14 +2581,33 @@ def test_every_lifecycle_word_the_readers_hide_has_an_ended_cue():
 
 
 def test_the_population_register_names_a_module_for_every_member():
-    """The routing table and the reads cannot drift apart."""
+    """The routing table and the reads cannot drift apart.
+
+    ⛔ `assert importlib.import_module(module)` was ALWAYS TRUTHY (review finding):
+    `import_module` returns a `ModuleType` or raises, so the assertion expression
+    had no falsifying state and its message could never be produced. The row reds
+    by the raise, never by that line, and nothing checked that the module it
+    imported actually HOLDS the read the population routes to. Assert the DOOR.
+    """
     import importlib
 
-    from tortoise.state_intent import POPULATIONS
+    from tortoise.state_intent import COMMITMENTS, ENDED, POPULATIONS
 
-    assert set(POPULATIONS) == {"commitments", "ended"}
+    assert set(POPULATIONS) == {COMMITMENTS, ENDED}
+    # The read door each population's module must expose — the population's own
+    # answer, so a swapped module cannot pass on "it imported fine".
+    _DOOR = {
+        COMMITMENTS: "enumerate_live_commitments",
+        ENDED: "enumerate_ended",
+    }
+    assert set(_DOOR) == set(POPULATIONS), (
+        f"a population with no declared read door: {sorted(set(POPULATIONS) - set(_DOOR))}")
     for population, module in POPULATIONS.items():
-        assert importlib.import_module(module), population
+        mod = importlib.import_module(module)
+        door = _DOOR[population]
+        assert callable(getattr(mod, door, None)), (
+            f"{population!r} routes to {module}, which provides no {door} — the "
+            f"routing table and the reads have drifted apart")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
