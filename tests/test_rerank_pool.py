@@ -1332,16 +1332,32 @@ def _seam_opaque_values(node):
     When the mention reaches one of these the walk cannot say what happens to it —
     so "no call found" is NOT deadness and the caller must fail closed.
 
-    ⛔ WHY ANNOTATIONS ARE AN ESCAPE RATHER THAN A MODELLED BINDING, though the
-    MENTION there really is read: an annotation is an ordinary expression Python
-    EVALUATES, and nothing in it is a call, so a mention that appears ONLY in one
-    reaches no call — which is the negative this walk reports. But its value then
-    travels into ``__annotations__``/a ``__annotate__`` thunk the walk does not
-    follow, so "reaches no call" there is not deadness either; admitting it costs
-    one row and keeps the enumeration's claim TRUE. Measured before this fix:
-    ``_x: SEAM`` (no value), ``def f() -> SEAM`` and ``def f(_x: SEAM)`` each
-    returned ``calls=0, opaque=False`` — read as PROVABLY DEAD, which is the exact
-    direction this function exists to forbid (round-18 review).
+    ⛔ WHY ANNOTATIONS ARE AN ESCAPE RATHER THAN A MODELLED BINDING. A mention
+    that appears only in an annotation reaches no call, which is the negative this
+    walk reports — but "no call" is not deadness for every annotation SCOPE, and
+    this walk has no scope model to tell them apart:
+
+    * module- and class-scope: the annotation IS evaluated and stored in
+      ``__annotations__`` (measured: a module-level or class-body ``y: 1/0``
+      raises ``ZeroDivisionError``), so its value travels somewhere the walk does
+      not follow. Admitting it is the fail-closed direction.
+    * function-local: PEP 526 does NOT evaluate a local's annotation (measured:
+      ``def f(): x: 1/0`` does not raise and ``locals()`` stays empty), so a
+      mention there is genuinely dead and admitting it is an OVER-block.
+
+    That over-block is accepted deliberately (doctrine: a false block is B, a
+    deadness claim about an evaluated annotation is A), and it is why the pin
+    carries BOTH a module-scope row (``ann-module`` — the evaluated shape the
+    escape exists for) and a function-local one (``ann-only`` — the shape it
+    over-blocks). Before this fix all three shapes returned
+    ``calls=0, opaque=False``, read as PROVABLY DEAD — the exact direction this
+    function exists to forbid (round-18 review).
+
+    ⛔ KNOWN RESIDUALS, named rather than claimed closed: ``raise SEAM`` and
+    ``await SEAM`` are value positions that evaluate the mention (``await`` even
+    calls ``__await__``) and are still read as dead. Neither can hide a real seam
+    READ — the seam is a bound method, so no call to it can occur there — so they
+    are documented, not modelled.
 
     ⛔ This is an enumeration, not a proof about future syntax: it is every binder
     kind in the Language Reference's list ("Naming and binding", §4.2.1) that this
@@ -1812,10 +1828,15 @@ def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
     admission ADDED for round 10; `helper-arg` is the one row that exercises the
     argument-carrier branch (a seam handed to ANOTHER call rather than called),
     which nothing else reached — deleting that branch left every row GREEN
-    (measured at `62fb081200`); `ann-only`/`ann-param`/`ret-ann` grade the three
-    ANNOTATION escapes added for round 18 — a mention there is EVALUATED but
+    (measured at `62fb081200`); `ann-module`/`ann-only`/`ann-param`/`ret-ann`
+    grade the four ANNOTATION escapes added for round 18 — a mention there
     reaches no call, so reading it as provably dead is the fail-open the
-    enumeration forbids (all three measured `calls=0, opaque=False` before it).
+    enumeration forbids. `ann-module` is deliberately the only one whose
+    annotation Python actually evaluates and stores; `ann-only` is its
+    function-local counterpart, which PEP 526 does not evaluate — the pin carries
+    it because the over-block is the accepted cost of a walk with no scope model,
+    so neither shape can be silently re-guarded (round-19 review: a
+    scope-sensitive skip left every row green).
 
     ⛔ AND EVERY BRANCH OF THE TWO ENUMERATIONS HAS A ROW, because a pin cannot be
     a tripwire for a binding kind it never exercises: measured at `93178a6495`,
@@ -1939,6 +1960,8 @@ def helperarg(sdk):
 def annotonly(sdk):
     _bare: sdk._tortoise_fts_query
 
+_bare_module: sdk._tortoise_fts_query
+
 def annotparam(sdk):
     def _g(_x: sdk._tortoise_fts_query):
         pass
@@ -1975,7 +1998,8 @@ def retann(sdk) -> sdk._tortoise_fts_query:
         (0, True, []),                  # `@SEAM` on a class
         (0, True, []),                  # `class _K2(metaclass=SEAM)`
         (0, True, []),                  # `case SEAM.attr:` VALUE pattern
-        (0, True, []),                  # `_bare: SEAM` annotation, no value
+        (0, True, []),                  # MODULE-scope `_bare_module: SEAM` — evaluated + stored
+        (0, True, []),                  # `_bare: SEAM` annotation, no value (func-local: over-block)
         (0, True, []),                  # `def _g(_x: SEAM)` parameter annotation
         (0, True, []),                  # `def f() -> SEAM` return annotation
         (1, False, ["ann"]),            # `_ann: object = SEAM; _ann(…)`
