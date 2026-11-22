@@ -591,7 +591,15 @@ def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
     # narrowed to `except RuntimeError` leaves every OTHER row in this file green
     # while it regresses exactly this path (#14038 review cycle 10, P3).
     quota.OrgNotFoundError("Team 'team-solo-001' not found in control plane"),
-], ids=["transport", "org-not-found"])
+    # ⛔ A THIRD CLASS IN NEITHER of the two above, because two NAMED classes pin
+    # two names, not the guard's BREADTH: a narrowing to
+    # `except (RuntimeError, quota.OrgNotFoundError)` leaves the two rows above
+    # green while `QuotaCheckError` — a real raise of this same instrument
+    # (`tortoise/quota.py:773`, an empty `org_id`) — escapes `evaluate` and
+    # reaches `sweep_pass` as the generic `error` this row exists to prevent
+    # (#14038 review cycle 11, P3).
+    quota.QuotaCheckError("resolve_org_limits requires a org_id"),
+], ids=["transport", "org-not-found", "quota-check-error"])
 def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
         monkeypatch, exc):
     """A gauge that RAISES must answer with the documented status, not escape.
