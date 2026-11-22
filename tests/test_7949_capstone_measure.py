@@ -7324,23 +7324,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to one
         # FILE and the consume pair was re-pointed in one document while the definition
-        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`), and a later `origin/main` merge a further `+32` (`12136`/`12189` -> `12168`/`12221`, which is what the rows below carry) — each re-read by content at the head that moved it.
+        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`), and a later `origin/main` merge a further `+32` (`12136`/`12189` -> `12168`/`12221`) — each re-read by content at the head that moved it. ⛔ RE-DERIVED AGAIN at `#14224`'s repair: the definition moved `7201` -> `7565` with `#14224` (`94d75667dc`) and `7565` -> `7582` with `#14262` (`8e4ffedc2e`), and the `sdk.py` pair moved `12206`/`12259` -> `12227`/`12280` with `#14260` (`f0e1ceb629`, `+21` above both) — which is what the rows below carry.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
-            ("7201", "def subject_binding_available(graph) -> bool:"),
+            ("7582", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("12206", "subject_binding_available,"),
-            ("12259", "and not subject_binding_available(graph):"),
+            ("12227", "subject_binding_available,"),
+            ("12280", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("7201", "def subject_binding_available(graph) -> bool:"),
+            ("7582", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12111`/`12164` -> `12116`/`12169` pair (`#13556` then added a further `+20` to `12136`/`12189`, and a later `origin/main` merge a further `+32` to the `12168`/`12221` the rows below carry).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("12206", "subject_binding_available,"),
-            ("12259", "and not subject_binding_available(graph):"),
+            ("12227", "subject_binding_available,"),
+            ("12280", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
@@ -7587,12 +7587,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("20329", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
-            ("12179", "_registry_cache = PackRegistry(packs_dir)"),
+            ("12200", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
             # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, onto `12116`/`12169` — the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` (`sdk.py:45`), NOT `#12745`, which is an ancestor of `#13486` — and `#13556`'s own `+20` then took it to `12136`/`12189`, and a later `origin/main` merge a further `+32` took the live values to `12168`/`12221`.
-            ("12206", "subject_binding_available,"),
-            ("12259", "and not subject_binding_available(graph):"),
+            ("12227", "subject_binding_available,"),
+            ("12280", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("1186", '"sha256": sha, "turns": None'),
@@ -18487,7 +18487,8 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     `r[key] = st[key]` — neither line carries the symbol, so a reader
     following the second pair landed on unrelated code. It was green because the two
     `_pin_row_failures` rows scoped to that line carry ONLY the opening pair's numbers — the
-    fail-OPEN probe row names `7201` and its consume row names `12168`/`12221`, and NO row
+    fail-OPEN probe row names `7201` and its consume row names `12206`/`12259` at the pre-fix
+    head (they read `7582` and `12227`/`12280` after `#14224`/`#14262`/`#14260`), and NO row
     anywhere names `12110` or `12163` (`grep -nE '12110|12163'` finds comment lines and this
     docstring only). ⛔ NO LINE RANGE is quoted for those two rows (#13746 review round 9): an
     earlier cut wrote one, and it identified lines that are not the rows — the span started
