@@ -1083,17 +1083,24 @@ SWEEP_NAMES = 66
 #: merged tree's pair is MEASURED on the RESOLVED tree and it coincides with `main`'s own: `--repin`
 #: here prints `(11857, "ed40203dbbf32b87")`, the SAME pair `main` pins at `e74cf1d13d`. ⛔ THE
 #: COINCIDENCE IS NOT THE EVIDENCE — the evidence is that `--repin` run. What makes it expected
-#: rather than lucky is MEASURED too, not assumed: `git diff origin/main` on the resolved tree
-#: touched TWO files, and every line it added was either `#:`-prefixed prose or the single docstring
-#: figure in `tests/test_sdk_privatise_sweep.py` — not one executable line. ⛔ THAT IS A READING OF
-#: THE TREE IT NAMES, NOT A STANDING PROPERTY OF THIS BRANCH: an earlier cut of this block shipped
-#: from a head where that file did not differ at all (`git diff origin/main --
-#: tests/test_sdk_privatise_sweep.py | wc -l` → 0), so a reader re-running the command THERE saw ONE
-#: file and a correct exclusion read as a false one — the "the FILE changed, the ROW did not" trap
-#: this block warns about below, in its mirror form. It differs again NOW, by the `OWN_PINS` row and
+#: rather than lucky is MEASURED too, not assumed: `git diff 70fbd1a27dd 000f00c868` — the
+#: resolved tree against the `main` that merge brought in — touched exactly ONE file,
+#: `tools/sdk_privatise.py`, and `tests/test_sdk_privatise_sweep.py` carried ZERO diff lines
+#: (`git diff 70fbd1a27dd 000f00c868 -- tests/test_sdk_privatise_sweep.py | wc -l` → 0). ⛔ THE
+#: EARLIER FIGURE HERE WAS WRONG "touches exactly TWO files … the single docstring figure in
+#: `tests/test_sdk_privatise_sweep.py`": the three bases measured here reproduce ONE file
+#: (`70fbd1a27dd`), 29 files and 156 test-file lines (`0467ba329d7`), and four files with the same
+#: 156 (`fa4d1c8065`) — none of them TWO. ⛔ AND THAT IS A READING OF THE TREE IT
+#: NAMES, NOT A STANDING PROPERTY OF THIS BRANCH: an unpinned `git diff origin/main --
+#: tests/test_sdk_privatise_sweep.py | wc -l` prints 0 only while `origin/main` happens to be
+#: `70fbd1a27dd`, and 156 once `main` moves past it — which is why the base is NAMED in the command
+#: above, for the same reason the rest of this block names one. The trap is the "the FILE changed,
+#: the ROW did not" one this block warns about below, in its mirror form. It differs from `main`
+#: again NOW, by the `OWN_PINS` row and
 #: its refspec that GRADE the `fa4d1c8065` pin below: test DATA, not one executable line of the tool
-#: either way. The conclusion is unaffected: a docstring is a `Constant`, never an `Attribute`.
-#: `edits_for`
+#: either way. What the ONE file adds that is not prose is the `SWEEP_RESIDUE` pin itself — the
+#: constant below, `-`/`+` — so what moves on this branch is the PIN and never a ROW. The conclusion
+#: is unaffected: a docstring is a `Constant`, never an `Attribute`. `edits_for`
 #: walks the AST and cannot see a comment, and a docstring is a `Constant`, not an `Attribute`, so
 #: this branch can move no row in either direction, which is why the two readings agree.
 #: ⛔ NEITHER SIDE'S FIGURE IS INHERITED BY ARITHMETIC: this branch's own tree `1b0db04894` measured
