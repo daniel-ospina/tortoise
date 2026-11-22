@@ -607,7 +607,7 @@ def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
     # `unknown-account` before the gauge) — the class is what pins breadth, the
     # instance must be a reachable one (#14038 review cycle 13, P3).
     quota.QuotaCheckError(
-        "pricing.json tier 'solo' 'max_graph_storage_mb' is unreadable ('n/a')"),
+        "pricing.json tier 'solo' max_graph_storage_mb is unreadable ('n/a')"),
 ], ids=["transport", "org-not-found", "quota-check-error"])
 def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
         monkeypatch, exc):
