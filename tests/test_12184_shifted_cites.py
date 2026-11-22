@@ -250,6 +250,19 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37547", "tortoise/sdk.py", 37547, "``:Document`` node)."),
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37589` in `_file_human_approval`", "tortoise/sdk.py", 37589, "``:Document`` node)."),
+    # ⛔ The same sentence's OPENING values were pinned by nothing, and a merge resurrected the +21-era
+    # siblings over main's corrected ones (`(opening :37548` = a kwarg line, `(opening :37588` = the other
+    # docstring) while the two graded headlines stayed right — green pins over a wrong sentence (#14038
+    # review, cycle 2). Pinned as the `def` lines they claim to be, and the `:Source` line between them
+    # (`:37546` carries `D10: a document is a ``:Source``, not a` — the line ABOVE `:37547`).
+    (_SUBSTRATE, "(opening `:37527`", _SDK, 37527, "def record_decision"),
+    (_SUBSTRATE, "`:37546` is the `:Source` line", _SDK, 37546, "D10: a document is a ``:Source``, not a"),
+    (_SUBSTRATE, "(opening `:37567`)**)", _SDK, 37567, "def _file_human_approval"),
+    # ⛔ And the §"capability placement" heal pair: the two `hosted_api.py` addresses were re-pointed by
+    # DELTA in the merge (+114) onto the operator-stamp statement and a comment line, while the fragment
+    # the row quotes (`coalesce(n.is_episodic,false) <> true`) lives 37 lines lower. Pinned by content.
+    (_AUDIT, "hosted_api.py:21451-21453", "tortoise/hosted_api.py", 21453, "coalesce(n.is_episodic,false) <> true"),
+    (_AUDIT, "hosted_api.py:21458", "tortoise/hosted_api.py", 21458, "_stamp_capture_provenance("),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -480,6 +493,11 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 #: reported (18:24:17Z on `549bad0c77`) is post-merge by construction. That is why `main` was lint-red
 #: until this removal. #9314 is the pytest-level guard this file does not have.
 _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21451-21453'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21458'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37527`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37546` is the `:Source` line'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37567`)**)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:667`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:844`'): 2,
@@ -758,9 +776,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "167 of this document's 227",
-        "dedupes the **345** as-written spellings to 227 — **118**",
-        "345 written spellings → 227 pairs → 118 collisions → 167 drifters of the 227",
+        "169 of this document's 229",
+        "dedupes the **345** as-written spellings to 229 — **116**",
+        "345 written spellings → 229 pairs → 116 collisions → 169 drifters of the 229",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -3109,7 +3127,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # (`entity_verdict.py:43`), and NOTHING read it — its `sdk.py:28581` sibling was pinned and the
     # neighbour was not, so a rotation of `entity_verdict.py` under that cite would have moved it
     # silently. Same shape as the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
-    assert len(_PINS) == 102
+    # 107 at the #14038 review (cycle 2, P2 ×2): five addresses that NOTHING read — the audit's
+    # heal scan + its stamp-back (`hosted_api.py:21451-21453` / `:21458`, re-pointed by DELTA onto the
+    # operator-stamp statement and a comment line, 37 lines off) and the SUBSTRATE sentence's three
+    # OPENING values (`:37527`, `:37546`, `:37567`), which a forward merge had resurrected at +21 while
+    # the two graded headlines stayed right. Same shape as every row above: green pins, wrong sentence.
+    assert len(_PINS) == 107
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
