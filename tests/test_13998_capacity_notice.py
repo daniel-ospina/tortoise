@@ -578,6 +578,53 @@ def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
         "the gauge was never consulted — this row would be vacuous")
 
 
+def test_a_raising_allowance_is_named_in_the_closed_list_not_left_to_escape(
+        monkeypatch):
+    """A gauge that RAISES must answer with the documented status, not escape.
+
+    `notify_account` publishes a CLOSED list of statuses a caller aggregates on,
+    and `unreadable-allowance`/`unreadable-reading` are defined there as "the
+    gauge pair could not be read". `sweep_pass` turns ANY exception into its
+    generic `error`, so a raise left unguarded inside `evaluate` would make both
+    names unreachable for the very failure they name — the caller would see
+    `error` and the cause would live only in a log line nothing aggregates.
+
+    MEASURED before the guard existed: the RuntimeError below escaped
+    `evaluate`, which is why this row is the pin and not a restatement.
+    """
+    def raise_on_read(org_id):
+        raise RuntimeError("the allowance read failed: HTTP 500")
+
+    monkeypatch.setattr("tortoise.quota.resolve_org_limits", raise_on_read)
+    # No `limits=` argument: the production path resolves them, which is exactly
+    # the instrument that is broken here. Passing limits would make this vacuous.
+    assert cn.evaluate(ORG_ID) == (None, "unreadable-allowance")
+
+    # And the CONSEQUENCE through the caller that aggregates the closed list: a
+    # status, not an escaped exception, and nothing sent.
+    send = _Sender()
+    out = asyncio.run(cn.notify_account(ORG_ID, cp=_fake_cp(), send=send))
+    assert out["status"] == "unreadable-allowance", out
+    assert send.calls == [], "a broken gauge mailed a customer"
+
+
+def test_a_raising_meter_is_named_in_the_closed_list_not_left_to_escape(
+        monkeypatch):
+    """The meter half of the same closed list: a reading that RAISES is named.
+
+    Distinct from the row above because the two instruments are separate seams
+    and only one of them is exercised on each path; a single pin would leave the
+    other half of the documented pair unreachable and ungraded.
+    """
+    def raise_on_read(dimension, org_id):
+        raise RuntimeError("the meter read failed: HTTP 503")
+
+    monkeypatch.setattr("tortoise.allowance_gate.read_dimension", raise_on_read)
+    # `reading=None` is the production default: "read it yourself", so the raise
+    # is injected at exactly the instrument a real caller would hit.
+    assert cn.evaluate(ORG_ID, limits=_limits(102)) == (None, "unreadable-reading")
+
+
 def test_evaluate_sends_nothing_without_an_armed_allowance():
     """`free`/`anon` carry no hot window (`quota._arm_graph_storage` leaves them
     unarmed), so the copy's "capacity included in your plan" has no figure."""
