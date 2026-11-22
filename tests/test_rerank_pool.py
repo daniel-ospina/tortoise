@@ -1603,6 +1603,34 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # site under either name must find its grant here.
         "tools/capstone_12186_recall.py": frozenset({
             "tortoise_fts_query", "_tortoise_fts_query", "_query_rows", "run"}),
+        # ⛔ A MIRROR of `extractor_v2._fts_rows`, on the tool's OWN stated contract:
+        # its `query()` docstring says "EXACTLY the leg ``_fts_rows`` runs, at width
+        # ``k``, returning ids", and the call passes the same TWO lever flags the
+        # capture leg passes (`_record_reads=False`, `_valid_time_rerank=False`)
+        # while omitting `_rerank_candidates` — because `_fts_rows` omits it: the
+        # capture path KEEPS the rerank deliberately (the `OVERRIDES:` record at
+        # `tortoise/extractor_v2.py:2931`, which `tortoise/sdk.py` cites beside its
+        # `_rerank_candidates` parameter, and #12297's measured recall@3 delta).
+        # Opting the probe out would make
+        # every M5 figure describe a reader `_fts_rows` does not run — the mirror
+        # would be broken by the "fix", which is the same ground
+        # `window_quality_m2.py` and `capstone_12186_recall.py` hold.
+        # ⛔ THE GRANT IS NOT THE WHOLE ARGUMENT, so the flags are ASSERTED against
+        # the leg this row names: `tests/test_miss_rate_m5.py::
+        # test_the_probe_reads_the_exact_leg_fts_rows_runs` compares the two call
+        # sites keyword by keyword — a literal's VALUE, or a derived flag's
+        # NORMALISED FORM, at every keyword that is not a site coordinate — and it
+        # CALLS the capture leg (`_fts_rows`) with a stub sdk to pin that the read
+        # receives no `_rerank_candidates` in any form at all, because a string-level
+        # scan could not see a `**mapping` key, a nested `**{...}`, a subscript
+        # assignment or a split literal (all four measured green against it) — and pins the
+        # arithmetic that makes the grant harmless at the width the probe MEASURES —
+        # `DEEP_LIMIT` (50) AT OR ABOVE `DEFAULT_FUSED_RERANK_POOL` (40) — a permutation at
+        # equal width is set-preserving — and composition can
+        # only move when `limit < pool` (plus the width the read would resolve if
+        # the gate were armed). The only sub-pool read this file issues is the
+        # width-1 WARM-UP, whose result is discarded.
+        "tools/miss_rate_m5.py": frozenset({"query"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
