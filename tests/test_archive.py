@@ -4138,6 +4138,117 @@ def test_a_SYMLINKED_package_init_whose_TARGET_is_deleted_is_a_removal(tree: Pat
     )
 
 
+def test_a_TWO_HOP_link_chain_whose_FINAL_target_is_OUTSIDE_the_package_is_a_removal(
+    tree: Path,
+) -> None:
+    """P1 (round-23): one hop was not enough, and the docstring claimed the loss was impossible.
+
+    Measured: `tortoise/x/__init__.py -> ../../shared/alias.py -> impl.py`, one commit deleting
+    all three. `_blob_following_links` returned the SECOND link's TEXT (`"impl.py"`), which parses
+    as an inert expression, so `tortoise.x` never entered `base_modules`; the final target sat
+    outside `tortoise/`, which `_package_paths_at` does not enumerate — so no arm red it (`[]`).
+    The same code whose final target sat under `tortoise/` gave two `MODULE REMOVED` rows, i.e.
+    the answer depended on where the real file happened to live, which is the class this gate
+    exists to remove. The old docstring asserted "the body is never silently lost; only the
+    package name stops being blamed" — false for exactly the outside-package shape.
+
+    Mutation: follow ONE hop only -> RED here.
+    """
+    (tree / "shared").mkdir()
+    (tree / "shared" / "impl.py").write_text("def handler():\n    return 1\n", encoding="utf-8")
+    (tree / "shared" / "alias.py").symlink_to("impl.py")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../../shared/alias.py")
+    _commit(tree, "shared/impl.py", "shared/alias.py", "tortoise/x/__init__.py")
+    subprocess.run(
+        ["git", "rm", "-r", "-q", "tortoise/x", "shared/alias.py", "shared/impl.py"],
+        cwd=tree,
+        check=True,
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.x:") and "REMOVED" in p for p in problems), (
+        f"a two-hop chain holds code like any other carrier: {problems}"
+    )
+
+
+def test_the_route_printed_for_a_SYMLINKED_carrier_ANCHORS_at_the_commit_that_holds_it(
+    tree: Path,
+) -> None:
+    """P1 (round-23): the writer froze the TARGET's text while the anchor compared LINK TEXT.
+
+    `_module_source` freezes `path.read_text()`, which FOLLOWS the link; `block_holds` compared
+    that block against `_git_blob` — the LINK TEXT for mode `120000` — so it could never hold.
+    Measured on a probe commit: `holds(base) = False` while `_git_blob(base, path)` was
+    `'../../shared/alias.py'`, so `archive module tortoise.x` — the remedy the gate PRINTS for
+    this carrier — refused with "no commit on main holds this code" at the very commit that holds
+    it: a red with no green route, the class rounds 19–21 closed twice elsewhere.
+
+    Mutation: read the candidate with `_git_blob` in `block_holds` -> RED here.
+    """
+    (tree / "shared").mkdir()
+    (tree / "shared" / "impl.py").write_text("def handler():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../../shared/impl.py")
+    _commit(tree, "shared/impl.py", "tortoise/x/__init__.py")
+    base = _head_sha(tree)
+
+    blocks = arch._module_source(tree, "tortoise.x")
+    holds = arch.block_holds(tree, "module", "tortoise.x", blocks)
+    assert holds(base) is True, (
+        "the anchor must read the body the writer froze, not the link text: the printed remedy "
+        "is otherwise refused at the commit that holds the code"
+    )
+    anchored, ref = arch.anchor_sha(tree, [block[0] for block in blocks], holds)
+    assert anchored == base
+    assert ref, "anchor_sha must name the ref it read"
+
+
+def test_a_DANGLING_symlink_is_not_the_archived_module_COMING_BACK(tree: Path) -> None:
+    """P2 (round-23): one file, two arms, contradictory statements about the same tree.
+
+    `_file_text` returns `None` for a dangling link, and the old `text is not None and ...` let
+    it fall through to `return candidate` — i.e. "REAPPEARED on the live surface" for a file
+    holding no code — while arm 1b graded that same file `MODULE BODY REMOVED` in the same run.
+    A file that holds nothing is not the module coming back; the removal arm is the true verdict.
+
+    Mutation: fold the `text is None` case back into the `and` -> RED here.
+    """
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../../shared/impl.py")
+    surface = {"modules": {"tortoise.x"}, "modules_with_a_body": {"tortoise.x"}}
+    entry = {"kind": arch.MODULE, "symbol": "tortoise.x"}
+    assert arch.live_return(entry, surface, tree) is None, (
+        "a dangling link holds no code: counting it LIVE contradicts arm 1b about one file"
+    )
+
+
+def test_the_blob_MODE_cache_is_keyed_on_a_SHA_not_a_ref(tree: Path) -> None:
+    """P2 (round-23): "a commit's tree is immutable" is true of a SHA and FALSE of `HEAD`.
+
+    Measured in one process: `_blob_mode(root, "HEAD", path)` answered `100644` after the path
+    had been committed as a symlink (`ls-tree HEAD` reports `120000`). No caller in the tool
+    passes a ref today — which is why the miss has to be structural, not a habit.
+
+    Mutation: drop `_commit_sha` from `_blob_mode` -> RED here.
+    """
+    (tree / "tortoise" / "q.py").write_text("x = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/q.py")
+    arch._blob_mode_at.cache_clear()
+    assert arch._blob_mode(tree, "HEAD", "tortoise/q.py").startswith("100")
+
+    (tree / "tortoise" / "q.py").unlink()
+    (tree / "tortoise" / "real.py").write_text("y = 2\n", encoding="utf-8")
+    (tree / "tortoise" / "q.py").symlink_to("real.py")
+    _commit(tree, "tortoise/q.py", "tortoise/real.py")
+
+    assert arch._blob_mode(tree, "HEAD", "tortoise/q.py").startswith("120"), (
+        "the cache answered a MOVED question: a ref is not an immutable tree"
+    )
+    arch._blob_mode_at.cache_clear()
+
+
 def test_an_EMPTY_pyi_sibling_does_not_rescue_a_bodyless_module(tree: Path) -> None:
     """P2 (round-20): the writer's OTHER-CARRIER walk exempted `.pyi` from the content test by
     SUFFIX, so an EMPTY stub let the writer freeze a 0-char block.

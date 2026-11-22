@@ -129,6 +129,7 @@ import ast
 import fnmatch
 import hashlib
 import json
+import os
 import posixpath
 import re
 import subprocess
@@ -663,7 +664,23 @@ def live_return(entry: dict, surface: dict, root: Path | None = None) -> str | N
                 continue  # scaffolding only: the name resolves, the module's BODY is not here
             if root is not None:
                 text = _file_text(root, candidate)
-                if text is not None and not _init_carries_a_body(text):
+                if text is None:
+                    # ⛔ A CARRIER THAT EXISTS AND READS AS NOTHING IS NOT "COMING BACK"
+                    # (round-23 review, P2 — measured). `read_text` follows a symlink, so a
+                    # DANGLING link answers `None` here — and the old `text is not None and ...`
+                    # let it fall through to `return candidate`, i.e. "REAPPEARED on the live
+                    # surface" for a file holding no code, while arm 1b graded that same file
+                    # `MODULE BODY REMOVED` in the same run. A correct verdict beside a false
+                    # stated fact, the class this file keeps having to remove.
+                    # ⛔ AND A PATH THAT IS ABSENT ALTOGETHER KEEPS THE OLD ANSWER (measured on
+                    # the round-18 positive control): the surface set is then the only evidence
+                    # there is, and "cannot read it" must not become "it is not live" — that
+                    # direction would let a real REAPPEARED row go green. Only an entry that is
+                    # ON DISK and holds nothing is demoted.
+                    if not os.path.lexists(root / candidate):
+                        return candidate
+                    continue
+                if not _init_carries_a_body(text):
                     # A leftover EMPTY / docstring-only file is not the module coming back: arm
                     # 1b just called it a removal, and crediting it here would red the very
                     # remedy arm 1b prints (round-8 review).
@@ -1187,6 +1204,12 @@ def _modules_with_a_body(paths, read) -> set[str]:
     return out
 
 
+#: How many SYMLINK hops `_blob_following_links` will follow before answering "unreadable". No
+#: shape in this repo comes near it; the bound exists so a malformed chain cannot be walked forever
+#: and so a chain that IS truncated answers `None` rather than a plausible-looking link text.
+_LINK_HOPS = 8
+
+
 def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
     """The commit's text for *path*, following a SYMLINK to its target in the same commit.
 
@@ -1197,35 +1220,87 @@ def _blob_following_links(root: Path, sha: str, path: str) -> str | None:
     GREEN in every arm with the body in no file under `archive/`, i.e. the central promise broken by
     choosing a FILENAME (`alias.py` → RED, `x/__init__.py` → GREEN).
 
-    ⛔ ONE LEVEL ONLY, AND A CYCLE ANSWERS THE PEER'S LINK TEXT — not `None`, which an earlier
-    draft of this docstring claimed before it was measured (round-20 VGATE). A self-loop resolves
+    ⛔ FOLLOW THE WHOLE CHAIN, NOT ONE HOP (round-23 review, P1 — measured). One hop was not
+    enough, and the excuse this docstring used to make for it was FALSE: for
+    `x/__init__.py → ../../shared/alias.py → impl.py` the read returned the SECOND LINK'S TEXT
+    (`"impl.py"`), which parses as an inert expression, so `tortoise.x` never entered
+    `base_modules` — and because the final target lived OUTSIDE `tortoise/`, `_package_paths_at`
+    never scanned it either. Deleting the package, the alias AND the target was GREEN in every arm
+    (measured on a probe commit: `[]`), while the same code whose final target sat under
+    `tortoise/` gave two `MODULE REMOVED` rows. The old sentence — "the body is never silently
+    lost; only the package name stops being blamed" — held only for chains ending INSIDE the
+    package, which is the shape least likely to be met.
+
+    ⛔ A CYCLE ANSWERS THE PEER'S LINK TEXT — not `None`, which an earlier draft of this docstring
+    claimed before it was measured (round-20 VGATE). A self-loop resolves
     to the file's own link text and a two-cycle to the other link's, both of which parse as inert
     expressions: the module simply does not enter the carrier set, exactly as it did before this
     function existed. That is the SAFE direction — the set answers "did this carrier hold a body",
-    and a link loop holds no code. A chain (`x/__init__.py` → `a_link.py` → `real.py`) keeps its
-    attribution on the FINAL file, which still reds as its own `MODULE REMOVED`, so the body is
-    never silently lost; only the package name stops being blamed.
+    and a link loop holds no code. A chain longer than `_LINK_HOPS` links, or one that dangles,
+    answers `None` (unreadable): no depth bound is reached by any shape this repo has, and a bound
+    that IS reached must not invent a reading by returning the last link's text.
     """
     text = _git_blob(root, sha, path)
     if text is None:
         return None
-    if not _blob_mode(root, sha, path).startswith("120"):
-        return text
-    # ⛔ NORMALISE FIRST (round-21 review, P1 — measured). A relative link target
-    # (`../../shared/impl.py`) concatenated onto the carrier's directory yields
-    # `tortoise/x/../../shared/impl.py`, which `git show <sha>:<path>` REFUSES with
-    # `fatal: path … exists on disk` — so the read answered `None`, which the carrier tests
-    # treat as "unreadable, never cancel a removal". `posixpath.normpath` collapses the `..`
-    # segments before the ask; the result never escapes the repo root because `git show`
-    # refuses an absolute or outside path anyway.
-    target = posixpath.normpath((Path(path).parent / text.strip()).as_posix())
-    resolved = _git_blob(root, sha, target)
-    return resolved if resolved is not None else None
+    seen = {path}
+    for _ in range(_LINK_HOPS):
+        if not _blob_mode(root, sha, path).startswith("120"):
+            return text
+        # ⛔ NORMALISE BEFORE THE ASK (round-21 review, P1 — measured). A relative link target
+        # (`../../shared/impl.py`) concatenated onto the carrier's directory yields
+        # `tortoise/x/../../shared/impl.py`, which `git show <sha>:<path>` REFUSES with
+        # `fatal: path … exists on disk` — so the read answered `None`, which the carrier tests
+        # treat as "unreadable, never cancel a removal". `posixpath.normpath` collapses the `..`
+        # segments before the ask; the result never escapes the repo root because `git show`
+        # refuses an absolute or outside path anyway.
+        target = posixpath.normpath((Path(path).parent / text.strip()).as_posix())
+        if target in seen:
+            return text  # a loop holds no code: the peer's link text, as measured
+        seen.add(target)
+        resolved = _git_blob(root, sha, target)
+        if resolved is None:
+            return None  # dangles: unreadable, never a plausible reading
+        path, text = target, resolved
+    return None
+
+
+#: A FULL object name is immutable, which is the whole reason it is a legal cache key; anything
+#: else (a ref, an abbreviation) can move underneath the cache.
+_IMMUTABLE_OBJECT = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+
+
+def _commit_sha(root: Path, rev: str) -> str:
+    """The full sha *rev* names, so a cache key can never be a MOVING ref.
+
+    ⛔ A REF IS NOT AN IMMUTABLE TREE (round-23 review, P2 — measured). `_blob_mode_at` caches on
+    `(root, sha, path)` on the strength of "a commit's tree is immutable" — true of a SHA, FALSE of
+    `HEAD`: commit a mode change in the same process and the cached answer still describes the old
+    tree (measured: `100644` returned for a path `ls-tree HEAD` had since made `120000`). No caller
+    in THIS tool passes a ref (`resolve_base` returns a merge-base sha), which is exactly why the
+    miss must be structural instead of a property every future caller has to remember. A full sha
+    costs no spawn. ⛔ NOT `@cache`d ITSELF (measured while writing this): memoising `"HEAD"` here
+    only moves the staleness one level up — the ref would resolve once and answer that sha forever.
+    The hot path is 307 calls with a FULL sha, which the regex answers without spawning git.
+    """
+    if _IMMUTABLE_OBJECT.match(rev):
+        return rev
+    code, out = _git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
+    return out.strip() if code == 0 and out.strip() else rev
+
+
+def _blob_mode(root: Path, sha: str, path: str) -> str:
+    """The commit's file mode for *path* (`""` when the tree has no such entry).
+
+    Resolves the rev first (`_commit_sha`) so the cache below is keyed on an IMMUTABLE object, not
+    on whatever spelling the caller happened to hold.
+    """
+    return _blob_mode_at(root, _commit_sha(root, sha), path)
 
 
 @cache
-def _blob_mode(root: Path, sha: str, path: str) -> str:
-    """The commit's file mode for *path* (`""` when the tree has no such entry).
+def _blob_mode_at(root: Path, sha: str, path: str) -> str:
+    """The cached read behind `_blob_mode` — `sha` MUST be a full object name.
 
     ⛔ CACHED BECAUSE THE SAME QUESTION IS ASKED THREE TIMES (round-22 VGATE, measured). Reading
     the mode before the text asked for it 924 times per run to answer for 307 carriers —
@@ -2510,11 +2585,19 @@ def block_holds(
 
     The block comparison the GATE uses (`expected_block`), so "the anchor holds the code" means
     the same thing on the way in and on the way out.
+
+    ⛔ READ THROUGH THE LINK, LIKE THE WRITER DOES (round-23 review, P1 — measured). The writer
+    freezes `path.read_text()`, which FOLLOWS a symlink, so comparing that frozen block against
+    `_git_blob` — the LINK TEXT for mode `120000` — could never hold: `archive module tortoise.x`
+    refused with "no commit on main holds this code" at the very commit that holds it (measured:
+    `holds(base) = False` while `_git_blob(base, path) == '../../shared/alias.py'`). That is a red
+    with no green route, the class rounds 19–21 closed twice elsewhere. `None` still reads as
+    "does not hold", so an unreadable candidate is unaffected.
     """
 
     def holds(candidate: str) -> bool:
         for path, segment, node_key in blocks:
-            blob = _git_blob(root, candidate, path)
+            blob = _blob_following_links(root, candidate, path)
             if blob is None:
                 return False
             expected = expected_block(kind, symbol, path, blob, node_key)
@@ -2781,8 +2864,12 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
         # one carrier over. A body-carrying carrier anywhere in the module's set is the thing to
         # freeze, so walk the set in the same preference order and refuse only when NONE carries a
         # body. A `.pyi` carries (a stub under the shipped package IS importable surface, and it is
-        # the module's only code when nothing else carries it), which is the exemption the
-        # suffix test above already makes.
+        # the module's only code when nothing else carries it), which the CONTENT rule makes on its
+        # own: a real stub is a `FunctionDef`, so `_init_carries_a_body` accepts it and no suffix
+        # test is needed. ⛔ NOT "the exemption the suffix test above already makes" — round 19
+        # REMOVED that exemption (`if not rel.endswith(".pyi") and not _init_carries_a_body(...)`)
+        # because a suffix-keyed one let the writer freeze an EMPTY `.pyi`; naming a mechanism this
+        # same file no longer has (round-23 review, P2) sends the next reader looking for it.
         for other in (package_rel, stub_rel, package_stub_rel):
             other_path = root / other
             if other == rel or not other_path.exists():

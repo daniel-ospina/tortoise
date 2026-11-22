@@ -266,6 +266,18 @@ see it.
 > graded GREEN). The gate grades per-symbol EXISTENCE across a path set, not proportions, and a
 > legitimate shim is indistinguishable from a decoy without comparing the two sides' name sets —
 > which is a separate arm, not a tighter spelling rule (#14298).
+>
+> **SYMLINKED carriers** are followed, in the commit and in the working tree, to the file that
+> actually holds the code (`_blob_following_links`), so deleting a package whose `__init__.py` is a
+> link is graded like deleting the same code under its own name. The rule is one hop per link and a
+> bound of 8 links per chain, and the residuals are deliberate and named here rather than hidden:
+> a chain LONGER than that bound answers "unreadable" (which never cancels a removal), and a
+> LINK LOOP (`a → a`, or `a → b → a`) resolves to the peer's link TEXT — which parses as an inert
+> expression, so the module simply does not enter the carrier set, exactly as it did before link
+> following existed. A link that DANGLES holds no code, so deleting it is not a removal of code.
+> The one thing NOT claimed: a carrier whose final target lives outside `tortoise/` is now READ (so
+> the removal reds and names the carrier), but `_package_paths_at` still enumerates only
+> `tortoise/`, so a removal of that outside target alone is not a module removal.
 
 This check runs as part of the `surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2),
 never a quiet pass. If the deletion is already recorded somewhere this gate cannot read, state
