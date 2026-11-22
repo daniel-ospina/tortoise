@@ -37,6 +37,7 @@ from __future__ import annotations
 import contextlib
 import http.server
 import json
+import math
 import os
 import socket
 import subprocess
@@ -648,10 +649,17 @@ class TestConfiguration:
         assert 0.0 < embed_seam.DEFAULT_MAX_WAIT_MS <= 50.0, (
             "the issue's stated bound is <= 50 ms")
 
-    @pytest.mark.parametrize("raw", ["20ms", "-5", "nan", ""])
+    @pytest.mark.parametrize("raw", ["20ms", "-5", "nan", "inf", "-inf",
+                                     "1e999", "1e12", ""])
     def test_an_unusable_window_falls_back_to_the_default_with_a_warning(
             self, monkeypatch, caplog, raw):
-        """TOTAL: a bad number must not silently become 0 (i.e. no batching)."""
+        """TOTAL: a bad number must not silently become 0 (i.e. no batching).
+
+        ``inf`` / ``-inf`` / ``1e999`` are the P1 of review F1 at ``76e58a21bb``:
+        the old guard (``not (value >= minimum) or value != value``) ACCEPTED an
+        infinite window, because ``inf >= 0`` is true and ``inf != inf`` is false.
+        ``1e12`` is the finite-but-absurd value — the same park, longer fuse.
+        """
         monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, raw)
         with caplog.at_level("WARNING"):
             resolved = embed_seam.resolve_max_wait_ms(embed_seam.BACKING_WORKER)
@@ -662,6 +670,45 @@ class TestConfiguration:
         else:
             assert resolved == embed_seam.DEFAULT_MAX_WAIT_MS
             assert caplog.records, f"{raw!r} was accepted without a warning"
+
+    def test_a_non_finite_window_cannot_park_a_ticket(self, monkeypatch):
+        """The CONSEQUENCE of the P1, not just its parse: a bound stays a bound.
+
+        The parser row above pins the refusal; this one pins why it matters. An
+        infinite window made ``_collect``'s ``deadline = ... + window_s`` infinite
+        (a lone query's batch could only fire on ``max_batch``) and sized
+        ``submit``'s valve — ``window + budget + slack`` — to infinity: the
+        unbounded wait the issue's contradiction test (a) makes unshippable,
+        reachable by one typo. A future "accept it, clamp it later" reddens here.
+        """
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "inf")
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        window_ms = embed_seam.resolve_max_wait_ms()
+        bound = embed_seam.resolve_ticket_wait_s(30.0)
+        assert math.isfinite(window_ms), window_ms
+        assert window_ms == 0.0, (
+            "an `inf` window was accepted — the in-process default must apply")
+        assert math.isfinite(bound), bound
+        assert bound <= 31.0 + 0.001, (
+            f"a non-finite window sized a ticket's wait bound to {bound}s")
+
+    def test_the_other_wait_levers_refuse_infinity_too(self, monkeypatch, caplog):
+        """Same class, the other two levers: an infinite request or boot budget.
+
+        ``TORTOISE_EMBED_QUERY_TIMEOUT_S=inf`` makes ``sock.settimeout`` / the
+        external ``urlopen`` bound outlive the process it is supposed to protect;
+        an infinite ``..._WORKER_STARTUP_S`` parks every read on a boot that may
+        never finish, because ``_ensure_started``'s deadline is
+        ``time.monotonic() + timeout`` (#13528's shape).
+        """
+        monkeypatch.setenv(embed_seam.ENV_TIMEOUT_S, "inf")
+        monkeypatch.setenv(embed_seam.ENV_WORKER_STARTUP_S, "1e999")
+        with caplog.at_level("WARNING"):
+            assert embed_seam.resolve_timeout_s() == embed_seam.DEFAULT_TIMEOUT_S
+            assert embed_seam.resolve_worker_startup_s() == \
+                embed_seam.DEFAULT_WORKER_STARTUP_S
+        assert len(caplog.records) >= 2, (
+            "an infinite budget was refused without saying which lever")
 
     def test_max_batch_refuses_a_non_positive_value(self, monkeypatch, caplog):
         monkeypatch.setenv(embed_seam.ENV_MAX_BATCH, "0")
@@ -772,7 +819,7 @@ class TestTheDistributionsAreExported:
         assert set(block) == {
             "backing", "max_wait_ms", "max_batch", "timeout_s",
             "last_decline", "last_decline_age_s", "injected", "backing_state",
-            "latency", "backings",
+            "latency", "latency_stale", "backings",
         }, sorted(block)
         assert set(embed_seam.seam_status()) >= set(
             hosted_api._EMBED_SEAM_HEALTH_KEYS), (
@@ -780,6 +827,43 @@ class TestTheDistributionsAreExported:
             "operator's read resolves to null forever")
         assert block["backing"] == embed_seam.BACKING_INPROCESS
         assert block["max_wait_ms"] == 0.0
+        assert block["latency_stale"] is False, (
+            "a fresh process read its own (never-observed) distributions as "
+            "stale — the flag must answer 'did the lever move past the live "
+            "backing', never 'has anything run yet'")
+
+    def test_the_degraded_seam_arm_carries_its_reason_into_health(self, monkeypatch):
+        """Review F4: ``seam_status`` NEVER RAISES, so its own ``error`` must ride.
+
+        ``_embed_seam_health``'s ``except`` only catches a RAISE, but
+        ``seam_status`` has its OWN degraded arm returning every key as ``None``
+        PLUS ``error``. The reason was therefore dropped: ``/health`` published
+        ``backing: null`` with nothing saying why, contradicting this module's own
+        comment and the runbook ("every value null, plus ``error``"). The raise arm
+        is pinned above; this drives the INTERNAL arm, which is the one that
+        actually fires in a deployment.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        def _explode() -> str:
+            raise RuntimeError("TORTOISE_EMBED_BACKING unreadable")
+
+        # ``seam_status`` calls this FIRST, so the raise lands inside its own try.
+        monkeypatch.setattr(embed_seam, "resolve_backing", _explode)
+        block = hosted_api._embed_seam_health()
+        assert "error" in block, (
+            "the seam's own degraded arm arrived at /health as `backing: null` "
+            "with no reason — the operator cannot tell a broken read from an "
+            "unwarmed process")
+        assert "TORTOISE_EMBED_BACKING unreadable" in block["error"]
+        assert set(block) == set(hosted_api._EMBED_SEAM_HEALTH_KEYS) | {"error"}
+        # The degraded arm's own shape: every key null except ``injected``, which
+        # it answers ``False`` (nothing was injected into a read that failed).
+        for key in hosted_api._EMBED_SEAM_HEALTH_KEYS:
+            if key == "injected":
+                assert block[key] is False, block[key]
+                continue
+            assert block[key] is None, (key, block[key])
 
     def test_the_health_producer_never_raises(self, monkeypatch):
         """A broken seam read must not 5xx ``/health``.
@@ -1397,6 +1481,188 @@ class TestWorkerReadinessIsTheSocketExisting:
             embed_seam.install_backing(None)
 
 
+    def test_the_published_socket_path_is_connectable_the_moment_it_exists(
+            self, tmp_path, monkeypatch):
+        """Review F2: existence must imply LISTENING, not merely ``bind``ed.
+
+        ⛔ THE WIDENED WINDOW IS THE PROOF. ``bind()`` creates the path one
+        statement before ``listen()`` makes it connectable, so a client that won
+        the readiness poll could ``connect()`` to a bound-but-not-listening socket
+        and get ``ECONNREFUSED`` (``unix(7)``) — a DECLINE recorded against a
+        perfectly healthy worker, in ``last_decline``, where the runbook told an
+        operator to read it as a fault. The real gap is microseconds, so this row
+        delays ``listen`` by 0.4 s: pre-fix the published path exists during that
+        delay and the immediate connect is refused; post-fix the path the worker
+        binds is a SIBLING until after ``listen``, renamed into place atomically.
+        """
+        from tortoise import embed_worker
+
+        # The real watchers take the session down (``_watch_stdin`` calls
+        # ``os._exit`` on EOF) — same reason as the ordering row above.
+        monkeypatch.setattr(embed_worker, "_watch_stdin", lambda *a, **k: None)
+        monkeypatch.setattr(embed_worker, "_watch_parent", lambda *a, **k: None)
+        monkeypatch.setattr(embed_worker, "_preload_encoder", lambda: True)
+
+        path = tmp_path / "ready.sock"
+        stop = threading.Event()
+        real_socket = socket.socket
+
+        class _SlowListen:
+            """A real AF_UNIX listening socket whose ``listen`` is late."""
+
+            def __init__(self) -> None:
+                self._sock = real_socket(socket.AF_UNIX, socket.SOCK_STREAM)
+
+            def bind(self, path: str) -> None:
+                self._sock.bind(path)
+
+            def listen(self, backlog: int) -> None:
+                time.sleep(0.4)
+                self._sock.listen(backlog)
+
+            def accept(self):
+                self._sock.settimeout(0.05)
+                try:
+                    return self._sock.accept()
+                except TimeoutError as exc:
+                    raise OSError("stopped") from exc
+
+            def close(self) -> None:
+                self._sock.close()
+
+        class _SocketShim:
+            AF_UNIX = socket.AF_UNIX
+            SOCK_STREAM = socket.SOCK_STREAM
+
+            @staticmethod
+            def socket(*_a, **_k):
+                return _SlowListen()
+
+        # The module's REFERENCE, not the stdlib module (see the row above).
+        monkeypatch.setattr(embed_worker, "socket", _SocketShim())
+
+        thread = threading.Thread(
+            target=embed_worker.serve,
+            kwargs={"socket_path": str(path), "parent_pid": os.getpid(),
+                    "stop": stop},
+            daemon=True)
+        thread.start()
+        try:
+            # EXACTLY what the client does, polls the path and nothing else.
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not os.path.exists(path):
+                time.sleep(0.005)
+            assert os.path.exists(path), "the worker never published its socket"
+            # …and the instant it exists, a client must be able to connect.
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(5.0)
+            try:
+                client.connect(str(path))
+            except ConnectionRefusedError as exc:  # pragma: no cover — the defect
+                raise AssertionError(
+                    "the worker published its socket path while nothing was "
+                    "LISTENING on it — a client that wins the readiness poll "
+                    "gets ECONNREFUSED and records a decline on a healthy "
+                    f"worker (#14186 review F2): {exc}") from exc
+            finally:
+                client.close()
+        finally:
+            stop.set()
+            thread.join(timeout=10.0)
+
+    def test_a_client_retries_a_path_with_no_listener_behind_it(
+            self, tmp_path, monkeypatch):
+        """The client half: a path can exist with NO listener, so retry briefly.
+
+        A predecessor killed with SIGKILL leaves its socket FILE behind (nothing
+        unlinks it), and a predecessor mid-``unlink``/``bind`` leaves a window.
+        Both answer ``ECONNREFUSED``, and pre-fix either one was a recorded
+        decline on a healthy worker. The retry is BOUNDED
+        (``_CONNECT_REFUSED_GRACE_S``, 250 ms against a 30 s request budget), so a
+        genuinely dead path still declines promptly.
+
+        Driven with a real stale socket file and a real listener that appears
+        inside the grace: deterministic, no sleep-based race.
+        """
+        path = str(tmp_path / "stale.sock")
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(path)
+        stale.close()  # the FILE remains — exactly a SIGKILLed worker's residue
+        assert os.path.exists(path), "the stale socket file did not survive close"
+
+        # ⛔ THE GRACE IS WIDENED FOR THIS ROW ONLY. The shipped grace is 250 ms
+        # and the fake listener appears after a 100 ms sleep, so on a loaded box
+        # overshooting 150 ms turned this row into an error rather than a signal
+        # (review P3) — the load-sensitivity class this PR already hardened in
+        # ``TestStopIsAStop``. The companion row below keeps the SHIPPED bound
+        # under test, so widening here does not unpin it.
+        monkeypatch.setattr(
+            embed_seam._LineJSONClient, "_CONNECT_REFUSED_GRACE_S", 2.0)
+
+        serving = threading.Event()
+        stop = threading.Event()
+
+        def _listen_late() -> None:
+            assert serving.wait(5.0)
+            time.sleep(0.1)
+            if os.path.exists(path):
+                os.unlink(path)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(path)
+            server.listen(8)
+            server.settimeout(0.05)
+            while not stop.is_set():
+                try:
+                    conn, _addr = server.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    break
+                conn.close()
+            server.close()
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+
+        thread = threading.Thread(target=_listen_late, daemon=True)
+        thread.start()
+        client = embed_seam._LineJSONClient(path)
+        serving.set()
+        try:
+            stream = client.open_stream(timeout_s=5.0)
+            stream.close()
+        finally:
+            stop.set()
+            thread.join(timeout=5.0)
+
+    def test_a_dead_path_still_declines_within_the_grace(self, tmp_path):
+        """The belt is BOUNDED: no listener ever → raise, do not park.
+
+        Without this the retry could be widened into the unbounded park the
+        issue's contradiction test (a) forbids.
+        """
+        path = str(tmp_path / "never.sock")
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(path)
+        stale.close()
+        started = time.monotonic()
+        with pytest.raises(ConnectionRefusedError):
+            embed_seam._LineJSONClient(path).open_stream(timeout_s=5.0)
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, (
+            f"a path with no listener behind it parked for {elapsed:.1f}s — the "
+            "retry is not bounded")
+        # ⛔ AND THE SHIPPED BOUND ITSELF IS PINNED HERE (review P3). The row
+        # above proves the retry TERMINATES; without this line a regression that
+        # widened the grace to 1.9 s would pass both rows while quietly spending
+        # most of a request budget on a dead socket. The widened row above sets
+        # the constant for itself only (``monkeypatch``), so this reads the
+        # shipped value.
+        assert embed_seam._LineJSONClient._CONNECT_REFUSED_GRACE_S == 0.25, (
+            "the shipped connect-retry grace moved — it is bounded so a dead "
+            "path cannot park a request: "
+            f"{embed_seam._LineJSONClient._CONNECT_REFUSED_GRACE_S}")
+
+
 class _FakeProc:
     """Stands in for a live ``Popen`` — ``poll() is None`` means "running"."""
 
@@ -1930,6 +2196,15 @@ class TestStopIsAStop:
         recorder = backing(delay_s=1.0)
         # Shrink the join so an in-flight encode is guaranteed to outlast it.
         monkeypatch.setattr(embed_seam, "_STOP_JOIN_S", 0.05)
+        # ⛔ AND SHRINK THE RETIRE BOUND TOO. ``_RETIRE_JOIN_S`` is a MODULE
+        # CONSTANT computed at import (``_STOP_JOIN_S + DEFAULT_TIMEOUT_S +
+        # 30``), so patching ``_STOP_JOIN_S`` alone left it at 65 s while this row
+        # waited only 10 s — the close legally had 65 s, the assertion allowed 10.
+        # That is the load-sensitivity a review measured as a flake (one red on
+        # `_close_when_idle` under a busy box, then six green repeats). Pinning it
+        # explicitly makes the code's bound and the row's wait SELF-CONSISTENT: the
+        # encode is 1 s, the retire wait 3 s, the row's wait 10 s.
+        monkeypatch.setattr(embed_seam, "_RETIRE_JOIN_S", 3.0)
         try:
             threads, _outcome = self._start_in_flight(recorder)
             collector = embed_seam._collector
@@ -2122,6 +2397,49 @@ class TestTheConfiguredSeamIsWhatTheRowsDrive:
             "per-backing table cannot answer 'would the other one be better'")
         assert stale["submissions"] >= 1
         assert backings["inprocess"]["latency_stale"] is True
+
+    def test_a_lever_flip_before_the_next_encode_is_marked_stale(
+            self, monkeypatch):
+        """Review F3: ``backing`` is CONFIGURED; the counters are the LIVE one's.
+
+        Between a lever flip and the next encode — the documented rollout path,
+        where the runbook tells the operator to verify with
+        ``jq .embed_seam.backing`` — the configured name has already moved while
+        ``_backing``/``_collector`` still belong to the OLD backing. Pre-fix
+        ``/health`` published ``backing: "external"`` with the in-process
+        collector's counters as ``backings.external.latency``, unflagged: the
+        PRE-switch distribution was presented as the new backing's, fresh, at the
+        exact moment an operator was reading it to verify the switch.
+        """
+        first = _RecordingBacking()
+        second = _RecordingBacking()
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        monkeypatch.setattr(
+            embed_seam, "_construct",
+            lambda name: second if name == embed_seam.BACKING_EXTERNAL else first)
+        embed_seam.encode_query("a")  # the in-process backing served one batch
+
+        # ⛔ THE LEVER MOVES AND NOTHING ENCODES AFTER IT — the window itself.
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+        status = embed_seam.seam_status()
+
+        assert status["backing"] == embed_seam.BACKING_EXTERNAL, (
+            "`backing` must stay the CONFIGURED choice — the documented read")
+        assert status["latency_stale"] is True, (
+            "the pre-switch distribution was published as the configured "
+            "backing's, unflagged — an operator verifying a rollout reads it "
+            "as post-switch")
+        # ``backing_state.backing`` names what the state actually describes, so
+        # the two disagreeing IS the signal, and it is on the wire.
+        assert status["backing_state"]["backing"] != status["backing"], (
+            status["backing_state"])
+        backings = status["backings"]
+        assert backings[embed_seam.BACKING_EXTERNAL]["latency"] is None, (
+            "the configured backing has never run, so its distribution must be "
+            "null — the old collector's counters were filed under it as fresh")
+        assert backings[embed_seam.BACKING_INPROCESS]["latency"]["submissions"] \
+            >= 1, "the live collector's observations were dropped, not relocated"
+        assert backings[embed_seam.BACKING_INPROCESS]["latency_stale"] is True
 
 
 class TestTheTicketBoundIsSizedForTheNextPhase:
@@ -2441,10 +2759,22 @@ class TestThePrivateSocketDirectoryLifecycle:
             "describe() minted the private socket directory")
 
     def test_a_directory_named_for_a_dead_pid_is_pruned(self, monkeypatch):
-        """A SIGKILLed process cannot clean up after itself; nothing else did."""
+        """A SIGKILLed process cannot clean up after itself; nothing else did.
+
+        ⛔ THE RESIDUE SHAPE MATTERS (review P2). The row used to build an EMPTY
+        directory — a shape the code never produces — while a killed worker always
+        leaves its SOCKET inside, and ``os.rmdir`` refuses a non-empty directory.
+        So the prune was inert and the row that pinned it was green by
+        construction. This builds the real shape: the socket file inside.
+        """
         root = tempfile.gettempdir()
         stale = os.path.join(root, "tortoise-embed-worker-999999-stale")
         os.makedirs(stale, exist_ok=True)
+        socket_file = os.path.join(stale, "embed.sock")
+        holder = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        holder.bind(socket_file)
+        holder.close()  # the FILE survives, exactly as after SIGKILL
+        assert os.path.exists(socket_file)
         monkeypatch.setattr(embed_seam, "_pid_alive",
                             lambda pid: pid != 999999)
         worker = embed_seam.WorkerBacking()
@@ -2453,7 +2783,29 @@ class TestThePrivateSocketDirectoryLifecycle:
         finally:
             worker.close()
         assert not os.path.exists(stale), (
-            "a socket directory left by a dead worker was never pruned")
+            "a socket directory left by a dead worker was never pruned — "
+            "`os.rmdir` cannot remove the socket file inside it")
+
+    def test_a_close_removes_its_own_directory_with_the_socket_inside(
+            self, monkeypatch):
+        """``close()`` reaps its private directory, residue and all (review P2).
+
+        The sibling residue a crash can leave beside the socket made ``rmdir``
+        fail here too, so a retired backing left its ``0700`` directory behind.
+        """
+        worker = embed_seam.WorkerBacking()
+        address = worker.socket_path()
+        directory = os.path.dirname(address)
+        assert os.path.isdir(directory)
+        # A socket file of the kind a killed predecessor leaves.
+        socket_file = os.path.join(directory, "embed.sock")
+        residue = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        residue.bind(socket_file)
+        residue.close()
+        worker.close()
+        assert not os.path.exists(directory), (
+            "close() left the private socket directory behind because it was "
+            "not empty — `rmdir` refuses exactly the shape a crash leaves")
 
     def test_a_close_does_not_remove_a_directory_it_did_not_mint(self):
         """The close/describe interleave must not re-mint.
@@ -2470,3 +2822,255 @@ class TestThePrivateSocketDirectoryLifecycle:
         # A second close is a no-op and mints nothing.
         worker.close()
         assert worker._socket_dir is None
+
+
+def _indent_at(source: str, offset: int) -> int:
+    """The leading-whitespace width of the line containing ``offset``.
+
+    Read from the WHOLE line, not the prefix before ``offset``: an offset that IS
+    a line start has an empty prefix, and the prefix form answers 0 for it — which
+    made a block-boundary scan end the block on its own first body line.
+    """
+    line_start = source.rfind("\n", 0, offset) + 1
+    line_end = source.find("\n", line_start)
+    line = source[line_start:line_end if line_end != -1 else len(source)]
+    return len(line) - len(line.lstrip())
+
+
+class TestTheReadinessBoundsKnowWhereTheEncoderLives:
+    """#14186 review P1 — the write/read bounds must not kick a load that is not theirs.
+
+    ``await_write_ready_reason`` / ``await_read_ready_reason`` exist to bound a
+    LOCAL load, and with a ``worker`` / ``external`` backing the local model is
+    not this path's encoder. Two review rounds named the two ways that can go
+    wrong — a 432 MB local load started for nothing, and the create's budget
+    charged to the backing's BOOT (``#4055``/``#13224`` forbid charging process
+    initialization to a request) — so the write answers DECLINE-with-the-right-
+    cause and kicks nothing, and the read answers READY (it is defence in depth:
+    ``sdk`` takes its ``_seam_remote`` branch before this ladder).
+    """
+
+    @pytest.fixture
+    def cold_model(self, monkeypatch):
+        """A genuinely cold singleton, so "already warm" cannot mask the gate."""
+        from tortoise.embeddings import EmbeddingModel
+
+        monkeypatch.setattr(EmbeddingModel, "_instance", None, raising=False)
+        monkeypatch.setattr(EmbeddingModel, "_warm_up_started", False,
+                            raising=False)
+        kicked: list[tuple] = []
+        monkeypatch.setattr(
+            EmbeddingModel, "start_warm_up",
+            classmethod(lambda cls: kicked.append((cls.__name__,)) or None))
+        monkeypatch.setenv("TORTOISE_EMBEDDER_WARMUP", "1")
+        return kicked
+
+    def test_a_BOOTING_worker_declines_without_kicking_a_local_load(
+            self, cold_model, monkeypatch):
+        """A boot in flight ⇒ decline, having loaded and waited for nothing."""
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+        from tortoise.embeddings import _WRITE_DECLINE_BACKING_COLD, EmbeddingModel
+
+        reason = EmbeddingModel.await_write_ready_reason(0.05)
+        assert reason == _WRITE_DECLINE_BACKING_COLD, (
+            "a bounded write while the backing boots answered "
+            f"{reason!r} — the causes are distinct and an operator repairs "
+            "them differently")
+        assert EmbeddingModel.await_read_ready_reason(0.05) is None, (
+            "the read bound declined on a worker backing")
+        assert cold_model == [], (
+            "the readiness bounds kicked a LOCAL 432 MB load with the encoder "
+            f"served elsewhere: {cold_model}")
+
+    def test_a_WARM_worker_is_READY_and_does_not_decline(self, cold_model,
+                                                         monkeypatch):
+        """⛔ The gate is on the BACKING's phase, not on the LEVER (review P2).
+
+        Declining on the lever alone would have stored no derived vector for the
+        LIFE of the process, not for one boot: with `worker` configured, a warm
+        worker answered `backing_cold` forever. The predicate is
+        `embed_seam.backing_booting()`, so a warm backing is READY and the encode
+        goes through the seam in milliseconds.
+        """
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: False)
+        from tortoise.embeddings import EmbeddingModel
+
+        assert EmbeddingModel.await_write_ready_reason(0.05) is None, (
+            "a WARM worker backing declined a bounded write — every derived "
+            "fold would store no vector for the life of the process")
+        assert cold_model == []
+
+    def test_the_boot_predicate_reads_the_backing_not_the_lever(self, monkeypatch):
+        """``backing_booting()``: warm worker ⇒ False, booting ⇒ True, external ⇒ False."""
+        class _Fake:
+            #: A real WorkerBacking's own name — the boot predicate also answers
+            #: True when the LEVER says worker but the live backing is not one.
+            name = embed_seam.BACKING_WORKER
+
+            def __init__(self, pending: bool) -> None:
+                self._pending = pending
+
+            def startup_pending(self) -> bool:
+                return self._pending
+
+            def encode(self, texts, *, timeout_s=None):  # pragma: no cover
+                return None
+
+            def close(self) -> None:
+                return None
+
+            def describe(self) -> dict:
+                return {}
+
+        try:
+            monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+            # Nothing constructed and the lever says worker ⇒ the FIRST encode
+            # pays a boot, which is the same wait for this question.
+            embed_seam.install_backing(None)
+            embed_seam._backing = None
+            embed_seam._backing_name = None
+            assert embed_seam.backing_booting() is True
+
+            embed_seam.install_backing(_Fake(pending=True))
+            assert embed_seam.backing_booting() is True
+            embed_seam.install_backing(_Fake(pending=False))
+            assert embed_seam.backing_booting() is False
+
+            # `external` is a round trip: no boot to wait for, ever.
+            monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+            embed_seam.install_backing(None)
+            embed_seam._backing = None
+            embed_seam._backing_name = None
+            assert embed_seam.backing_booting() is False
+        finally:
+            embed_seam.install_backing(None)
+            embed_seam.reset_seam()
+
+    def test_the_backing_cold_line_names_the_backing_and_claims_no_wait(
+            self, cold_model, monkeypatch, caplog):
+        """⛔ The arm that reports `backing_cold` had no row (review P3).
+
+        Deleting it silently fell through to the budget-expired text — *"stored
+        WITHOUT a vector after waiting 0.25s"* — for the one cause where nothing
+        was waited, which is the exact false claim #13229 F2 removed. So: INFO
+        (not a fault to repair), no wait claim, the backing named, the backfill
+        named, and ONE line per process per cause.
+        """
+        import logging as _logging
+
+        from tortoise import embeddings as embeddings_module
+        from tortoise.embeddings import EmbeddingModel
+
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        monkeypatch.setattr(embed_seam, "backing_booting", lambda *a, **k: True)
+        embeddings_module._COLD_WRITE_REPORTED.clear()
+        with caplog.at_level(_logging.DEBUG, logger="tortoise.embeddings"):
+            assert EmbeddingModel.await_write_ready_reason(0.05) == \
+                embeddings_module._WRITE_DECLINE_BACKING_COLD
+            embeddings_module._note_cold_write(
+                0.25, reason=embeddings_module._WRITE_DECLINE_BACKING_COLD)
+            # Latched: a second call adds nothing.
+            embeddings_module._note_cold_write(
+                0.25, reason=embeddings_module._WRITE_DECLINE_BACKING_COLD)
+        lines = [r for r in caplog.records
+                 if r.name == "tortoise.embeddings"
+                 and "vector" in r.getMessage()]
+        assert len(lines) == 1, [r.getMessage() for r in lines]
+        msg = lines[0].getMessage()
+        assert lines[0].levelno == _logging.INFO, (
+            f"`backing_cold` is logged at {lines[0].levelname} — nothing local "
+            f"needs repairing, so this is not a fault line: {msg!r}")
+        assert "after waiting" not in msg, (
+            f"the line claims a wait for a cause that waited 0 s: {msg!r}")
+        assert embed_seam.BACKING_WORKER in msg, (
+            f"the backing that is booting is not named: {msg!r}")
+        assert "backfill_embeddings.py" in msg, (
+            f"the repair an operator runs is not named: {msg!r}")
+
+    def test_the_in_process_backing_still_kicks_the_load(self, cold_model,
+                                                        monkeypatch):
+        """The control: the gate is a gate, not a blanket skip."""
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        from tortoise.embeddings import EmbeddingModel
+
+        EmbeddingModel.await_write_ready_reason(0.0)
+        assert cold_model, (
+            "the IN-PROCESS backing stopped kicking its own warm-up — the cold "
+            "window would now be paid synchronously by the first write")
+
+    def test_the_sdk_engine_kick_follows_the_backing(self, monkeypatch):
+        """``_embedder_engine_kick_allowed`` — the engine-init kick's decision.
+
+        ⛔ FAIL-SAFE DIRECTION: an unreadable seam answers TRUE (warm), because a
+        silent skip is a load that never happens on the configuration that needs
+        it — the mirror of ``hosted_api._lifespan``'s arm, which keeps the
+        pre-warm ON when the seam cannot be read.
+        """
+        from tortoise import sdk as sdk_module
+
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_WORKER)
+        assert sdk_module._embedder_engine_kick_allowed() is False
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+        assert sdk_module._embedder_engine_kick_allowed() is False
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        assert sdk_module._embedder_engine_kick_allowed() is True
+
+        def _unreadable() -> bool:
+            raise RuntimeError("the seam cannot be read")
+
+        monkeypatch.setattr(embed_seam, "encodes_in_process", _unreadable)
+        assert sdk_module._embedder_engine_kick_allowed() is True, (
+            "an unreadable seam silently skipped the engine-init warm-up")
+
+    def test_the_engine_init_site_CONSULTS_the_gate(self):
+        """The wiring, not just the decision (review P3).
+
+        Deleting the gate at the call site and calling
+        ``EmbeddingModel.start_warm_up()`` unconditionally left every suite green:
+        the helper's own row cannot see its caller. ``sdk.py`` is too large to
+        boot for a unit row, so this pins the ONE fact the wiring is — the
+        engine-init kick sits inside a branch on the helper, with the call in the
+        same block. Same source-level technique ``tests/test_fly_secret_drift.py``
+        already uses to pin a citation.
+        """
+        import inspect
+
+        from tortoise import sdk as sdk_module
+
+        source = inspect.getsource(sdk_module)
+        gate = source.index("if _embedder_engine_kick_allowed():")
+        warm = source.index("EmbeddingModel.start_warm_up()", gate)
+        gate_line = source.rfind("\n", 0, gate) + 1
+        gate_indent = _indent_at(source, gate)
+        warm_indent = _indent_at(source, warm)
+        assert warm_indent > gate_indent, (
+            "the engine-init warm-up call is not guarded by "
+            "_embedder_engine_kick_allowed() — the SDK kick ignores the embed "
+            "backing again")
+
+        # ⛔ THE BLOCK BOUNDARY, not just the indent (review P3). An indent test
+        # alone passed `if gate(): pass` / `else: EmbeddingModel.start_warm_up()`
+        # — the call is deeper than the gate line but NOT inside its block — and
+        # passed a kick moved to any later deeper block. So: the gate's block ENDS
+        # at the first following line at (or left of) the gate's own indent, the
+        # call must fall inside it, and no `else:`/`elif:` may appear in it (that
+        # is the polarity inversion).
+        block_end = len(source)
+        cursor = gate_line
+        while True:
+            newline = source.find("\n", cursor)
+            if newline == -1:
+                break
+            cursor = newline + 1
+            line_end = source.find("\n", cursor)
+            line = source[cursor:line_end if line_end != -1 else len(source)]
+            if line.strip() and _indent_at(source, cursor) <= gate_indent:
+                block_end = cursor
+                break
+        assert gate < warm < block_end, (
+            "the engine-init warm-up call is not INSIDE the "
+            "_embedder_engine_kick_allowed() block (an `else:`/`elif:` inversion "
+            "or a moved call both look guarded by indentation alone) — the SDK "
+            "kick ignores the embed backing again")

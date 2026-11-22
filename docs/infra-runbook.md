@@ -1295,6 +1295,7 @@ The body carries
                            "wait_ms":   {"n": 0, "window": 0, "p50": null, "p95": null, "max": null},
                            "encode_ms": {"n": 0, "window": 0, "p50": null, "p95": null, "max": null},
                            "batch_size":{"n": 0, "window": 0, "p50": null, "p95": null, "max": null}},
+               "latency_stale": false,
                "backings": {"inprocess": {"max_wait_ms": 0.0,  "selected": true,  "latency": null},
                             "worker":    {"max_wait_ms": 20.0, "selected": false, "latency": null},
                             "external":  {"max_wait_ms": 20.0, "selected": false, "latency": null}}}
@@ -1321,7 +1322,7 @@ the block arrives with the SAME key set, every value `null`, plus `error`, and `
 | variable | default | what it does |
 |---|---|---|
 | `TORTOISE_EMBED_BACKING` | `inprocess` | `inprocess` · `worker` · `external`. Unset ⇒ `inprocess`, the pre-#14186 path. |
-| `TORTOISE_EMBED_MAX_WAIT_MS` | per backing (below) | The query-batching collection window, in ms. |
+| `TORTOISE_EMBED_MAX_WAIT_MS` | per backing (below) | The query-batching collection window, in ms. ⛔ Refused unless FINITE and ≤ 60000: an `inf`/`1e9` window makes the collector's deadline infinite and the ticket's valve unbounded (`inf >= 0` passed the old guard). |
 | `TORTOISE_EMBED_MAX_BATCH` | `32` | A batch fires early when it reaches this. |
 | `TORTOISE_EMBED_QUERY_TIMEOUT_S` | `30` | The bound on ONE fired request (worker / external round trip). |
 | `TORTOISE_EMBED_WORKER_SOCKET` | a `0700` directory this process mints (`$TMPDIR/tortoise-embed-worker-<pid>-*/embed.sock`) | Where the worker listens. The private directory is not decoration: readiness is the path's EXISTENCE, and a shared directory would let any local user create it first. An explicit path here is honoured verbatim — and the CLIENT then verifies the answering peer's uid (`SO_PEERCRED`) after `connect`, so an operator-pointed shared path cannot be hijacked by a foreign process either. |
@@ -1349,6 +1350,60 @@ deployed machine means rolling it (see "Rollback is one variable" below).
 ```bash
 fly secrets set TORTOISE_EMBED_BACKING=inprocess    # or `fly secrets unset` it — same thing
 ```
+
+⛔ **AND A NON-`inprocess` BACKING DISABLES THE IN-PROCESS WARM-UPS BY ITSELF.** Both eager loads
+that put the encoder in the SERVING process are gated on the seam's backing, so choosing `worker` or
+`external` removes the copies rather than adding to them (#14186 review F5):
+
+- the **lifespan pre-warm** (`hosted_api`, thread `embedding-prewarm`) is skipped and logs one line
+  naming the backing;
+- the **engine-init kick** (`TortoiseSDK._get_proj` → `EmbeddingModel.start_warm_up`, thread
+  `tortoise-embedder-warmup`) is skipped too.
+
+Both existed only to make the *in-process* forward pass warm; with the encode elsewhere they are
+432 MB resident that nothing consults (3.66 GB with two overlapping loads, #13674). No lever has to
+be set: the gate is `embed_seam.encodes_in_process()`, read from the `TORTOISE_EMBED_BACKING`
+value. ⛔ The gate is on those KICKS plus the two READINESS BOUNDS
+(`EmbeddingModel.await_write_ready_reason` / `await_read_ready_reason`), because with the encoder
+elsewhere their only effect was to start a local load and then decline the write that triggered it.
+It is deliberately NOT inside `start_warm_up` itself — those bounds read that call's return value as
+"a load is in flight", so a skip inside it would turn a healthy local load into a decline.
+
+⛔ **A bounded WRITE declines — `backing_cold` — while the backing is BOOTING, and pays nothing.**
+`encode_for_row(bounded=True)` keeps #13224's promise (a create never waits for setup it did not
+trigger): if `embed_seam.backing_booting()` is true the derived row is stored without a vector and
+`graph-scripts/backfill_embeddings.py` re-encodes it once the backing answers. The alternative —
+carrying on into the seam — would charge the worker's BOOT to the create (#4055/#13224 forbid
+exactly that), so it is refused by design. ⛔ The predicate is the BACKING's phase, not the lever:
+a WARM `worker` (or `external`, which is a round trip with no boot) answers ready and the encode goes
+through the seam in milliseconds — declining on the lever alone would have stored no derived vector
+for the LIFE of the process.
+
+⚠️ **THE BUDGET COVERS `bounded=True` ONLY — the RECORD-TRUTH writes still pay the boot.**
+`compute_embeddings` (`bounded` default `false`) has no such bound, and it must not: a Point's vector
+is stamped into the journal with PRESENCE IS OWNERSHIP, so declining it would record an explicit
+CLEAR that a rebuild reproduces. On `worker`/`external` those calls block on the seam, which waits
+out the boot under `TORTOISE_EMBED_WORKER_STARTUP_S` (600 s) — so the first create/update/capture
+after a deploy can be slow rather than wrong. That is the deliberate trade, not an oversight.
+
+⚠️ **NOTHING WARMS THE WORKER AT BOOT TODAY.** The lifespan pre-warm is skipped on `worker` /
+`external` (it would load a local copy), and no equivalent kick boots the *worker* — so the first
+encode after a deploy or a lever change is the one that pays the boot: bounded writes decline until
+it lands, and record-truth writes block on it. A boot-time worker warm is a known follow-up, not
+something this section promises.
+
+⚠️ **WHAT THE GATE DOES NOT REMOVE — read this before promising an RSS drop.** A few residual paths
+still encode IN-PROCESS and call `EmbeddingModel.get()` synchronously rather than going through the
+seam: entity resolution and the cross-lens pass arrive via `embeddings._encode`. With `worker` /
+`external` those are no longer warmed at boot, so the FIRST such call pays the cold load
+(13.5 s warm cache, ~57 s cold, `_LOAD_TIMEOUT_S` 300 s) on its own request thread. Routing them
+through the seam is a behaviour change, tracked separately; until then the serving process still
+loads the encoder **lazily** on that path, and the RSS claim in this section is about the two EAGER
+copies (and the readiness kicks), not about every copy ever created.
+
+The **boot page-cache warm** (`entrypoint.sh`, a throwaway process before `exec`) is deliberately NOT
+gated: it is not resident, and under `worker` it still helps — the worker loads the same model from
+the same interpreter and reads those pages warm.
 
 The next encode returns to the pre-#14186 path: the same `EmbeddingModel.get()` +
 `ensure_embed_threads()` + `model.encode(list)` call, the same thread pin, the same decline
@@ -1383,6 +1438,13 @@ curl -sS https://api.premiselabs.co/health \
   caller felt, and `collect_ms` as the part the window is responsible for. (Measured on the 0 ms
   default: `coalesced` rises while `collect_ms` stays ~0 — the coalescing is queue-behind-encode,
   which adds no admission wait — review F5.)
+- **`latency_stale` says whether the two blocks above are the CONFIGURED backing's.**
+  `backing` is always the configured choice; `backing_state.backing` names the backing the state and
+  the distributions actually describe. Between a lever flip and the next encode those are two
+different backings, and `latency_stale: true` marks it — the next encode pays the switch (a boot,
+  for `worker`). Read `latency_stale: true` as "this is what the OLD backing was doing", which is
+  exactly the read a rollout verification makes; a `null` distribution on a `backings[*]` entry means
+  that backing has never run in this process, which is not the same as "it cost nothing".
 - **`coalesced` counts the tickets that rode a batch they did not open.** A large `submissions`
   with `coalesced: 0` is a process with no concurrency — expected on a single interactive user,
   and *not* evidence the seam is broken.
@@ -4605,16 +4667,17 @@ operator who read the line above as "CI defends this" would never run it.
 > ⛔ **This is a WARM-UP switch, not a request-path kill switch.** With it `0`, the app still loads
 > the model on the **first request that needs an embedding**, cold, under its own bound. Turning it
 > off MOVES the cost to that first request; it does not remove it. The check is
-> `tortoise/embeddings.py::_embedder_warmup_enabled` (`:40-50`, `env_flag(..., True)` — shipped
+> `tortoise/embeddings.py::_embedder_warmup_enabled` (`:43-53`, `env_flag(..., True)` — shipped
 > default **ON**), and it gates **five** read sites:
 >
-> 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1361`;
+> 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1364`;
 > 2. the SDK **write-path** bound — `tortoise/embeddings.py::await_write_ready_reason`,
->    `:1466` (#13224);
+>    `:1471` (#13224);
 > 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
->    `:1592` (#13528);
+>    `:1625` (#13528);
 > 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
->    `:3272-3282` (the reader that runs on the deployed box);
+>    `:3302-3306` (the reader that runs on the deployed box — the `elif` that CALLS the flag and
+>    the thread it starts; the import and the comment above it are not the reader);
 > 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
 >    read at `:432`.
 >
@@ -4623,8 +4686,11 @@ operator who read the line above as "CI defends this" would never run it.
 > pair. The **function names** are the invariant — the line numbers are a convenience and they move
 > whenever `embeddings.py` grows, so re-pin them on a merge. ⛔ **This copy is the only line-citing
 > one left, and it is pinned:** `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
-> resolves each cite above by NAME↔NUMBER, so a merge that moves the code reds instead of rotting it
-> silently. The manifest used to carry a sibling copy and its own pin; **this change** deletes the
+> resolves each cite above by NAME↔NUMBER **and requires the cited span to CALL the reader** — an
+> import or a comment that spells the identifier is not a flag read (entry 4 above cited exactly such
+> a span while the real gate had moved below it, and every other check passed) — so a merge that
+> moves the code reds instead of rotting it silently. The manifest used to carry a sibling copy and
+> its own pin; **this change** deletes the
 > `fly-only:#13674` block that carried it (#13926 had already taken the name to route (b), and that
 > block landed on top of it seven minutes later — which is what produced the duplicate), so there is
 > no second copy to keep in step: do not reintroduce one without its own arm.
@@ -4638,7 +4704,7 @@ operator who read the line above as "CI defends this" would never run it.
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
 > Number 2 and 3 are the second most likely to be missed, and they change behaviour: with the flag
-> `0` each returns `None` immediately (`:1466-1470`, `:1592-1593`), so the write and read paths fall
+> `0` each returns `None` immediately (`:1471-1475`, `:1625-1626`), so the write and read paths fall
 > back to the **synchronous in-request load** — that fallback is part of what flipping the switch
 > chooses.
 

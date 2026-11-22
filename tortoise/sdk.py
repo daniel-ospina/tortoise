@@ -890,6 +890,30 @@ def _kind_invisible_char(kind: str) -> str | None:
     return None
 
 
+def _embedder_engine_kick_allowed() -> bool:
+    """Whether ENGINE INIT should kick the in-process encoder warm-up (#14186 F5).
+
+    ``False`` when the seam's backing is ``worker`` / ``external``: this process
+    runs no forward pass on those, so an eager load is a 432 MB copy nothing
+    consults — the RSS the ``worker`` backing exists to remove (#13674).
+
+    ⛔ FAILS SAFE, in the opposite direction from a skip: a seam that cannot be
+    imported answers ``True`` (warm), mirroring ``hosted_api._lifespan``'s
+    own arm, which keeps the pre-warm ON when the seam cannot be read. A silent
+    skip on an import error is a load that never happens on the configuration
+    that NEEDS it.
+
+    A function rather than an inline ``try`` so the three answers (worker ⇒ no,
+    inprocess ⇒ yes, unreadable seam ⇒ yes) are pinnable without building a graph.
+    """
+    try:
+        from .embed_seam import encodes_in_process
+
+        return encodes_in_process()
+    except Exception:  # noqa: BLE001, RUF100 — an unreadable seam warms
+        return True
+
+
 def _kind_suggestion(kind: str) -> str:
     """``kind`` with its non-identifier characters removed, for the message.
 
@@ -15530,9 +15554,33 @@ class TortoiseSDK:
             # EmbeddingModel.status() (``retrieval_legs()`` declared it too
             # until #4282 deleted that method); the cooldown
             # itself is unchanged (never sticky-off).
+            #
+            # ⛔ NOT WHEN THE ENCODER LIVES ELSEWHERE (#14186 review F5). With the
+            # seam's backing on ``worker``/``external`` this process runs no forward
+            # pass, so an eager in-process load is a 432 MB copy nothing consults —
+            # the RSS the ``worker`` backing exists to remove (#13674). This is the
+            # engine-init kick (thread ``tortoise-embedder-warmup``);
+            # ``hosted_api``'s lifespan pre-warm is gated the same way, and between
+            # them they were the two copies the documented migration left resident
+            # (``docs/infra-runbook.md`` §4.1.1e).
+            #
+            # ⛔ THE GATE IS HERE, NOT INSIDE ``start_warm_up``: the write/read
+            # readiness paths read that call's return value as "is a load in
+            # flight", so a skip there would turn a healthy LOCAL load into a
+            # decline on a deployment that still uses the in-process encoder for a
+            # residual path.
+            #
+            # ⛔ AND THE DECISION IS A FUNCTION, NOT AN INLINE IMPORT (review
+            # P3): folded into the blanket ``except`` below, a seam that could not
+            # be imported silently SKIPPED the warm-up — the mirror image of
+            # ``hosted_api._lifespan``, which keeps the pre-warm ON when the seam
+            # cannot be read. :func:`_embedder_engine_kick_allowed`
+            # fails SAFE (unreadable lever ⇒ warm) and is pinnable without
+            # building a graph.
             try:
                 from .embeddings import EmbeddingModel
-                EmbeddingModel.start_warm_up()
+                if _embedder_engine_kick_allowed():
+                    EmbeddingModel.start_warm_up()
             except Exception:  # noqa: BLE001, RUF100 — warm-up is never fatal
                 pass
         return self._proj
