@@ -8,8 +8,9 @@ division and the band checks are skipped on the rows that were always going to b
 rejected. ⛔ **BUT NOT ALL OF THE COERCION, AND THE GUARD IS NOT FREE** — the
 bound is built from the same ``numeric_operand_cypher`` expressions the division
 uses, so coercion ALSO runs on every candidate row INSIDE the guard itself. On
-the emitted predicate: 8 ``CASE WHEN`` before ``$contested_sum_bound`` against 73
-in the division it spares, so a rejected row pays 8 coercion cases to skip 73.
+the emitted predicate: 8 coercion ``CASE WHEN`` before ``$contested_sum_bound``
+against 73 between it and ``$contested_threshold`` (72 coercion + the division's
+own selector), so a rejected row pays 8 coercion cases to skip 72.
 BOTH halves are graded below. The guard's own 8 are its price, not a saving —
 which is a CAVEAT on the saving, never a claim that no coercion is spared:
 
@@ -351,8 +352,9 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     # asserted.
     spared = crit[guard:division].count("CASE WHEN")
     assert spared == 73, (
-        f"{spared} coercion `CASE WHEN` sit between the guard and "
-        "`$contested_threshold`, but the docstring promises 73 — re-derive BOTH "
+        f"{spared} `CASE WHEN` sit between the guard and "
+        "`$contested_threshold`, but the docstring promises 73 (72 coercion + "
+        "the division's own selector) — re-derive BOTH "
         "numerals against THIS predicate")
     assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)

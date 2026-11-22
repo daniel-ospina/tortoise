@@ -5810,20 +5810,22 @@ def beta_variance_sum_bound(threshold: float) -> float:
     a sufficient one: it can only reject a pair whose variance is provably not
     above the threshold, so adding it in front of ``beta_variance_cypher(…) >
     $contested_threshold`` cannot change a result set — it only spares the
-    division, the ~11.7k-char coercion ``CASE`` that division carries (this
-    file's own name for it, in ``beta_variance_gt_cypher``'s note) and
+    division, the ~11.7k-char coercion ``CASE`` that division carries (the name
+    the ``⛔ ONE EMISSION, NOT TWO`` note beside the crit read gives it) and
     ``_beta_variance``'s band, on the rows that were always going to be rejected.
     ⛔ BUT THE GUARD IS NOT FREE, AND IT DOES NOT SPARE ALL OF THE COERCION. Its
     operands are the SAME ``numeric_operand_cypher`` expressions the division
     uses, so coercion is evaluated on every candidate row INSIDE the guard.
-    Measured on the emitted predicate: **8** ``CASE WHEN`` before
-    ``$contested_sum_bound`` against **73** in the division it spares — a rejected
-    row pays 8 coercion ``CASE``s to skip 73. That 8 is the guard's own price, and
+    Measured on the emitted predicate: **8** coercion ``CASE WHEN`` before
+    ``$contested_sum_bound`` against **73** between it and
+    ``$contested_threshold`` (72 coercion + the division's own selector) — a
+    rejected row pays 8 coercion ``CASE``s to skip 72. That 8 is the guard's own
+    price, and
     it is stated here because an earlier cut of this paragraph called the guard a
     pure saving without saying so. ⛔ A CAVEAT ON THE SAVING, NOT A DENIAL OF IT:
     an earlier cut of this very PR replaced the true clause "spares … the
     coercion ``CASE``" with "NOT the coercion ``CASE``", which the same
-    measurement refutes — the spared 73 ARE the coercion ``CASE``.
+    measurement refutes — ~90% of what the guard spares IS the coercion ``CASE``.
     ⛔ NO MILLISECOND FIGURE AND NO ROW COUNT IS
     QUOTED HERE. The shipped artifacts measure the WHOLE function and its
     isolated A/B (``docs/evidence/14192-read-wave/``), never this query alone,
