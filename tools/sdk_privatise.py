@@ -1139,19 +1139,31 @@ SWEEP_NAMES = 66
 #: (the tool's own `edits_for`, rows compared, not arithmetic) names the shape: `proj.g.query`
 #: 3643 → 3646, exactly three, with no other row moving in either direction.
 #: WHERE THEY ARE: all three in `tools/read_wave_latency.py`, the file that commit ADDS — the
-#: two `MATCH (n:Point) RETURN count(n)` census reads at `:238` and `:245`, and the
-#: ab-relationships ids read at `:439` (`ids = [r[0] for r in proj.g.query(`) — a raw `Graph`
-#: handle on an untyped receiver. (`tests/test_relationships_bounded.py` carries one
+#: two `MATCH (n:Point) RETURN count(n)` census reads, and the ab-relationships ids read
+#: (`ids = [r[0] for r in proj.g.query(`) — a raw `Graph` handle on an untyped receiver.
+#: ⛔ CITED BY TEXT AND BY SHA, NEVER BY A TYPED LINE NUMBER — this file's own rule, stated in the
+#: `captured.update` note above. The first cut of THIS block typed them as `:238`/`:245`/`:439`,
+#: and those were ALREADY STALE on the tree it merges into: they hold at `94d75667dc` and moved
+#: when `9a771c59db` reflowed that same harness on `main` afterwards. Reproduce the position,
+#: never restate it — `git show <sha>:tools/read_wave_latency.py | grep -n 'proj\.g\.query'`
+#: (no hits before `94d75667dc`, three after; the numbers move, the texts do not).
+#: (`tests/test_relationships_bounded.py` carries one
 #: `proj.g.query` too, but it is pre-existing and byte-identical on both sides of that commit, so
 #: it is not part of this delta — the per-file split is what a COUNT cannot show.)
 #: DECLARED, not rewritten: that is the ordinary-word receiver this sweep deliberately leaves
 #: alone, neither an SDK handle nor a typed reference to a public name — `typed references still
 #: pointing at a public name` is 0 at this head, which is the number the retirement owes.
-#: ⛔ WHAT TO TAKE FROM THE DRIFT RATHER THAN THE NUMBER: the 11858 pin was set from the PREVIOUS
-#: PAIR (the `11858 − out.update` reading quoted above) rather than from `--repin` on the tree that
-#: would commit it, so an error three rows old was CARRIED FORWARD at the one place that exists to
-#: correct it. A re-pin is a READING of that tree — one command — and a row-by-row diff explains a
-#: delta, it never replaces the read.
+#: ⛔ WHAT TO TAKE FROM THE DRIFT RATHER THAN THE NUMBER: the 11858 pin was a READING of a tree
+#: that was NOT the one that committed it — `11858 − out.update` held for the pre-`94d75667dc`
+#: merge base and not for `10e51693f1`'s tree — so an error three rows old was CARRIED FORWARD at
+#: the one place that exists to correct it. ⛔ THAT IS THE ONLY ORIGIN THIS BLOCK ASSERTS, and it
+#: SUPERSEDES the `--repin` sentence above rather than agreeing with it: `--repin` printing the
+#: same pair ACROSS `9f83a63bfa`'s merge is not evidence the pair was read FROM the committing
+#: tree, and "derived over the whole tree" and "set from the previous pair" are two different
+#: origins for one number, not one story told twice. What was measured is the reading; which
+#: command produced the stale value was not, and is not claimed.
+#: A re-pin is a READING of the tree that will commit it — one command — and a row-by-row diff
+#: explains a delta, it never replaces the read.
 SWEEP_RESIDUE = (11861, "f0647020531c078c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
