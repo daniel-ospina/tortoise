@@ -18,6 +18,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _TOOL = _REPO_ROOT / "tools" / "read_wave_latency.py"
 
@@ -1166,7 +1168,9 @@ def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
 _EXPECTED_DOOR_ARGS = frozenset({"query", "limit", "read_status_out", "_truncation_out"})
 
 
-def _door_read_contract() -> set[str]:
+def _door_read_contract(
+    hosted_source: str | None = None, sdk_source: str | None = None
+) -> set[str]:
     """The kwargs the SHIPPED door hands the read — DERIVED from `hosted_api.py`.
 
     A mirror must not name an argument the door does not name: `kind` selects a
@@ -1184,8 +1188,18 @@ def _door_read_contract() -> set[str]:
     levers through (`kind`, `_elevated_timeout_ms`, `pool_size`, `claim_class`,
     `order_by`, `exclude_status`…). The door's own call site is the one authority that
     is neither too narrow nor too wide, and it is measured, not remembered.
+
+    ⛔ THE TWO SOURCES ARE PARAMETERS (#14326 review P1, measured: replacing each of the
+    four assertions below with `True` left **27 passed**). Every clause here is a
+    fail-closed guard on the door — `len(door_calls) == 1` is what stops a hoisted
+    `_do_search()` from widening the allow-list, `allowed == _EXPECTED_DOOR_ARGS` is the
+    backstop for a lever the bool-lever intersection cannot see — and NONE of them could
+    be red by any row while the sources were hard-wired to the two real files: a row can
+    only mutate a file it is allowed to write. `test_every_door_contract_clause_reds`
+    therefore synthesises the mutation it needs from the REAL source text and passes it in,
+    so each clause now has a row that fails when the clause is deleted.
     """
-    sdk_tree = ast.parse(_SDK.read_text())
+    sdk_tree = ast.parse(sdk_source if sdk_source is not None else _SDK.read_text())
     defs = [n for n in ast.walk(sdk_tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
             and n.name == "_tortoise_fts_query"]
@@ -1200,7 +1214,7 @@ def _door_read_contract() -> set[str]:
     assert {"_rerank_candidates", "_record_reads", "_valid_time_rerank",
             "include_terminal"} <= bool_levers, sorted(bool_levers)
 
-    hosted_tree = ast.parse(_HOSTED.read_text())
+    hosted_tree = ast.parse(hosted_source if hosted_source is not None else _HOSTED.read_text())
     hosted_parents: dict[int, ast.AST] = {}
     for node in ast.walk(hosted_tree):
         for child in ast.iter_child_nodes(node):
@@ -5032,20 +5046,13 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         f"{len(calls)}")
     measured = looped[0]
     warm = next(c for c in calls if c is not measured)
-    for call in calls:
-        assert not call.args, (
-            f"line {call.lineno} hands the read {len(call.args)} POSITIONAL argument(s) — "
-            "this pin reads keywords, so a positional `kind`/`limit` would be invisible")
-        assert not any(k.arg is None for k in call.keywords), (
-            f"line {call.lineno} splats a mapping into the read, so which arguments it "
-            "carries is invisible to this pin")
-        named = {k.arg for k in call.keywords}
-        extra = sorted(named - allowed)
-        assert not extra, (
-            f"line {call.lineno} hands {extra} to the read — the `/v1/search` door names "
-            f"only {sorted(allowed - {'leg_trace'})}, and each of these changes WHICH rows "
-            "survive `limit`, so a mirror that names one times a reader the product does "
-            "not run (and hides the page permutation the verdict exists to catch)")
+    # ⛔ ONE PREDICATE, SHARED WITH THE ROWS THAT PIN IT (#14326 review P1, measured:
+    # replacing each of these three asserts with `True` left **27 passed**). A clause inside
+    # this test body can only be red by a row that RE-IMPLEMENTS the walk, which is the
+    # drift `_read_reach` exists to prevent; the predicate lives at module level so
+    # `test_every_argument_clause_reds` runs the SAME code the pin runs.
+    argument_findings = _call_argument_findings(calls, allowed)
+    assert not argument_findings, argument_findings[0]
     # `limit` is the ONE argument that sets the survival window, and the pin's own message
     # says every forbidden argument "changes WHICH rows survive `limit`" — yet its VALUE was
     # unpinned, so `limit=1` in the measured read handed `compare()` a one-element page and
@@ -5072,6 +5079,12 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     run_defs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and n.name == "run"]
     assert len(run_defs) == 1, f"tools/read_wave_latency.py defines `run` {len(run_defs)}×"
+    # ⛔ THE RECEIVER, NOT ONLY THE NAME (#14326 review P1, measured GREEN at `4e966eb`):
+    # `_read_calls` matches `attr`/`id`, so `sdk._fast._tortoise_fts_query(…)` and
+    # `sdk = _FastMirror(TortoiseSDK())` both satisfied every reach check while the harness
+    # timed a door the product never opens. Shared with its rows, like `_read_reach`.
+    receiver_findings = _receiver_findings(run_defs[0])
+    assert not receiver_findings, receiver_findings[0]
     # ⛔ THE BLESSED MAPPER IS A NAME, SO IT CAN BE SHADOWED (#14281 review P1, measured
     # GREEN): `_result_id = lambda _r: "X"` inside `run()` made every `order` a list of
     # constants while the element check — which blesses the NAME — stayed satisfied.
@@ -5114,29 +5127,10 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
             f"the artifact's `{key}` has {len(value.generators)} `for` clauses — the pin "
             f"cannot follow which one carries the measured {what}: {ast.unparse(value)}")
         gen = value.generators[0]
-        if key == "order":
-            # The verdict's input is the WHOLE page: a filter clause reports a subset while
-            # the pinned contract ("iterated AS ITSELF") reads satisfied (measured green).
-            assert not gen.ifs, (
-                f"the artifact's `order` FILTERS the measured page "
-                f"(`if {ast.unparse(gen.ifs[0])}`) — the rank-identity verdict would compare "
-                "a subset of the page")
-        else:
-            # The trace is filtered by the tool's own documented rule — "only rows that
-            # carry a `leg`" — and that rule is pinned as a SHAPE, so an added condition
-            # (`and not e.get("slow")`) cannot quietly drop rows from the table.
-            assert len(gen.ifs) == 1, (
-                f"the artifact's `legs` has {len(gen.ifs)} filter clauses — the tool's rule "
-                "is `if <entry>.get(\"leg\")` and nothing else")
-            cond = gen.ifs[0]
-            assert (isinstance(cond, ast.Call) and getattr(cond.func, "attr", None) == "get"
-                    and len(cond.args) == 1 and not cond.keywords
-                    and isinstance(cond.args[0], ast.Constant)
-                    and cond.args[0].value == "leg"
-                    and _names_in(cond.func.value) & _names_in(gen.target)), (
-                f"the artifact's `legs` filters on {ast.unparse(cond)} — the tool's rule is "
-                f"`{ast.unparse(gen.target)}.get(\"leg\")`, which drops exactly the trace "
-                "entries that record no leg")
+        # ⛔ THE GENERATOR'S FILTER CLAUSES, via the shared predicate (#14326 review P1,
+        # measured: `assert not gen.ifs` replaced by `True` left 27 passed).
+        filter_findings = _generator_filter_findings(key, gen)
+        assert not filter_findings, filter_findings[0]
         assert _is_exactly(gen.iter, var), (
             f"the artifact's `{key}` iterates {ast.unparse(gen.iter)}, not `{var}` — the "
             f"measured read's {what} must be iterated AS ITSELF (a helper call there cannot "
@@ -5144,8 +5138,9 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         # ⛔ A MENTION IS NOT A USE: `_DUMMY if r else _DUMMY` names `r` and records a
         # constant page (measured green). For a conditional element only the VALUE branch
         # counts, so the target cannot sit purely in the condition.
-        _used = _names_in(value.elt.body) if isinstance(value.elt, ast.IfExp) \
-            else _names_in(value.elt)
+        # ⛔ `_used` was the deleted `_used & _names_in(gen.target)` clause's only reader
+        # (#14326 review P2): computing it here and never reading it is exactly the
+        # "sentence that reads as a guard" shape this file removes.
         if key == "order":
             # ⛔ STRUCTURAL, because a mention is not a use (#14281 review P1, all three
             # measured GREEN and each records a CONSTANT page, so `compare()` reports
@@ -5165,14 +5160,13 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
                 "mention (a BoolOp arm, a tuple index, a constant branch) can record a "
                 "constant and make a permuted page compare as identical")
         if key == "legs":
-            # ⛔ MOVED INSIDE THE `legs` BRANCH, because for `order` it can never be the
-            # failing row (#14281 review P3, measured: it fires only with `_ok` neutered):
-            # `_ok` above already implies the element names the target. A clause that can
-            # never red reads to the next lane as an independent guard and is not one — the
-            # reason two other clauses were deleted earlier in this file.
-            assert _used & _names_in(gen.target), (
-                f"the artifact's `{key}` does not derive its element from the loop target "
-                f"`{ast.unparse(gen.target)}`: {ast.unparse(value.elt)}")
+            # ⛔ DELETED (#14326 review P2, measured: replacing it with `True` left 27
+            # passed). The move recorded here bought nothing: the `leg_item` assertion BELOW
+            # already implies it — `leg_item` is a VALUE of `value.elt`, and that assertion
+            # requires `_names_in(leg_item.func.value) & _names_in(gen.target)`, so the
+            # element necessarily names the target. A clause that can never be the failing
+            # row reads to the next lane as an independent guard and is not one — the reason
+            # two other clauses were deleted earlier in this file.
             # `leg` IS the declared-legs key: a constant there folds every leg into one
             # name, and `compare()` never reads `legs`, so nothing downstream notices.
             leg_item = next((v for k, v in zip(value.elt.keys, value.elt.values, strict=True)
@@ -5281,3 +5275,302 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         "`TORTOISE_API_URL`/`TORTOISE_API_KEY` pops are allowed) — the artifact does not "
         "record which arm of the fused-rerank gate was in force, so a baseline/after pair "
         "could straddle it and `compare()` would still call them comparable (#14289)")
+
+
+# ── shared predicates for the clauses above (#14326 review P1/P2) ──────────────────────
+#
+# WHY THEY ARE MODULE-LEVEL FUNCTIONS AND NOT INLINE ASSERTS. A clause written inside
+# `test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags` can only be made
+# REDDENABLE by a row that RE-IMPLEMENTS the walk over a synthetic artifact — a second
+# definition of the check, which is the drift `_read_reach`'s own docstring exists to
+# prevent ("a table that resolved the read with its own walk could pass while the pin
+# failed"). So the clauses the review measured as silence-able are predicates here, the
+# pin calls them, and their rows call the SAME code on a mutated source. MEASURED before
+# this refactor (each clause replaced by `True` in turn, all six times): **27 passed**.
+
+
+def _call_argument_findings(calls: list[ast.Call], allowed: set[str]) -> list[str]:
+    """Every reason a read CALL SITE names an argument this pin cannot see.
+
+    Three clauses, each of which the review measured as un-red by any row
+    (#14326 review P1): a POSITIONAL argument (the pin reads keywords, so a positional
+    `kind` would be invisible), a SPLAT (`**opts` puts which arguments it carries beyond
+    static reach), and an argument the `/v1/search` door does not name (`kind`,
+    `threshold`, `order_by` … all change WHICH rows survive `limit`).
+    """
+    out: list[str] = []
+    for call in calls:
+        if call.args:
+            out.append(
+                f"line {call.lineno} hands the read {len(call.args)} POSITIONAL argument(s) — "
+                "this pin reads keywords, so a positional `kind`/`limit` would be invisible")
+        if any(k.arg is None for k in call.keywords):
+            out.append(
+                f"line {call.lineno} splats a mapping into the read, so which arguments it "
+                "carries is invisible to this pin")
+        extra = sorted({k.arg for k in call.keywords if k.arg is not None} - allowed)
+        if extra:
+            out.append(
+                f"line {call.lineno} hands {extra} to the read — the `/v1/search` door names "
+                f"only {sorted(allowed - {'leg_trace'})}, and each of these changes WHICH rows "
+                "survive `limit`, so a mirror that names one times a reader the product does "
+                "not run (and hides the page permutation the verdict exists to catch)")
+    return out
+
+
+_SDK_CONSTRUCTOR = "TortoiseSDK"
+
+
+def _receiver_findings(run_def: ast.AST) -> list[str]:
+    """Every reason the measured read is not provably read OFF the shipped SDK object.
+
+    ⛔ `_read_calls` MATCHES THE NAME, NOT THE OBJECT (#14326 review P1; BOTH spellings
+    measured GREEN at `4e966eb` with this pin untouched, and the tool restored
+    byte-identically afterwards):
+
+        results = sdk._fast._tortoise_fts_query(…)   # a mirror/private door
+        sdk = _FastMirror(TortoiseSDK())             # a wrapper around the door
+
+    Both keep mentions=2 / calls=2 / the door's own argument names, so every reach check in
+    this file passes while the harness times a reader the product never opens — the exact
+    class this pin exists to catch, one layer BELOW the name it was checking. So the
+    receiver is pinned too: every read call is an ATTRIBUTE of ONE bare name, that name is
+    bound by `run()` itself (not taken as a parameter), exactly ONCE, and that one binding
+    is a call of `TortoiseSDK` — not a call through anything else.
+    """
+    reads = [c for c in ast.walk(run_def) if isinstance(c, ast.Call)
+             and (getattr(c.func, "attr", None) or getattr(c.func, "id", None)) in _READ_NAMES]
+    out: list[str] = []
+    receivers: set[str] = set()
+    for call in reads:
+        recv = call.func.value if isinstance(call.func, ast.Attribute) else None
+        if not isinstance(recv, ast.Name):
+            out.append(
+                f"line {call.lineno} reaches the read through {ast.unparse(call.func)} — the "
+                "receiver must be the one bare name holding the shipped `TortoiseSDK()`, so a "
+                "computed receiver (an attribute segment, a call result, `getattr(sdk, …)("
+                "…)`) can be a mirror door this pin cannot see through")
+            continue
+        receivers.add(recv.id)
+    if len(receivers) > 1:
+        out.append(
+            f"the read is reached through {sorted(receivers)} — more than one receiver means "
+            "at least one of them is not the SDK object `run()` constructs")
+    params = {a.arg for a in run_def.args.posonlyargs} | {a.arg for a in run_def.args.args} \
+        | {a.arg for a in run_def.args.kwonlyargs}
+    for name in sorted(receivers):
+        if name in params:
+            out.append(
+                f"`run` takes `{name}` as a PARAMETER — the receiver is then whatever the "
+                "caller passes, and nothing in this file ties the measured read to the object "
+                "the product's door reads off")
+            continue
+        stores = [n for n in ast.walk(run_def)
+                  if isinstance(n, ast.Name) and n.id == name
+                  and isinstance(n.ctx, (ast.Store, ast.Del))]
+        if len(stores) != 1:
+            out.append(
+                f"`{name}` is bound {len(stores)} time(s) inside `run()` — the receiver must "
+                "be bound exactly once, because a later re-bind (`sdk = _FastMirror(sdk)`) "
+                "swaps the object the read is measured on while every name-based check stays "
+                "satisfied")
+            continue
+        stmt = next((s for s in ast.walk(run_def) if isinstance(s, (ast.Assign, ast.AnnAssign))
+                     and any(n is stores[0] for n in ast.walk(s))), None)
+        value = getattr(stmt, "value", None)
+        if not (isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == _SDK_CONSTRUCTOR):
+            out.append(
+                f"`{name}` is bound to {ast.unparse(value) if value is not None else 'a form '
+                'this pin cannot follow'}, not `{_SDK_CONSTRUCTOR}()` — the pin proves which "
+                "read DOOR is opened only while the receiver is the shipped SDK object")
+    return out
+
+
+def _generator_filter_findings(key: str, gen: ast.comprehension) -> list[str]:
+    """Every reason the artifact's `key` comprehension reports something but the page.
+
+    `order` must be the WHOLE measured page (a filter clause reports a subset while the
+    pinned contract, "iterated AS ITSELF", still reads satisfied); `legs` is filtered by the
+    tool's own documented rule and that rule is pinned as a SHAPE, so an added condition
+    cannot quietly drop rows from the table. Both clauses are measured un-red by any row in
+    their inline form (#14326 review P1/P2: `assert not gen.ifs` replaced by `True` left
+    27 passed).
+    """
+    if key == "order":
+        if gen.ifs:
+            return [f"the artifact's `order` FILTERS the measured page "
+                    f"(`if {ast.unparse(gen.ifs[0])}`) — the rank-identity verdict would "
+                    "compare a subset of the page"]
+        return []
+    if len(gen.ifs) != 1:
+        return [f"the artifact's `legs` has {len(gen.ifs)} filter clauses — the tool's rule "
+                'is `if <entry>.get("leg")` and nothing else']
+    cond = gen.ifs[0]
+    if (isinstance(cond, ast.Call) and getattr(cond.func, "attr", None) == "get"
+            and len(cond.args) == 1 and not cond.keywords
+            and isinstance(cond.args[0], ast.Constant) and cond.args[0].value == "leg"
+            and _names_in(cond.func.value) & _names_in(gen.target)):
+        return []
+    return [f"the artifact's `legs` filters on {ast.unparse(cond)} — the tool's rule is "
+            f"`{ast.unparse(gen.target)}.get(\"leg\")`, which drops exactly the trace entries "
+            "that record no leg"]
+
+
+def _findings_of_run(source: str, predicate) -> list[str]:
+    """`predicate(run_def)` for the single `run` defined by `source` — the row harness."""
+    run_def = next(n for n in ast.walk(ast.parse(source))
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "run")
+    return predicate(run_def)
+
+
+def test_every_argument_clause_reds() -> None:
+    """Each `_call_argument_findings` clause must be RED by its own row (#14326 review P1).
+
+    Measured before this row existed: `assert not call.args`, `splat` and `assert not extra`
+    each replaced by `True` in turn left **27 passed**. The `extra` clause is the one the
+    review proved composes with a real lever — `kind="statement"` on the measured read reds
+    the pin ONLY through it — so a silent deletion of both the clause and a later lever
+    would read as green forever.
+    """
+    allowed = _door_read_contract()
+    calls = lambda body: [n for n in ast.walk(ast.parse(body)) if isinstance(n, ast.Call)]  # noqa: E731
+
+    faithful = ('sdk._tortoise_fts_query(query=q, limit=10, read_status_out=st, '
+                '_truncation_out=tr, leg_trace=tr2)')
+    assert _call_argument_findings(calls(faithful), allowed) == []
+
+    positional = 'sdk._tortoise_fts_query(q, limit=10)'
+    assert any("POSITIONAL" in f
+               for f in _call_argument_findings(calls(positional), allowed)), positional
+
+    splat = 'sdk._tortoise_fts_query(**opts)'
+    assert any("splats a mapping" in f
+               for f in _call_argument_findings(calls(splat), allowed)), splat
+
+    lever = 'sdk._tortoise_fts_query(query=q, limit=10, kind="statement")'
+    assert any("kind" in f
+               for f in _call_argument_findings(calls(lever), allowed)), lever
+
+
+def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
+    """The receiver clause must be RED by its own row, and GREEN on the faithful shape.
+
+    The row this closes (#14326 review P1) is the grant's own class: a harness that times
+    `sdk._fast._tortoise_fts_query` — or wraps the SDK before reading — is not a mirror of
+    the shipped `/v1/search` door, and the name-based reach checks could not tell.
+    """
+    faithful = (
+        "def run(queries):\n"
+        "    sdk = TortoiseSDK()\n"
+        "    sdk._tortoise_fts_query(query=queries[0]['query'], limit=10)\n"
+        "    results = sdk._tortoise_fts_query(query=queries[0]['query'], limit=10, "
+        "leg_trace=None)\n"
+        "    return results\n")
+    assert _findings_of_run(faithful, _receiver_findings) == []
+
+    mirror_door = faithful.replace("results = sdk._tortoise_fts_query(",
+                                   "results = sdk._fast._tortoise_fts_query(", 1)
+    got = _findings_of_run(mirror_door, _receiver_findings)
+    assert got and "receiver must be the one bare name" in got[0], got
+
+    wrapper = faithful.replace("    sdk = TortoiseSDK()\n",
+                               "    sdk = TortoiseSDK()\n    sdk = _FastMirror(sdk)\n", 1)
+    got = _findings_of_run(wrapper, _receiver_findings)
+    assert got and "bound 2 time(s)" in got[0], got
+
+    foreign = faithful.replace("    sdk = TortoiseSDK()\n", "    sdk = get_sdk()\n", 1)
+    got = _findings_of_run(foreign, _receiver_findings)
+    assert got and "not `TortoiseSDK()`" in got[0], got
+
+    parameter = faithful.replace("def run(queries):", "def run(sdk, queries):", 1)
+    got = _findings_of_run(parameter, _receiver_findings)
+    assert got and "as a PARAMETER" in got[0], got
+
+
+def test_every_door_contract_clause_reds() -> None:
+    """Each fail-closed clause of `_door_read_contract` must be RED by a row (#14326 P1).
+
+    Measured before this test: each of the four clauses — `len(door_calls) == 1`,
+    `{"_rerank_candidates", …} <= bool_levers`, `not named_levers`, and the equality
+    against `_EXPECTED_DOOR_ARGS` — replaced by `True` in turn left **27 passed**, because
+    nothing in the file ever mutated `hosted_api.py` or `sdk.py`. Each row below mutates the
+    REAL source text, so deleting the clause makes the row fail by NOT raising.
+    """
+    hosted = _HOSTED.read_text()
+    sdk = _SDK.read_text()
+
+    # Control / non-vacuity: the real sources satisfy the contract, and it carries the
+    # door's four arguments plus this harness's out-sink.
+    assert _door_read_contract() == set(_EXPECTED_DOOR_ARGS) | {"leg_trace"}
+
+    def raised(needle: str, *, hosted_source: str | None = None,
+               sdk_source: str | None = None) -> str:
+        with pytest.raises(AssertionError) as exc:
+            _door_read_contract(hosted_source=hosted_source, sdk_source=sdk_source)
+        message = str(exc.value)
+        assert needle in message, (needle, message)
+        return message
+
+    anchor = "_truncation_out=trunc_out),"
+    assert hosted.count(anchor) == 1
+
+    # 1. the door itself names a BOOL lever -> `not named_levers`
+    raised("the door itself already names",
+           hosted_source=hosted.replace(
+               anchor, "_truncation_out=trunc_out, _rerank_candidates=False),", 1))
+
+    # 2. the door names a lever the bool-lever intersection cannot see -> the equality
+    raised("re-derive this contract and the harness's",
+           hosted_source=hosted.replace(anchor, "_truncation_out=trunc_out, "
+                                               'kind="statement"),', 1))
+
+    # 3. a second read call inside `search` (a hoisted `_do_search`, an added arm) -> the
+    #    cardinality clause, which is what stops the allow-list being a UNION
+    raised("read calls — this contract is derived from exactly one",
+           hosted_source=hosted.replace(
+               anchor,
+               "_truncation_out=trunc_out),\n"
+               "                lambda: sdk._tortoise_fts_query(q, limit=limit),", 1))
+
+    # 4. `_rerank_candidates` stops being a bool-defaulted parameter -> the bool-lever seed,
+    #    which every lever clause above is an intersection against
+    assert sdk.count("_rerank_candidates: bool = True") == 1
+    raised("", sdk_source=sdk.replace("_rerank_candidates: bool = True",
+                                      "_rerank_candidates: bool | None = None", 1))
+
+
+def test_the_artifact_generator_filter_clauses_red() -> None:
+    """The `order`/`legs` filter clauses must be RED by their own rows (#14326 P1/P2).
+
+    Measured before this row existed: `assert not gen.ifs` (order) and the `legs` filter
+    shape both replaced by `True`/`pass` left **27 passed**.
+    """
+    def findings(key: str, item: str) -> list[str]:
+        order = item if key == "order" else "[_result_id(r) for r in results]"
+        legs = item if key == "legs" else '[e for e in trace if e.get("leg")]'
+        source = ("def run(results, trace):\n"
+                  "    per_query = []\n"
+                  f'    per_query.append({{"order": {order}, "legs": {legs}}})\n')
+        run_def = next(n for n in ast.walk(ast.parse(source))
+                       if isinstance(n, ast.FunctionDef) and n.name == "run")
+        entries, _append = _artifact_entries(run_def)
+        value = entries[key]
+        assert isinstance(value, ast.ListComp), value
+        return _generator_filter_findings(key, value.generators[0])
+
+    assert findings("order", "[_result_id(r) for r in results]") == []
+    assert findings("legs", '[e for e in trace if e.get("leg")]') == []
+
+    got = findings("order", "[_result_id(r) for r in results if r]")
+    assert got and "FILTERS the measured page" in got[0], got
+
+    got = findings("legs", "[e for e in trace]")
+    assert got and "0 filter clauses" in got[0], got
+
+    got = findings("legs", '[e for e in trace if e.get("leg") and True]')
+    assert got and "filters on" in got[0], got
+
+    got = findings("legs", '[e for e in trace if e.get("kind")]')
+    assert got and "filters on" in got[0], got
