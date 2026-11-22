@@ -931,8 +931,11 @@ def escape_dollars_outside_code(markdown: str) -> str:
       markdownlint happens to dislike the shape (measured — one such line lints
       clean, another reds MD038 from the backtick pairing alone with no ``$``
       involvement), so the gate cannot be relied on to catch it.
-    * An UNCLOSED fence leaves the rest of the document unescaped. That one is
-      deliberate: a fence that never closes really does make what follows code.
+    * An UNCLOSED, UNQUOTED fence leaves the rest of the document unescaped.
+      That one is deliberate: a fence that never closes really does make what
+      follows code. A fence opened INSIDE a blockquote is not in that class —
+      the quote ending closes it — so a line carrying fewer markers than the
+      opener ends both the fence and the container, and is escaped as prose.
     * An INDENTED code block (4+ spaces, which CommonMark makes code) is not
       tracked as code, so a ``$`` inside one IS escaped — the fence rules above
       are applied, indentation-based code blocks are not. This module emits
@@ -950,6 +953,12 @@ def escape_dollars_outside_code(markdown: str) -> str:
     fence: str = ""
     fence_depth: int = 0
     for line in markdown.split("\n"):
+        if fence and _quote_depth(line) < fence_depth:
+            # The blockquote that held the fence ENDED on this line, so the fence
+            # ended with it and this line is prose (or a new opener) again —
+            # CommonMark closes the container, it does not carry it on.
+            fence = ""
+            fence_depth = 0
         if fence:
             out.append(line)
             out.append("\n")

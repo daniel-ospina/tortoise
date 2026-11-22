@@ -219,6 +219,15 @@ _FENCED = {
     "nested blockquote fence": (
         "# t\n\na $1\n\n> > ```\n> > echo $HOME\n> > ```\n\nb $2\n",
         "> > ```\n> > echo $HOME\n> > ```"),
+    # The blockquote ENDING closes the fence it held: CommonMark ends the
+    # container, it does not carry a fence on past it. Without this the prose
+    # after the quote was left bare — the silent direction.
+    "container ends after a quoted fence": (
+        "# t\n\n> ```\n> echo $HOME\na $5\n",
+        "> ```\n> echo $HOME"),
+    "container ends after a nested quoted fence": (
+        "# t\n\n> ```\n> > ```\na $5\n",
+        "> ```\n> > ```"),
     # An unclosed fence makes the REST of the document code — deliberate, and
     # stated in the docstring.
     "unclosed fence": ("# t\n\ntotal $5\n\n```\necho $HOME\nmore $7 code\n",
@@ -238,7 +247,8 @@ def test_a_fenced_block_is_never_escaped(case):
     # INCLUDING one after the fence — that is what proves the fence state was
     # left, rather than escaping being switched off for the rest of the doc.
     for before, after in (("total $5", "total \\$5"), ("z $2", "z \\$2"),
-                          ("$5 total", "\\$5 total"), ("b $2", "b \\$2")):
+                          ("$5 total", "\\$5 total"), ("b $2", "b \\$2"),
+                          ("a $5\n", "a \\$5")):
         if before in doc:
             assert after in out, f"{case}: prose {before!r} must be escaped"
     if case != "unclosed fence" and "after $6" in doc:
