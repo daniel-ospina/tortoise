@@ -1021,10 +1021,12 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
             account = await asyncio.to_thread(read_account, cp, org_id)
         except Exception as e:
             # ⛔ NO SEND WITHOUT A READABLE LEDGER. A missing `storage_notice_pct`
-            # column (code deployed before its migration) makes PostgREST answer the
-            # unknown column with HTTP 400 (body code `PGRST204` — the body code is
-            # not a status, and 204 is No Content, i.e. success) here; sending anyway
-            # would re-send the same one-shot notice on
+            # column (code deployed before its migration) makes PostgREST reject the
+            # `select=`, and the seam discards the body and renders the STATUS alone —
+            # so this reader sees a bare **HTTP 400**, never `PGRST204`/`42703` (see
+            # `read_account`, and the doctrine note above `read_account` that forbids
+            # attributing either body code to this seam); sending anyway would re-send
+            # the same one-shot notice on
             # EVERY pass, and the provider key only collapses a replay of the
             # SAME threshold inside its 24 h window — it cannot make a 6-hourly
             # re-send safe. So the
