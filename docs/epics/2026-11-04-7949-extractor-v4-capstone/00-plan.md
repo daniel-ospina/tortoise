@@ -167,7 +167,7 @@ closed on a cycle or an `implemented` row on an unbuilt precondition. Four rows 
 (#5087). ⇒ **none of the owner's five assertions has a row.** That is the gap stated as an artifact.
 
 **R6 · The DOOR is the v2 lane, and that corrects the brief.** `hosted_api._capture_lane()`
-(`tortoise/hosted_api.py:19979`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
+(`tortoise/hosted_api.py:20017`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
 fleet captures land in `_extract_session_v2` → `extract_session_v2` (`tortoise/extractor_v2.py`) — the
 **LLM v2 lane**, not `extractor.py`'s rule extractor (that is the opt-in `m2` lane,
 `_extract_session_llm`). ⚠️ **The brief's premise — "today the fleet writes through the legacy rule
@@ -424,7 +424,7 @@ from `sdk.py`'s point-creation path at `:21678` — keyed by symbol: `bind_point
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
 `subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:7582` and
-consumed at `sdk.py:12232`/`:12285` (`#13486`'s own `sdk.py` insert is +36 above both, so the pair moved from `12074`/`12127` — re-derived by content at that head, not nudged; `#13535` added +2 above the definition (`7031` -> `7033`) and `#13466` a further +15 (`7033` -> `7048`), and a later `origin/main` merge a further +153 (`7048` -> `7201`), and it inserted +5 above the `sdk.py` pair at `12111`/`12164` (`=> 12116`/`12169`; the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` at `sdk.py:45` (`#12745` is an ANCESTOR of `#13486`, so its `+1` is already inside `12110`)), each re-derived by content at the head that moved it, and `#13556`'s own `sdk.py` insert then took the pair a further `+20` — `12116`/`12169` -> `12136`/`12189` — and a later `origin/main` merge a further `+32`, `12136`/`12189` -> `12175`/`12228` at that head — `12175`/`12228` is NOT this cell's pair and is not presented as one: the pair this cell cites is the one its opening clause states and the supersession note below re-derives, `12232`/`12285` at the reconciled tree) — ⚠️ all three are LINE cites, not symbols (nothing in this tree
+consumed at `sdk.py:12256`/`:12285` (`#13486`'s own `sdk.py` insert is +36 above both, so the pair moved from `12074`/`12127` — re-derived by content at that head, not nudged; `#13535` added +2 above the definition (`7031` -> `7033`) and `#13466` a further +15 (`7033` -> `7048`), and a later `origin/main` merge a further +153 (`7048` -> `7201`), and it inserted +5 above the `sdk.py` pair at `12111`/`12164` (`=> 12116`/`12169`; the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` at `sdk.py:45` (`#12745` is an ANCESTOR of `#13486`, so its `+1` is already inside `12110`)), each re-derived by content at the head that moved it, and `#13556`'s own `sdk.py` insert then took the pair a further `+20` — `12116`/`12169` -> `12136`/`12189` — and a later `origin/main` merge a further `+32`, `12136`/`12189` -> `12175`/`12228` at that head — `12175`/`12228` is NOT this cell's pair and is not presented as one: the pair this cell cites is the one its opening clause states and the supersession note below re-derives, `12232`/`12285` at the reconciled tree) — ⚠️ all three are LINE cites, not symbols (nothing in this tree
 keys them by symbol, and an earlier version of this parenthesis said the pair was), so an insert
 above any of them moves the claim: this PR's own +22-line tail to `search_engine.py` moved the definition
 `6637` -> `6659` at the merge of `origin/main` `070d97360c`, re-derived from the merged tree
@@ -432,7 +432,7 @@ rather than carried from either side; ⛔ RE-DERIVED AGAIN ON THE `cypher-reconc
 `origin/main` `70fbd1a27d`), by CONTENT rather than by a delta: the definition is at `search_engine.py:7582`
 (`grep -nF 'def subject_binding_available' tortoise/search_engine.py` -> `7582:def
 subject_binding_available(graph) -> bool:`, its probe `_SUBJECT_SOURCE_SCOPED_PROBE` at `:7576`), and the
-two consumers at `sdk.py:12232`/`:12285` (`grep -nF 'subject_binding_available' tortoise/sdk.py`), which
+two consumers at `sdk.py:12256`/`:12285` (`grep -nF 'subject_binding_available' tortoise/sdk.py`), which
 supersedes the `7201`/`12227`/`12280` this cell read before), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —

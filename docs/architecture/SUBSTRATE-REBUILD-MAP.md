@@ -308,16 +308,16 @@ names the retired label in order to explain a rule about it — and it is the fi
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
 retirement prose in `tortoise/mcp_server.py:4477`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:37573` and `_file_human_approval`'s `:37615`, one line each in a file this population already
-reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
+`tortoise/sdk.py:37621` and `_file_human_approval`'s `:37663`, one line each in a file this population already
+reached (⛔ **the `:4406` and `:36735,36718` addresses this sentence carried are
 DELETED, re-measured at this head: `mcp_server.py:4382` is the `# prop named "error"
 must not suppress the onboarding observation.` comment (not blank) and the
-`:Document` retirement prose is at `:4477`; `sdk.py:37026` is a
-``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37002`
+`:Document` retirement prose is at `:4477`; `sdk.py:37074` is a
+``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37050`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
-`:Document` docstring lines are `:37573` in `record_decision` (opening `:37527`;
-`:37491` is the `:Source` line immediately above it, which is what a re-measure by that
-phrase alone lands on) and `:37615` in `_file_human_approval` (opening `:37567`)**), whose
+`:Document` docstring lines are `:37621` in `record_decision` (opening `:37575`;
+`:37539` is the `:Source` line immediately above it, which is what a re-measure by that
+phrase alone lands on) and `:37663` in `_file_human_approval` (opening `:37567`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the
