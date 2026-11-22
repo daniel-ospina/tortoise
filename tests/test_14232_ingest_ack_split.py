@@ -910,16 +910,23 @@ def test_a_504_on_this_path_names_its_stage(client, monkeypatch):
     pins the WIRE SHAPE of a genuine refusal — flat body, a named stage, a timed
     gate phase, and the bound's own error text — which is what a client reads.
     """
+    # ⛔ RESTORED, NOT ADDED (review round 8, P1): the commit that rewrote the
+    # docstring above ALSO deleted this import while declaring the change
+    # docstring-only, which is why the mechanical AST check could not pass. It is
+    # inert here — that is what the `noqa` absorbs — and it stays so the delta is
+    # literally what it says it is.
+    from tortoise.session_projection import SESSION_EXTRACTION_PHASES  # noqa: F401
 
     # ⛔ THE GATES PHASE MUST BE CHEAP FOR THIS ROW TO BE ATTRIBUTABLE (#5049
     # rule 1, `tests/conftest.py`'s own fixture docstring). The bound below is
-    # 0.35 s and the write is made to overrun it; the gates phase runs FIRST, and
+    # 3.0 s and the write is made to overrun it; the gates phase runs FIRST, and
     # on an un-stubbed tree it contains `count_org_usage(org, "points")` — a
     # FULL-GRAPH scan (`hosted_api.py:20796`, which this PR's plan calls out as
-    # pre-existing and out of scope). When that scan alone exceeds 0.35 s the
-    # refusal correctly names `capture_gates` and the row reds — for a reason
-    # that is about the host, not about the `capture_write` mark it exists to
-    # pin. Measured (review round 4, at the parent head): 4 failed / 1 passed
+    # pre-existing and out of scope). When that scan alone exceeds the bound the
+    # refusal correctly names `capture_gates` instead of the write, and this row
+    # reports that as INCONCLUSIVE rather than red (the skip arm below) — the red
+    # would be about the host, not about the `capture_write` mark it exists to
+    # pin. Measured at the round-4 head, then bound 0.35 s: 4 failed / 1 passed
     # with `{'stage': 'capture_gates', 'stages_ms': {'pre_handler': 24.1}}`.
     # Stubbing the quota read to a constant leaves ONE thing able to cross the
     # bound: the deliberately slow write.
