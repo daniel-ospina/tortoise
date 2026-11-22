@@ -264,6 +264,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # §2.4's prose AND row 2b's own copy, which is why each token occurs twice.
     (_AUDIT, "hosted_api.py:21451-21453", "tortoise/hosted_api.py", 21453, "coalesce(n.is_episodic,false) <> true"),
     (_AUDIT, "hosted_api.py:21458", "tortoise/hosted_api.py", 21458, "_stamp_capture_provenance("),
+    # ⛔ The four addresses the `#14038` cycle-3 pass RE-DERIVED BY CONTENT after the −21 fold had left
+    # them pointing at a comment and a receipt builder — and, pinned here, the reason they cannot drift
+    # back silently: `:21128` was a comment (the calls are `21433`/`43794`/`43902`), `hosted_api.py`'s
+    # `:22529` was inside a receipt builder (the call is `:23062`), and `sdk.py:18872` was a blank `#`
+    # with `:18769` a comment (the extractor PAYLOAD read is `:21393`, `pt` bound at `:21321`).
+    # (`:61999`/`:62019` are re-pointed and pinned by the row-2d pass above; not duplicated here.)
+    (_AUDIT, "hosted_api.py:23062", "tortoise/hosted_api.py", 23062, "sdk._find_point_by_content("),
+    (_AUDIT, "sdk.py:21433", _SDK, 21433, "hit_id = self._find_point_by_content("),
+    (_AUDIT, "sdk.py:21393", _SDK, 21393, '_mention_records = pt.get("mentions")'),
+    (_AUDIT, "`:21321`", _SDK, 21321, 'for pt in payload.get("points", []) or []:'),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -509,6 +519,10 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21451-21453'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:21458'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23062'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21433'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21393'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21321`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37527`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37546` is the `:Source` line'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37567`)**)'): 1,
@@ -3161,7 +3175,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # `_figure_problems` is invariant under a re-point (345/229/116/169 hold at any address this pair
     # takes), and the drift numerator cannot see it because both addresses sit past the pin's `sdk.py`
     # and are therefore non-comparable. Only opening the line catches this class, so the line is pinned.
-    assert len(_PINS) == 109
+    # 109 -> 113 at the follow-up lane: the two rows the previous fix lane NAMED but did not establish
+    # (2d's `_find_point_by_content` callers, 14's payload-`mentions` read and its `pt` binding) are
+    # re-pointed by content and pinned — four rows, each anchored on the line its row claims.
+    assert len(_PINS) == 113
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
