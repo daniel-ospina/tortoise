@@ -4501,6 +4501,55 @@ def test_a_link_CHAIN_AT_the_HOP_BOUND_whose_TARGET_holds_code_is_a_removal(tree
     )
 
 
+def test_a_link_CHAIN_PAST_the_HOP_BOUND_that_reaches_code_is_a_removal(tree: Path) -> None:
+    """Round-24 P1, the OTHER half: an EXHAUSTED bound is UNKNOWN, never "no code".
+
+    The sibling row above pins the `+1` (a chain of exactly `_LINK_HOPS` links must RESOLVE, so it
+    never reaches the bound). That leaves the bound itself unmeasured: nothing in this file built a
+    chain the loop cannot resolve, so the fail-closed polarity could be reverted silently. It was —
+    the bound used to return `None`, which the two askers read in OPPOSITE directions: `_content_or_link`
+    took it as "not the module's code" (so the module never entered `base_body_modules` and arm 1
+    `continue`d) while `_modules_with_a_body` took the SAME `None` as content. The cancelling reader
+    decided the verdict, so deleting a 9-link chain that ends at real code was GREEN with the body in
+    no file under `archive/` — a false PASS in the one direction this gate exists to prevent.
+
+    Mutation: `return _UNREADABLE` at the bound -> `return _DANGLING` -> RED here (no `tortoise.x`
+    row: the module drops out of `base_body_modules` and arm 1 cancels the removal).
+    """
+    # ONE PAST what the loop can resolve: the carrier link PLUS `_LINK_HOPS` intermediates is
+    # `_LINK_HOPS + 1` links in total, one more than `range(_LINK_HOPS + 1)` can walk to the end.
+    links = arch._LINK_HOPS
+    for i in range(links):
+        (tree / "tortoise" / f"link{i}.py").symlink_to(
+            "real.py" if i == links - 1 else f"link{i + 1}.py"
+        )
+    (tree / "tortoise" / "real.py").write_text(
+        "def real(x):\n    return x * 2\n", encoding="utf-8"
+    )
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").symlink_to("../link0.py")
+    _commit(tree,
+            *(f"tortoise/link{i}.py" for i in range(links)),
+            "tortoise/real.py", "tortoise/x/__init__.py")
+    subprocess.run(
+        ["git", "rm", "-r", "-q", "tortoise/x", "tortoise/real.py"]
+        + [f"tortoise/link{i}.py" for i in range(links)],
+        cwd=tree, check=True,
+    )
+    _commit(tree, ".")
+
+    # the premise: this chain is genuinely UNRESOLVED, not merely a shorter one that resolves
+    assert arch._blob_following_links(tree, "HEAD~1", "tortoise/x/__init__.py") is None, (
+        "the fixture must exceed the bound, or it measures the sibling row instead"
+    )
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(p.startswith("tortoise.x:") and "REMOVED" in p for p in problems), (
+        "an unresolvable chain to real code is UNKNOWN, and unknown must not cancel a removal "
+        f"(fail closed): {problems}"
+    )
+
+
 def test_an_archived_module_from_a_SYMLINKED_carrier_is_CLEAN(tree: Path) -> None:
     """P1 (round-24): the anchor read the RAW blob, so the gate red a record the writer had just made.
 
