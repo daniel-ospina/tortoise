@@ -1830,8 +1830,13 @@ def test_an_UNIMPORTABLE_loop_folds_inline_instead_of_breaking_the_write(
     an earlier title said ImportError and cited two line numbers that are not the
     arm). The breadth is deliberate — a partially-shipped wheel raising
     `AttributeError`/`RuntimeError` at import is the same hazard — and narrowing it
-    would let that failure escape AFTER the journal append committed, which is the
-    "written to neither store" outcome the chokepoint exists to prevent. An import that fails
+    would not make the failure escape the chokepoint, it would make the chokepoint
+    ANSWER it wrongly: `write()`'s own `except Exception` catches the raise, reports
+    it as a RAISED-after-append disagreement and SKIPS the fold, so the line is
+    written but the derived store is left behind for `unprojected_journal` /
+    `record_runner.py apply` to heal. "Written to NEITHER store" is the record-only
+    arm (#14002) — a different arm, with no committed line to disagree with.
+    An import that fails
     here is not a fault to report: the line has committed, the fold must happen,
     and folding inline is the pre-#14185 shape.
 
