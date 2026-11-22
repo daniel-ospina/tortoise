@@ -181,7 +181,16 @@ jobs:
             # artifact therefore sees verdict.json present and the log telling them it is
             # absent — the same class of unfollowable log this change exists to end. `-s`
             # is a test for CONTENT, so the line describes what it can actually observe.
-            echo "published-artifact-canary wrote NO verdict (empty or absent verdict.json) — nothing was measured (exit_code=$rc)"
+            # ⛔ AND IT MUST NOT CLAIM MORE THAN THE ABSENCE IT SEES (review cycle 7, P3,
+            # MEASURED): "nothing was measured" was false in a REACHABLE state. The tool
+            # flushes its transcript INCREMENTALLY (one line per command) and prints the JSON
+            # only at the very end, so a run that installs, measures, and then fails before
+            # emitting JSON (the `--summary-file` append's guarded `return 2`, or `main()`'s
+            # backstop) leaves a 0-byte verdict.json AND a populated
+            # `published-artifact-canary.log` — the only diagnosis that exists. Telling a
+            # reader "nothing was measured" sends them away from it. This line names what is
+            # absent (the verdict payload) and where the evidence actually lives.
+            echo "published-artifact-canary wrote NO verdict (empty or absent verdict.json) — no verdict payload exists; any transcript is in the uploaded log artifact (exit_code=$rc)"
           fi
           exit "$rc"
       # `always()` — not `failure()` — so this step is still considered when the JOB is
@@ -307,10 +316,10 @@ jobs:
               echo "this repo fixes it: it clears when a release lands (version bump → tag →"
               # ⛔ NO BACKTICKS: inside these double quotes they are COMMAND SUBSTITUTION,
               # so the two artifact names this branch exists to name were EXECUTED — the
-              # run printed "line 22: publish-pypi.yml: command not found" twice and the
-              # summary reached the human as "… → ) and  is published" (measured on
-              # run 44995025534, the release finding for a client-published arm that
-              # IS the tortoise-client 404).
+              # shell printed one command-not-found line PER NAME (`publish-pypi.yml:` and
+              # `tortoise-client:`, each once) and the summary reached the human as
+              # "… → ) and  is published" (measured on run 44995025534, the release finding
+              # for a client-published arm that IS the tortoise-client 404).
               echo "the publish-pypi.yml workflow) and tortoise-client is published. See #12363."
             fi
             echo

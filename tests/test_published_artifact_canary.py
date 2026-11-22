@@ -2610,10 +2610,14 @@ def test_the_canary_step_PRINTS_its_verdict_so_the_log_can_be_read(tmp_path):
     # ⛔ The phrase IS the contract here, and the reason is MEASURED: without this the whole
     # suite stayed green with the no-verdict branch's body replaced by `:` (mutation M2),
     # because the round-18 `::warning::` line above it already made "printed something at
-    # all" true. A log line whose only value is telling a reader that nothing was measured
-    # has to be pinned by what it says.
+    # all" true. A log line whose only value is telling a reader that no verdict exists has
+    # to be pinned by what it says. ⛔ WHAT IT MAY NOT SAY (review cycle 7, P3): "nothing was
+    # measured" — the tool flushes its transcript per command before it prints the JSON, so a
+    # run that measured and then failed before emitting JSON has a populated
+    # `published-artifact-canary.log`; the line names the absent VERDICT PAYLOAD and points at
+    # that artifact instead. The test's message below inherits the same correction.
     assert "NO verdict (empty or absent verdict.json)" in printed, (
-        "the crash log does not say the verdict file was never written — a reader is left "
+        "the crash log does not say that no verdict payload exists — a reader is left "
         "to infer it from a warning about the exit code, which is the inverse inference "
         f"that started #12660: {printed!r}"
     )
