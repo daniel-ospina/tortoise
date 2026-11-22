@@ -274,6 +274,25 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "sdk.py:21433", _SDK, 21433, "hit_id = self._find_point_by_content("),
     (_AUDIT, "sdk.py:21393", _SDK, 21393, '_mention_records = pt.get("mentions")'),
     (_AUDIT, "`:21321`", _SDK, 21321, 'for pt in payload.get("points", []) or []:'),
+    # ⛔ ROW 2d's OWN pass (#14038, cycle 6). Five of the nine addresses this row carried were stale at
+    # `28ba95d64d` — measured line by line, `:32395` was the comment `# confidence/weight (they are plain
+    # direct-edge attributes).`, `:43479` was `_find_point_by_content`'s docstring prose, `:43416` was
+    # `def _fold_source_evidence(`, `:32527-32528` was `for key in ("confidence", "weight"):`, and
+    # `:32566` was `# Key the result so a lookup by the raw endpoint value finds the` — so the row quoted
+    # `MATCH (n:Point {content_hash:$ch})` and `RETURN n.content_hash, …` at addresses holding none of it.
+    # Re-pointed BY CONTENT, never by delta, and pinned so the same rot cannot come back silently: the
+    # population arms are all blind here (`_resolved_pairs` counts only `path.py:NNNN` and two-code-span
+    # spellings, so these bare `:NNNN` continuations move the 345/227/215/167 figures by nothing —
+    # measured identical before and after the edit — and a line number is only graded by opening it).
+    # ⛔ `sdk.py:32759` was CORRECT all along: a hand-off table on this PR told lanes to move it to
+    # `:32776`, which is the sibling `any_hash` map INSIDE the same function, not the first map. Pinned
+    # so the false-correction shape that table took cannot take it again.
+    (_AUDIT, "sdk.py:32759", _SDK, 32759, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
+    (_AUDIT, "`:32776`", _SDK, 32776, '"MATCH (n:Point {content_hash:$ch}) WHERE "'),
+    (_AUDIT, "`:43860`", _SDK, 43860, 'f"MATCH (n:Point {{content_hash:$ch}}) WHERE "'),
+    (_AUDIT, "`:43797`", _SDK, 43797, "def _find_point_by_content("),
+    (_AUDIT, "`:32908-32909`", _SDK, 32909, '"RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "'),
+    (_AUDIT, "`:32947`", _SDK, 32947, '"RETURN n.content_hash, n.pointKind, n.content, n.id, n.key, "'),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -523,6 +542,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21433'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21393'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:21321`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:32759'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32776`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:43860`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:43797`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32908-32909`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:32947`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37527`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37546` is the `:Source` line'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '(opening `:37567`)**)'): 1,
@@ -3178,7 +3203,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 109 -> 113 at the follow-up lane: the two rows the previous fix lane NAMED but did not establish
     # (2d's `_find_point_by_content` callers, 14's payload-`mentions` read and its `pt` binding) are
     # re-pointed by content and pinned — four rows, each anchored on the line its row claims.
-    assert len(_PINS) == 113
+    # 113 -> 119 at row 2d's own pass: the row's five remaining stale addresses were re-pointed by
+    # CONTENT and pinned, plus `sdk.py:32759` — which was already correct and which a hand-off table on
+    # this PR told lanes to MOVE, i.e. the false-correction shape pinned rather than repeated. The
+    # population arms are invariant under this edit (measured: 345/227/215/167 and 229/217/157/169
+    # identical before and after), which is why only opening the lines can grade it.
+    assert len(_PINS) == 119
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
