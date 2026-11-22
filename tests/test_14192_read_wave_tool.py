@@ -235,6 +235,13 @@ def test_a_door_diff_selects_this_pin():
 
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
 _HOSTED = _REPO_ROOT / "tortoise" / "hosted_api.py"
+#: Callees whose STRING argument can become a call target, so a literal naming the read
+#: inside one is a reach: `getattr`/`setattr`/`delattr`/`__getattribute__` resolve an
+#: attribute by name, and `operator`'s two-by-name factories do the same. `print` is
+#: deliberately absent (#14281 review P2, measured: a blanket `Call` parent red it).
+_EXECUTES_STRING_ARG = {"getattr", "setattr", "delattr", "__getattribute__", "__setattr__",
+                        "__delattr__", "methodcaller", "attrgetter"}
+
 _READ_NAMES = ("tortoise_fts_query", "_tortoise_fts_query")
 
 
@@ -414,7 +421,8 @@ def _extra_bindings(tree: ast.AST, names: set[str]) -> list[str]:
 
     shadowed the mapper the check blesses — a rename-preserving refactor
     (`_result_id = _id_of`) reaches the same place by accident. The tool defines it once,
-    at module level, so any second site is a finding.
+    at module level, so any second BIND is a finding — a nested def, an assignment, a
+    duplicate top-level def, a parameter of that name.
     """
     out: list[str] = []
 
@@ -423,7 +431,13 @@ def _extra_bindings(tree: ast.AST, names: set[str]) -> list[str]:
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
-            if node not in getattr(tree, "body", []):
+            # ⛔ A SECOND TOP-LEVEL `def` IS A SECOND SITE TOO (#14281 review P3, measured):
+            # the first form skipped every top-level def, so a duplicate
+            # `def _result_id(r): return "X"` at the bottom of the module passed this guard.
+            _seen = [n for n in getattr(tree, "body", [])
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and n.name == node.name]
+            if node not in getattr(tree, "body", []) or _seen[0] is not node:
                 _flag(node.name, node)
             continue
         if isinstance(node, ast.ClassDef) and node.name in names:
@@ -781,12 +795,17 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
       - any shape whose value is a COPY (`dict(pq)`, `list(results)`, `_result_id(r)`):
         those are correctly exempt, and a copy cannot mutate what it copied.
 
-    ⛔ THREE SURVIVORS MEASURED AT THIS HEAD, named so the list above is evidence rather
+    ⛔ TWO SURVIVORS MEASURED AT THIS HEAD, named so the list above is evidence rather
     than a category (each permutes the recorded page while `compare()` still reads
-    `rank_identical: True`):
+    `rank_identical: True`). A third — `_m = [results][0]; _m.sort()` — was listed here and
+    is NOT a survivor at this head (measured RED), and the mechanism is worth stating because
+    it took three attempts to get right: the PAGE pass leaves it alone (a bare `Subscript`
+    value is not an alias), but the TRACE pass does not — the page assignment's value mentions
+    `trace` (`leg_trace=trace`), so `results` is an alias of the trace there and `_m` is then a
+    name bound to an expression that mentions a watched name, which the alias rule's MENTION
+    clause resolves. Renaming it does not help (same mention chain).
 
         globals()["results"].sort()        the page's NAME is computed at runtime
-        _m = [results][0]; _m.sort()       the container is a LITERAL, so nothing binds it
         operator.iadd(results[0], {…})     a module-level mutator handed an ELEMENT, and
                                            `_element_only()` must exempt subscripts (the
                                            artifact builds `[_result_id(r) for r in
@@ -841,8 +860,15 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
     #
     #     _box[0] = results[0]        a SLOT REPLACEMENT — a bind, mutates nothing
     #     _box[0] |= {…}              a write INTO the held object — a page mutation
-    #     _box.append(None)           a container operation — mutates nothing the
-    #     _d.clear()                  artifact reads
+    #
+    # ⛔ ACCEPTED FALSE RED, stated because this file's contract is to state them: when the
+    # container is bound to a LITERAL that MENTIONS the page (`_box = [results]`), the alias
+    # rule puts `_box` in `watched`, so the container's OWN operations are red as if the box
+    # were the page — `_box.clear()`, `_box.append(None)`, `_box[0] = results[0]` (all three
+    # measured RED at `11f34db125`). Tolerable: each is a no-op for the artifact and the
+    # container ops that matter (`_box[0].sort()`, `_box[0][k] = v`) are mutations anyway.
+    # A container built EMPTY first (`_box = [None]`) is not in `watched`, which is the shape
+    # `holders` was written for.
     #
     # Folding holders into `muts` (the first form of this arm) reds the bind line and every
     # container-only operation above — the bind-line over-fire this file has been cured of
@@ -856,6 +882,16 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         for _node in ast.walk(run_def):
             if isinstance(_node, (ast.For, ast.AsyncFor, ast.comprehension)):
                 _iter, _target = _node.iter, _node.target
+                # ⛔ THE ITERABLE MUST MENTION A WATCHED NAME (#14281 review P2, measured).
+                # Without this gate EVERY loop target in `run()` joined `muts`, so
+                # `_m = [results][0]; _m.sort()` red only because `run()` happens to use
+                # `_m` as an unrelated comprehension target (`member_table = {… for _m, _f,
+                # name in TIMED}`) — a false red decided by VARIABLE NAMING, and any
+                # `for row in report: row["x"] = 1` would red too. The fixpoint still
+                # cascades (`for row in per_query:` then `for cell in row.values():`) because
+                # `row` is in `muts` by the second pass.
+                if not (_names_in(_iter) & (muts | holders)):
+                    continue
             elif isinstance(_node, (ast.Assign, ast.AnnAssign)) and _node.value is not None:
                 # ⛔ AN UNPACKED BIND IS AN ELEMENT BIND (#14281 review P1, measured).
                 # `(_a,) = results` takes the FIRST ELEMENT, and `_a |= {"id": …}` then
@@ -972,12 +1008,17 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         """The names on `node` that are the page — or a SLOT'S VALUE when it REACHES
         THROUGH a container (`_d["k"]`, `_o.a`, `self._page`), never the container itself.
 
-        A bare holder name is the CONTAINER: `_box.clear()` / `_box.append(…)` reorder the
-        box the page was put in, and `_box[0] = results[0]` REPLACES a slot — none of them
-        mutates what the artifact reads. Reding those would be the bind-line over-fire this
-        file has been cured of three times, and its contract is to state its false reds
-        rather than add them (#14281 review P1). The distinction is the same one the
-        `Subscript` STORE arm needs: a slot that HOLDS the page vs. a write INTO it.
+        A bare holder name is the CONTAINER, so it never counts as the page here — but this
+        function is not the only arm that sees it: when the container was bound to a LITERAL
+        that MENTIONS the page (`_box = [results]`, the shape this file itself uses), the
+        alias rule already put `_box` in `watched`, so the container's OWN operations are red
+        as if the box were the page. ⛔ ACCEPTED FALSE RED, measured: `_box.clear()`,
+        `_box.append(None)` and `_box[0] = results[0]` all red at `11f34db125`, none of them
+        mutates what the artifact reads. This docstring used to claim they were GREEN; the
+        file's contract is to state its false reds, so they are stated here as well as at the
+        comment above. A container built EMPTY first (`_box = [None]`) is not in `watched`
+        and is the shape `holders` exists for. The distinction that still matters is the same
+        one the `Subscript` STORE arm needs: a slot that HOLDS the page vs. a write INTO it.
         """
         names = _names_in(node)
         if isinstance(node, (ast.Subscript, ast.Attribute)):
@@ -1082,9 +1123,11 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             if isinstance(arg, ast.Subscript):
                 # ⛔ UNLESS THE BASE IS A CONTAINER OF THE PAGE (#14281 review P2,
                 # measured): `_box = [results]; random.shuffle(_box[0])` shuffles the WHOLE
-                # page through a slot, and the blanket `return True` exempted it. `holders`
-                # is exactly the set of containers that hold the page, so a subscript over
-                # one of them is NOT an element of the page.
+                # page through a slot, and the blanket `return True` exempted it.
+                # `page_container` is `holders` (slot-tracked containers) UNION the names
+                # bound to a LITERAL container of the page (`_box = [results]`, which the
+                # mention rule puts in `watched` instead), so a subscript over either is NOT
+                # an element of the page.
                 return not bool(_names_in(arg.value) & page_container)
             if isinstance(arg, ast.Call):
                 callee_id = getattr(arg.func, "id", None) or getattr(arg.func, "attr", None)
@@ -1125,11 +1168,15 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
         def _slot_ref(arg: ast.AST) -> bool:
             """A slot's VALUE handed to a call is the object stored there (#14281 P1).
 
-            `_element_only()` exempts any `Subscript`, because `results[0]` is an element
-            of the page and the artifact itself hands ELEMENTS to `_result_id`. A container
-            that HOLDS the page is the other case: `random.shuffle(_d["k"])` permutes the
-            element the artifact records, invisibly. Only the REACHING form counts — `_d`
-            alone is the container, and shuffling it changes nothing the artifact reads.
+            `_element_only()` exempts a subscript over the collection ITSELF, because
+            `results[0]` is an element of the page and the artifact hands ELEMENTS to
+            `_result_id`; it does NOT exempt a subscript over a holder (`_box[0]`), and a
+            holder bound to `[None]` and filled by a SLOT STORE is covered too (`holders`
+            tracks the store). What is still not followed is a holder filled by an
+            UNTRACKED route — `_box = [None]; _fill(_box); _box[0].sort()` is GREEN
+            (measured), because the page entered the box inside a callee. Only the REACHING
+            form counts — `_d` alone is the container, and shuffling it changes nothing the
+            artifact reads.
             """
             return (isinstance(arg, (ast.Subscript, ast.Attribute))
                     and bool(_names_in(arg) & holders))
@@ -1156,11 +1203,12 @@ def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[in
         for _pq in per_query: _pq["order"].sort()
         for _pq in per_query: _pq["order"] = sorted(_pq["order"], key=str)
         for _i, _pq in enumerate(per_query): _pq["order"].sort()
+        for _pq in per_query: _s = _pq["order"]; _s.sort()
         (zed,) = per_query[-1:]; zed["order"].sort()
 
     ⛔ IT IS NOT THE COVERAGE — IT IS THE MESSAGE, AND THAT HAD TO BE MEASURED (#14281
     review P2). This said the UNPACKED target was "the only listed shape it alone
-    catches"; substituting `element_mutations = []` leaves ALL FIVE listed shapes RED
+    catches"; substituting `element_mutations = []` leaves ALL FIVE shapes listed above RED
     through `_mutated_after`'s `rows`/`muts` fixpoint (measured), including
     `(zed,) = per_query[-1:]; zed["order"].sort()` — the fixpoint keys on the TARGET being
     a Tuple, not on a value of matching length. What this guard uniquely reds is a REBIND
@@ -2427,8 +2475,19 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
         # — left the census at 2 mentions and `_read_calls` at 2 calls, and the pin passed
         # while a lever reached a read the door does not name. The literal's parent there is
         # the SUBSCRIPT, not the call, so the executed spelling spans both.
-        return (isinstance(node, ast.Constant) and node.value in _READ_NAMES
-                and isinstance(parents.get(id(node)), (ast.Call, ast.Subscript)))
+        # ⛔ …AND THE `Call` PARENT MUST BE ABLE TO EXECUTE IT (#14281 review P2,
+        # measured): a blanket `Call` parent also admitted `print("_tortoise_fts_query")`,
+        # which cannot reach the read — the very false red the dict-value narrowing removed.
+        # `getattr`/`setattr` are caught earlier by `indirect`; they are kept here so the
+        # census stays honest if that guard is ever reordered again.
+        _parent = parents.get(id(node))
+        if not isinstance(node, ast.Constant) or node.value not in _READ_NAMES:
+            return False
+        if isinstance(_parent, ast.Subscript):
+            return True  # `vars(type(sdk))["…"]`, `_ops["…"]` — a slot that may be called
+        return (isinstance(_parent, ast.Call)
+                and (getattr(_parent.func, "id", None) or getattr(_parent.func, "attr", None))
+                in _EXECUTES_STRING_ARG)
 
     # ⛔ ⛔ `indirect` IS EVALUATED *BEFORE* THE MENTIONS CENSUS (#14281 review F3). It used
     # to sit after it, where it was DEAD: every node satisfying `indirect` is also
