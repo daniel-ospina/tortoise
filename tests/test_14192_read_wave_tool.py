@@ -243,47 +243,256 @@ def _read_calls(tree: ast.AST) -> list[ast.Call]:
             and (getattr(n.func, "attr", None) or getattr(n.func, "id", None)) in _READ_NAMES]
 
 
-def _str_constants(tree: ast.AST) -> dict[str, str]:
-    """Every name bound to a string LITERAL anywhere in the file, module or local scope.
+def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
+    """Every statically POSSIBLE string literal each name may hold, anywhere in the file.
 
-    ⛔ EVERY STATIC BINDING FORM, and the LAST bind wins (#14281 review P1, measured GREEN
-    over the whole pin file): this resolved a single-`Name` `Assign` only, with
-    `setdefault` keeping the FIRST binding, so
+    ⛔ EVERY STATIC BINDING FORM (#14281 review P1, measured GREEN over the whole pin file).
+    This resolved a single-`Name` `Assign` only, with `setdefault` keeping the FIRST
+    binding, so each of
 
         _N: str = "_tortoise_fts_query"          # AnnAssign
         (_N,) = ("_tortoise_fts_query",)         # unpack target
         _N = _M = "_tortoise_fts_query"          # chained
         (_N := "_tortoise_fts_query")            # walrus
+        for _N in ("_tortoise_fts_query",):      # `for` target — a bind with NO Assign node
+        [_N for _N in ("_tortoise_fts_query",)]  # comprehension target, same
 
-    each left the name unresolved, and `getattr(sdk, _N)(…, kind="statement")` — a third
-    reach carrying a lever — left the pin GREEN while the grant stood. An annotated literal
-    is statically visible; it is not the declared "computed at runtime" residual.
+    left the name unresolved, and `getattr(sdk, _N)(…, kind="statement")` — a third reach
+    carrying a lever — left the pin GREEN while the grant stood. The `for`/comprehension
+    forms are the ones this file's SIBLING guards already carry (`_aliases_of(…,
+    loops=True)`, and the mapping seed that feeds `_environ_mutations`), so their absence
+    here was an inconsistency inside one file, not a declared boundary (#14279 review F1).
+    An annotated or iterated literal is statically visible; it is not the "computed at
+    runtime" residual.
+
+    ⛔ THE VALUE IS THE SET OF EVERY BINDING, NOT THE LAST ONE (#14279 review P1, both
+    mechanisms measured GREEN with a third reach executing the product read). `ast.walk` is
+    breadth-first, not source order, and this map is file-global, so "last bind wins" was a
+    flow-insensitive justification with two fail-open consequences:
+
+        _N = "_tortoise_fts_query"; getattr(sdk, _N)(…, kind="statement"); _N = "done"
+        _N = "_tortoise_fts_query"; _counts[_N] = "zero"; getattr(sdk, _N)(…)
+
+    The first re-binds the same scratch name — or plants a decoy in an unrelated function —
+    and SILENCES the genuine binding; the second binds `_N` through a SUBSCRIPT target,
+    though `_N` is never assigned at runtime. Fail-closed is the opposite polarity: a name
+    is a reach if ANY value it can statically hold is a read name, so a later bind can only
+    ADD candidates. Assignment targets are `Name`/`Tuple`/`List` — the shape the `_bind` in
+    `_aliases_of` accepts — because a store into a container or an attribute binds no name.
+
+    Name-to-name and unpack propagation is a FIXPOINT, so a chain of any length resolves:
+    `_alias = _N`, `(_pair,) = (_N,)` and `_pair = (sdk, _N)` all leave `_pair` resolving to
+    the read name (#14279 review F2/F3 — the container-carried name that the
+    executable-parent narrowing in `_is_read_ref` no longer reaches directly).
+
+    RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`, an
+    f-string, `_N + "_x"`, a parameter) and a value read out of a container or an attribute
+    (`_CFG["read"]`, `self._read`) are not resolved here.
     """
-    out: dict[str, str] = {}
+    binds: list[tuple[ast.AST, ast.AST]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            binds.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+            binds.append((node.target, node.value))
+        # ⛔ A `for`/COMPREHENSION TARGET IS A BIND TOO (#14279 review F1): the spelling
+        # carries no `Assign` node at all, so no assignment arm above could ever see it.
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            binds.append((node.target, node.iter))
+    out: dict[str, set[str]] = {}
 
-    def _bind(target: ast.AST, value: ast.AST) -> None:
+    def _values(value: ast.AST) -> set[str]:
+        """Every string `value` can statically hold."""
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return {value.value}
+        if isinstance(value, ast.Name):
+            return set(out.get(value.id, ()))  # a chain resolves on the next pass
+        if isinstance(value, (ast.Tuple, ast.List)):
+            # A `for`/COMPREHENSION target over a literal sequence binds each element in
+            # turn, so every element is a possible value — the fail-closed reading, and the
+            # one that makes `for _N in ("_tortoise_fts_query",)` resolvable at all.
+            return set().union(*(_values(elt) for elt in value.elts))
+        return set()
+
+    def _bind(target: ast.AST, value: ast.AST) -> bool:
+        """Add every possible value of `value` to `target`; True when the map GREW."""
+        if isinstance(target, ast.Name):
+            have = out.setdefault(target.id, set())
+            before = len(have)
+            have |= _values(value)
+            return len(have) != before
         # ⛔ AN UNPACKED LITERAL PAIRS ELEMENT-WISE (`(_N,) = ("…",)`), so the target shape
-        # and the value shape have to be walked together — the flat form treated the tuple
-        # VALUE as the literal and bound nothing (measured GREEN).
+        # and the value shape are walked together — the flat form treated the tuple VALUE as
+        # the literal and bound nothing (measured GREEN). Indexed rather than `zip`: the
+        # length guard above makes `zip(strict=True)` a check that could never fire, and
+        # ruff's B905 requires it (#14279 review P3).
         if (isinstance(target, (ast.Tuple, ast.List))
                 and isinstance(value, (ast.Tuple, ast.List))
                 and len(target.elts) == len(value.elts)):
-            for _t, _v in zip(target.elts, value.elts, strict=True):
-                _bind(_t, _v)
-            return
-        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
-            return
-        for name in _names_in(target):
-            out[name] = value.value  # LAST bind wins — a re-bind is what the file ends with
+            grew = False
+            for index in range(len(target.elts)):
+                grew = _bind(target.elts[index], value.elts[index]) or grew
+            return grew
+        return False
 
+    changed = True
+    while changed:  # fixed point: a chain of any length resolves in one call
+        changed = False
+        for target, value in binds:
+            if _bind(target, value):
+                changed = True
+    return {name: frozenset(values) for name, values in out.items() if values}
+
+
+def _parents_of(tree: ast.AST) -> dict[int, ast.AST]:
+    parents: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                _bind(target, node.value)
-        elif isinstance(node, ast.NamedExpr) or (
-                isinstance(node, ast.AnnAssign) and node.value is not None):
-            _bind(node.target, node.value)
-    return out
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    return parents
+
+
+def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> frozenset[str]:
+    """Every string value `node` can statically hold, a literal container expanded."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return frozenset((node.value,))
+    if isinstance(node, ast.Name):
+        return consts.get(node.id, frozenset())  # a literal bound to a name, in ANY scope
+    if isinstance(node, ast.Starred):
+        return _possible_strings(node.value, consts)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return frozenset().union(*(_possible_strings(elt, consts) for elt in node.elts))
+    return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
+
+
+def _carries_read_name(node: ast.AST, consts: dict[str, frozenset[str]]) -> bool:
+    """True when `node` may statically BE one of the product read names."""
+    return not _possible_strings(node, consts).isdisjoint(_READ_NAMES)
+
+
+def _is_read_ref(node: ast.AST, parents: dict[int, ast.AST],
+                 consts: dict[str, frozenset[str]]) -> bool:
+    """True when `node` is a REACH on the read — a mention the census must account for."""
+    if isinstance(node, ast.Attribute) and node.attr in _READ_NAMES:
+        return True
+    # ⛔ A NAME IS ONLY A REACH WHERE IT CAN BE EXECUTED (#14281 review P2, measured): the
+    # Name arm was blanket, so a provenance constant beside `git_sha`/`db_uri` —
+    # `_NOTE = "_tortoise_fts_query"` then `print(f"measuring {_NOTE}")` — red the census
+    # with "an alias, a string reference or a getattr", the exact false red the Constant
+    # arm was narrowed to remove. Same executable-parent test, same reason. ⛔ The parent is
+    # tested for being ABLE TO EXECUTE, so a name carried through a container into a
+    # `getattr(*…)` splat is not this arm's — it is `_indirect_reads`' (#14279 review F3).
+    if isinstance(node, ast.Name) and _carries_read_name(node, consts):
+        _np = parents.get(id(node))
+        return (isinstance(_np, ast.Call)
+                and (getattr(_np.func, "id", None)
+                     or getattr(_np.func, "attr", None)) not in _PURE_READS) \
+            or (isinstance(_np, ast.Subscript) and isinstance(_np.ctx, ast.Load))
+    # ⛔ A STRING LITERAL MATTERS ONLY WHERE IT CAN BE EXECUTED. The census counts mentions
+    # because a bare name can be handed to `getattr`; a `Constant` in dict-value position is
+    # INERT — and recording provenance is the direction #14289 asks for. Measured RED
+    # before this narrowing, on both of:
+    #     "read": "_tortoise_fts_query",
+    #     "measured_by": f"{'_tortoise_fts_query'}",
+    # which the message called "an alias, a string reference or a getattr" — for a string
+    # that could not reach the read.
+    # ⛔ …AND IT IS KEPT UNDER A `Subscript` TOO (#14281 review P2, measured): the first form
+    # kept only `Call` parents, so a THIRD reach added beside the two real ones —
+    #     _lever = vars(type(sdk))["_tortoise_fts_query"](query=q["query"], limit=10)
+    # — left the census at 2 mentions and `_read_calls` at 2 calls, and the pin passed while
+    # a lever reached a read the door does not name. The literal's parent there is the
+    # SUBSCRIPT, not the call, so the executed spelling spans both.
+    # ⛔ …AND THE `Call` PARENT MUST BE ABLE TO EXECUTE IT (#14281 review P2, measured): a
+    # blanket `Call` parent also admitted `print("_tortoise_fts_query")`, which cannot reach
+    # the read — the very false red the dict-value narrowing removed. `getattr`/`setattr` are
+    # caught earlier by `_indirect_reads`; they are kept here so the census stays honest if
+    # that guard is ever reordered again.
+    _parent = parents.get(id(node))
+    if not isinstance(node, ast.Constant) or node.value not in _READ_NAMES:
+        return False
+    if isinstance(_parent, ast.Subscript):
+        # ⛔ A STORE CANNOT BE CALLED (#14281 review P2, measured): counting every subscript
+        # red `_counts["_tortoise_fts_query"] = 0` and
+        # `_counts2["_tortoise_fts_query"] += 1` — the recording direction #14289 wants, and
+        # the same "can this be EXECUTED?" rule the `Call` arm follows.
+        return isinstance(_parent.ctx, ast.Load)
+    # ⛔ FAIL-CLOSED ON AN UNKNOWN CALLEE (#14281 review P1, three spellings measured GREEN
+    # against the allow-list this replaced): `_g = getattr;
+    # _g(sdk, "_tortoise_fts_query")(…)`, `getattr.__call__(…)` and
+    # `dict.__getitem__(vars(type(sdk)), "_tortoise_fts_query")(…)` each carry a lever. The
+    # allow-list answered the `print("…")` false red by OPENING the hole — the wrong
+    # direction. `_PURE_READS` is the set this file already trusts not to reach a callee by
+    # name (it contains `print`, `len`, `dict`, …), so `print("…")` stays green and a name
+    # alias of `getattr` does not become a way through.
+    return (isinstance(_parent, ast.Call)
+            and (getattr(_parent.func, "id", None) or getattr(_parent.func, "attr", None))
+            not in _PURE_READS)
+
+
+def _splat_operands(call: ast.Call) -> list[ast.AST]:
+    """The operands a positional list can deliver, a LITERAL splat expanded one level.
+
+    `getattr(*[sdk, _N])` passes ONE `Starred` node and delivers two arguments, so an
+    arity test (`len(n.args) >= 2`) could not see it at all (#14279 review F2/F3).
+    """
+    operands: list[ast.AST] = []
+    for arg in call.args:
+        operands.append(arg)
+        if isinstance(arg, ast.Starred) and isinstance(arg.value, (ast.Tuple, ast.List)):
+            operands.extend(arg.value.elts)
+    return operands
+
+
+def _name_reaching_operands(call: ast.Call) -> list[ast.AST]:
+    """The operands of `call` that are NOT the object being read.
+
+    Everything after the first positional, plus EVERY splat: a splat's own arity and
+    position are not statically knowable here, so it is fail-closed — `getattr(*_pair)`, a
+    one-element positional list, still inspects `_pair` (#14279 review F3).
+    """
+    operands = _splat_operands(call)[1:]
+    operands.extend(arg for arg in call.args if isinstance(arg, ast.Starred))
+    return operands
+
+
+def _indirect_reads(tree: ast.AST, consts: dict[str, frozenset[str]]) -> list[ast.Call]:
+    """`getattr`/`setattr` calls that reach the read BY NAME — the census's own diagnosis.
+
+    ⛔ MEASURED BYPASS (#14279 review F3/P2), each GREEN before this arm resolved a name
+    carried through a container: `_pair, = (_N,)` or `_pair = (sdk, _N)` followed by
+    `getattr(sdk, _pair)(…)` / `getattr(*_pair)(…)`, and `getattr(*[sdk, _N])(…)`. The
+    census cannot recover them (the `_is_read_ref` Name arm requires an executable parent),
+    so this fires FIRST, under its own diagnosis, before `len(mentions) == 2` can mask it.
+    """
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+            in ("getattr", "setattr")
+            and any(_carries_read_name(arg, consts)
+                    for arg in _name_reaching_operands(n))]
+
+
+def _read_reach(tree: ast.AST, consts: dict[str, frozenset[str]] | None = None,
+                parents: dict[int, ast.AST] | None = None,
+                ) -> tuple[list[ast.AST], list[ast.Call], list[ast.Call]]:
+    """`(mentions, calls, indirect)` — THE reach census, for the pin AND its own tests.
+
+    ⛔ ONE FUNCTION (#14279 review F2). Every mutant table in this file resolves the read
+    through THIS call, so a test cannot pass by using a different (looser) copy of the walk
+    — the failure mode rule 3 names, and the reason `_collection_alias_predicate` exists.
+
+    ⛔ `indirect` IS EVALUATED *BEFORE* THE MENTIONS CENSUS (#14281 review F3). It used to
+    sit after it, where it was DEAD: every node satisfying it is also `_is_read_ref`-true (a
+    `Constant` in `_READ_NAMES`, or a `Name` bound to one), so the census at
+    `len(mentions) == 2` always red first — measured three ways, all of them red at the
+    census: `getattr(...)` replacing the warm-up, `getattr(...)` added alongside, and a
+    bound-method alias. The class was covered, so nothing was a false PASS; but an
+    assertion that can never be the failing row reads to the next lane as an independent
+    guard, and it is not one. Returned first, so a caller can fire it first.
+    """
+    consts = _str_constants(tree) if consts is None else consts
+    parents = _parents_of(tree) if parents is None else parents
+    mentions = [n for n in ast.walk(tree) if _is_read_ref(n, parents, consts)]
+    return mentions, _read_calls(tree), _indirect_reads(tree, consts)
 
 
 #: The kwargs `tortoise/hosted_api.py::search` hands the read, as of this pin. A LITERAL
@@ -633,8 +842,11 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False) -> set[str]:
                 and isinstance(value, (ast.Tuple, ast.List)) \
                 and len(target.elts) == len(value.elts):
             grew = False
-            for target_elt, value_elt in zip(target.elts, value.elts, strict=True):
-                grew = _bind(target_elt, value_elt) or grew
+            # Indexed, not `zip(strict=True)`: the length guard above makes the strict
+            # check unreachable, and it was dead weight in this sibling walk too
+            # (#14279 review P3).
+            for index in range(len(target.elts)):
+                grew = _bind(target.elts[index], value.elts[index]) or grew
             return grew
         return False
 
@@ -2605,6 +2817,167 @@ def test_mutating_a_RECORDED_entry_through_an_alias_is_red() -> None:
         "losing one silently widens the other")
 
 
+def _pin_source(body: str) -> ast.AST:
+    """A minimal module carrying the two real reads plus `body`, for the pin's own census.
+
+    The same shape the pin inspects in the artifact — a warm-up call, the measured call
+    assigned to a name, then whatever the case under test adds — so a table row exercises
+    the PRODUCTION predicate against a source the pin would have to refuse.
+    """
+    return ast.parse(
+        "def run(sdk, queries):\n"
+        "    sdk._tortoise_fts_query(query=queries[0]['query'], limit=10)\n"
+        "    results = sdk._tortoise_fts_query(query=queries[0]['query'], limit=10, "
+        "leg_trace=None)\n" + body + "    return results\n")
+
+
+def _pin_refuses(source: ast.AST) -> bool:
+    """True when the pin's OWN three reach assertions on `source` would be RED.
+
+    ⛔ THE SAME FUNCTION THE PIN RUNS (`_read_reach`), and the same three conditions the
+    pin asserts (`not indirect`, `len(calls) == 2`, `len(mentions) == 2`) — a table that
+    resolved the read with its own walk could pass while the pin failed (#14279 review F2,
+    the drift `_collection_alias_predicate` exists to prevent).
+    """
+    mentions, calls, indirect = _read_reach(source)
+    return bool(indirect) or len(calls) != 2 or len(mentions) != 2
+
+
+def _mutations_of(body: str) -> list[int]:
+    """`_mutated_after`'s hits for `body` appended after the measured read."""
+    run_def = _pin_source(body).body[0]
+    # The MEASURED call is the LAST read in the source `_pin_source` builds (the warm-up is
+    # the first), so anchor the scan there — the pin's own `holder.lineno`.
+    read = max((n for n in ast.walk(run_def)
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "_tortoise_fts_query"),
+               key=lambda n: n.lineno)
+    return _mutated_after(run_def, "results", read.lineno, artifact_append=None)
+
+
+def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
+    """Each way a name can hold the read's NAME must be a reach the pin refuses.
+
+    ⛔ THIS IS THE ASSERTION THE PREVIOUS COMMITS DID NOT HAVE (#14279 review F2). Four
+    fix hunks shipped with zero tests: reverting any of them left the file byte-identical to
+    `origin/main`, which the pin runs GREEN at 22 passed — so the fail-open re-opened under
+    any later refactor and nothing reddened. Measured non-vacuity, each mutant run against
+    THIS table:
+
+      - revert `_str_constants` to its previous form -> the `for`-target, comprehension,
+        re-bind, subscript-store, name-chain, tuple-unpack and name-carried rows all pass
+        (the third reach goes uncensused);
+      - revert `_indirect_reads` to its arity test -> the two `getattr(*…)` splat rows pass;
+      - at `origin/main` -> the `AnnAssign`/unpack/chained/walrus rows pass as well.
+
+    The control at the end is the OTHER direction: a provenance constant whose value merely
+    NAMES the read (`print(f"measuring {_NOTE}")`) must stay GREEN, or the narrowing that
+    removed that false red is gone.
+    """
+    reach = 'getattr(sdk, {name})(query=queries[0]["query"], limit=10, kind="statement")'
+    rows = {
+        "AnnAssign": f'    _N: str = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n',
+        "unpack target": f'    (_N,) = ("_tortoise_fts_query",)\n    {reach.format(name="_N")}\n',
+        "chained assign": f'    _N = _M = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n',
+        "walrus": f'    (_N := "_tortoise_fts_query")\n    {reach.format(name="_N")}\n',
+        "for target": ('    for _N in ("_tortoise_fts_query",):\n        '
+                       f'{reach.format(name="_N")}\n'),
+        "comprehension target": (f'    [_N for _N in ("_tortoise_fts_query",)]\n    '
+                                 f'{reach.format(name="_N")}\n'),
+        "re-bind AFTER the reach": (f'    _N = "_tortoise_fts_query"\n    {reach.format(name="_N")}\n'
+                                    '    _N = "done"\n'),
+        "subscript STORE target": ('    _N = "_tortoise_fts_query"\n    _counts = {}\n'
+                                   f'    _counts[_N] = "zero"\n    {reach.format(name="_N")}\n'),
+        "name chained to name": ('    _N = "_tortoise_fts_query"\n    _A = _N\n'
+                                 f'    {reach.format(name="_A")}\n'),
+        "name carried in a tuple": ('    _N = "_tortoise_fts_query"\n    _pair, = (_N,)\n'
+                                    f'    {reach.format(name="_pair")}\n'),
+        "name carried into a splat": ('    _N = "_tortoise_fts_query"\n    _pair = (sdk, _N)\n'
+                                      '    getattr(*_pair)(query=queries[0]["query"], limit=10, '
+                                      'kind="statement")\n'),
+        "literal carried into a splat": ('    _N = "_tortoise_fts_query"\n'
+                                         '    getattr(*[sdk, _N])(query=queries[0]["query"], '
+                                         'limit=10, kind="statement")\n'),
+    }
+    for label, body in rows.items():
+        assert _pin_refuses(_pin_source(body)), (
+            f"[{label}] a third reach executes the product read with `kind=\"statement\"` and "
+            "the pin is GREEN on it — every static binding of the literal must resolve, or "
+            "the `intentional_keep` grant for `run()` stands on a pin that cannot go red")
+
+    # ⛔ THE CONTROL, in the false-red direction: a constant that only NAMES the read.
+    inert = ('    _NOTE = "_tortoise_fts_query"\n'
+             '    print(f"measuring {_NOTE}")\n')
+    assert not _pin_refuses(_pin_source(inert)), (
+        "a provenance constant beside `git_sha`/`db_uri` is a FALSE RED — the read is named "
+        "and never executed, and this pin's job is to bound executable reaches")
+
+
+def test_the_READ_side_of_str_is_NOT_a_MUTATION() -> None:
+    """`strip`/`lower`/`split` return a NEW object; they do not mutate the tainted receiver.
+
+    ⛔ MEASURED FALSE REDS at `66880dace8` (#14281 review P3): `print(results[0]["query"]
+    .strip())` and `_lbl = results[0]["query"].lower()` were reported as "an in-place
+    sort/clear", because the mutator polarity is FAIL-CLOSED and the str read side was not
+    listed. Adding those names shipped with no test (#14279 review F2) — reverting the hunk
+    left the pin GREEN, so the false red could come back silently.
+
+    Both directions are asserted: the reads stay green, and the fail-closed polarity that
+    makes an unlisted name a mutation is untouched.
+    """
+    for name in ("strip", "lstrip", "rstrip", "lower", "upper", "casefold", "split",
+                 "rsplit", "replace", "format", "join", "title", "capitalize", "zfill",
+                 "center", "startswith", "endswith", "find", "rfind", "isdigit", "isalpha"):
+        assert not _is_mutator_method(name), (
+            f"`{name}()` is a str READ that returns a new object, and this pin calls it a "
+            "mutation of the tainted receiver (a false red on the natural next edit to the "
+            "tool's per-query print line)")
+    for name in ("sort", "clear", "append", "extend", "update", "__delitem__", "__init__",
+                 "__iadd__", "a_method_python_adds_later"):
+        assert _is_mutator_method(name), (
+            f"`{name}` is not in `_PURE_METHODS`, so the fail-closed polarity must call it a "
+            "mutation — an unlisted name reading green is the closed-list defect this "
+            "polarity replaced")
+    assert not _is_mutator_method(None), (
+        "a call whose callee is not an attribute at all is not a method call")
+    # End to end, through the detector the pin actually runs.
+    for body in ('    print(results[0]["query"].strip())\n',
+                 '    _lbl = results[0]["query"].lower()\n'):
+        assert not _mutations_of(body), (
+            f"{body.strip()!r} mutates nothing (`hits={_mutations_of(body)}`) — a str read on "
+            "a tainted row is not an in-place mutation of the page")
+    for body in ('    results[0]["order"].sort()\n',
+                 '    helper(results)\n'):
+        assert _mutations_of(body), (
+            f"{body.strip()!r} MUST stay red — adding the str reads to `_PURE_METHODS` must "
+            "not disable the arm that catches a real mutation")
+
+
+def test_a_COMPREHENSION_argument_is_NOT_the_collection() -> None:
+    """A comprehension BUILDS A NEW collection, so it cannot mutate its source.
+
+    ⛔ MEASURED FALSE REDs at `66880dace8` (#14281 review P2): `", ".join(e.get(\"leg\") or
+    \"\" for e in trace)` and `statistics.fmean(len(r) … for r in results)` were reported as
+    "an in-place sort/clear reaches the artifact", decided by the CALLEE's name. The
+    exemption shipped with no test (#14279 review F2); reverting it left the pin GREEN.
+
+    ⛔ AND THE EXEMPTION IS NARROW: a mutation INSIDE the comprehension is still a mutation —
+    the comprehension's own receiver arm catches it, so this cannot become a blanket
+    exoneration of every expression that mentions the page.
+    """
+    for body in ('    print(", ".join(str(e) for e in results))\n',
+                 '    print(statistics.fmean(len(r) for r in results))\n'):
+        assert not _mutations_of(body), (
+            f"{body.strip()!r} hands a NEW collection to the callee, not the page "
+            f"(`hits={_mutations_of(body)}`) — a comprehension over the page is not a "
+            "mutation of it")
+    for body in ('    _x = [results.clear() for r in results]\n',
+                 '    _y = [results.sort() or r for r in results]\n'):
+        assert _mutations_of(body), (
+            f"{body.strip()!r} MUST stay red — the exemption is for a comprehension that "
+            "only READS the page, and a mutation written inside one still mutates it")
+
+
 def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     """The harness must time the read the PRODUCT runs — with the door's own arguments.
 
@@ -2653,8 +3026,15 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     ``vars(type(sdk))[...]``), a name BOUND to that literal, and a bare attribute
     mention with no call all left earlier shapes of this pin green while carrying a
     lever (each measured). Residual, stated rather than implied: a name COMPUTED at
-    runtime (``"".join(…)``, a parameter) cannot be resolved statically, so this pin
-    bounds the static reaches. Aliases ARE resolved on both halves (`alias = results;
+    runtime (``"".join(…)``, an f-string, a parameter) or READ OUT OF a container or an
+    attribute (``_CFG["read"]``, ``self._read``) cannot be resolved statically, so this pin
+    bounds the static reaches. ⛔ REACHES THROUGH A CONTAINER ARE **COVERED**, not residual
+    (#14279 review F2/F3, both measured GREEN before the fix): a name bound to the literal
+    and then carried through another name or a tuple into a ``getattr`` — ``_pair, = (_N,)``
+    / ``_pair = (sdk, _N)`` / ``getattr(*[sdk, _N])`` — fires `_indirect_reads`, and the
+    resolution itself is set-valued (``_str_constants``), so neither a later re-bind of the
+    scratch name nor a subscript store can silence a genuine binding.
+    Aliases ARE resolved on both halves (`alias = results;
     alias.sort()`, `env = os.environ; env[…] = …`), and handing either collection to a call
     that is not a known non-mutator is red. ⛔ The env-write half is one-sided on purpose: the
     harness does not RECORD which arm of `TORTOISE_FUSED_RERANK` was in force, so a
@@ -2662,92 +3042,18 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     comparable — tracked as #14289, not asserted here.
     """
     tree = ast.parse(_TOOL.read_text())
-    parents: dict[int, ast.AST] = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[id(child)] = node
+    parents = _parents_of(tree)
     consts = _str_constants(tree)
-
-    def _resolved(node: ast.AST) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.Name):
-            return consts.get(node.id)  # a literal bound to a name, in ANY scope
-        return None  # e.g. a parameter — not statically knowable here, see the docstring
-
-    def _is_read_ref(node: ast.AST) -> bool:
-        if isinstance(node, ast.Attribute) and node.attr in _READ_NAMES:
-            return True
-        # ⛔ A NAME IS ONLY A REACH WHERE IT CAN BE EXECUTED (#14281 review P2, measured):
-        # the Name arm was blanket, so a provenance constant beside `git_sha`/`db_uri` —
-        # `_NOTE = "_tortoise_fts_query"` then `print(f"measuring {_NOTE}")` — red the
-        # census with "an alias, a string reference or a getattr", the exact false red the
-        # Constant arm was narrowed to remove. Same executable-parent test, same reason.
-        if isinstance(node, ast.Name) and _resolved(node) in _READ_NAMES:
-            _np = parents.get(id(node))
-            return (isinstance(_np, ast.Call)
-                    and (getattr(_np.func, "id", None)
-                         or getattr(_np.func, "attr", None)) not in _PURE_READS) \
-                or (isinstance(_np, ast.Subscript) and isinstance(_np.ctx, ast.Load))
-        # ⛔ A STRING LITERAL MATTERS ONLY WHERE IT CAN BE EXECUTED. The census counts
-        # mentions because a bare name can be handed to `getattr`; a `Constant` in
-        # dict-value position is INERT — and recording provenance is the direction #14289
-        # asks for. Measured RED before this narrowing, on both of:
-        #     "read": "_tortoise_fts_query",
-        #     "measured_by": f"{'_tortoise_fts_query'}",
-        # which the message called "an alias, a string reference or a getattr" — for a
-        # string that could not reach the read.
-        # ⛔ …AND IT IS KEPT UNDER A `Subscript` TOO (#14281 review P2, measured): the first
-        # form kept only `Call` parents, so a THIRD reach added beside the two real ones —
-        #     _lever = vars(type(sdk))["_tortoise_fts_query"](query=q["query"], limit=10)
-        # — left the census at 2 mentions and `_read_calls` at 2 calls, and the pin passed
-        # while a lever reached a read the door does not name. The literal's parent there is
-        # the SUBSCRIPT, not the call, so the executed spelling spans both.
-        # ⛔ …AND THE `Call` PARENT MUST BE ABLE TO EXECUTE IT (#14281 review P2,
-        # measured): a blanket `Call` parent also admitted `print("_tortoise_fts_query")`,
-        # which cannot reach the read — the very false red the dict-value narrowing removed.
-        # `getattr`/`setattr` are caught earlier by `indirect`; they are kept here so the
-        # census stays honest if that guard is ever reordered again.
-        _parent = parents.get(id(node))
-        if not isinstance(node, ast.Constant) or node.value not in _READ_NAMES:
-            return False
-        if isinstance(_parent, ast.Subscript):
-            # ⛔ A STORE CANNOT BE CALLED (#14281 review P2, measured): counting every
-            # subscript red `_counts["_tortoise_fts_query"] = 0` and
-            # `_counts2["_tortoise_fts_query"] += 1` — the recording direction #14289 wants,
-            # and the same "can this be EXECUTED?" rule the `Call` arm follows.
-            return isinstance(_parent.ctx, ast.Load)
-        # ⛔ FAIL-CLOSED ON AN UNKNOWN CALLEE (#14281 review P1, three spellings measured
-        # GREEN against the allow-list this replaced): `_g = getattr;
-        # _g(sdk, "_tortoise_fts_query")(…)`, `getattr.__call__(…)` and
-        # `dict.__getitem__(vars(type(sdk)), "_tortoise_fts_query")(…)` each carry a lever.
-        # The allow-list answered the `print("…")` false red by OPENING the hole — the wrong
-        # direction. `_PURE_READS` is the set this file already trusts not to reach a callee
-        # by name (it contains `print`, `len`, `dict`, …), so `print("…")` stays green and a
-        # name alias of `getattr` does not become a way through.
-        return (isinstance(_parent, ast.Call)
-                and (getattr(_parent.func, "id", None) or getattr(_parent.func, "attr", None))
-                not in _PURE_READS)
-
-    # ⛔ ⛔ `indirect` IS EVALUATED *BEFORE* THE MENTIONS CENSUS (#14281 review F3). It used
-    # to sit after it, where it was DEAD: every node satisfying `indirect` is also
-    # `_is_read_ref`-true (a `Constant` in `_READ_NAMES`, or a `Name` bound to one), so the
-    # census at `len(mentions) == 2` always red first — measured three ways, all of them
-    # red at the census: `getattr(...)` replacing the warm-up, `getattr(...)` added
-    # alongside, and a bound-method alias. The class was covered, so nothing was a false
-    # PASS; but an assertion that can never be the failing row reads to the next lane as an
-    # independent guard, and it is not one. First, it fires with its own diagnosis.
-    indirect = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                and (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
-                in ("getattr", "setattr")
-                and len(n.args) >= 2 and _resolved(n.args[1]) in _READ_NAMES]
+    # ⛔ THE CENSUS IS ONE FUNCTION, SHARED WITH THE TESTS THAT CHECK IT (#14279 review F2):
+    # `_read_reach` is what this pin and every mutant table below call, so a test cannot
+    # pass by resolving the read with a DIFFERENT (looser) copy of the walk.
+    mentions, calls, indirect = _read_reach(tree, consts, parents)
+    # ⛔ `indirect` FIRES FIRST, with its own diagnosis (#14281 review F3 — the comment that
+    # explains why is on `_read_reach`, which owns the ordering).
     assert not indirect, (
         f"the tool reaches the read through "
         f"{getattr(indirect[0].func, 'id', None) or indirect[0].func.attr}() by name — that bypasses "
         "every check in this pin")
-
-    mentions = [n for n in ast.walk(tree) if _is_read_ref(n)]
-    calls = _read_calls(tree)
     # Anti-vacuity: TWO mentions, both calls, both the reads this pin is about (the
     # warm-up and the per-query measurement), and both inside `run()`.
     assert len(calls) == 2, (
