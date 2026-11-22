@@ -774,8 +774,12 @@ def _raises_a_skip(exc: ast.expr) -> bool:
     same "figure attached to the wrong population" class this paragraph had just fixed). The
     population THIS residual is over is therefore EVERY handler-last `Raise` of a CALL, whose
     callee is a `Name` OR an `Attribute`: **408** in `tests/`+`tools/` at this head, measured as
-    **394** Name-callee plus **14** Attribute-callee (no other callee form exists — a
-    handler-last `Raise` of a NON-call is 1 and is out of the class by definition). The 14 read
+    **394** Name-callee plus **14** Attribute-callee, and no other callee form exists, so 408 is
+    the whole class. ⛔ THE OUT-OF-CLASS ROWS ARE **148**, not the single one this parenthetical
+    used to imply (review of #14287, round 3): a handler-last `Raise` that is not a CALL is **147
+    bare re-raises** (`raise`, which has no raised object at all) plus **1 non-call OBJECT** —
+    `raise refused from None` in `tools/vector_parity_13906.py`. Stated together they make the
+    walk's total checkable: 394 + 14 + 148 = **556** handler-last raises. The 14 read
     `C.CurationRefused` ×7, `smc._state_error` ×3, and one each of `config.DaemonTargetError`,
     `socket.gaierror`, `argparse.ArgumentTypeError`, `_argparse.ArgumentTypeError`. With each of
     the **408** raised expressions resolved against its module scope, the ones that resolve to a
