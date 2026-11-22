@@ -448,6 +448,7 @@
   }
  },
  "costs": {
+  "arm": "cold",
   "fit": {
    "input": {
     "intercept": 45502.74148083167,

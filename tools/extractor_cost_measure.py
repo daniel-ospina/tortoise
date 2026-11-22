@@ -782,6 +782,11 @@ def cost_table(report: dict, rates_peak: dict, rates_off: dict) -> dict:
                            rates_off)
     return {
         "rows": rows, "hit_ratio": hit_ratio,
+        # #14277 review: the arm these rows and this ratio were read from. The
+        # renderers print it rather than the literal "cold", so a bundle
+        # measured with `--arms warm` is not labelled as a cold one (that
+        # mislabelling was the same defect as the pooling above, one level up).
+        "arm": arm_name,
         "usd_per_million_peak": per_m_peak,
         "usd_per_million_off_peak": per_m_off,
         "warm_hit_ratio": float(warm_cache.get("hit_ratio") or 0.0),
@@ -1183,7 +1188,7 @@ def render_cost(report: dict) -> str:
     add("## Cost: modelled vs measured")
     add("")
     add(f"Measured cache-hit share of prompt tokens: "
-        f"**{cost['hit_ratio']:.1%}** (cold arm) · "
+        f"**{cost['hit_ratio']:.1%}** ({cost.get('arm', 'cold')} arm) · "
         f"{cost['warm_hit_ratio']:.1%} (warm arm). "
         "`measured-cold` prices every prompt token at the full input rate — "
         "the conservative end `#14275` says it is quoting; `measured-cached` "
@@ -1254,8 +1259,13 @@ def render_verdict(report: dict) -> str:
         f"1,000 median documents ≈ "
         f"**${median['measured_cached_peak'] * 1000:,.2f}** at peak, not "
         f"$5.6–7.7.")
-    fit_in = report["arms"]["cold"]["input_fit"]
-    fit_out = report["arms"]["cold"]["output_fit"]
+    # the fitters below must read the arm the cost table priced — a
+    # `--arms warm` bundle has no `cold` key at all and used to raise
+    # `KeyError: 'cold'` here (#14277 review).
+    fitted = report["arms"][cost.get("arm") or ("cold" if report["arms"].get("cold")
+                                                 else "warm")]
+    fit_in = fitted["input_fit"]
+    fit_out = fitted["output_fit"]
     add(f"- **The two constants — CORRECTED, and one of them was never a "
         f"constant.** Input: `tokens_in = "
         f"{fit_in['intercept']:,.0f} + {fit_in['slope']:.2f} × T` per "

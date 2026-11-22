@@ -463,9 +463,14 @@ def test_the_cost_table_reads_one_arm_and_not_a_pool_of_both():
     back silently: cold rows are 50k/16k, warm rows are 90k/40k, so the
     pooled median (70k/28k) is a third value that matches NEITHER arm.
     """
-    rows = ([_row(arm="cold", prompt_tokens=50_000, completion_tokens=16_000)
+    rows = ([_row(arm="cold", prompt_tokens=50_000, completion_tokens=16_000,
+                  cache_hit_tokens=25_000, cache_miss_tokens=25_000)
              for _ in range(3)]
-            + [_row(arm="warm", prompt_tokens=90_000, completion_tokens=40_000)
+            # a DIFFERENT cache split too (75% vs 50%), so the hit-ratio
+            # assertion below cannot pass on a wrong arm that happens to share
+            # the cold arm's ratio
+            + [_row(arm="warm", prompt_tokens=90_000, completion_tokens=40_000,
+                    cache_hit_tokens=67_500, cache_miss_tokens=22_500)
                for _ in range(3)])
     report = m.report_from_rows(rows)
     cost = report["costs"]
@@ -478,3 +483,24 @@ def test_the_cost_table_reads_one_arm_and_not_a_pool_of_both():
     # both arms happening to share a median
     assert (median["measured_in"], median["measured_out"]) != (70_000, 28_000)
     assert cost["hit_ratio"] == report["arms"]["cold"]["doc"]["cache"]["hit_ratio"]
+
+
+def test_a_warm_only_bundle_renders_and_says_it_is_the_warm_arm():
+    """#14295 review, P2: `--arms warm` is a documented flag, and its bundle
+    crashed the renderer (`KeyError: 'cold'` from `render_verdict`) or, one
+    function over, labelled the warm arm's cache ratio as the COLD arm's — the
+    same mislabelling the pooling fix removed, one level up in the render.
+    """
+    rows = [_row(arm="warm", prompt_tokens=90_000, completion_tokens=40_000,
+                 cache_hit_tokens=67_500, cache_miss_tokens=22_500)
+            for _ in range(3)]
+    report = m.report_from_rows(rows)
+    assert list(report["arms"]) == ["warm"]
+
+    text = m.report_markdown(report)          # used to raise KeyError: 'cold'
+    assert report["costs"]["arm"] == "warm"
+    assert "**75.0%** (warm arm)" in text, (
+        "the cost section must name the arm it measured, not the literal 'cold'")
+    assert "(cold arm)" not in text
+    # and the fits it quotes are that arm's own
+    assert f"{report['arms']['warm']['input_fit']['intercept']:,.0f} + " in text
