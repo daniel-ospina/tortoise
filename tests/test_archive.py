@@ -4717,3 +4717,72 @@ def test_a_chain_BEYOND_the_HOP_BOUND_names_the_BOUND_not_a_working_tree_diff(tr
     assert "the working tree differs from every commit" not in message, (
         f"a clean tree must not be told it differs from every commit: {message}"
     )
+
+
+def test_an_UNREADABLE_candidate_does_not_MASK_the_working_tree_refusal(tree: Path) -> None:
+    """P2 (round-25): widening `_UNREADABLE` made `anchor_sha` suppress the true refusal.
+
+    `_UNREADABLE` used to mean exactly "hop bound exhausted", and the refusal that names it was
+    written then. Once it also covered an ABSOLUTE/escaping target and an unreadable mode, an
+    unreadable candidate could out-shout a candidate that was READ and did not hold the code —
+    printing "This is NOT a working-tree difference, and committing the source will not change
+    it", both halves false, while the real remedy (commit the source) was never shown. A definite
+    `False` is hard evidence and decides.
+
+    Mutation: raise on `unreadable_here` without the `not false_here` guard -> RED here.
+    """
+    for body in ("def real(x):\n    return x * 2\n", "def real(x):\n    return x + 1\n"):
+        (tree / "tortoise" / "real.py").write_text(body, encoding="utf-8")
+        _commit(tree, "tortoise/real.py")
+    shas = subprocess.run(
+        ["git", "rev-list", "main", "--", "tortoise/real.py"],
+        cwd=tree,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert len(shas) >= 2, f"the fixture needs two commits that touched the path: {shas}"
+    unreadable, readable_disagreement = shas[-1], shas[0]
+
+    def holds(candidate: str) -> bool | None:
+        # The OLDEST commit cannot be read; the NEWEST was read and does not hold this body.
+        return None if candidate == unreadable else False
+
+    with pytest.raises(arch.ArchiveRefused) as refused:
+        arch.anchor_sha(tree, ["tortoise/real.py"], holds=holds)
+    message = str(refused.value)
+    assert "the working tree differs from every commit" in message, (
+        f"a readable candidate that disagreed must decide the refusal: {message}"
+    )
+    assert "cannot be READ" not in message, (
+        f"the unreadable arm must not out-shout a readable disagreement: {message}"
+    )
+    assert readable_disagreement, "the readable candidate is the one that must decide"
+
+
+def test_the_unREADABLE_refusal_names_its_CAUSES_not_only_the_hop_bound(tree: Path) -> None:
+    """P2 (round-25): the refusal asserted "exceeds `_LINK_HOPS`" for a ONE-hop absolute link.
+
+    Measured pre-fix: a carrier whose single link target was ABSOLUTE was refused with "the
+    carrier's link chain … exceeds `_LINK_HOPS` (8) hops" — a fact about a chain that is one hop
+    long, and a remedy ("shorten the chain") that cannot apply. The read now returns
+    `_UNREADABLE` for three distinct causes, so the message names all three.
+
+    Mutation: restore the "exceeds `_LINK_HOPS` … shorten the chain" wording -> RED here.
+    """
+    (tree / "tortoise" / "real.py").write_text("def real(x):\n    return x * 2\n", encoding="utf-8")
+    _commit(tree, "tortoise/real.py")
+    sha = subprocess.run(
+        ["git", "rev-parse", "main"], cwd=tree, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    def holds(candidate: str) -> bool | None:
+        return None  # one candidate, unreadable
+
+    with pytest.raises(arch.ArchiveRefused) as refused:
+        arch.anchor_sha(tree, ["tortoise/real.py"], holds=holds)
+    message = str(refused.value)
+    assert sha, "the fixture must have a commit for the carrier"
+    assert "cannot be READ" in message, f"the refusal must say the read failed: {message}"
+    assert "ABSOLUTE" in message, f"the refusal must name the target shape it can hit: {message}"
+    assert "mode cannot be read" in message, f"the refusal must name the unreadable-mode cause: {message}"
