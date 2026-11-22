@@ -67,10 +67,10 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:15701-15707`` and
-``result["vet"]`` at ``:15711-15715``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:15706-15712`` and
+``result["vet"]`` at ``:15716-15720``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:22094``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:22147``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -278,7 +278,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:3058-3083``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:22492`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:22545`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -553,7 +553,7 @@ SEAM_LEDGER = (
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2846`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2875`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -1842,10 +1842,10 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:14783, the "
-        "flag; :14787, the early return; :14818, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17894), "
-        "`if vet_enabled and complete_list:` (:15367) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:14788, the "
+        "flag; :14792, the early return; :14823, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:17970), "
+        "`if vet_enabled and complete_list:` (:15372) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
         "returns {} on its fail-open path, :14512 and :14515)."
@@ -1853,16 +1853,16 @@ _IDLE_CITES: dict[str, str] = {
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:14752 (and set False when its classifier cannot "
-        "be constructed, :14777), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:14757 (and set False when its classifier cannot "
+        "be constructed, :14782), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:14814-14817), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:14819-14822), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:15236) around `if items:` "
-        "(:15239), `if classify_later and complete_list:` (:15382) around "
-        "`if items:` (:15392) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:15241) around `if items:` "
+        "(:15244), `if classify_later and complete_list:` (:15387) around "
+        "`if items:` (:15397) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :15252 / :15403)."
+        "empty stats (its fail-open `except` at :15257 / :15408)."
     ),
 }
 
@@ -1874,26 +1874,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:14814-14817, :14818, :15701-15707, :15711-15715) — so an acceptance test of "a non-empty dict"
+    {}}`` (:14819-14822, :14823, :15706-15712, :15716-15720) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:14783`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:14786``, whose
-    ``if not edus:`` early return (``:14787``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:14818``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:14788`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:14791``, whose
+    ``if not edus:`` early return (``:14792``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:14823``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:17894``) and ``if vet_enabled and complete_list:``
-    (``:15367``). So a session whose conversation produced no list emits
+    embed_list:`` (``:17970``) and ``if vet_enabled and complete_list:``
+    (``:15372``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:14512-14515``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:14752`, its own early-return
+    is different code (``classify_later`` at `:14757`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -3372,7 +3372,7 @@ def _a4_pointkind(projection) -> dict:
     `projection/entities.py:3078`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
-    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2846`)
+    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2875`)
     inside `_write_capture_turns` — and 159 of
     the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
     them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
