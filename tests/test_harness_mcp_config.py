@@ -1167,6 +1167,12 @@ class TestDocsPageAndSkillConfig:
         # withhold a write tool), and the row must name NO retired tool (#3883
         # class — a tool-grant client cannot call one).
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        assert "tortoise_graph_overview" in row, (
+            "the row must NAME the current graph-discovery affordance — the "
+            "pre-#10914 block asserted the standalone `tortoise_list_graphs` "
+            "here, and its replacement asserted only the `section=` argument, "
+            "which left nothing tying the row's text to the tool it teaches "
+            "(#14038 review, P2 — the property is the NAME, so assert the name")
         assert 'section="graphs"' in row, (
             "the row must name the graph-discovery affordance — a connector "
             "carries no graph of its own, so the user has to see what exists "
