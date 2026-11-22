@@ -5,8 +5,16 @@ the MCP and SDK doors consult the installed packs' declared `relations` /
 `kindDefs` before they let a caller **write** and **connect** things? The
 extractor does, exhaustively (`extractor_v2` derives each kind's edgemates from
 the declared `relations` and closes them to a fixpoint); the write path had no
-**kind-pair** leg at all, so `Product --blocks--> Feature` landed while no pack
-declared `blocks` for any pair of those kinds.
+**kind-pair** leg at all.
+
+The SILENT case the leg closes is the `label` on the OPERATOR and INGEST doors: a
+pack declares `assignedTo` / `contains` / `addresses`, so the `#1934`/`#7551`
+predicate leg says nothing (the WORD is declared) and nothing asked whether these
+two KINDS are a pair the pack declares that word for. ⛔ It is NOT
+`link_entities("blocks", …)`: that routes to `_EdgeHandlers.create_edge`, whose
+`_VALID_EDGE_PREDICATES` allow-list is CLOSED and raises `Unknown predicate:`
+before writing — the residual the `69a9fae6c8` review (F4) corrected here in
+both places the wrong example was told.
 
 What this file pins, and why each test is here rather than in a docstring:
 
@@ -64,12 +72,34 @@ from tortoise.sdk import TortoiseSDK
 
 TEST_GRAPH = "tortoise_test_14263_relation_pairs"
 
-#: The outcomes the module can PRODUCE. A value outside this set is a claim
-#: nothing implements — the assertion below is what keeps "refuse" and
-#: "redirect" from being added quietly.
+#: The outcomes the module can PRODUCE — the CONTRACT, stated here so the module
+#: is graded against it rather than against itself. `_produced_outcomes()` reads
+#: the module and must EQUAL this, so a new outcome constant added to
+#: `relation_guards.py` (a `refuse()`, a `redirect()`) reds this by name instead
+#: of being pinned to a literal set that can never vary.
 PRODUCED_OUTCOMES = {
     ACCEPT, NORMALISED, UNDECLARED_PAIR, REVERSED_PAIR, ABSTAIN,
 }
+
+
+def _produced_outcomes() -> set[str]:
+    """The outcome VALUES the module actually defines, read from the module.
+
+    Derived by the module's own naming convention — every module-level UPPERCASE
+    string that is not an abstention REASON id (``ABSTAIN_*``, a *why* not a
+    *what*) and not a RULE id (``RULE_*``, which names a payload's rule field) is
+    an outcome. Reading it rather than restating it is the point: the assertion
+    that uses this must be able to RED, which a test-local literal compared with
+    another test-local literal (``X >= X``) can never do — it stayed green under
+    every possible edit to `relation_guards.py`, including one that added a
+    ``refuse()`` outcome, while reading as the pin for the no-refusal property
+    (`69a9fae6c8` review, F6).
+    """
+    return {
+        value for name, value in vars(rg).items()
+        if name.isupper() and isinstance(value, str)
+        and not name.startswith(("ABSTAIN_", "RULE_"))
+    }
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -273,8 +303,14 @@ class TestAXAdmission:
     def test_no_refusal_outcome_exists(self):
         assert "refuse" not in dir(rg)
         assert "Refused" not in dir(rg)
-        assert {
-            ACCEPT, NORMALISED, UNDECLARED_PAIR, REVERSED_PAIR, ABSTAIN} >= PRODUCED_OUTCOMES
+        # ⛔ This is the non-vacuous half: `_produced_outcomes()` READS the module,
+        # so a new outcome constant (`REFUSE = "refuse"`, a `REDIRECT`) makes the
+        # two sets differ and reds here BY VALUE. The literal set stays on the
+        # right-hand side as the CONTRACT — deleting a shipped outcome reds too.
+        assert _produced_outcomes() == PRODUCED_OUTCOMES, (
+            "the module's outcome vocabulary drifted from the declared contract: "
+            f"module={sorted(_produced_outcomes())} "
+            f"contract={sorted(PRODUCED_OUTCOMES)}")
 
     def test_the_module_declares_why_redirect_is_not_produced(self):
         doc = rg.__doc__ or ""
@@ -477,6 +513,197 @@ def _edge_exists(sdk, from_id, to_id, predicate) -> bool:
         f"MATCH (a)-[r:{predicate}]->(b) WHERE a.id=$f AND b.id=$t RETURN count(r)",
         params={"f": from_id, "t": to_id}).result_set
     return bool(rows and rows[0][0])
+
+
+def _edge_label(sdk, from_id, to_id, rel_type="IMPL"):
+    """The STORED `label` property on the direct edge between two ids."""
+    rows = sdk._get_proj().g.query(
+        f"MATCH (a)-[r:{rel_type}]->(b) WHERE a.id=$f AND b.id=$t "
+        "RETURN r.label",
+        params={"f": from_id, "t": to_id}).result_set
+    return rows[0][0] if rows else None
+
+
+def _operator_label(sdk, operator_id):
+    """The STORED `label` property on the operator Point."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) RETURN o.label",
+        params={"id": operator_id}).result_set
+    return rows[0][0] if rows else None
+
+
+# ══ 6. the 69a9fae6c8 review's findings, one class ═════════════════
+
+
+class TestTheSpellingIsWrittenWhereItIsReported:
+    """Review F3 — `normalise` must be TRUE on every door that reports it.
+
+    `PairVerdict.predicate` is documented as *"the spelling to WRITE: the
+    declared one on a `NORMALISED` verdict"* and the module's table says a
+    re-spelling is normalised **silently**. Measured at the previous head, only
+    `_create_edge` applied it: these two doors reported the write as normalised
+    while storing the caller's spelling, so the graph held two spellings of ONE
+    declared relation and no reply said so.
+    """
+
+    def test_the_direct_edge_door_writes_the_declared_spelling(self, sdk):
+        api = _obj(sdk, "API", "dev:api")
+        db = _obj(sdk, "DB", "dev:database")
+        out = sdk._create_direct_edge("IMPL", api, db, label="DEPENDSON")
+        assert out["created"] is True
+        assert _edge_label(sdk, api, db) == "dependsOn", (
+            "a re-spelling of a DECLARED predicate must be written as the "
+            "DECLARED spelling — otherwise the graph accumulates two tokens "
+            "for one relation while the reply calls the write normalised")
+        # …and it stays SILENT: the outcome is not one of the two REPORTED ones.
+        assert "relation_declaration" not in out
+        assert "warnings" not in out
+
+    def test_the_operator_door_writes_the_declared_spelling(self, sdk):
+        api = _obj(sdk, "API", "dev:api")
+        db = _obj(sdk, "DB", "dev:database")
+        out = sdk._create_operator("IMPL", api, [db], label="DEPENDSON")
+        assert out.get("id"), "the operator must LAND"
+        assert _operator_label(sdk, out["id"]) == "dependsOn", (
+            "the operator route stored the caller's spelling (review F3)")
+        assert "relation_declaration" not in out
+
+    def test_the_predicate_leg_still_warns_about_an_UNDECLARED_label(self, sdk):
+        """The other direction: a gate never rewrites what it reports as bad.
+
+        `_canonical_relation_spelling` answers `None` for a verb no pack
+        declares, and the caller's own spelling must survive — the `#1934`
+        predicate leg's warning names the word the CALLER used.
+        """
+        api = _obj(sdk, "API", "dev:api")
+        db = _obj(sdk, "DB", "dev:database")
+        out = sdk._create_operator("IMPL", api, [db], label="inventedVerb")
+        assert _operator_label(sdk, out["id"]) == "inventedVerb"
+        assert any(w.get("code") == "undeclared_relation"
+                   for w in out.get("warnings") or ()), \
+            "the #1934 predicate leg still speaks about an invented verb"
+
+
+class TestThePairUniquenessIsOverPairs:
+    """Review F5 — uniqueness over hit ROWS reports a declared pair as undeclared.
+
+    `declared_relation_pairs()` accumulates rows from EVERY loaded pack, so two
+    manifests declaring the same predicate for the same pair produce two hits
+    for ONE pair. A `len(hits) == 1` test then answers "no single relation" —
+    an agent-facing falsehood about a pair the packs declare twice.
+    """
+
+    def test_a_pair_declared_twice_is_still_declared(self):
+        pair = ("dev:api", "dev:database")
+        declared = {"dependsOn": (pair, pair)}
+        verdict = relation_pair_verdict(
+            "dependsOn", "dev:api", "dev:database", declared=declared)
+        assert verdict.outcome == ACCEPT, (
+            f"a pair the packs declare TWICE was reported as {verdict.outcome}")
+        assert verdict.payload is None, "an accept says nothing"
+
+    def test_the_reverse_check_is_deduped_the_same_way(self):
+        """`REVERSED_PAIR` shares the helper, so it shared the bug."""
+        declared = {"dependsOn": (("dev:database", "dev:api"),
+                                   ("dev:database", "dev:api"))}
+        verdict = relation_pair_verdict(
+            "dependsOn", "dev:api", "dev:database", declared=declared)
+        assert verdict.outcome == REVERSED_PAIR
+
+    def test_two_DIFFERENT_matching_pairs_still_resolve_to_none(self):
+        """Deduping must not turn a genuine ambiguity into a guess."""
+        declared = {"dependsOn": (("dev:api", "dev:database"),
+                                   ("dev:api", "dev:cache"))}
+        # A bare `dev` pair that both declarations' local halves could answer is
+        # not expressible here, so assert the surviving rule directly: one
+        # asked pair resolves only when exactly ONE distinct pair matches.
+        assert relation_pair_verdict(
+            "dependsOn", "dev:api", "dev:cache", declared=declared
+        ).outcome == ACCEPT
+        assert relation_pair_verdict(
+            "dependsOn", "dev:cache", "dev:database", declared=declared
+        ).outcome == UNDECLARED_PAIR
+
+
+class TestAReportedTargetIsAttributable:
+    """The prior review's P3 — a multi-target write kept only the FIRST fact.
+
+    `relation_declaration` is one dict, so on a multi-target operator write the
+    other targets' facts survived only in `warnings` — and without a target id
+    there they could not be attributed to the target they are about.
+    """
+
+    def test_every_reported_target_carries_its_own_id(self, sdk):
+        epic = _obj(sdk, "Epic", "dev:epic")
+        issue = _obj(sdk, "Issue", "dev:issue")
+        db = _obj(sdk, "DB", "dev:database")
+        out = sdk._create_operator("IMPL", epic, [issue, db], label="dependsOn")
+        reported = {w["relation_declaration"]["target"]
+                    for w in out["warnings"]}
+        assert reported == {issue, db}, (
+            f"every reported target must be named; got {reported}")
+        # the singular field is documented as the FIRST reported target, and it
+        # is attributable too rather than being an anonymous block
+        assert out["relation_declaration"]["target"] == issue
+
+
+class TestIngestCarriesTheReport:
+    """Review F2 — the bulk surface computed the judgement and dropped it.
+
+    Ingest is `#14263`'s motivating surface (it mints edges in bulk), and it was
+    the ONE place where the leg ran and the caller saw nothing: the router read
+    `created`/`id` and rebuilt the envelope from scratch.
+    """
+
+    def test_the_direct_route_carries_the_declaration(self, sdk):
+        out = sdk._ingest(_pair_bundle(reify=False, label="contains"),
+                          granularity="granular")
+        assert out["relation_declarations"], (
+            "the ingest surface paid for the leg and reported NOTHING")
+        entry = out["relation_declarations"][0]
+        assert entry["outcome"] == UNDECLARED_PAIR
+        assert entry["predicate"] == "contains"
+        assert entry["connection"] == "c1"
+        assert entry["fromId"] and entry["toId"]
+        # the per-connection view (granular mode) agrees with the rollup
+        conn_result = next(r for r in out["results"]
+                           if r["section"] == "connections")["result"]
+        assert conn_result["relation_declaration"]["outcome"] == UNDECLARED_PAIR
+
+    def test_the_operator_route_carries_the_declaration(self, sdk):
+        out = sdk._ingest(_pair_bundle(reify=True, label="contains"))
+        assert out["relation_declarations"]
+        assert out["relation_declarations"][0]["outcome"] == UNDECLARED_PAIR
+
+    def test_a_declared_pair_reports_nothing_and_the_key_is_still_there(self, sdk):
+        out = sdk._ingest(_pair_bundle(reify=False, label="dependsOn"))
+        assert "relation_declarations" in out, (
+            "the field is part of the STABLE key set — always present")
+        assert out["relation_declarations"] == []
+
+
+def _pair_bundle(*, reify: bool, label: str) -> dict:
+    """Two Object endpoints of DECLARED kinds, and one connection by label.
+
+    `dev:api` / `dev:database` occur in the declared vocabulary (as
+    `dependsOn`'s pair) but NOT as `contains`'s, so the pair leg reaches a
+    verdict instead of abstaining on an unknown scope. `reify` picks the route:
+    without it an Object->Object `IMPL` is an operator-less DIRECT edge, with it
+    the operator route — so the two tests drive both writers.
+    """
+    conn = {"ref": "c1", "from": "oA", "to": "oB",
+            "operator": "IMPL", "label": label}
+    if reify:
+        conn["reify"] = True
+    return {
+        "entities": [
+            {"ref": "oA", "type": "object", "name": "The API spec",
+             "objectKind": "dev:api"},
+            {"ref": "oB", "type": "object", "name": "The database",
+             "objectKind": "dev:database"},
+        ],
+        "connections": [conn],
+    }
 
 
 # ══ 6. cost, and no surface change ════════════════════════════════════════

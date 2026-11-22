@@ -191,7 +191,8 @@ Rules that hold regardless of granularity or policy:
     "refs": {"pA": "01J8…", "pB": "01J8…", "src1": "…"}
   },
   "nudges": [],
-  "warnings": []
+  "warnings": [],
+  "relation_declarations": []
 }
 ```
 
@@ -240,6 +241,7 @@ with its primitive result and a `deduped` flag:
   "ids": {"points": ["01J8…"], "entities": [], "sources": [], "connections": [], "refs": {}},
   "nudges": [],
   "warnings": [],
+  "relation_declarations": [],
   "results": [
     {"section": "points", "index": 0, "ref": "pA", "item": {"tags": ["x"]},
      "result": {"id": "01J8…", "pointKind": "statement", "status": "draft", "content": "A implies B"},
@@ -288,6 +290,7 @@ policy):
 | `ids` | `{points[], entities[], sources[], connections[], refs{}}` | The ids/urls the bundle produced or matched, plus the ref table. |
 | `nudges` | `[]` | Advisory only, never enforced. |
 | `warnings` | `["<key>:<ids>:<detail>", …]` | Divergences the engine noticed (never fatal). Each entry is a key-prefixed string — the key is the §3.2 closed-set token, then the affected ids, then any context (colon-delimited). A warning key outside the §3.2 table is a divergence. |
+| `relation_declarations` | `[{outcome, predicate, from, to, target, connection, fromId, toId, …}, …]` | **Always present** (empty when nothing was reported, so the key set is stable). The relation-PAIR leg's verdicts for this bundle's connections, rolled up from the connect doors — see [§3.3](#33-relation_declarations--the-relation-pair-legs-report-14263). It is deliberately NOT a §3.2 warning key: that key set is a CLOSED enumeration whose new members must land in the upstream-authored served skill mirror first, while this field is a report the caller branches on. |
 | `results` | per-item array | Granular mode only. |
 
 `ids["connections"]` descriptor shapes:
@@ -339,6 +342,49 @@ enumeration** — a warning key outside this table is a divergence; report it.
 > `created.entities: 2` and `warnings: []` — and the missing emission is
 > **#10899**. Treat `warnings[]` as a bonus signal, never as your duplicate
 > detector: compare `created` and `ids` across a retry (§15).
+
+### 3.3 `relation_declarations` — the relation-PAIR leg's report (#14263)
+
+The packs declare which **kind pairs** each relation predicate connects. Ingest
+is warn-not-block (`#1934`, governance D1/D2): the connection is written exactly
+as asked and any judgement about the pair is **reported**, never used to refuse.
+That judgement is `out["relation_declarations"]`.
+
+```json
+{
+  "outcome": "undeclared_pair",
+  "predicate": "assignedTo",
+  "from": "pm:card",
+  "to": "Subject",
+  "target": "01J8…",
+  "connection": "c1",
+  "fromId": "01J8…",
+  "toId": "01J8…",
+  "rule": "undeclared_relation_pair",
+  "declaredFor": [{"fromKind": "pm:card", "toKind": "Subject"}],
+  "declaredBetweenTheseKinds": [],
+  "override": null,
+  "undo": "none — the write was stored exactly as asked",
+  "message": "relation 'assignedTo' is not declared between …"
+}
+```
+
+- **One entry per REPORTED target.** A `to` list with several targets produces
+  one entry per target that was reported, each carrying its own `target` id —
+  the same shape the connect doors return individually. `connection` is the
+  request's `ref` (or the connection index), `fromId`/`toId` are the graph ids.
+- **Absent judgements are silent by design.** An `accept` (the pack declares
+  this predicate for this pair), a re-spelling of a declared predicate (applied
+  silently — the declared spelling is what gets WRITTEN) and every abstention
+  contribute NOTHING. An empty list is the normal, common case: a bundle of
+  `ownedBy`/`hasPart` edges between declared pairs reports nothing at all.
+- **A resubmission that mints nothing reports nothing.** The operator route's
+  exact-dedup and partial-absorb arms write no edge, so they carry no fresh
+  judgement — the same reason `ids["connections"]` is stable across a retry.
+- **NOT a §3.2 warning key**, on purpose: §3.2 is a closed enumeration whose
+  members are mirrored into the upstream-authored skill, while this is a
+  structured report a client branches on. `warnings` stays the string list it
+  always was.
 
 ---
 

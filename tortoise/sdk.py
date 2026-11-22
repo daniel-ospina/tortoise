@@ -29128,6 +29128,25 @@ class TortoiseSDK:
         # covers the relation leg only; the kind-pair leg is an epic-level
         # gap, out of #2030 scope.)
         warnings: list[dict] = []
+        # ── #14263 (review F3): ONE spelling resolution, on this door too ────
+        # A re-spelling of a DECLARED predicate (`HASPART`, `ASSIGNEDTO`,
+        # `grounded_in`) is `docs/ax/ax-principles.md` §1 Rule 1 class 1 —
+        # format variance, not a claim — so it is applied SILENTLY, exactly as
+        # `_create_edge` has always applied it. Resolving it HERE, before the
+        # `#1934` membership leg, is what makes one spelling reach all of them:
+        # the declaredness test, the direction/semantics resolution, the stored
+        # `label` property and the journal. Before this, THIS door and
+        # `_create_direct_edge` reported the write as `normalised`
+        # (`PairVerdict.predicate` in `relation_guards.py` promises "the spelling
+        # to WRITE") while storing the caller's spelling — so the graph then
+        # held two spellings of one declared relation, silently. The reference
+        # implementation for this case (SHACL) does not rewrite a lexical
+        # spelling as a side effect of reporting a validation result; where it
+        # IS applied it is applied consistently, which is the property this line
+        # restores across all three connect doors.
+        _declared_spelling = self._canonical_relation_spelling(label)
+        if _declared_spelling:
+            label = _declared_spelling
         if label:
             from tortoise.enforcement import emit_violation, warning_for_relation
             from tortoise.pack_registry import (
@@ -35731,6 +35750,18 @@ class TortoiseSDK:
         # drift warnings appended during the connection loop.
         warnings: list[str] = []
         self._ingest_warnings = warnings
+        # ── #14263: the relation-PAIR leg's honest state, per connection ──────
+        # The doors (`_create_direct_edge`, `_create_operator`) already computed
+        # this and returned it; this router used to read ONE key (`created` /
+        # `id`) and rebuild the envelope from scratch, so the report was dropped
+        # on the surface that mints edges in BULK — the fail-silent class the
+        # issue was filed about, one layer above the writer (`69a9fae6c8`
+        # review, F2). It is NOT a §3.2 `warnings` key: that set is a CLOSED
+        # contract whose new members must land in the upstream-authored served
+        # skill mirror FIRST, so the report gets its own top-level field, always
+        # present (empty when nothing was reported) so the response key set stays
+        # stable. Shape and reasoning: INGEST_CONTRACT.md §3.3.
+        relation_declarations: list[dict] = []
 
         def _register_ref(ref: str, cid: str, section: str) -> None:
             if ref in refs:
@@ -36212,6 +36243,9 @@ class TortoiseSDK:
                         deduped["connections"] += 1
                     conn_result = {"direct_edge": op_type, "from": src,
                                    "to": dsts[0], "deduped": not created_flag}
+                    self._carry_relation_declaration(
+                        conn_result, edge_res, relation_declarations,
+                        connection=conn.get("ref") or i, source=src)
                     # §6.1 descriptor: the ids["connections"] entry is the
                     # STABLE shape (no deduped — aggregated in
                     # deduped.connections) so identical-resubmission equality
@@ -36239,6 +36273,11 @@ class TortoiseSDK:
                 existing = self._find_operator(
                     op_type, [src, *dsts],
                     label=label, direction=direction)
+                # The door result of THIS pass, when one was written (the
+                # `exact` / `partial` arms below are resubmissions that mint
+                # nothing, so there is no fresh judgement to carry — see
+                # `_carry_relation_declaration`'s docstring for that residual).
+                door_result = None
                 if existing is not None and existing.get("kind") == "exact":
                     oid = existing["id"]
                     # k=N boundary (cycle-15): re-apply promotion when the
@@ -36366,6 +36405,7 @@ class TortoiseSDK:
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}
+                    door_result = op
                 else:
                     op = self._create_operator(op_type, src, dsts,
                                               label=label, direction=direction,
@@ -36373,6 +36413,11 @@ class TortoiseSDK:
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}
+                    door_result = op
+                if door_result is not None:
+                    self._carry_relation_declaration(
+                        conn_result, door_result, relation_declarations,
+                        connection=conn.get("ref") or i, source=src)
                 # §4.2 (A4): operator Points are stamped POST-WRITE keyed on the
                 # returned id (create_operator accepts no props). Stamp-when-
                 # absent covers the operator-path crash boundary too (position
@@ -36495,6 +36540,7 @@ class TortoiseSDK:
             "ids": ids,
             "nudges": nudges,
             "warnings": warnings,
+            "relation_declarations": relation_declarations,
         }
         if results is not None:
             out["results"] = results
@@ -36958,6 +37004,16 @@ class TortoiseSDK:
             f"MERGE (a)-[r:{rel_type}]->(b)",
             params={"src": source_id, "tgt": target_id},
         )
+        # ── #14263 (review F3): the declared spelling is what this door WRITES ─
+        # A re-spelling of a declared predicate is Rule 1 class 1 — silent — and
+        # the module's `PairVerdict.predicate` contract says the DECLARED one is
+        # "the spelling to WRITE". Applied here so the stored `label`, the
+        # `DirectEdgeCreated` journal descriptor that replays it and the reply
+        # all agree on ONE token (this door reported `normalised` and stored the
+        # caller's spelling before).
+        _declared_spelling = self._canonical_relation_spelling(label)
+        if _declared_spelling:
+            label = _declared_spelling
         attrs = {"direction": direction}
         if confidence is not None:
             attrs["confidence"] = float(confidence)
@@ -37480,6 +37536,58 @@ class TortoiseSDK:
         acc = getattr(self, "_ingest_warnings", None)
         if acc is not None:
             acc.append(entry)
+
+    def _carry_relation_declaration(self, conn_result: dict, door_result: dict,
+                                    collector: list, *, connection, source) -> None:
+        """Fold a connect door's relation-PAIR report into the ingest envelope (#14263).
+
+        ``_create_direct_edge`` and ``_create_operator`` each return
+        ``relation_declaration`` (the FIRST reported target) plus ``warnings``
+        (every reported target, one entry each). This router reads only the
+        write-receipt keys, so before this helper existed the leg's cost was
+        paid and its verdict was dropped — on the surface that mints edges in
+        bulk, which is the surface `#14263` exists for.
+
+        Three renderings, ONE judgement each, never a second opinion:
+
+        * ``conn_result["relation_declaration"]`` — per connection, so a granular
+          caller sees it beside the id the write produced;
+        * ``conn_result["warnings"]`` — the same entries the door returned;
+        * ``collector`` (``out["relation_declarations"]``) — the bulk rollup,
+          each entry stamped with the connection's ``ref`` (or index), its
+          ``fromId`` and the ``toId`` it is about. The convergence here is
+          deliberate: a validation report attaches per-result entries to ONE
+          top-level report, and each result names its focus node — a fact with
+          no focus node is not actionable.
+
+        ⛔ NEVER raises and never blocks: a door that reported nothing, or a
+        malformed entry, simply contributes nothing. The write has already
+        landed (`#1934`) and this is reporting, not gating.
+
+        ⚠️ **Residual, stated rather than hidden.** The operator route's
+        ``exact`` (dedup hit) and ``partial`` (absorb) arms mint nothing and call
+        no door, so they carry no judgement here. That is the same reason
+        ``ids["connections"]`` is stable across a resubmission: the edge landed
+        and was reported when it was WRITTEN, and a resubmission that writes
+        nothing has no new state to report.
+        """
+        entries = list(door_result.get("warnings") or ())
+        if not entries:
+            return
+        conn_result["relation_declaration"] = door_result.get(
+            "relation_declaration")
+        conn_result["warnings"] = entries
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            declaration = entry.get("relation_declaration")
+            if not isinstance(declaration, dict):
+                continue
+            item = dict(declaration)
+            item["connection"] = connection
+            item["fromId"] = source
+            item["toId"] = declaration.get("target")
+            collector.append(item)
 
     def _reapply_operator_promotion(self, op_id: str) -> None:
         """k=N boundary (cycle-15): re-apply promotion to a NULL-status
@@ -61937,6 +62045,31 @@ class TortoiseSDK:
                 want.discard(node_id)
         return out
 
+    def _canonical_relation_spelling(self, predicate) -> str | None:
+        """The DECLARED spelling of ``predicate``, or ``None`` (#14263).
+
+        The ONE resolution the three connect doors share — ``_create_edge``,
+        ``_create_direct_edge`` and ``_create_operator`` — so a re-spelling
+        cannot be normalised by one door and stored verbatim by another (the
+        `69a9fae6c8` review, F3). ``None`` means either "no predicate" or "not a
+        declared relation, under any spelling": the caller's own spelling must
+        then survive **unchanged**, because the `#1934`/`#7551` predicate leg
+        still has to warn about it — a gate never rewrites what it is about to
+        report as undeclared.
+
+        ⛔ NEVER RAISES and never refuses a write: an unreadable declaration set
+        answers ``None``, which leaves the caller's spelling alone. Failing here
+        would make a write depend on a read this guard cannot guarantee.
+        """
+        if not predicate or not isinstance(predicate, str):
+            return None
+        try:
+            from tortoise.relation_guards import canonical_predicate
+
+            return canonical_predicate(predicate)
+        except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
+            return None
+
     def _relation_pair_notes(self, *, predicate, source_id, target_ids) -> list[dict]:
         """AX blocks for edges whose KIND PAIR no installed pack declares (#14263).
 
@@ -61998,7 +62131,16 @@ class TortoiseSDK:
                     from_label=src_label, to_label=tgt_label,
                     declared=declared)
                 if verdict.reportable and verdict.payload is not None:
-                    notes.append(verdict.payload)
+                    # The TARGET id travels with the judgement. A multi-target
+                    # operator write reports one judgement per target, and
+                    # `relation_declaration` is only the FIRST of them — without
+                    # the id, the other rows in `warnings` could not be
+                    # attributed to the target they are about, and a fact with
+                    # no focus node is not actionable (`69a9fae6c8` review, P3
+                    # on the prior review's finding 3).
+                    note = dict(verdict.payload)
+                    note["target"] = target_id
+                    notes.append(note)
             return notes
         except Exception:  # noqa: BLE001, RUF100 — never raise into a write
             return []
@@ -62087,12 +62229,10 @@ class TortoiseSDK:
         #
         # ⛔ Order matters only for the silent leg: the normalised spelling must
         # be the one `proj.create_edge` validates AND the one the reply reports.
-        try:
-            from tortoise.relation_guards import canonical_predicate
-
-            _canonical = canonical_predicate(relation)
-        except Exception:  # noqa: BLE001, RUF100 — a gate read must not raise
-            _canonical = None
+        # One resolution, shared with `_create_direct_edge` and `_create_operator`
+        # (`_canonical_relation_spelling`), so these three doors cannot disagree
+        # about whether a re-spelling is applied.
+        _canonical = self._canonical_relation_spelling(relation)
         if _canonical:
             relation = _canonical
         _declaration_notes = self._relation_pair_notes(

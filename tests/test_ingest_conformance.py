@@ -37,7 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # ── canonical enumeration anchors (INGEST_CONTRACT §2.2/§2.3/§3.2) ────
 TOP_LEVEL = {"granularity", "batch_id", "created", "deduped", "ids",
-             "nudges", "warnings"}
+             "nudges", "warnings", "relation_declarations"}
 SECTION_COUNTS = {"points", "entities", "sources", "connections"}
 IDS_KEYS = {"points", "entities", "sources", "connections", "refs"}
 WARNING_KEYS = {

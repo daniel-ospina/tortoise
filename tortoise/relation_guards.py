@@ -7,13 +7,29 @@ those asks the question `#11656` states as a rule:
 
     **a declared relation connects only the kinds it declares.**
 
-So at the merged head a caller could mint ``Product --blocks--> Feature`` while
-no pack declares ``blocks`` for any pair of those kinds — the edge landed, EP
-priced it, and nothing in the reply said the pack had no such relation. The
-extractor never produces that shape, because it derives each kind's *edgemates*
-from the packs' declared ``relations`` and closes them to a fixpoint
+So at the merged head the write path had no such leg. The SILENT case is the
+**`label`** on the operator and ingest doors: a pack declares ``assignedTo``,
+``contains`` or ``addresses``, so the ``#1934``/``#7551`` predicate leg stays
+quiet (the WORD is declared) and nothing asked whether these two KINDS are a
+pair the pack declares that word for — the edge landed, EP priced it, and the
+reply never said the pack had no such relation. The extractor never produces
+that shape, because it derives each kind's *edgemates* from the packs' declared
+``relations`` and closes them to a fixpoint
 (``extractor_v2._select_pack_kinds``, ``#9733``); the write path had no such
 leg at all. This module is that leg.
+
+⛔ **The plain-edge door is NOT the example, and naming it as one is what the
+``69a9fae6c8`` review (F4) corrected.** ``link_entities`` routes a non-epistemic
+verb to ``projection.edges._EdgeHandlers.create_edge``, whose
+``_VALID_EDGE_PREDICATES`` allow-list is CLOSED and raises ``Unknown predicate:
+<verb>`` **before writing** — so ``link_entities("blocks", …)`` never lands and
+EP never prices it (``blocks`` is a Layer-3 operator label, not a structural
+edge; an earlier draft of this docstring claimed the opposite). That
+pre-existing refusal is a RESIDUAL this module does not change. ``_create_edge``
+IS reachable, but only for the pack-declared verbs the allow-list also carries
+(``hasPart``, ``dependsOn``, ``ownedBy``) — so the doors where a declared verb
+reached the graph with no pair check are the operator and direct-edge ``label``
+paths and ``ingest``, and that is where the leg was missing.
 
 ## What it decides — and what it deliberately does not
 
@@ -393,7 +409,20 @@ def _pair_matches(pairs: tuple[tuple[str, str], ...],
     hits = [pair for pair in pairs
             if _kind_equivalent(from_kind, pair[0], from_label)
             and _kind_equivalent(to_kind, pair[1], to_label)]
-    return hits[0] if len(hits) == 1 else None
+    # Uniqueness is over DISTINCT PAIRS, never over hit ROWS. ``declared``
+    # accumulates rows from EVERY loaded pack (`pack_registry.list_relations`
+    # yields each pack's own rows), so two manifests declaring the same
+    # predicate for the same pair produce TWO hits for ONE pair — and a
+    # uniqueness test over ROWS would then answer "no single relation" about a
+    # pair the packs declare twice, i.e. report ``undeclared_pair`` for a
+    # DECLARED pair. That would be an agent-facing falsehood, which is the one
+    # thing this module exists not to produce (the `69a9fae6c8` review, F5).
+    # ⚠️ Not reachable with the SHIPPED packs today (39 rows across nine
+    # manifests, no `(predicate, from, to)` triple repeats), and reachable the
+    # moment a tenant/extra manifest re-declares a pair — which is exactly what
+    # "over every loaded pack" invites.
+    distinct = list(dict.fromkeys(hits))
+    return distinct[0] if len(distinct) == 1 else None
 
 
 def _predicates_between(declared: dict[str, tuple[tuple[str, str], ...]],
