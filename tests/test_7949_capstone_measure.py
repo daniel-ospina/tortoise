@@ -18258,7 +18258,9 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ RE-MEASURED AT THIS HEAD (measured, never carried): `main`'s `#13854` (issue `#13826`,
     # `ae26adf963`) re-derived `04-plan.md`'s own row from `sdk.py:28718` to `sdk.py:28935`,
     # and `main`'s `#13971` (`e0accb8fe6`) then moved both the file and that row to
-    # `sdk.py:29142` — and the MERGE also re-pointed the row's I7 range, so the file IS in
+    # `sdk.py:29121` (the value `origin/main` STILL carries at that row), while this
+    # branch's own `b186ce98fe73` re-pointed the ROW to `sdk.py:29142` — and the MERGE also
+    # re-pointed the row's I7 range, so the file IS in
     # the diff at this head (measured in the block below). An earlier
     # cut of this block stated the opposite in both halves (once "NOT in this diff at all", once
     # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
@@ -18276,7 +18278,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-measured at this head)")
     # ⛔ RE-DERIVED (#14183 re-cut, MEASURED): `main`'s `#13971` moved that row to
-    # `sdk.py:29142` and agreed with this branch there — but the MERGE also re-pointed the
+    # `sdk.py:29121` and this branch's `b186ce98fe73` re-pointed it to `sdk.py:29142`, so the
+    # two heads DISAGREE on that row (main `29121`, here `29142`) — but the MERGE also re-pointed the
     # row's I7 range, so at this head the file IS in the diff
     # (`git diff --numstat origin/main...HEAD -- .../04-plan.md` -> `2  2`, the two lines
     # being `sdk.py:29121` -> `:29142` and `hosted_api.py:15346-15423` -> `15449-15526`).
