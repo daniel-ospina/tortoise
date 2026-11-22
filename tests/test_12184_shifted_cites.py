@@ -1317,7 +1317,8 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
     )
     # The incomparable half splits in two: the pairs that DO exist at the named `main` (and so drift) and the
     # ones that exist at neither head (and so cannot be compared at all). Both counts are published, and they
-    # must add up to the population `_PIN_EOF_PAIRS` measures — which is what makes "eight of those eleven"
+    # must add up to the population `_PIN_EOF_PAIRS` measures — which is what makes "eight of those thirteen"
+    # (the split this edition publishes; it read "eight of those eleven" before the `:7170`/`:7201` re-point)
     # checkable rather than asserted.
     drifters_incomparable = _as_int(drift.group(3))
     absent_at_main = _as_int(absent.group(1))
