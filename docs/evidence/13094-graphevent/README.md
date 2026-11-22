@@ -70,7 +70,12 @@ cumulative `+2` / `+62` / `+151`, and the flat `+134` an earlier draft applied l
 **Verdict: `record_only`-shaped.** Not one reader needs a graph capability — no traversal, no adjacency
 walk, no fulltext query, no EP walk, no vector query. Every one is a key lookup, an ordered range scan,
 an aggregate, a predicate delete, or the schema those depend on; those are SQL shapes paying RAM prices.
-The **serving** row is exactly one statement, so a re-home re-points one read and not a family of them.
+The **serving** row is exactly one statement *in this table* — so a re-home re-points one censused read
+and not a family of them. ⚠️ That is a fact about the TABLE, not about the tree: the export endpoint's
+own whole-graph scan (`hosted_api.py:33404`) is a serving reader under this census's own class rule and
+is deliberately **not censused** (`#14204`; the exclusion is stated in §6 step 4 and in the restore row's
+own `why`), so a re-point driven by this census alone would leave the export endpoint reading the old
+home. A re-home must re-point it too.
 
 **Classification, made checkable** rather than asserted in a document:
 
