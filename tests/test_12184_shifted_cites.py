@@ -1879,6 +1879,26 @@ def test_the_comparability_split_names_every_pair_past_the_pins_eof() -> None:
             _main_readable = False
             break
         _main_sizes[_path] = len(_blob)
+    # ⛔ THE SKIP IS NAMED, never silent (#14038 review cycle 7, P2 — pre-existing, and the same class
+    # as the failed-diff arm below). Every arm in this function that needs `origin/main`'s BLOBS is
+    # gated on `_main_readable`, which goes False when any of them would not render — and a gate with
+    # no excuse reports green without measuring. The ONLY legitimate cause is an ABSENT `origin/main`:
+    # the `test` job checks out at the default `fetch-depth: 1`, so the ref does not exist there and
+    # these arms cannot run. If the ref RESOLVES and a blob still would not read, the cause is a
+    # readable tree failing to render a path it carries — a defect in this arm, not an environment
+    # fact — so that state reds instead of skipping.
+    if not _main_readable:
+        _main_ref = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", "origin/main"],
+            cwd=REPO, capture_output=True, text=True, check=False)
+        assert _main_ref.returncode != 0, (
+            "`origin/main` RESOLVES ("
+            f"{_main_ref.stdout.strip()[:12]}) but one of its blobs would not render, so every "
+            "main-side arm here — the file lengths, the absent-at-main count, the provenance pair "
+            "and the write measurement — reported green WITHOUT MEASURING. The only excused cause "
+            "is an ABSENT `origin/main` (a `fetch-depth: 1` checkout), never a readable tree that "
+            "failed to read."
+        )
     if _main_readable:
         _measured_absent = sum(1 for _path, _line in _PIN_EOF_PAIRS if _line > _main_sizes[_path])
         assert absent_at_main == _measured_absent, (
