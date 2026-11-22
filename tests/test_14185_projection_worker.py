@@ -534,6 +534,56 @@ def test_the_fork_reset_replaces_PROMETHEUS_own_locks_so_no_path_can_hang(armed,
     assert monitoring.projection_worker_gauges()["queue_depth"] == 1
 
 
+def test_the_RESET_ITSELF_replaces_prometheus_locks_not_a_publisher_behind_it(
+        armed, monkeypatch):
+    """⛔ FINDING 1 (#14222 review): the reset's docstring names a call, so the
+    reset is what must MAKE it — the leg above cannot tell the two apart.
+
+    MEASURED ON THE CODE THAT SHIPPED WITHOUT THIS LEG: `worker.stats()` triggers
+    the reset, and the snapshot the reset returns is published by its CALLER
+    through `monitoring.record_projection_queue_state`, whose first line is
+    `ensure_projection_metrics_fork_safe()`. So every end-to-end path outside the
+    reset reaches the replacement by itself, and a reset that made NO call at all
+    still passed the test above — the docstring's claim ("the reset therefore also
+    calls ... this is what makes the publish below safe") was carried by prose,
+    not by a mechanism, and deleting the call would have red nothing.
+
+    So this leg calls the RESET ALONE — no publish, no read, no health probe — and
+    requires the inherited locks to be gone afterwards.
+    """
+    worker = projection_worker.worker()
+    holders = (
+        monitoring.PROJECTION_QUEUE_DEPTH,
+        monitoring.PROJECTION_QUEUE_DEPTH._value,
+        monitoring.PROJECTION_PENDING_POSITIONS,
+        monitoring.PROJECTION_PENDING_POSITIONS._value,
+    )
+    held = []
+    for holder in holders:
+        lock = threading.Lock()
+        lock.acquire()               # the peer thread's lock, held at `fork()`
+        holder._lock = lock
+        held.append(lock)
+
+    # A fork is observed by the metrics module too, so the pid gate cannot answer
+    # "already valid here" and short-circuit the replacement.
+    monkeypatch.setattr(monitoring, "_PROJECTION_METRICS_PID", os.getpid() + 1_000_000)
+    try:
+        worker._reset_for_fork_locked()          # THE RESET ALONE
+        survivors = [holder for holder, lock in zip(holders, held, strict=True)
+                     if getattr(holder, "_lock", None) is lock]
+        assert not survivors, (
+            "the fork reset returned without replacing prometheus's inherited "
+            f"locks ({len(survivors)} survived) — its docstring names "
+            "`monitoring.ensure_projection_metrics_fork_safe()` as what makes its "
+            "own publish safe, so a reverted call must red HERE and not only on a "
+            "path that reaches the same function through `monitoring`")
+    finally:
+        for lock in held:
+            if lock.locked():
+                lock.release()
+
+
 def test_a_metrics_failure_never_escapes_into_the_loop(armed, monkeypatch):
     """⛔ #14222 review cycles 5 and 6: the observability channel cannot kill the fold.
 
