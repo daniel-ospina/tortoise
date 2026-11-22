@@ -51,7 +51,6 @@ Runnable embedded (no Docker)::
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import sys
@@ -121,18 +120,28 @@ def sdk(tmp_path):
     s = TortoiseSDK(str(tmp_path / "pairs.db"), namespace=TEST_GRAPH,
                     event_log_path=str(events / "events.jsonl"))
     yield s
-    with contextlib.suppress(Exception), s._live_write_scope("test-cleanup-14263"):
-        s._get_proj().g.query("MATCH (n) DETACH DELETE n")
+    # ⛔ No graph wipe here, on purpose. The teardown used to read
+    # `with contextlib.suppress(Exception), s._live_write_scope(...)` — but
+    # `_live_write_scope` is a `tortoise.projection` FUNCTION, not an SDK method,
+    # so the AttributeError was swallowed and the `MATCH (n) DETACH DELETE n`
+    # NEVER RAN (measured). It must not be repaired into a working wipe either:
+    # under a URI-set lane (and in CI) this fixture's graph IS the shared
+    # container, where a graph-wide DELETE would destroy every other test's
+    # nodes. Residue is harmless instead — every test mints its endpoints through
+    # `_uniq`, so a later run addresses only its own namespace.
     s.close()
 
 
 # ── per-test endpoint namespace ───────────────────────────────────────────
 #
-# ⛔ The bundles below mint their endpoints by NAME, so a fixed name gives a
-# fixed content-addressed id — and under `TORTOISE_TEST_CARVE_OUT=1` every test
-# shares ONE graph (the epic-#1647 redirect), so a fixed name lets tests (and,
-# worse, two pytest PHASES of one CI job: the `last-failed` fast-fail pre-phase
-# then the full run) collide on the same pair. Measured on #14284 CI shard
+# ⛔ The bundles below mint their endpoints by NAME, and the create door is
+# IDEMPOTENT on a name (the same name twice in one graph resolves to one node;
+# ids are minted ULIDs, never a hash of the name) — so wherever tests SHARE a
+# graph, a fixed name hands them the same node. They do share one: a URI-set
+# lane (`tools/test_lane.py run` exports `TORTOISE_DB_URI`) redirects the
+# fixture's `tmp_path` store to a shared container graph (`FalkorProjection`),
+# and CI runs the `last-failed` fast-fail PRE-PHASE before the full run in the
+# same job — so pass 2 collided with pass 1 on the same pair. Measured on #14284 CI shard
 # `test (b)`: `test (b) FAILED … one pair must never carry two live mechanisms
 # (#9750): [(…'dependsOn'), (…'contains')]` and `create_operator: the pair …
 # already carries the 'IMPL' mechanism … cannot also carry 'NAND'` — one test's
@@ -151,13 +160,39 @@ def _fresh_pair_namespace():
 
 
 def _uniq(base: str) -> str:
-    """An endpoint name this RUN owns, so its content-addressed id is this run's."""
+    """An endpoint name this RUN owns, so the node it resolves to is this run's."""
     return f"{base} [{_PAIR_TOKEN}]"
 
 
 def _obj(sdk, name, kind):
-    """A ``:Object`` of a pack kind — the shape a declared relation names."""
-    out = sdk._create_object(name, objectKind=kind)
+    """A ``:Object`` of a pack kind — the shape a declared relation names.
+
+    ⛔ The NAME goes through `_uniq` for the same reason the bundles do. The
+    create door is IDEMPOTENT on a name: the same name twice in ONE graph
+    resolves to the SAME node (measured — two calls in one graph return one id,
+    two fresh graphs return two; the ids are minted ULIDs, never `obj-<hash>` of
+    the name). So a fixed name hands every test, and every pytest PROCESS, the
+    same node as soon as they share a graph. This helper is the second, larger
+    minting surface — 38 call sites. Measured on ONE shared graph with fixed
+    names: TWO `IMPL` operators on one pair — `_create_operator("IMPL", a, [b],
+    label="dependsOn")` then `_create_operator("IMPL", a, [b], label="contains")`
+    — is what CI read as "one pair must never carry two live mechanisms (#9750):
+    [('…', 'dependsOn'), ('…', 'contains')]", and a following `NAND` on that
+    pair is refused by the #12067 guard ("already carries the 'IMPL' mechanism").
+    ⛔ NOT `composedOf`: it carries no mechanism at all (`CORE_PREDICATES` is
+    IMPL/NAND/coherence, and `MECHANISM_REL_TYPES` has no `composedOf`), which is
+    exactly why #12067 lets a part/whole operator sit beside an IMPL one — and
+    why the quoted tuple must be attributed to two IMPL writes.
+    ⚠️ SHARING is what makes it bite, and sharing is the documented local shape
+    too: the lane invocation (`tools/test_lane.py run`) exports
+    `TORTOISE_DB_URI`, and `FalkorProjection` then REDIRECTS this fixture's
+    `tmp_path` store to the shared container graph (this stem is not in
+    `_embedded.TEST_NO_REDIRECT_STEMS`), so that run collides exactly as CI
+    does. Only a URI-less `TORTOISE_TEST_CARVE_OUT=1` run gives every test its
+    own graph and cannot collide. Within one test the token is stable, so
+    repeated `_obj` calls with one name still resolve to one node.
+    """
+    out = sdk._create_object(_uniq(name), objectKind=kind)
     assert out.get("id"), out
     return out["id"]
 
@@ -571,10 +606,15 @@ class TestDoors:
         """Unknown kinds are not evidence of an undeclared pair."""
         from tortoise.projection import _live_write_scope
 
+        # ⛔ `_uniq` here too: a raw fixed id is the one way a test can still
+        # address a namespace shared with every earlier run (measured: three
+        # shared-graph runs left 2 → 4 → 6 `:Object` nodes carrying ONE id, and
+        # 1 → 4 → 9 edges, because the duplicate-id CREATEs accumulate).
+        a, b = _uniq("unk_a"), _uniq("unk_b")
         with _live_write_scope("test-fixture-14263"):
             sdk._get_proj().g.query(
-                "CREATE (:Object {id:'unk_a'}), (:Object {id:'unk_b'})")
-        out = sdk.link_entities("dependsOn", "unk_a", "unk_b")
+                f"CREATE (:Object {{id:'{a}'}}), (:Object {{id:'{b}'}})")
+        out = sdk.link_entities("dependsOn", a, b)
         assert out["created"] is True
         assert "relation_declaration" not in out
 
