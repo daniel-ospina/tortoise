@@ -306,8 +306,8 @@ all three `durations:` rows still emits 720.7 at `main`'s tree `10e51693f1`) —
 over 11 shards is what was measured to cross the minute boundary at the earlier head. ⛔ **And
 `#13998`'s registration lands in the SAME pool without a further re-pack**:
 `tests/test_13998_capacity_notice.py` enters at the flat 2.0 s `DEFAULT_FAST_WEIGHT` (it has no
-`durations:` row), and the tree merged with `main` `10e51693f1` emits **four** shards at **721.3 s**
-(a, b, c, i) and **seven** at 721.2 s — `ceil(721.3/60 x 2)` is still **25 m**, the emitted term,
+`durations:` row), and the tree merged with `main` `10e51693f1` emits **all eleven** shards at **721.6 s**
+(a-k, two runs byte-identical) — `ceil(721.6/60 x 2)` is still **25 m**, the emitted term,
 not a hand count. The three
 hand-added figures are re-added from the
 emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, plus `config/ci-surfaces.yml`'s S=11
