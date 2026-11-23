@@ -48,6 +48,16 @@ version: 1
 # 6.5 m of headroom (90 - 83.46)), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and it is re-measured on the tree this block
+# MERGES INTO, never carried from the branch that first wrote it. On THIS tree (`main` at
+# `b2d1e908`, i.e. with #14409's `tests/test_14371_offline_embed_json.py` row AND #14434's
+# re-measure both landed) the same verb packs four shards at 836.8 s (a, d, e, k) and seven at
+# 836.7 s (b, c, f, g, h, i, j), so
+# `ceil(836.8/60 x 2)` = 28 m governs (a shard's job-level wall clock is the SLOWEST shard's) —
+# and the same emission prints `watchdog_minutes: 28` with `watchdog_headroom: 2.01`, so the two
+# agree by construction rather than by a hand re-read. ⛔ The shard NAMES moved WITH the seconds on
+# this re-derivation (they did not on the previous one), which is why both are stated here and
+# graded rather than only the minute. ⛔ The MINUTE has stood at 28 m across every reading of this pool from
+# 835.5 s to 836.8 s while the SECONDS moved under it, so NO arithmetic
 # MERGES INTO, never carried from the branch that first wrote it. On this merged tree (`main` at
 # `b2d1e9086a`, plus this PR's two `core`-registered rows — `tests/test_14371_offline_embed_json.py`
 # and `tests/test_14186_embedder_seam_batching.py` — both at the flat 2.0 s `DEFAULT_FAST_WEIGHT`)
@@ -12257,8 +12267,8 @@ tier1:
 # JSON/markdown reads plus the in-memory corpus.
 - test_text_gate_13099.py
 # #12184: the shifted-evidence-cite pin (`core` above). Every document it guards is
-# under `docs/` — `CAPABILITY-PLACEMENT-AUDIT.md`, `SUBSTRATE-REBUILD-MAP.md`, the
-# #12298 M3 recall brief and the #13083 census README — and `docs/` is in
+# under `docs/` — `SUBSTRATE-REBUILD-MAP.md`, the #12298 M3 recall brief, the #13083
+# census README, `ENTITY-VERDICT-BANDS.md`, `00_index.md`, the #4997 plan — and `docs/` is in
 # NON_PYTHON_PREFIXES while none of them matches a SOURCE_PATTERNS entry, so a
 # docs-only diff takes the early return and selects NO surface: measured at this
 # head, `--changed-files docs/architecture/SUBSTRATE-REBUILD-MAP.md` ->
