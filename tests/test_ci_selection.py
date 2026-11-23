@@ -13825,7 +13825,16 @@ def _emission_block_claims(
     """Read the `fast_shards` header block's stated emission.
 
     Returns `{est_seconds -> shard names}`, the `ceil(...)` operand and the minutes it
-    states; `None` when the block (the text above the `fast_shards:` key) states none.
+    states; `None` when the block (the text above the `fast_shards:` key) states none, or
+    when it carries a correct `ceil(...)` derivation but no partition clause to grade.
+
+    ⛔ It RAISES rather than returning `None` on two conditions, so the caller reds with the
+    real reason instead of the generic "states no emission" message: an `AssertionError` if
+    the manifest carries no `fast_shards:` key (the bound would otherwise be the whole 1.18
+    MB file), and one if any `ceil(...)` multiplier is not
+    `ci_selection.WATCHDOG_HEADROOM` — the block would then state an arithmetic the code does
+    not perform. The headroom check runs BEFORE the empty-partition return on purpose, so a
+    wrong multiplier is never reported as an absent sentence.
     """
     header = _emission_block_header(manifest_text)
     groups: dict[float, set[str]] = {}
@@ -13861,9 +13870,9 @@ def _emission_block_claims(
     # but it would send the next reader looking for a missing sentence rather than a moved
     # constant).
     # ⛔ Compare the headroom NUMERICALLY, not as a spelling. `f"{2.0:g}"` is `"2"`, so a string
-    # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling this very
-    # file uses above (`shard_watchdog_minutes()` rounds `840.2/60 x 2.0`). A false block is the one
-    # failure this check must not produce, so `2` and `2.0` must both satisfy it.
+    # comparison reds a block that writes `x 2.0` — the same multiplier, and the spelling the
+    # manifest's own block uses (`config/ci-surfaces.yml:46`: `shard_watchdog_minutes()` rounds
+    # `840.2/60 x 2.0` up to 29 m). A false block is the one failure this check must not produce.
     headrooms = {float(h) for _est, h, _minutes in ceil_matches}
     assert headrooms == {float(cs.WATCHDOG_HEADROOM)}, (
         f"the block derives its watchdog with headroom {sorted(headrooms)}, but the code uses "
@@ -13872,12 +13881,17 @@ def _emission_block_claims(
         "anything computes. Update the sentence, or the constant moved and the block is stale.")
     if len(ceil_matches) > 1:
         # A SECOND `ceil(...)` clause is a repeat, not a second statement of one fact — the same
-        # doctrine as `<est X stated twice>` for the partition clauses, and here it needs its own
-        # arm because `.search()` used to take the FIRST match: measured 2026-11-23, a block
-        # stating both `ceil(836.4/60 x 2)` = 28 m and `= 29 m` read as `(836.4, 28)` and BOTH
-        # guard rows stayed green while the block visibly claimed two different minutes. That is
-        # exactly the shape a rebase produces (two sides of one paragraph interleaved), so the
-        # repeat is marked and the partition comparison reds.
+        # doctrine as `<est X stated twice>` for the partition clauses, which also fires on an
+        # IDENTICAL second clause at one `est` (measured, not assumed). Here it needs its own arm
+        # because `.search()` used to take the FIRST match: measured 2026-11-23, a block stating
+        # both `ceil(836.4/60 x 2)` = 28 m and `= 29 m` read as `(836.4, 28)` and BOTH guard rows
+        # stayed green while the block visibly claimed two different minutes. That is exactly the
+        # shape a rebase produces (two sides of one paragraph interleaved).
+        #
+        # ⛔ This is deliberately ANY second clause, an exact restatement included, so that this
+        # helper has ONE rule for repeats rather than an exception nobody would remember — a block
+        # that states its derivation twice is redundancy in a paragraph this tight, whatever the
+        # two clauses say. Both shapes are pinned in the vacuity test.
         groups = {est: names | {f"<ceil stated {len(ceil_matches)} times>"}
                   for est, names in groups.items()}
     est_str, _headroom, minutes_str = ceil_matches[0]
@@ -14029,13 +14043,32 @@ def test_the_emission_block_guard_is_not_vacuous():
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
         "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 29 m\n\nfast_shards: 11\n")
     assert duplicate_ceil is not None
-    live_groups_now, _live_minutes_now = _live_fast_shard_emission()
-    assert duplicate_ceil[0] != live_groups_now, (
-        "a block stating its watchdog derivation TWICE was read as one statement — the duplicate "
-        f"must enter the partition so the guard reds: {duplicate_ceil[0]}")
+    # ⛔ The witness is the MARKER, and its paired NEGATIVE — not `partition != live_groups`. That
+    # comparison is satisfied by any live-emission drift as well, so it would stop witnessing the
+    # arm exactly when the block went stale (which the manifest's own comment says it has done three
+    # times): an assertion that cannot fail for the reason it names is the class this file keeps
+    # re-learning. The single-clause block below proves the marker is caused by the duplicate.
     assert "<ceil stated 2 times>" in next(iter(duplicate_ceil[0].values())), (
         "the duplicate `ceil(...)` marker did not fire — `.findall` should mark a repeat the way "
         f"`<est X stated twice>` does: {duplicate_ceil[0]}")
+    single_ceil = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
+    assert single_ceil is not None and not any(
+        marker.startswith("<ceil")
+        for names in single_ceil[0].values() for marker in names), (
+        "ONE `ceil(...)` clause picked up the duplicate marker — the arm fires on the count of "
+        f"clauses, not on a repeat: {single_ceil[0]}")
+    # An EXACT restatement is a repeat too, and it is pinned rather than left to chance: the sibling
+    # `<est X stated twice>` arm also reds on an identical second clause at one `est` (measured), so
+    # the helper has ONE rule for repeats instead of an exception nobody would remember.
+    exact_repeat = _emission_block_claims(
+        "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
+        "# `ceil(836.4/60 x 2)` = 28 m\n# `ceil(836.4/60 x 2)` = 28 m\n\nfast_shards: 11\n")
+    assert exact_repeat is not None and "<ceil stated 2 times>" in next(
+        iter(exact_repeat[0].values())), (
+        "an EXACT restatement of the derivation was read as one statement — the same repeat rule "
+        f"as the partition clauses must apply: {exact_repeat[0]}")
     # …and the multiplier is the CODE's constant, not a literal this guard owns. A block deriving
     # with a different headroom does not state what `ci_selection.WATCHDOG_HEADROOM` computes, so
     # it reds with that reason rather than reading as "no emission stated".
@@ -14043,9 +14076,10 @@ def test_the_emission_block_guard_is_not_vacuous():
         _emission_block_claims(
             "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
             "# `ceil(836.4/60 x 3)` = 42 m\n\nfast_shards: 11\n")
-    # …but the comparison is NUMERIC, so the same multiplier spelled `2.0` — which this very file
-    # uses above, in `shard_watchdog_minutes()`'s `840.2/60 x 2.0` — must NOT red. A false block is
-    # the one failure that check must never produce, and a string compare would produce it.
+    # …but the comparison is NUMERIC, so the same multiplier spelled `2.0` — the spelling the
+    # manifest's own block uses at `config/ci-surfaces.yml:46` (`shard_watchdog_minutes()` rounds
+    # `840.2/60 x 2.0` up to 29 m) — must NOT red. A false block is the one failure that check must
+    # never produce, and a string compare would produce it.
     spelled = _emission_block_claims(
         "# eight shards at 836.4 s (a, b, c, d, e, h, j, k) and three at 836.3 s (f, g, i)\n"
         "# `ceil(836.4/60 x 2.0)` = 28 m\n\nfast_shards: 11\n")
