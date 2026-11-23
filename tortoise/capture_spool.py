@@ -48,6 +48,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -624,10 +625,16 @@ class FlushSummary:
     #: correct response is to stop being the second drainer, which the pass has
     #: already done.
     lost_claim: bool = False
-    #: #14350: the claim could not be CREATED (an unwritable spool root), so this
-    #: pass ran WITHOUT the cross-process exclusion. Never a silent state — see
-    #: `tortoise.drain_claim.DrainClaimUnavailable`.
+    #: #14350: the claim could not be CREATED, so this pass ran WITHOUT the
+    #: cross-process exclusion. Never a silent state — see
+    #: `tortoise.drain_claim.DrainClaimUnavailable` — and never a silent WORRY
+    #: either: `claim_unavailable_reason` is what the operator line prints, because
+    #: `DrainClaimUnavailable` covers more than one cause (an unwritable root, and an
+    #: obstruction at the claim path that `acquire` refused to delete) and a
+    #: hard-coded "unwritable spool root" sentence is false for the second (review
+    #: finding).
     claim_unavailable: bool = False
+    claim_unavailable_reason: str | None = None
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -4152,17 +4159,16 @@ def flush_spool(
 
     ── #14350 (D1): WHY THIS PASS IS SERIALIZED AND WHAT ITS CEILING IS ────
 
-    **One drainer per spool.** An UNTARGETED pass (no ``only_session_id``)
-    takes the drain claim; a TARGETED one does not. ``""`` counts as untargeted
-    on BOTH sides of that split — the claim here and the ``_flush_one`` filter
-    (`if only_session_id and …`) — so an empty id can never mean "drain the whole
-    spool, unclaimed" (review finding: it did).
-    takes the spool's claim (:mod:`tortoise.drain_claim`, honoured by both legs)
-    and returns immediately — ``held_by_claim``, zero POSTs — when another
-    process holds it. Every ``SessionStart`` backgrounds a drain, ``SessionEnd``
-    takes a final flush and ``agent_end`` another, so on a busy box N drains used
-    to run at once against ONE server ceiling of 8 captures; that is the
-    self-feeding shape #14342 §7.3 measured (908 entries, ``attempts`` 10–17).
+    **One drainer per spool.** An UNTARGETED pass takes the spool's claim
+    (:mod:`tortoise.drain_claim`, honoured by both legs) and returns immediately —
+    ``held_by_claim``, zero POSTs — when another process holds it. Every
+    ``SessionStart`` backgrounds a drain, ``SessionEnd`` takes a final flush and
+    ``agent_end`` another, so on a busy box N drains used to run at once against ONE
+    server ceiling of 8 captures; that is the self-feeding shape #14342 §7.3
+    measured (908 entries, ``attempts`` 10–17). A TARGETED pass does not, and
+    ``""`` counts as untargeted on BOTH sides of that split — the claim here and
+    the ``_flush_one`` filter (`if only_session_id and …`) — so an empty id can
+    never mean "drain the whole spool, unclaimed" (review finding: it did).
 
     ⛔ **A TARGETED pass does NOT take the claim, deliberately.**
     ``session capture`` and the SessionEnd flush file ONE named session, and
@@ -4209,28 +4215,48 @@ def flush_spool(
                 root, leg="python",
                 ttl_s=_CLAIM_TTL_S if claim_ttl_s is None else claim_ttl_s)
         except DrainClaimUnavailable:
-            # ⛔ NOT NECESSARILY "nobody": an object at the claim path that could not
-            # be READ (a transient local error, or an unclearable obstruction) may
-            # belong to a holder that is draining right now, and running this pass
-            # UNCLAIMED beside it is the two-drainer defect the claim removes. Fail
-            # CLOSED when anything is at the path; only a path that is EMPTY may be
-            # treated as "the root cannot hold a claim" (which is the broken-spool
-            # report the false-PASS rule requires).
+            # ⛔ NOT NECESSARILY "nobody", AND NOT NECESSARILY "unwritable root" EITHER.
+            # `DrainClaimUnavailable` covers three causes and they want DIFFERENT
+            # answers; collapsing them was the review finding here:
+            #   * a REGULAR file at the claim path that we could not read — a
+            #     transient local error (EMFILE, EIO, EACCES after a mode drift) on
+            #     something that COULD be a live holder. Honour it: `held_by_claim`,
+            #     nothing attempted. This is the fail-closed direction.
+            #   * something that CANNOT be a claim record — a non-empty directory, a
+            #     FIFO, a device. `acquire` clears the clearable obstructions and
+            #     refuses to delete unknown content, so what lands here is the
+            #     unclearable rest. Running unclaimed cannot create a second drainer
+            #     (there is no claim to violate) while reporting contention names a
+            #     holder that does not exist and wedges the spool FOREVER — which
+            #     #14350's own rule forbids ("a stale claim is re-verifiable, not a
+            #     permanent block").
+            #   * NOTHING at the path — the root cannot hold a 60-byte claim file, so
+            #     it cannot hold a spool entry either. Run unclaimed and say so: the
+            #     pass can only report the broken spool, and refusing to run would
+            #     hide that report (the false-PASS direction this codebase treats as
+            #     the worse error).
             try:
-                obstructed = claim_path(root).exists() or claim_path(root).is_symlink()
+                mode = os.lstat(claim_path(root)).st_mode
+            except FileNotFoundError:
+                summary.claim_unavailable = True
             except OSError:
                 # The path cannot even be STAT'ed, which means the root itself is
                 # unusable: this pass can only report the broken spool (nothing in it
                 # is listable either), so there is nothing to serialize. That is the
-                # false-PASS arm below, kept as the documented decision.
-                obstructed = False
-            if obstructed:
-                summary.held_by_claim = True
-                summary.claim_holder = (
-                    "a claim file exists at this spool but could not be read "
-                    "(pid unknown) — nothing attempted")
-                return summary
-            summary.claim_unavailable = True
+                # false-PASS arm, kept as the documented decision.
+                summary.claim_unavailable = True
+            else:
+                if stat.S_ISREG(mode):
+                    summary.held_by_claim = True
+                    summary.claim_holder = (
+                        "a claim file exists at this spool but could not be read "
+                        "(pid unknown) — nothing attempted")
+                    return summary
+                summary.claim_unavailable = True
+                summary.claim_unavailable_reason = (
+                    f"{claim_path(root)} exists and is not a claim record "
+                    "(not a regular file) and could not be cleared — this pass ran "
+                    "WITHOUT the one-drainer exclusion")
         if claim is None and not summary.claim_unavailable:
             # Another drainer owns this box's spool. Every entry this pass would
             # have attempted is still on disk and THAT process is working the
@@ -4453,10 +4479,15 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
     # The leak this guards is a probe LINGERING — a detached codex/cursor worker
     # spooling one after verify's cleanup has run — and the next thing that
     # would file it is an automatic `session drain`. So: refuse only when the
-    # caller named no session (`only_session_id is None` == a drain), and always
-    # allow a targeted filing, where the caller knows which session it means.
+    # caller named no session — `not only_session_id`, which is the SAME predicate
+    # the claim and the filter above use — and always allow a targeted filing, where
+    # the caller knows which session it means. ⛔ The predicate used to be
+    # `only_session_id is None`, which made `""` a THIRD case: untargeted for the
+    # claim and for the filter, but "targeted" here, so an empty id drained the
+    # whole spool INCLUDING probes while the docstring above claimed the split held
+    # "on BOTH sides" (review finding). One predicate, three call sites.
     # The refusal is non-destructive: verify's own cleanup removes what it made.
-    if only_session_id is None and is_probe_session_id(sid):
+    if not only_session_id and is_probe_session_id(sid):
         summary.held_back += 1
         summary.probe_refusals.append({
             "session_id": sid,

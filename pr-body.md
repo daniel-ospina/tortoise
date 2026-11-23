@@ -87,17 +87,17 @@ The last rows matter as much as the first: on today's main the free server is **
 * **Class:** `code`
 * **R1** — two concurrent UNTARGETED drains cannot both POST to one spool; the survivor is a no-op that reports who holds it, and it writes no durable status.
 * **R2** — a claim is reclaimed when its holder is provably gone or its lease expires, and a slow holder can never delete a successor's claim.
-* **R3** — a `429` capacity refusal charges no entry (`attempts`, `next_attempt_at_ms` untouched) and ends the pass; the pass retries the *same* entry after a bounded yield.
+* **R3** — a `429` capacity refusal charges no entry (`attempts`, `next_attempt_at_ms` untouched) and ends the pass; on the Python leg the pass retries the *same* entry after a bounded yield, and on the Pi leg it ends and lets the next opportunity continue (its pass is `await`ed on `session_shutdown`, so it must not sleep). Both legs charge nothing — that is the rule; the yield is the Python leg's implementation of it.
 * **R4** — no behaviour change for a spool whose box is not saturated and whose drain is the only one running (guarded: the free-server measurement and the existing suites).
 * **R5** — nothing here writes a raw captured turn to the graph, moves extraction into the drain, or changes the spool's on-disk format.
-* **R6** — both legs implement ONE protocol; a divergence is a defect.
+* **R6** — both legs implement ONE protocol; a divergence is a defect. **The one deliberate asymmetry is R3's yield** (Python sleeps and retries, Pi ends the pass), stated here rather than left for a reviewer to re-derive as a defect; everything else — the claim record and its version, the staleness rules, the compare-and-delete takedown, the capacity rule, the on-disk unit, the refusal's rendering — is the same on both sides and pinned by cross-leg tests that run one leg's predicate under the other's runtime.
 
 ## Tests
 
 ```text
-# 45 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
+# 49 cases — the claim protocol, the capacity rule, the falsifier, 4 CROSS-LEG
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_14350_drain_convergence.py -q
-45 passed
+49 passed
 
 # capture family + install-contract pins (generation 33) + store_sync + doctor
 TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
@@ -105,12 +105,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
     tests/test_12992_capture_capacity_typed_refusal.py tests/test_capture_backlog_4197.py \
     tests/test_12379_unrecorded_trace.py tests/test_capture_install.py \
     tests/test_store_sync_worker.py tests/test_doctor.py -q
-407 passed
+738 passed
 
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-294 pass / 0 fail
+301 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -179,6 +179,25 @@ all 16 red — and that check is how the broken first version of the expiry test
 The review's last mutation-table row ("`tortoise-capture.test.ts` … stays GREEN") is
 what the P2 row above removes: the row now names the behaviour it protects, and
 the mutant reds it.
+
+**Cycle 5** (a fresh-context reviewer at `a61c123644`) — **3 P1**, 5 P2. Every
+finding was checked against the source before it was applied; all eight are
+fixed, and each fix has a test whose named mutant was actually run.
+
+| finding | disposition |
+|---|---|
+| **P1** `read_claim` was not `lstat`-gated, so `renew`/`holder` hang forever on a FIFO — the Pi twin was gated, so this was also a leg divergence | **fixed**: `read_claim` now goes through `_read_raw` (the gate), so a non-regular object answers `None` immediately; `renew` returns `False` (stop being the holder), `holder` returns `None`. Measured: with the old `read_text`, a standalone probe **hung** (exit 124); with the gate it returns `None`. The test that claimed to cover this asserted *after* `acquire` had already cleared the FIFO — it read a non-existent path and passed for the wrong reason; it now asserts while the FIFO is still there, and a second case renews against one. |
+| **P1** an UNCLEARABLE obstruction at the claim path was reported as *contention*, so the drain wedged forever naming a holder that does not exist | **fixed**: the `DrainClaimUnavailable` arm now branches on the object's TYPE — a regular file we cannot read stays `held_by_claim` (it may be a live holder), anything that cannot be a claim record (non-empty directory, FIFO, device) sets `claim_unavailable`, runs the pass unclaimed, and names the path in `claim_unavailable_reason` (the operator line prints that instead of a hard-coded "unwritable spool root", which was a false diagnosis). Two `flush_spool`-level tests, because the previous one only exercised `acquire`; the mutant (`S_ISREG` → `True`) reds the obstruction case and the fail-closed case is pinned separately. |
+| **P1** `renew`'s verify-after-write reads back the bytes it just wrote, so it cannot close the race its own comment claims — a peer's fresh claim is clobbered and two drainers hold the spool | **fixed, both legs**: the refresh is now a **compare-and-swap** — `_takedown` moves the judged record aside, the refreshed one is installed with `link` (create-if-absent), and `EEXIST` means a peer claimed in the window and ITS record stands. `os.replace`/`renameSync` is gone from the renew path. A deterministic window test drives the real `_takedown` and installs the peer's claim before the install; the mutant (`link` → `os.replace`) reds it. A failed write still restores the record it moved aside, so a failed refresh never loses the lease. |
+| **P2** the Pi leg rendered the capacity cause as the raw code while Python rendered "capture capacity" — over the same `status.json` | **fixed**: `refusalLabel` gained the capacity arm. New cross-leg test renders the health line on the Pi side and asserts the words; the mutant reds it with `429 capture_capacity_saturated`. |
+| **P2** `""` was "untargeted" for the claim and the filter but "targeted" for the probe guard, so an empty id drained probes too | **fixed**: one predicate (`not only_session_id`) at all three sites, which is what the docstring above already claimed held. |
+| **P2** the `flush_spool` docstring was left grammatically broken where the `""` paragraph was inserted | **fixed**: the two fragments are re-joined, and the untargeted/targeted rule now reads in one sentence. |
+| **P2** R3/R6 were stated as *both legs* while only Python yields and retries | **fixed in the contract**: R3 and R6 now state the per-leg yield and why, instead of leaving a future reviewer to re-derive the asymmetry as a defect. |
+| **P2** the receipts in this record were stale, and the measurement harness carried two dead constants and cited a non-existent constant name | **fixed**: the receipts above are re-measured at this head (49 / 738 / 301); the unused `RETRY_AFTER`/`CAPACITY_BODY` are deleted, and `_CAPACITY_CAPACITY_RETRY_AFTER_S` is corrected to `_CAPTURE_CAPACITY_RETRY_AFTER_S`. |
+
+⚠️ The Pi-leg byte change is a SECOND re-cut of generation 33's recorded digest,
+under the same never-shipped exception the residual below states — see the note
+beside `_PINNED_PI_SEAM_INSTALL_CONTRACT`.
 
 ## Residuals, stated
 

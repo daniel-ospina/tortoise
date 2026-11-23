@@ -89,9 +89,9 @@ import secrets
 import socket
 import stat
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 #: The claim file, in the spool ROOT — never ``entries/``, so it is invisible to
 #: the spool's own accounting (`_entry_bytes`, `prune_spool`, `_scan_spool`),
@@ -233,21 +233,30 @@ def claim_is_stale(
     if recorded_boot and boot_id and recorded_boot != boot_id:
         return True  # rule 3, rebooted: the recorded pid is not the holder
     pid = record.get("pid")
-    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-        if not alive(pid):
-            return True  # rule 3: the holder is gone
-    return False
+    # rule 3: the holder is gone. `isinstance(pid, bool)` is excluded explicitly —
+    # `True` is an `int` to Python, and a pid of 1 would read as "the holder is alive".
+    return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and not alive(pid)
 
 
 def read_claim(root: Path) -> dict | None:
-    """The parsed claim, or ``None``. The SURFACE (`session drain`, health, tests)."""
-    try:
-        text = claim_path(root).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    """The parsed claim, or ``None``. The SURFACE (`session drain`, health, tests).
+
+    ⛔ THROUGH :func:`_read_raw`, NEVER ``Path.read_text`` — that gate is the whole
+    reason this function exists in two halves. ``read_text`` on a FIFO or a socket
+    BLOCKS until a writer appears, and THIS reader is the one ``renew``,
+    ``_claim_still_ours`` and ``holder`` call, so a corrupt object at the claim path
+    hung the drain's own refresh forever (measured: ``renew`` never returned, killed
+    at 15 s) — the permanent block #14350 forbids, in the exact corruption class the
+    gate below documents covering. It was also a leg divergence over a file both legs
+    share (R6): the Pi twin's ``readDrainClaim`` gates with ``lstatSync``, so renew
+    and the holder line were safe there and not here (review finding).
+    """
+    raw = _read_raw(claim_path(root))
+    if raw is None:
         return None
     try:
-        record = json.loads(text)
-    except ValueError:
+        record = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
         return None
     return record if isinstance(record, dict) else None
 
@@ -345,12 +354,20 @@ def _claim_still_ours(path: Path, token: str) -> bool:
     return isinstance(record, dict) and record.get("token") == token
 
 
-def _write_claim_atomic(path: Path, record: dict) -> None:
-    """Write ``record`` in place, atomically (the RENEW path).
+def _write_claim_linked(path: Path, record: dict) -> None:
+    """Install ``record`` at ``path`` with ``os.link`` — create-if-absent.
 
-    ``renew`` addresses the claim by PATH, so replacing the inode is fine; the
-    ``os.replace`` keeps a reader from ever seeing a half-written record (rule 1
-    would read that as corrupt and steal a live claim).
+    The RENEW path, and the reason it is ``link`` and not ``os.replace``: renew
+    must be a compare-and-swap against the claim it judged stale-aside, so the
+    install has to FAIL rather than overwrite when a peer claimed inside the
+    window. ``os.replace`` would clobber that peer's fresh record silently — the
+    two-drainer defect — while ``link`` raises ``FileExistsError``, which the
+    caller reads as "we are no longer the holder". Full content is visible at
+    creation (the same property ``acquire`` relies on), so no reader can observe a
+    half-written record and mis-judge it as corrupt.
+
+    Raises ``FileExistsError`` when the claim path is occupied, and ``OSError`` on
+    any other failure; the caller restores what it moved aside in that case.
     """
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{record['token']}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -359,11 +376,10 @@ def _write_claim_atomic(path: Path, record: dict) -> None:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
+        os.link(tmp, path)
+    finally:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
-        raise
 
 
 @dataclass
@@ -401,43 +417,70 @@ class DrainClaim:
     def renew(self, now_s: float | None = None) -> bool:
         """Refresh the lease. ``False`` means the claim is no longer ours.
 
-        ⛔ TWO GUARDS, both from review findings, and both one-directional:
+        ⛔ THREE GUARDS, all from review findings, all one-directional:
 
-        * a claim that is ALREADY EXPIRED is never resurrected. ``renew`` reads
-          the record and then ``os.replace``s its own — a read-then-replace with
-          no compare — so a holder that overran its lease (while still being the
-          token owner on disk) could overwrite the successor a peer had
-          legitimately installed, and return ``True``. Reproduced in review.
-          Refusing to renew an expired record converts that into "we are no
-          longer the holder", which the caller already handles by stopping.
+        * a claim that is ALREADY EXPIRED is never resurrected — see the check
+          below;
         * a failed WRITE is not "not ours": :func:`_claim_still_ours` says
           whether the record is still ours, and the caller keeps draining on the
-          un-refreshed lease rather than aborting a pass it still owns.
+          un-refreshed lease rather than aborting a pass it still owns;
+        * the refresh is a **COMPARE-AND-SWAP on the inode**, not a read followed
+          by an ``os.replace``. This is the one that took a second review cycle,
+          and the reason is worth keeping: the earlier version read the record,
+          replaced it, and then READ BACK to verify — which reads the bytes this
+          process just wrote, so it always matched and the guard was vacuous. The
+          race it thought it covered is real (a peer whose takeover lands between
+          our read and our replace has its fresh claim clobbered, and both
+          processes then hold the spool for up to ``TTL/3``), and the trigger is a
+          renewal landing at the deadline — a freeze, or the first write that
+          succeeds after a run of failed ones — which is exactly when a stale
+          on-disk record exists for the peer to judge. Reusing :func:`_takedown`
+          (the same arbiter ``acquire`` uses) and installing the refresh with
+          ``os.link`` makes the window a real CAS: ``EEXIST`` means a peer claimed
+          in it and THEIR claim stands, which is the safe direction.
         """
         now = self.clock() if now_s is None else now_s
-        current = read_claim(self.path.parent)
-        if current is None or current.get("token") != self.token:
+        raw = _read_raw(self.path)
+        if raw is None:
+            return False
+        try:
+            current = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(current, dict) or current.get("token") != self.token:
             return False
         expires = _finite(current.get("expires_at"))
         if expires is not None and now * TIMESTAMP_UNIT_MS >= expires:
             return False
-        try:
-            _write_claim_atomic(self.path, self.record(now))
-        except OSError:
-            return _claim_still_ours(self.path, self.token)
-        # ⛔ VERIFY AFTER WRITING. `_write_claim_atomic` REPLACES the inode, and the
-        # read above is not a compare: a peer whose takeover landed between that
-        # read and this replace had its fresh claim overwritten — `renew` would
-        # return True while two drainers exist (found in review). The realistic
-        # trigger is a run of failed renewals (`_claim_still_ours` keeps the pass
-        # going on the un-refreshed lease), after which the first write that
-        # succeeds is the clobbering one. Reading back converts that race into
-        # "we are no longer the holder", which the caller already handles by
-        # stopping — and it also covers a peer that took over between the replace
-        # and now.
-        written = read_claim(self.path.parent)
-        if written is None or written.get("token") != self.token:
+        # ── the CAS ──────────────────────────────────────────────────────────
+        # 1. move the claim aside atomically, so no other process can judge the
+        #    record we are about to compare against (see `_takedown`);
+        moved = _takedown(self.path, self.token)
+        if moved is None:
+            return False  # a peer moved it first: it is no longer ours to refresh
+        quarantine, data = moved
+        if data != raw:
+            # We displaced a NEWER record than the one we judged — `_takedown`
+            # puts it back; we are not the holder any more.
+            _dispose_quarantine(quarantine, data, self.path, raw)
             return False
+        # 2. install the refreshed record with `link` (create-if-absent), so a peer
+        #    that claimed inside the window is never clobbered.
+        try:
+            _write_claim_linked(self.path, self.record(now))
+        except FileExistsError:
+            # A peer holds the claim now. Their record STANDS; ours is obsolete.
+            _dispose_quarantine(quarantine, data, self.path, raw)
+            return False
+        except OSError:
+            # The write failed. Put the record we moved aside BACK (never lose a
+            # lease to a failed refresh) and report honestly from the path.
+            with contextlib.suppress(OSError):
+                os.link(quarantine, self.path)
+            with contextlib.suppress(OSError):
+                os.unlink(quarantine)
+            return _claim_still_ours(self.path, self.token)
+        _dispose_quarantine(quarantine, data, self.path, raw)
         # ⛔ `_issued_at` is NOT advanced: it is when this claim was ACQUIRED, and
         # the Pi leg deliberately preserves it across renewals (`started_at:
         # record.started_at`). Advancing it here made the two legs disagree about a
@@ -603,9 +646,12 @@ def acquire(
                 # holder. Rule 1 already says stale, and leaving it would `EEXIST`
                 # every future attempt — a permanent block, which #14350 forbids.
                 if not _clear_unusable_claim_path(path):
+                    # `from None`: the EEXIST that brought us here is the SYMPTOM, and
+                    # the sentence below is the diagnosis. Chaining it would bury the
+                    # one line an operator needs under a traceback about a mkdir race.
                     raise DrainClaimUnavailable(
                         f"{path} exists and is not a claim, and cannot be cleared — "
-                        "the spool root is not writable by this process")
+                        "the spool root is not writable by this process") from None
                 continue
             # ATOMIC TAKEDOWN, then verify in quarantine: see `_takedown`. The
             # previous read-compare-unlink let two contenders delete each other's

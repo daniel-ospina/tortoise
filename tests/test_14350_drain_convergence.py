@@ -50,8 +50,8 @@ from tortoise.capture_spool import (
     PostOutcome,
     Snapshot,
     _age_key,  # noqa: F401  — the ordering the monotonicity argument rests on
-    capture_health_line,
     capacity_refusal,
+    capture_health_line,
     count_pending_captures,
     flush_spool,
     read_capture_status,
@@ -452,7 +452,7 @@ def test_a_capacity_stop_does_not_skip_the_OLDEST_entry(tmp_path):
     attributed to the entry and the oldest one drifts back in the queue).
     """
     root = _spool(tmp_path, sessions=3)
-    post, state = _capacity(refusals=2)
+    post, _state = _capacity(refusals=2)
     submitted: list[str] = []
     inner = post
 
@@ -501,6 +501,75 @@ def test_an_UNWRITABLE_spool_root_runs_UNCLAIMED_and_says_so(tmp_path):
         os.chmod(root, 0o700)
     assert summary.held_by_claim is False
     assert summary.claim_unavailable is True
+
+
+def test_an_UNCLEARABLE_obstruction_runs_the_pass_UNCLAIMED_and_SAYS_what_it_is(tmp_path):
+    """A non-empty directory at the claim path cannot be a CLAIM, so reporting
+    contention over it names a holder that does not exist — and wedges the spool
+    forever, which #14350's own rule forbids.
+
+    Three records say so and none of them was honoured: `DrainClaimUnavailable`'s
+    docstring ("run unclaimed, and SAY so"), the test above ("never report
+    contention"), and the issue's "a stale claim is re-verifiable, not a permanent
+    block". `acquire` correctly refuses to delete unknown content; the CALLER then
+    collapsed that refusal into `held_by_claim` whenever anything was at the path,
+    so `claim_unavailable` was unreachable in exactly the case it exists for
+    (review finding — measured: three consecutive passes, `attempted=0`, forever).
+
+    MUTATION THAT REDS THIS: test `claim_path(root).exists()` instead of
+    `stat.S_ISREG(mode)` in the `DrainClaimUnavailable` arm — the pass then reports
+    a holder and files nothing.
+    """
+    root = _spool(tmp_path, sessions=1)
+    obstruction = root / "drain.claim"
+    obstruction.mkdir()
+    (obstruction / "keep").write_text("x")
+    summary = flush_spool(root, lambda p: PostOutcome(ok=True, status=200, body={}),
+                          now=1000.0)
+    assert summary.held_by_claim is False, (
+        "a directory is not a holder: reporting contention names a holder that "
+        "does not exist")
+    assert summary.claim_unavailable is True
+    assert summary.claim_unavailable_reason, "the operator line must name the cause"
+    assert "drain.claim" in summary.claim_unavailable_reason
+    assert summary.filed == 1, (
+        "the pass must actually RUN unclaimed — refusing forever is the permanent "
+        "block #14350 forbids")
+    assert (obstruction / "keep").exists(), "unknown content must not be deleted"
+
+
+def test_an_UNREADABLE_regular_claim_still_reads_as_CONTENTION(tmp_path):
+    """…and the OTHER half of the same decision: a REGULAR claim file we could not
+    read may belong to a live holder, so it is honoured — the fail-closed direction.
+
+    The two arms must stay distinct: collapsing them is what made an unclearable
+    DIRECTORY report a phantom holder, and collapsing them the other way would run
+    a second drainer beside a live one.
+
+    MUTATION THAT REDS THIS: drop the `stat.S_ISREG` branch (an unreadable regular
+    claim then runs the pass unclaimed, beside the holder).
+    """
+    if os.getuid() == 0:
+        pytest.skip("root ignores mode bits")
+    root = _spool(tmp_path, sessions=1)
+    path = drain_claim.claim_path(root)
+    path.write_text(json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "live-holder", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(),
+        "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    }))
+    os.chmod(path, 0o000)
+    try:
+        summary = flush_spool(root, lambda p: PostOutcome(ok=True, status=200, body={}),
+                              now=1000.0)
+    finally:
+        os.chmod(path, 0o600)
+    assert summary.held_by_claim is True, (
+        "a regular claim we could not read may be a LIVE holder — honour it")
+    assert summary.claim_unavailable is False
+    assert summary.filed == 0, "no POST may be attempted beside a possible holder"
+    assert path.exists(), "a regular claim file must NEVER be deleted unread"
 
 
 # ── The falsifier ─────────────────────────────────────────────────────────
@@ -828,7 +897,8 @@ def _ts_verdict(root: Path) -> dict:
     rules would agree with the Python rules by construction and prove nothing.
     """
     script = (
-        'import { acquireDrainClaim, claimIsStale, readDrainClaim } from %s;\n'
+        'import { acquireDrainClaim, claimIsStale, readDrainClaim } from '
+        + json_dumps(_TS_LEG.as_posix()) + ';\n'
         'const dir = process.env.CLAIM_DIR;\n'
         'const rec = readDrainClaim(dir);\n'
         'const stolen = acquireDrainClaim(dir, { leg: "pi" });\n'
@@ -838,7 +908,7 @@ def _ts_verdict(root: Path) -> dict:
         '  stole: !!stolen,\n'
         '  seconds_scale: rec ? rec.expires_at < 1e11 : null,\n'
         '  version: rec ? rec.version : null,\n'
-        '}));\n' % json_dumps(_TS_LEG.as_posix())
+        '}));\n'
     )
     # `node -e` shifts argv (the script is argv[0]), so the path goes through the
     # environment: an off-by-one here would make the test pass against the WRONG
@@ -902,9 +972,9 @@ def test_a_PI_claim_is_read_in_the_SAME_UNIT_by_both_legs(tmp_path):
     root = tmp_path / "spool"
     root.mkdir(parents=True, exist_ok=True)
     script = (
-        'import { acquireDrainClaim } from %s;\n'
+        'import { acquireDrainClaim } from ' + json_dumps(_TS_LEG.as_posix()) + ';\n'
         'const c = acquireDrainClaim(process.env.CLAIM_DIR, { leg: "pi", ttlMs: 60000 });\n'
-        'process.stdout.write(JSON.stringify({ ok: !!c }));\n' % json_dumps(_TS_LEG.as_posix())
+        'process.stdout.write(JSON.stringify({ ok: !!c }));\n'
     )
     out = subprocess.run([_NODE, "--input-type=module", "-e", script],
                          capture_output=True, text=True, timeout=120,
@@ -1006,7 +1076,7 @@ def test_a_pass_that_RECOVERS_from_a_capacity_refusal_is_not_recorded_BLOCKED(tm
     not None` again (drop the `capacity_stopped` gate).
     """
     root = _spool(tmp_path, sessions=3)
-    post, state = _capacity(refusals=1)  # one refusal, then the box is free
+    post, _state = _capacity(refusals=1)  # one refusal, then the box is free
     summary = flush_spool(root, post, now=1000.0, sleep=lambda _s: None)
     assert summary.filed == 3, "the pass recovered and filed everything"
     assert summary.capacity_stopped is False
@@ -1061,19 +1131,108 @@ def test_a_FIFO_at_the_claim_path_does_not_HANG_the_drain(tmp_path):
     forever — the permanent block #14350 forbids, in the one corruption class the
     code claimed to cover (found in review: measured as a hang, killed at 15 s).
 
+    ⛔ THE `read_claim` ASSERTION RUNS WHILE THE FIFO IS STILL THERE. The earlier
+    version of this test asserted it AFTER `acquire` had already cleared the FIFO
+    and `release` had removed the claim, so it read a NON-EXISTENT path and passed
+    for the wrong reason — it could not have caught the bug it names (review
+    finding).
+
     MUTATION THAT REDS THIS: read the path without the `S_ISREG` gate — this test
     then TIMES OUT rather than asserting (run it under a watchdog to see it).
     """
     root = tmp_path / "spool"
     root.mkdir(parents=True)
-    os.mkfifo(root / "drain.claim")
+    path = drain_claim.claim_path(root)
+    os.mkfifo(path)
+    # The READER first — this is the surface renew/_claim_still_ours/holder use, and
+    # it is the one that used `Path.read_text` and blocked forever.
+    assert drain_claim.read_claim(root) is None, (
+        "read_claim must lstat-gate: reading a FIFO HANGS")
+    assert drain_claim.holder(root) is None
     claim = drain_claim.acquire(root, leg="python")
     assert claim is not None, (
         "a FIFO is not a holder and must not block the drain (if this test hung, "
         "the FIFO was READ)")
     claim.release()
-    # And the reader is safe on its own, which is what renew/holder/health use.
-    assert drain_claim.read_claim(root) is None
+    assert not path.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+def test_renew_does_not_HANG_on_a_FIFO_at_the_claim_path(tmp_path):
+    """A live holder's REFRESH must not block either — the half the previous test
+    could not see, because it never renewed with the FIFO in place.
+
+    `renew` is called once per entry by `renew_if_due`, so a hang here wedges a
+    draining pass forever while it still holds the claim: the worst shape of the
+    permanent block, because the spool is locked too.
+
+    MUTATION THAT REDS THIS: read the claim with `Path.read_text` instead of
+    `_read_raw` — this test then TIMES OUT rather than asserting.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    path = drain_claim.claim_path(root)
+    os.unlink(path)
+    os.mkfifo(path)
+    try:
+        assert claim.renew() is False, (
+            "a claim we cannot READ must read as 'not ours' — never as a hang")
+        # …and the HOT PATH (`renew_if_due`, once per entry). `now` is pushed past
+        # the ttl/3 gate so the renewal is actually DUE; without that it returns
+        # True without reading, which would make this half vacuous.
+        assert claim.renew_if_due(time.time() + 1000.0) is False
+    finally:
+        os.unlink(path)
+
+
+def test_a_RENEW_never_clobbers_a_peer_that_claimed_in_the_window(tmp_path, monkeypatch):
+    """The refresh must be a COMPARE-AND-SWAP, not a read-then-replace.
+
+    `renew` reads the record and then installs a refreshed one. If a peer's
+    takeover lands in that window — which happens exactly when a renewal lands at
+    the deadline, after a freeze or a run of failed writes — a replace CLOBBERS
+    the peer's fresh claim and `renew` returns True while two drainers exist. The
+    earlier version tried to cover this by reading back after the write, which
+    reads the bytes it just wrote and so always matched.
+
+    The window is reproduced deterministically: the taker (the same `_takedown`
+    `acquire` uses) runs for real, and a peer's claim is installed before `renew`
+    gets to its install step.
+
+    MUTATION THAT REDS THIS: install the refresh with `os.replace` instead of
+    `os.link` (and drop the `FileExistsError` arm) — `renew` then returns True and
+    the on-disk token is ours, not the peer's.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None
+    peer = {
+        "version": drain_claim.CLAIM_VERSION, "token": "peer-token", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(),
+        "boot_id": drain_claim._boot_id(),
+        "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    }
+    real_takedown = drain_claim._takedown
+
+    def takedown_then_peer_wins(p, token):
+        moved = real_takedown(p, token)
+        # ⛔ THE WINDOW: renew has moved our record aside; a peer legitimately
+        # claims the spool before renew installs its refresh.
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(peer) + "\n")
+        return moved
+
+    monkeypatch.setattr(drain_claim, "_takedown", takedown_then_peer_wins)
+    assert claim.renew() is False, (
+        "renew claimed ownership while a peer held a live claim — two drainers")
+    on_disk = drain_claim.read_claim(root)
+    assert on_disk is not None and on_disk.get("token") == "peer-token", (
+        f"the peer's live claim was destroyed by our refresh: {on_disk}")
 
 
 # ── The refusal's NAME must be the server's, in BOTH legs ──────────────────
@@ -1096,7 +1255,6 @@ def test_the_severed_SECOND_429_keeps_the_servers_own_NAME(tmp_path):
 
     MUTATION THAT REDS THIS: hardcode `code = CAPTURE_CAPACITY_CODE`.
     """
-    root = _spool(tmp_path, sessions=1)
     outcome = PostOutcome(ok=False, status=429, detail=_INGEST_BODY)
     refusal = capacity_refusal(outcome)
     assert refusal is not None, "a 429 is still a box-level refusal (the CHARGING rule)"
@@ -1121,9 +1279,9 @@ def test_BOTH_legs_name_the_same_429_the_same_way(tmp_path):
     root = tmp_path / "spool"
     root.mkdir(parents=True)
     script = (
-        'import { capacityRefusal } from %s;\n'
+        'import { capacityRefusal } from ' + json_dumps(_TS_LEG.as_posix()) + ';\n'
         'const r = capacityRefusal({ status: 429, detail: process.env.BODY });\n'
-        'process.stdout.write(JSON.stringify(r ?? null));\n' % json_dumps(_TS_LEG.as_posix())
+        'process.stdout.write(JSON.stringify(r ?? null));\n'
     )
     out = subprocess.run([_NODE, "--input-type=module", "-e", script],
                          capture_output=True, text=True, timeout=120,
