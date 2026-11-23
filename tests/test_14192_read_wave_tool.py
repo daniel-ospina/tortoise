@@ -7711,15 +7711,52 @@ def _generator_filter_findings(key: str, gen: ast.comprehension) -> list[str]:
     return []
 
 
+#: The import-search-path ATTRIBUTES on `sys`: the objects a re-created registry entry is
+#: READ from, i.e. the other half of every "what is written into `sys.modules`" arm.
+_PATH_ATTRS = frozenset({"path", "meta_path", "path_hooks"})
+
+
 def _is_import_path_object(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
-    """`sys.path` / `sys.meta_path` / `sys.path_hooks` — the search path OBJECT."""
-    return (isinstance(node, ast.Attribute)
-            and node.attr in {"path", "meta_path", "path_hooks"}
-            and _is_sys_ref(node.value, ctx.sys_names))
+    """`sys.path` / `sys.meta_path` / `sys.path_hooks` — the search path OBJECT.
+
+    ⛔ AND A READ OF IT THROUGH `sys`'s OWN MAPPING IS THE SAME OBJECT (#14326 round 32,
+    MEASURED GREEN at `f7ff126b2c5a`: `sys.__dict__["path"] = ["/tmp/evil"] + sys.path`, and
+    its `vars(sys)`/alias twins, each resolved a planted `tortoise/sdk.py` end-to-end while
+    the pin stayed GREEN). The registry axis already learned this one key over —
+    `sys.__dict__["modules"]` is `sys.modules` (round 24) — so the search-path predicate
+    reading only the ATTRIBUTE spelling was the in-file asymmetry this file keeps removing.
+    `ctx.Load` only: a STORE target is a mutation, and it is graded by the write arms below.
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr in _PATH_ATTRS and _is_sys_ref(node.value, ctx.sys_names)
+    if (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load)
+            and _is_sys_dict_mapping(node.value, ctx)):
+        return bool(_string_keys_of(node.slice, ctx.consts) & _PATH_ATTRS)
+    return False
+
+
+def _is_path_expr(node: ast.AST | None, ctx: _RegistryCtx,
+                  path_names: frozenset[str]) -> bool:
+    """Is this expression the search path — or ONE HOP out from it?
+
+    Three hops, all of them the SAME object: the attribute (`sys.path`), a one-bind NAME
+    alias of it (`_p = sys.path`), and an ELEMENT of it (`sys.path[0]`, the receiver in
+    `sys.path[0].__init__`). A COPY is deliberately NOT here — `_p = sys.path[:]`,
+    `list(sys.path)` and `copy.copy(sys.path)` all leave `path_names` empty (measured), so
+    widening the alias axis cannot re-open the shallow-copy false-red class this file was
+    cured of at `c380075b45ab`.
+    """
+    if _is_import_path_object(node, ctx):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in path_names
+    if isinstance(node, ast.Subscript):
+        return _is_path_expr(node.value, ctx, path_names)
+    return False
 
 
 def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
-                             path_names: frozenset[str] = frozenset()) -> bool:
+                             path_names: frozenset[str]) -> bool:
     """A write to the IMPORT SEARCH PATH — `sys.path` / `sys.meta_path` / `sys.path_hooks`.
 
     ⛔ THE AXIS THE PIN HAD NO VIEW OF (#14326 round 29 P2, MEASURED GREEN). Every other arm
@@ -7727,12 +7764,28 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
     With the search path poisoned, `del sys.modules["tortoise.sdk"]` stops being the inert no-op
     this file used to assert it was: the deferred `from tortoise.sdk import …` re-imports, and a
     planted `tortoise/sdk.py` earlier on the path becomes the constructor (measured end-to-end:
-    the fake class resolved, the pin GREEN). Deliberately coarse — the fine-grained alternative
-    is to enumerate finders and path shapes, i.e. the unbounded class this file already declares
-    as residual — and coarse here can only over-RED code that simultaneously rewrites the
-    import path and empties the registry while the pin is watching, which is the premise.
+    the fake class resolved, the pin GREEN). Coarse here can only over-RED code that
+    simultaneously rewrites the import path and empties the registry while the pin is watching,
+    which is the premise.
+
+    ⛔ THE RESIDUAL IS DECLARED HERE, NOT ASSUMED INTO SOMEONE ELSE'S (#14326 round 32 P3).
+    Rounds 31 and 32 both said "the unbounded class this file already declares as residual" and
+    `grep` disproves it: this file declares residuals for CALLEE computation (a lambda,
+    `operator.attrgetter`, `partial(getattr, …)`) and for string resolution, and nothing at all
+    for finders or path shapes. The forms that genuinely remain GREEN here, each MEASURED at
+    `f7ff126b2c5a` as a live lever, are the CALLEE-composition class applied to the path —
+    not a distinct finder vocabulary:
+
+        sys.__dict__.update(path=["/tmp/evil"] + sys.path)    (the `.update(**kw)` spelling)
+        builtins.__dict__["setattr"](sys, "path", […])         (a callee via builtins' mapping)
+        _p = operator.attrgetter("path")(sys); _p.insert(0, …)  (a computed path object)
+
+    They are the same UNNUMBERABLE route the file already refuses to enumerate for the
+    registry, so they are declared as residual and pinned GREEN in
+    `test_the_IMPORT_PATH_axis_residuals_are_NAMED_and_pinned_GREEN` — not chased one spelling
+    at a time. Closing any of them must EDIT that table rather than leave it contradicting the
+    code.
     """
-    _PATH_ATTRS = {"path", "meta_path", "path_hooks"}
     if isinstance(node, ast.Call):
         func = node.func
         # ⛔ ONLY WHAT ADDS TO THE SEARCH PATH (#14326 round 31 P3, MEASURED). `remove`/
@@ -7746,14 +7799,19 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
                 # `sys.path.__init__(…)` / `list.__init__(sys.path, …)` spellings are caught by
                 # the arguments-first arm below. The first set is ADDITIONS by receiver.
                 and func.attr in {"insert", "append", "extend"}
-                and (_is_import_path_object(func.value, ctx)
-                     # ⛔ A NAME ALIAS OF THE PATH IS THE PATH (#14326 round 31 P2, MEASURED
-                     # GREEN end-to-end: `_p = sys.path; _p.insert(0, "/tmp/evil")` resolved a
-                     # planted class). This is NOT a "finder/path shape" — it is the plain
-                     # one-bind alias axis `_aliases_of` already resolves for the registry and
-                     # every other object here, so no residual can cover it.
-                     or (isinstance(func.value, ast.Name)
-                         and func.value.id in path_names))):
+                # ⛔ A NAME ALIAS OF THE PATH IS THE PATH (#14326 round 31 P2, MEASURED
+                # GREEN end-to-end: `_p = sys.path; _p.insert(0, "/tmp/evil")` resolved a
+                # planted class). This is NOT a "finder/path shape" — it is the plain
+                # one-bind alias axis `_aliases_of` already resolves for the registry and
+                # every other object here.
+                # ⛔ AND IT IS THE SAME OBJECT IN EVERY OTHER SPELLING (#14326 round 32 P1,
+                # MEASURED GREEN at the round-31 head): round 31 resolved the alias for
+                # `insert`/`append`/`extend` and LEFT IT RAW one form over, so
+                # `_p[0:0] = ["/tmp/evil"]`, `_p.__setitem__(0, …)`, `_p.__init__([…])`,
+                # `list.__init__(_p, […])`, `_p.__iadd__([…])` and `_p += […]` each resolved a
+                # planted `tortoise/sdk.py` end-to-end with the pin GREEN. One accessor,
+                # `_is_path_expr`, so the next form cannot be half-covered again.
+                and _is_path_expr(func.value, ctx, path_names)):
             return True
         # ⛔ `setattr(sys, "path", …)` IS THE SAME WRITE (#14326 round 31 P2, MEASURED GREEN
         # end-to-end). The file already owns a `launderers` axis for exactly this spelling on
@@ -7762,20 +7820,16 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
                 and len(node.args) >= 2 and _is_sys_ref(node.args[0], ctx.sys_names)
                 and (_string_keys_of(node.args[1], ctx.consts) & _PATH_ATTRS)):
             return True
-        # `sys.path.__setitem__(…)` / `list.__init__(sys.path, […])` are the same write
-        if (isinstance(func, ast.Attribute) and func.attr in {"__init__", "__setitem__", "__iadd__"}
-                and node.args and isinstance(node.args[0], (ast.Attribute, ast.Subscript))):
-            # `list.__init__(sys.path, …)` — the UNBOUND spelling: the path is args[0]
-            _unbound = node.args[0]
-            _ub = _unbound.value if isinstance(_unbound, ast.Subscript) else _unbound
-            if (isinstance(_ub, ast.Attribute) and _ub.attr in _PATH_ATTRS
-                    and _is_sys_ref(_ub.value, ctx.sys_names)):
+        # `sys.path.__setitem__(…)` / `list.__init__(sys.path, […])` are the same write.
+        # ⛔ TWO SPELLINGS, ONE PREDICATE: the UNBOUND form names the path in `args[0]`
+        # (`list.__init__(sys.path, …)`), the RECEIVER form as `func.value`
+        # (`sys.path.__init__(…)`). Both go through `_is_path_expr`, so the alias axis is
+        # covered in BOTH positions — measured GREEN one form over before round 32.
+        if (isinstance(func, ast.Attribute)
+                and func.attr in {"__init__", "__setitem__", "__iadd__"}):
+            if node.args and _is_path_expr(node.args[0], ctx, path_names):
                 return True
-        if (isinstance(func, ast.Attribute) and func.attr in {"__init__", "__setitem__", "__iadd__"}
-                and isinstance(func.value, (ast.Attribute, ast.Subscript))):
-            base = func.value.value if isinstance(func.value, ast.Subscript) else func.value
-            if (isinstance(base, ast.Attribute) and base.attr in _PATH_ATTRS
-                    and _is_sys_ref(base.value, ctx.sys_names)):
+            if _is_path_expr(func.value, ctx, path_names):
                 return True
         return False
     # ⛔ `ast.AugAssign` IS IN THIS TUPLE DELIBERATELY, and a SEPARATE `AugAssign` arm was
@@ -7794,10 +7848,33 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
             # `/tmp/evil/tortoise/sdk.py` resolved, pin GREEN). The commit that added it
             # claimed "a plain assign" — that claim was FALSE, which is the third instance of
             # this lane's one recurring defect: a mechanism asserted rather than measured.
-            element = target.value if isinstance(target, ast.Subscript) else target
-            if (isinstance(element, ast.Attribute) and element.attr in _PATH_ATTRS
-                    and _is_sys_ref(element.value, ctx.sys_names)):
-                return True
+            if isinstance(target, ast.Subscript):
+                # ⛔ `sys.__dict__["path"] = …` IS THE SAME STORE (#14326 round 32 P2,
+                # MEASURED GREEN at `f7ff126b2c5a`: it and its `vars(sys)`/alias twins each
+                # resolved a planted `tortoise/sdk.py` end-to-end). The registry axis has
+                # graded this spelling since round 24 (`sys.__dict__["modules"] = …`); the
+                # path axis reading only the ATTRIBUTE spelling was the asymmetry, one key
+                # over. Narrowed to `sys`'s own mapping, as every form of
+                # `_is_sys_dict_mapping` is, so `_cfg["path"] = …` stays GREEN.
+                if (_is_sys_dict_mapping(target.value, ctx)
+                        and (_string_keys_of(target.slice, ctx.consts) & _PATH_ATTRS)):
+                    return True
+                element: ast.AST | None = target.value
+            else:
+                element = target
+            if not _is_path_expr(element, ctx, path_names):
+                continue
+            # ⛔ A REBIND OF THE ALIAS NAME IS NOT A MUTATION OF THE PATH (#14326 round 32,
+            # the FALSE-RED guard). `_p = ["/tmp/evil"]` (and `_p: list = […]`) replaces this
+            # local NAME and leaves `sys.path` untouched — it is the same rebind as
+            # `_p = sys.path` and must stay GREEN. `_p += […]` is `list.__iadd__`, which DOES
+            # mutate the shared list in place (measured: the entry lands on `sys.path`), so
+            # only a plain `Name` under a non-`AugAssign` statement is skipped. An ATTRIBUTE
+            # target is never skipped: `sys.path = …` IS the write (round 30 P1).
+            if (element is target and isinstance(target, ast.Name)
+                    and not isinstance(node, ast.AugAssign)):
+                continue
+            return True
     return False
 
 
@@ -8297,12 +8374,19 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
     # they install a mirror — and the axis is not hypothetical, the artifact's own
     # `tools/read_wave_latency.py` already does `sys.path.insert(0, _REPO_ROOT)`.
     #
-    # The clause is deliberately coarse — "the search path is mutated AND the registry is
-    # emptied of a `tortoise*` key" — because the fine-grained alternative is to enumerate
-    # finders and path shapes, which is the unbounded class this file already declares as
-    # residual. Coarse here can only over-RED code that simultaneously rewrites the import
-    # path and drops the package from the cache while the pin is watching, which is the
-    # premise itself.
+    # The clause is deliberately coarse — "the search path is mutated AND the registry loses an
+    # ANCESTOR of the deferred target" — and the fine-grained alternative IS to enumerate finders
+    # and path shapes. ⛔ THIS COMMENT USED TO SAY THAT CLASS WAS "the unbounded class this file
+    # already declares as residual", WHICH WAS FALSE and is retracted at its source (#14326 round
+    # 32 P3; `grep` finds no such declaration). The residual that DOES exist is now named in
+    # `_is_import_path_mutation`'s docstring and pinned GREEN by
+    # `test_the_IMPORT_PATH_axis_residuals_are_NAMED_and_pinned_GREEN`. ⛔ AND "emptied of a
+    # `tortoise*` key" WAS ONE RULE STALE (#14326 round 30 fixed the rule, round 31 claimed to
+    # fix this sentence and did not): the code grades ANCESTORS only (`tortoise`,
+    # `tortoise.sdk`), because dropping a `tortoise._ab_…` submodule re-imports nothing and
+    # redding it was a FALSE RED on the shipped `tools/read_wave_latency.py`. Coarse here can
+    # only over-RED code that simultaneously rewrites the import path and drops the package
+    # from the cache while the pin is watching, which is the premise itself.
     path_names = frozenset(_aliases_of(tree, lambda _n: _is_import_path_object(_n, ctx),
                                        loops=True))
     _path_mutations = [
@@ -9269,6 +9353,52 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "`sys.path[0:0] = [...]` slice assign + `del`":
             'sys.path[0:0] = ["/tmp/evil"]\n'
             'del sys.modules["tortoise.sdk"]\n',
+        # ⛔ AND THE SIX ALIAS SPELLINGS ROUND 31 LEFT RAW (#14326 round 32 P1, EACH MEASURED
+        # GREEN at `f7ff126b2c5a` AND END-TO-END: a planted `/tmp/evil14326/tortoise/sdk.py`
+        # was the resolved constructor — `_p[0:0] = [...]`, `_p.__setitem__(0, ...)`,
+        # `_p.__init__([...] + _p[1:])` and `list.__init__(_p, ...)` each printed
+        # FAKE-CLASS-RESOLVED; `_p += [...]` / `_p.__iadd__(...)` are the in-place additions
+        # that `sys.path.append` already reds). Round 31 resolved the one-bind alias for
+        # `insert`/`append`/`extend` and left every OTHER form of the same object reading the
+        # bare attribute predicate — the in-file asymmetry this lane exists to remove.
+        "a plain ALIAS `_p = sys.path` then `_p[0:0] = [...]` + `del`":
+            '_p = sys.path\n_p[0:0] = ["/tmp/evil"]\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "a plain ALIAS `_p = sys.path` then `_p.__setitem__` + `del`":
+            '_p = sys.path\n_p.__setitem__(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "a plain ALIAS `_p = sys.path` then `_p.__init__` + `del`":
+            '_p = sys.path\n_p.__init__(["/tmp/evil"] + _p[1:])\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "a plain ALIAS `_p = sys.path` then `list.__init__(_p, ...)` + `del`":
+            '_p = sys.path\nlist.__init__(_p, ["/tmp/evil"] + _p[1:])\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "a plain ALIAS `_p = sys.path` then `_p.__iadd__` + `del`":
+            '_p = sys.path\n_p.__iadd__(["/tmp/evil"])\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "a plain ALIAS `_p = sys.path` then `_p += [...]` + `del`":
+            '_p = sys.path\n_p += ["/tmp/evil"]\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        # ⛔ AND THE `sys.__dict__["path"]` MAPPING SPELLINGS (#14326 round 32 P2, EACH
+        # MEASURED GREEN at `f7ff126b2c5a`, and `sys.__dict__["path"] = [...]` measured
+        # end-to-end as a planted class). The REGISTRY axis has graded this spelling since
+        # round 24 (`sys.__dict__["modules"] = ...`); the path axis read only the ATTRIBUTE,
+        # which is the same asymmetry one key over.
+        "`sys.__dict__[\"path\"] = [...]` store + `del`":
+            'sys.__dict__["path"] = ["/tmp/evil"] + sys.path\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`vars(sys)[\"path\"] = [...]` store + `del`":
+            'vars(sys)["path"] = ["/tmp/evil"] + sys.path\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`_d = sys.__dict__` then `_d[\"path\"] = [...]` + `del`":
+            '_d = sys.__dict__\n_d["path"] = ["/tmp/evil"] + _d["path"]\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`sys.__dict__[\"path\"].insert` + `del`":
+            'sys.__dict__["path"].insert(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`_p = sys.__dict__[\"path\"]` then `_p.insert` + `del`":
+            '_p = sys.__dict__["path"]\n_p.insert(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
     }
     for name, lever in path_levers.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
@@ -9430,6 +9560,36 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   'sys.path.insert(0, "/tmp/evil")\nsys.modules.pop(_AB_MODULE, None)\n',
                   'sys.path.insert(0, "/tmp/evil")\ndel sys.modules[_AB_MODULE]\n',
                   'sys.modules[_AB_MODULE] = module\n',
+                  # ⛔ AND THE FALSE-RED CONTROLS FOR THE WIDENED PATH AXIS (#14326 round 32):
+                  # a COPY is NOT the path (`_p = sys.path[:]` / `list(sys.path)` /
+                  # `copy.copy(sys.path)` all leave `path_names` empty — measured), a REBIND
+                  # of the alias NAME is not a mutation of the shared list, a SHORTENING stays
+                  # inert, and the same spellings on an unrelated list, an unrelated dict and
+                  # an unrelated `__dict__` are ordinary code. Each must stay GREEN or the
+                  # widening bought a false red, which is the expensive direction here.
+                  '_p = sys.path[:]\n_p.insert(0, "/tmp/evil")\n',
+                  '_p = list(sys.path)\n_p.insert(0, "/tmp/evil")\n',
+                  '_p = sys.path\n_p = ["/tmp/evil"]\n',
+                  # ⛔ AND THE SAME CONTROLS WITH THE OTHER HALF OF THE CLAUSE PRESENT (#14326
+                  # round 32, MEASURED — without a `del` the clause cannot fire at all, so the
+                  # pair above pins nothing and the rebind guard read as inert). These are the
+                  # rows that red when the `Name`-rebind guard is deleted (`42 passed` ->
+                  # `1 failed`) and when the `sys`-dict narrowing is widened to ANY name.
+                  '_p = sys.path\n_p = ["/tmp/evil"]\ndel sys.modules["tortoise"]\n',
+                  '_cfg = {}\n_cfg["path"] = ["/tmp/evil"]\n'
+                  'del sys.modules["tortoise"]\n',
+                  '_od = other.__dict__\n_od["path"] = ["/tmp/evil"]\n'
+                  'del sys.modules["tortoise"]\n',
+                  '_p = sys.path\n_p: list = ["/tmp/evil"]\n',
+                  '_p = sys.path\n_p.remove("/tmp/evil")\n',
+                  '_p = sys.path\n_p.pop(0)\n',
+                  '_l = ["a"]\n_l[0:0] = ["/tmp/evil"]\n',
+                  '_l = ["a"]\n_l.__setitem__(0, "/tmp/evil")\n',
+                  '_l = ["a"]\nlist.__init__(_l, ["/tmp/evil"])\n',
+                  '_cfg = {}\n_cfg["path"] = ["/tmp/evil"]\n',
+                  '_od = other.__dict__\n_od["path"] = ["/tmp/evil"]\n',
+                  'sys.__dict__["flags"] = 1\n',
+                  'x = sys.__dict__["path"]\nprint(len(x))\n',
                   '_x["modules"] = {"tortoise.sdk": _Mirror}\n',
                   'a, b = 1, 2\nprint(a, b)\n',
                   'for _k in ("a", "b"):\n    print(_k)\n'):
@@ -9463,6 +9623,65 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     no_import = "def run(queries):\n    sdk = TortoiseSDK()\n"
     got = ctor_findings(no_import)
     assert got and "no `from tortoise.sdk import TortoiseSDK`" in got[0], got
+
+
+def test_the_IMPORT_PATH_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
+    """The import-path axis' DECLARED residual, measured and pinned GREEN (#14326 round 32 P3).
+
+    ⛔ WHY THIS ROW EXISTS AT ALL. Rounds 31 and 32 both wrote that the search-path axis was
+    "deliberately coarse" because the fine-grained alternative "is the unbounded class this
+    file already declares as residual" — and `grep` disproves it: this file declares residuals
+    for CALLEE computation and for string resolution, and nothing at all for finders or path
+    shapes. The sentence was doing real work (it excused four levers, three of them live) while
+    naming a declaration that did not exist. It is retracted at both sites, and what DOES remain
+    open is named here instead — the CALLEE-composition class applied to the path, which is the
+    same UNNUMBERABLE route the file already refuses to enumerate for the registry.
+
+    ⛔ EACH ROW BELOW WAS MEASURED AT `f7ff126b2c5a` as a LIVE lever — `sys.__dict__.update(
+    path=["/tmp/evil"] + sys.path)` followed by an ancestor `del` resolved a planted
+    `tortoise/sdk.py` end-to-end. They are pinned GREEN so the note cannot drift: closing any of
+    them must EDIT this table, not leave it contradicting the code. A future round that wants to
+    resolve one should START from the callee-composition residual this file already owns rather
+    than growing another spelling list.
+    """
+    shipped = ("import sys\n"
+               "from tortoise.sdk import TortoiseSDK\n"
+               "def run(queries):\n"
+               "    sdk = TortoiseSDK()\n"
+               "    return queries\n")
+
+    def reds(lever: str) -> bool:
+        return bool(_constructor_provenance_findings(ast.parse(shipped + lever)))
+
+    # The two failures this row must NOT bless: the widened alias and mapping axes.
+    assert reds('_p = sys.path\n_p[0:0] = ["/tmp/evil"]\n'
+                'del sys.modules["tortoise"]\n')
+    assert reds('sys.__dict__["path"] = ["/tmp/evil"] + sys.path\n'
+                'del sys.modules["tortoise"]\n')
+
+    declared_residual = {
+        # the `.update(**kw)` spelling of the mapping store
+        "`sys.__dict__.update(path=[...])`":
+            'sys.__dict__.update(path=["/tmp/evil"] + sys.path)\n'
+            'del sys.modules["tortoise"]\n',
+        # a callee reached through builtins' MAPPING (the round-30 residual, this axis)
+        "`builtins.__dict__[\"setattr\"](sys, \"path\", ...)`":
+            'import builtins\n'
+            'builtins.__dict__["setattr"](sys, "path", ["/tmp/evil"] + sys.path)\n'
+            'del sys.modules["tortoise"]\n',
+        # a COMPUTED path object — the same non-enumerable route the callee axis declares
+        "`_p = operator.attrgetter(\"path\")(sys)` then `_p.insert`":
+            'import operator\n_p = operator.attrgetter("path")(sys)\n'
+            '_p.insert(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise"]\n',
+        "`_p = (lambda o: o.path)(sys)` then `_p.insert`":
+            '_p = (lambda o: o.path)(sys)\n_p.insert(0, "/tmp/evil")\n'
+            'del sys.modules["tortoise"]\n',
+    }
+    for name, lever in declared_residual.items():
+        assert not reds(lever), (
+            f"{name} now RED — the declared residual in `_is_import_path_mutation` is stale; "
+            "EDIT the note and this table instead of leaving them contradicting the code")
 
 
 def test_the_ALIAS_axis_iterable_residuals_are_NAMED_and_pinned_GREEN() -> None:
