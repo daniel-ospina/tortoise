@@ -106,6 +106,27 @@ def _cache_hit_tokens(usage: object) -> int:
     return int(raw)
 
 
+#: The flash family runs NON-REASONING on every route (#1790, pilot #1549).
+#:
+#: ONE predicate, THREE pool members (#14357). Before this, the family gate
+#: lived only inside ``DeepSeekDirectModel.complete``, so ``deepseek-direct``
+#: sent ``thinking: disabled`` while the ``openrouter`` and ``venice`` members
+#: of the SAME pool sent no suppression field at all and ran at the model's
+#: default (thinking: high) — the collapse this module records as
+#: *"1500/1500 reasoning tokens, finish_reason=length, ZERO output content"*.
+#: A failover silently changed the extraction's behaviour, and only on the
+#: route nobody watches. Now ``_build_single`` asks THIS predicate for every
+#: member, so the three agree by construction rather than by three comments
+#: that can drift apart (the same gate ↔ MODELS drift hazard #1790 names).
+#:
+#: Prefix-agnostic (``deepseek/deepseek-v4-flash`` counts) — a prefixed id must
+#: never bypass the gate. ``deepseek-v4-pro`` is deliberately NOT in the set:
+#: it keeps its default (no collapse evidence — pending verification, #1790).
+def _runs_non_thinking(model_id: str) -> bool:
+    """True → the served id is one this module runs with thinking DISABLED."""
+    return (model_id or "").rsplit("/", 1)[-1] == "deepseek-v4-flash"
+
+
 class OpenRouterModel:
     """Adapter for the OpenRouter API — supports any model on the platform.
 
@@ -163,6 +184,26 @@ class OpenRouterModel:
         except Exception:
             pass
 
+    def _apply_reasoning_suppression(self, body: dict) -> None:
+        """Write this provider's thinking/reasoning control into ``body``.
+
+        Default (OpenRouter) shape: ``reasoning`` with either a hard budget
+        (``max_tokens``) or ``effort: "none"``. OpenRouter's documented
+        ``reasoning.effort`` enum is
+        ``max | xhigh | high | medium | low | minimal | none`` (docs fetched
+        2026-11-21, https://openrouter.ai/docs/use-cases/reasoning-tokens), so
+        ``{"effort": "none"}`` is the documented "do not think" value on that
+        wire — not an invented field.
+
+        ``thinking_budget > 0`` wins over ``disable_reasoning`` (a bounded
+        reasoning budget is a deliberate spend, and the pre-#14357 precedence
+        is unchanged).
+        """
+        if self.thinking_budget > 0:
+            body["reasoning"] = {"max_tokens": self.thinking_budget}
+        elif self.disable_reasoning:
+            body["reasoning"] = {"effort": "none"}
+
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
         headers = {
@@ -198,11 +239,9 @@ class OpenRouterModel:
         # structural override beats the content heuristic.
         if self.json_mode is not False and _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
-        # Enable thinking for reasoning models
-        if self.thinking_budget > 0:
-            body["reasoning"] = {"max_tokens": self.thinking_budget}
-        elif self.disable_reasoning:
-            body["reasoning"] = {"effort": "none"}
+        # Thinking control (#14357): the per-PROVIDER wire shape, delegated so
+        # a subclass can send its own documented field.
+        self._apply_reasoning_suppression(body)
 
         r = self._session.post(
             self.base_url, headers=headers, json=body, timeout=(10, 60),
@@ -261,6 +300,37 @@ class VeniceModel(OpenRouterModel):
         super().__init__(model_id, max_tokens=max_tokens,
                          temperature=temperature, **kw)
         self.api_key = os.environ.get(self.key_env, "")
+
+    def _apply_reasoning_suppression(self, body: dict) -> None:
+        """Venice's OWN thinking toggle — not OpenRouter's ``reasoning`` object.
+
+        Venice documents the suppression under ``venice_parameters``:
+        ``disable_thinking`` (boolean, default ``false``) — *"On supported
+        reasoning models, disables thinking and strips reasoning from the
+        response"* (Venice API reference, POST /chat/completions,
+        ``venice_parameters``, fetched 2026-11-21). Its ``deepseek-v4-flash``
+        catalog entry reports ``supportsReasoning: true`` (verified against
+        ``GET /models`` the same day — #4129: a provider's wire shape is only
+        asserted for an id it is confirmed to SERVE), so the default is
+        thinking ON and the member needs the explicit toggle to match the
+        other two.
+
+        Why the native field rather than Venice's OpenAI-compatible
+        ``reasoning: {"effort": "none"}`` (which its schema also accepts):
+        ``disable_thinking`` is the provider's dedicated control AND strips
+        reasoning from the response, so it leaves no thinking text for the
+        S2/S4 parse ladder to trip over. One field per provider, deliberately
+        — sending both would leave it ambiguous which one is load-bearing.
+
+        ``thinking_budget > 0`` keeps the OpenRouter-shaped bounded budget:
+        a budget is a spend decision, not a suppression.
+        """
+        if self.thinking_budget > 0:
+            body["reasoning"] = {"max_tokens": self.thinking_budget}
+        elif self.disable_reasoning:
+            params = dict(body.get("venice_parameters") or {})
+            params["disable_thinking"] = True
+            body["venice_parameters"] = params
 
 
 class DeepSeekDirectModel(OpenRouterModel):
@@ -327,7 +397,10 @@ class DeepSeekDirectModel(OpenRouterModel):
         # keeps its default (no collapse evidence — pending verification).
         # prefix-agnostic: a provider-prefixed id (e.g. "deepseek/deepseek-v4-flash")
         # must not bypass the gate (gate ↔ MODELS drift would re-open #1549).
-        if self.id.rsplit("/", 1)[-1] == "deepseek-v4-flash":
+        # #14357: the SAME predicate now decides the other two pool members'
+        # suppression (``_build_single``) — one source of truth, so the family
+        # gate cannot be extended in one place and missed in the other.
+        if _runs_non_thinking(self.id):
             body["thinking"] = {"type": "disabled"}
         r = self._session.post(
             self.base_url,
@@ -1300,17 +1373,30 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
             _direct_wire_id(model_id),
             max_tokens=max_tokens, temperature=temperature,
             json_mode=json_mode)
+    # #14357: EVERY non-deepseek-direct pool member gets the SAME suppression
+    # the direct member hardcodes. The class default is
+    # ``disable_reasoning=False`` — which is exactly where this rotted: a bare
+    # ``OpenRouterModel(...)`` in this branch sent NO reasoning field, so a
+    # failed-over extraction ran thinking-on and collapsed to
+    # ``finish_reason=length`` with zero content (the failure mode this module
+    # records at ``MODELS`` below). The decision is family-gated, not
+    # lane-gated, so all three members answer to ONE predicate and a v4-pro
+    # extraction still keeps its default on all three (#1790).
+    suppress = _runs_non_thinking(model_id)
     if provider == "venice":
-        # Venice's catalog serves the documented flash id (docstring). A
-        # wrong id fails LOUD via preflight (config-4xx → fatal gate), never
-        # silently; verify the venice catalog before enabling the pool
-        # (#1549).
+        # Venice's catalog serves the documented flash id: ``GET /models``
+        # lists ``deepseek-v4-flash`` (DeepSeek V4 Flash 0423) with
+        # ``supportsReasoning: true`` — verified live 2026-11-21 (#4129: the
+        # id is confirmed SERVED before its wire shape is asserted). A wrong
+        # id fails LOUD via preflight (config-4xx → fatal gate), never
+        # silently (#1549).
         return VeniceModel(
             _strip_family_prefix(model_id),
             max_tokens=max_tokens, temperature=temperature,
-            json_mode=json_mode)
+            disable_reasoning=suppress, json_mode=json_mode)
     return OpenRouterModel(model_id, max_tokens=max_tokens,
-                           temperature=temperature, json_mode=json_mode)
+                           temperature=temperature,
+                           disable_reasoning=suppress, json_mode=json_mode)
 
 
 # #4992: eligibility reason kinds returned by

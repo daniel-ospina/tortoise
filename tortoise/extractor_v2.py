@@ -16154,8 +16154,10 @@ def _classify_error(e: BaseException) -> str:
     Stable keys (the report census + retry-then-fix triage read these):
     fatal_401_auth / fatal_402_billing / fatal_403_forbidden / fatal_4xx /
     transient_429_rate_limit / transient_5xx / transient_timeout /
-    transient_network / transient_unknown. ``parse_error`` and ``truncated``
-    are produced by the stage callers, not here.
+    transient_network / transient_unknown. ``parse_error``, ``truncated`` and
+    ``reasoning_collapse`` (#14357) are produced by the stage callers / the
+    yield guard, not by the status mapper — this function is the FIRST branch
+    for the one of them that arrives as a raised exception.
 
     Duck-typed (``e.response.status_code``) so the extractor stays free of a
     hard ``requests`` import. This is the CENSUS-class mapper, NOT the retry
@@ -16181,7 +16183,10 @@ def _classify_error(e: BaseException) -> str:
     The key-limit test itself is ``_is_key_limit_error`` above (its breadth
     caveat included).
 
-    The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``.
+    The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``, or the
+    ``parse_error``/``truncated_parse_error``/``reasoning_collapse`` classes
+    the module's own exception types decide (``_ParseError``'s ``truncated``
+    flag, ``_ReasoningCollapse``'s type).
 
     KNOWN DIVERGENCES from P2's retry taxonomy (both pre-existing, not
     introduced here, and both tracked on #5525, whose root was restated to
@@ -16198,6 +16203,10 @@ def _classify_error(e: BaseException) -> str:
     Neither is changed here (a classifier change is its own concern, #5525),
     and neither is denied here."""
     st = getattr(getattr(e, "response", None), "status_code", None)
+    if isinstance(e, _ReasoningCollapse):
+        # #14357: no status to read — the class is the TYPE's fact, decided by
+        # the yield guard in ``_complete`` (empty content, finish_reason=length).
+        return "reasoning_collapse"
     if st is not None:
         if st == 429:
             return "transient_429_rate_limit"
@@ -16230,12 +16239,41 @@ def _is_fatal_error(e: BaseException) -> bool:
     the same ``fatal_*`` prefix (GATE-1). This is the ABORT decision ONLY.
     The CENSUS class comes from ``_classify_error``, and the two are NOT
     guaranteed to agree — it reads the status from a different attribute and
-    maps 408/425 differently; see its KNOWN DIVERGENCES paragraph."""
+    maps 408/425 differently; see its KNOWN DIVERGENCES paragraph.
+
+    #14357: ``_ReasoningCollapse`` is fatal by TYPE — a re-call sends the SAME
+    prompt with the SAME budget at temperature 0, so a retry re-burns the
+    output budget into hidden reasoning and collapses again; it would only add
+    spend to a call that already returned nothing."""
+    if isinstance(e, _ReasoningCollapse):
+        return True
     try:
         from tortoise.model_adapters import is_fatal
         return is_fatal(e)
     except ImportError:  # pragma: no cover — P2 landed; defensive fallback
         return _classify_error(e).startswith("fatal")
+
+
+class _ReasoningCollapse(RuntimeError):
+    """A call returned EMPTY content with ``finish_reason="length"`` — the
+    reasoning-budget collapse (#14357).
+
+    The signature this module has on the record since pilot #1549: the model
+    reasons by default (thinking: high), spends the whole ``max_tokens`` budget
+    on hidden reasoning tokens, and emits nothing — ``1500/1500 reasoning
+    tokens, finish_reason=length, ZERO output content``. Raised by the yield
+    guard in ``_complete`` so the call is a RECORDED failure rather than a
+    document that silently extracted no facts.
+
+    Fatal by type (``_is_fatal_error``): the retry would resend the identical
+    prompt at temperature 0 with the same budget and collapse identically,
+    buying nothing and billing again.
+
+    Census class: ``reasoning_collapse`` (``_classify_error``). NOTE it is NOT
+    in ``tools/longmem_eval/report.py``'s ``RECOVERABLE_CENSUS_CLASSES`` —
+    deliberately: an extraction that produced zero content is a hard failure,
+    and that gate fails CLOSED on an unknown class, which is the direction
+    this defect needs."""
 
 
 class _ParseError(ValueError):
@@ -17090,6 +17128,32 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                     _rec["truncation_completion_tokens"] = (
                         _rec.get("truncation_completion_tokens", 0)
                         + completion_tokens)
+            # #14357 — the YIELD GUARD, and the reason it lives here rather
+            # than in a retry: ``finish_reason="length"`` with EMPTY content is
+            # the reasoning-collapse signature this module already records
+            # (pilot #1549: "1500/1500 reasoning tokens, finish_reason=length,
+            # ZERO output content"). It is NOT a truncation of a real answer
+            # whose tail was cut — the model produced nothing at all, and
+            # returning it unchanged makes "the document had no facts" and
+            # "the extraction never ran" the SAME observable outcome. Raising
+            # makes the chunk a RECORDED failure (``errors`` +
+            # ``error_census['reasoning_collapse']``) instead of a silent empty
+            # document, without inventing a retry ladder: the caller's S1/S2/S4
+            # handlers already treat an exception as a failed call.
+            #
+            # Only the collapse shape is caught. A non-empty length-truncated
+            # response keeps its existing escalation behaviour (a cut tail is
+            # recoverable, #2134 Task 4), and an empty response with
+            # ``finish_reason=stop`` is a legitimate empty answer (the two-phase
+            # prompt abstains in writing) — neither is a reasoning burn.
+            if truncated and not (resp or "").strip():
+                raise _ReasoningCollapse(
+                    "empty content with finish_reason=length — the output "
+                    "budget was consumed by hidden reasoning tokens "
+                    f"(route={call_provider!r}, model={call_model!r}, "
+                    f"completion_tokens={completion_tokens}, "
+                    f"max_tokens={max_tokens!r}); the call produced no "
+                    "extraction (#14357)")
             return resp
         except BaseException as e:  # noqa: BLE001, RUF100
             if not isinstance(e, Exception):  # never retry SystemExit/KeyboardInterrupt
