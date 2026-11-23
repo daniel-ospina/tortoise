@@ -147,8 +147,12 @@ def test_a_failed_item_is_counted_but_never_priced():
 
 def test_allowance_table_derives_documents_from_the_measured_token_count():
     """`#14275`'s 3M-token allowance buys `3M / tokens-per-document` items —
-    the arithmetic that turned ≈200 documents into ~47. It is derived here,
-    never asserted, so a re-measured token count moves the answer."""
+    the arithmetic that turned ≈200 documents into ~46. It is derived here,
+    never asserted, so a re-measured token count moves the answer.
+
+    ⛔ The answer is the FLOOR. `round()` said 47 here, and `47 × 64,000 =
+    3,008,000` is 8,000 tokens PAST the allowance — a capacity column nothing
+    at that tier can buy (review round 4, P2)."""
     rows = [_row(item_tokens=5_000 + i, prompt_tokens=48_000,
                  completion_tokens=16_000) for i in range(5)]
     report = m.build_report(rows)
@@ -159,12 +163,83 @@ def test_allowance_table_derives_documents_from_the_measured_token_count():
     assert per_doc == 64_000
     table = m.allowance_table(cost, per_doc)
     solo = next(a for a in table if a["tier"] == "solo")
-    assert solo["documents"] == round(3_000_000 / 64_000)
-    assert solo["documents"] == 47
+    assert solo["documents"] == 46
+    # the discriminator: the NEAREST integer overruns the allowance, which is
+    # exactly what round() printed and why the cell has to be floored.
+    assert round(3_000_000 / 64_000) == 47
+    assert 47 * 64_000 > 3_000_000 >= 46 * 64_000
     assert solo["usd_peak"] > 0.0
     assert solo["pct_peak"] > 0.0
     free = next(a for a in table if a["tier"] == "free")
     assert free["documents"] == 0 and free["usd_peak"] == 0.0
+
+
+def test_no_allowance_cell_claims_more_than_its_allowance_can_buy():
+    """Every printed count is the FLOOR of allowance ÷ unit cost.
+
+    This is the pin that was MISSING, which is why three overstating cells
+    walked past four review rounds (review round 4, P2 on
+    `docs/evidence/14343-amplify/README.md:320-322`): 50 × 60,201 = 3,010,050
+    at solo's 3M, 399 × 60,201 = 24,020,199 at team's 24M, and 62 × 64,799 =
+    4,017,538 at pro's 4M.
+
+    Checked on the COMMITTED artifacts rather than a fabricated row: the frozen
+    `report.json` the renderer produced, and the hand-written §4/§5 tables in
+    the #14343 bundle that quote it. Restoring `round()` reds it (62 → 61 at
+    pro, 110 → 109 sessions) and so does hand-editing one cell.
+    """
+    committed = json.loads((_EVIDENCE / "report.json").read_text())
+    assert committed["allowances"], "the frozen report carries no allowances"
+    per_doc = committed["costs"]["tokens_per_median_doc"]
+    session_row = next(r for r in committed["costs"]["rows"]
+                       if r["item"] == "median session")
+    per_session = session_row["measured_in"] + session_row["measured_out"]
+    assert (per_doc, per_session) == (64_799, 36_415), (
+        "the measured unit costs moved; re-derive the README tables with this pin")
+
+    for row in committed["allowances"]:
+        if not row["allowance"]:
+            continue
+        for column, unit in (("documents", per_doc), ("sessions", per_session)):
+            got = row[column]
+            assert got == m.affordable_count(row["allowance"], unit), (
+                f"{row['tier']}.{column}={got} is not the floor of "
+                f"{row['allowance']}/{unit}")
+            assert got * unit <= row["allowance"] < (got + 1) * unit, (
+                f"{row['tier']}.{column}={got} × {unit} does not fit "
+                f"{row['allowance']}")
+
+    readme = (_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+              / "README.md").read_text(encoding="utf-8")
+    allowances = {"solo": 3_000_000, "pro": 4_000_000, "team": 24_000_000}
+    after_tokens = 60_201          # 64,799 − 4,598, this bundle's own Δ row
+
+    # §4: | documents / month · solo (3M) | 46 | 49 | +6.5 % |
+    rows = re.findall(r"^\| documents / month · (solo|pro|team) \(\w+\) "
+                      r"\| (\d+) \| (\d+) \| \+([\d.]+) % \|$",
+                      readme, flags=re.MULTILINE)
+    assert len(rows) == 3, f"§4's capacity rows are gone or malformed: {rows}"
+    for tier, before, after, delta in rows:
+        before, after, delta = int(before), int(after), float(delta)
+        allowance = allowances[tier]
+        assert before == m.affordable_count(allowance, per_doc), tier
+        assert after == m.affordable_count(allowance, after_tokens), tier
+        assert before * per_doc <= allowance < (before + 1) * per_doc
+        assert after * after_tokens <= allowance < (after + 1) * after_tokens
+        assert delta == round(100 * (after / before - 1), 1), (
+            f"{tier}'s Δ is derived from the two cells; restate it when one moves")
+
+    # §5: | solo | 3M | 46 | 66 | 93 |
+    rows5 = re.findall(r"^\| (solo|pro|team) \| \d+M \| (\d+) \| (\d+) "
+                       r"\| (\d+) \|$", readme, flags=re.MULTILINE)
+    assert len(rows5) == 3, f"§5's capacity rows are gone or malformed: {rows5}"
+    for tier, *cells in rows5:
+        allowance = allowances[tier]
+        for cell, unit in zip(cells, (per_doc, 45_000, 32_000), strict=True):
+            cell = int(cell)
+            assert cell * unit <= allowance < (cell + 1) * unit, (
+                f"{tier}: {cell} × {unit} does not fit {allowance} — a capacity "
+                f"cell may round DOWN, never up")
 
 
 def test_the_corpus_is_deterministic_and_carries_the_length_spread():

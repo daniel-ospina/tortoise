@@ -320,9 +320,16 @@ answer.)
 | input tokens / median document | 48,461 | 43,863 | −4,598 |
 | output tokens / median document | 16,338 | 16,338 (unchanged by construction) | 0 |
 | **tokens / median document** | **64,799** | **60,201** | **−7.1 %** |
-| documents / month · solo (3M) | 46 | 50 | +8.7 % |
-| documents / month · pro (4M) | 62 | 66 | +6.5 % |
-| documents / month · team (24M) | 370 | 399 | +7.8 % |
+| documents / month · solo (3M) | 46 | 49 | +6.5 % |
+| documents / month · pro (4M) | 61 | 66 | +8.2 % |
+| documents / month · team (24M) | 370 | 398 | +7.6 % |
+
+| document / month cells are FLOORS** — `3,000,000/60,201 = 49.83` prints **49**, because
+50 × 60,201 = 3,010,050 overruns the allowance, and a capacity column that cannot be bought at
+that tier is wrong in the direction that flatters us. `round()` printed 50/62/399 here (and 110
+sessions at pro) until review round 4; `tools/extractor_cost_measure.py:affordable_count` is the
+one convention now, pinned by
+`test_no_allowance_cell_claims_more_than_its_allowance_can_buy`.
 
 ⚠️ The output column is "unchanged *by construction*" — the input to S4 changed, so what S4
 *emits* is the thing the capstone measures, and it has not been measured here.
@@ -335,11 +342,11 @@ Unchanged by this bundle, and re-stated so the lever's value is on the record. F
 | tier | allowance | documents/month at 64,799 | at 45,000 (−30 %) | at 32,000 (−50 %) |
 |---|---|---|---|---|
 | solo | 3M | 46 | 66 | 93 |
-| pro | 4M | 62 | 88 | 125 |
+| pro | 4M | 61 | 88 | 125 |
 | team | 24M | 370 | 533 | 750 |
 
 A 30 % cut — which the composition says is available *in principle* (S2's re-read plus the
 kind vocabulary alone are 50.5 % of the composition, 47 % of the constant) — is worth
-**+43 %** documents per allowance. The one lever shipped here (disarmed) is worth **+8 %**
-on its own. **Neither is quotable as a plan until the capstone re-runs green**: what is
+**+43 %** documents per allowance. The one lever shipped here (disarmed) is worth
+**+6.5 % / +8.2 % / +7.6 %** (solo / pro / team) on its own. **Neither is quotable as a plan until the capstone re-runs green**: what is
 measured here is the size of the lever, not its safety.

@@ -974,6 +974,32 @@ def measurement_cost(rows: list[dict], rates_peak: dict, rates_off: dict) -> dic
     }
 
 
+def affordable_count(allowance: int, unit_cost: float) -> int:
+    """How many ``unit_cost``-priced items a token ``allowance`` can BUY.
+
+    ⛔ FLOOR, never ``round()`` — this is a capacity claim, not a ratio.
+    `round()` overstated three of the six printed cells: solo-after
+    ``3,000,000/60,201 = 49.83`` printed **50**, and ``50 × 60,201 =
+    3,010,050`` is 10,050 tokens PAST the allowance; team-after printed 399
+    for ``24,020,199 > 24,000,000``; pro-before printed 62 for
+    ``4,017,538 > 4,000,000``; pro's session count printed 110 for
+    ``4,005,650 > 4,000,000``. A table whose "what you get for your tier"
+    column cannot be bought at that tier is wrong in the direction that
+    flatters us, so the count is what FITS, not the nearest integer.
+
+    The bundle was already inconsistent about its own convention — §5's
+    ``45,000``/``32,000`` columns and the ``+43 %`` derived from them are
+    floors, while the ``64,799`` column was ``round()`` — which is why the
+    three overstating cells survived four review rounds (review round 4,
+    P2: ``docs/evidence/14343-amplify/README.md:320-322`` and
+    ``.env.example:1767``). One convention, and it is the one that cannot
+    overpromise.
+    """
+    if not unit_cost or unit_cost <= 0:
+        return 0
+    return int(allowance // unit_cost)
+
+
 def allowance_table(cost: dict, tokens_per_doc: int) -> list[dict]:
     """`#14275`'s four allowances, re-stated in the MEASURED unit.
 
@@ -982,6 +1008,9 @@ def allowance_table(cost: dict, tokens_per_doc: int) -> list[dict]:
     what that allowance costs us. Both are derived here rather than asserted:
     the in:out mix comes from the measured median document, and the cost per
     token from the measured cache behaviour at peak rates.
+
+    The document/session counts are FLOORS (`affordable_count`) — round()
+    printed counts the allowance cannot afford.
     """
     rows = cost.get("rows") or []
     if not rows:
@@ -1012,12 +1041,11 @@ def allowance_table(cost: dict, tokens_per_doc: int) -> list[dict]:
             "usd_peak": usd_peak, "usd_off_peak": usd_off,
             "pct_peak": round(100 * usd_peak / price, 1) if price else 0.0,
             "pct_off_peak": round(100 * usd_off / price, 1) if price else 0.0,
-            "documents": round(allowance / tokens_per_doc) if tokens_per_doc else 0,
+            "documents": affordable_count(allowance, tokens_per_doc),
             "sessions": (
-                round(allowance / (session_row["measured_in"]
-                                   + session_row["measured_out"]))
-                if session_row and (session_row["measured_in"]
-                                    + session_row["measured_out"]) else 0),
+                affordable_count(allowance, session_row["measured_in"]
+                                 + session_row["measured_out"])
+                if session_row else 0),
         })
     return out
 
