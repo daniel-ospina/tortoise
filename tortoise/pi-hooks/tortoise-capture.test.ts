@@ -7809,6 +7809,29 @@ test("#14350: a displaced claim is RESTORED, never disposed of", async () => {
   assert.equal(existsSync(ours.quarantine), false);
 });
 
+test("#14350: a NOT-OURS release leaves the successor's claim in place", async () => {
+  // The Python leg's `release` reads the token BEFORE moving anything (a not-ours
+  // release takes no destructive step at all). The Pi leg still took the claim
+  // aside first (#14423 cycle-6 review, P2): a third process installing into the
+  // momentarily-empty path made the restore `linkSync` fail `EEXIST`, and the
+  // successor's bytes were unlinked — a live claim destroyed by a release that was
+  // trying to be polite. Both legs must behave identically here (R6).
+  // MUTATION THAT REDS THIS: takedown first, compare after.
+  const spool = tmpSpool();
+  const slow = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
+  assert.ok(slow);
+  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1100, ttlMs: 60 });
+  assert.ok(successor);
+  const before = readDrainClaim(spool);
+  assert.equal(slow.release(), false, "the token is no longer ours");
+  const after = readDrainClaim(spool);
+  assert.equal(after?.token, successor.token, "the successor's claim must survive intact");
+  assert.deepEqual(after, before, "and be byte-identical: nothing may have touched it");
+  assert.equal(successor.renew(1110), true, "…and still be renewable");
+  assert.equal(successor.release(), true, "an OURS release still takes it");
+  assert.equal(readDrainClaim(spool), undefined);
+});
+
 test("#14350: an unmakeable root is UNAVAILABLE, not a lost RACE", async () => {
   // `undefined` from `acquireDrainClaim` means two different things, and the
   // difference decides whether `flushSpool` may run the pass UNCLAIMED

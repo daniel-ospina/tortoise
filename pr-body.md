@@ -110,7 +110,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_capture_spool.py \
 # the four cross-leg cases run the REAL TypeScript predicate under `node`, so the
 # seam is graded by both implementations rather than by one leg's opinion of it
 node --test tortoise/pi-hooks/tortoise-capture.test.ts tortoise/pi-hooks/tortoise-volunteer.test.ts
-302 pass / 0 fail
+303 pass / 0 fail
 ```
 
 Every new case names the mutation that reds it. `WORKTREE-REPORT.md` carries the commands verbatim.
@@ -197,7 +197,7 @@ required set, so it cannot block the merge; it stays red only on that `main`-sid
 | **P2** `release` could dispose of a claim it did not own (three-process interleaving) | **fixed**: it reads the token first and returns `False` without touching the file when the claim is not ours; the takedown stays for the ours branch. A new test pins that a not-ours release does not even change the file's inode/mtime. |
 | **P2** an out-of-range-but-finite `expires_at` raised `OverflowError` out of `flush_spool` (`time.gmtime` outside its try/finally) and, being honoured by rule 2 as never-expiring, blocked the spool PERMANENTLY | **fixed**: the format is guarded, and a test builds that record end-to-end and asserts the operator line still renders. |
 | **P2** the Pi leg could run UNCLAIMED when both takeover attempts lost a race (path momentarily empty → read as "cannot create") | **fixed**: `acquireDrainClaim` reports `state.raced` and `flushSpool` fails CLOSED on it, as the Python leg does for any `None` from `acquire`. A test pins the OTHER arm (an unmakeable root is NOT a lost race) so the documented "run unclaimed and say so" cannot be swallowed by the flag. |
-| **P2** `renew`'s post-write read-back does not close the takeover race it claimed to — the replace IS the clobber | **record corrected, not changed.** ⚠️ **SUPERSEDED at cycle 6**: the residual below is CLOSED on both legs rather than documented — see the closed residual. | Reproduced (a peer record installed between the guard read and the replace is lost; `renew` returns `True`). The comment now states exactly what the read-back covers and what it does not; the residual is below. |
+| **P2** `renew`'s post-write read-back does not close the takeover race it claimed to — the replace IS the clobber | **record corrected, not changed.** Reproduced (a peer record installed between the guard read and the replace is lost; `renew` returns `True`). The comment now states exactly what the read-back covers and what it does not; the residual is below. ⚠️ **SUPERSEDED at cycle 6**: the residual below is CLOSED on both legs rather than documented — see the closed residual. |
 | **P2** `DRAIN_MAX_IN_FLIGHT` is read by no code and bounds 1 POST per PASS, while a TARGETED pass takes no claim | **record corrected**: the constant's docstring now says the ceiling is per pass, that the claim is what serialises passes, that the box's worst case is **2** in that overlap, and that no test asserts the per-pass property itself. |
 
 **Cycle 6** (a fresh-context reviewer at `a61c123644`, merged with a peer lane's
@@ -220,11 +220,12 @@ finding fixed once and the duplication removed rather than merged as-is.
 
 * **Generation 33 is introduced by this PR and has never shipped**, so its recorded
   seam digest in `test_capture_install.py` was updated in place at each head
-  (capture half `dd1331c9…`, re-cut three times: for the export-only test seam,
-  for this leg's behaviour change, and for the MERGE of a peer lane's overlapping
-  fixes — a merge is a byte change, and no side's digest describes it;
-  the read half moved `708b6a…`→`904d2742…` because its
-  generation MARKER moved 32→33 with the pair) instead of
+  (capture half `1e1e684a…`, re-cut four times: for the export-only test seam, for
+  the peer lane's `release`/`raced` behaviour fixes, for this leg's behaviour
+  changes, and for the MERGE of the two — a merge is a byte set neither side
+  hashed, so the digest is always derived from the merged tree; the read half moved
+  `708b6a…`→`904d2742…` because its generation MARKER moved 32→33 with the pair)
+  instead of
   spending a generation 34 on a refinement of the same unreleased seam. From the
   moment 33 reaches `main` the entries are frozen and a byte change needs 34.
 * ~~**A `renew` that lands inside the read → replace window can overwrite a peer's
