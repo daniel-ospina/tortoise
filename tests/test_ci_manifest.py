@@ -257,6 +257,37 @@ def test_a_weight_with_finer_precision_than_the_writer_is_red() -> None:
     assert any(key in reason and "precision" in reason for reason in red), red
 
 
+def test_a_fast_file_with_no_row_is_a_default_not_a_defect() -> None:
+    """#2148/B9: an UNROWED fast file is a default weight, never a gate failure.
+
+    The retired ENTRY RULE ("the row must EXIST, not merely default") obliged
+    every author who ADDED a test file to hand-write a row plus a note into
+    `config/ci-surfaces.yml` — a `merge=union` file and the repo's top churn
+    source — and it was never a gate: `--integrity` stayed GREEN over a missing
+    row either way, because `duration_coverage_issues` is a 0.90 RATIO with ~1.3k
+    fast files of headroom and `duration_issues` validates keys that EXIST.
+
+    This pins the replacement contract from BOTH ends — every map check stays
+    silent, and the packer weighs the file at `DEFAULT_FAST_WEIGHT` — so putting
+    the requirement back has to delete this row on purpose. The existence rule
+    that DOES survive is `durations_floors` (a declared CAP that cannot bind
+    without its row, `floor_issues`); it is untouched here.
+    """
+    manifest = _manifest((NOW - dt.timedelta(days=1)).isoformat())
+    unrowed = "test_a_file_this_pr_added_with_no_row.py"
+    manifest["surfaces"]["core"] = [*manifest["surfaces"].get("core", []), unrowed]
+    assert unrowed not in manifest["durations"], (
+        "this case is vacuous unless the file really has no row")
+    assert ci_manifest.map_issues(manifest) == [], ci_manifest.map_issues(manifest)
+    assert cs.duration_issues(manifest) == []
+    assert ci_manifest.plausibility_issues(manifest) == []
+    red, _unknown = ci_manifest.check(manifest, NOW)
+    assert red == [], red
+    # "A default is not a reading" is still true — and the default is still the
+    # weight the file packs at until a sweep measures it.
+    assert cs._duration_weight(manifest["durations"].get(unrowed)) == cs.DEFAULT_FAST_WEIGHT
+
+
 def test_the_map_checks_are_composed_not_re_implemented() -> None:
     """`check` reports what the selector's own checks report.
 

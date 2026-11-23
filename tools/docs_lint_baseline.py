@@ -1394,6 +1394,15 @@ def _run_lychee(files: list[str], repo_root: Path, lychee_bin: str) -> dict:
                 "--no-progress",
                 "--format",
                 "json",
+                # #2148/B5: LOCAL targets only, on BOTH sides of the pin — the
+                # producer (`.github/scripts/docs-link-check.sh`) carries the
+                # same flag, and `tests/test_docs_link_check.py` compares the
+                # two argv lists element by element. A remote host's answer is a
+                # property of the RUN (status codes, egress, rate limits, bot
+                # policy — the snapshot's own `variance` note), not of the diff,
+                # and the REQUIRED `docs` job was redded by one (#14230).
+                "--exclude",
+                "^https?://",
                 "--files-from",
                 str(list_path),
             ],
