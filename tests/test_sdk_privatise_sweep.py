@@ -366,11 +366,16 @@ _ARM_REFSPECS: dict[str, str] = {
     # GitHub serves a commit reachable from ANY ADVERTISED REF, by FULL SHA — `main`'s ancestry, or
     # `refs/pull/<n>/head` (`efe5605e976a` is served via `refs/pull/14270/head`: the rebase left it
     # no longer an ancestor of `main`, so an ancestry-only rule does NOT explain that entry) — and a
-    # DESTINATION is required (round 13), so each maps to `+<sha>:refs/remotes/origin/<abbrev>`.
+    # DESTINATION is required (round 13), so each maps to `+<sha>:refs/pi/<abbrev>`.
+    # ⛔ NOT `refs/remotes/origin/<abbrev>` (#14282 review, P3): `git fetch --prune origin` DELETES a
+    # remote-tracking ref the remote does not advertise — measured in a scratch clone, the destination
+    # was removed with ` - [deleted] (none) -> origin/<abbrev>` — so a routine prune silently disarmed
+    # the re-arm this map prints. `refs/pi/*` is what every sibling sha want here uses, and `--prune`
+    # does not touch it.
     # Measured on this repo: each fetch created its destination ref at the named sha.
-    "5e83c2a2f6": "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/remotes/origin/5e83c2a2f6",
-    "10e51693f1": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/remotes/origin/10e51693f1",
-    "efe5605e976a": "+efe5605e976af24ea45cc66d2015861d30d3a39c:refs/remotes/origin/efe5605e976a",
+    "5e83c2a2f6": "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/pi/5e83c2a2f6",
+    "10e51693f1": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f1",
+    "efe5605e976a": "+efe5605e976af24ea45cc66d2015861d30d3a39c:refs/pi/efe5605e976a",
     #
     # ⛔ AND #14258's TWO, FROM THE OTHER SIDE OF THIS MERGE. They are kept alongside the
     # three above rather than replacing them: all five are an `OWN_PINS` key on the MERGED
@@ -423,7 +428,11 @@ _ARM_REFSPECS: dict[str, str] = {
     "1b0db0489408": "+1b0db0489408e1e817688f83cef0d7c1ee33be5d:refs/pi/1b0db0489408",
     "2c0d66e2ec": "+2c0d66e2ec07d673b17e31b76dc24fbdd57f8e14:refs/pi/2c0d66e2ec",
     "e74cf1d13d": "+e74cf1d13da76ba7176c73ebacd96cef843378f5:refs/pi/e74cf1d13d",
-    "2fe01fc775e": "+2fe01fc775ea5b202907cf3036565a82fd1f389f:refs/pi/2fe01fc775e",
+    # ⛔ `2fe01fc775e` is NOT listed here: it is `RESIDUE_REWRITE_PARENT`, already mapped at the top of
+    # this map to `_PR_HEAD_REFSPEC`. A second literal entry bound the SAME key, so Python kept the last
+    # one and the constant's row became dead data — and the printed remedy silently changed from a
+    # refspec that creates `refs/pull/14108/head` to a sha want that creates only `refs/pi/2fe01fc775e`
+    # (#14282 review, P2). One key, one row.
     "e0accb8fe6": "+e0accb8fe6362942a0c847c7daa1829e272296a9:refs/pi/e0accb8fe6",
     "72c104bcbb": "+72c104bcbb1cbcef901476a535ed35262d167e02:refs/pi/72c104bcbb",
     # `8889f1140105` is a MERGE on a deleted feature branch, so no depth-1 REF arms it — but a sha
