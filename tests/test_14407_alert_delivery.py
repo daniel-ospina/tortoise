@@ -421,19 +421,23 @@ def test_a_resolution_window_stays_pending_until_it_completes(monkeypatch):
 
     monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
     engine = AbuseEngine(_FlagOnceStore())
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    clock = [datetime.now(timezone.utc)]  # noqa: UP017
+    monkeypatch.setattr("tortoise.abuse._utcnow", lambda: clock[0])
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)   # 2 SKIPPED_WINDOW
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])   # 2 SKIPPED_WINDOW
     after_first = len(calls)
     assert after_first == 2, calls
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)   # 2 more SKIPPED_WINDOW
+    clock[0] = clock[0] + timedelta(seconds=3601)
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])   # 2 more SKIPPED
     assert len(calls) == 4, f"SKIPPED_WINDOW dropped the retry ({calls})"
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)   # RESOLVED now
+    clock[0] = clock[0] + timedelta(seconds=3601)
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])   # RESOLVED now
     assert len(calls) == 6, calls
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)   # completed → no more
+    clock[0] = clock[0] + timedelta(seconds=3601)
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])   # completed
     assert len(calls) == 6, f"a completed resolution kept retrying ({calls})"
 
 
@@ -527,17 +531,42 @@ def test_a_cooldown_refusal_does_not_consume_the_retry_budget(monkeypatch):
 
 
 def test_two_rules_cannot_both_claim_one_migrated_issue():
-    """ONE issue, ONE scoped claimant — across two store instances (two processes).
+    """ONE issue, ONE scoped claimant — INTERLEAVED across two store instances.
 
-    Two rules of one org can migrate from the same legacy object concurrently, and
-    `delete` is idempotent on both substrates, so a read-then-delete "claim check"
-    lets both claim: one rule's episode end then closes the issue the other rule is
-    tracked by (false `✅`), and the other re-files (#3029/#3031).
+    The racers are two REPLICAS (`AlertStore` objects sharing one object store), and
+    the window that matters is where both are inside the migration at once: rule
+    B's migration runs while rule A has created its scoped key but has NOT yet
+    released the legacy object. `delete` is idempotent on both substrates, so a
+    read-then-delete "claim check" would let both claim — one rule's episode end
+    then closes the issue the other rule is tracked by (a false `✅`) and the other
+    re-files (#3029/#3031).
+
+    Sequential execution does NOT test this (the second migration would just find
+    the legacy object gone), so A's release is held open by a storage double while
+    B runs to completion.
     """
+    import threading
+
     from tortoise.alert_store import AlertStore
     from tortoise.hosted_backup import MemoryStorage
 
-    storage = MemoryStorage()
+    class _PausableStorage(MemoryStorage):
+        """Blocks the FIRST legacy release so the second migration interleaves."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.block_release = True
+            self.release_started = threading.Event()
+            self.release_may_finish = threading.Event()
+
+        def delete(self, key):
+            if self.block_release and key.endswith("/org-a.json"):
+                self.block_release = False
+                self.release_started.set()
+                assert self.release_may_finish.wait(timeout=10), "release never freed"
+            return super().delete(key)
+
+    storage = _PausableStorage()
 
     def _store():
         return AlertStore(
@@ -554,16 +583,82 @@ def test_two_rules_cannot_both_claim_one_migrated_issue():
     first, second = _store(), _store()
     first.open_incident_state("abuse_review_needed", "org-a", {"detail": "legacy"})
 
-    moved_a = first.migrate_incident_subject(
-        "abuse_review_needed", "org-a:point_create", "org-a")
-    moved_b = second.migrate_incident_subject(
-        "abuse_review_needed", "org-a:key_create", "org-a")
+    results: dict[str, bool] = {}
+
+    def _migrate(store, subject, name):
+        results[name] = store.migrate_incident_subject(
+            "abuse_review_needed", subject, "org-a")
+
+    winner = threading.Thread(
+        target=_migrate, args=(first, "org-a:point_create", "A"))
+    winner.start()
+    assert storage.release_started.wait(timeout=10), \
+        "the winning migrator never reached its legacy release"
+
+    # ...and B migrates from the SAME legacy object while A holds it mid-flight.
+    _migrate(second, "org-a:key_create", "B")
+
+    storage.release_may_finish.set()
+    winner.join(timeout=10)
 
     claims = [subj for subj in ("org-a:point_create", "org-a:key_create")
               if first.incident_record("abuse_review_needed", subj)]
-    assert moved_a is True and moved_b is False, (moved_a, moved_b)
+    assert results.get("A") is True, results
+    assert results.get("B") is False, f"both replicas claimed one issue: {results}"
     assert claims == ["org-a:point_create"], (
         f"two scoped sentinels claim one issue: {claims}")
+
+
+def test_a_created_claim_is_released_when_the_scoped_key_already_exists():
+    """A claim left behind permanently blocks migrating that issue ever again.
+
+    The "another writer already owns the scoped key" branch used to return without
+    deleting the claim, so a later attempt found its own stale claim and refused
+    for ever — leaving the legacy sentinel (and its OPEN issue) stranded next to a
+    duplicate filed for one condition: a permanent #2844 alias.
+    """
+    from tortoise.alert_store import AlertStore
+    from tortoise.hosted_backup import MemoryStorage
+
+    class _Racing(MemoryStorage):
+        """Loses the scoped create to a real writer that got there first."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.lose_next_create = False
+
+        def create_if_not_exists(self, key, payload):
+            if self.lose_next_create and key.endswith("/org-a:point_create.json"):
+                self.lose_next_create = False
+                super().create_if_not_exists(key, b'{"kind": "other-writer"}')
+                return False
+            return super().create_if_not_exists(key, payload)
+
+    storage = _Racing()
+    store = AlertStore(
+        storage,
+        file_issue=lambda title, body: 7,
+        close_issue=lambda number, comment=None: None,
+        search_open=lambda kind, org: [],
+        push_telegram=lambda text: None,
+        issue_open=lambda number: True,
+        comment_issue=lambda number, body: None,
+        repo="daniel-ospina/tortoise",
+    )
+    store.open_incident_state("abuse_review_needed", "org-a", {"detail": "legacy"})
+
+    storage.lose_next_create = True
+    assert store.migrate_incident_subject(
+        "abuse_review_needed", "org-a:point_create", "org-a") is False
+
+    # the competing scoped key goes away (its own episode end closes it)...
+    storage.delete("ops/alerts/abuse_review_needed/org-a:point_create.json")
+
+    # ...and the migration must be able to RUN AGAIN, i.e. the claim is gone.
+    assert store.migrate_incident_subject(
+        "abuse_review_needed", "org-a:point_create", "org-a") is True, (
+        "the claim object outlived its own migration — this issue can never be "
+        "migrated again, so its legacy sentinel is stranded")
 
 
 def test_a_migration_that_fails_mid_flight_leaves_one_claimant():
@@ -914,19 +1009,32 @@ def test_a_failed_episode_end_close_is_retried_on_the_next_clean_window(
 
     monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
     engine = AbuseEngine(_FlagOnceStore())
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    clock = [datetime.now(timezone.utc)]  # noqa: UP017
+    monkeypatch.setattr("tortoise.abuse._utcnow", lambda: clock[0])
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)
+    def _advance(seconds):
+        clock[0] = clock[0] + timedelta(seconds=seconds)
+
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
     first = len(calls)
     assert first == 2, f"one resolve per incident kind, got {calls}"   # both RAISE
 
-    engine._evaluate("org-a", "point_create", 500, 3600, now)
+    # The retry is spaced by the store's own close-cooldown (#14407 round 5), so a
+    # clean window inside that backoff costs no store read at all...
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
+    assert len(calls) == first, (
+        f"the retry ran inside its backoff, paying a store read ({calls})")
+
+    # ...and once the backoff has elapsed it retries.
+    _advance(3601)
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
     assert len(calls) == first * 2, (
         "the failed episode-end close was never retried — the incident stays "
         f"OPEN forever ({calls})")
 
     # ...and once it succeeds the retry is dropped: no further store work.
-    engine._evaluate("org-a", "point_create", 500, 3600, now)
+    _advance(3601)
+    engine._evaluate("org-a", "point_create", 500, 3600, clock[0])
     assert len(calls) == first * 2, f"a resolved episode kept retrying ({calls})"
 
 
