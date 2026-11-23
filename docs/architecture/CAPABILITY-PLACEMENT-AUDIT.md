@@ -109,16 +109,15 @@ exists at `ccb49741b2ec` — and **the thirteen that are NOT comparable are addr
 them this branch's own, the thirteenth moved past the pin by `main`'s `#14169` and re-pointed here — each
 named at the address this document writes for it: `sdk.py:57951`, `:58099` (the `entity_type="event"` FTS call), `:58315`/`:58317` (the session-detail
 read's `proj.g.query(` call and its column list), `sdk.py:58966` (the `:Source` traversal), `:61999`/`:62019` (the `:Meta` read and
-its `_config_reset_state` delegate), `search_engine.py`'s `:7170`/`:7201` (§2.1's operator-expansion leg — the subquery preview and
-the `COUNT` that follows it) and `:7577`/`:7579`, `mcp_server.py`'s `:11590` (the `:Tag` traversal §2.5's row
+its `_config_reset_state` delegate), `search_engine.py`'s `:7193`/`:7226`/`:7600`/`:7602`, `mcp_server.py`'s `:11590` (the `:Tag` traversal §2.5's row
 quotes — the ONE of the thirteen that `main` moved, not this branch), and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid`
 condition) — every one of their written lines sits past the pin's copy of its file
 (`git show ccb49741b2ec:tortoise/sdk.py | wc -l` -> `56415`; `…/search_engine.py` -> `7071`; `…/mcp_server.py` -> `11466`; `…/hosted_api.py` -> `49851`), so all thirteen
 were re-derived at a head the pin predates. So the drift is **128 of the 221 comparable, plus eight of those thirteen pairs** (the
-five that do not exist at `main` either are `sdk.py`'s `:61999`/`:62019`, `hosted_api.py`'s `:50935` and `search_engine.py`'s `:7577`/`:7579`), and
+five that do not exist at `main` either are `sdk.py`'s `:61999`/`:62019`, `hosted_api.py`'s `:50935` and `search_engine.py`'s `:7600`/`:7602`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
-**The drift is 136 of those 234.** ⚠️ **These counts are a parsing decision, and this header states which
+**The drift is 136 of those 234.** ⚠️ **The move from `138` is a re-measurement, not an adjustment, and the two deltas that produce it are the ones `#14278` wrote**: that pass re-pointed three `search_engine.py` addresses by content (`:6834`→`:7190`, `:6837`→`:7193`, `:6891`→`:7226`), and TWO of the new addresses (`:7193`, `:7226`) sit past this pin's 7,071-line copy, so those pairs LEFT the comparable half — while the two addresses the same pass re-pointed inside the non-comparable half (`:7600`/`:7602`) now sit past `main`'s 7,441-line copy too, so they moved from the "exists at `main`" half to the "exists at neither head" half. So the split reads **221 comparable / thirteen non-comparable / 128 of those 221 drift / eight of the thirteen drift / five exist at neither head**, and the headline falls by two because the two pairs that crossed the pin's EOF are no longer comparable drift. ⛔ The arithmetic that would have "corrected" this is the one the paragraph below forbids: no `+N` was applied, all four figures were re-derived at this edition from the rule stated above (the counts are reproduced by `tests/test_12184_shifted_cites.py`'s `_PIN_FILE_LENGTHS` arm, which DERIVES membership from the pin's file lengths instead of trusting the transcription that shipped these wrong). ⚠️ **These counts are a parsing decision, and this header states which
 one it took**: the 234 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
 written as ONE token. The document also writes six pairs as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
@@ -180,7 +179,7 @@ that nothing else is at `main`** — and a range entry spans every line it cover
 `:6974-6990` (the block), `:6984` (`Event`), `:6985` (`Subject`), `:6989` (`Object`), `:6990` (`Source`);
 `record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37883`/`:37906` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5250`/`:8515`/`:11590`; `goal_judgement.py:1128`; and §2.1's own table, which carries
-two of this class as well — `sdk.py:24626` and `search_engine.py:7201`, both open at this revision and neither
+two of this class as well — `sdk.py:24626` and `search_engine.py:7226`, both open at this revision and neither
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at **this head** (⚠️ NOT at
 `main` `ae54df166d`, where `hosted_api.py`'s `:23046` is `for ev in (payload.events or []):` and the commit
 door's `MERGE (s:Source {url:$did})` is the integration head's line) but
@@ -415,9 +414,9 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/projection/edges.py:1888` | `(p:Point {id:$pid})-[:TAGGED]->(t:Tag)` | **traversal** |
 | `tortoise/sdk.py:24626` | `(n:Point {id:$id})-[:TAGGED]->()` | **traversal** |
 | `tortoise/search_engine.py:4950-4954` | `MATCH path = (seed)-[:IMPL\|NAND*1..{max_hops}]-(n:Point)` — `expand_structural_hops`, a **variable-length** belief walk (min hop distance) | **traversal** |
-| `tortoise/search_engine.py:7170` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW | **adjacency** |
-| `tortoise/search_engine.py:7201` | `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)` — the operator-expansion leg's COUNT, the statement that follows `:7167` inside the same function | **adjacency** |
-| `tortoise/search_engine.py:7577` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7576-7579`, consumed only by `subject_binding_available()`, `:7582-7621` — the WHOLE function, so the span brackets its only consumption, `rows = graph.query(_SUBJECT_SOURCE_SCOPED_PROBE, …)` at `:7598-7599`; the range this replaces, `:7201-7214`, stopped one line short of the docstring's closing quote and was corrected here rather than carried) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
+| `tortoise/search_engine.py:7193` | `(op)-[r2:IMPL\|hasPart]-(other:Point)` — the operator-expansion leg's subquery PREVIEW (the `expand_ops` branch at `:7190`) | **adjacency** |
+| `tortoise/search_engine.py:7226` | `RETURN op.id, type(r2) AS et, count(other)` — the operator-expansion leg's family-size COUNT (`Q2f`, the branch that follows the `expand_ops` preview at `:7190`). ⛔ The row cited `:7224` until review measured that its old fragment, `(op)-[r2:IMPL\|NAND\|hasPart]-(other:Point)`, is byte-identical to the `Q2-crit` line at `:7113`, so the pin could not tell the two branches apart and a co-mutated re-point to `:7113` stayed green; the `RETURN` line above is unique to `Q2f` | **adjacency** |
+| `tortoise/search_engine.py:7600` | `(n:Point)-[r:aboutSubject]->(:Subject)` (inside `_SUBJECT_SOURCE_SCOPED_PROBE`, `:7599-7602`, consumed only by `subject_binding_available()` at `:7605-7644`) — an **edge-existence probe** answering "can this graph carry `aboutSubject` edges at all", not a per-node degree prior; it fails OPEN | **adjacency** |
 | `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Point', $query)` | **fulltext index** |
 | `tortoise/search_engine.py:4878-4880` | `run_structural_query`'s `MATCH (n:{label}) WHERE …` — a plain label scan, no pattern | **none** |
 | `tortoise/search_engine.py:4293` | `CALL db.idx.vector.queryNodes('Point', 'embedding', $limit, vecf32($query_vec))` — the HNSW leg | **vector index** |
@@ -487,7 +486,7 @@ mechanism, not a citation nicety.
 | reader (`file:line`) | what it does | capability |
 |---|---|---|
 | `tortoise/goal_judgement.py:1128` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
-| `tortoise/search_engine.py:7579` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
+| `tortoise/search_engine.py:7602` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
 | `tortoise/assembly.py:2632` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
 | `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3062` derives the label from `entity_type`; `sdk.py:58099` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6984` | **fulltext index** |
 
