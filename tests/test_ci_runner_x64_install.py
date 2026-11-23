@@ -4427,8 +4427,12 @@ _DE_NUMBERED_POINTER_RE = r"`python-ci\.yml`'s\s+(?:own\s+)?(?:checkout\s+)?(?:s
 #: cited clause cuts the piece before the depth it states, and the pin then reports a false RED whose
 #: message ("no longer states the claim") is untrue. `re` has no variable-length lookbehind, so the
 #: abbreviations this repo actually writes are listed explicitly; a NEW one is a one-line addition,
-#: not a redesign — and the punctuation-independent contradiction check below still catches a piece
-#: that absorbs a second claim.
+#: not a redesign.
+#: ⚠ MEASURED COVERAGE of the contradiction check that stands behind this list — it refuses a piece
+#: carrying MORE THAN ONE VALUE for the key, so it catches an absorbed second claim only when that
+#: claim states a DIFFERENT depth. Absorption carrying the SAME value stays GREEN (the piece then
+#: holds one value, and it is the other subject's) — a residual, recorded rather than papered over:
+#: closing it needs subject attribution, not a substring rule.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<!vs\.)(?<=[.;])\s+")
 
 
@@ -4957,12 +4961,25 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
             "the de-numbered pin no longer sees its OWN sentence rewritten to make the OPPOSITE "
             "claim — it would grade a claim the sentence no longer makes"
         )
-        # …and the SENTENCE SCOPE is what reds it: after the mutation the BLOCK still states the
-        # declaration (a different sentence does, about a different subject), so a block-scoped check
-        # would be GREEN here. Without this the control cannot tell the two scopes apart.
-        assert _declaration in _mutated_block, (
-            "the sentence mutant removed the declaration from the whole BLOCK, so a block-scoped "
-            "check would red too and this control would not distinguish the scopes it exists for"
+        # …and the mutation corrupts ONLY the cited claim: the block STILL states `fetch-depth:` for
+        # the other subject, so the red above is the sentence scope doing its work, not the paragraph
+        # losing the key wholesale.
+        # ⚠ What this control does NOT claim: that widening the check to the BLOCK quietly passes. It
+        # does not — the block carries BOTH values (`… its default `fetch-depth: 1`` and `… This job
+        # checks out at `fetch-depth: 0``), so a block-scoped version reds on the REAL file through
+        # the two-values branch, i.e. the register loop's first assertion. That is why the scope
+        # assertion here is `count(…) > 1` on BOTH sides rather than "the block contains the
+        # declaration": the latter is true of the mutant for a reason that has nothing to do with
+        # scope (the single-piece replace leaves the other sentence's occurrence in place), so it
+        # could not fail if the scope regressed.
+        assert _block.count("fetch-depth:") > 1, (
+            "the pointer's comment block no longer states `fetch-depth:` for more than one subject — "
+            "the reason this claim check is SENTENCE-scoped is gone, so re-derive the scope instead "
+            "of keeping this control"
+        )
+        assert _mutated_block.count("fetch-depth:") > 1, (
+            "the sentence mutant stripped every `fetch-depth:` from the block, so a block-scoped "
+            "check would red for the wrong reason and this control would not isolate the scope"
         )
         assert _de_numbered_cite_problems(
             _citing, [line.replace(_marker, "_11057 review P2_") for line in workflow_lines], _entry
@@ -5049,6 +5066,29 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         assert _unregistered_de_numbered_pointers("\n".join(_rewrapped), _entry) == [], (
             "a rewrap between the marker and the pointer makes the completeness arm call the "
             "REGISTERED pointer unregistered — a false RED with no correct operator action"
+        )
+        # (e) The abbreviation list in `_SENTENCE_SPLIT_RE`: `e.g.` inside the cited clause must not
+        # cut the sentence before the depth it states. Remove the lookbehinds and this REDS with a
+        # message that is untrue ("no longer states the claim").
+        _eg = _lines[:]
+        _eg[_pointer_at] = _eg[_pointer_at].replace("checkout step,", "checkout step, e.g. the one,")
+        assert not _de_numbered_cite_problems("\n".join(_eg), workflow_lines, _entry), (
+            "an `e.g.` inside the cited clause cuts the sentence before the depth it states — the "
+            "abbreviation lookbehinds in `_SENTENCE_SPLIT_RE` are gone or no longer cover it"
+        )
+        # (f) The punctuation-INDEPENDENT contradiction check: rewriting the cited clause's terminal
+        # `;` as a comma MERGES the next sentence — same key, DIFFERENT subject, different value — and
+        # a substring test then reads the wrong subject's value as the cited one.
+        _merged = _lines[:]
+        _merged[_pointer_at + 1] = (
+            "          # `fetch-depth: 1` — #9075 review r6 P1 made the same call, and this job"
+        )
+        assert any(
+            "more than one value" in problem
+            for problem in _de_numbered_cite_problems("\n".join(_merged), workflow_lines, _entry)
+        ), (
+            "a comma-merged following sentence carrying a DIFFERENT value for the same key is "
+            "accepted — the contradiction check is what keeps the cited note's depth unambiguous"
         )
     # …and the completeness arm's own non-vacuity: emptied of its register it must SEE the pointer
     # (so a green is not it matching nothing), and with the register restored it must see NONE.
