@@ -28,6 +28,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import {
@@ -7889,6 +7890,34 @@ test("#14350: a DIRECTORY at the claim path is cleared, not a permanent block", 
   claim.release();
 });
 
+test("#14350: a FIFO at the claim path is cleared, not a permanent block", async () => {
+  // A FIFO/socket/device is neither a file nor a symlink, so the previous
+  // `clearUnusableClaimPath` sent it to `rmdirSync` — which raises `ENOTDIR`
+  // (POSIX `rmdir(2)`; Node's `rmdirSync` is that syscall). The catch answered
+  // `false`, the caller answered `undefined` = "somebody else holds it", and
+  // NOTHING on this leg could ever remove the object: every pass reported
+  // "another drainer holds this spool … pid unknown" with zero POSTs, forever, and
+  // the only exit was a PYTHON drain — a dependency a Pi-only host does not have.
+  // The Python twin `unlink`s everything that is not an `S_ISDIR`.
+  // MUTATION THAT REDS THIS: send the non-directory arm back to `rmdirSync`.
+  if (process.platform === "win32") return; // no mkfifo on win32
+  const spool = tmpSpool();
+  const claimPath = join(spool, "drain.claim");
+  try {
+    execFileSync("mkfifo", [claimPath], { stdio: "ignore" });
+  } catch {
+    return; // no `mkfifo` on this box — the object cannot be built, so nothing to grade
+  }
+  // ⛔ THE READER IS ASSERTED WHILE THE FIFO IS STILL THERE. Reading a FIFO blocks
+  // until a writer appears, so an ungated read hangs the drain, `renew`, the holder
+  // line and every health surface forever; this line hanging IS the red.
+  assert.equal(readDrainClaim(spool), undefined, "a FIFO holds no claim");
+  // …and `acquire` must REMOVE it, not report a holder that does not exist.
+  const claim = acquireDrainClaim(spool, { leg: "pi" });
+  assert.ok(claim, "a FIFO is not a holder and must not block the drain");
+  claim.release();
+});
+
 test("#14350: a slow holder's release leaves a SUCCESSOR's claim alone", async () => {
   // The restore path: the takedown moves whatever is at the path aside and compares
   // in quarantine, so a release by a holder whose lease expired — after a successor
@@ -7909,6 +7938,55 @@ test("#14350: a slow holder's release leaves a SUCCESSOR's claim alone", async (
   assert.ok(onDisk, "the successor's claim must still exist");
   assert.equal(onDisk.token, successorToken, "the successor's claim must SURVIVE");
   assert.equal(successor.renew(1110), true, "and remain renewable");
+  successor.release();
+});
+
+test("#14350: a release that cannot READ a claim it does not own must not DESTROY it", async () => {
+  // A release must prove ownership BEFORE it moves anything. The
+  // takedown-then-compare order `rename`d WHATEVER was at the path aside and only
+  // then compared a token it had not read — and `takedownClaim` unlinks its
+  // quarantine when the displaced bytes cannot be read back, so a successor's
+  // claim that is unreadable BY US is DELETED, not restored. Reading our token
+  // first has no window at all in the not-ours direction, which is the direction
+  // that destroyed a live claim (#14423 cycle-6 review, P2).
+  //
+  // ⛔ AN UNREADABLE CLAIM, NOT THE INODE/MTIME CLAUSE the review named: that
+  // clause CANNOT fail on this order — `rename` keeps the inode and `link`
+  // restores a second name to the SAME inode, so both hold under either order.
+  // The Python twin measured exactly this and replaced its inode/mtime assertion
+  // with a takedown-call count (`test_a_release_does_not_MOVE_a_claim_that_is_not_
+  // ours`), whose docstring records that restoring the pre-fix `release` left its
+  // suite green. An ES module binding cannot be counted from here, so the
+  // discriminating observable used is the destruction itself: under the old order
+  // `takedownClaim` renames the claim aside, cannot read it back, UNLINKS the
+  // quarantine (so no `.tmp-take-` residue is left to assert on) and the claim is
+  // simply GONE.
+  // MUTATION THAT REDS THIS: take the claim aside before reading its token.
+  const spool = tmpSpool();
+  const successorPath = join(spool, "drain.claim");
+  const slow = acquireDrainClaim(spool, { leg: "python", nowMs: 1000, ttlMs: 60 });
+  assert.ok(slow);
+  const successor = acquireDrainClaim(spool, { leg: "pi", nowMs: 1100, ttlMs: 60 });
+  assert.ok(successor, "the lease expired, so the peer may take over");
+  chmodSync(successorPath, 0o000);
+  // A mode the process itself is exempt from (root) cannot build this case: the
+  // read would SUCCEED, the token would simply differ, and the destroyer arm is
+  // not reached. Say so rather than assert on a shape that was never created.
+  let stillReadable = true;
+  try { readFileSync(successorPath, "utf8"); } catch { stillReadable = false; }
+  if (stillReadable) {
+    chmodSync(successorPath, 0o600);
+    successor.release();
+    return;
+  }
+  assert.equal(slow.release(), false, "we no longer held it");
+  assert.ok(
+    existsSync(successorPath),
+    "a release that cannot read the claim must LEAVE IT where it is — the takedown " +
+    "would have renamed it aside and then unlinked the quarantine it could not read",
+  );
+  chmodSync(successorPath, 0o600);
+  assert.equal(successor.renew(1110), true, "the successor still holds it");
   successor.release();
 });
 

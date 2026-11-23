@@ -4947,7 +4947,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #:
 #: The READ half is untouched (`904d2742…`), exactly as generation 31's re-cut did.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "442d76f58d897da130c7f91712135f9cae35739fc68c22bedbf6651576feb6cb")
+    33, "72d2cf62900cdc89db16c42a5106b9a5bb575fef84bddaab834f80cb9b165deb")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5119,7 +5119,15 @@ _GENERATION_DIGESTS = {
     # keeps draining concurrently with the Python leg and keeps charging the
     # box's refusals to per-entry exponential backoff — the 908-entry /
     # attempts-10-17 shape #14342 starts from — so it must read STALE.
-    33: "442d76f58d897da130c7f91712135f9cae35739fc68c22bedbf6651576feb6cb",
+    # ⛔ RE-CUT IN PLACE, before it shipped: this same unmerged generation gained the
+    # cycle-6 review's two Pi-leg fixes — `clearUnusableClaimPath` now discriminates
+    # on `isDirectory()` (`rmdirSync` raised `ENOTDIR` on a FIFO/socket, so the arm
+    # that was supposed to clear corruption answered `false` and the object could
+    # never be removed: a permanent drain block), and `release()` reads our token
+    # before it moves anything. Generation 33 has never been on `main`, so no
+    # installed copy carries it and no "local edit" verdict can be falsified — the
+    # one rewrite the rule below permits (#14423 cycle-6 review, P1+P2).
+    33: "72d2cf62900cdc89db16c42a5106b9a5bb575fef84bddaab834f80cb9b165deb",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
