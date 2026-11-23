@@ -9299,6 +9299,164 @@ def test_watchdog_is_per_shard_and_scales_with_the_shard():
         assert shard_watchdog_minutes(bad) == WATCHDOG_FLOOR_MIN, bad
 
 
+def test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed():
+    """#6145 direction (b): the sizing contract — "a shard unable to fit is
+    flagged rather than silently killed". #4819 option 2 recorded this as the
+    thing nothing checked: "the watchdog value and the shard count — nothing
+    checks that [they are consistent]".
+
+    The CEILING is what makes a shard unable to fit: it clamps the built factor
+    (2.0x) DOWNWARD. Before this check the clamp was silent, so raising an
+    estimate produced a TIGHTER margin with no signal anywhere — the state in
+    which a shard that fits its own declared estimate is killed.
+
+    Kept by #14419: `watchdog_headroom_issues()` still runs in the REQUIRED
+    `manifest-integrity` leg, and this is the only arm that drives it on a
+    manifest it must REFUSE — the live guard reads the committed map, which is
+    compliant, so without this the emitter could stop naming mis-sized legs with
+    every required check green.
+    """
+    from tools.ci_selection import (
+        WATCHDOG_CEILING_MIN,
+        WATCHDOG_HEADROOM,
+        load_manifest,
+        push_legs,
+        shard_watchdog_minutes,
+        watchdog_headroom_issues,
+    )
+    # (a) the committed manifest is consistent: nothing named, and every leg's
+    #     emitted budget retains the factor it was built from.
+    committed = load_manifest()
+    assert watchdog_headroom_issues(committed) == []
+    for s in push_legs(committed)["shards"]:
+        assert s["watchdog_headroom"] >= WATCHDOG_HEADROOM, s
+    # (b) an estimate past the ceiling's reach is NAMED (fail-closed). 30.62 min
+    #     is the ceiling's OWN provenance exemplar ("55m for a ~30m shard",
+    #     factor 1.8 — the constants block): ceil(30.62*2)=62 -> clamped to 55 =
+    #     1.80x, BELOW the factor the budget was built from. (The real S=2 shape
+    #     is heavier still — the probe that lowered fast_shards to 2 measured
+    #     est=1951.0s = 32.52 min at 1.69x — so this exemplar is the gentler of
+    #     the two, not a best case.)
+    assert shard_watchdog_minutes(30.62 * 60) == WATCHDOG_CEILING_MIN == 55
+    m = _shard_manifest(2, heavy={"test_huge_a.py": 1837.2,
+                                  "test_huge_b.py": 1837.2})
+    issues = watchdog_headroom_issues(m)
+    assert issues, "a shard the ceiling clamps below the build factor must be NAMED"
+    assert any("its emitted budget retains" in i for i in issues), issues
+    assert any("ceiling clamped it" in i for i in issues), issues
+    # (d) the decision is taken at the PUBLISHED precision (2 dp — the same
+    #     rounding the emitters apply), so a manifest is never refused while the
+    #     row it would emit reads a compliant `2.0`, and the message never says
+    #     "2.00x, below the 2.0x". 1651.0s = 27.5167 min -> 55/27.5167 = 1.9988,
+    #     which ROUNDS to 2.0 and must therefore pass; 1660.0s = 27.6667 min ->
+    #     1.9880 -> 1.99 and must still be refused. `tiny=0` keeps the shard's
+    #     estimate exactly the heavy file's duration.
+    edge = _shard_manifest(1, heavy={"test_edge.py": 1651.0}, tiny=0)
+    assert watchdog_headroom_issues(edge) == [], watchdog_headroom_issues(edge)
+    past = _shard_manifest(1, heavy={"test_past.py": 1660.0}, tiny=0)
+    assert watchdog_headroom_issues(past), "1.99x must still be refused"
+    # (e) the OTHER end of the same quantum. A ratio below 0.005 rounds to 0.00,
+    #     which is also `watchdog_headroom`'s "no usable estimate" sentinel — so
+    #     a guard testing the ROUNDED value for truthiness FAILS OPEN here: it
+    #     skips the leg and publishes `0.00` on a row it passed. The sentinel is
+    #     therefore read from the UNROUNDED ratio, and a leg this far past the
+    #     ceiling is still NAMED. 844400.0s = 14073.3 min -> 55/14073.3 = 0.0039
+    #     -> rounds to 0.0.
+    collapsed = _shard_manifest(1, heavy={"test_collapsed.py": 844400.0},
+                               tiny=0)
+    assert watchdog_headroom_issues(collapsed), (
+        "a ratio that rounds to 0.00 is a mis-sized leg, not an absent estimate")
+    # and the sentinel itself is NOT a finding: a leg with no estimate has no
+    # ratio to judge (an empty leg is not over-tight).
+    empty = _shard_manifest(1, tiny=0)
+    assert watchdog_headroom_issues(empty) == [], watchdog_headroom_issues(empty)
+    # (c) a genuinely wedged leg is STILL KILLED. The check makes an over-tight
+    #     budget visible; it does not widen it and it does not disarm the kill —
+    #     the emitted budget is unchanged, and the workflow still applies it with
+    #     a SIGINT-then-SIGKILL escalation, so a leg that hangs past its budget
+    #     is still terminated (and the outer job cap still bounds the total).
+    #     Read the PARSED run step, never the file text: the identical string
+    #     also sits in heading COMMENTs (and with literal durations in other
+    #     steps), so a whole-file scan stays green if the real execution line is
+    #     deleted — an assertion that can pass on a comment does not guard what
+    #     its message claims.
+    for s in push_legs(m)["shards"]:
+        assert s["watchdog_minutes"] == WATCHDOG_CEILING_MIN, s
+    wf = _load_python_ci()
+    run = next(s for s in wf["jobs"]["test"]["steps"]
+               if s.get("name", "").startswith("Run fast test suite"))["run"]
+    assert "timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m" in run, (
+        "the per-shard kill must stay wired: without it a wedged leg runs to the "
+        "job's outer cap and the budget is advisory")
+
+
+def test_a_shard_merely_slow_under_load_still_fits_its_budget():
+    """#6145 direction (a): a shard that runs SLOW under load must still fit.
+
+    The budget is built from `WATCHDOG_HEADROOM`, so the question this test asks
+    is whether that factor is still above the slowest width a healthy shard has
+    actually been observed to occupy. If it were not, the watchdog would kill a
+    shard that observed no defect — the whole defect #6145 names.
+
+    MEASURED — pytest-STEP duration of all nine fast shards, 76 SUCCESSFUL leg
+    samples drawn from main runs 2026-10-02T01:19Z-03:22Z, each over that shard's
+    declared 7.22-min estimate: min 0.47x, median 0.86x, MAX 1.33x.
+
+    ⛔ THE SAMPLE IS SUCCESS-ONLY, DELIBERATELY, AND ITS LIMIT IS NAMED. A killed
+    leg is excluded because a kill is not a "merely slow" observation — it is the
+    event this budget exists to bound, and it is not what this assertion is
+    about. For the record, the kills in that window and the day after were at
+    ~2.11x (legs SIGKILLed at the 15m floor with 0 failures), and the SAME shards
+    ran 0.9x-1.2x on another attempt of that run — a nondeterministic wedge
+    beyond this distribution, not a tail of it. So this bounds the SUCCESSFUL
+    distribution; it does NOT claim the budget survives every loaded leg, and
+    #6145 carries that half. The value
+    that must survive is the MAX (the median is what a healthy shard costs).
+    A job's WALL time is deliberately NOT the measurement: it carries ~6 min of
+    setup plus the off-watchdog collect-only pre-phase, so it overstates the
+    shard by roughly the setup constant — the pytest step is the only surface
+    the watchdog actually bounds, hence the only comparable one.
+    """
+    from tools.ci_selection import (
+        WATCHDOG_HEADROOM,
+        load_manifest,
+        push_legs,
+        watchdog_headroom_issues,
+    )
+    # The slowest healthy shard measured. A frozen literal is right HERE, unlike
+    # the derived floor below: this is an observation about runs that have
+    # already happened, not a property of the committed manifest, so there is
+    # nothing in-tree to re-derive it from. It is re-measured by hand when the
+    # pool changes materially (the durations map's own sweep is the trigger).
+    measured_max_healthy_shard_ratio = 1.33
+    assert measured_max_healthy_shard_ratio < WATCHDOG_HEADROOM, (
+        "the worst HEALTHY shard measured is already outside the factor the "
+        "budget is built from — the margin no longer covers even the "
+        "successful distribution, and the constant must be raised "
+        "DELIBERATELY (#6145)")
+    # The shipped gate's OWN verdict on the committed manifest is the primary
+    # assertion, so this test cannot disagree with the gate at either end of the
+    # reporting quantum (#6145). The loop below is a readable restatement for a
+    # non-empty leg, not a second, differently-precise gate.
+    committed = load_manifest()
+    assert watchdog_headroom_issues(committed) == [], watchdog_headroom_issues(committed)
+    for s in push_legs(committed)["shards"]:
+        headroom = s["watchdog_minutes"] * 60.0 / s["est_seconds"]
+        assert headroom >= measured_max_healthy_shard_ratio, (
+            f"shard {s['name']}: {headroom:.2f}x is below the slowest healthy "
+            f"shard measured ({measured_max_healthy_shard_ratio}x) — a merely "
+            f"slow shard would be killed")
+        # The shipped gate's own invariant, asserted on the value the matrix
+        # PUBLISHES (2 dp) rather than on a second, differently-precise
+        # recomputation: otherwise this test and the gate could disagree in the
+        # band where rounding decides — a manifest could pass `--integrity` and
+        # then red here (#6145).
+        assert s["watchdog_headroom"] >= WATCHDOG_HEADROOM, (
+            f"shard {s['name']}: emitted budget retains "
+            f"{s['watchdog_headroom']:.2f}x, below the {WATCHDOG_HEADROOM}x it "
+            f"is built from (#6145)")
+
+
 def test_fast_shard_config_is_validated_not_silently_defaulted():
     """#6135: a malformed `fast_shards` is NAMED by the integrity gate — a
     present-but-unusable declaration must not read as the default 2."""
@@ -10879,7 +11037,9 @@ def test_duration_coverage_guard_boundary_and_realistic():
 def _added_files_off_the_flat_default(durations: dict, tails: dict):
     """Files in this fold's row set whose row is neither the flat default nor a CI reading.
 
-    The ENTRY RULE's SECOND half, which the existence pin above cannot see: the
+    The ENTRY RULE's SECOND half, which the per-file existence pin that used to sit
+    above (#14419 cut it; `duration_coverage_issues()` is a 0.90 ratio and is silent
+    over a single missing row) cannot see either: the
     VALUE of a PR-added row must be `DEFAULT_FAST_WEIGHT`, because no push-to-main
     junit sweep can have collected the file yet — a hand-picked number is this
     host's wall clock, and `fast_pool()` feeds the shard balancer (#2818/#3419/#4348,
@@ -10911,8 +11071,10 @@ def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
     above is the authority on what the set actually is, #2148 review P3 — but the whole
     set is the row-set this pin guards.)
 
-    The existence pin above stayed green through it, because a local reading is a
-    row like any other; the coverage floor could not see it either (it is a RATIO
+    The per-file existence pin that used to sit above (and went with the
+    durations-map arithmetic cut, #14419) stayed green through it, because a local
+    reading is a row like any other; the coverage floor could not see it either
+    (it is a RATIO
     with ~70 files of headroom). Nothing reds on a hand-picked shard weight, which
     is precisely why it needs its own pin — `test_state_value_verbatim_10360.py` is
     the settled shape: state the local reading as a sanity bound and keep the flat
@@ -10927,6 +11089,85 @@ def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
         f"`DEFAULT_FAST_WEIGHT` nor a CI reading: {off}. A local wall clock is not "
         "a shard-layout input (#2818/#3419) — keep the flat default and state the "
         "local number as a sanity bound, or wait for the junit sweep to adopt one.")
+
+
+def test_the_flat_default_value_pin_bites_on_the_pre_fix_row_and_spares_a_ci_reading():
+    """Non-vacuity for the pin above, in both directions.
+
+    The pre-fix state is reconstructed from the LIVE row (the local-reading `4.0`
+    a review corrected) rather than an invented fixture, so a future reader can
+    re-derive what was wrong; and a `2.0 -> 3.1` ADOPTED CI reading — the
+    `test_oauth_consent_page_step4.py` shape — must stay silent, or the pin would
+    forbid the refresher from doing its job.
+
+    ⛔ BOTH halves are reconstructed, and the TAIL half is not optional: the
+    exemption `_added_files_off_the_flat_default` applies is keyed on the row's
+    tail (a CI basis), never on its value. Reusing the LIVE tail exempts the
+    reconstructed pre-fix value the moment `--refresh-durations` adopts this row
+    onto its row line — which the row's own note promises it will — and this pin
+    then reds about its own fixture. `""` is the FAITHFUL pre-fix tail: the `4.0`
+    row carried nothing after it on its row line, its measurement note in the
+    continuation block below (#10726 review round 4, P2).
+
+    The pre-fix state is dated by its own commits, not by memory: `33b312feb`
+    (`fix(10692)`) INTRODUCED the row as `…search_keys_shape.py: 4.0` with an empty
+    row-line tail, and `36b028494` (`fix(10726)`) is the commit that REPLACED it
+    with `2.0` (`git show 36b028494^:config/ci-surfaces.yml` still carries `4.0`;
+    `git show 36b028494:config/ci-surfaces.yml` carries `2.0`). So the fixing commit
+    is `36b028494` and the carrier of the defect is its parent.
+
+    Kept by #14419: the guard it proves can fire survives the cut, and a guard whose
+    bite is asserted nowhere is the inert-enforcer shape the cut must not produce.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    victim = "test_9548_record_search_keys_shape.py"
+    pre_fix = dict(real, **{victim: 4.0})
+    pre_fix_tails = dict(tails, **{victim: ""})
+    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)], (
+        "the reconstruction must find exactly the row this review corrected — "
+        "otherwise the pin is not testing that defect")
+    adopted = dict(real, **{victim: 3.1})
+    adopted_tails = dict(tails, **{
+        victim: "  # new in #1 — ci-timing junit-census+top-15 2026-11-02"
+                " (run 41375596528); was 2.0"})
+    assert _added_files_off_the_flat_default(adopted, adopted_tails) == [], (
+        "a row the refresher ADOPTED from a junit sweep must not be reported — "
+        "that value is the CI reading the balancer should take")
+
+
+def test_the_pre_fix_reconstruction_clears_the_tail_a_sweep_would_adopt():
+    """Regression pin for the half-reconstruction defect (review round 4, P2).
+
+    Simulates the state the FIRST post-landing `--refresh-durations` sweep produces
+    for this row — an adopted junit basis written ONTO the row line — without waiting
+    for that sweep, so the hazard is falsifiable in the repo rather than a year from
+    now in a red shard.
+
+    Both directions matter: the control asserts the exemption really IS tail-keyed
+    (a valid adopted row stays silent, so the fix cannot be "make the helper ignore
+    tails"), and the second arm asserts the reconstruction still finds the pre-fix
+    row once its tail is cleared — which is exactly what reusing the live tail
+    (the pre-fix test body) stops doing.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    victim = "test_9548_record_search_keys_shape.py"
+    swept_tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    swept_tails[victim] = (
+        "  # ci-timing junit-census+top-15 2026-11-09 (run 99999999999); was 2.0")
+    adopted = dict(real, **{victim: 3.1})
+    assert _added_files_off_the_flat_default(adopted, swept_tails) == [], (
+        "control: an ADOPTED row must be exempt on its tail — this is why the tail "
+        "cannot be reused when reconstructing the PRE-fix row")
+    pre_fix = dict(real, **{victim: 4.0})
+    assert _added_files_off_the_flat_default(pre_fix, swept_tails) == [], (
+        "control: reusing a swept tail exempts the pre-fix value, i.e. the pin "
+        "would report nothing and the reconstruction assertion above would red — "
+        "the exact defect this pin exists for")
+    pre_fix_tails = dict(swept_tails, **{victim: ""})
+    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)]
 
 
 def _durations_rows_claiming_the_flat_default(text: str, durations: dict):
@@ -10958,6 +11199,70 @@ def test_no_durations_row_claims_the_flat_default_at_a_measured_value():
         "claim), keeping any #4348 do-not-drop instruction.")
 
 
+def test_flat_default_claim_check_is_not_vacuous():
+    """The guard above must bite on the stale shape and stay quiet on its siblings.
+
+    Kept by #14419 with the guard it proves: the guard survives the cut, so its bite
+    must survive it too.
+    """
+    stale = (
+        "  test_a.py: 2.2  # a new file takes the #3400 flat 2.0s default."
+        "\n"
+        "  test_b.py: 3.7  # so it takes the #3400 flat 2.0s default; required."
+        "\n"
+        # The CONSTANT-NAME spelling of the same claim: measured on the real
+        # manifest as `test_oauth_consent_page_step4.py: 3.1` and
+        # `test_5095_s3_identity_policy.py: 0.4`, both invisible to the value-only
+        # pattern (#10790 review, P3).
+        "  test_g.py: 3.1  # a PR-added file, so it takes the flat"
+        " `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading."
+        "\n"
+        "  test_h.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
+        " and NOT a local reading.")
+    legitimate = (
+        "  test_c.py: 7.2  # unmeasured — without this row the file packs at the"
+        " flat 2.0s default.\n"
+        "  test_d.py: 18.0  # its absence packs it at the flat 2.0s default.\n"
+        "  test_e.py: 140.3  # a real weight, not the flat 2.0 default.\n"
+        "  test_f.py: 2.0  # this row IS the flat 2.0s default, and unmeasured.\n"
+        # the COUNTERFACTUAL spelling of the constant NAME — no claim verb, so it
+        # must stay silent
+        "  test_g.py: 6.5  # its absence packs it at the flat `DEFAULT_FAST_WEIGHT`."
+        # …and the two counterfactual forms that phrase the constant's name without
+        # a claim verb (#10790 review).
+        "\n  test_i.py: 0.4  # THAT SWEEP HAS NOW LANDED: the flat"
+        " `DEFAULT_FAST_WEIGHT` is what it REPLACED rather than what it needs."
+        "\n  test_j.py: 23.8  # must carry a row or it packs at the flat 2.0 s"
+        " `DEFAULT_FAST_WEIGHT`, not a dev-box reading.")
+    # …and the NAMED-CONSTANT spelling of the CLAIM, which shipped twice on the real
+    # map (`test_10602_query_limit_bound.py: 2.3`, `test_5095_s3_identity_policy.py:
+    # 0.4`) because neither guard's verb list carried `stays` and the first
+    # alternation insists on the literal `flat 2.0s default` phrase.
+    named_constant = (
+        "  test_h.py: 2.3  # The weight stays the flat `DEFAULT_FAST_WEIGHT`"
+        " declaration a file a PR ADDS takes.\n"
+        "  test_i.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
+        " and NOT a local reading.")
+    # …and the DEMONSTRATIVE copula spelling, which has no claim verb and no
+    # determiner, and so went unread on `test_required_set.py: 0.4` (#11602 review
+    # P3 finding 1: CI was green on a falsified claim).
+    demonstrative = (
+        "  test_j.py: 0.4  # #10991: pre-merge estimate for a NEW file; This is"
+        " `DEFAULT_FAST_WEIGHT`, stated as a placeholder, not a measurement."
+        " — ci-timing junit-census+top-15 2026-11-09 (run 1); was 2.0")
+    durations = {f"test_{c}.py": 1.0 for c in "abcdefghij"}
+    assert _durations_rows_claiming_the_flat_default(stale, durations) == [
+        ("test_a.py", 2.2), ("test_b.py", 3.7),
+        ("test_g.py", 3.1), ("test_h.py", 0.4)]
+    assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
+    assert _durations_rows_claiming_the_flat_default(named_constant, durations) == [
+        ("test_h.py", 2.3), ("test_i.py", 0.4)]
+    assert _durations_rows_claiming_the_flat_default(demonstrative, durations) == [
+        ("test_j.py", 0.4)], (
+        "the demonstrative copula form must bite — it is the shape that shipped "
+        "past this guard at the 2026-11-09 refresh")
+
+
 def test_no_durations_row_states_a_stale_case_count():
     """#10356 review P3-1: a cited `grep -c` count must match the file it weighs."""
     offenders = _durations_rows_with_a_stale_case_count(
@@ -10967,6 +11272,111 @@ def test_no_durations_row_states_a_stale_case_count():
         "ENTRY RULE tells the reader to re-derive with (`grep -c '^def test_'`) and "
         f"the file disagrees — (key, stated, actual): {offenders}. Re-derive the "
         "count AND extend the row's staleness chain with the cycle that moved it.")
+
+
+#: over exactly the contradiction the guard was widened for two cycles earlier
+#: (`tests/test_ci_selection.py`'s own comment measures that row). It is a FAIL-
+#: OPEN in a guard: the guard's job is "no row carries a count its file refutes",
+#: and "the first count is right" is not that sentence.
+_ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM = (
+    "durations:\n"
+    "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` -> 2) — and the\n"
+    "  # older re-derivation beside it still reads (`grep -c '^def test_'` = 190).\n"
+    "surfaces: []\n")
+
+
+def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
+    """The guard above must bite on a stale citation and stay quiet on history."""
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    stale = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 3 cases (`grep -c '^def test_'` -> 3; pytest "
+        "collects 3).\n"
+        "surfaces: []\n")
+    fresh = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` \u2192 2; pytest "
+        "collects 2).\n"
+        "surfaces: []\n")
+    # The SAME claim spelled with `=` — a CORRECT one must stay quiet (#10610 review
+    # at `7c03efc1d`), or the widened branch would red notes it was widened for.
+    fresh_equals = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2; pytest "
+        "collects 2).\n"
+        "surfaces: []\n")
+    historical = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #9352: the module held 7 at the #9352 head and 9 after "
+        "the follow-up; no instrument is cited, so this is provenance for the WEIGHT, "
+        "not a current claim.\n"
+        "  test_other.py: 1.0  # 11 cases, re-derived by hand.\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(stale, tmp_path) == [
+        ("test_two.py", 3, 2)]
+    assert _durations_rows_with_a_stale_case_count(fresh, tmp_path) == []
+    # ⛔ The `=` spelling. Measured at the #10610 review head, a row carried BOTH a
+    # corrected leading count and `` `grep -c '^def test_'` = <old> `` beside it, and
+    # the pre-fix regex (`->`/`→` only) returned `[]` for it — a required leg green
+    # over the claim its own ENTRY RULE tells the reader to re-derive. This arm reds
+    # on that regex and passes on the widened one; the note's joiner is not the claim.
+    equals = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 3).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(equals, tmp_path) == [
+        ("test_two.py", 3, 2)]
+    # …and the guard must stay QUIET on a CORRECT `=` claim: reading the
+    # new branch as a citation is only safe if it still clears the spelling
+    # it was widened for (an over-matching guard would red correct notes).
+    assert _durations_rows_with_a_stale_case_count(fresh_equals, tmp_path) == []
+    assert _durations_rows_with_a_stale_case_count(historical, tmp_path) == []
+    gone = (
+        "durations:\n"
+        "  test_gone.py: 1.0  # (`grep -c '^def test_'` -> 4).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(gone, tmp_path) == [
+        ("test_gone.py", 4, None)]
+
+
+def test_the_stale_case_count_guard_reads_EVERY_claim_in_a_row(tmp_path):
+    """A row may cite the instrument twice; the STALE cite must be the one reported.
+
+    Non-vacuity: at the pre-fix head (`.search`) this is `[]` — measured, one arm
+    red — because the first claim is CORRECT and the search never reached the
+    second. With `finditer` it reports `('test_two.py', 190, 2)`.
+
+    ⛔ AND THE COUNT IS NOT SILENTLY DEDUPLICATED: two stale cites of DIFFERENT
+    values are two offenders, because each is a separate sentence a maintainer has
+    to delete. Two cites of the SAME stale value are reported TWICE as well — one
+    entry per offending SENTENCE, never per distinct repair: the read appends on
+    every match and nothing deduplicates it, so the list describes what the row
+    still carries. Both shapes are MEASURED below rather than asserted, because an
+    earlier revision of this docstring claimed a dedupe the code never had.
+    """
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    assert _durations_rows_with_a_stale_case_count(
+        _ROW_WITH_A_CORRECT_THEN_A_STALE_CLAIM, tmp_path) == [("test_two.py", 190, 2)]
+
+    # The SAME stale value cited twice is two offenders, not one: nothing dedupes.
+    twice = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 190) and\n"
+        "  # again (`grep -c '^def test_'` = 190).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(twice, tmp_path) == [
+        ("test_two.py", 190, 2), ("test_two.py", 190, 2)], (
+        "one offender per offending SENTENCE — the guard does not deduplicate")
+
+    # A row whose ONLY claim is correct stays quiet — the widened read must not
+    # turn a single good cite into an offender.
+    fresh_only = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` -> 2).\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_case_count(fresh_only, tmp_path) == []
 
 
 def test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it():
@@ -12755,6 +13165,39 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "this job must READ the pip cache and write nothing — two other jobs own "
         "that key and it is 93% of the 3.8 GB payload that cancelled a green "
         f"shard (#7612/#11063): {pip_writers}")
+
+    # (d1) …and the READERS must be FOUND. Arms (c) and (d) count WRITERS
+    # (`!= restore`), so a job with NO restore at all satisfies both: the save in
+    # (c) is then the single write and (d)'s writer list is trivially empty. That
+    # is the no-op-over-an-empty-subject-set shape — deleting the restore is the
+    # #7612 regression this pin is kept BY NAME to prevent, and it must red here
+    # (measured by mutation: dropping all three restores left this guard GREEN
+    # before these arms were added).
+    uv_restores = [s for s in steps
+                   if _path(s) == "~/.cache/uv" and _uses(s) == "actions/cache/restore"]
+    assert len(uv_restores) == 1, (
+        "the `test` job's uv cache reader must be exactly one "
+        f"`actions/cache/restore@` (found {len(uv_restores)}) — with none, every "
+        "shard resolves and downloads its deps cold, which is what #7612 removed")
+    pip_steps = [s for s in steps if _path(s) == "~/.cache/pip"]
+    assert pip_steps, (
+        "the `test` job no longer touches ~/.cache/pip at all — the torch wheel "
+        "set is #7612's payload (140 wheels, ~3.2 GB, 93-219 s per job cold) and "
+        "`install-cpu-torch` installs it with `pip`, so every shard would then "
+        "re-download it")
+    pip_restores = [s for s in pip_steps if _uses(s) == "actions/cache/restore"]
+    assert len(pip_restores) == 1, (
+        "the `test` job's pip cache reader must be exactly one "
+        f"`actions/cache/restore@` (found {len(pip_restores)} of {len(pip_steps)})")
+    hf_steps = [s for s in steps if "~/.cache/huggingface" in _path(s)]
+    assert hf_steps, (
+        "the `test` job no longer restores the HF embedding cache — the dense leg "
+        "would download from huggingface.co on every run (#11063 cycle 5)")
+    hf_restores = [s for s in hf_steps if _uses(s) == "actions/cache/restore"]
+    assert len(hf_restores) == 1, (
+        "the `test` job's HF cache reader must be exactly one "
+        f"`actions/cache/restore@` (found {len(hf_restores)} of {len(hf_steps)}) — "
+        "three sibling jobs keep that key warm and this one must only read it")
 
     # (d2) the RETIRED combined key is unreferenced ANYWHERE, on EITHER axis.
     # `uv-pip-<os>-<hash>` restored both trees into one step (3.88 GB); the split
