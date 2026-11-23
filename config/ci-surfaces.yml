@@ -12215,9 +12215,9 @@ tier1:
 # 18.95m to 7.58m.
 # The 40m watchdog's headroom is the DERIVED legs against the 2.0x
 # `WATCHDOG_HEADROOM` floor (5.3x
-# at the 7.58m heavier leg of the pre-#10194 pool; 6.99x at today's 5.72m — the
-# ratio is DERIVED, so it moves with the pool and is not restated as a fixed
-# number), and the workflow's drift guard pins the union of the EXPANDED legs to
+# at the 7.58m heavier leg of the pre-#10194 pool, and higher today on a lighter
+# leg — the ratio is DERIVED, so it moves with the pool and is not restated as a
+# fixed number here), and the workflow's drift guard pins the union of the EXPANDED legs to
 # `slow_gating_files()`. Read the live shape with `python3
 # tools/ci_selection.py --non-gating-report` rather than from a figure here.
 # NOTHING was deleted, moved off the pre-merge gate, or

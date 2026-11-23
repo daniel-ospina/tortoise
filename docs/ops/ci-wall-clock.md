@@ -850,12 +850,15 @@ wiring, and the arithmetic behind the caps is stated above rather than pinned:
 - the per-shard watchdog sitting INSIDE the job, and the matrix coming from the selector rather
   than a workflow literal → `--integrity`'s `workflow_matrix_issues()` still checks the matrix half
   mechanically (both `test` and `test-slow` take theirs from `fromJSON(...)` and carry no literal
-  `include:` rows); the WATCHDOG half is what lost its mechanical pin with
-  `test_the_workflow_matrix_is_derived_and_the_watchdog_is_per_shard`, so read it from the job;
+  `include:` rows); the WATCHDOG half is still pinned, though not here —
+  `tests/test_ci_last_failed.py` (`test_prephase_has_its_own_bounded_watchdog`)
+  requires the gating line to carry `timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m`
+  and refuses a literal, so read the job itself for the shard's watchdog;
 - the aggregate keying on the job id, never on a leg name → `::test_no_required_check_names_a_fast_leg`;
-- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — arithmetic
-  properties, stated here rather than pinned by a test. Re-derive them from the pool before
-  moving any of the three numbers.
+- the three caps themselves (presence, `ceil(shards/cap) <= 4`, and `sum <= 9`) — presence is
+  pinned by `::test_every_matrix_bearing_job_declares_a_fan_out_cap`; the wave and sum arithmetic
+  is stated here rather than pinned by a test. Re-derive all three from the pool before moving
+  any of the three numbers.
 
 **Re-derive before moving any of the three numbers**: re-read the pool (`gh api
 repos/<owner>/<repo>/actions/runners`), and re-measure the per-shard wall with §2's command — but

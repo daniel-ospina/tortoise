@@ -11261,6 +11261,116 @@ def _durations_row_tail(key: str) -> str:
     return ""
 
 
+def test_every_matrix_bearing_job_declares_a_fan_out_cap():
+    """#6744 PRESENCE arm: every matrix job declares `max-parallel`.
+
+    Presence is the invariant a green run cannot see — a matrix completes either
+    way, so a cap silently deleted never reds anything, while the job goes back to
+    admitting its whole shard set at once (measured: one PR held 18 of a
+    12-runner pool). The job ids are DERIVED from the workflow, so a FOURTH matrix
+    added later cannot ship unbounded behind a green run.
+
+    ⛔ SCOPE: presence only. The wave count and the sum are the arithmetic the
+    B7 cut removed; with the cap present they are re-derivable from the pool
+    (`docs/ops/ci-wall-clock.md` §7), and what nothing else can see is a cap that
+    is GONE.
+    """
+    wf = _load_python_ci()
+    matrix_jobs = {
+        job_id
+        for job_id, job in wf["jobs"].items()
+        if isinstance(job.get("strategy"), dict) and "matrix" in job["strategy"]
+    }
+    assert matrix_jobs, (
+        "no matrix-bearing job found in python-ci.yml — this arm would pass "
+        "vacuously, which is the fail-closed shape it must not have")
+    missing = {
+        job_id: (wf["jobs"][job_id].get("strategy") or {}).get("max-parallel")
+        for job_id in matrix_jobs
+        if not isinstance(
+            (wf["jobs"][job_id].get("strategy") or {}).get("max-parallel"), int)
+    }
+    assert missing == {}, (
+        f"matrix-bearing job(s) declare no integer `max-parallel`: {missing} — an "
+        "uncapped matrix lets one PR hold its whole shard set at once (#6744), "
+        "and nothing else in the suite names the absence")
+
+
+_ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
+
+
+#: A row asserting that its OWN committed weight stands at N — "The 3.7 weight sits
+#: inside that range and is deliberately unchanged". The number is a claim about the
+#: row it sits in, so it can be falsified by that row's value.
+#: A note that quotes a PREVIOUS weight ("was 3.7", the sweep's provenance) must not
+#: be read as a claim — the sweep suffix never puts a present-tense predicate after
+#: the number, which is what this anchors on.
+#:
+#: ⛔ WIDENED at the 2026-11-16 refresh (#12962 cycle 6). The arm read exactly ONE
+#: predicate (`deliberately unchanged`), so nine rows asserted a superseded weight
+#: in another spelling and the pin returned `[]` while they contradicted their own
+#: value: `the 8.8 WEIGHT is deliberately left alone`, `The 18.0 WEIGHT … is
+#: deliberately NOT re-derived`, `the 10.0 weight is NOT moved`, `Declared at 5.0,
+#: above the highest observed wall`, `the 6.8 weight … left alone`, `WEIGHT raised
+#: 3.6 -> 6.2 … never corrected downward`, `The 5.0 WEIGHT is kept`, `the 2.0 weight
+#: is unchanged`. That is the same false-clean class this PR closes one function
+#: above — a guard that reads one spelling of a claim cannot say the claim is
+#: absent — so the predicate set is now the family the map actually uses. The PAST
+#: tense stays silent by construction: every alternative below is present-tense, and
+#: `was`/`held`/`had` are not among them.
+_WEIGHT_UNCHANGED_CLAIM_RE = re.compile(
+    r"\bthe\s+(?P<w>\d+(?:\.\d+)?)\s*weight\b" +
+    # ⛔ the tense boundary: a PAST copula governing the predicate means the clause is
+    # history ("The 8.8 WEIGHT WAS deliberately left alone"), which is what every
+    # repaired row says after a sweep re-bases it. Without this the widening bit the
+    # healed form and left no legal way to write the note.
+    #
+    # ⛔ AND THE BOUNDARY IS THE PREDICATE'S OWN COPULA, NOT A SENTENCE-WIDE SCAN
+    # (#12962 rebase review, P2). It shipped as a negative LOOKAHEAD over the whole
+    # window — `(?![^.;]*?\b(?:was|were|had|held|became)\b)` — so ANY past verb
+    # anywhere later in the clause silenced a LIVE claim: measured on a row holding
+    # `1.5`, "The 5.0 WEIGHT is kept, because the earlier reading had been 3.6"
+    # returned `[]`, while the same sentence with the reason dropped BIT. A lookahead
+    # cannot be scoped to "the gap I am about to match", so the scan had to become a
+    # lookbehind ON THE PREDICATE — which is the shape `_WEIGHT_DECLARED_CLAIM_RE`
+    # below already used, and the two arms now agree about the rule they document.
+    #   • The over-block this trades for is real and narrow: a past copula that does
+    #     NOT sit immediately before the predicate still bites — "The 8.8 WEIGHT
+    #     WAS, per the census, deliberately left alone", "… had all been deliberately
+    #     left alone". Loud, one word away from a legal form, and deliberately
+    #     preferred over a silent miss — the polarity this file's future-sweep arm
+    #     sets out at length further down.
+    #
+    # ⛔ AND A SINGLE TOKEN IS NOT ENOUGH (#12962 rebase review cycle 2, P1). The
+    # first cut of this lookbehind listed five ONE-WORD copulas, so every multi-token
+    # past auxiliary put `been`/`being` immediately before the predicate and fell
+    # straight through it: measured end-to-end, a correctly-healed row reading "The
+    # 8.8 WEIGHT had been deliberately left alone until the 2026-11-16 census
+    # replaced it" reported `[('test_a.py', 8.8, 1.4)]` — a FALSE RED on a
+    # `slow_files` row, i.e. on `test-slow`, which is the very failure this commit's
+    # own sibling fix set out to remove. The auxiliary chains are named explicitly.
+    # ⚠️ `has been` is NOT in the list and must not be: present perfect is a claim
+    # about the CURRENT state ("the 8.8 WEIGHT has been deliberately left alone" says
+    # it is left alone now), so it has to bite. `had been` / `was being` are history.
+    _CLAUSE +
+    r"(?<!\bwas )(?<!\bwere )(?<!\bhad )(?<!\bheld )(?<!\bbecame )"
+    r"(?<!\bhad been )(?<!\bwas being )(?<!\bwere being )"
+    r"\b(?:deliberately\s+(?:unchanged|left\s+alone|not\s+re-derived)"
+    r"|(?:is|stays|remains)\s+(?:kept|unchanged|not\s+moved|an\s+upper\s+bound)"
+    r"|never\s+corrected\s+downward)",
+    re.IGNORECASE)
+#: The same claim in its `declared at N` spelling: "Declared at 5.0, above the
+#: highest observed wall, so a loaded leg cannot under-pack" while the row holds 1.5.
+#: Kept as its own arm because it names no `weight` noun at all.
+_WEIGHT_DECLARED_CLAIM_RE = re.compile(
+    # the same tense boundary, on the other side of the verb: "It WAS declared at 5.0"
+    # is history, "Declared at 5.0" is a claim.
+    r"(?<!\bwas )(?<!\bwere )(?<!\bhad )\bdeclared\s+at\s+(?P<w>\d+(?:\.\d+)?)\b" + _CLAUSE +
+    r"\b(?:above\s+the\s+highest|so\s+a\s+loaded\s+leg\s+cannot\s+under-pack"
+    r"|so\s+a\s+cold\s+leg\s+cannot\s+under-pack)",
+    re.IGNORECASE)
+
+
 #: A row asserting that its OWN committed weight IS a number the row no longer
 #: holds — "The weight is 0.9", "Declared 14.0s". This is the DECLARATIVE arm; the
 #: sibling non-declarative spelling it was originally paired with

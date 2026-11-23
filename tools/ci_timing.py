@@ -2490,8 +2490,10 @@ def _joined_note_tail(fragment: str, continuation_lines: list[str]) -> str:
 #
 # A guard in the suite reads ONE rule off this map, and the writer did not
 # implement it: a row that carries a MEASUREMENT may not also carry the note of a
-# row no sweep has collected. The second arm that read the same rule was cut as
-# durations-map arithmetic; this one stays.
+# row no sweep has collected. TWO arms read that rule, and both are live: the one
+# below, and `test_ci_selection.py`'s
+# `test_no_durations_row_claims_the_flat_default_at_a_measured_value` (restored
+# with the `durations:` rows it guards, whose notes cite it).
 #
 #   tests/test_tool_risk_tiers.py::test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it
 #
