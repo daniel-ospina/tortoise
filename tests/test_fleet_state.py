@@ -3802,13 +3802,14 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: deliberately BELOW the true count, so a step derived from it still carries the clock with one
 #: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1) — for a TYPO
 #: in either direction. MEASURED on copies at this head, implementation unmutated, only this
-#: constant moved:
-#: `6 -> 7` leaves `184 passed`, `19` leaves `184 passed`, and `1` and `2` also leave `184 passed`
-#: (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red nothing, because the step
-#: has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict, which this integer domain
-#: cannot reach). Only a raise to `>= 20` reds (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED,
-#: `11 failed`, the premise-(b) assertion firing across all 11 params. The behavioural pins are the
-#: `once_slow` and `death_after_streak` ROWS, not a bare assertion on this constant.
+#: constant moved: `6 -> 7` leaves `184 passed`, `19` leaves `184 passed`, and `1` and `2` also
+#: leave `184 passed` (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red
+#: nothing, because the step has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict,
+#: which no positive value of this integer can reach). A raise to `>= 20` reds, by the premise-(b)
+#: assertion (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED, `11 failed` across all 11 params;
+#: `0` raises `ZeroDivisionError` instead, so `0` is not a silent typo but a crash. Every OTHER
+#: value tried stayed green. The behavioural pins are the `once_slow` and `death_after_streak`
+#: ROWS, not a bare assertion on this constant.
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
@@ -3830,19 +3831,23 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: WHY the typo is NOT survivable: with the gate not yet qualified at the death sample the poll
 #: keeps going; a moved-below check then meets the already-dead child on that same sample and
 #: breaks to the same outside-signal SKIP the shipped order produces — both orderings agree, and
-#: the arm can no longer distinguish them. (Deleting the check instead reds the row on every K at
-#: which the file is green unmutated — for a DIFFERENT reason, since nothing observes the death at
-#: all — which is exactly why the wrong mutant looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS
-#: MEASURED AT: the deletion raises on the death sample itself at the shipped `K = 5`
-#: (`on 2 consecutive samples over 2.50s`) and only one sample later from `K = 7` (`K = 8`: count 3,
-#: span 3.15 s), and at `K = 1` nothing at all is attributable — premise (b) below reds the FILE
-#: with no mutant applied, the same `11 failed, 173 passed` either way.)
+#: the arm can no longer distinguish them. (Deleting the check instead reds the row for a DIFFERENT
+#: reason — nothing observes the death at all — at every K at which the file is green unmutated
+#: that has been measured: 3, 5, 7, 8, 12, 16, 17, 19, 50. That is exactly why the wrong mutant
+#: looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS MEASURED AT: the deletion raises on the death
+#: sample itself at the shipped `K = 5` (`on 2 consecutive samples over 2.50s`), and the count it
+#: needs GROWS with `K` — 3 at `K = 8` (`span 3.15 s`) and at `K = 16` (`2.03 s`), 4 from `K = 17`
+#: (`2.83 s`) — so it is not "one sample later" in general. And at `K = 1` nothing at all is
+#: attributable: premise (b) below reds the FILE with no mutant applied, the same
+#: `11 failed, 173 passed` either way.)
 #: SO: no static assertion can pin this constant. The `death_after_streak` ROW pins the ORDERING
 #: wherever the gate is satisfied at the death sample — `5 * (2/K + 0.1) >= 2.0`, i.e. `K <= 6` —
 #: MEASURED: `1 failed` at `K` = 2, 3, 4, 5, 6, and `184 passed` (vacuous) at `K` = 7 and 8. A typo
 #: past that boundary therefore retires the guard silently, with nothing static to red. ⛔ SCOPE IT
 #: THAT WAY rather than to "the shipped value": the row covers a RANGE of K, and writing the range
-#: as one point is the same over-claim in the safe direction.
+#: as one point is the same over-claim in the safe direction. Same discipline on the other side:
+#: state a range with its derivation and its endpoints, never a bare "from K = 7" — that phrase
+#: was written once here and was already false by `K = 17`.
 _LONG_PATH_STREAK_TIME_CALLS = 5
 
 
