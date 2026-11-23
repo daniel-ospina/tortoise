@@ -3208,6 +3208,16 @@ def render_embed_json_measurement(m: dict) -> str:
         "| session | arm | items | `indent=1` | compact | saved | saved % |",
         "|---|---|---|---|---|---|---|",
     ]
+    #: Per-item figures, DERIVED from this run's own cells (never typed in): the
+    #: two layouts differ by the indentation, and compact lands BELOW S2's own
+    #: emission because the model's JSON is not compact either. Stated this way
+    #: because the earlier wording ("the copy S4 re-reads is the emission plus
+    #: whitespace") is contradicted by these very numbers — the compact copy is
+    #: 90.2 tokens/item against a 100.9-token emission.
+    items = agg["items"] or 1
+    per_item_indent = agg["indented_tokens"] / items
+    per_item_compact = agg["compact_tokens"] / items
+    per_item_gap = per_item_indent - per_item_compact
     for r in m["per_emission"]:
         saved = r["indented_tokens"] - r["compact_tokens"]
         share = 100.0 * saved / r["indented_tokens"] if r["indented_tokens"] else 0.0
@@ -3221,9 +3231,15 @@ def render_embed_json_measurement(m: dict) -> str:
         f"**{agg['saved_per_emission']:,} tokens per emission**, and the share "
         f"spans {agg['per_emission_share_min_pct']}%–"
         f"{agg['per_emission_share_max_pct']}% across them — a property of the "
-        "serialization, not of one session. S2's own emission is "
-        f"{agg['tokens_per_item']} completion tokens per item, so the copy S4 "
-        "re-reads is the pipeline's own whitespace on top of it.", "",
+        "serialization, not of one session. Per item that is "
+        f"`{per_item_indent:,.1f}` tokens in `indent=1` against "
+        f"`{per_item_compact:,.1f}` compact, so the `{per_item_gap:,.1f}`-token "
+        "difference between the two layouts IS the indentation. ⛔ Neither "
+        "layout is S2's emission plus whitespace: S2 emits "
+        f"`{agg['tokens_per_item']}` completion tokens per item, and the compact "
+        "copy is BELOW that — the model's own JSON is not compact either — so "
+        "the gap measured here is the indentation, not a re-rendering of the "
+        "emission's content.", "",
         "### Tokens per document, before → after", "",
         "The arithmetic, in the order it is applied:", "",
         f"1. the re-sent embed region is **solved** from the corpus per S4 "

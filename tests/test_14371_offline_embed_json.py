@@ -397,6 +397,38 @@ def test_the_fetch_observer_records_tiktoken_s_own_reader(clean_posture):
         clean_posture.setattr(_load, "read_file", real)
 
 
+def test_the_verb_reports_the_observer_s_fetches_rather_than_a_constant(
+        clean_posture, monkeypatch):
+    """The offline claim is the OBSERVER's output, not a literal in the dict.
+
+    A pass-through observer that reports nothing — an instrument that observes
+    nothing — left every other assertion in this file green: the end-to-end leg
+    runs on a warm cache, so it cannot tell a working instrument from a dead
+    one, while the artifact went on printing "tiktoken's own reader was never
+    called". So the seam is pinned here, with the encoder stubbed (no cache, no
+    tokenizer, no network): whatever the observer yields is what the artifact
+    reports, in BOTH directions.
+    """
+    import contextlib
+
+    class _StubEncoder:
+        def encode(self, text):
+            return list(range(len(text) % 97))
+
+    @contextlib.contextmanager
+    def _seeded():
+        yield ["https://example.invalid/blob.tiktoken"]
+
+    monkeypatch.setattr(m, "_encoding", lambda: _StubEncoder())
+    monkeypatch.setattr(m, "_observe_encoder_fetches", _seeded)
+    measured = m.embed_json_measurement(_RECEIPTS, _EVIDENCE)
+    assert measured["encoder_cache"]["fetched"] == [
+        "https://example.invalid/blob.tiktoken"], (
+        "the verb did not report the observer's fetches — its `network_used` "
+        "would then be a constant, and the artifact's offline claim unverified")
+    assert measured["encoder_cache"]["network_used"] is True
+
+
 # ── the committed artifact: the recorded cells must be REACHABLE ─────────
 
 
@@ -481,13 +513,37 @@ def test_the_committed_allowance_cells_are_the_recorded_floors():
     reason="no tiktoken BPE cache on this box; fetching cl100k_base's ranks is "
            "network egress from a deterministic test, so the cells stay pinned "
            "in the committed artifact (module docstring) instead of downloaded")
-def test_the_offline_measurement_reproduces_the_recorded_cells(clean_posture):
+def test_the_offline_measurement_reproduces_the_recorded_cells(
+        clean_posture, monkeypatch):
     """End to end: the verb, on the real corpus, with no provider and no fetch.
 
     ⛔ The assertions are the PUBLISHED cells, not a re-derivation: this run and
     `docs/evidence/14343-amplify/README.md` §4a must agree exactly, or one of
     them is wrong and neither is a measurement.
+
+    The egress trap is BEHAVIOURAL, and deliberately not the four-name list
+    `test_the_verb_makes_no_provider_call` checks: on this tiktoken,
+    `tiktoken.load.read_file` fetches through `requests.get`, so raising there
+    catches the reader's cache-miss path under ANY name — including one added
+    after that list was written — and the `Session.post` and `urlopen` traps
+    cover the other two client paths a paid call could take. Verified by
+    positive control: pointed at an EMPTY cache dir the fetch fires and this
+    test reds, instead of silently passing.
     """
+    import urllib.request
+
+    import requests
+
+    def _no_egress(*args, **kwargs):
+        raise AssertionError(
+            "the measurement opened a network connection — tiktoken's reader "
+            "was reached on a cache miss (or a paid client was called), so the "
+            "'warm cache, no fetch' claim this artifact publishes is false for "
+            "this run")
+
+    monkeypatch.setattr(requests, "get", _no_egress)
+    monkeypatch.setattr(requests.sessions.Session, "post", _no_egress)
+    monkeypatch.setattr(urllib.request, "urlopen", _no_egress)
     clean_posture.setenv("TIKTOKEN_CACHE_DIR", str(_BPE_CACHE))
     measured = m.embed_json_measurement(_RECEIPTS, _EVIDENCE)
 
@@ -496,10 +552,14 @@ def test_the_offline_measurement_reproduces_the_recorded_cells(clean_posture):
     #: LITERALS in the return dict (`tools/extractor_cost_measure.py`, the
     #: `embed_json_measurement` result), so asserting them re-reads the constant
     #: this verb writes and cannot fail for any behaviour — the vacuous-pin class
-    #: this same file pins elsewhere. The real evidence is the observation: no
-    #: tiktoken reader call, hence no fetch during this run. `provider_calls` is
-    #: guarded separately by `test_the_verb_makes_no_provider_call` (it drives the
-    #: verb and asserts none of the provider entry points was reached).
+    #: this same file pins elsewhere. The evidence here is the OBSERVATION (no
+    #: tiktoken reader call, hence no fetch during this run) plus the `urlopen`
+    #: trap below; `provider_calls` stays pinned by
+    #: `test_the_verb_makes_no_provider_call`, which is a SOURCE pin (it reads
+    #: `embed_json_measurement`'s source text and refuses the four paid entry
+    #: points appearing in it) — it does not drive the verb, and the comment this
+    #: replaces said it did. A paid call reached under any other name is caught by
+    #: the `urlopen` trap, not by that list.
     assert measured["encoder_cache"]["network_used"] is False
     assert measured["encoder_cache"]["fetched"] == []
     assert agg["emissions"] == _RECORDED["emissions"]

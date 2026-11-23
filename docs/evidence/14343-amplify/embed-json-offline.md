@@ -39,7 +39,7 @@ The layout seam resolved to **`indent`** — this measurement counts BOTH layout
 | wp07_bluepeak_followup | narrative | 37 | 4,960 | 3,387 | 1,573 | 31.7 |
 | **total** | 14 emissions | 580 | **77,561** | **52,346** | **25,215** | **32.5** |
 
-**1,801 tokens per emission**, and the share spans 29.64%–34.99% across them — a property of the serialization, not of one session. S2's own emission is 100.9 completion tokens per item, so the copy S4 re-reads is the pipeline's own whitespace on top of it.
+**1,801 tokens per emission**, and the share spans 29.64%–34.99% across them — a property of the serialization, not of one session. Per item that is `133.7` tokens in `indent=1` against `90.3` compact, so the `43.5`-token difference between the two layouts IS the indentation. ⛔ Neither layout is S2's emission plus whitespace: S2 emits `100.9` completion tokens per item, and the compact copy is BELOW that — the model's own JSON is not compact either — so the gap measured here is the indentation, not a re-rendering of the emission's content.
 
 ### Tokens per document, before → after
 
