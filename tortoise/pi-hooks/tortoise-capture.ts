@@ -1,4 +1,4 @@
-// tortoise-hook-version: 26
+// tortoise-hook-version: 27
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -1770,10 +1770,29 @@ export function listSpoolEntries(
   // ceiling, predicate answering False). One scan, both answers. The CORRUPT
   // class comes back too: it is just as invisible to `metas.length`, and a
   // read-only probe that dropped it would stop counting what it cannot parse.
+  //
+  // ⛔ AND SO DOES A META-LESS TURN LOG (#14347 review, cycle 3, finding 3). The
+  // writer stores the log BEFORE the meta and `discardEntry` unlinks the meta
+  // FIRST, so an ENOSPC or a failed second unlink leaves a byte-bearing
+  // `<key>.turns.jsonl` with no meta — in neither `metas`, `unreadable` (built
+  // from `.meta.json` names) nor `orphanPaths` (matches only `.orphan`). Nothing
+  // counted it, so BOTH ceilings were blind to bytes on disk. It goes in the
+  // THIRD element (what the ceilings must count that no parsed meta can) and NOT
+  // into `unreadable`, whose ledger record says "cannot read N spool meta(s)" —
+  // an absent meta is not an unreadable one. Mirrors `capture_spool._scan_spool`.
+  const metaStems = new Set(
+    names
+      .filter((name) => name.endsWith(".meta.json"))
+      .map((name) => name.replace(/\.meta\.json$/, "")),
+  );
+  const strayLogs = names
+    .filter((name) => name.endsWith(".turns.jsonl"))
+    .map((name) => name.replace(/\.turns\.jsonl$/, ""))
+    .filter((stem) => !metaStems.has(stem) && fileSize(join(root, `${stem}.turns.jsonl`)) > 0);
   return {
     metas,
     discards,
-    unreadable: [...unreadable.map((u) => u.stem), ...corrupt].sort(),
+    unreadable: [...unreadable.map((u) => u.stem), ...corrupt, ...strayLogs].sort(),
   };
 }
 
@@ -2332,7 +2351,20 @@ export function writeSpoolEntry(
   // what is actually on disk. Mirrors `capture_spool.write_spool_entry`.
   const priorRead = readSpoolEntryState(dir, snapshot.sessionId);
   const prior = priorRead.meta;
-  const unusablePrior = priorRead.state === PRIOR_META_UNUSABLE;
+  // ⛔ AN ABSENT META IS NOT AN EMPTY ENTRY (#14347 review, cycle 3, finding 3).
+  // This function writes the LOG first and the meta second, and `discardEntry`
+  // unlinks the meta first — so an ENOSPC (the normal condition on the box this
+  // PR exists for) or a failed second unlink leaves a byte-bearing
+  // `.turns.jsonl` with no meta. Reading that as a fresh session REPLACED the log
+  // with no record and no `.orphan`, and its bytes are none of `metas`,
+  // `unreadable` or `orphanPaths` — so BOTH ceilings were blind to them: exactly
+  // #12483's false PASS, one state over. The log path comes from the CALLER's
+  // session id, so the stored turns are as addressable here as in the UNUSABLE
+  // arm. Mirrors `capture_spool.write_spool_entry`.
+  const strayLogBytes = fileSize(logPath);
+  const metaAbsent = priorRead.state === PRIOR_META_ABSENT;
+  const unusablePrior =
+    priorRead.state === PRIOR_META_UNUSABLE || (metaAbsent && strayLogBytes > 0);
   // ⛔ `prior === undefined` IS NOT "THE ENTRY IS ON DISK" (#14347 review F2).
   // In the UNUSABLE arm `prior` is undefined BY DEFINITION while the entry —
   // meta AND turn log — still occupies bytes. Every question that is really
@@ -2341,7 +2373,14 @@ export function writeSpoolEntry(
   // of an unreadable entry TWICE, so the writer refused at ~half the byte
   // ceiling while the health line reported the same spool healthy. Mirrors
   // `capture_spool.write_spool_entry`.
-  const entryOnDisk = priorRead.state !== PRIOR_META_ABSENT;
+  const entryOnDisk = priorRead.state !== PRIOR_META_ABSENT || strayLogBytes > 0;
+  // ONE spelling of "why this prior cannot be used", so no record below can
+  // describe an ABSENT meta as one it "could not read" (the ledger may not lie
+  // in either direction).
+  const priorDesc = metaAbsent
+    ? `the stored meta (${basename(metaPath)}) is ABSENT and a ${strayLogBytes}-byte` +
+      ` turn log (${basename(logPath)}) is the only record of this entry`
+    : `the stored meta (${basename(metaPath)}) could not be read or used`;
   const storedRead = entryOnDisk
     ? readSpoolTurnsState(dir, snapshot.sessionId)
     : { turns: [] as Turn[], state: TURNS_ABSENT };
@@ -2418,6 +2457,14 @@ export function writeSpoolEntry(
   // resolved before the guards and APPLIED after them (#14347 review F3).
   let divergentTurns = 0;
   let divergentBytes = 0;
+  // ⛔ NOTHING ABOUT THE DISPOSITION IS RECORDED YET (#14347 review, cycle 3,
+  // finding 2). The admission guard ~230 lines below can still REFUSE this
+  // write, and a record emitted here asserted what the write DID — "the write
+  // APPENDED N new turn(s)" — for a write that was refused and never happened.
+  // The disposition is CARRIED and recorded on the admitted path, once the write
+  // it describes has actually happened. Mirrors `capture_spool.write_spool_entry`.
+  let unusableDisposition: "append" | undefined;
+  let appendedTurns = 0;
   if (unusablePrior) {
     // ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
     // (#12487). Measured on the Python twin (the same code): `written: true` with
@@ -2456,11 +2503,10 @@ export function writeSpoolEntry(
             reason: DISCARD_META_UNREADABLE,
             retained: true,
             detail:
-              `neither the stored meta (${basename(metaPath)}) nor the turn log` +
-              " could be read, so this snapshot was REFUSED and the entry left" +
-              " byte-identical: nothing can be concluded about what is on disk," +
-              " and a resync would hide a conversation that some other uid may" +
-              " still be able to deliver",
+              `${priorDesc} — and that turn log could not be read either, so this` +
+              " snapshot was REFUSED and the entry left byte-identical: nothing" +
+              " can be concluded about what is on disk, and a resync would hide a" +
+              " conversation that some other uid may still be able to deliver",
           },
           { stamp: `unusable-meta:${snapshot.sessionId}` },
         ),
@@ -2468,25 +2514,8 @@ export function writeSpoolEntry(
       return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
     }
     if (extendsLog) {
-      const note =
-        `the write APPENDED ${snapshot.turns.length - stored.length} new turn(s)` +
-        " and overwrote nothing; the entry's retry/filing state could not be" +
-        " carried forward (it lived in the unreadable meta), so the entry may" +
-        " re-POST once";
-      discards.push(
-        recordRefusal(
-          dir,
-          {
-            session_id: snapshot.sessionId,
-            capture_key: captureKey(snapshot.sessionId, snapshot.turns),
-            reason: DISCARD_META_UNREADABLE,
-            retained: true,
-            detail:
-              `the stored meta (${basename(metaPath)}) could not be read or used; ` + note,
-          },
-          { stamp: `unusable-meta:${snapshot.sessionId}` },
-        ),
-      );
+      unusableDisposition = "append";
+      appendedTurns = snapshot.turns.length - stored.length;
     } else {
       // ⛔ NOTHING IS MOVED YET (#14347 review F3). The guards BELOW can still
       // REFUSE this write, and a refusal must leave the entry byte-identical.
@@ -2758,6 +2787,7 @@ export function writeSpoolEntry(
     };
   }
 
+  let quarantineNote: string | undefined;
   if (divergentBytes > 0) {
     // ⛔ THE GATE IS THE BYTES ON DISK, NOT THE PARSED TURN COUNT — see the
     // diverge arm above (cycle-2 finding 1).
@@ -2780,37 +2810,35 @@ export function writeSpoolEntry(
             reason: DISCARD_META_UNREADABLE,
             retained: true,
             detail:
-              `the stored meta (${basename(metaPath)}) could not be read or used,` +
-              ` and its stored turn log could not be moved aside (${divergentTurns}` +
-              ` turn(s) still at ${basename(logPath)}) — so this snapshot was` +
-              " REFUSED and the entry left byte-identical: writing it would" +
-              " overwrite the very turns this path exists to preserve",
+              `${priorDesc}, and its stored turn log could not be moved aside` +
+              ` (${divergentTurns} parsed turn(s) still at ${basename(logPath)}) —` +
+              " so this snapshot was REFUSED and the entry left byte-identical:" +
+              " writing it would overwrite the very turns this path exists to" +
+              " preserve",
           },
           { stamp: `unusable-meta-unquarantinable:${snapshot.sessionId}` },
         ),
       );
       return { written: false, bytes: spoolEntryBytes(dir, snapshot.sessionId), discards };
     }
-    discards.push(
-      recordRefusal(
-        dir,
-        {
-          session_id: snapshot.sessionId,
-          capture_key: meta.capture_key,
-          reason: DISCARD_META_UNREADABLE,
-          retained: true,
-          detail:
-            `the stored meta (${basename(metaPath)}) could not be read or used; ` +
-            `this snapshot diverges from the stored log, so the stored` +
-            ` ${divergentTurns} turn(s) were QUARANTINED to` +
-            ` ${quarantined === undefined ? "(none)" : basename(quarantined)}` +
-            " — preserved on disk for forensics and still counted against the byte" +
-            " ceiling — and the entry was rewritten from this snapshot; the" +
-            " retry/filing state could not be carried forward",
-        },
-        { stamp: `unusable-meta:${snapshot.sessionId}` },
-      ),
-    );
+    // ⛔ THE RECORD IS CARRIED, NOT EMITTED (#14347 review, cycle 3, finding 2):
+    // it says the entry WAS rewritten, and the write below can still fail — a
+    // write failure must not leave that claim on the ledger. It is emitted after
+    // the write, under its OWN stamp, because this disposition and the append one
+    // are two different EVENTS about one session and the shared stamp suppressed
+    // the second (a session that appends on turn N and diverges later had its
+    // quarantine record swallowed, leaving the earlier "APPENDED … and
+    // overwrote nothing" as the ledger's account of turns that had left the
+    // queue). The stored log is described by BOTH its bytes and its parsed
+    // turns: the gate is the bytes, so a byte-bearing/zero-parse log must not
+    // report "the stored 0 turn(s) were quarantined" about 22 bytes.
+    quarantineNote =
+      `this snapshot diverges from the stored log, so the stored turn log` +
+      ` (${divergentBytes} byte(s), ${divergentTurns} parsed turn(s)) was QUARANTINED to` +
+      ` ${quarantined === undefined ? "(none)" : basename(quarantined)}` +
+      " — preserved on disk for forensics and still counted against the byte" +
+      " ceiling — and the entry was rewritten from this snapshot; the" +
+      " retry/filing state could not be carried forward";
   }
 
   try {
@@ -2832,16 +2860,61 @@ export function writeSpoolEntry(
   } catch (err) {
     // A filesystem failure (full disk, read-only home) is a LOSS — record it
     // with a reason rather than returning an empty discard list (the silent
-    // drop this issue exists to remove).
+    // drop this issue exists to remove). When the quarantine already ran its
+    // bytes are STILL PRESERVED, and that fact must survive into the ledger too.
+    const errText = err instanceof Error ? err.message : String(err);
     discards.push(
       recordDiscard(dir, {
         session_id: snapshot.sessionId,
         capture_key: meta.capture_key,
         reason: DISCARD_WRITE_FAILED,
-        detail: err instanceof Error ? err.message : String(err),
+        detail: quarantineNote === undefined ? errText : `${errText}; ${quarantineNote}`,
       }),
     );
     return { written: false, bytes: 0, discards };
+  }
+
+  // ⛔ THE DISPOSITION RECORD IS EMITTED HERE — AFTER THE WRITE IT DESCRIBES
+  // (#14347 review, cycle 3, finding 2). Emitted above the admission guard, a
+  // saturated spool returned `[<"the write APPENDED N new turn(s)">,
+  // <spool_saturated refusal>]` for a write that never happened; emitted before
+  // `atomicWrite`, a failed write left "the entry was rewritten" standing. Each
+  // disposition carries its OWN stamp: they share `(session_id, reason)`, and the
+  // dedupe key is that pair plus the stamp, so one stamp made the second
+  // disposition's record a suppressed repeat of the first. Mirrors
+  // `capture_spool.write_spool_entry`.
+  if (unusableDisposition === "append") {
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: meta.capture_key,
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail:
+            `${priorDesc}; the write APPENDED ${appendedTurns} new turn(s)` +
+            " and overwrote nothing; the entry's retry/filing state could not be" +
+            " carried forward (it lived in the unreadable meta), so the entry may" +
+            " re-POST once",
+        },
+        { stamp: `unusable-meta-append:${snapshot.sessionId}` },
+      ),
+    );
+  } else if (quarantineNote !== undefined) {
+    discards.push(
+      recordRefusal(
+        dir,
+        {
+          session_id: snapshot.sessionId,
+          capture_key: meta.capture_key,
+          reason: DISCARD_META_UNREADABLE,
+          retained: true,
+          detail: `${priorDesc}; ${quarantineNote}`,
+        },
+        { stamp: `unusable-meta-diverge:${snapshot.sessionId}` },
+      ),
+    );
   }
 
   // Post-write prune: keep the spool inside BOTH ceilings, oldest first. Never
@@ -2948,6 +3021,13 @@ export function pruneSpool(
   // bytes it removes from the evictable pool), so one check up front is the whole
   // test. The COUNT axis is deliberately not folded in: a count overage IS
   // relievable by a filed entry even when the byte ceiling is not.
+  //
+  // ⛔ THE LOOP BELOW HONOURS THE SAME FLOOR (#14347 review, cycle 3, finding
+  // 1). Without it, a spool breaching BOTH ceilings evicted EVERY filed entry to
+  // relieve one count slot (measured on the Python twin: 5 filed 100-byte
+  // entries + one 2,000-byte undelivered entry at maxEntries=3,
+  // maxTotalBytes=1000 lost all 5) and was still over the byte ceiling
+  // afterwards — the same #10175 violation this floor exists to prevent.
   const bytesReachable =
     total > bounds.maxTotalBytes && total - evictableBytes <= bounds.maxTotalBytes;
   if (count <= bounds.maxEntries && !bytesReachable) return discards;
@@ -2961,7 +3041,12 @@ export function pruneSpool(
   // is never evicted at all (capture-loss). The record names the class in the
   // same `loss` vocabulary the live entries use (#6388).
   for (const { meta, bytes } of ranked.filter(({ meta: m }) => entryFiled(m))) {
-    if (count <= bounds.maxEntries && total <= bounds.maxTotalBytes) break;
+    // #14347 review, cycle 3, finding 1: `bytesReachable` false means no eviction
+    // can bring the byte term under the ceiling (the permanent classes alone are
+    // over it), so a loop still testing `total <= maxTotalBytes` never stops on
+    // that axis and spends the whole filed class for a count overage that needed
+    // one eviction.
+    if (count <= bounds.maxEntries && (total <= bounds.maxTotalBytes || !bytesReachable)) break;
     const reason =
       total > bounds.maxTotalBytes ? DISCARD_BYTES_EXCEEDED : DISCARD_COUNT_EXCEEDED;
     // #6388: name the CLASS of loss. The discard line is the only surface a cap

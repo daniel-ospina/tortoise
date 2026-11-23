@@ -6711,3 +6711,250 @@ test("a CORRUPT meta is counted by a READ-ONLY probe (#14347 cyc2)", () => {
   assert.equal(existsSync(metaPath), true, "a read-only probe must not touch the entry");
   assert.equal(readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan")).length, 0);
 });
+
+// ── cycle 3 — the floor's LOOP, the ledger's timing, and the meta-less log ──
+//
+// Three findings from the review at `9de49e36b801`, each a seam opened by the
+// FIX for the previous one. Mirrors `tests/test_12483_12487_spool_integrity.py`.
+
+test("prune stops at the COUNT ceiling when the byte ceiling is unreachable (#14347 cyc3)", () => {
+  // `bytesReachable` false means no eviction can bring the byte term under
+  // `maxTotalBytes` (the permanent classes alone are over it), so a loop still
+  // testing `total <= maxTotalBytes` never stops on that axis: it evicted EVERY
+  // filed entry to relieve one count slot and was still over the byte ceiling
+  // afterwards — #10175 ("refuse new work, never destroy the queue to admit it")
+  // violated from inside the guard added to enforce it.
+  //
+  // MUTATION THAT REDS THIS: restore the loop break
+  // `count <= bounds.maxEntries && total <= bounds.maxTotalBytes` -> all five
+  // filed entries are unlinked and only the undelivered one survives.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const seed = (sid: string, stamp: string, filed: boolean, payload: string) => {
+    const markers = filed
+      ? { capture_key: "K", filed_key: "K", capture_lane: "hook", filed_lane: "hook" }
+      : { capture_key: "U" };
+    writeFileSync(
+      join(dir, `${entryKey(sid)}.meta.json`),
+      JSON.stringify({
+        version: 1,
+        session_id: sid,
+        ...markers,
+        updated_at: stamp,
+        created_at: stamp,
+      }),
+    );
+    writeFileSync(
+      join(dir, `${entryKey(sid)}.turns.jsonl`),
+      `${JSON.stringify({ role: "user", content: payload })}\n`,
+    );
+  };
+  for (let i = 0; i < 5; i += 1) seed(`sess-f${i}`, `2026-01-01T00:00:0${i}Z`, true, "x");
+  seed("sess-undelivered", "2026-01-01T00:00:09Z", false, "y".repeat(2000));
+
+  const bounds = { maxEntries: 3, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 };
+  const discards = pruneSpool(spool, undefined, bounds);
+
+  assert.equal(
+    discards.length,
+    3,
+    `counting six entries against maxEntries=3 needs exactly three evictions; prune spent ${discards.length}`,
+  );
+  assert.equal(
+    existsSync(join(dir, `${entryKey("sess-undelivered")}.meta.json`)),
+    true,
+    "an undelivered entry is never evicted to make room (capture-loss)",
+  );
+  assert.deepEqual(
+    [0, 1, 2, 3, 4].map((i) => existsSync(join(dir, `${entryKey(`sess-f${i}`)}.meta.json`))),
+    [false, false, false, true, true],
+    "oldest-first, and only the count overage",
+  );
+  const surviving = ["sess-f3", "sess-f4", "sess-undelivered"].reduce(
+    (sum, sid) => sum + spoolEntryBytes(spool, sid),
+    0,
+  );
+  assert.ok(
+    surviving > bounds.maxTotalBytes,
+    `the byte ceiling was NOT reached by any of those evictions: ${surviving}`,
+  );
+});
+
+test("a REFUSED append records NOTHING about the append it could not do (#14347 cyc3)", () => {
+  // Measured on the Python twin (the same code): a saturated spool returned
+  // `[<"the write APPENDED 1 new turn(s)">, <spool_saturated refusal>]` for a
+  // write that never happened.
+  //
+  // MUTATION THAT REDS THIS: emit the append record inside the `unusablePrior`
+  // arm (above the admission guard) -> the detail claims an append the write did
+  // not perform.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-w";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  let res;
+  try {
+    const bounds = { maxEntries: 1, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 };
+    res = writeSpoolEntry(spool, snapshot(sid, [...stored, { role: "assistant", content: "new" }]), bounds);
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(res.written, false, "one unreadable entry at maxEntries=1 is full");
+  assert.equal(res.discards.at(-1)?.reason, DISCARD_SPOOL_SATURATED);
+  assert.equal(
+    res.discards.some((d) => (d.detail ?? "").includes("APPENDED")),
+    false,
+    `the ledger must not claim a write that was refused: ${JSON.stringify(res.discards)}`,
+  );
+  assert.equal(
+    readFileSync(logPath, "utf8").split("\n").filter(Boolean).length,
+    6,
+    "and the log is byte-identical — which is what makes that claim false",
+  );
+});
+
+test("one session RECORDS BOTH its append and its later quarantine (#14347 cyc3)", () => {
+  // The dedupe key is `(session_id, reason)` plus the stamp, and both
+  // dispositions use `DISCARD_META_UNREADABLE`: one shared stamp made the second a
+  // "repeat" of the first. Measured on the Python twin: a session that appended
+  // on turn N and diverged after a compaction had its QUARANTINE record
+  // swallowed, leaving the earlier "APPENDED … and overwrote nothing" as the
+  // ledger's account of turns that had just left the live queue for an `.orphan`.
+  //
+  // MUTATION THAT REDS THIS: give both records the same `unusable-meta:<sid>`
+  // stamp -> the second is suppressed and the ledger holds no QUARANTINED line.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  const sid = "sess-w";
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const logPath = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  writeFileSync(metaPath, JSON.stringify({ version: 1, session_id: sid }));
+  const stored = Array.from({ length: 6 }, (_, i) => ({ role: "user" as const, content: `turn-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  chmodSync(metaPath, 0o000);
+  let second;
+  try {
+    const first = writeSpoolEntry(spool, snapshot(sid, [...stored, { role: "assistant", content: "new" }]));
+    assert.equal(first.written, true);
+    assert.match(first.discards.at(-1)?.detail ?? "", /APPENDED/);
+    // The repaired meta is corrupted again: the SAME live session, still
+    // unreadable, now DIVERGING (a compaction moved the window).
+    chmodSync(metaPath, 0o000);
+    second = writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "compacted" }]));
+  } finally {
+    if (existsSync(metaPath)) chmodSync(metaPath, 0o600);
+  }
+  assert.equal(second.written, true);
+  assert.match(
+    second.discards.at(-1)?.detail ?? "",
+    /QUARANTINED/,
+    `the quarantine is a DIFFERENT event and must be recorded: ${JSON.stringify(second.discards)}`,
+  );
+  const details = readDiscards(spool).map((d) => d.detail ?? "");
+  assert.ok(details.some((d) => d.includes("APPENDED")), JSON.stringify(details));
+  assert.ok(details.some((d) => d.includes("QUARANTINED")), JSON.stringify(details));
+  const orphans = readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan"));
+  assert.equal(orphans.length, 1, JSON.stringify(orphans));
+  assert.equal(
+    readFileSync(join(spool, "entries", orphans[0]!), "utf8").split("\n").filter(Boolean).length,
+    7,
+    "the turns that left the live queue are ON DISK — six stored plus the appended one",
+  );
+});
+
+test("a META-LESS turn log is QUARANTINED, not overwritten (#14347 cyc3)", () => {
+  // The writer stores the log BEFORE the meta, and `discardEntry` unlinks the meta
+  // FIRST — so an ENOSPC or a failed second unlink leaves a byte-bearing
+  // `.turns.jsonl` with no meta. Read as a fresh session it was REPLACED with no
+  // record and no `.orphan`: #12487's destroy, one state over.
+  //
+  // MUTATION THAT REDS THIS: `priorRead.state !== PRIOR_META_ABSENT` (the pre-fix
+  // occupancy test) -> written true, one line in the log, no record, no orphan.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const sid = "sess-orphan";
+  const logPath = join(dir, `${entryKey(sid)}.turns.jsonl`);
+  const stray = Array.from({ length: 3 }, (_, i) => ({ role: "user" as const, content: `orphan-${i}` }));
+  writeFileSync(logPath, stray.map((t) => `${JSON.stringify(t)}\n`).join(""));
+  assert.equal(existsSync(join(dir, `${entryKey(sid)}.meta.json`)), false);
+
+  const res = writeSpoolEntry(spool, snapshot(sid, [{ role: "user", content: "fresh" }]));
+  assert.equal(res.written, true);
+  assert.match(res.discards.at(-1)?.detail ?? "", /QUARANTINED/);
+  assert.match(
+    res.discards.at(-1)?.detail ?? "",
+    /ABSENT/,
+    "the record says which state was found, not that a meta it never saw 'could not be read'",
+  );
+  const orphans = readdirSync(dir).filter((n) => n.includes(".orphan"));
+  assert.equal(orphans.length, 1, JSON.stringify(orphans));
+  assert.equal(
+    readFileSync(join(dir, orphans[0]!), "utf8").split("\n").filter(Boolean).length,
+    3,
+    "every stored turn survives — on disk, even though it left the queue",
+  );
+  assert.equal(
+    readFileSync(logPath, "utf8").split("\n").filter(Boolean).length,
+    1,
+    "the live log now holds only this snapshot",
+  );
+});
+
+test("the writer APPENDS to a meta-less log it could reconcile (#14347 cyc3)", () => {
+  // The append is PROVABLE here too: the log path comes from the caller's session
+  // id, so a snapshot that extends the stored turns destroys nothing.
+  //
+  // MUTATION THAT REDS THIS: the pre-fix occupancy test -> the log is overwritten
+  // (3 lines -> 1) with no record.
+  const spool = tmpSpool();
+  const dir = join(spool, "entries");
+  mkdirSync(dir, { recursive: true });
+  const sid = "sess-orphan";
+  const logPath = join(dir, `${entryKey(sid)}.turns.jsonl`);
+  const stored = Array.from({ length: 2 }, (_, i) => ({ role: "user" as const, content: `orphan-${i}` }));
+  writeFileSync(logPath, stored.map((t) => `${JSON.stringify(t)}\n`).join(""));
+
+  const res = writeSpoolEntry(
+    spool,
+    snapshot(sid, [...stored, { role: "assistant", content: "new" }]),
+  );
+  assert.equal(res.written, true);
+  assert.match(res.discards.at(-1)?.detail ?? "", /APPENDED/);
+  assert.equal(readFileSync(logPath, "utf8").split("\n").filter(Boolean).length, 3);
+  assert.equal(readdirSync(dir).filter((n) => n.includes(".orphan")).length, 0);
+});
+
+test("a meta-less turn log is COUNTED by both ceilings (#14347 cyc3)", () => {
+  // Nothing counted a lone `.turns.jsonl`: not in `metas` (no meta), not in
+  // `unreadable` (built from `.meta.json` names), not in `orphanPaths` (matches
+  // only `.orphan`). Measured on the Python twin: 5,000 bytes on disk with
+  // `maxTotalBytes=1000` answering not-saturated and a health line reading
+  // `draining`.
+  //
+  // MUTATION THAT REDS THIS: drop the stray-log stems from `listSpoolEntries`'s
+  // third element -> both verdicts flip back.
+  const spool = tmpSpool();
+  mkdirSync(join(spool, "entries"), { recursive: true });
+  writeFileSync(
+    join(spool, "entries", `${entryKey("sess-orphan")}.turns.jsonl`),
+    `${JSON.stringify({ role: "user", content: "y".repeat(5000) })}\n`,
+  );
+
+  const byteBounds = { maxEntries: 1000, maxTotalBytes: 1000, maxEntryBytes: 1 << 20 };
+  assert.equal(spoolSaturated(spool, byteBounds), true);
+  assert.equal(captureHealthLine(spool, { bounds: byteBounds }).state, "saturated");
+
+  const countBounds = { maxEntries: 1, maxTotalBytes: 1 << 20, maxEntryBytes: 1 << 20 };
+  assert.equal(
+    spoolSaturated(spool, countBounds),
+    true,
+    "a lone turn log is an entry the COUNT ceiling cannot see without this",
+  );
+});

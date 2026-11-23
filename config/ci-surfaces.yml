@@ -14398,7 +14398,8 @@ durations:
   # #14342 D2: registering `test_12483_12487_spool_integrity.py` puts one more file
   # in `fast_pool()`, and `--integrity`'s duration-coverage floor (0.90) is
   # measured against that pool's own size — so the row must EXIST, not merely
-  # default. Measured locally: 17 tests, DB-free / graph-free / network-free /
+  # default. Measured locally: 26 tests (11 at #12483/#12487, +6 at the cycle-2
+  # findings, +9 at the cycle-3 ones), DB-free / graph-free / network-free /
   # model-free, every case under `tmp_path`.
   test_12483_12487_spool_integrity.py: 1.5
   test_6388_session_events_drain.py: 0.3  # The row has to EXIST, not merely default: the `core` + `api` registration puts one more file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. What the weight covers: DB-free, graph-free, network-free and model-free — every case writes day files under `tmp_path` (`TORTOISE_SESSION_EVENTS_DIR`/`store=`) and drives `drain_session_events` with a recording `PostOutcome` transport; the only subprocess-free cost is gzip encode/decode on the sealed-day cases. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.0
