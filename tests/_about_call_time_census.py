@@ -359,6 +359,56 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
         ),
         2,
     ),
+    # ⛔ #14012's bounded pin (added with `tortoise/resident_pin.py` by `#14161`) brought
+    # TWO untyped closure walks into the class at once, and neither is a referent read.
+    # The ground is the pattern's USE: it RETURNS `id(m)` and `m.{key_prop}` — a
+    # neighbour IDENTITY, for the footprint and degree the budget is enforced on — and
+    # never `type(r)` nor any edge property, so it asks *is there a neighbour, and
+    # which one*, not *what does the referent say*. That is the same ground
+    # `validate_chain_integrity` (a boolean existence test) and `sdk._connected_pairs`
+    # (a connectivity inventory) are registered on.
+    # ⛔ THE ENDPOINT ARGUMENT IS **NOT** AVAILABLE HERE, and it is written down because a
+    # later reader will otherwise re-add it: both ends of this hop carry the SAME label
+    # (`(n:{label})--(m:{label})`), which looks like it excludes `Point -> Object` — but a
+    # MULTI-LABELLED node is a shape this write path mints (`tortoise/ep.py`: "a
+    # multi-labelled endpoint (`:Point:Object` — a shape the write path can mint)";
+    # `sdk.py` matches `:Point:Object` directly), so an `aboutObject` whose target is
+    # `:Point:Object` has BOTH ends on `Point`, and the walk traverses it (measured on a
+    # live graph, by creating that pair and running this exact query). It cannot be
+    # excluded on endpoints; it is excluded because it reads no referent.
+    (
+        "tortoise/resident_pin.py",
+        "read",
+        "the bounded pin's 1-hop CLOSURE read — a DEGREE/footprint read, and the "
+        "ground is its USE, not its endpoints: it RETURNS neighbour identity only "
+        "(`id(m)`, `m.{key_prop}`) for the footprint and degree the budget is "
+        "enforced on, and never `type(r)` or an edge property, so it asks whether a "
+        "neighbour exists and who it is, never what the referent says. ⛔ No endpoint "
+        "exclusion is claimed: a multi-labelled `:Point:Object` target puts both ends "
+        "of an `aboutObject` on `Point`, and this walk DOES traverse it (measured)",
+        (
+            "OPTIONAL MATCH (n)--(m:{label})",
+            'RETURN k, collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",',
+        ),
+        1,
+    ),
+    (
+        "tortoise/resident_pin.py",
+        "_closure_for",
+        "the SAME closure read one entry over — `pin()`'s per-key probe calls it "
+        "(`resident_pin.py`: `fresh_reading = _closure_for(...)`), so each walk is "
+        "stated separately. Same ground, "
+        "same limits: it RETURNS neighbour identity only (`id(m)`, "
+        "`m.{key_prop}`), never `type(r)` or an edge property, and no endpoint "
+        "exclusion is claimed (a multi-labelled `:Point:Object` target makes both "
+        "ends `Point`, and the walk traverses that `aboutObject` edge)",
+        (
+            "OPTIONAL MATCH (n)--(m:{label})",
+            'RETURN k, collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",',
+        ),
+        1,
+
+    ),
 )
 
 #: The readers of the THIRD shape: a relationship type that is an EXPRESSION, not
