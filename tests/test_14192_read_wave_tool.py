@@ -2885,9 +2885,17 @@ def _loop_target_sources(iterable: ast.AST) -> list[ast.AST]:
     expand — a `IfExp`/`BoolOp`/`BinOp` over literals, a comprehension or generator, a
     subscript, or a NESTED literal (only a `Starred` element is spliced: `((sys.modules,),)`
     binds the INNER TUPLE, not `sys.modules`, so `for _x in ((sys.modules,),)` is GREEN while
-    `for _x in (sys.modules,)` is RED — MEASURED at `57735ab47947`; harmless in fact, `|=` on a
-    tuple raises `TypeError`, so that shape cannot be a working mirror lever, but the
-    enumeration must not read as exhaustive when it is not) — binds the container expression,
+    `for _x in (sys.modules,)` is RED — MEASURED at `57735ab47947`) — binds the container
+    expression,
+    ⛔ AND IT IS UNNUMBERABLE, **NOT HARMLESS** (#14326 round 30 P2): this paragraph used to
+    say "`|=` on a tuple raises `TypeError`, so that shape cannot be a working mirror lever".
+    That was MEASURED FALSE and is retracted. The shape needs no `|=` at all —
+    `for _x in ((sys.modules,),): _x[0][...] = _Mirror` is a plain subscript store that raises
+    nothing — and the `|=` spelling mutates the INNER dict before the `TypeError` raises, so a
+    suppressed error keeps it. `_x[0] |= {…}` and `_x[0][...] = _Mirror` both resolved a
+    planted class end-to-end with the pin GREEN. The residual is real and stays declared; what
+    was wrong was justifying it by a mechanism that does not hold — the third instance of this
+    lane's one recurring defect, and a residual is not exempt from being measured.
     so every SHAPE predicate
     (`_is_module_registry`, `_is_namespace_expr`, `_is_setattr_like`) is blind to it. It is
     deliberately NOT enumerated here (the power-set blow-up the `_str_constants` note
@@ -7733,26 +7741,106 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx) -> bool:
                     and _is_sys_ref(base.value, ctx.sys_names)):
                 return True
         return False
+    # ⛔ `ast.AugAssign` IS IN THIS TUPLE DELIBERATELY, and a SEPARATE `AugAssign` arm was
+    # measured VACUOUS (#14326 round 30, mutation-tested): `sys.path += […]` is an AugAssign
+    # whose target is the same `sys.path` Attribute, so this branch already covers it once the
+    # target is read correctly, and deleting the dedicated arm left `41 passed`. Only the
+    # METHOD spelling `sys.path.__iadd__(…)` is a `Call` and is handled above.
     if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         for target in targets:
-            element = target.value if isinstance(
-                target, ast.Subscript) else getattr(target, "value", None)
+            # ⛔ THE TARGET ITSELF, NOT ITS BASE (#14326 round 30 P1, MEASURED). This read
+            # `getattr(target, "value", None)`, which for a plain `sys.path = […]` yields the
+            # `Name` `sys` — never an `Attribute` — so the branch fired for a SUBSCRIPT target
+            # only, and `sys.path = …` / `sys.path += …` / `sys.meta_path = …` /
+            # `sys.path_hooks = …` were all measured GREEN end-to-end (a planted
+            # `/tmp/evil/tortoise/sdk.py` resolved, pin GREEN). The commit that added it
+            # claimed "a plain assign" — that claim was FALSE, which is the third instance of
+            # this lane's one recurring defect: a mechanism asserted rather than measured.
+            element = target.value if isinstance(target, ast.Subscript) else target
             if (isinstance(element, ast.Attribute) and element.attr in _PATH_ATTRS
                     and _is_sys_ref(element.value, ctx.sys_names)):
                 return True
     return False
 
 
-def _is_registry_delete(target: ast.AST, ctx: _RegistryCtx) -> bool:
-    """A `del` of a registry ENTRY — or of the registry itself.
+def _empties_the_registry(node: ast.AST, ctx: _RegistryCtx,
+                          registry_aliases: frozenset[str]) -> bool:
+    """The registry is EMPTIED — by `del`, or by the four call spellings of the same thing.
 
-    ⛔ NOT AN ARM ON ITS OWN, AND THAT IS THE POINT (#14326 round 29 P2). `del` alone really is
-    inert: the deferred import re-creates the entry from the shipped class, or fails. It is only
-    an arm TOGETHER with an import-path mutation, which is why the caller requires both.
+    ⛔ NOT AN ARM ON ITS OWN, AND THAT IS STILL THE POINT (#14326 round 29 P2). On its own the
+    registry is re-created from the shipped class, or the import fails. It is an arm only
+    TOGETHER with an import-path mutation, which is why the caller requires both.
+    ⛔ AND "ON ITS OWN" IS NARROWER THAN IT READS (#14326 round 30 P3, MEASURED GREEN):
+    `_PATH_ATTRS` covers `sys.path` / `sys.meta_path` / `sys.path_hooks` only, so a package's own
+    `tortoise.__path__ = ["/tmp/evil"] + tortoise.__path__` paired with a `del` is a lever this
+    arm does not see. That is the SAME axis (where a re-created entry is read from), just one
+    receiver over, and it is declared with the rest of the unbounded class rather than chased.
+
+    ⛔ BUT "EMPTIED" IS NOT `ast.Delete` (#14326 round 30 P2, MEASURED GREEN): `clear()` and
+    `pop()` empty the registry just as completely while being no `Delete` node at all —
+    `sys.path.insert(0, "/tmp/evil"); sys.modules.clear()` and the `pop` twin both resolved a
+    planted class end-to-end with the pin GREEN, as did `dict.clear(sys.modules)` and
+    `sys.modules.__delitem__(…)`. The stated premise of this arm was "the registry is EMPTIED",
+    so the implementation has to mean what the premise says rather than name one syntax.
+
+    ⛔ AND AN ALIAS OF THE REGISTRY IS THE REGISTRY (#14326 round 30 P2, MEASURED GREEN:
+    `_m = sys.modules; sys.path.insert(0, "/tmp/evil"); del _m["tortoise.sdk"]` was GREEN).
+    Every STORE arm already resolves `registry_aliases` — this one did not, the exact in-file
+    asymmetry the round-21 note exists to remove. Aliases are PASSED IN rather than recomputed
+    here so the set has one owner, the same reason `_RegistryCtx` exists.
     """
-    return _is_module_registry(target, ctx) or (
-        isinstance(target, ast.Subscript) and _is_module_registry(target.value, ctx))
+    def _is_reg(expr: ast.AST | None) -> bool:
+        if expr is None:
+            return False
+        return _is_module_registry(expr, ctx) or (
+            isinstance(expr, ast.Name) and expr.id in registry_aliases)
+
+    def _drops_the_deferred_target(key: ast.AST | None) -> bool:
+        """The key removed is one whose loss makes `from tortoise.sdk import …` RE-EXECUTE.
+
+        ⛔ REMOVING A *tortoise SUBMODULE* IS NOT THE SAME AS REMOVING THE PACKAGE (#14326
+        round 30, MEASURED — a FALSE RED on the shipped artifact, the expensive direction).
+        The coarse "any tortoise* key" rule reddened `tools/read_wave_latency.py`, whose
+        `sys.modules.pop(_AB_MODULE, None)` cleans up its OWN registration after
+        `loader.exec_module` — and `_AB_MODULE` is `"tortoise._ab_14192_old_search_engine"`,
+        which `"tortoise.sdk"` never resolves through. Deleting it leaves `tortoise` and
+        `tortoise.sdk` cached, so nothing re-imports and there is no lever. Only an ANCESTOR
+        of the deferred target (`tortoise`, `tortoise.sdk`) forces the re-execution, because
+        the dotted import walks each prefix — which is exactly why the reviewer's
+        `del sys.modules["tortoise"], sys.modules["tortoise.sdk"]` IS a lever and this is not.
+        """
+        keys = _string_keys_of(key, ctx.consts)
+        return any(k == _SHIPPED_MODULE or _SHIPPED_MODULE.startswith(k + ".")
+                   for k in keys)
+
+    if isinstance(node, ast.Delete):
+        for t in node.targets:
+            if _is_reg(t):
+                return True
+            if isinstance(t, ast.Subscript) and _is_reg(t.value) \
+                    and _drops_the_deferred_target(t.slice):
+                return True
+        return False
+    if isinstance(node, ast.Call):
+        func = node.func
+        # `clear()` / `popitem()` empty EVERYTHING, so they always take the target with them.
+        if (isinstance(func, ast.Attribute) and func.attr in {"clear", "popitem"}
+                and _is_reg(func.value)):
+            return True
+        if (isinstance(func, ast.Attribute) and func.attr in {"pop", "__delitem__"}
+                and _is_reg(func.value) and node.args
+                and _drops_the_deferred_target(node.args[0])):
+            return True
+        # `dict.clear(registry)` / `dict.pop(registry, key)` — the unbound spellings
+        if (isinstance(func, ast.Attribute) and _callee_names_of(func.value) & {"dict"}
+                and node.args and _is_reg(node.args[0])):
+            if func.attr in {"clear", "popitem"}:
+                return True
+            if func.attr in {"pop", "__delitem__"} and len(node.args) > 1 \
+                    and _drops_the_deferred_target(node.args[1]):
+                return True
+    return False
 
 
 def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
@@ -8162,8 +8250,7 @@ def _constructor_provenance_findings(tree: ast.AST) -> list[str]:
         if _is_import_path_mutation(node, ctx)]
     _dels = [
         node for node in ast.walk(tree)
-        if isinstance(node, ast.Delete) and any(
-            _is_registry_delete(t, ctx) for t in node.targets)]
+        if _empties_the_registry(node, ctx, registry_aliases)]
     if _path_mutations and _dels:
         out.append(
             f"line {min(n.lineno for n in _path_mutations)} mutates the import search path "
@@ -9074,6 +9161,39 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "`sys.path.__setitem__` slice + `del`":
             'sys.path.__setitem__(slice(0, 0), ["/tmp/evil"])\n'
             'del sys.modules["tortoise"], sys.modules["tortoise.sdk"]\n',
+        # ⛔ AND THE SPELLINGS ROUND 29's OWN CLAUSE COULD NOT SEE (#14326 round 30 P1/P2,
+        # each MEASURED GREEN end-to-end: a planted `/tmp/evil/tortoise/sdk.py` resolved).
+        # The assign branch tested the BASE of the target instead of the target, so a plain
+        # assign was dead code; `clear`/`pop` empty the registry without being a `Delete` node;
+        # and an alias of the registry was not the registry on this axis.
+        "`sys.path = [...] + sys.path` + `del`":
+            'sys.path = ["/tmp/evil"] + sys.path\n'
+            'del sys.modules["tortoise"], sys.modules["tortoise.sdk"]\n',
+        "`sys.path += [...]` (AugAssign, not the `__iadd__` call) + `del`":
+            'sys.path += ["/tmp/evil"]\n'
+            'del sys.modules["tortoise"], sys.modules["tortoise.sdk"]\n',
+        "`sys.meta_path = [...] + sys.meta_path` + `del`":
+            'sys.meta_path = [_Evil()] + sys.meta_path\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`sys.path_hooks = [...] + sys.path_hooks` + `del`":
+            'sys.path_hooks = [_Hook()] + sys.path_hooks\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`sys.modules.clear()` after a poisoned path (no `Delete` node)":
+            'sys.path.insert(0, "/tmp/evil")\n'
+            'sys.modules.clear()\n',
+        "`sys.modules.pop(...)` of the package after a poisoned path":
+            'sys.path.insert(0, "/tmp/evil")\n'
+            'sys.modules.pop("tortoise"); sys.modules.pop("tortoise.sdk")\n',
+        "`dict.clear(sys.modules)` — the unbound spelling":
+            'dict.clear(sys.modules)\n'
+            'sys.path.insert(0, "/tmp/evil")\n',
+        "`sys.modules.__delitem__(...)` after a poisoned path":
+            'sys.modules.__delitem__("tortoise.sdk")\n'
+            'sys.path.insert(0, "/tmp/evil")\n',
+        "an ALIAS of the registry `del`ed after a poisoned path":
+            '_m = sys.modules\n'
+            'sys.path.insert(0, "/tmp/evil")\n'
+            'del _m["tortoise"], _m["tortoise.sdk"]\n',
         "`sys.path[0:0] = [...]` slice assign + `del`":
             'sys.path[0:0] = ["/tmp/evil"]\n'
             'del sys.modules["tortoise.sdk"]\n',
@@ -9204,6 +9324,15 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
                   'sys.path.insert(0, "/tmp/evil")\n',
                   'sys.meta_path.insert(0, _Evil())\n',
                   'sys.path[0:0] = ["/tmp/evil"]\n',
+                  # ⛔ AND REMOVING A tortoise SUBMODULE IS NOT REMOVING THE PACKAGE (#14326
+                  # round 30, a FALSE RED on the shipped artifact): the coarse "any tortoise*
+                  # key" rule redded `tools/read_wave_latency.py`, whose `sys.modules.pop(
+                  # _AB_MODULE, None)` cleans up its own `tortoise._ab_14192_old_search_engine`
+                  # registration. `from tortoise.sdk import …` never resolves through it, so
+                  # nothing re-imports and there is no lever. Only an ANCESTOR (`tortoise`,
+                  # `tortoise.sdk`) forces the re-execution.
+                  'sys.path.insert(0, "/tmp/evil")\nsys.modules.pop(_AB_MODULE, None)\n',
+                  'sys.path.insert(0, "/tmp/evil")\ndel sys.modules[_AB_MODULE]\n',
                   'sys.modules[_AB_MODULE] = module\n',
                   '_x["modules"] = {"tortoise.sdk": _Mirror}\n',
                   'a, b = 1, 2\nprint(a, b)\n',
@@ -9318,8 +9447,10 @@ def test_the_ALIAS_axis_iterable_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # ⛔ THE NESTED LITERAL IS A RESIDUAL TOO, AND THIS TABLE DID NOT NAME IT (#14326
         # round 19 P3, MEASURED at `57735ab47947`: GREEN here, `RED` one nesting shallower).
         # Only a `*`/`**` element is spliced; a PLAIN nested container is one element, so the
-        # target binds the inner tuple. Harmless in fact — `|=` on a tuple raises `TypeError`
-        # — but the enumeration this table pins must name it or it reads as exhaustive.
+        # target binds the inner tuple. ⛔ NOT "harmless": this comment used to claim `|=` on a
+        # tuple raises `TypeError` so the shape "cannot be a working mirror lever" — MEASURED
+        # FALSE (#14326 round 30 P2): `_x[0][...] = _Mirror` raises nothing at all, and
+        # `_x[0] |= {…}` mutates the inner dict before the raise. UNNUMBERABLE, not inert.
         "nested literal (only a STARRED element is spliced)":
             'for _x in ((sys.modules,),):\n    _x |= {"tortoise.sdk": _Mirror}\n',
     }
