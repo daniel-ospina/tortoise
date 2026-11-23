@@ -7829,9 +7829,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # the END was the blank line before `return OrgInfoResponse(` (`:15526`, call at `:15527`).
         # ⛔ THAT IS HISTORY, NOT THIS HEAD'S: this branch inserts 114 lines into `hosted_api.py`
         # above `point_count`, so the span is `:15951-16028` at this head — START `:15951`, END
-        # the blank line before `return OrgInfoResponse(` at `:16022` (the call `:16023`) — measured by
+        # the blank line before `return OrgInfoResponse(` at `:16028` (the call `:16029`) — measured by
         # the same two `grep -n` commands against this working tree, never by adding `+114` to the pair
-        # above. The three offsets (+29 `nodes_used` -> `:15974`, +39 `max_nodes` -> `:15984`, +77 END)
+        # above. The three offsets (+29 `nodes_used` -> `:15980`, +39 `max_nodes` -> `:15990`, +77 END)
         # hold EXACTLY from this START too, which is how the numbers below were re-derived rather than
         # nudged — a uniform +114, and the offsets re-measured rather than assumed (⛔ not `:15641`).
         # ⛔ THIS BRANCH REACHED THE SAME PAIR INDEPENDENTLY, by STRUCTURE rather than by an
@@ -8122,9 +8122,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cited
     # `hosted_api.py:15328-15405` at `09f5c99afd`, `hosted_api.py:15346-15423` at #13844,
-    # `hosted_api.py:15449-15526` on `origin/main`, and `hosted_api.py:15563-15640` at this
-    # head (re-derived by CONTENT: `main` moved the `org_info` block +103 between the first
-    # two, and this branch's own 114 inserted lines move it again between the last two). The
+    # `hosted_api.py:15940-16017` on `origin/main` (HISTORY: `15449-15526` was an earlier
+    # base's — read via `git show origin/main:…/04-plan.md | grep -o 'hosted_api.py:[0-9]*-[0-9]*'`),
+    # and `hosted_api.py:15951-16028` at this head. Both pairs were re-derived by CONTENT. The
     # END of that range is a BLANK line — so the row above can only anchor the start, and a
     # range that drifts by a line still "contains" the number the doc names (the reason this
     # file pins ranges at both endpoints where it can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN
@@ -18493,15 +18493,15 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # "IS in the diff, this branch's re-point"), which is the head-bound-membership class this
     # arm has been wrong in both directions on.
     # ⛔ AND THE I7 RANGE **IS** A RE-POINT OF THIS DIFF, which is the opposite of what the
-    # `#14269`-era cut of this block said and is MEASURED here: `main`'s copy carries
-    # `hosted_api.py:15449-15526`, while THIS branch inserts 114 lines into `hosted_api.py`
+    # `#14269`-era cut of this block said and is MEASURED here: `main`'s copy carries its own
+    # (stale) pair, while THIS branch's repair re-points it into `hosted_api.py`
     # above `point_count`, so the merged copy carries `hosted_api.py:15951-16028`
     # (`grep -n 'point_count = await asyncio.to_thread('` -> `:15951` in this tree, `:15826`
-    # on `origin/main`; the END is the blank line before `return OrgInfoResponse(` at `:16022`,
-    # the call `:16023`). ⛔ The cut before this one moved the number onto the blank line
-    # (`:16023`) and deleted the qualifying ", the call `:16023`", which made the parenthetical
+    # on an earlier base; the END is the blank line before `return OrgInfoResponse(` at `:16028`,
+    # the call `:16029`). ⛔ The cut before this one moved the number onto the blank line
+    # (`:16029`) and deleted the qualifying ", the call `:16029`", which made the parenthetical
     # contradict the range it sits in and the graded sentence in `05-verify.md` (#14386 review
-    # round 8, F3 — measured: `sed -n '16022p;16023p'` is the blank line, then the call).
+    # round 8, F3 — measured: `sed -n '16028p;16029p'` is the blank line, then the call).
     # The arm below grades the claim against BOTH copies in both directions, so this sentence
     # and the range it names have to move together.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
@@ -19561,6 +19561,24 @@ def test_the_index_table_row_states_each_anchor_it_names_at_this_head() -> None:
                 f"line it names, so an AMBIGUOUS needle is a red too: it would accept a "
                 f"re-point to any of them (#14386 review, P2). Give the entry a fragment "
                 f"unique to `:{number}`, as the `_logger.warning(` entry does.")
+    # ⛔ THE RESIDUAL, MEASURED RATHER THAN IMPLIED (#14386 review round 11, P2). This arm
+    # grades every match of the SHAPES declared in `_INDEX_ROW_DOC_SHAPES`; a restatement of an
+    # anchor in a NEW wording that matches no declared shape is NOT graded. Two candidate
+    # generalisations were built and BOTH red true history, which is why this is stated rather
+    # than "fixed":
+    #   • "every `` `:N` (`<content>`) `` pair must resolve" -> 3 false positives on this row
+    #     (measured: `:28019`, `:27907` and `:24789` are HISTORY — the number each content had
+    #     at an earlier head, which the row documents on purpose);
+    #   • "any `:N` whose following 200 chars name a known anchor must be that anchor's line"
+    #     -> 18 false positives, for the same reason.
+    # A row whose thesis is that numbers rot MUST be able to record the numbers they rotted
+    # FROM, so a content rule cannot separate a stale present-tense claim from an honest
+    # history entry — that separation is what the explicit SHAPES encode. The reachable
+    # guarantee is therefore: every declared shape, every match, graded (above), plus the
+    # label census and `_ANCHOR_FLOOR` so a shape cannot be dropped to make this green. The
+    # class is named here so the next reader does not assume a closure this arm does not give
+    # (the same discipline `_PAIRED` states one function up: enumerating spellings cannot
+    # converge).
     failures.extend(_sdk147_census_failures())
     assert not failures, (
         "the `docs/00_index.md` row's present-tense anchors are not the lines they name "

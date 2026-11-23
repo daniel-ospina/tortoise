@@ -826,9 +826,8 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # `tests/test_7949_capstone_measure.py`) rather than side-picked, at
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
-                                                          # later commits on this branch (#13802 review, P2)**: the value the guard reads at THIS head IS
-                                                          # (`:16708`), and it is typed in both places as that value, not as a distance — two are the
-                                                          # derived value the guard reads at this head — named by the value, never by its
+                                                          # later commits on this branch (#13802 review, P2)**: the value the guard reads at THIS
+                                                          # head IS (`:16708`) — named by the value in BOTH places it is typed, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
                                                           # ⛔ IT IS PARENTHESISED IN BOTH PLACES ON PURPOSE (#14060 review, P3): the arm
