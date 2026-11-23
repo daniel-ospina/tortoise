@@ -4088,9 +4088,12 @@ app.add_middleware(
         # registering the STATIC constant made `TORTOISE_BATCH_MAX_INLINE_BYTES`
         # a no-op — the middleware refused at 4 MiB before the handler (which
         # had the env-aware bound) ever saw the raised limit, an advertised
-        # setting nobody could reach. `_BATCH_MAX_INLINE_BYTES` is defined far
-        # below this registration, which runs at import time, so the same
-        # expression is spelled once here rather than referenced.
+        # setting nobody could reach. The env expression lives in
+        # `_batch_cap_bytes()` — a helper DEFINED ABOVE this registration, which
+        # runs at import time, so the bound and the 413 copy that names it are
+        # resolved from ONE place. (It used to be spelled inline here, and the
+        # comment then named a `_BATCH_MAX_INLINE_BYTES` constant that no longer
+        # existed.)
         "/v1/batches": (
             _batch_cap_bytes(),
             # ⛔ THE REFUSAL NAMES THE CAP IT WAS CONFIGURED WITH (#14415 review
@@ -16689,8 +16692,13 @@ class BatchItemRequest(BaseModel):
     name: str | None = Field(None, max_length=512)
     #: The document's text, when the caller already holds it (an upload). When
     #: absent, ``ref`` names a path under this ORG's storage root —
-    #: ``$TORTOISE_INGEST_BASE_DIR/<org_id>/…`` (#329), absolute or relative to
-    #: that root. ⛔ A URL is NOT fetched (#14415 review round 4, P1): this
+    #: ``$TORTOISE_INGEST_BASE_DIR/<org_id>/…`` (#329). ⛔ A RELATIVE ref is
+    #: relative to ``<base>/<org_id>``, NOT to the base: `docs/a.md` resolves to
+    #: ``<base>/<org_id>/docs/a.md``. Spelling the ORG SEGMENT into a relative ref
+    #: (`org_1/docs/a.md`) doubles it into ``<base>/org_1/org_1/docs/a.md`` — a
+    #: path that is still inside the tenancy bound, so it is accepted and then
+    #: fails as missing. An absolute ref is used as given and must stay inside
+    #: the same root. ⛔ A URL is NOT fetched (#14415 review round 4, P1): this
     #: docstring used to promise "or a URL the indexer fetches", and no fetch
     #: exists on this path — the indexer door reads a FILE under the base, and a
     #: URL arrived at ``resolve_under_base`` and settled the item `failed` with a
@@ -17011,8 +17019,22 @@ def _recover_org_batches(org: dict) -> list[str]:
             # failing scan — and, because the offset went with it, reset the
             # rotation to 0 so the tail was never reached while the fault
             # persisted.
-            _BATCH_SCAN[org_id] = (now - _BATCH_RESCAN_S + _BATCH_RETAIN_FAILURE_S,
-                                   offset)
+            # ⛔ ANCHOR THE THROTTLE AT THE FAILURE, NOT AT THE SCAN'S START
+            # (#14415 review round 8, NB2). With `now` from before the scan, a
+            # failure that takes longer than the retain interval (50 batches x 4
+            # round trips is this file's own measured cost, and a loaded graph is
+            # the reason the arm exists) had already expired its own throttle by
+            # the time it was written — so EVERY read paid a full failing scan,
+            # which is the opposite of what the arm is for. And ⛔ ADVANCE THE
+            # OFFSET WHILE FAILING (#14415 review round 8, NB3): retaining it
+            # pinned the window on a batch whose own read raises, so that batch
+            # was retried for ever and everything behind it was never inspected
+            # by any scan — non-terminal for ever, the stranding class the
+            # rotation exists to remove. A failed window is skipped, and the next
+            # scan starts after it.
+            _BATCH_SCAN[org_id] = (
+                time.monotonic() - _BATCH_RESCAN_S + _BATCH_RETAIN_FAILURE_S,
+                offset + _BATCH_RECOVER_LIMIT)
         return []
     # ⚠️ Every returned batch gets a drain, including one whose only non-terminal
     # item is a FRESH claim a peer may own — that is the round-5 decision (defer,

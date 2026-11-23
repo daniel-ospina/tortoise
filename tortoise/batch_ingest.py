@@ -87,7 +87,8 @@ path that wrote raw points would produce exactly the bloat the capability audit
       check, and the one a test pins with a runner that fails if reached;
     * **path items** are keyed by the INDEXER once it has read the file (its
       stored ``:Source.contentHash`` vs the file's hash). That is the SAME rule
-      (:func:`content_key` is asserted equal to ``file_indexer.hash_text``), and
+      (a test asserts :func:`content_key` equals ``file_indexer.compute_file_hash``
+      over a CRLF file — the indexer's real read path, not a re-derivation), and
       it is still decided before the three LLM passes — the layer cannot pre-read
       a file it has not opened, and doing so would double every read. What the
       layer does guarantee there is that the verdict is *surfaced* as
@@ -1143,16 +1144,20 @@ class GraphBatchStore:
             "UNION "
             f"MATCH (i:{ITEM_LABEL} {{org_id:$org}}) "
             "WHERE NOT i.state IN $terminal "
-            "RETURN DISTINCT i.batch_id AS bid "
-            # ⛔ ORDERED, because the ROTATING recovery window is only fair if the
-            # list it rotates over is deterministic (#14415 review round 7, N6):
-            # a `UNION` with no `ORDER BY` leaves the order to the engine, and a
-            # window over a reshuffling list is a window that can starve a batch.
-            "ORDER BY bid",
+            "RETURN DISTINCT i.batch_id AS bid",
             {"org": org_id, "terminal": [str(s) for s in TERMINAL_ITEM_STATES],
              "batch_terminal": [str(s) for s in TERMINAL_BATCH_STATES]},
         )
-        return [r[0] for r in rows]
+        # ⛔ SORTED HERE, NOT IN CYPHER (#14415 review round 8, BLOCKING 1,
+        # measured). A `UNION` with a trailing `ORDER BY` is ACCEPTED by FalkorDB
+        # and the clause is then IGNORED — the real query came back in insertion
+        # order, byte-identical to the same query without it, three runs out of
+        # three (the single-arm control sorts correctly, so the engine honours
+        # `ORDER BY` and just not after a union). The rotating recovery window is
+        # only fair over a DETERMINISTIC list, so the order is imposed by the
+        # caller: an inert clause in the Cypher would have been exactly the
+        # "assertion that cannot fail" this branch keeps having to remove.
+        return sorted(r[0] for r in rows)
 
     def batch_counts(self, org_id: str, batch_ids: Sequence[str]
                      ) -> dict[str, dict[str, int]]:
@@ -1835,10 +1840,11 @@ class BatchCoordinator:
                             "which ended without settling the item (a "
                             "retryable skip, or a process that stopped "
                             "mid-item); re-submit this item to try again"))
-            claimed = self.advance(org_id, fresh, BatchItemState.EXTRACTING,
-                                   attempt=True,
-                                   expected=BatchItemState.QUEUED,
-                                   expected_attempts=fresh.attempts)
+            claimed, won = self._advance_landed(
+                org_id, fresh, BatchItemState.EXTRACTING,
+                attempt=True,
+                expected=BatchItemState.QUEUED,
+                expected_attempts=fresh.attempts)
             # ⛔ THE CLAIM IS A COMPARE-AND-SET, AND A LOST ONE DOES NOT RUN THE
             # RUNNER (#14415 review round 4, BLOCKING 1). A cancel that landed
             # between the read above and this write leaves the row `cancelled`;
@@ -1847,7 +1853,15 @@ class BatchCoordinator:
             # stopped — the module's own promise ("`queued` → `cancelled`, zero
             # tokens") is broken by exactly that interleaving. Reproduced against
             # the pre-fix tree: item `indexed`, 60 000 tokens, batch `cancelled`.
-            if claimed.state is not BatchItemState.EXTRACTING:
+            #
+            # ⛔ AND THE TEST IS `won`, NOT THE RETURNED STATE (#14415 review
+            # round 5, P1). The claim writes the very state both the winner and
+            # the loser then observe, so `claimed.state is EXTRACTING` is TRUE for
+            # a lost compare too: the loser fell through and ran the runner on a
+            # document a peer was already inside, billing the same 60 000 tokens
+            # twice (reproduced). `_advance_landed`'s flag is the only thing that
+            # distinguishes my write from theirs.
+            if not won or claimed.state is not BatchItemState.EXTRACTING:
                 return claimed
             fresh = claimed
         elif fresh.state in (BatchItemState.EXTRACTING,
@@ -1890,11 +1904,15 @@ class BatchCoordinator:
             if voided.state is not BatchItemState.QUEUED:
                 # Another drain voided or settled it first: its row is the truth.
                 return voided
-            claimed = self.advance(org_id, voided, BatchItemState.EXTRACTING,
-                                   attempt=True,
-                                   expected=BatchItemState.QUEUED,
-                                   expected_attempts=attempts_before)
-            if claimed.state is not BatchItemState.EXTRACTING:
+            claimed, won = self._advance_landed(
+                org_id, voided, BatchItemState.EXTRACTING,
+                attempt=True,
+                expected=BatchItemState.QUEUED,
+                expected_attempts=attempts_before)
+            # ⛔ `won`, not the state: see the QUEUED claim above — the loser
+            # observes the winner's `extracting` row, so the state test cannot
+            # tell them apart and the loser would run the runner too.
+            if not won or claimed.state is not BatchItemState.EXTRACTING:
                 return claimed
             fresh = claimed
         try:
@@ -1907,15 +1925,16 @@ class BatchCoordinator:
         # already terminal and must not be resurrected (the customer stopped it).
         latest = self._fresh(org_id, fresh)
         if latest.terminal:
-            # ⛔ OUR CALL STILL SPENT (#14415 review round 7, N1). Reaching here
-            # means the runner RAN and reported tokens, but the row was settled
-            # by someone else first (a peer, or a cancel). The tokens are a real
-            # spend — of a genuinely separate call, not a re-bill of the peer's —
-            # so they belong on the meter. Returning the row with an empty charge
-            # record under-billed it and left the ONE budget under-read.
-            latest.charge_in = max(0, int(outcome.tokens_in or 0))
-            latest.charge_out = max(0, int(outcome.tokens_out or 0))
-            return latest
+            # ⛔ OUR CALL STILL SPENT, AND THE ROW MUST SAY SO TOO (#14415 review
+            # rounds 7 and 8, N1 then BLOCKING 2). Reaching here means the runner
+            # RAN and reported tokens, but the row was settled by someone else
+            # first (a peer, or a cancel). The tokens are a real spend of a
+            # genuinely separate call, so they are BILLED — and recorded on the
+            # row as well, because a meter that bills 735 against a receipt that
+            # says 5 is the same bill/receipt disagreement this layer keeps having
+            # to remove (measured: ledger 735 / `tokens_spent` 5).
+            return self._bill(org_id, latest, outcome.tokens_in,
+                              outcome.tokens_out)
         try:
             settled, landed = self._advance_landed(
                 org_id, latest, outcome.state, reason=outcome.reason,
@@ -1925,22 +1944,68 @@ class BatchCoordinator:
                 expected=latest.state)
         except IllegalTransition:
             # Another writer settled this item while the runner was working (a
-            # cancel, or the same item drained twice across processes). The
-            # item's ROW is authoritative — report it rather than crash the
-            # drain, which is what would lose every LATER item. Nothing is
-            # charged: this process did not land the outcome.
-            return self._fresh(org_id, fresh)
+            # cancel, or the same item drained twice across processes). The item's
+            # ROW is authoritative — report it rather than crash the drain, which
+            # is what would lose every LATER item. ⛔ AND OUR SPEND IS STILL BILLED
+            # AND RECORDED (#14415 review round 8, BLOCKING 2b): this arm used to
+            # record NOTHING, so tokens that really were spent appeared on neither
+            # surface — the same situation as the terminal arm above, one branch
+            # away, decided the other way.
+            return self._bill(org_id, self._fresh(org_id, fresh),
+                              outcome.tokens_in, outcome.tokens_out)
         if landed:
             # ⛔ THE CHARGE RECORD (#14415 review round 4, BLOCKING 4 / round 5,
             # HIGH). Only a call this process ACTUALLY LANDED may be charged, and
-            # only for the figures it just spent — never the row's totals, which
-            # a peer may have written or an earlier pass may already have
-            # charged. `landed` is `_advance_landed`'s EXPLICIT flag, not "the
-            # returned row has the state I wanted": a peer settling to the same
-            # state would pass that test and be charged a second time.
+            # only for the figures it just spent — never the row's totals, which a
+            # peer may have written or an earlier pass may already have charged.
+            # `landed` is `_advance_landed`'s EXPLICIT flag, not "the returned row
+            # has the state I wanted": a peer settling to the same state would
+            # pass that test and be charged a second time.
             settled.charge_in = max(0, int(outcome.tokens_in or 0))
             settled.charge_out = max(0, int(outcome.tokens_out or 0))
-        return settled
+            return settled
+        # The write did not land (a peer moved the row first): the row is
+        # authoritative, and our spend is still billed and recorded on it.
+        return self._bill(org_id, settled, outcome.tokens_in,
+                          outcome.tokens_out)
+
+    def _bill(self, org_id: str, item: BatchItem, tokens_in: int | None,
+              tokens_out: int | None) -> BatchItem:
+        """Record one runner call's spend on the ROW and mark it for the meter.
+
+        ⛔ THE ROW AND THE LEDGER MUST HOLD THE SAME NUMBER (#14415 review round
+        8, BLOCKING 2). `tokens_in/out` are the document's cumulative spend, and
+        the meter sums every call, so a call whose outcome could not be written
+        (the row went terminal, or moved under the compare-and-set) still has to
+        accumulate — otherwise the receipt under-reports the bill. The write here
+        is additive and best-effort: if it fails, the ledger is still charged (the
+        spend is real) and the row is left as it was, which is the visible form of
+        the loss rather than a silent one.
+
+        ⚠️ DECLARED RESIDUAL: this is a read-modify-write against a state-based
+        compare-and-set, so two writers that both read before either writes could
+        lose one accumulation. It is not reachable from today's call sites (every
+        token-carrying write through `advance` changes state, and the state CAS
+        then serialises the pair), but a caller that passes tokens on a
+        state-preserving edge would make it reachable — a counter column, or a
+        second CAS on the token total, is the fix.
+        """
+        tokens_in = max(0, int(tokens_in or 0))
+        tokens_out = max(0, int(tokens_out or 0))
+        item.charge_in = tokens_in
+        item.charge_out = tokens_out
+        if not (tokens_in or tokens_out):
+            return item
+        item.tokens_in = max(0, item.tokens_in) + tokens_in
+        item.tokens_out = max(0, item.tokens_out) + tokens_out
+        item.updated_at = self._now()
+        try:
+            self._store.put_item(org_id, item)
+        except Exception:
+            _logger.warning("batch spend not recorded on item %s (team %s): the "
+                            "ledger is charged, the row's total is short",
+                            item.item_id, org_id, exc_info=True)
+        return item
 
     def _fresh(self, org_id: str, item: BatchItem) -> BatchItem:
         stored = self._store.get_item(org_id, item.batch_id, item.item_id)
@@ -2046,7 +2111,15 @@ class BatchCoordinator:
                                           reason=(reason or
                                                   "cancelled by the customer"),
                                           expected=BatchItemState.QUEUED)
-                    stopped = stopped or halted.state is not BatchItemState.QUEUED
+                    # ⛔ ONLY A ROW THAT ACTUALLY BECAME `cancelled` IS A STOP
+                    # (#14415 review round 5, P2). This read `is not QUEUED`,
+                    # which counted a LOST compare whose row came back
+                    # `extracting`/`indexed` as "we stopped something" — so the
+                    # batch was stamped `cancelled` with an invented
+                    # `cancelled_at` over work that was still running, and the
+                    # route rendered "will not run and is not charged" beside an
+                    # item that then ran and was charged.
+                    stopped = stopped or halted.state is BatchItemState.CANCELLED
         if not stopped:
             # ⛔ NOTHING WAS ACTUALLY STOPPED, SO DO NOT RELABEL THE BATCH (#14415
             # review round 4, BLOCKING 1 direction B). Every CAS above lost,
@@ -2172,7 +2245,12 @@ class BatchCoordinator:
         # ever, which is the lost-document class the issue forbids. The caller
         # advances `offset` per scan and wraps, so every unfinished batch is
         # reached within `ceil(n / limit)` scans.
-        pending = self._store.pending_batches(org_id)
+        # ⛔ SORTED HERE, for BOTH stores (#14415 review round 8, BLOCKING 1).
+        # `GraphBatchStore` sorts its own result (Cypher ignores `ORDER BY` after
+        # a `UNION`), and the in-memory store returns insertion order — sorting at
+        # the one place that consumes the list makes the rotation's fairness
+        # independent of the store.
+        pending = sorted(self._store.pending_batches(org_id))
         width = max(1, int(limit))
         start = int(offset) % len(pending) if pending else 0
         # Rotate, then take a window: rotating first means the wrap cannot
@@ -2180,99 +2258,111 @@ class BatchCoordinator:
         # one batch was reported resumed twice in a single call).
         rotated = pending[start:] + pending[:start]
         for batch_id in rotated[:width]:
+            # ⛔ ONE BATCH'S FAULT MUST NOT ABORT THE SCAN (#14415 review round 8,
+            # NB3). A row whose own read raises (`get_batch`/`items` on a corrupt
+            # or vanished row — `settle()`'s `KeyError`, a malformed
+            # `estimate_json`) used to propagate out of `recover()`, so the
+            # caller lost the whole window and the failure throttle was written
+            # against an offset that never moved: that batch was retried for ever
+            # and every batch behind it was never inspected at all. The scan goes
+            # on; the fault is logged and the next scan covers it again.
             if is_live(batch_id):
-                # A drain in THIS process owns this batch's claim; see the
-                # `live_batches` note above. Requeueing it would destroy the
-                # outcome of work that is still running.
+                # A drain in THIS process owns this batch's claim; requeueing it
+                # would destroy the outcome of work that is still running.
                 continue
-            batch = self._store.get_batch(org_id, batch_id)
-            if batch is None:
-                # ⛔ ORPHAN ROWS, not an inconsistency (#14219 review). Acceptance
-                # writes the items BEFORE the batch row (so an ACK never names a
-                # document we did not record); a crash between the two leaves
-                # items with no batch. Skipping them would strand those rows on
-                # every boot, invisible on every surface. Adopt them: the items
-                # ARE the record of accepted work.
-                orphan_items = self._store.items(org_id, batch_id)
-                if not orphan_items:
-                    continue
-                batch = Batch(batch_id=batch_id, org_id=org_id,
-                              state=BatchState.RESUMING,
-                              created_at=orphan_items[0].updated_at,
-                              updated_at=orphan_items[0].updated_at)
-                self._store.put_batch(batch)
-            if batch.state is BatchState.CANCELLED:
-                # A cancelled batch is NOT resumed: the customer stopped it, and
-                # a restart is not a reason to spend their allowance. But an item
-                # left non-terminal by a crash AFTER the cancel must not sit
-                # non-terminal for ever (it would be re-listed as pending on
-                # every boot and never resolved — an inert row). At boot nothing
-                # is running, so its claim is void: settle it ``cancelled``,
-                # without inventing token counts for a run we cannot observe.
-                self.abandon_dead_claims(org_id, batch_id)
+            try:
+                moved = self._resume_batch(org_id, batch_id,
+                                           reclaim_after=reclaim_after,
+                                           stamp=stamp)
+            except Exception:
+                _logger.exception("batch %s: recovery of this batch failed; "
+                                  "continuing the scan", batch_id)
                 continue
-            items = self._store.items(org_id, batch_id)
-            moved = False
-            for item in items:
-                if item.state in (BatchItemState.EXTRACTING,
-                                  BatchItemState.EMBEDDED):
-                    if _age_seconds(item.updated_at) < reclaim_after:
-                        # A LIVE claim: not ours to TAKE — but the batch is still
-                        # ours to REPORT (#14415 review round 5, BLOCKING 1).
-                        # Skipping the whole batch here discarded the decision
-                        # instead of deferring it: an item in flight when the
-                        # process died is SECONDS old at the restart that
-                        # recovers it, so the ordinary redeploy stranded it for
-                        # the process lifetime. The drain re-checks the window itself
-                        # (`run_item`) and leaves a fresh claim alone, so listing
-                        # the batch is safe: it works the `queued` siblings,
-                        # re-drives the leftover, and the tick revisits until the
-                        # claim is stale enough to reclaim.
-                        continue
-                    # ⛔ The requeue carries the CLAIM IDENTITY too (review
-                    # round 5): a peer that re-claimed this row between our read
-                    # and this write leaves the row at a new `attempts`, so a
-                    # state-only compare would requeue work somebody is inside the
-                    # runner call on. And `moved` follows the WRITE, not the
-                    # call: a lost compare must not report the batch as resumed.
-                    requeued = self.advance(
-                        org_id, item, BatchItemState.QUEUED,
-                        reason="resumed after a process restart — "
-                               "requeued for a fresh attempt",
-                        expected=item.state,
-                        expected_attempts=item.attempts)
-                    moved = moved or requeued.state is BatchItemState.QUEUED
-            # ⛔ Report a batch as RESUMED when this call gave it work, found
-            # unclaimed work, OR found only a fresh claim that a later pass must
-            # revisit (#14415 review round 5, BLOCKING 1 — defer, never discard).
-            # `_drain_batch` refuses to re-enter a fresh claim on its own
-            # (`run_item`), so the peer a fresh claim may belong to is not raced.
-            if moved or any(not i.terminal for i in items):
-                # ⛔ BUT ONLY RELABEL A BATCH THIS SCAN GAVE WORK TO (#14415
-                # review round 7, N7). A batch whose only non-terminal item is a
-                # FRESH claim may be running in a PEER process right now; writing
-                # `resuming` over its row made the customer's status surface say
-                # "resuming" over work that was in progress, until the peer's own
-                # `settle()` repaired it — hours for a 500-item batch. Return it
-                # (a later pass must revisit it) without touching its state.
-                if moved or any(i.state is BatchItemState.QUEUED for i in items):
-                    batch.state = BatchState.RESUMING
-                    batch.updated_at = stamp
-                    self._store.put_batch(batch)
+            if moved is not None:
                 resumed.append(batch_id)
-            elif items:
-                # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2,
-                # B1 arm 2 / B2's root). Every item is terminal but the batch row
-                # is not: `settle()`'s own write timed out, or the process died
-                # between the last item write and the settle. Nothing else ever
-                # re-derived it — `pending_batches()` selected on ITEM state, so
-                # such a row was invisible even to a fresh boot, and
-                # `cancel()` was the only call that would move it (which is how
-                # a charged, fully-indexed batch came to be relabelled
-                # `cancelled`). `settle()` is idempotent and derives the terminal
-                # state from the rows, so this is the repair.
-                self.settle(org_id, batch_id)
         return resumed
+
+    def _resume_batch(self, org_id: str, batch_id: str, *,
+                      reclaim_after: float, stamp: str) -> bool | None:
+        """Re-open ONE batch. Returns ``True`` when reported, ``None`` when not.
+
+        Split out of :meth:`recover` so ONE batch's read fault cannot abort the
+        tenant's whole scan (see the caller's note).
+        """
+        batch = self._store.get_batch(org_id, batch_id)
+        if batch is None:
+            # ⛔ ORPHAN ROWS, not an inconsistency (#14219 review). Acceptance
+            # writes the items BEFORE the batch row (so an ACK never names a
+            # document we did not record); a crash between the two leaves items
+            # with no batch. Skipping them would strand those rows on every boot,
+            # invisible on every surface. Adopt them: the items ARE the record of
+            # accepted work.
+            orphan_items = self._store.items(org_id, batch_id)
+            if not orphan_items:
+                return None
+            batch = Batch(batch_id=batch_id, org_id=org_id,
+                          state=BatchState.RESUMING,
+                          created_at=orphan_items[0].updated_at,
+                          updated_at=orphan_items[0].updated_at)
+            self._store.put_batch(batch)
+        if batch.state is BatchState.CANCELLED:
+            # A cancelled batch is NOT resumed: the customer stopped it, and a
+            # restart is not a reason to spend their allowance. But an item left
+            # non-terminal by a crash AFTER the cancel must not sit non-terminal
+            # for ever (it would be re-listed as pending on every boot and never
+            # resolved — an inert row). At boot nothing is running, so its claim
+            # is void: settle it ``cancelled``, without inventing token counts for
+            # a run we cannot observe.
+            self.abandon_dead_claims(org_id, batch_id)
+            return None
+        items = self._store.items(org_id, batch_id)
+        moved = False
+        for item in items:
+            if item.state in (BatchItemState.EXTRACTING,
+                              BatchItemState.EMBEDDED):
+                if _age_seconds(item.updated_at) < reclaim_after:
+                    # A LIVE claim: not ours to TAKE — but the batch is still
+                    # ours to REPORT (#14415 review round 5, BLOCKING 1). Skipping
+                    # the whole batch here discarded the decision instead of
+                    # deferring it: an item in flight when the process died is
+                    # SECONDS old at the restart that recovers it, so the ordinary
+                    # redeploy stranded it for the process lifetime. The drain
+                    # re-checks the window itself (`run_item`) and leaves a fresh
+                    # claim alone, so listing the batch is safe.
+                    continue
+                # ⛔ The requeue carries the CLAIM IDENTITY too (review round
+                # 5): a peer that re-claimed this row between our read and this
+                # write leaves the row at a new `attempts`, so a state-only
+                # compare would requeue work somebody is inside the runner call
+                # on. And `moved` follows the WRITE, not the call: a lost compare
+                # must not report the batch as resumed.
+                requeued = self.advance(
+                    org_id, item, BatchItemState.QUEUED,
+                    reason="resumed after a process restart — "
+                           "requeued for a fresh attempt",
+                    expected=item.state,
+                    expected_attempts=item.attempts)
+                moved = moved or requeued.state is BatchItemState.QUEUED
+        if moved or any(not i.terminal for i in items):
+            # ⛔ BUT ONLY RELABEL A BATCH THIS SCAN GAVE WORK TO (#14415 review
+            # round 7, N7). A batch whose only non-terminal item is a FRESH claim
+            # may be running in a PEER process right now; writing `resuming` over
+            # its row made the customer's status surface say "resuming" over work
+            # in progress, until the peer's own `settle()` repaired it — hours for
+            # a 500-item batch. Return it (a later pass must revisit it) without
+            # touching its state.
+            if moved or any(i.state is BatchItemState.QUEUED for i in items):
+                batch.state = BatchState.RESUMING
+                batch.updated_at = stamp
+                self._store.put_batch(batch)
+            return True
+        if items:
+            # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2, B1
+            # arm 2 / B2's root). Every item is terminal but the batch row is not:
+            # `settle()`'s own write timed out, or the process died between the
+            # last item write and the settle. Nothing else ever re-derived it.
+            self.settle(org_id, batch_id)
+        return None
 
     # -- batch settlement -------------------------------------------------
     def settle(self, org_id: str, batch_id: str) -> Batch:
@@ -2302,9 +2392,25 @@ class BatchCoordinator:
                           for i in items)
             if batch.state is not BatchState.RUNNING and (
                     batch.state is not BatchState.RESUMING or started):
+                observed = batch.state
                 batch.state = BatchState.RUNNING
                 batch.updated_at = self._now()
-                self._store.put_batch(batch)
+                # ⛔ EVEN THE NON-TERMINAL WRITE IS A COMPARE-AND-SET (#14415
+                # review round 5, P1). `batch` was read before `items()`, so a
+                # `cancel()` landing in that gap used to be overwritten by
+                # `running` WITH EMPTY `cancelled_at`/`cancel_reason` — and
+                # `recover()` then no longer recognised the batch as cancelled
+                # (`abandon_dead_claims` is skipped only for a row that says so),
+                # so the cancelled document was re-driven and BILLED. Measured:
+                # cancel recorded → settle wrote `running` with no evidence →
+                # `recover()` resumed it → runner ran → 60 000 tokens. The
+                # terminal write below was hardened first; this one is the same
+                # window one line earlier.
+                if not self._store.put_batch_if_state(batch, (observed,
+                                                              BatchState.RUNNING,
+                                                              BatchState.RESUMING)):
+                    return self._store.get_batch(batch.org_id,
+                                                 batch.batch_id) or batch
             return batch
         # ⛔ THE TERMINAL WRITE IS A COMPARE-AND-SET (#14415 review round 5, P2).
         # `batch` above was read BEFORE `items()`, so a `cancel()` landing in
@@ -2442,12 +2548,6 @@ def _discard_staged(stage_base: str | None, batch_id: str) -> None:
             os.rmdir(target)
 
 
-#: How far into the future an `updated_at` may sit before it is treated as an
-#: untrustworthy stamp (and therefore as an ANCIENT claim). A second or two is
-#: ordinary clock skew between boxes; a minute is not a clock, it is a bug.
-_FUTURE_STAMP_SKEW_S = 60.0
-
-
 def _age_seconds(stamp: str) -> float:
     """Seconds since an ISO stamp. An unparseable stamp counts as ANCIENT.
 
@@ -2463,16 +2563,23 @@ def _age_seconds(stamp: str) -> float:
     if then.tzinfo is None:
         then = then.replace(tzinfo=UTC)
     delta = (datetime.now(UTC) - then).total_seconds()
-    if delta < -_FUTURE_STAMP_SKEW_S:
-        # ⛔ A STAMP IN THE FUTURE IS NOT A FRESH CLAIM (#14415 review round 7,
-        # N8). `max(0.0, …)` read a skewed or corrupt `updated_at` as age 0, i.e.
-        # permanently "someone is working on it": the item was never re-claimed,
-        # the retry ceiling never incremented (`attempts` stayed at 1 across five
-        # passes) and the document was non-terminal for ever. A stamp we cannot
-        # trust is treated as ANCIENT, because the failure it would otherwise
-        # cause is a lost document.
-        return float("inf")
-    return max(0.0, delta)
+    if delta < 0:
+        # ⛔ A FUTURE STAMP IS FRESH ONLY WITHIN ONE RECLAIM WINDOW (#14415 review
+        # round 8, NB1 — measured both ways). The two failure modes are opposite:
+        #
+        # * `max(0.0, delta)` (the original) read a stamp months in the future as
+        #   age 0 — permanently "someone is working on it": never re-claimed, the
+        #   retry ceiling never incremented, the document non-terminal for ever.
+        # * a 60 s cliff read 61 s of ORDINARY two-box clock skew as ANCIENT and
+        #   re-ran the runner on a claim that was seconds old — a second
+        #   extraction, a second graph write, a second charge.
+        #
+        # So: within one reclaim window it is just clock skew (age 0, i.e. FRESH —
+        # the safe direction, nobody is robbed); beyond that the stamp is not a
+        # clock, it is corruption or a huge jump, and it is treated as ANCIENT
+        # because the outcome of believing it is a lost document.
+        return 0.0 if (-delta) <= float(BATCH_RECLAIM_AFTER_S) else float("inf")
+    return delta
 
 
 def _utc_now() -> str:
