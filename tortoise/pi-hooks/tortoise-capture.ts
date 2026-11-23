@@ -1,4 +1,4 @@
-// tortoise-hook-version: 25
+// tortoise-hook-version: 26
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -1610,6 +1610,11 @@ export function listSpoolEntries(
   // it is recorded ONCE per distinct unreadable SET (see the aggregate below)
   // rather than once per file per scan.
   const unreadable: { stem: string; message: string }[] = [];
+  // Stems whose meta was READ but is unusable (not JSON, wrong shape, no
+  // session_id). Separate from `unreadable` because the LEDGER distinguishes
+  // them — but both are entries this scan cannot see through, so both go back to
+  // the callers that must COUNT them (#14347 review, cycle 2, finding 2).
+  const corrupt: string[] = [];
   const root = entriesDir(dir);
   let names: string[];
   try {
@@ -1666,8 +1671,16 @@ export function listSpoolEntries(
       meta = undefined;
     }
     if (!meta || typeof meta.session_id !== "string" || !meta.session_id) {
-      if (!repair) continue;
       const stem = name.replace(/\.meta\.json$/, "");
+      // ⛔ COLLECTED WHATEVER `repair` IS — the same rule the read class above
+      // follows. A corrupt meta is an entry that occupies disk and that
+      // `metas.length` cannot see, so a read-only scan that silently dropped it
+      // UNDER-COUNTED the ceiling it was asked about; that is how the write
+      // path's admission probe, once it stopped repairing, would have lost a
+      // whole class. Collecting is not a mutation; only the recorded line and the
+      // quarantine below are.
+      corrupt.push(stem);
+      if (!repair) continue;
       discards.push(
         recordDiscard(dir, {
           session_id: `unreadable:${stem}`,
@@ -1754,8 +1767,14 @@ export function listSpoolEntries(
   // #12483: the stems go BACK to the caller because a retained-unreadable entry
   // is on disk and in no parsed list — both ceilings would otherwise compute the
   // spool's size without it (measured: 5,228 bytes held against a 1,000-byte
-  // ceiling, predicate answering False). One scan, both answers.
-  return { metas, discards, unreadable: unreadable.map((u) => u.stem).sort() };
+  // ceiling, predicate answering False). One scan, both answers. The CORRUPT
+  // class comes back too: it is just as invisible to `metas.length`, and a
+  // read-only probe that dropped it would stop counting what it cannot parse.
+  return {
+    metas,
+    discards,
+    unreadable: [...unreadable.map((u) => u.stem), ...corrupt].sort(),
+  };
 }
 
 /** Bytes on disk for entries whose meta this process could NOT read (#12483).
@@ -1852,6 +1871,12 @@ function quarantineLog(log: string): string | undefined {
     // leave it in place — better than deleting it
     return undefined;
   }
+  // ⛔ THE SUCCESS PATH MUST RETURN THE TARGET (#14347 review, cycle 2,
+  // finding 5). Without it this function returned `undefined` on SUCCESS too, so
+  // an admitted resync recorded "were QUARANTINED to (none) — preserved on disk"
+  // while the `.orphan` sat right there, and the caller's `undefined &&
+  // fileSize > 0` refusal guard passed only by accident of the missing return.
+  return target;
 }
 
 /** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
@@ -2392,6 +2417,7 @@ export function writeSpoolEntry(
   // The stored turn count this write would QUARANTINE if it is admitted —
   // resolved before the guards and APPLIED after them (#14347 review F3).
   let divergentTurns = 0;
+  let divergentBytes = 0;
   if (unusablePrior) {
     // ⛔ THE WRITE PATH MUST NOT OVERWRITE WHAT IT COULD NOT USE AS A PRIOR
     // (#12487). Measured on the Python twin (the same code): `written: true` with
@@ -2470,6 +2496,14 @@ export function writeSpoolEntry(
       // record are deferred to the admitted path; refusing is not a no-op, it
       // is a mutation. Mirrors `capture_spool.write_spool_entry`.
       divergentTurns = stored.length;
+      // ⛔ THE GATE IS "THE LOG HAS BYTES", NOT "THE LOG PARSED TO TURNS"
+      // (#14347 review, cycle 2, finding 1). `stored` is the PARSED list, so a log
+      // that HAS bytes but parses to ZERO turns — a torn first append, a foreign
+      // format — left `divergentTurns == 0`, skipped the quarantine entirely and
+      // was OVERWRITTEN by the full-snapshot write: `written: true`, no record, no
+      // `.orphan`. That is #12487's own signature, reintroduced by gating a BYTE
+      // decision on a PARSE result. Mirrors `capture_spool.write_spool_entry`.
+      divergentBytes = fileSize(logPath);
       stored = [];
       extendsLog = false;
     }
@@ -2678,6 +2712,18 @@ export function writeSpoolEntry(
       // or not its meta was readable. `undefined` here counted the entry twice
       // and inflated the count term by one for a write that adds no entry.
       replacesSessionId,
+      // …but a REPLACEMENT is not the same as ALREADY COUNTED (#14347 review,
+      // cycle 2, finding 4): `saturatedForMetas` counts `metas.length`, and an
+      // entry whose meta is unreadable is in neither that list nor its byte sum.
+      // `prior === undefined` ⇒ this session is NOT in `metas.length` ⇒ it ADDS
+      // one, whether it is fresh or an unreadable entry being resynced.
+      addsEntry: prior === undefined,
+      // The bytes this write is about to quarantine are in neither
+      // `entryBytes` nor the replaced entry's size (#14347 review, cycle 2,
+      // finding 3), so without this an admitted resync could land the spool over
+      // the ceiling and the `pruneSpool` on the SAME call would evict the orphan
+      // it had just promised to keep.
+      pendingOrphanBytes: divergentBytes,
       sessionId: snapshot.sessionId,
     })
   ) {
@@ -2712,7 +2758,10 @@ export function writeSpoolEntry(
     };
   }
 
-  if (divergentTurns > 0) {
+  if (divergentBytes > 0) {
+    // ⛔ THE GATE IS THE BYTES ON DISK, NOT THE PARSED TURN COUNT — see the
+    // diverge arm above (cycle-2 finding 1).
+    //
     // ⛔ THE QUARANTINE HAPPENS HERE, ON THE ADMITTED PATH ONLY (#14347 review
     // F3/F4). Above the guards it mutated the spool before the decision. And
     // `quarantineLog` returns `undefined` for TWO outcomes — "nothing to keep"
@@ -3002,7 +3051,12 @@ export function pruneSpool(
 export function spoolSaturated(
   dir: string,
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+  projection: {
+    projectedBytes?: number;
+    replacesSessionId?: string;
+    addsEntry?: boolean;
+    pendingOrphanBytes?: number;
+  } = {},
   opts: { repair?: boolean } = {},
 ): boolean {
   // `repair: false` keeps the meta scan from MUTATING the spool (no ledger line,
@@ -3020,6 +3074,7 @@ export function spoolSaturated(
     bounds,
     projection,
     unreadableEntryBytes(dir, unreadable),
+    unreadable.length,
   );
 }
 
@@ -3045,9 +3100,16 @@ export function spoolSaturated(
 export function admissionSaturated(
   dir: string,
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: { projectedBytes?: number; replacesSessionId?: string; sessionId?: string } = {},
+  projection: {
+    projectedBytes?: number;
+    replacesSessionId?: string;
+    sessionId?: string;
+    addsEntry?: boolean;
+    pendingOrphanBytes?: number;
+  } = {},
 ): boolean {
-  const { projectedBytes, replacesSessionId, sessionId } = projection;
+  const { projectedBytes, replacesSessionId, sessionId, addsEntry, pendingOrphanBytes } =
+    projection;
   if (
     sessionId !== undefined &&
     refusedAtCurrentState(
@@ -3063,14 +3125,34 @@ export function admissionSaturated(
   }
   const cheap = cheapSpoolScan(dir);
   if (cheap !== undefined) {
-    const added = replacesSessionId === undefined ? 1 : 0;
+    const added = addsEntry === false || (addsEntry === undefined && replacesSessionId !== undefined) ? 0 : 1;
     if (
       cheap.names + added <= bounds.maxEntries &&
-      cheap.total + (projectedBytes ?? 0) <= bounds.maxTotalBytes
+      cheap.total + (projectedBytes ?? 0) + (pendingOrphanBytes ?? 0) <= bounds.maxTotalBytes
     )
       return false;
   }
-  return spoolSaturated(dir, bounds, { projectedBytes, replacesSessionId });
+  // ⛔ THE PROBE MUST NOT REPAIR (#14347 review, cycle 2, finding 2). This fell
+  // through to `spoolSaturated` with `opts` omitted, i.e. `repair` ON — so the
+  // write path called the repairing scanner directly, and on a spool near a
+  // ceiling a write that was then REFUSED had ALREADY had its meta unlinked and
+  // its turn log renamed to `.orphan`, which the next `pruneSpool` evicts. The
+  // refusal text said "the turns the spool already holds are kept" about turns
+  // the probe had just moved. `spoolSaturated`'s own docstring states the rule
+  // this call site broke: "A refused write repairs nothing itself".
+  //
+  // ⚠️ STATED CONSEQUENCE: with `repair: false` a CORRUPT meta counts as
+  // permanent (its orphan-able log is not an orphan yet), so admission is more
+  // conservative than the post-repair state. That refusal loses nothing — the
+  // entry is intact, the conversation is still in the harness session log, and
+  // the DRAIN (`flushSpool`) still repairs and prunes, which unblocks it.
+  // Conservative-and-intact beats admitted-and-destroyed.
+  return spoolSaturated(
+    dir,
+    bounds,
+    { projectedBytes, replacesSessionId, addsEntry, pendingOrphanBytes },
+    { repair: false },
+  );
 }
 
 /** The ceiling arithmetic of `spoolSaturated`, over an ALREADY-READ scan.
@@ -3087,8 +3169,14 @@ function saturatedForMetas(
   dir: string,
   metas: SpoolMeta[],
   bounds: SpoolBounds = DEFAULT_BOUNDS,
-  projection: { projectedBytes?: number; replacesSessionId?: string } = {},
+  projection: {
+    projectedBytes?: number;
+    replacesSessionId?: string;
+    addsEntry?: boolean;
+    pendingOrphanBytes?: number;
+  } = {},
   unreadableBytes = 0,
+  unreadableCount = 0,
 ): boolean {
   // Bytes `pruneSpool` may reclaim WITHOUT spending an undelivered entry: the
   // orphan class is byte-evictable only (see below).
@@ -3101,18 +3189,37 @@ function saturatedForMetas(
     // unreadable — measured 5,228 bytes in `entries/` against a 1,000-byte
     // ceiling with the predicate answering False.
     unreadableBytes +
+    // Bytes a resync is about to quarantine are NOT in the projection (#14347
+    // review, cycle 2, finding 3): they become an `.orphan` AFTER the decision,
+    // so an admitted resync could land the spool over the byte ceiling and the
+    // `pruneSpool` on the SAME call would then evict the orphan it had just
+    // promised to keep. They are NOT reclaimable credit either — credit would say
+    // "prune may delete them", which is the outcome being avoided.
+    (projection.pendingOrphanBytes ?? 0) +
     reclaimableOrphanBytes;
   const { projectedBytes, replacesSessionId } = projection;
+  // The COUNT answer and the BYTE answer are different questions (#14347
+  // review, cycle 2, finding 4): an entry whose meta is unreadable occupies disk
+  // (a byte REPLACEMENT) but is absent from `metas.length` (so it still ADDS one
+  // to the count). Defaults keep every existing caller's behaviour.
+  const addsEntry =
+    projection.addsEntry ?? (projection.replacesSessionId === undefined);
+  // #12483 said "both ceilings": `metas.length` cannot see a read-refused or
+  // corrupt entry either, so counting only parsed metas admitted writes past
+  // `maxEntries` without limit (measured: 6 unreadable metas against a ceiling of
+  // 3). Those entries are permanent — no meta to rank, never evicted — so they
+  // belong in the TOTAL and in the FLOOR, exactly like the byte term.
+  const parsedCount = metas.length + unreadableCount;
   let strict = false;
-  let count = metas.length;
+  let count = parsedCount;
   if (projectedBytes === undefined && replacesSessionId === undefined) {
     // STRICT: the question is whether ADDING an entry would cross the ceiling, so
     // a spool exactly AT the count ceiling is already saturated.
     strict = true;
-    if (metas.length < bounds.maxEntries && total - reclaimableOrphanBytes < bounds.maxTotalBytes)
+    if (parsedCount < bounds.maxEntries && total - reclaimableOrphanBytes < bounds.maxTotalBytes)
       return false;
   } else {
-    count = metas.length + (replacesSessionId === undefined ? 1 : 0);
+    count = parsedCount + (addsEntry ? 1 : 0);
     if (replacesSessionId !== undefined) {
       // A GROWTH replaces this entry's bytes instead of adding a second copy of
       // them, and adds no count.
@@ -3148,7 +3255,7 @@ function saturatedForMetas(
     filed.reduce((sum, m) => sum + spoolEntryBytes(dir, m.session_id), 0) -
     reclaimableOrphanBytes;
   const floorCount = count - filed.length;
-  const overCount = strict ? metas.length >= bounds.maxEntries : count > bounds.maxEntries;
+  const overCount = strict ? parsedCount >= bounds.maxEntries : count > bounds.maxEntries;
   const overBytes =
     strict
       ? total - reclaimableOrphanBytes >= bounds.maxTotalBytes
@@ -4647,7 +4754,12 @@ export function captureHealthLine(
  */
 function healthScan(
   dir: string,
-): { pending: number; metas: SpoolMeta[]; unreadableBytes: number } | undefined {
+): {
+  pending: number;
+  metas: SpoolMeta[];
+  unreadableBytes: number;
+  unreadableCount: number;
+} | undefined {
   const { metas, discards, unreadable } = listSpoolEntries(dir, { repair: false });
   if (discards.some((d) => d.reason === DISCARD_SPOOL_UNREADABLE)) return undefined;
   let onDisk = 0;
@@ -4667,7 +4779,17 @@ function healthScan(
   // walk. A meta it can read but not USE (invalid JSON, no `session_id`) is not
   // counted: the repairing scan quarantines it, and its log then counts as an
   // orphan. Mirrors `capture_spool._health_scan`.
-  return { pending, metas, unreadableBytes: unreadableEntryBytes(dir, unreadable) };
+  //
+  // ⛔ THE COUNT ELEMENT IS THE OTHER HALF (#12483's "both ceilings"):
+  // `metas.length` cannot see either unreadable class, so a health line that
+  // counted only parsed metas described a spool of three entries as having none —
+  // and the write path, which counts them, disagreed with it about one directory.
+  return {
+    pending,
+    metas,
+    unreadableBytes: unreadableEntryBytes(dir, unreadable),
+    unreadableCount: unreadable.length,
+  };
 }
 
 function spoolHealthLine(
@@ -4709,6 +4831,7 @@ function spoolHealthLine(
     opts.bounds ?? DEFAULT_BOUNDS,
     {},
     scan.unreadableBytes,
+    scan.unreadableCount,
   );
   // A marker we cannot UNDERSTAND is not a marker — the same rule this file
   // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited

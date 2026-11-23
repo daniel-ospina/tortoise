@@ -4711,7 +4711,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 25}
+                             "pi": 26}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4824,7 +4824,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     artifact, move the generation, update this pair — all three in one commit").
     What is never rewritten is a SHIPPED entry in ``_GENERATION_DIGESTS``.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 25
+    assert hook_install.read_hook_version(_PI_SRC) == 26
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4905,7 +4905,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: stamp, so it must read as STALE ("reinstall"), never as the user's
 #: `modified-artifact` ("local edit").
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    25, "5e6821d800ff8b5a5e7079bb1ec21fc0be9ce60029f6d965ac536f86b26c6f9d")
+    26, "1f00f887bf6357fad31f0673e45e59339810e52d859dfcf24934a1a6451e012b")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4952,6 +4952,23 @@ _GENERATION_DIGESTS = {
     # untouched) because `contract_version_for('pi')` grades the pair as ONE
     # contract and answers None when the two markers disagree.
     25: "5e6821d800ff8b5a5e7079bb1ec21fc0be9ce60029f6d965ac536f86b26c6f9d",
+    # Generation 26 (#14347 review, cycle 2): five defects at the seams the
+    # THREE-STATE prior read opens — the quarantine gate follows BYTES on disk
+    # instead of the parsed-turn COUNT (a byte-bearing log that parses to zero
+    # turns was overwritten, #12487's own signature); the admission probe scans
+    # with `repair: false` so a REFUSED write still mutates nothing; the bytes a
+    # resync is about to quarantine enter the projection (`pendingOrphanBytes`)
+    # so an admitted resync cannot then evict the orphan it just preserved; the
+    # COUNT ceiling counts the unreadable and corrupt classes (`unreadableCount`)
+    # so writer and health line stop disagreeing about one directory; and
+    # `quarantineLog` returns its target on SUCCESS, so an admitted resync no
+    # longer records "QUARANTINED to (none)". BEHAVIOUR moved on shipped bytes,
+    # so the generation moves with it — a generation-25 copy still overwrites a
+    # zero-turn log and still repairs inside a refusal, and must read STALE
+    # ("reinstall"), never `modified-artifact` ("local edit"). The READ half moves
+    # its header only (its behaviour is untouched) because
+    # `contract_version_for('pi')` grades the pair as ONE contract.
+    26: "1f00f887bf6357fad31f0673e45e59339810e52d859dfcf24934a1a6451e012b",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
@@ -5150,13 +5167,19 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # seam has to carry the capture half's number. A new byte set needs a new
     # entry; the 19 entry above stays exactly as it shipped.
     20: "5737edf7c3e0beaf444f260225897ac508f6dd1424089db16db8ec2af9894190",
+    # Generation 26 (#14347 review, cycle 2): header only — the READ half's
+    # behaviour is untouched, but `contract_version_for("pi")` grades the PAIR as
+    # one contract and answers None when the two markers disagree, so the read
+    # seam has to carry the capture half's number. A new byte set needs a new
+    # entry; every entry above stays exactly as it shipped.
+    26: "67768e816492f6549ab4d9e993a488e624776c08b01bf7b4a97397cfecd3f6cb",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    25, "6755920e63660716dbe538b2734291c417f89330363afc4a7dd729bbdb6b6a6e")
+    26, "67768e816492f6549ab4d9e993a488e624776c08b01bf7b4a97397cfecd3f6cb")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
