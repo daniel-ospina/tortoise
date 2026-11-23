@@ -3781,16 +3781,6 @@ _CENSUS_ERROR_MIN_SPAN_S = 2.0
 #: `_run`'s default (`timeout: int = 60`), so it cannot be imported — keep the two in step.
 _CENSUS_SAMPLE_TIMEOUT_S = 30.0
 
-#: How much of the poll's budget census ERRORS may consume before the ALIVE arm's diagnosis stops
-#: being true (#12039 cycle 9, P1). The ALIVE arm asserts *"invisible … for 10 s of polling"* and the
-#: `-ww` cause; neither holds when the errors ate the budget, because then the poll barely polled.
-#: A sample that costs between the remaining budget and the full `_run` timeout falls through the
-#: conjunction (count 1) and used to land in that arm with the census's own `err` DROPPED — three
-#: false statements from one sample, and a FAIL for load. HALF the budget is the bar: an isolated
-#: blip (0.1 s) and even a descheduled `once_slow` sample (2.5 s) stay far below it and keep the
-#: ALIVE pin, while the measured 9.5 s..29 s band all skip.
-_CENSUS_ERROR_BUDGET_SHARE_S = 5.0
-
 
 def _signal_name(num: int) -> str:
     """`SIGNAME (n)` for a signal number — TOTAL over the numbers, unlike `signal.Signals`.
@@ -3895,10 +3885,11 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     box without a usable `ps` does not red a census that is fine); where an
     OUTSIDE signal killed the fixture's child while the poll ran (`_OUTSIDE_SIGNALS` — the OOM
     killer, an orphan sweep, the shard's own timeout; a killed child has no `argv[0]` for any
-    census to match); **or** where the census's own erroring samples consumed a material share of
-    the poll's budget (`_CENSUS_ERROR_BUDGET_SHARE_S`, and `_CENSUS_SAMPLE_TIMEOUT_S` for one
-    sample that burned `_run`'s whole subprocess budget) — the budget ran out, so the poll barely
-    polled and nothing here can distinguish a `ps` timeout from a broken invocation. Everything
+    census to match); where ONE census sample burned `_run`'s whole subprocess budget
+    (`_CENSUS_SAMPLE_TIMEOUT_S`) — a `ps` timeout is load, and `pi_processes` folds it into the
+    same string as a broken invocation; **or** where the census NEVER answered the poll
+    (`healthy_samples == 0`) — with no healthy sample there is nothing to judge the `-ww` flag by.
+    Everything
     else stays a FAIL, and there are FOUR of them — the taxonomy is
     enumerated here so a reader re-deriving from this header cannot reinstate a skip that the
     arms below deliberately removed (#12039, review cycles 4, 6 and 9):
@@ -3920,12 +3911,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     The last two are the test substrate's fault, not the box's; the second is this test's own
     subject; the first is the property under test. See the exits far below.
 
-    ⚠️ THE COUNT IS PART OF THE CONTRACT. Four `raise` sites and **three** skip paths
-    (`_CENSUS_ERROR_BUDGET_SHARE_S`, `_CENSUS_SAMPLE_TIMEOUT_S`, `_OUTSIDE_SIGNALS`); a header that
+    ⚠️ THE COUNT IS PART OF THE CONTRACT. Four `raise` sites and **FOUR** skip paths — the table
+    unreadable at all (`_ps_answers`), one sample over `_CENSUS_SAMPLE_TIMEOUT_S`, a census that
+    never answered (`healthy_samples == 0`), and `_OUTSIDE_SIGNALS`; a header that
     states a different count is the drift `test_the_long_path_test_header_names_the_census_error_fail_arm`
     guards by NAME rather than by number (it pins `_CENSUS_ERROR_STREAK`, `_ps_answers`,
-    `_CENSUS_ERROR_MIN_SPAN_S`, `_CENSUS_SAMPLE_TIMEOUT_S`, `_CENSUS_ERROR_BUDGET_SHARE_S` and
-    `OVERRIDES`). (Measured drift: this block said "THREE" while
+    `_CENSUS_ERROR_MIN_SPAN_S`, `_CENSUS_SAMPLE_TIMEOUT_S`, `_ps_answers` and `OVERRIDES`).
+    (Measured drift: this block said "THREE" while
     omitting the ALIVE arm, in the same docstring that says "FOUR classifications" — two
     contradictory counts, in the block a guard exists to keep honest. Cycle 9 caught the same class
     again from the other side: the count said "two skip paths" after a third one landed.)
@@ -4037,10 +4029,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
             err_streak = 0
             streak_started: float | None = None
             pids: list[int] = []
-            # Budget the census's own ERRORS consumed, and the first error seen. Both are needed at
-            # the exits: the amount decides whether the ALIVE arm's "invisible for 10 s of polling"
-            # is even true, and the TEXT is the evidence that arm currently drops (#12039 cycle 9).
-            err_budget_s = 0.0
+            # ⛔ HOW MANY SAMPLES THE CENSUS ACTUALLY ANSWERED, and the first error it reported
+            # (#12039 cycles 9 and 10). Whether the ALIVE arm's "invisible for 10 s of polling" is
+            # true depends on this count, NOT on how long the errors took: a cumulative-time test
+            # skipped the `-ww` pin after ONE 5 s error even when fifteen healthy samples had come
+            # back without the fixture — a FAIL-OPEN, which is worse than the false red it fixed.
+            healthy_samples = 0
+            err_samples = 0
             first_census_err = ""
             while True:
                 # ⛔ HOW LONG THE SAMPLE ITSELF TOOK, measured around the call (#12039 cycle 8, P1).
@@ -4055,7 +4050,7 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 procs, err = fs.pi_processes()
                 sample_s = time.time() - sample_started
                 if err:
-                    err_budget_s += sample_s
+                    err_samples += 1
                     if not first_census_err:
                         first_census_err = err
                     # ⛔ A CENSUS ERROR IS NOT A PERMANENT SKIP — BUT ONE SAMPLE IS NOT A VERDICT
@@ -4157,6 +4152,7 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     continue
                 err_streak = 0
                 streak_started = None
+                healthy_samples += 1
                 pids = [p["pid"] for p in procs]
                 # ⛔ A DEAD CHILD ENDS THE POLL (#12039 review finding 4a). Liveness was
                 # consulted only AFTER the 10 s deadline burned, so on a box where the child
@@ -4218,31 +4214,41 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 #                                   under a `sleep(60)` payload, so it never ran.
                 row = _row_for_pid(proc.pid)
                 rc = proc.poll()
-                if rc is None and err_budget_s >= _CENSUS_ERROR_BUDGET_SHARE_S:
-                    # ⛔ THE POLL SPENT ITS BUDGET ON CENSUS ERRORS, SO IT BARELY POLLED (#12039
-                    # cycle 9, P1). Measured band: an erroring sample costing 9.5 s..29 s falls
+                if rc is None and healthy_samples == 0:
+                    # ⛔ THE CENSUS NEVER ANSWERED, SO NOTHING HERE CAN JUDGE THE `-ww` FLAG (#12039
+                    # cycles 9 and 10). Measured band: one erroring sample costing 9.5 s..29 s falls
                     # through the count+span conjunction (`err_streak == 1`), spends the deadline,
                     # and used to land in the ALIVE arm — which then asserted `invisible for 10s of
-                    # polling` after ONE sample, `pids seen: []` when the census never answered at
-                    # all, and the `-ww` cause while dropping `err`. A FAIL for load, and three
-                    # untrue statements in the message. Rule 1: the budget ran out, the outcome is
-                    # unknown, so this is INCONCLUSIVE and it quotes what the census actually said.
+                    # polling` after ONE sample, `pids seen: []` when the census never answered, and
+                    # the `-ww` cause while dropping `err`. Rule 1: the budget ran out and the census
+                    # gave no answer, so the outcome is unknown; this is INCONCLUSIVE and it quotes
+                    # what the census actually said.
+                    # ⛔ KEYED ON `healthy_samples == 0`, NOT on cumulative error TIME. A time test
+                    # skipped a GENUINE `-ww` regression after one 5 s error even when fifteen
+                    # healthy samples had come back without the fixture — a fail-open, and it
+                    # falsified the `OVERRIDES:` scope on #12039, which justifies the ALIVE FAIL
+                    # with "the census has already answered NEGATIVELY". Measured verdict flip on
+                    # the time test at 4.9 s with 15 healthy samples; the count test keeps the FAIL.
                     inconclusive(
-                        "a long-path `pi` lane observed by a census that kept erroring",
+                        "a long-path `pi` lane observed by a census that never answered",
                         deadline_s=10.0,
                         diagnosis=(
-                            f"The census spent {err_budget_s:.1f}s of the poll's 10.0s budget "
-                            f"failing and last reported {first_census_err!r}, so the poll never "
-                            f"got the healthy samples the `-ww` diagnosis needs; the table's row "
-                            f"for the fixture pid read {row!r}."),
+                            f"Every one of the poll's {err_samples} census sample(s) failed — the "
+                            f"first reported {first_census_err!r} — so there is no healthy sample "
+                            f"to judge the `-ww` flag by and the error itself is the evidence; the "
+                            f"table's row for the fixture pid read {row!r}."),
                     )
                 if rc is None:
                     # ALIVE and unreported after the full deadline: the census, or the `-ww`
                     # flag, is broken. This is the assertion the pin exists for.
+                    err_note = (
+                        f" ({err_samples} of {healthy_samples + err_samples} samples failed and "
+                        f"the first reported {first_census_err!r})" if err_samples else "")
                     raise AssertionError(
                         f"a lane whose argv[0] is {str(pi)!r} was ALIVE and invisible to the "
                         f"census for {10.0:.0f}s of polling (pids seen: {pids}; the table's row "
-                        f"for the fixture pid read {row!r}) — a narrow/`-ww`-less census truncates "
+                        f"for the fixture pid read {row!r}){err_note} — a narrow/`-ww`-less census "
+                        f"truncates "
                         f"the argv[0] on every sample, so this is the flag removed or the matcher "
                         f"broken")
                 if rc < 0 and -rc in _OUTSIDE_SIGNALS:
@@ -4446,20 +4452,33 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "ONE isolated `ps` death is the load class (#5049 rule 1) and must not red the shard",
         ),
         (
-            "once_slow", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "once_slow", True, None, "skip", "observed by a census that never answered",
             "ONE counting sample whose streak span the CLOCK steps past the bound — without the "
             "COUNT half, a >= _CENSUS_ERROR_MIN_SPAN_S gap between the streak's own two `time()` "
             "reads reds a required shard (cycle-7: dropping the count left 175 passed; cycle-8: "
             "the mechanism is the clock, NOT `ps` cost — `streak_started` is taken after "
-            "`pi_processes()` returns, so a slow `ps` is spent before the streak clock starts)",
+            "`pi_processes()` returns, so a slow `ps` is spent before the streak clock starts). "
+            "The verdict is INCONCLUSIVE, not the ALIVE FAIL, because a clock that slow exhausts "
+            "the poll before a healthy sample is ever taken — so this arm is the COUNT pin and "
+            "`never_answered` is the SKIP pin; deleting the count flips THIS one to HarnessDefect",
         ),
         (
-            "once_costly", True, None, "skip", "observed by a census that kept erroring",
-            "ONE erroring sample that costs HALF the poll's budget then recovers is neither the "
-            "census nor the `-ww` pin: it used to fall through the count gate, spend the deadline "
-            "and land in the ALIVE arm, which then asserted 'invisible for 10s of polling' after "
-            "ONE sample, 'pids seen: []' when the census never answered, and dropped `err` "
-            "(cycle-9 P1, measured across the 9.5s..29s band)",
+            "costly_once", True, None, AssertionError, "was ALIVE and invisible to the census",
+            "ONE expensive erroring sample followed by HEALTHY samples that never see the fixture "
+            "must stay the ALIVE FAIL: the census DID answer, so the `-ww` regression is live. ⛔ "
+            "This is the cycle-10 P1 pin — a skip keyed on cumulative error TIME flipped exactly "
+            "this shape to INCONCLUSIVE with 15 healthy samples (measured), i.e. a fail-open that "
+            "retires the pin the whole test exists for",
+        ),
+        (
+            "never_answered", True, None, "skip", "observed by a census that never answered",
+            "ONE erroring sample costing almost the whole poll budget breaks before a healthy "
+            "sample is taken, so the census never ANSWERED — it used to land in the ALIVE arm, "
+            "which then asserted 'invisible for 10s of polling' after ONE sample, 'pids seen: []' "
+            "when the census never answered, and dropped `err` (cycle-9 P1, the 9.5s..29s band). "
+            "⛔ Scope is `healthy_samples == 0`: with healthy samples back and no fixture the "
+            "`-ww` pin still FAILS (cycle-10 P1 — a cumulative-time test skipped that, a "
+            "fail-open)",
         ),
         (
             "persistent_slow", True, None, "skip", "may be a `ps` timeout",
@@ -4468,8 +4487,7 @@ def test_long_path_census_expiry_splits_on_the_fixture_exit_kind(monkeypatch, rc
             "calling it the census's own invocation was the cycle-8 P1",
         ),
         (
-            "persistent_beyond_budget", True, None, AssertionError,
-            "was ALIVE and invisible to the census",
+            "persistent_beyond_budget", True, None, "skip", "observed by a census that never answered",
             "a span bound the poll budget cannot contain must still reach a VERDICT: the error "
             "branch spends the budget and breaks, so the loop cannot spin (cycle-6 P2: deleting "
             "that break left the file fully green, and a constant bump then HANGS the shard)",
@@ -4518,7 +4536,15 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     # what is stepped. `persistent_slow` reads a `ps` TIMEOUT instead, where the cost is inside the
     # census call, and spends the clock there rather than here: a per-call step cannot express the
     # difference, and conflating the two is what let a `ps` timeout stay a FAIL (cycle 8, P1).
-    clock = _FakeClock(step_s=2.5 if census_kind == "once_slow" else 0.1)
+    # ⛔ DERIVED FROM THE CONSTANT, never the literal 2.5 (#12039 cycle 10, P2): a hard step retires
+    # the COUNT-half pin the moment `_CENSUS_ERROR_MIN_SPAN_S` is raised past it — measured, at
+    # `_CENSUS_ERROR_MIN_SPAN_S = 2.6` with the count half deleted the whole file stayed green. The
+    # premise (one sample's own span clears the bound) is asserted, not assumed.
+    once_slow_step_s = _CENSUS_ERROR_MIN_SPAN_S * 1.25
+    assert once_slow_step_s > _CENSUS_ERROR_MIN_SPAN_S, (
+        "the `once_slow` step must place ONE erroring sample's own `time()` pair past "
+        "_CENSUS_ERROR_MIN_SPAN_S, or the COUNT half is unpinnable")
+    clock = _FakeClock(step_s=once_slow_step_s if census_kind == "once_slow" else 0.1)
     child = _FakeChild(child_rc)
     err = "`ps -ww -axo pid=,ppid=,uid=,command=` produced nothing"
     calls = {"n": 0}
@@ -4572,13 +4598,23 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
             # fake clock is the only affordable way to place it. `err_streak` is 1, so the COUNT
             # half is the only thing between this and a `HarnessDefect` on a required shard.
             return ([], err) if calls["n"] == 1 else ([], None)
-        if census_kind == "once_costly":
-            # One erroring sample that SPENDS half the poll's budget inside the census, then a
-            # healthy census that simply never sees the fixture. The shape the 9.5s..29s band
-            # produces on a loaded runner: too cheap to reach `_CENSUS_SAMPLE_TIMEOUT_S`, far too
-            # expensive to leave the "10 s of polling" claim true.
+        if census_kind == "costly_once":
+            # ONE erroring sample that costs most of the poll budget, then a HEALTHY census that
+            # simply never sees the fixture. `healthy_samples` is therefore >= 1: the census
+            # answered, so the `-ww` pin must still FAIL (#12039 cycle 10, P1).
             if calls["n"] == 1:
-                clock.now += _CENSUS_ERROR_BUDGET_SHARE_S + 1.0
+                clock.now += 5.0
+                return [], err
+            return [], None
+        if census_kind == "never_answered":
+            # ONE erroring sample that costs almost the whole poll budget, so the poll's own budget
+            # check breaks before a healthy sample is ever taken — `healthy_samples` stays 0. That is
+            # the 9.5s..29s band on a loaded runner: too cheap to reach `_CENSUS_SAMPLE_TIMEOUT_S`,
+            # far too expensive to leave the "10 s of polling" claim true. ⛔ Deliberately NOT the
+            # "one costly error then 15 healthy samples" shape: there the census DID answer, the
+            # `-ww` pin must still FAIL, and a test that skipped it would pin a fail-open.
+            if calls["n"] == 1:
+                clock.now += 9.8
                 return [], err
             return [], None
         if census_kind == "persistent_slow":
@@ -4718,7 +4754,7 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
     # header went on saying "SKIPS on TWO paths", with the count explicitly declared part of the
     # contract one paragraph below it. The count is guarded here the only way it can be: by NAME,
     # because a guard cannot count what a future reader is free to re-word.
-    for const in ("_CENSUS_SAMPLE_TIMEOUT_S", "_CENSUS_ERROR_BUDGET_SHARE_S"):
+    for const in ("_CENSUS_SAMPLE_TIMEOUT_S", "healthy_samples"):
         assert const in taxonomy, (
             f"the header stopped naming {const}, so a reader re-deriving the verdict rules from "
             f"it cannot see that a slow / budget-consuming census SKIPS instead of reding — the "
