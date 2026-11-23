@@ -1581,9 +1581,11 @@ def run_s1(model, transcript: str, *,
             + int(stats.get("completion_tokens") or 0))
     esc = _extractor_escalation_tokens(base)
     if esc <= base:
-        # P2-15: no headroom → the truncated summary stands; NO escalation
-        # episode is counted (matches _complete_parsed's esc<=base ordering —
-        # `escalated` counts calls that actually fired).
+        # P2-15: no headroom → the truncated summary stands (S1 narrative is
+        # never a list-damage class; the truncation is already recorded).
+        # NO escalation episode is counted (matches _complete_parsed's
+        # esc<=base ordering: `escalated` counts calls that actually fired —
+        # the 3-bucket invariant stays literal under the no-headroom config).
         return response
     retained = response
     if _rec is not None:
