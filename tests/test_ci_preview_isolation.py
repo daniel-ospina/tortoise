@@ -52,6 +52,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 from pathlib import Path
@@ -137,10 +138,55 @@ def _spawn(cmd: list[str], cwd: Path, executable: str | None = None) -> subproce
     `executable=` decouples WHAT RUNS from `argv[0]`: the census/`pkill` name and the
     program are then two different things, which is the only portable way to put an
     arbitrary name in front of a live process (#12039).
+
+    ⛔ THE DECOY'S STDERR IS KEPT, NOT DISCARDED (#14122). It used to go to
+    `subprocess.DEVNULL`, which made the two very different failures produce the SAME
+    message: a decoy the census could not SEE, and a decoy that had already DIED. Both
+    surfaced as `ps -p <pid> -o command=` naming `[comm] <defunct>` and the harness
+    could only say "the harness cannot measure" — true, but silent on the reason. The
+    log is captured per pid so `_await_exec` can print what the child itself said as it
+    went; that is the only thing that can explain WHY it exited.
     """
-    return subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True,
-                            executable=executable)
+    fd, path = tempfile.mkstemp(prefix="decoy-stderr-", suffix=".log")
+    os.close(fd)
+    errlog = Path(path)
+    fh = errlog.open("wb")
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.DEVNULL,
+                                stderr=fh, start_new_session=True,
+                                executable=executable)
+    except BaseException:
+        # ⛔ A `Popen` THAT RAISES NEVER REACHES `_DECOY_STDERR`, so nothing would ever
+        # remove this log: the registry is the only handle on it (review of #14388, F4).
+        _discard_decoy_stderr_path(errlog)
+        raise
+    finally:
+        fh.close()
+    _DECOY_STDERR[proc.pid] = errlog
+    return proc
+
+
+#: Captured decoy stderr, keyed by pid (#14122) — see `_spawn`.
+_DECOY_STDERR: dict[int, Path] = {}
+
+
+def _discard_decoy_stderr_path(log: Path) -> None:
+    """Remove ONE captured stderr log, tolerating that it is already gone."""
+    with contextlib.suppress(OSError):
+        log.unlink()
+
+
+def _discard_decoy_stderr(pid: int) -> None:
+    """Remove `pid`'s captured stderr log from the registry (#14122 / review F4).
+
+    ⛔ EVERY `_spawn` CREATES ONE `mkstemp` FILE (#14388 review F4). Only the dead-decoy
+    branch used to unlink it, so a decoy that BEHAVED — and this file spawns dozens per
+    run, on long-lived self-hosted runners — left `/tmp/decoy-stderr-*.log` behind
+    forever. The reapers are the places that own a decoy's lifetime, so they own its log.
+    """
+    log = _DECOY_STDERR.pop(pid, None)
+    if log is not None:
+        _discard_decoy_stderr_path(log)
 
 
 def _wait_alive(pid: int, timeout: float = 5.0) -> None:
@@ -193,6 +239,30 @@ def _await_exec(pid: int, argv0: str, timeout: float = 5.0) -> None:
         time.sleep(0.05)
     why = (f"the last row read for it named {seen!r}, not {argv0!r}" if seen
            else "the table had no row for it")
+    # ⛔ A ZOMBIE IS NOT A CENSUS GAP — it is a decoy that EXITED (#14122). The kernel
+    # renders an unreaped dead process's command row as `[<comm>] <defunct>` and its
+    # `/proc/<pid>/cmdline` reads EMPTY, so no later sample can EVER name `argv0` again.
+    # The loop above already BREAKS on the first sample that finds it dead (`:213-214`),
+    # so the deadline is NOT what this costs — the NAME is: without this branch the
+    # report reads "the harness cannot measure", which is true of a census gap and false
+    # of a decoy that died, and that misattribution is what #14122 was filed for. Say
+    # which of the two it was, and print the decoy's own captured stderr — the only
+    # evidence of WHY it went.
+    if not _pid_alive(pid):
+        log = _DECOY_STDERR.get(pid)
+        said = ""
+        if log is not None:
+            try:
+                said = log.read_text(errors="replace").strip()
+            except OSError:
+                said = ""
+        _discard_decoy_stderr(pid)
+        pytest.fail(
+            f"decoy pid {pid} EXITED before any census row could name {argv0!r} — a DEAD "
+            f"DECOY, not a harness that cannot measure ({why}; the decoy's own stderr"
+            + (f" said {said!r}" if said else " was EMPTY")
+            + ")"
+        )
     pytest.fail(
         f"decoy pid {pid} never showed a row starting {argv0!r} — the harness cannot "
         f"measure ({why})"
@@ -398,6 +468,24 @@ def _reap(*pids: int) -> None:
         # helper killed them, not that we did. SIM105's `suppress` is the idiom.
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, 9)
+        # The decoy's captured stderr is a real file; whoever ends the decoy's life
+        # ends the file's too, or one `/tmp` entry leaks per spawn (#14388 review F4).
+        _discard_decoy_stderr(pid)
+
+
+def _reap_wait(proc: subprocess.Popen, timeout: float = 20.0) -> None:
+    """Reap by `wait()` AND drop the decoy's captured stderr log (#14388 review F6).
+
+    ⛔ `_reap`/`_reap_group` ARE NOT THE ONLY WAY A DECOY DIES. `test_alive_calls_a_
+    zombie_GONE_not_alive` must let its child EXIT without being reaped — the unreaped
+    `Z` IS the subject — and then end it with `Popen.wait()`, so it can use neither
+    reaper. That was the one spawn site F4's fix missed: one `/tmp/decoy-stderr-*.log`
+    leaked per run of that test, and `_DECOY_STDERR` kept a dead pid's entry forever.
+    Whoever ends the decoy's life ends its log; this is that, for the wait-reaped arm.
+    """
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=timeout)
+    _discard_decoy_stderr(proc.pid)
 
 
 def _reap_group(pid: int) -> None:
@@ -413,6 +501,9 @@ def _reap_group(pid: int) -> None:
     """
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pid, 9)
+    # `start_new_session=True` makes `pid` the group leader and the process we spawned,
+    # so its stderr log is exactly this pid's (#14388 review F4).
+    _discard_decoy_stderr(pid)
 
 
 @pytest.fixture()
@@ -1097,8 +1188,9 @@ def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) ->
     victim = _spawn(["/bin/sleep", "60"], tmp_path)
     try:
         _wait_alive(victim.pid)
-        # THE DISCRIMINATING ARM: alive, and the table names something else.
-        with pytest.raises(pytest.fail.Exception):
+        # THE DISCRIMINATING ARM: alive, and the table names something else. It must fail
+        # on the CENSUS-GAP branch — a live process is not a `DEAD DECOY` (#14388 F2).
+        with pytest.raises(pytest.fail.Exception, match="the harness cannot measure"):
             _await_exec(victim.pid, "/nonexistent/never-shown", timeout=0.3)
     finally:
         _reap(victim.pid)
@@ -1108,9 +1200,121 @@ def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) ->
     assert not _pid_alive(victim.pid), "the harness cannot measure: the decoy survived its own kill"
 
     # The cheap arm, kept: a pid that is gone is still rejected — legibly, without waiting
-    # out the deadline.
-    with pytest.raises(pytest.fail.Exception):
+    # out the deadline, and CLASSIFIED. ⛔ `match=` is the pin (#14388 review F2): without
+    # it, deleting the dead-decoy branch restores the pre-fix message verbatim and this
+    # arm stays green, so the file's headline claim ("a zombie is not a census gap") would
+    # be protected by nothing at all.
+    with pytest.raises(pytest.fail.Exception, match="DEAD DECOY"):
         _await_exec(victim.pid, "/nonexistent/never-shown", timeout=0.3)
+
+
+def test_await_exec_repeats_a_dead_decoys_own_stderr(tmp_path: Path) -> None:
+    """⛔ THE CAPTURED STDERR IS THE ONLY EVIDENCE OF WHY A DECOY WENT (#14122).
+
+    `_spawn` used to send the child's stderr to `DEVNULL`, so a decoy that died in
+    `execve` — the renamed multi-call binary shape `_start_fake_pi` documents,
+    `coreutils: unknown program 'pi'` — explained itself to nobody and the report was
+    "the harness cannot measure".
+
+    Non-vacuity: put `stderr=subprocess.DEVNULL` back in `_spawn` and the message says
+    `was EMPTY` instead of quoting the line below, so the assertion reddens.
+    """
+    loud = tmp_path / "dies-loudly.sh"
+    loud.write_text("#!/bin/sh\necho 'coreutils: unknown program' >&2\nexit 3\n")
+    loud.chmod(0o755)
+    decoy = _spawn(["/nonexistent/never-shown"], tmp_path, executable=str(loud))
+    try:
+        with pytest.raises(pytest.fail.Exception, match="DEAD DECOY") as caught:
+            _await_exec(decoy.pid, "/nonexistent/never-shown", timeout=0.5)
+        assert "coreutils: unknown program" in str(caught.value), (
+            f"the dead decoy's own stderr was not repeated: {str(caught.value)!r}"
+        )
+    finally:
+        _reap(decoy.pid)
+
+
+def _record_mkstemp(monkeypatch) -> list[Path]:
+    """Record every temp file `_spawn` creates, so a leaked one is observable."""
+    made: list[Path] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, path = real_mkstemp(*args, **kwargs)
+        made.append(Path(path))
+        return fd, path
+
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+    return made
+
+
+def test_a_reap_leaves_no_decoy_stderr_log_behind(tmp_path: Path, monkeypatch) -> None:
+    """⛔ ONE `mkstemp` PER `_spawn` IS UNBOUNDED `/tmp` LITTER IF NOTHING REMOVES IT (#14388 F4).
+
+    Only the dead-decoy branch used to unlink the log, so every decoy that BEHAVED left
+    `/tmp/decoy-stderr-*.log` behind forever — and this file spawns dozens per run, on
+    long-lived self-hosted runners.
+
+    Non-vacuity: remove the `_discard_decoy_stderr(pid)` call from `_reap` and the file
+    survives its reaping, so the assertion reddens.
+    """
+    made = _record_mkstemp(monkeypatch)
+    decoy = _spawn(["/bin/sleep", "30"], tmp_path)
+    assert made, "the pin never reached `mkstemp` — the assertion below would be vacuous"
+    log = made[0]
+    try:
+        assert log.exists(), "`_spawn` created no log, so there is nothing to leak"
+        _reap(decoy.pid)
+        assert not log.exists(), (
+            f"`_reap` left {log} behind — one leaked temp file per decoy"
+        )
+        assert decoy.pid not in _DECOY_STDERR, (
+            "the registry still names a log that no longer exists"
+        )
+    finally:
+        _reap(decoy.pid)
+
+
+def test_a_wait_reaped_decoy_leaves_no_decoy_stderr_log_behind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The `Popen.wait()` reaper is a reaper too (#14388 review F6).
+
+    `test_alive_calls_a_zombie_GONE_not_alive` cannot use `_reap`/`_reap_group` (the
+    unreaped `Z` is its subject), so it ended its decoy with a bare `wait()` and left one
+    `/tmp/decoy-stderr-*.log` per run — the one site F4's fix missed.
+
+    Non-vacuity: drop the `_discard_decoy_stderr` call from `_reap_wait` and the file
+    survives the reap, so both assertions redden.
+    """
+    made = _record_mkstemp(monkeypatch)
+    decoy = _spawn(["/bin/true"], tmp_path)
+    assert made, "the pin never reached `mkstemp` — the assertions below would be vacuous"
+    log = made[0]
+    assert log.exists(), "`_spawn` created no log, so there is nothing to leak"
+    _reap_wait(decoy, timeout=20)
+    assert not log.exists(), (
+        f"the wait-reaper left {log} behind — one leaked temp file per decoy"
+    )
+    assert decoy.pid not in _DECOY_STDERR, (
+        "the registry still names a log that no longer exists"
+    )
+
+
+def test_a_raising_spawn_leaves_no_decoy_stderr_log_behind(tmp_path: Path, monkeypatch) -> None:
+    """A `Popen` that raises never reaches `_DECOY_STDERR`, so nothing would ever remove
+    its log — the registry is the only handle on it (#14388 F4).
+
+    Non-vacuity: drop the `except BaseException:` unlink in `_spawn` and the file
+    survives the raise, so the assertion reddens.
+    """
+    made = _record_mkstemp(monkeypatch)
+    with pytest.raises(OSError):
+        _spawn(["/bin/true"], tmp_path, executable=str(tmp_path / "no-such-binary"))
+    assert made, "the pin never reached `mkstemp` — the assertion below would be vacuous"
+    assert not made[0].exists(), (
+        f"a raising `_spawn` leaked {made[0]} — no registry entry points at it, so it is "
+        "unreachable from every reaper"
+    )
 
 
 def test_stop_refuses_a_pid_whose_start_time_changed(tmp_path: Path, state) -> None:
@@ -1298,8 +1502,16 @@ def test_alive_calls_a_zombie_GONE_not_alive(tmp_path: Path, state) -> None:
         assert "GONE" in result.stdout and "DIED MID-RUN" in result.stdout, result.stdout
         assert " is ALIVE" not in result.stdout, result.stdout
     finally:
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            child.wait(timeout=20)
+        # ⛔ THE `wait()` REAPER OWNS THE LOG TOO (#14388 review F6). A bare
+        # `child.wait()` here left one `/tmp/decoy-stderr-*.log` per run — the single
+        # spawn site F4's fix did not reach. Asserted, not just called: reverting this
+        # line to `child.wait(...)` must REDDEN this test, not silently re-leak.
+        log = _DECOY_STDERR.get(pid)
+        _reap_wait(child, timeout=20)
+        assert log is not None and not log.exists(), (
+            "the wait-reaped decoy left its captured stderr log behind — one leaked "
+            "temp file per run of this test (#14388 F6)"
+        )
 
 
 def test_alive_refuses_a_recycled_pid(tmp_path: Path, state) -> None:

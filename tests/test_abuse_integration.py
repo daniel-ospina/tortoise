@@ -2090,6 +2090,63 @@ class TestIntrospection:
         violations = write_surface_map_violations()
         assert violations == [], "; ".join(violations)
 
+    def test_the_declared_write_surface_map_carries_no_duplicate_key(self):
+        """#14261: a REPEATED key in the declaration map is a SILENT shadow.
+
+        ⛔ WHY THIS IS MEASURED, NOT HYPOTHETICAL. #14232 added `link_entities` to
+        `DECLARED_WRITE_SURFACE_MAP` while `main` had added the same row independently
+        (#11609 lane P7), in a DIFFERENT region of the same literal — so the union
+        merge kept BOTH keys. Nothing above red-ed: `write_surface_map_violations()`
+        reads the runtime dict, which cannot see a shadowed copy at all, so a row that
+        had drifted could have read as coverage while authorizing nothing (the same
+        vanish-without-a-red shape `test_uri_env_mutations_declared.py`'s duplicate-key
+        guard records for its own table). The only witness was repo-wide
+        `ruff check .` — `F601 Dictionary key literal "link_entities" repeated` — and
+        that leg is NOT a required context of this repo, so a duplicate key can land
+        without blocking the merge.
+
+        So the map is read as SOURCE here, not as the object it becomes.
+        """
+        import ast
+
+        src = (Path(__file__).with_name("tool_surface_capabilities.py")
+               .read_text(encoding="utf-8"))
+
+        def _duplicate_keys(text: str) -> dict[str, list[str]]:
+            out: dict[str, list[str]] = {}
+            for node in ast.parse(text).body:
+                target = getattr(node, "target", None) or (
+                    node.targets[0]
+                    if isinstance(node, ast.Assign) and node.targets else None)
+                value = getattr(node, "value", None)
+                if not isinstance(value, ast.Dict) or target is None:
+                    continue
+                name = getattr(target, "id", None) or getattr(target, "attr", None)
+                keys = [k.value for k in value.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+                seen: set[str] = set()
+                dupes: list[str] = []
+                for key in keys:
+                    if key in seen:
+                        dupes.append(key)
+                    seen.add(key)
+                if dupes and name:
+                    out[name] = list(dict.fromkeys(dupes))
+            return out
+
+        dupes = _duplicate_keys(src)
+        assert not dupes, (
+            "duplicate key(s) in a declaration dict — Python keeps the LAST value "
+            "silently, so the shadowed row authorizes nothing while still reading as "
+            "coverage, and repo-wide `ruff check .` reds `F601`. Keep ONE row and "
+            "merge the two comment blocks (say in it why): "
+            + "; ".join(f"{table} -> {keys}" for table, keys in dupes.items()))
+        # …and the reader is non-vacuous: it must REPORT the exact shape the #14261
+        # union merge shipped (an annotated module-level literal, as this map is),
+        # not merely parse cleanly.
+        assert _duplicate_keys('X: dict[str, str] = {"a": "1", "a": "2"}') == {
+            "X": ["a"]}
+
     def test_destructive_mutating_tools_never_read_classified(self):
         """#4113: capability-derived — every handler-reached graph mutation must
         be write-classified (or a self-guarding HTTP-excluded tool).  The old

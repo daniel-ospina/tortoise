@@ -48,16 +48,18 @@ tests/test_fork_safety_3845.py::test_without_the_fix_the_same_race_hangs_a_child
 # pytest.param(id=...))".
 #
 # #10502: the reaper's decision-table pins. The file is registered in
-# tests/test_markers.py::PLATFORM_GATED_TESTS (two of its tests carry a
-# `sys.platform` skipif — they read `/proc/<pid>/comm` from a REAL child), so
-# the registry's runtime half must observe it (#4215): the file is routed to
+# tests/test_markers.py::PLATFORM_GATED_TESTS (THREE of its tests carry a
+# `sys.platform` skipif — two read `/proc/<pid>/comm` from a REAL child, and the
+# third needs a plain-ELF shell because `_argv0_stand_in_source()` accepts only
+# `b"\x7fELF"` candidates and macOS ships Mach-O), so the registry's runtime half
+# must observe it (#4215): the file is routed to
 # the URI-unset carve-out lane (`config/ci-surfaces.yml:carve_out:`) and the
 # nodeids below are that lane's `--collect-only` for THIS file.
-# No `allow-skipped` budget: on the ubuntu runners both `/proc` tests RUN, so a
+# No `allow-skipped` budget: on the ubuntu runners all three gated tests RUN, so a
 # skip here is a gate evasion and must red rather than be absorbed.
 # PROVENANCE: `pytest tests/test_reap_redislite_orphans.py --collect-only -q
 #   -m 'not track_b and not live and not integration'` (the carve-out job's own
-#   marker filter, .github/workflows/python-ci.yml) at this head; 58 nodeids.
+#   marker filter, .github/workflows/python-ci.yml) at this head; 59 nodeids.
 tests/test_reap_redislite_orphans.py::test_a_census_the_inventory_cannot_account_for_is_exit_3
 tests/test_reap_redislite_orphans.py::test_a_dry_run_never_signals
 tests/test_reap_redislite_orphans.py::test_a_live_peers_young_server_is_kept
@@ -80,6 +82,7 @@ tests/test_reap_redislite_orphans.py::test_an_unlistable_proc_is_exit_2_too
 tests/test_reap_redislite_orphans.py::test_an_unmeasurable_age_on_a_live_dir_is_kept
 tests/test_reap_redislite_orphans.py::test_an_unreadable_inventory_is_exit_2_not_a_silent_zero
 tests/test_reap_redislite_orphans.py::test_apply_signals_exactly_the_reapable_rows
+tests/test_reap_redislite_orphans.py::test_argv0_stand_in_selection_rejects_both_hazards
 tests/test_reap_redislite_orphans.py::test_every_cleaning_job_invokes_the_scoped_reaper
 tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test-carve-out]
 tests/test_reap_redislite_orphans.py::test_every_embedded_leg_invokes_the_scoped_reaper[test-concurrency-falkor]
