@@ -104,7 +104,7 @@ Peak rates (`#14275`'s own: \$0.30/M in, \$1.20/M out, \$0.006/M cache hit). Off
 |---|---|---|---|---|---|---|---|---|
 | free | \$0 | 0 | \$0.00 | 0.0% | \$0.00 | 0.0% | 0 | 0 |
 | solo | \$19 | 3,000,000 | \$1.24 | 6.5% | \$0.62 | 3.3% | 46 | 82 |
-| pro | \$25 | 4,000,000 | \$1.66 | 6.6% | \$0.83 | 3.3% | 62 | 110 |
+| pro | \$25 | 4,000,000 | \$1.66 | 6.6% | \$0.83 | 3.3% | 61 | 109 |
 | team | \$149 | 24,000,000 | \$9.94 | 6.7% | \$4.97 | 3.3% | 370 | 659 |
 
 - **The overage rate — CONFIRMED (as a rate above cost).** Our measured cost is **\$0.41 per 1M blended tokens at peak** and **\$0.21 off-peak**, so `#14275`'s \$1.00/1M sits 2.4× above cost at peak and 4.8× off-peak. It is not below cost at either end, which is the property the issue needs from it.
