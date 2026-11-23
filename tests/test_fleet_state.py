@@ -28,6 +28,12 @@ from pathlib import Path
 
 import pytest
 
+# #5049 rule 1: a wall-clock expiry is an INCONCLUSIVE skip that NAMES the deadline — never a
+# product-defect FAIL. Imported at module level (stdlib + pytest only, so the #1686 test-mode
+# import ordering is untouched) because `test_pi_processes_sees_a_real_long_path_lane` needs it
+# on the path where the FIXTURE — not the census — is what went away.
+from tests._verdict import inconclusive
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import fleet_state as fs
@@ -3760,6 +3766,17 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     legible (the deadline plus the table's own row, below), NOT because a race here was
     measured. It does not widen the match, so the truncation pin keeps its power: a
     `-ww`-less census truncates on every sample, burns the deadline and fails.
+
+    ⛔ THE EXPIRY HAS TWO EXITS, SPLIT ON THE FIXTURE'S OWN LIVENESS (#5049 rule 1). The pin's
+    claim is "a `-ww`-less census misses a LIVE child", so a live child that survives the poll
+    unreported is still a FAIL. But a child that has already been REAPED (observed on
+    `pi-runner-cell3-x64-1`, 2026-11-23: the table row read `'[python] <defunct>'` while the
+    census correctly matched a *different* `pi` the runner box itself runs) has no `argv[0]`
+    left for any census to match, so the expiry says nothing about the flag — it is an
+    INCONCLUSIVE skip that names the 10 s deadline, exactly as `tests/_verdict.py` requires.
+    Before this split that case redded a REQUIRED shard on a diff
+    (`tests/test_12184_shifted_cites.py`) that cannot reach this file, and a re-run could not
+    clear it because the fixture dies again on the same box.
     """
     import shutil
     import subprocess
@@ -3793,12 +3810,42 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 if proc.pid in pids or time.time() >= deadline:
                     break
                 time.sleep(0.1)
-            assert proc.pid in pids, (
-                f"a lane whose argv[0] is {str(pi)!r} was invisible to the census for "
-                f"{10.0:.0f}s of polling (pids seen: {pids}; the table's row for the "
-                f"fixture pid read {_row_for_pid(proc.pid)!r}) — a narrow/`-ww`-less "
-                f"census truncates the argv[0] on every sample, so this is either the "
-                f"flag removed or the process is genuinely not matchable on this box")
+            if proc.pid not in pids:
+                # ⛔ TWO EXITS, SPLIT ON THE FIXTURE'S OWN LIVENESS (#5049 rule 1, measured on
+                # `pi-runner-cell3-x64-1` 2026-11-23). A wall-clock expiry must never produce a
+                # FAIL, but the pin's discriminating power is "a `-ww`-less census misses a
+                # LIVE child" — which the assert at the bottom still fails. Those two are
+                # different facts, and before this split the test could not tell them apart:
+                #
+                #   FAILED … test_pi_processes_sees_a_real_long_path_lane — … invisible to the
+                #   census for 10s of polling (pids seen: [1104635]; the table's row for the
+                #   fixture pid read '[python] <defunct>')
+                #
+                # `[python] <defunct>` is the row a REAPED child leaves, and `pids seen`
+                # matching some OTHER `pi` (the runner box itself runs one) is a healthy
+                # census. Ten seconds of polling cannot make a dead process visible, so that
+                # red measured machine load, not the `-ww` flag — and it redded a REQUIRED
+                # shard on a diff (`tests/test_12184_shifted_cites.py`) that cannot reach this
+                # file at all.
+                row = _row_for_pid(proc.pid)
+                if proc.poll() is not None:
+                    inconclusive(
+                        "a live lane whose argv[0] is a long path (the fixture child "
+                        "exited before the census could observe it)",
+                        deadline_s=10.0,
+                        diagnosis=(
+                            f"The fixture process {proc.pid} had already exited "
+                            f"(returncode {proc.poll()!r}); the table's row read {row!r} "
+                            f"and the census matched {pids!r}. A reaped child has no "
+                            f"argv[0] left to match, so the property was never observable "
+                            f"and this expiry is evidence about the box, not the census."),
+                    )
+                raise AssertionError(
+                    f"a lane whose argv[0] is {str(pi)!r} was ALIVE and invisible to the "
+                    f"census for {10.0:.0f}s of polling (pids seen: {pids}; the table's row "
+                    f"for the fixture pid read {row!r}) — a narrow/`-ww`-less census truncates "
+                    f"the argv[0] on every sample, so this is the flag removed or the matcher "
+                    f"broken")
         finally:
             proc.terminate()
             proc.wait(timeout=10)
