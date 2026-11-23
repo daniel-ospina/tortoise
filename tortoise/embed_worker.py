@@ -55,6 +55,8 @@ import sys
 import threading
 import time
 
+from tortoise.env_truthy import TRUTHY
+
 _logger = logging.getLogger(__name__)
 
 #: How often the parent-liveness check runs when no request is in flight. The
@@ -76,8 +78,7 @@ ENV_WORKER_REQUIRE_PEER = "TORTOISE_EMBED_WORKER_REQUIRE_PEER"
 
 def _require_peer() -> bool:
     """Whether an unverifiable peer must be REFUSED rather than allowed."""
-    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in {
-        "1", "true", "yes", "on"}
+    return (os.environ.get(ENV_WORKER_REQUIRE_PEER) or "").strip().lower() in TRUTHY
 
 
 def _peer_uid(conn: socket.socket) -> int | None:
