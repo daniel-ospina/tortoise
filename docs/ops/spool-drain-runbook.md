@@ -83,15 +83,21 @@ drain line's `skipped N` as loss, you will chase a non-defect.
 ```bash
 SPOOL="${TORTOISE_CAPTURE_SPOOL_DIR:-$HOME/.tortoise/capture-spool}"
 find "$SPOOL/entries" -type f | sort | xargs sha256sum > /tmp/spool-before.txt
-find "$SPOOL/entries" -type f -print0 | sort -z | xargs -0 cat | sha256sum
+sha256sum "$SPOOL"/entries/*.turns.jsonl | sort | sha256sum   # THE transcript digest
 ```
 
-Record the count (`wc -l < /tmp/spool-before.txt`) and the aggregate digest.
+Record the file count (`wc -l < /tmp/spool-before.txt`) and the transcript
+digest.
 
 **Pass:** you have both numbers written down somewhere outside the box.
 
 ⛔ **Do this before anything else touches the spool.** The acceptance criterion
-for the whole operation is that the aggregate digest is unchanged afterwards.
+for the whole operation is that the **transcript** files (`*.turns.jsonl`) are
+byte-identical afterwards — **NOT the whole tree**. A real drain rewrites each
+entry's `meta.json` (`filed_key`, `attempts`, `next_attempt_at_ms`), so a
+whole-tree aggregate WILL change, and that is the drain working rather than data
+loss (Stage 4 says the same thing from the other end). The transcript is the only
+copy; the bookkeeping beside it is not.
 
 ---
 
@@ -134,10 +140,24 @@ and the printed summary reports the expectations in the table below.
 
 | mode | what it proves | expected |
 |---|---|---|
-| `head-keyless` | the drain on a box with no extraction provider | every entry `filed_key`-marked, `terminal 0`, graph `extraction.status: stored`, `extracted: 0` |
+| `head-keyless` | the drain on a box with no extraction provider | `POST`s == `unfiled` (measured 264 of 265 entries, 1 already filed); `filed_key` == entries MINUS those a `429` parked (measured **215/265**); `terminal 0`; graph `capture_ok 0`, `extracted points 0`, `entities 0`. ⚠️ An unpaced run IS expected to park a share of the corpus on the key budget — that is the Stage 3b finding, not a failure |
 | `head-mock` | the same with the extraction pipeline RUNNING (offline `MockModel`, zero spend) | `POST`s == `unfiled`, all `200`, **zero 504s**, `phase in flight → 0` on its own, extracted points > 0 |
 | `pre-14261` | what the old defect looks like now | `504` with a `stage=capture_*` string (not `stage=unmarked`), entry DEFERRED not discarded |
-| `backpressure` | the `#12992` refusal, and that it is retryable | `429 capture_capacity_saturated`, entries deferred with `attempts` > 0, **terminal 0**, nothing removed |
+| `backpressure` | the `#12992` refusal from ONE drainer against a 1-slot ceiling, and that it is retryable | `429 capture_capacity_saturated`, entries deferred with `attempts` > 0, **terminal 0**, nothing removed |
+
+⚠️ **`graph extraction.status: stored` is not an observable of this tool** —
+`_graph_state` reads `sessions`, `turn points`, `extracted points`, `capture_ok`,
+`phase in flight` and `entities`, and `extraction.status` is never read, so a
+table row asking you to grade it cannot be graded. Grade `head-keyless` on
+`capture_ok 0` / `extracted points 0` / `entities 0`, which is what the tool
+prints.
+
+⚠️ **The 50 park in `head-keyless` is 19 % of the corpus, not a rounding
+error.** The command above is the unpaced fast run, so the key budget refuses a
+slice of it and parks those entries for ~6 h — the single operational finding
+this rehearsal produced (Stage 3b). A `head-keyless` run that files everything
+means the corpus was small enough to stay under 100 POST/min, not that the
+drain behaves differently.
 
 **Rollback:** none — nothing outside the temp dir and the throwaway graph was
 written.
@@ -153,11 +173,45 @@ the same thing:
 # the API the drain POSTs to, and a key with capture permission
 export TORTOISE_API_URL='https://api.premiselabs.co'
 export TORTOISE_API_KEY='…'          # must be a WRITE-capable key
-export TORTOISE_CAPTURE=1            # consent — the drain is a TRANSMISSION verb
 
-# prove the key can write BEFORE spending an hour draining
-uv run python tools/gh_write_preflight.py --repo .
+export TORTOISE_CAPTURE=1            # consent — the drain is a TRANSMISSION verb
 ```
+
+### Prove the KEY can write — with a capture probe, not the GitHub preflight
+
+⛔ `tools/gh_write_preflight.py` proves the **GitHub** credential can write
+repository contents. It measures **nothing** about `TORTOISE_API_KEY`, and a
+`GH-WRITE-OK` line over an unmeasured key is exactly the false PASS this section
+exists to prevent. The drain's credential is proven by one capture POST that is
+then deleted:
+
+```bash
+PROBE_ID="runbook-key-probe-$(date -u +%s)"
+code=$(curl -sS -o /tmp/key-probe.json -w '%{http_code}' \
+  -X POST "$TORTOISE_API_URL/v1/sessions" \
+  -H "Authorization: Bearer $TORTOISE_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d "{\"session_id\":\"$PROBE_ID\",\"harness\":\"runbook\",
+       \"source\":\"runbook-key-probe\",
+       \"conversation\":[{\"role\":\"user\",\"content\":\"key write probe — safe to delete\"}]}")
+echo "$code"; cat /tmp/key-probe.json
+# 200/201 = the key holds graphs:write and the capture door accepted it.
+# 401/403 = wrong or read-only key → STOP.  402 = quota.  422 = body shape.
+curl -sS -X DELETE "$TORTOISE_API_URL/v1/sessions/$PROBE_ID" \
+  -H "Authorization: Bearer $TORTOISE_API_KEY"
+```
+
+**Pass:** the POST answered `200`/`201` and the DELETE answered 2xx. A `404` on
+the DELETE means the server assigned a different id than the one sent — read
+`/tmp/key-probe.json`, delete that id, and treat the probe as unresolved until it
+is gone.
+
+⚠️ A **read** probe proves nothing here: `GET /v1/sessions` (and `tortoise
+session list`) answers 200 for a key minted `graphs:read`, and that key 403s on
+every drain POST. Two credentials, two different tools — if this drain is run
+from a lane that must also push a branch, prove the *GitHub* credential
+separately with `uv run python tools/gh_write_preflight.py --repo .`; its green
+run is not a pass for the API key above.
 
 ⛔ **`session drain` is gated on capture consent** (`TORTOISE_CAPTURE`). Without
 it the drain prints `spool drain: capture declined — …` and exits **0**. That is
@@ -251,9 +305,12 @@ the window.
 `deferred N` means **retryable, still on disk, will be attempted again**. There
 are three shapes and they are all recoverable:
 
-- `429 capture_capacity_saturated` (`#12992`) — the in-flight ceiling. Wait;
-  it clears. Do not run two drains at once (that is what produces it — see
-  `backpressure` in the rehearsal evidence).
+- `429 capture_capacity_saturated` (`#12992`) — the in-flight ceiling. A capture
+  holds its admission slot for its WHOLE extraction, so the next POST of the
+  SAME drain is refused while the previous capture is still extracting (that is
+  what `backpressure` measured: ONE client, ceiling 1, 2 s extraction → 2 of 4
+  refused with `in_flight 1 / limit 1`). It clears on its own — wait. A second
+  drainer only makes it likelier; the rehearsal never ran two.
 - `504` at the transport bound — the ack window was missed. Re-run.
 - a transport error (`status=None`) — the spool backs off exponentially
   (`backoff_delay(attempts)`), so a later pass picks it up.
@@ -270,22 +327,17 @@ cause is fixed — a corrected lane/harness, a lifted quota, a re-minted key.
 ## Stage 4 — prove it (5 min)
 
 ```bash
-# 1. the source spool is byte-identical
-find "$SPOOL/entries" -type f | sort | xargs sha256sum > /tmp/spool-after.txt
-find "$SPOOL/entries" -type f -print0 | sort -z | xargs -0 cat | sha256sum
-diff <(cut -d' ' -f1 /tmp/spool-before.txt | sort) \
-     <(cut -d' ' -f1 /tmp/spool-after.txt | sort) && echo "CONTENT IDENTICAL"
+# 1. the TRANSCRIPTS are byte-identical (this is the thing that must never change)
+sha256sum "$SPOOL"/entries/*.turns.jsonl | sort | sha256sum   # compare to Stage 0
 ```
 
-⚠️ **The aggregate digest WILL change, and that is correct.** The drain rewrites
-each entry's `meta.json` (`filed_key`, `attempts`, `next_attempt_at_ms`), which
-is bookkeeping, not content. The digest of the **`*.turns.jsonl`** files must be
-identical — that is the transcript, and it is the thing that must never change.
-Compare those, not the whole tree:
-
-```bash
-sha256sum "$SPOOL"/entries/*.turns.jsonl | sort | sha256sum   # before and after
-```
+⚠️ **The aggregate digest of the WHOLE tree WILL change, and that is correct.**
+The drain rewrites each entry's `meta.json` (`filed_key`, `attempts`,
+`next_attempt_at_ms`), which is bookkeeping, not content. So a whole-tree
+compare — `find … -type f | xargs sha256sum`, then `diff` of the two lists —
+reports a difference for every filed entry and its `&& echo CONTENT IDENTICAL`
+can never fire. It is not a stricter check; it is a check that always fails.
+**Compare transcript digests, not the tree.**
 
 ```bash
 # 2. sessions the API actually holds
@@ -347,10 +399,13 @@ concentrated, and batching by size does not change the total. ⚠️ That is a
 drain box's own spool with the command above before committing a budget.
 
 **If no provider key is configured the extraction does not run at all**
-(`extraction: {"status": "stored", "extractor": "none"}`), and the drain files
-everything for ~zero model cost — with `extracted: 0`. That is a legitimate
-terminal state, and it is what `head-keyless` measures: **check the status
-string before believing a token estimate.**
+(`extraction: {"status": "stored", "extractor": "none"}`), so extraction costs
+nothing and the graph shows `extracted: 0` — that is a legitimate terminal state,
+and it is the PATH `head-keyless` measures. It is **not** a claim that the drain
+files everything: on the rehearsal corpus the same mode filed 215 of 265 entries,
+because the key budget parked 50 of them (Stage 3b). Check the status string
+before believing a token estimate, and do not read "keyless" as "costs nothing
+and files everything".
 
 ---
 
@@ -360,9 +415,9 @@ string before believing a token estimate.**
 |---|---|---|
 | `spool drain: capture declined` | consent off — the drain did nothing | `export TORTOISE_CAPTURE=1`, re-run |
 | `filed 0` everything | consent, auth, or an unreachable URL | `spool drain: nothing filed — …` names it; `tortoise session verify` reads the install |
-| `404`/`401` on every POST | wrong host or a read-only key | re-check `TORTOISE_API_URL`; prove the key with `tools/gh_write_preflight.py` |
+| `404`/`401` on every POST | wrong host or a read-only key | re-check `TORTOISE_API_URL`; re-run the capture-POST probe in Stage 3 (NOT `gh_write_preflight.py` — that one proves the GitHub credential) |
 | `429 Rate limit exceeded. 100 points/minute per API key.` | the KEY's request budget, not the capture ceiling | wait 60 s; drain slower / in batches (Stage 3b). Entries are deferred, not lost |
-| `429 capture_capacity_saturated` | in-flight ceiling (`#12992`) — too many captures AT ONCE | wait (`retry_after` 30 s); ensure ONE drainer (that is `#14342` D1) |
+| `429 capture_capacity_saturated` | the in-flight ceiling (`#12992`): the previous capture's extraction still holds its slot | wait (`retry_after` 30 s); drain with ONE drainer paced under its own extraction latency (that is `#14342` D1). The rehearsal reproduced this with ONE drainer, so it is not evidence that a second client is needed to hit it |
 | `… skipped N (M waiting on backoff)` | M entries parked by `backoff_delay`, up to 6 h | this is not a failure to fix by retrying — wait, or the first pass should have been paced |
 | `504` with `stage=capture_extract` | ack window missed — the extraction outran it | re-run; idempotent. The entry is confirmed and filed anyway when the record landed |
 | `terminal N > 0` | permanent 4xx recorded | fix the cause, then `--retry-terminal` |

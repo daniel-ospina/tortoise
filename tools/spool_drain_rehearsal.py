@@ -40,7 +40,16 @@ MODES
 | `head-keyless` | HEAD, no extraction provider | one copy, 2 passes | the drain as a keyless box runs it: ACK path, store-only extraction |
 | `head-mock` | HEAD + `TORTOISE_SESSION_LLM_MOCK=1` | one copy, 2 passes | the same, with the extraction pipeline actually running (offline, zero spend) |
 | `pre-14261` | ACK join window disabled + a 12 s extraction | 3 entries | what the 504 looked like, and what `stage=` says now |
-| `backpressure` | `TORTOISE_CAPTURE_IN_FLIGHT=1`, slow mock extraction | two DISJOINT copies, drained CONCURRENTLY | the `capture_capacity_saturated` 429, and how the drain classifies it |
+| `backpressure` | `TORTOISE_CAPTURE_IN_FLIGHT=1`, slow mock extraction | ONE copy, ONE serial drainer | the `capture_capacity_saturated` 429, and how the drain classifies it |
+
+⛔ `backpressure` is ONE copy drained by ONE serial client — it does not run two
+concurrent drainers, and no run in the evidence directory does. The ceiling it
+reproduces is a per-capture ADMISSION slot that is held for the WHOLE extraction
+(`_release_session`: "a handed-off slot waits for its worker"), so the next POST
+of the SAME drain is refused while the previous capture is still extracting.
+That is evidence about the CEILING and about one drainer's pace, not about two
+concurrent clients: the `ensure ONE drainer` remedy is right for a different
+reason, and the refusal would arrive for a single client too.
 
 USAGE
 -----
@@ -96,8 +105,9 @@ ACTOR_ID = "00000000-0000-4000-8000-000000000142"
 #: Extraction latency injected in `pre-14261`, chosen to exceed the transport
 #: bound (10 s). It is a REHEARSAL artefact and is named as one in the report.
 PRE_BOUND_EXTRACTION_DELAY_S = 12.0
-#: A smaller delay for `backpressure`: long enough that two concurrent captures
-#: overlap and the 1-slot ceiling refuses the second.
+#: A smaller delay for `backpressure`: long enough that the NEXT serial POST of
+#: the same drain arrives while the previous capture's extraction still holds the
+#: 1-slot admission ceiling. It is a per-capture overlap, not two clients.
 BACKPRESSURE_EXTRACTION_DELAY_S = 2.0
 
 
@@ -127,6 +137,18 @@ def _source_fingerprint(root: Path) -> dict:
         "bytes": total,
         "aggregate_sha256": agg,
     }
+
+
+def _source_unchanged(before: dict, after: dict) -> bool:
+    """Recorded decision 1: the source spool must be untouched afterwards.
+
+    ONE definition of the acceptance claim, so a test can pin the thing the
+    runbook rests on: the fingerprints compare count, byte total AND aggregate
+    digest, so a source that changed in any of those can never read as
+    untouched. (Previously this was an inline `before == after` in `_one_mode`,
+    which no test could reach without running a full drain.)
+    """
+    return before == after
 
 
 def _gate_uri(uri: str | None) -> str:
@@ -435,11 +457,17 @@ def _observations(log_path: Path) -> dict:
     # (`"stage":"capture_extract"`), while the older prose form was
     # `stage=unmarked`. A regex for one shape silently reports "no stages seen"
     # on the other — exactly the kind of blind observer this tool exists not to be.
-    stages = sorted({m.group(1) for r in posts
-                     for m in [re.search(r'"stage"\s*:\s*"([^"]+)"|stage=([A-Za-z0-9_]+)',
-                                         r["body"] or "")] if m
-                     for _ in [0] if (m.group(1) or m.group(2))}
-                    | set())
+    # ⛔ The alternative whose group did NOT match is `None`, so the element is
+    # `group(1) or group(2)`: collecting `group(1)` unconditionally put a `None`
+    # into the set, and the prose form — the one shape this regex was widened
+    # for — then crashed `sorted()` / `', '.join()` with `TypeError`.
+    stages: set[str] = set()
+    for r in posts:
+        m = re.search(r'"stage"\s*:\s*"([^"]+)"|stage=([A-Za-z0-9_]+)',
+                      r["body"] or "")
+        if m:
+            stages.add(m.group(1) or m.group(2))
+    stages = sorted(stages)
 
     def pct(v: float) -> float | None:
         if not durs:
@@ -596,17 +624,30 @@ def _wait_health(port: int, timeout_s: float = 180.0) -> bool:
 
 
 def _start_server(mode: str, log_path: Path) -> tuple[subprocess.Popen, int]:
+    """Start the child server with its output on a FILE, not an unread `PIPE`.
+
+    A `PIPE` nobody drains blocks the child on `write(2)` once it fills (~64 KiB)
+    and the server stops serving MID-DRAIN — and the symptom is a silent hang,
+    not a red, because the parent only ever read the pipe on the health-failure
+    path. `log_level="warning"` keeps today's runs under the bound (no warnings
+    were emitted), so this was a latent hazard rather than a live one; the file
+    removes it for free and is still read when health never arrives.
+    """
     port = _free_port()
-    proc = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "_serve",
-         "--mode", mode, "--port", str(port), "--log", str(log_path)],
-        env={**os.environ, "TORTOISE_API_URL": f"http://127.0.0.1:{port}"},
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    server_log = log_path.with_name("server.log")
+    with server_log.open("wb") as sink:
+        proc = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "_serve",
+             "--mode", mode, "--port", str(port), "--log", str(log_path)],
+            env={**os.environ, "TORTOISE_API_URL": f"http://127.0.0.1:{port}"},
+            stdout=sink, stderr=subprocess.STDOUT)
     if not _wait_health(port):
         out = ""
         with contextlib.suppress(Exception):
             proc.terminate()
-            out = (proc.communicate(timeout=20)[0] or "")[-3000:]
+            proc.wait(timeout=20)
+            out = server_log.read_text(
+                encoding="utf-8", errors="replace")[-3000:]
         raise SystemExit(f"local server never became healthy (port {port}):\n{out}")
     return proc, port
 
@@ -670,7 +711,7 @@ def _one_mode(mode: str, *, spool_src: Path, out_dir: Path,
     result = {
         "mode": mode,
         "corpus": {**copied, "source_before": before},
-        "invariant_source_untouched": before == after,
+        "invariant_source_untouched": _source_unchanged(before, after),
         "source_after": after,
         "passes": passes,
         "spool_after_pass_1": state_1,
@@ -738,11 +779,20 @@ def _summarise(results: list[dict], cost: dict) -> str:
         if p2 is not None:
             g2 = r["graph_after_pass_2"]
             s2 = r.get("spool_after_pass_2") or {}
+            # The replay's delta is measured from the SETTLED graph, never from
+            # `graph_after_pass_1`: the settle poll runs BETWEEN pass 1 and the
+            # replay, so a `g2 - g1` delta credits the replay with extraction that
+            # landed during the poll. Measured in this repo's own `head-mock.json`:
+            # g1 526 extracted / settled 528 / after replay 528 — and the old row
+            # printed `Δ 2` under "replay pass" in the very row whose purpose is to
+            # prove the replay added nothing.
+            base = r.get("graph_settled") or g1
             lines.append(f"- replay pass: exit {p2['exit']}, {p2['seconds']} s → "
-                         f"sessions {g2['sessions']} (Δ {g2['sessions'] - g1['sessions']}), "
+                         f"sessions {g2['sessions']} "
+                         f"(Δ {g2['sessions'] - base['sessions']} vs settled), "
                          f"extracted points {g2['extracted_points']} "
-                         f"(Δ {g2['extracted_points'] - g1['extracted_points']}), "
-                         f"filed_key {s2.get('filed_key_present')}")
+                         f"(Δ {g2['extracted_points'] - base['extracted_points']} "
+                         f"vs settled), filed_key {s2.get('filed_key_present')}")
             lines.append(f"  - replay stderr: `{p2['stderr'].strip().splitlines()[-1] if p2['stderr'].strip() else ''}`")
         lines.append("")
     lines.append("## corpus cost")
@@ -761,16 +811,13 @@ def _summarise(results: list[dict], cost: dict) -> str:
     return "\n".join(lines)
 
 
-def _write_summary(results: list[dict], cost: dict, out_dir: Path) -> None:
-    """Render the evidence artefacts. The ONLY writer of SUMMARY.md.
+def _summary_document(results: list[dict], cost: dict) -> str:
+    """The bytes of SUMMARY.md — a pure projection of the artefacts.
 
-    One writer so a formatting fix (e.g. the `###` → `##` heading level `MD001`
-    rejects under an H1) never needs a re-measure, and so the JSON and the prose
-    cannot disagree about the same run.
+    Separate from `_write_summary` so the `summary` verb can re-render the prose
+    WITHOUT rewriting `corpus-cost.json` from a live spool no mode measured.
     """
-    (out_dir / "corpus-cost.json").write_text(
-        json.dumps(cost, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (out_dir / "SUMMARY.md").write_text(
+    return (
         "---\n"
         'title: "Spool drain rehearsal — measured results (#14232 / #14261)"\n'
         "type: evidence\n"
@@ -787,7 +834,22 @@ def _write_summary(results: list[dict], cost: dict, out_dir: Path) -> None:
         "read from the run's own artefacts (`<mode>.json`, `corpus-cost.json`), "
         "not retyped. ⛔ The source spool is never written to: each mode records "
         "a before/after fingerprint and the run fails if they differ.\n\n"
-        + _summarise(results, cost) + "\n", encoding="utf-8")
+        + _summarise(results, cost) + "\n")
+
+
+def _write_summary(results: list[dict], cost: dict, out_dir: Path) -> None:
+    """Record a MEASURED corpus cost and render the evidence artefacts.
+
+    The ONLY writer of SUMMARY.md. One writer so a formatting fix (e.g. the
+    `###` → `##` heading level `MD001` rejects under an H1) never needs a
+    re-measure, and so the JSON and the prose cannot disagree about the same run.
+    `corpus-cost.json` is written only here — on the `run`/`all` path, where the
+    cost was just measured against the same spool the modes drained.
+    """
+    (out_dir / "corpus-cost.json").write_text(
+        json.dumps(cost, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (out_dir / "SUMMARY.md").write_text(
+        _summary_document(results, cost), encoding="utf-8")
 
 
 def _run(argv: list[str] | None = None) -> int:
@@ -827,14 +889,27 @@ def _run(argv: list[str] | None = None) -> int:
         # projection of the artefacts, so regenerating it must never require
         # re-running a 10-minute drain — and a formatting fix to the renderer
         # must not be a reason to re-measure.
+        # ⛔ That means `corpus-cost.json` is READ here, never recomputed: the
+        # live spool can have grown since the run, and rewriting the committed
+        # cost from it would describe a corpus NO mode measured (measured: run on
+        # 265 entries, spool +30, `summary` → SUMMARY.md reports 295 beside
+        # `head-keyless.json`'s 265). Absent is a refusal, not a re-measure.
         results = []
         for mode in ("head-keyless", "head-mock", "pre-14261", "backpressure"):
             p = args.out / f"{mode}.json"
             if not p.exists():
                 raise SystemExit(f"missing artefact: {p}")
             results.append(json.loads(p.read_text(encoding="utf-8")))
-        _write_summary(results, _corpus_cost(args.spool_src), args.out)
-        print(_summarise(results, _corpus_cost(args.spool_src)))
+        cost_path = args.out / "corpus-cost.json"
+        if not cost_path.exists():
+            raise SystemExit(
+                f"missing artefact: {cost_path} — `summary` re-renders the prose "
+                f"and never re-measures, so it needs the cost this run recorded; "
+                f"run `all` (or `run --mode …`) against this spool first")
+        cost = json.loads(cost_path.read_text(encoding="utf-8"))
+        (args.out / "SUMMARY.md").write_text(
+            _summary_document(results, cost), encoding="utf-8")
+        print(_summarise(results, cost))
         return 0
 
     plan = ([("head-keyless", None, True), ("head-mock", None, True),

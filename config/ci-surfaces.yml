@@ -2811,6 +2811,18 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #14429 review P2: the spool-drain rehearsal's two load-bearing invariants (the
+  # source spool is never written, and a non-loopback / production target is
+  # refused) are enforced only inside `tools/spool_drain_rehearsal.py`'s own control
+  # flow, so the file shipped with no assertion anywhere in the tree — `_gate_uri`
+  # could be reduced to `return uri`, letting a rehearsal drive production, with every
+  # check green. Registered `core` (hermetic: `_gate_uri` and `_source_unchanged` are
+  # pure, the summary/observations arms use tmp dirs, no graph and no docker), and
+  # `tools/spool_drain_rehearsal.py` is a `CORE_ALSO` entry so a tool-only diff
+  # selects it — otherwise `--changed-files tools/spool_drain_rehearsal.py` yielded
+  # `surfaces: []`. Pinned by
+  # tests/test_spool_drain_rehearsal.py::test_a_tool_only_diff_selects_this_pin.
+  - test_spool_drain_rehearsal.py
   - test_10893_probe_start_off_loop.py  # #10893: `tortoise/monitoring.py` matches no SOURCE_PATTERN (→ `core` fallback); the tests import only `tortoise.monitoring`, and the coordinator has no api-only seam in this file
   # #10749: DUAL-REGISTERED with `api` — see the `api` row for the measurement and
   # WHY both halves are load-bearing (`hosted_api.py` is an exact `api` SOURCE_PATTERN
