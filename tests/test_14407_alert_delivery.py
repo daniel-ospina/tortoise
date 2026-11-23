@@ -1208,6 +1208,126 @@ def test_a_failing_incident_read_never_raises_from_the_alert_path(monkeypatch):
     notify.reset_abuse_delivery_for_tests()
 
 
+# ── 5b. round-5 review: the seams the fixes themselves created ───────────────
+
+def test_a_blocked_signup_burst_names_the_clients_it_refused(delivered, monkeypatch):
+    """A digest that folds a distributed burst must not also discard WHO.
+
+    The 429 path calls `record_signup_block(ip)` with no org, so `notify_abuse`
+    maps the subject to "_" and every refused client in a window shares ONE
+    digest key. Pre-fix each block sent its own message carrying its IP; a bound
+    that collapses them into a single anonymous message would delete the security
+    record rather than bound it (#14407 round 5).
+    """
+    import tortoise.notify as notify
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(notify, "_delivery_now", lambda: now[0])
+    ips = ["203.0.113.7", "203.0.113.8", "203.0.113.9"]
+    for ip in ips:  # one window: the first is delivered, the other two fold
+        notify.notify_abuse("abuse_signup_velocity", {"org_id": None},
+                            {"ip": ip, "count": 0})
+    assert len(delivered.pushes) == 1, delivered.pushes
+
+    # The NEXT window's delivery is where the folded window is accounted for.
+    now[0] += notify._ACTIVITY_DELIVERY_WINDOW_S + 1
+    notify.notify_abuse("abuse_signup_velocity", {"org_id": None},
+                        {"ip": "203.0.113.10", "count": 0})
+
+    assert len(delivered.pushes) == 2, delivered.pushes
+    digest = delivered.pushes[-1]
+    for ip in ips[1:]:
+        assert ip in digest, (ip, digest)
+    assert "Folded sources:" in digest, digest
+
+
+def test_an_incident_that_raised_after_filing_is_not_called_absent(
+        delivered, monkeypatch):
+    """A raise after the issue exists must not produce 'no incident was filed'.
+
+    `open_incident_state` can raise AFTER it created + announced the issue (a
+    trailing write, the pending-push bookkeeping, the DEDUP health-streak write
+    that deliberately propagates). Telling the human "no incident was filed"
+    while issue #N is open would be a false statement and a second page about the
+    same condition (#14407 round 5).
+    """
+    import tortoise.notify as notify
+
+    class _Store:
+        def open_incident_state(self, kind, subject="", detail=None, writer=None):
+            raise RuntimeError("trailing write failed after filing")
+
+        def incident_record(self, kind, subject=""):
+            return {"issue_number": 4242}
+
+    sent: list[str] = []
+    monkeypatch.setattr(notify, "_abuse_alert_store", lambda: (_Store(), ""))
+    monkeypatch.setattr(notify, "telegram_send",
+                        lambda bot, chat, text, **k: sent.append(text))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    notify._skip_logged.clear()
+    notify.reset_abuse_delivery_for_tests()
+
+    notify.notify_abuse("abuse_review_needed", {"org_id": "org-a"},
+                        {"rule": "point_create", "count": 900})
+
+    assert len(sent) == 1, sent
+    assert "#4242" in sent[0], sent[0]
+    assert "no incident was filed" not in sent[0], sent[0]
+    notify.reset_abuse_delivery_for_tests()
+
+
+def test_the_absent_channel_reason_names_the_leg_that_is_missing(monkeypatch):
+    """`DR_ISSUES_PAT` unset and an unusable `R2_*` set are different fixes.
+
+    The builder returns None for both (`hosted_api`'s D6 residual), and the
+    reason is rendered into the message a human acts on — reporting every
+    absence as "DR_ISSUES_PAT unset" sends them to the wrong credential.
+    Names only, never values (#4010).
+    """
+    import tortoise.notify as notify
+
+    monkeypatch.delenv("DR_ISSUES_PAT", raising=False)
+    assert "DR_ISSUES_PAT" in notify._channel_absent_reason()
+
+    monkeypatch.setenv("DR_ISSUES_PAT", "placeholder-value-never-read")
+    for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+                 "R2_BUCKET"):
+        monkeypatch.delenv(name, raising=False)
+    reason = notify._channel_absent_reason()
+    assert "R2_" in reason and "DR_ISSUES_PAT" not in reason, reason
+    assert "placeholder-value-never-read" not in reason, reason
+
+    monkeypatch.setenv("R2_BUCKET", "b")
+    monkeypatch.setenv("R2_ACCOUNT_ID", "a")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "k")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "s")
+    assert "unavailable" in notify._channel_absent_reason()
+
+
+def test_the_delivery_ledger_cap_bounds_LIVE_entries(monkeypatch):
+    """The documented cap must bound live keys, not only expired ones.
+
+    The previous filter removed only entries whose deadline had already passed,
+    so with 24h windows a live population above the cap was never reduced and
+    the constant bounded nothing (measured in review: 4596 live subjects, 4596
+    entries). Evicting the soonest-to-expire is the honest bound.
+    """
+    import tortoise.notify as notify
+
+    notify.reset_abuse_delivery_for_tests()
+    now = 5_000_000.0
+    monkeypatch.setattr(notify, "_delivery_now", lambda: now)
+    over = notify._MAX_DELIVERY_KEYS + 50
+    for i in range(over):
+        notify._claim_delivery("abuse_flag", f"org-{i}:point_create",
+                               notify._INCIDENT_DELIVERY_WINDOW_S)
+
+    assert len(notify._delivery) <= notify._MAX_DELIVERY_KEYS, len(notify._delivery)
+    notify.reset_abuse_delivery_for_tests()
+
+
 # ── 6. the security instrument itself is untouched ───────────────────────────
 
 def test_detection_thresholds_are_not_loosened():

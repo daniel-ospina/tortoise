@@ -181,10 +181,18 @@ def _episode_delivery_kinds() -> tuple[str, ...]:
 #: persistent breach from going silent without paging a human every window: the
 #: pre-fix code re-paged hourly (``_claim_notify``'s window expiry) for a breach
 #: that was already tracked by ONE issue, so a single org over its R1 threshold
-#: cost ~24 messages/day. The engine releases the window at episode end, so a
-#: genuinely new episode pages at once — the bound is the episode, never a mute.
-#: The same window bounds the no-incident-channel fallback, where it is the only
-#: bound there is.
+#: cost ~24 messages/day. The engine releases the window when it OBSERVES the
+#: episode end (the clean window that persisted `flag_clear`, or its bounded
+#: retry), so a genuinely new episode pages at once. DECLARED RESIDUAL: an episode
+#: end the engine cannot observe — the `abuse_unsuspend` SQL function, a manual
+#: `flag_clear`, a death between the clear and the release — leaves the window
+#: armed, so a new episode inside it is folded and its reminder fires at the
+#: window's end naming the open issue. That is deliberately NOT inferred from a
+#: `latest_flag_at() is None` read: the same read returns None for a flag this
+#: process just wrote when the read is stale (#3631), and releasing on it re-pages
+#: per detection and can close the incident of an org still over threshold. The
+#: runbook row names the manual close. The same window bounds the
+#: no-incident-channel fallback, where it is the only bound there is.
 #:
 #: ACTIVITY kinds: the collapse window for the digest. 6h is chosen against the
 #: detector cadence — R3 re-arms every 5 minutes (288 messages/day/scope at
@@ -196,14 +204,21 @@ _ACTIVITY_DELIVERY_WINDOW_S = 21600.0
 
 _skip_logged: set[str] = set()
 
-#: The delivery ledger: ``(kind, subject) -> (window_deadline, folded_count)``.
-#: In-process like the engine's own alert claim (#3631): the honest ceiling
-#: across replicas is one message per replica per window, and shared state for a
-#: cosmetic bound is deliberately out of scope. #14407.
+#: The delivery ledger: ``(kind, subject) -> (window_deadline, folded_count,
+#: folded_identities, identity_overflow)``. In-process like the engine's own alert
+#: claim (#3631): the honest ceiling across replicas is one message per replica
+#: per window, and shared state for a cosmetic bound is deliberately out of scope.
+#: #14407.
 _delivery_lock = threading.Lock()
-_delivery: dict[tuple[str, str], tuple[float, int]] = {}
+#: entry: (deadline, folded_count, folded_identities, identities_over_cap)
+_delivery: dict[tuple[str, str], tuple[float, int, tuple[str, ...], int]] = {}
 _delivery_now = time.monotonic  # test seam (monotonic: no clock-jump aliasing)
 _MAX_DELIVERY_KEYS = 4096
+#: How many DISTINCT folded sources a digest NAMES (#14407 round 5). A digest
+#: that collapses a distributed burst into one message must not also throw the
+#: attackers away: the folded sources are carried, bounded so the message stays
+#: finite, with the overflow counted.
+_MAX_FOLDED_IDENTITIES = 8
 
 # Budget-skip billing incidents are informational and the budget stays exhausted
 # for the rest of the UTC day: file at most one per (kind, org) per process per
@@ -418,8 +433,29 @@ def _abuse_alert_store():
     except Exception as e:  # noqa: BLE001, RUF100
         return None, f"alert channel unavailable ({redact_safe(e)})"
     if store is None:
-        return None, "no alert channel configured (DR_ISSUES_PAT unset)"
+        return None, _channel_absent_reason()
     return store, ""
+
+
+def _channel_absent_reason() -> str:
+    """WHY no incident channel exists — the leg that is actually missing (#14407).
+
+    ``_incident_alert_store`` returns ``None`` for two physically different
+    reasons (its own D6 residual, ``hosted_api``): no issue filer, or no usable
+    object store. Reporting every absence as "``DR_ISSUES_PAT`` unset" sends an
+    operator to the wrong credential when the ``R2_*`` set is the broken one —
+    and this string is rendered into the message a human acts on, so being wrong
+    here costs the fix. Names only, never values (``#4010``).
+    """
+    if not _env("DR_ISSUES_PAT"):
+        return "no issue filer configured (DR_ISSUES_PAT unset)"
+    missing = [n for n in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID",
+                           "R2_SECRET_ACCESS_KEY", "R2_BUCKET") if not _env(n)]
+    if missing:
+        return ("no usable object store for the incident sentinel "
+                f"({', '.join(missing)} unset)")
+    # Both legs look configured and the builder still refused: do not guess.
+    return "alert channel unavailable (see the service log)"
 
 
 def _abuse_subject(org_id: str, rule: object) -> str:
@@ -437,13 +473,23 @@ def _abuse_subject(org_id: str, rule: object) -> str:
 
 
 def _claim_delivery(kind: str, subject: str, window_s: float,
-                    now: float | None = None) -> tuple[bool, int]:
-    """May this detection be DELIVERED? Returns ``(deliver, folded_count)``.
+                    identity: str | None = None,
+                    now: float | None = None,
+                    ) -> tuple[bool, int, tuple[str, ...], int]:
+    """May this detection be DELIVERED? Returns the digest for the NEXT window.
 
-    ``folded_count`` is how many detections the PREVIOUS window collapsed — the
-    digest's honest count, 0 on the first window of a key. The count is carried
-    rather than dropped because "12 more happened" is the information a rate
-    digest exists to convey.
+    ``(deliver, folded_count, folded_identities, identity_overflow)``: how many
+    detections the PREVIOUS window collapsed, which distinct SOURCES they came
+    from (bounded to :data:`_MAX_FOLDED_IDENTITIES`, with the overflow counted),
+    and whether this one goes out now. The count is carried rather than dropped
+    because "12 more happened" is the information a rate digest exists to
+    convey — and so are the sources: collapsing a distributed signup flood into
+    one message must not also discard WHICH clients were refused, or the bound
+    has deleted the security record instead of bounding it (#14407 round 5).
+
+    ``identity`` is the detection's own scope when it has one (the blocked IP for
+    the signup velocity classes, whose callers pass no org at all). It is
+    optional: an incident delivery names its ISSUE instead.
 
     The FIRST detection of a window is delivered at once (no timer, no batching
     delay): only repeats are folded. On a key whose window never expires the
@@ -455,18 +501,45 @@ def _claim_delivery(kind: str, subject: str, window_s: float,
     with _delivery_lock:
         entry = _delivery.get(key)
         if entry is not None:
-            deadline, folded = entry
+            deadline, folded, identities, overflow = entry
             if now < deadline:
-                _delivery[key] = (deadline, folded + 1)
-                return False, 0
-            _delivery[key] = (now + window_s, 0)
-            if len(_delivery) > _MAX_DELIVERY_KEYS:
-                _delivery = {k: v for k, v in _delivery.items() if v[0] > now}
-            return True, folded
-        _delivery[key] = (now + window_s, 0)
-        if len(_delivery) > _MAX_DELIVERY_KEYS:
-            _delivery = {k: v for k, v in _delivery.items() if v[0] > now}
-        return True, 0
+                folded += 1
+                # A REPEAT of a source already named is not a new source.
+                if identity and identity not in identities:
+                    if len(identities) < _MAX_FOLDED_IDENTITIES:
+                        identities = (*identities, identity)
+                    else:
+                        overflow += 1
+                _delivery[key] = (deadline, folded, identities, overflow)
+                return False, 0, (), 0
+            _delivery[key] = (now + window_s, 0, (), 0)
+            _enforce_delivery_cap(now)
+            return True, folded, identities, overflow
+        _delivery[key] = (now + window_s, 0, (), 0)
+        _enforce_delivery_cap(now)
+        return True, 0, (), 0
+
+
+def _enforce_delivery_cap(now: float) -> None:
+    """Hold the ledger at :data:`_MAX_DELIVERY_KEYS` LIVE entries (#14407).
+
+    The previous version filtered on ``deadline > now``, i.e. it only removed
+    entries that had ALREADY expired — so with 24 h incident windows a live
+    population above the cap was never reduced and the constant bounded nothing
+    (measured in review: 4596 live subjects, 4596 entries). A real bound has to
+    evict LIVE entries, and the honest choice is the soonest-to-expire: those
+    are the ones the window is about to free anyway, so evicting them costs at
+    most one extra message for a subject that was at the end of its window.
+    """
+    global _delivery
+    if len(_delivery) <= _MAX_DELIVERY_KEYS:
+        return
+    live = {k: v for k, v in _delivery.items() if v[0] > now}
+    if len(live) > _MAX_DELIVERY_KEYS:
+        kept = sorted(live.items(), key=lambda kv: kv[1][0],
+                      reverse=True)[:_MAX_DELIVERY_KEYS]
+        live = dict(kept)
+    _delivery = live
 
 
 def release_abuse_delivery(kind: str, subject: str) -> None:
@@ -477,6 +550,14 @@ def release_abuse_delivery(kind: str, subject: str) -> None:
     clean (``AbuseEngine._evaluate``). Without this release a long-lived fallback
     window would mute the second episode — the direction a security signal must
     never fail in (#4872).
+
+    Released on the episode end the engine OBSERVES (the clean window that
+    persisted ``flag_clear``, plus its bounded retry). An episode cleared out of
+    band — the ``abuse_unsuspend`` SQL function, a manual ``flag_clear`` — is not
+    observed, so its window stays armed and a new episode inside it is folded;
+    the reminder at the window's end still fires and names the open issue. That
+    residual is stated where the window is declared, and the runbook row names
+    the manual close (#14407 round 5).
     """
     with _delivery_lock:
         _delivery.pop((kind, subject), None)
@@ -589,7 +670,8 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
 
 
 def _abuse_message(kind: str, org_id: str, details: dict, *,
-                   attribution: str, folded: int = 0) -> str:
+                   attribution: str, folded: int = 0,
+                   identities: tuple[str, ...] = (), overflow: int = 0) -> str:
     """The human text: what fired, for whom, and WHY it is attributable.
 
     Every abuse message carries an ``attribution`` line — an issue number, the
@@ -620,6 +702,13 @@ def _abuse_message(kind: str, org_id: str, details: dict, *,
                  "no org scope, so there is no row to write)")
         parts.append(f"Digest: {folded} further {kind} detection(s) in the "
                      f"previous window were folded into this message; {recorded}.")
+    if identities or overflow:
+        # The folded SOURCES, not just their count (#14407 round 5): a distributed
+        # burst collapsed into one message still has to say which clients it
+        # refused, or the digest has replaced the evidence instead of bounding it.
+        listed = ", ".join(identities) if identities else "(none named)"
+        more = f" (+{overflow} more)" if overflow else ""
+        parts.append(f"Folded sources: {listed}{more}")
     return "\n".join(parts)
 
 
@@ -733,7 +822,28 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
         try:
             outcome = store.open_incident_state(incident_kind, subject, detail)
         except Exception as e:  # noqa: BLE001, RUF100
+            # The raise is NOT proof that nothing was filed: `open_incident_state`
+            # can raise AFTER it created + announced the issue (a trailing
+            # `_write_json`, the pending-push bookkeeping, `_set_healthy_streak`
+            # on the DEDUP path deliberately propagates). Saying "no incident was
+            # filed" then tells the human there is no record while issue #N is
+            # open and was pushed in the same breath — a duplicate page and a false
+            # statement, the class this change removes (#14407 round 5).
             reason = f"incident filing failed ({redact_safe(e)})"
+            # Best-effort: does an incident exist for this subject anyway?
+            try:
+                known = store.incident_record(incident_kind, subject).get(
+                    "issue_number")
+            except Exception:  # noqa: BLE001, RUF100 — the read itself may fail
+                known = None
+            if known:
+                deliver, folded, _ids, _over = _claim_delivery(
+                    kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
+                if deliver:
+                    _deliver_unattributed(
+                        kind, org_id, subject, details, folded,
+                        reason=reason, known_number=known)
+                return
         else:
             # The bound is the EPISODE, with a bounded RE-ALARM, and both are the
             # delivery ledger's (`_claim_delivery`). Arm the window here on EVERY
@@ -741,7 +851,7 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
             # the create-once path has already pushed the episode's first message
             # when it FILED, and on DEDUP the ledger alone decides whether the
             # open incident has earned its next reminder.
-            deliver, folded = _claim_delivery(
+            deliver, folded, _ids, _over = _claim_delivery(
                 kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
             # A read that RAISES is not "no issue number": the store may have
             # pushed an attributed alert already, so treating unknown as absent
@@ -835,7 +945,8 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
             # send again — the per-detection storm this change removes.
             return
 
-    deliver, folded = _claim_delivery(kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
+    deliver, folded, _ids, _over = _claim_delivery(
+        kind, subject, _INCIDENT_DELIVERY_WINDOW_S)
     if not deliver:
         return
     _deliver_unattributed(kind, org_id, subject, details, folded,
@@ -843,7 +954,8 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
 
 
 def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
-                          folded: int, *, reason: str) -> None:
+                          folded: int, *, reason: str,
+                          known_number: int | None = None) -> None:
     """Send the BOUNDED message for a class whose incident cannot be named.
 
     #14407: the invariant is "every abuse message is attributable — or it SAYS
@@ -862,7 +974,14 @@ def _deliver_unattributed(kind: str, org_id: str, subject: str, details: dict,
         kind, subject, reason, int(_INCIDENT_DELIVERY_WINDOW_S // 3600))
     if not _send_abuse(bot_token, chat_id, _abuse_message(
             kind, org_id, details,
-            attribution=f"Not attributable: {reason}.",
+            attribution=(
+                # `known_number` means an incident DOES exist (the store filed it,
+                # then a later step raised). Asserting "no incident was filed" here
+                # would be false, and would page a second time about the same
+                # condition without saying so.
+                f"Attribution uncertain — issue #{known_number} exists, but the "
+                f"incident state could not be confirmed: {reason}."
+                if known_number else f"Not attributable: {reason}."),
             folded=folded)):
         # A failed send must not consume the window: an outage must not mute the
         # class for the next window after it recovers.
@@ -901,7 +1020,16 @@ def _notify_abuse_activity(kind: str, org_id: str, details: dict) -> None:
       disabled, so a human never reads a measurement as an incident — the framing
       defect #10156 fixed on the dashboard and this change fixes in the chat.
     """
-    deliver, folded = _claim_delivery(kind, org_id, _ACTIVITY_DELIVERY_WINDOW_S)
+    # The detection's OWN scope is the identity a digest must carry: the
+    # signup-velocity callers reach here with no org at all (`record_signup_block`
+    # is called with no `org_id` by the 429 path), so without this every refused
+    # client in a window collapses into ONE anonymous message and the other IPs
+    # are in no alert record anywhere — the bound would have deleted the evidence
+    # rather than bounding it (#14407 round 5).
+    identity = details.get("ip")
+    identity = identity if isinstance(identity, str) and identity else None
+    deliver, folded, identities, overflow = _claim_delivery(
+        kind, org_id, _ACTIVITY_DELIVERY_WINDOW_S, identity=identity)
     if not deliver:
         return
     bot_token = _env("TELEGRAM_BOT_TOKEN")
@@ -917,7 +1045,7 @@ def _notify_abuse_activity(kind: str, org_id: str, details: dict) -> None:
                             if org_id and org_id != "_" else
                             "the detection carried no org scope, so NO dashboard "
                             "row was written for it.")),
-            folded=folded)):
+            folded=folded, identities=identities, overflow=overflow)):
         release_abuse_delivery(kind, org_id)
 
 

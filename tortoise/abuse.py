@@ -1819,11 +1819,16 @@ class AbuseEngine:
         self._last_notified: dict[tuple[str, str, str], datetime] = {}
         self._notify_lock = threading.Lock()
         # Episode ends whose incident resolution did not COMPLETE, awaiting a
-        # retry on a later clean window (#14407): the value is the FIRST-SEEN
-        # instant (a TTL anchor, read by `_remember_pending_resolve`), and the
-        # entry is dropped once `_EPISODE_RESOLVE_RETRY_TTL_S` has elapsed — a
-        # close that can never succeed is dropped instead of retried for ever.
-        # In-process and bounded twice (that TTL, and
+        # retry on a later clean window (#14407). The value is the FIRST-SEEN
+        # instant (a TTL anchor read by `_remember_pending_resolve`), and the
+        # entry is dropped once `_EPISODE_RESOLVE_RETRY_TTL_S` has elapsed.
+        # NOT an attempt count: the retry fires on every clean window while the
+        # store REFUSES attempts during its `close_cooldown_min` (#5143), so a
+        # count budget is spent inside one cooldown and drops the hint exactly
+        # when the retry would have worked — which is why the bound is a
+        # deadline AND the retries are spaced (`_EPISODE_RESOLVE_RETRY_BACKOFF_S`,
+        # without which the deadline is a 25h read tax, not a bound).
+        # In-process and bounded three ways (that deadline, the spacing, and
         # `_MAX_PENDING_EPISODE_RESOLVES`) — a hint, never an authority.
         self._pending_episode_resolves: dict[tuple[str, str], datetime] = {}
         # Last retry instant per subject, so a failing close is retried at the
@@ -2099,6 +2104,23 @@ class AbuseEngine:
             # alert itself stays bounded by _claim_notify (#3631 target a).
             flagged_at = None
         if flagged_at is None:
+            # NO FLAG ON RECORD — including an episode that ended out of band (the
+            # ``abuse_unsuspend`` SQL function and a manual ``flag_clear`` write the
+            # flag away with no in-process caller here), so no clean window ran the
+            # episode-end work and BOTH its incident and its 24h delivery window
+            # stand.
+            #
+            # Deliberately NOT inferred as an episode end here. The same read
+            # returns None when a flag we just WROTE is invisible to a stale read,
+            # and that is the #3631 storm: releasing the alert budget or queueing a
+            # close on every such None re-pages per detection and can close the
+            # incident of an org that is still over threshold (a false all-clear).
+            # A store read is not evidence that an episode ended unless it is the
+            # read that also cleared it (`flag_clear` on the clean-window branch).
+            # The cost of that choice is DECLARED and bounded: after an out-of-band
+            # clear a new episode inside the armed window is folded, and its
+            # reminder fires at the window's end naming the open issue; the runbook
+            # row names the manual close. See `notify._INCIDENT_DELIVERY_WINDOW_S`.
             return self._flag(org_id, rule, details, now, window_s)
         flagged_at = _ensure_aware(flagged_at)
         age_s = (now - flagged_at).total_seconds()
