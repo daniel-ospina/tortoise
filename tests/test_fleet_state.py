@@ -3743,15 +3743,30 @@ def _row_for_pid(pid: int) -> str:
 #: sends) are the interpreter dying under the fixture, so the substrate — never the box — is at
 #: fault. That asymmetry is deliberate: an unenumerated signal keeps the FAIL, because a
 #: permanent green on a crashing substrate is the false PASS this test exists to prevent.
-_OUTSIDE_SIGNALS = frozenset({
-    signal.SIGHUP, signal.SIGINT, signal.SIGQUIT,      # a terminal, or the shard's `timeout`
-    signal.SIGTERM, signal.SIGKILL,                    # an OOM killer, an orphan sweep
-    signal.SIGUSR1, signal.SIGUSR2, signal.SIGPWR,     # a user, a supervisor, the kernel
-    signal.SIGALRM, signal.SIGVTALRM, signal.SIGPROF,  # a wall-clock timer or an interval alarm
-    signal.SIGXCPU, signal.SIGXFSZ,                    # `ulimit -t` / `ulimit -f`
-    signal.SIGPIPE, signal.SIGSYS,                     # a closed pipe, a sandbox refusal
-    signal.SIGCONT, signal.SIGWINCH, signal.SIGURG,    # benign control signals, never a crash
-})
+#: ⛔ SIGPWR IS LINUX-ONLY AND MUST BE READ TOLERANTLY (#14287 review, third round). CPython
+#: declares it under `#ifdef SIGPWR` in `Modules/signalmodule.c`, so on a platform whose headers
+#: lack it — Darwin has SIGEMT and SIGINFO and no SIGPWR — the attribute does not exist. A bare
+#: `signal.SIGPWR` here is at MODULE scope, so its absence is an `AttributeError` at IMPORT: a
+#: COLLECTION ERROR of this entire file, not one failed test, and every CI job is Linux so nothing
+#: would ever see it. `getattr` with a `None` default and a filter is the repo's own shape for
+#: exactly this class (`tests/test_timeout_not_disarmable.py:38`, `tests/_signal_hygiene.py:64`),
+#: and the OTHER members stay bare on purpose: a typo in one of them should still be an error, and
+#: SIGPWR is the only member POSIX does not mandate across the platforms CPython supports — the
+#: other seventeen are POSIX/XSI-mandated and present on Darwin (SIGSYS=12, SIGXCPU=24, SIGXFSZ=25).
+#: Nothing is lost on Darwin — a signal the platform does not have cannot be delivered to the child.
+_OUTSIDE_SIGNALS = frozenset(
+    sig for sig in (
+        signal.SIGHUP, signal.SIGINT, signal.SIGQUIT,      # a terminal, or the shard's `timeout`
+        signal.SIGTERM, signal.SIGKILL,                    # an OOM killer, an orphan sweep
+        signal.SIGUSR1, signal.SIGUSR2,                    # a user, a supervisor
+        getattr(signal, "SIGPWR", None),                   # the kernel — Linux only, see above
+        signal.SIGALRM, signal.SIGVTALRM, signal.SIGPROF,  # a wall-clock timer, an interval alarm
+        signal.SIGXCPU, signal.SIGXFSZ,                    # `ulimit -t` / `ulimit -f`
+        signal.SIGPIPE, signal.SIGSYS,                     # a closed pipe, a sandbox refusal
+        signal.SIGCONT, signal.SIGWINCH, signal.SIGURG,    # benign control signals, never a crash
+    )
+    if sig is not None
+)
 
 #: How LONG the census must keep failing before the error stops being the box's and becomes the
 #: census's. ONE lost `ps` is not enough: `pi_processes()` folds a 30 s `_run` timeout, a refusal
