@@ -8916,7 +8916,9 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # never put to the question; `_composition_callee_is` now asks it and gates the module
         # on the `builtins`-module name set. Non-vacuity MEASURED: reverting that helper's
         # `Attribute` clause to `False` leaves these four rows GREEN and reds exactly these
-        # four, each named (40 passed before the fix, 44 after).
+        # four, each named (the run reads `1 failed, 43 passed`; this file carries 44 `def test_`
+        # entries at every commit on this branch, so 44 is the whole population both before and
+        # after — a `40 passed` figure here was wrong and is corrected, #14395 review P3).
         "module-attribute `builtins.vars` composition": (
             '    import builtins\n'
             '    builtins.vars(builtins)["exec"]("results = sdk._tortoise_fts_query(q)")\n'),
@@ -12353,9 +12355,14 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     and it does NOT reach the module fetched out of the builtins namespace (#14395 review, P1):
     `_f = builtins.dict.get; _f(builtins.__dict__, "exec")(<read>)` is GREEN and LIVE
     (`builtins.dict.get is dict.get` → True), as are `__builtins__["dict"].get`,
-    `builtins.__dict__["dict"].get`, `vars(builtins)["dict"].get`, `getattr(builtins, "dict").get`
-    and `_g = builtins.dict.__getitem__; _g("get")` — while the inline `builtins.dict.get(m,
-    "exec")` and `builtins.dict.__dict__["get"]` are RED. That class is PRE-EXISTING on `main`
+    `builtins.__dict__["dict"].get`, `vars(builtins)["dict"].get` and `getattr(builtins,
+    "dict").get` — while the inline `builtins.dict.get(m, "exec")` and
+    `builtins.dict.__dict__["get"]` are RED. ⛔ AND ONE SPELLING THIS PARAGRAPH USED TO CALL
+    LIVE IS NOT: `_g = builtins.dict.__getitem__; _g("get")` reads GREEN but CANNOT EXECUTE —
+    `builtins.dict.__getitem__("get")` raises `TypeError: descriptor '__getitem__' for 'dict'
+    objects doesn't apply to a 'str' object` (MEASURED, #14395 review P3). It stays GREEN in the
+    census and is NOT a lever, which is why it is named here as GREEN rather than folded into
+    the LIVE list above. That class is PRE-EXISTING on `main`
     (measured: the same seven shapes read GREEN there) and is FILED rather than claimed closed
     here; the arm is a receiver the `{"dict", "copy"}` union cannot supply, because the module is
     reached through the namespace and not named.
@@ -12557,6 +12564,45 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_g = <copy namespace>.get; _f = _g(\"copy\")` — via the module's IMPORT ALIAS (`_z`)": (
             'import builtins, copy as _z', '_g = _z.__dict__.get', '_f = _g("copy")',
             '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        # ⛔ AND THE OTHER MEMBERS AND RECEIVERS OF THAT SAME CLASS (#14395 review P2, EACH
+        # MEASURED GREEN — `refused=False` — at this head and on `origin/main`). The two rows
+        # above pinned the `.get` member for the literal namespace and for its `import … as`
+        # alias, so the paragraph's guarantee (closing the class must EDIT this table) held for
+        # FOUR of the class's spellings and not the other EIGHT: the module's other mapping
+        # reads (`.pop`, `.setdefault`) and the `vars(...)` / `getattr(..., "__dict__")`
+        # receivers of both the literal module and its alias resolve the SAME two-step
+        # composition — `_g("copy")` yields the copy callee, `_f(builtins.__dict__)` the
+        # builtins one — and a future partial closure of any one of them would have red no row.
+        # ⛔ THE BOUNDARY, STATED RATHER THAN IMPLIED: this is the class's spelling set for the
+        # `copy` module at the two bind depths the refused read-method rows above also pin. An
+        # alias of an alias is the same class one bind further and is NOT rowed, for the reason
+        # that boundary is already stated for the read-method receivers: a row per depth is the
+        # spelling list this file refuses to grow.
+        "`_g = copy.__dict__.pop; _f = _g(\"copy\")` — the `pop` member": (
+            'import builtins, copy', '_g = copy.__dict__.pop', '_f = _g("copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_g = copy.__dict__.setdefault; _f = _g(\"copy\")` — the `setdefault` member": (
+            'import builtins, copy', '_g = copy.__dict__.setdefault', '_f = _g("copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_g = vars(copy).get; _f = _g(\"copy\")` — via `vars(<module>)`": (
+            'import builtins, copy', '_g = vars(copy).get', '_f = _g("copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_g = vars(copy).pop; _f = _g(\"copy\")` — via `vars(<module>)`, `pop`": (
+            'import builtins, copy', '_g = vars(copy).pop', '_f = _g("copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_g = getattr(copy, \"__dict__\").get; _f = _g(\"copy\")` — via `getattr`": (
+            'import builtins, copy', '_g = getattr(copy, "__dict__").get', '_f = _g("copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_g = _z.__dict__.pop; _f = _g(\"copy\")` — IMPORT ALIAS, `pop`": (
+            'import builtins, copy as _z', '_g = _z.__dict__.pop', '_f = _g("copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_g = vars(_z).get; _f = _g(\"copy\")` — IMPORT ALIAS via `vars`": (
+            'import builtins, copy as _z', '_g = vars(_z).get', '_f = _g("copy")',
+            '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
+        "`_g = getattr(_z, \"__dict__\").get; _f = _g(\"copy\")` — IMPORT ALIAS via `getattr`": (
+            'import builtins, copy as _z', '_g = getattr(_z, "__dict__").get',
+            '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
         # ⛔ AND THE NAMESPACE-BOUND RECEIVERS OF THAT SAME TWO-STEP COMPOSITION (#14395 round-4
         # P2). The BOUNDARY sentences above named "the levels the closure rows distinguish" but
         # counted two where those rows carry THREE, and the third — a NAMESPACE bound to a name,
@@ -12586,7 +12632,12 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # (`_d["exec"](<read>)`) legitimately has no call-of-call; this one is shape-agnostic:
         # the read literal must be the ARGUMENT of some call, in EVERY row of the table.
         # MEASURED both ways: 44 passed unmutated, and splitting any row into two statements reds
-        # this arm naming the row.
+        # this arm naming the row. ⛔ ITS GUARANTEE IS EXACTLY THIS AND NO MORE (#14395 review P3):
+        # it proves the read literal is an argument of SOME call, not that the callee of that call
+        # is the resolved mapping read — a row rewritten to `_x = print` + `_x("results = …")`
+        # still satisfies it. The half it cannot see is covered by the row's own VERDICT
+        # (`not refused`), which is what a row exists to pin; this arm only stops the shape from
+        # degrading silently while that verdict stays constant.
         assert [
             n for n in ast.walk(_pin_source(body(*lines)))
             if isinstance(n, ast.Call)
