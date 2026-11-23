@@ -1876,17 +1876,30 @@ def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
             return False
         if isinstance(node.value, ast.Name):
             return node.value.id in names
-        # ⛔ AND THE DOTTED RECEIVER (#14326 review cycle 13, MEASURED GREEN **and LIVE**:
-        # `builtins.dict.__dict__["copy"]` and `builtins.dict.__dict__["get"]`, while
-        # `builtins.dict.copy` and `getattr(builtins.dict, "copy")` are REFUSED rows). The
-        # member is a NAME the caller passes for exactly this reason — the copy and
-        # read-method callers pass `{"dict", "copy"}` — and the module prefix is already in
-        # `names`, so the receiver set is the same set the Name arm reads. Spelling the dotted
-        # form in each caller would be the enumeration this predicate exists to prevent.
-        return (isinstance(node.value, ast.Attribute)
+        # ⛔ AND THE DOTTED RECEIVER, AND THE MODULE MEMBER FETCHED OUT OF THE MAPPING
+        # (#14326 review cycle 13 for the dotted form, FAIL LANE cycle 2 for the fetched one,
+        # EACH MEASURED GREEN **and LIVE** with its one-node-over twin RED):
+        #
+        #     builtins.dict.__dict__["get"] / ["copy"]          -> closed (cycle 13)
+        #     builtins.__dict__["dict"].__dict__["get"]           GREEN  `builtins.dict…` RED
+        #     vars(builtins)["dict"].__dict__["copy"]             GREEN  (`… is dict.copy`)
+        #     getattr(builtins, "dict").__dict__["get"]           GREEN
+        #     __builtins__["dict"].__dict__["get"]                GREEN  (imported-module form)
+        #
+        # Executed, not inferred: each returns the real `exec`. The prefix was required to be a
+        # bare `ast.Name` in `names`, so the module written any of the four ways this file already
+        # RESOLVES (`__builtins__["dict"]`, `builtins.__dict__["dict"]`, `vars(builtins)["dict"]`,
+        # `getattr(builtins, "dict")`) fell through — while the same member fetched through the
+        # same mapping is a REFUSED row in its attribute spelling (`__builtins__["dict"].copy`).
+        # The dotted form keeps its explicit arm (the resolver answers only Call/Subscript nodes);
+        # everything else is asked of the resolver the file already owns, for the one member.
+        if (isinstance(node.value, ast.Attribute)
                 and isinstance(node.value.value, ast.Name)
                 and node.value.value.id in names
-                and node.value.attr in names)
+                and node.value.attr in names):
+            return True
+        return _builtin_lookup_name(node.value, names, consts, frozenset({"__builtins__"}),
+                                   launderers, members=frozenset({"dict", "copy"})) is not None
     if not isinstance(node, ast.Call):
         return False
     if (isinstance(node.func, ast.Name)
@@ -7876,6 +7889,29 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    _g = getattr(dict, "__dict__")["get"]\n'
             '    _g(builtins.__dict__, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        # ⛔ AND THE MODULE WRITTEN THE FOUR OTHER WAYS THIS FILE ALREADY RESOLVES (#14326 fail
+        # lane cycle 2, EACH MEASURED GREEN **and LIVE** while its dotted twin was REFUSED):
+        #
+        #     builtins.__dict__["dict"].__dict__["get"](m, "exec")   GREEN
+        #     vars(builtins)["dict"].__dict__["copy"](m)             GREEN
+        #     getattr(builtins, "dict").__dict__["get"](…)          GREEN
+        #     __builtins__["dict"].__dict__["get"](m, "exec")        GREEN (imported-module form)
+        #
+        # The namespace receiver required a bare `Name` prefix, so the module fetched OUT of the
+        # mapping — the spelling whose attribute form is already a REFUSED row
+        # (`__builtins__["dict"].copy`) — fell through every arm.
+        "a READ METHOD from the module fetched OUT of the mapping": (
+            '    import builtins\n'
+            '    m = builtins.__dict__\n'
+            '    builtins.__dict__["dict"].__dict__["get"](m, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a COPY CALLEE from the module fetched OUT of the mapping, via `vars`": (
+            '    import builtins\n'
+            '    _d = vars(builtins)["dict"].__dict__["copy"](builtins.__dict__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q)")\n'),
+        "a READ METHOD from the module fetched OUT of the mapping, via `getattr`": (
+            '    import builtins\n'
+            '    m = builtins.__dict__\n'
+            '    getattr(builtins, "dict").__dict__["get"](m, "exec")("results = sdk._tortoise_fts_query(query=q)")\n'),
         # ⛔ AND THE ONE-BIND ALIAS OF THE NAMESPACE ITSELF (#14326 fail lane, EACH MEASURED
         # GREEN and LIVE: `_n = dict.__dict__; _n["copy"](m)["exec"] is exec` → True). The
         # one-bind alias of the MAPPING one module over (`_d = builtins.__dict__`) has been
