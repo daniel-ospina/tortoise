@@ -263,11 +263,13 @@ _WINDOW_WARN_LOCK = threading.Lock()
 #: authority: the store holds the incident, and the runbook's manual close remains
 #: the fallback for a close that cannot succeed.
 _MAX_PENDING_EPISODE_RESOLVES = 4096
-#: Attempts per subject before an episode-end close that keeps failing is dropped
-#: and the operator closes the incident by hand (#14407). Each retry costs the
-#: same incident reads as the first attempt, so an unbounded retry is a read tax
-#: on the request path, not a free set lookup.
-_MAX_EPISODE_RESOLVE_ATTEMPTS = 12
+#: How long an episode-end close that keeps failing stays on the retry list
+#: (#14407): 25h, i.e. one full incident-delivery window plus slack. A CALL-COUNT
+#: cap cannot work here — the store refuses retries for `close_cooldown_min` after
+#: a failure while the retry branch fires on every clean evaluation, so any count
+#: is spent inside one cooldown. Each retry costs the same incident reads as the
+#: first attempt, so an unbounded retry is a read tax on the request path.
+_EPISODE_RESOLVE_RETRY_TTL_S = 90_000.0
 
 
 def _negative_env(raw: str | None) -> bool:
@@ -1816,7 +1818,7 @@ class AbuseEngine:
         # retry on a later clean window (#14407): the value is the attempt count,
         # so a close that can never succeed is dropped instead of retried for
         # ever. In-process and bounded — a hint, never an authority.
-        self._pending_episode_resolves: dict[tuple[str, str], int] = {}
+        self._pending_episode_resolves: dict[tuple[str, str], datetime] = {}
 
     def _claim_notify(self, org_id: str, rule: str, stage: str,
                       now: datetime, window_s: int) -> bool:
@@ -1888,29 +1890,44 @@ class AbuseEngine:
     def _remember_pending_resolve(self, org_id: str, rule: str) -> None:
         """Queue an episode-end resolution that did not COMPLETE, for a retry.
 
-        Bounded twice, because the retry is not free: it costs the same incident
-        reads as the first attempt (~2 R2 GETs per rule), on every clean window.
-          * per subject — `_MAX_EPISODE_RESOLVE_ATTEMPTS`, after which the entry is
-            DROPPED with a warning: a close that keeps failing is a durable fault,
-            and the runbook's manual close is the honest fallback rather than an
-            unbounded read tax on the request path;
+        Bounded by WALL CLOCK, not by call count: the retry branch fires on every
+        clean-window evaluation of the rule — i.e. on every `record_point_create`
+        for an org under its threshold — while a failed close makes the store
+        REFUSE further attempts for `close_cooldown_min` (`#5143`). A call-count
+        cap is therefore spent inside a single cooldown, and the entry is dropped
+        exactly when the cooldown expires and the retry could have worked. A
+        deadline is the only bound that matches the store's backoff.
+
+        Bounded twice, because the retry is not free (the same incident reads as
+        the first attempt):
+          * per subject — `_EPISODE_RESOLVE_RETRY_TTL_S`, after which the entry is
+            DROPPED with a warning: a close that keeps failing past that is a
+            durable fault, and the runbook's manual close is the honest fallback
+            rather than an unbounded read tax on the request path;
           * overall — `_MAX_PENDING_EPISODE_RESOLVES` entries, so a fleet-wide
             outage cannot grow the map without limit.
         This is a retry HINT, never an authority: the store holds the incident.
         """
         key = (org_id, rule)
-        attempts = self._pending_episode_resolves.get(key, 0) + 1
-        if attempts > _MAX_EPISODE_RESOLVE_ATTEMPTS:
+        now = _utcnow()
+        first = self._pending_episode_resolves.get(key)
+        if first is not None and (now - first).total_seconds() > _EPISODE_RESOLVE_RETRY_TTL_S:
             self._pending_episode_resolves.pop(key, None)
             logger.warning(
-                "abuse episode end: %s/%s still not resolved after %d attempts — "
-                "giving up on the automatic close; close the incident by hand "
-                "(the runbook names the object)", org_id, rule, attempts - 1)
+                "abuse episode end: %s/%s still not resolved after %ds — giving up "
+                "on the automatic close; close the incident by hand (the runbook "
+                "names the object)", org_id, rule,
+                int(_EPISODE_RESOLVE_RETRY_TTL_S))
             return
-        self._pending_episode_resolves[key] = attempts
-        if len(self._pending_episode_resolves) > _MAX_PENDING_EPISODE_RESOLVES:
-            self._pending_episode_resolves.clear()
-            self._pending_episode_resolves[key] = attempts
+        with self._notify_lock:
+            self._pending_episode_resolves.setdefault(key, now)
+            if len(self._pending_episode_resolves) > _MAX_PENDING_EPISODE_RESOLVES:
+                logger.warning(
+                    "abuse episode end: %d pending resolutions exceeds the cap — "
+                    "dropping ALL retry hints; the incidents stay OPEN and need a "
+                    "manual close", len(self._pending_episode_resolves))
+                self._pending_episode_resolves.clear()
+                self._pending_episode_resolves[key] = now
 
     def _release_notify(self, org_id: str, rule: str, stage: str) -> None:
         """Re-arm the alert budget for a stage when its episode ENDS, so a

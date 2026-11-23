@@ -55,7 +55,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
-from tortoise.alert_store import OpenOutcome, ResolveOutcome
+from tortoise.alert_store import CloseCooldown, OpenOutcome, ResolveOutcome
 from tortoise.incident_kinds import (
     KIND_ABUSE_FLAG_RAISED,
     KIND_ABUSE_REVIEW_NEEDED,
@@ -550,6 +550,17 @@ def resolve_abuse_episode(org_id: str, rule: str | None) -> bool:
         for subj in subjects:
             try:
                 outcome = store.resolve_incident_state(kind, subj)
+            except CloseCooldown as cool:
+                # A REFUSAL, not a failed attempt: the store is backing off for
+                # `close_cooldown_min` after a recent failure (#5143) and NOTHING
+                # was tried. It must not consume the engine's retry budget —
+                # otherwise the budget is spent entirely inside one cooldown and
+                # the incident is dropped exactly when the cooldown expires.
+                ok = False
+                logger.info("abuse episode end: %s (%s) backing off after a "
+                            "recent failed close (%s)", kind, subj,
+                            redact_safe(cool))
+                continue
             except Exception as e:  # noqa: BLE001, RUF100
                 ok = False
                 logger.warning("abuse episode end: %s (%s) did not resolve (%s) — "
@@ -749,7 +760,9 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                 # the incident so the human can see it is the same one — the
                 # pre-fix code pushed every window with no reference at all.
                 ref = (f"issue #{number}" if number
-                       else "an open incident with no issue number on record")
+                       else ("an open incident whose issue number could not be "
+                             "read just now" if not number_known
+                             else "an open incident with no issue number on record"))
                 bot_token = _env("TELEGRAM_BOT_TOKEN")
                 chat_id = _env("TELEGRAM_CHAT_ID")
                 channel_ok = not (
@@ -765,6 +778,19 @@ def _notify_abuse_incident(kind: str, org_id: str, details: dict) -> None:
                         folded=folded)):
                     # A failed send must not consume the reminder window.
                     release_abuse_delivery(kind, subject)
+            elif outcome is OpenOutcome.FILED and not number_known and deliver:
+                # The store filed and may well have pushed a correctly attributed
+                # alert; the read-back is what failed. Sending the unattributed
+                # text would assert an absence we cannot establish, and LEAVING THE
+                # WINDOW ARMED would be silent for the whole window whenever the
+                # store filed WITHOUT a number (deferred filing) — "silence is an
+                # outcome", which #4872 forbids. Defer instead: release the window
+                # and let the next detection read the number.
+                release_abuse_delivery(kind, subject)
+                logger.warning(
+                    "abuse notify: %s (%s) filed but the issue number could not be "
+                    "read back — delivery deferred to the next detection (the "
+                    "window was released, not spent)", kind, subject)
             elif (outcome is OpenOutcome.FILED and number_known and not number
                   and deliver):
                 # FILED with NO issue number is NOT a delivered alert. The store

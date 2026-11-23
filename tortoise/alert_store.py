@@ -61,7 +61,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import threading
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable  # noqa: UP035
@@ -82,13 +81,6 @@ from tortoise.security import redact_for_publication
 logger = logging.getLogger(__name__)
 
 DEDUP_PREFIX = "ops/alerts/"
-
-#: Serialises `migrate_incident_subject` WITHIN one process (#14407): two rules of
-#: one org can migrate concurrently from the same legacy sentinel, and the claim
-#: check that follows the create is only meaningful when the create+release pair is
-#: not interleaved here. Cross-process ordering is the claim check's job, not this
-#: lock's.
-_MIGRATION_LOCK = threading.Lock()
 # #2844: the spellings of a SUBJECT-LESS (platform-scoped) sentinel, one per
 # writer. The store writes the canonical first entry; the DR driver writes
 # `global`. Both are read and both are deleted — see the module docstring.
@@ -548,47 +540,57 @@ class AlertStore:
             # recognisable (see the platform-scoping guard in `_alias_states`).
             state["org_id"] = new_subject
             state["team_id"] = new_subject
-            # ONE OWNER, or the legacy issue ends up claimed twice — which is the
-            # #2844 alias class this migration exists to remove, with the harm
-            # landing on exactly the org #10576 describes: two rules of one org can
-            # fire concurrently (the abuse pool is 4 workers; `_claim_notify`
-            # serialises only the SAME rule), and two scoped sentinels naming ONE
-            # issue means one rule's episode end closes the issue the other rule is
-            # tracked by (`_issue_is_live` false → it re-files), i.e. a `✅` pushed
-            # while the other rule is still breaching.
+            # ONE OWNER, or the legacy issue ends up claimed twice — the #2844
+            # alias class this migration exists to remove, with the harm landing on
+            # exactly the org #10576 describes: two rules of one org can fire
+            # concurrently (the abuse pool is 4 workers; `_claim_notify` serialises
+            # only the SAME rule), and two scoped sentinels naming ONE issue means
+            # one rule's episode end closes the issue the other rule is tracked by
+            # (`_issue_is_live` false → it re-files), i.e. a `✅` for a rule that is
+            # still breaching.
             #
-            # `create_if_not_exists` alone is NOT enough: it serialises writers on
-            # ONE key, while the racers here write DIFFERENT keys from one shared
-            # legacy object. So the create is followed by a CLAIM CHECK — only the
-            # migrator that still finds the legacy object holding this issue number
-            # may release it — and a migration that cannot complete is ROLLED BACK
-            # (its scoped key deleted) rather than left as a second claimant. The
-            # in-process lock closes the same-process window; the claim check covers
-            # the cross-process one.
-            with _MIGRATION_LOCK:
+            # `create_if_not_exists` on the SCOPED key cannot serialise that: the
+            # racers write DIFFERENT scoped keys from one shared legacy object, and
+            # `delete` is idempotent on both substrates, so a read-then-delete
+            # "claim check" lets both claim. The linearisation point is therefore a
+            # per-ISSUE claim object, created once atomically: only the migrator
+            # that creates it may move the sentinel (and no lock is needed, so no
+            # R2 round trip is held under one).
+            claim_key = f"ops/alerts/.migrating/{kind}/{number}.json"
+            try:
+                won = self._storage.create_if_not_exists(
+                    claim_key,
+                    json.dumps({"subject": new_subject,
+                                "legacy": legacy_subject}).encode())
+            except Exception as e:  # noqa: BLE001, RUF100 — treat as not-won
+                logger.warning("dedup: could not claim the migration of %s/%s "
+                               "(%s) — the caller files under the new subject",
+                               kind, legacy_subject, e)
+                return False
+            if not won:
+                # Another migrator already owns this issue: nothing to move, and a
+                # scoped sentinel here would be a second claim.
+                return False
+            try:
                 if not self._storage.create_if_not_exists(
                         new_key, json.dumps(state).encode()):
-                    return False
-                current = _read_json(self._storage, legacy_key)
-                if not current or current.get("issue_number") != number:
-                    # Another migrator released the legacy object first: it owns
-                    # this issue, and our scoped sentinel would be a second claim.
-                    self._discard_migration(new_key, kind, new_subject)
                     return False
                 try:
                     self._storage.delete(legacy_key)
                 except Exception as e:  # noqa: BLE001, RUF100
-                    # ROLL BACK: leaving the scoped key in place would let the NEXT
-                    # rule migrate the same issue number again, and the survivor
-                    # legacy object is the adoption SOURCE (so it is not inert).
-                    self._discard_migration(new_key, kind, new_subject)
-                    logger.warning(
-                        "dedup: %s/%s could not be released after migrating to %s "
-                        "(%s) — the migration was rolled back; the incident stays "
-                        "under its legacy spelling", kind, legacy_subject,
-                        new_subject, e)
-                    return False
-            return True
+                    raise RuntimeError(f"legacy release failed: {e}") from e
+                return True
+            except Exception as e:  # noqa: BLE001, RUF100
+                # ROLL BACK everything this call created. Leaving the scoped key in
+                # place (or the claim behind) would strand the incident under TWO
+                # spellings — the legacy object is the adoption SOURCE, not inert.
+                self._discard_migration(new_key, kind, new_subject)
+                self._discard_migration(claim_key, kind, new_subject)
+                logger.warning(
+                    "dedup: %s/%s could not be moved to %s (%s) — the migration "
+                    "was rolled back; the incident stays under its legacy spelling",
+                    kind, legacy_subject, new_subject, e)
+                return False
         except Exception as e:  # noqa: BLE001, RUF100 — adoption is best-effort
             logger.warning(
                 "dedup: %s/%s could not be migrated to %s (%s) — the caller files "
