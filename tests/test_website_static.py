@@ -3743,6 +3743,35 @@ DESKTOP_MIN_HEIGHT = 900
 MAX_SIDE_MEDIA_RE = re.compile(r"max-(width|height)\s*:\s*([^)\s]+)")
 
 
+def _media_query_components(condition: str) -> list[str]:
+    """The component queries of a comma-separated media query LIST.
+
+    A list is a logical OR: *"a media query list is true if any component query
+    is true and false only when all component queries are false"* (W3C Media
+    Queries Level 4 §3; MDN, "Using media queries": *"comma-separated media
+    queries act as a logical OR"*). Splitting is what lets
+    `_media_applies_at_desktop` decide by the list's BEST query instead of by a
+    single threshold drawn from the whole string (#14406 review round 7).
+
+    A comma inside `var(--narrow, 760px)` / `calc(…)` is NOT a list separator,
+    so the split tracks parenthesis depth.
+    """
+    parts: list[str] = []
+    depth, current = 0, []
+    for char in condition:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
 def _media_applies_at_desktop(condition: str) -> bool:
     """Could a media CONDITION apply at a desktop viewport — by its THRESHOLD?
 
@@ -3764,9 +3793,24 @@ def _media_applies_at_desktop(condition: str) -> bool:
     that is not plain `px` (`50em`, `calc(...)`, `var(...)`) is treated as
     REACHING a desktop viewport, because guessing "narrow" is the direction that
     hides an override.
+
+    The CONDITION may be a comma-separated query LIST, which is a logical OR —
+    so the answer is `any()` over the components, never a verdict from one
+    threshold picked out of the whole string. Measured (#14406 review round 7):
+    `@media (max-width: 760px), (min-width: 900px) { .pricing-card .btn {
+    margin-top: 0 } }` applies at 1440x900 through its SECOND query, and the
+    single-threshold form read it as a narrow hatch — all four rows of
+    `TestProductTeamsPricingCardCtaBaseline` stayed GREEN while the rendered
+    CTAs split back to three baselines 70.2px apart.
     """
+    return any(_media_query_applies_at_desktop(component)
+               for component in _media_query_components(condition))
+
+
+def _media_query_applies_at_desktop(component: str) -> bool:
+    """Could ONE component query (one comma-free condition) apply at desktop."""
     constrained = False
-    for axis, raw in MAX_SIDE_MEDIA_RE.findall(condition):
+    for axis, raw in MAX_SIDE_MEDIA_RE.findall(component):
         floor = DESKTOP_MIN_WIDTH if axis == "width" else DESKTOP_MIN_HEIGHT
         if not re.fullmatch(r"\d+(?:\.\d+)?px", raw):
             return True
@@ -11652,3 +11696,76 @@ class TestCssDesktopReachAndSpecificity:
             "the page's own narrow-viewport hatch (`max-width: 760px`) is now "
             "read as a desktop rule — the floor comparison has drifted below "
             f"the page's ~907px stack point. Reached: {reached!r}")
+
+    def test_a_comma_separated_media_list_is_decided_by_any_query(self):
+        """A query LIST is an OR, so its SECOND query can make it apply.
+
+        `@media (max-width: 760px), (min-width: 900px)` is *true* at 1440x900
+        through `min-width: 900px` — "a media query list is true if any
+        component query is true and false only when all component queries are
+        false" (W3C Media Queries 4 §3; MDN, "Using media queries").
+
+        The round-6 predicate compared the threshold of every `max-` it found in
+        the whole condition STRING and decided from that one number, so the
+        second query was never evaluated: the block read as a narrow hatch.
+        Measured (#14406 review round 7) — the mutant below left all four rows
+        of `TestProductTeamsPricingCardCtaBaseline` GREEN while a browser
+        applied it and split the rendered CTAs back to three baselines 70.2px
+        apart.
+        """
+        # The list decides by its BEST query, not by its narrowest.
+        for applying in (
+                "(max-width: 760px), (min-width: 900px)",
+                "(min-width: 900px), (max-width: 760px)",
+                "(max-width: 760px), print",
+                "(max-width: 760px), (max-width: 1440px)",
+        ):
+            assert _media_applies_at_desktop(applying), (
+                f"`@media {applying}` applies at 1440x900 through one of its "
+                "queries, but the reach predicate says it does not — the rule "
+                "inside it is invisible to every cascade row (#14406 review "
+                "round 7)")
+
+        # ...and a list of ONLY narrow queries is still a narrow hatch, or the
+        # page's own `max-width: 760px` blocks would become false REDs.
+        for excluded in (
+                "(max-width: 760px)",
+                "(max-width: 760px), (max-width: 480px)",
+                "(max-width: 760px) and (max-height: 600px)",
+        ):
+            assert not _media_applies_at_desktop(excluded), (
+                f"`@media {excluded}` cannot apply at 1440x900, but the reach "
+                "predicate says it does — the cards stack at those widths by "
+                "design, so this is a false RED on a correct page")
+
+        # A comma inside `var()`/`calc()` is not a list separator.
+        assert _media_query_components("(max-width: 760px), (min-width: 900px)") == [
+            "(max-width: 760px)", "(min-width: 900px)"], (
+            "the comma split did not split a real query list")
+        assert _media_query_components("(max-width: var(--narrow, 760px))") == [
+            "(max-width: var(--narrow, 760px))"], (
+            "a comma INSIDE the parens of `var(--narrow, 760px)` was treated as "
+            "a list separator, which invents a second query that does not exist")
+
+    def test_a_comma_list_override_of_the_ctas_slack_is_reached(self):
+        """The page-level mutant that the round-6 predicate left GREEN.
+
+        This reads through `_css_reaching_decls`, the reader
+        `test_no_other_rule_takes_the_ctas_slack` stands on — and that row now
+        REDs on the mutant below (it passed all four before this fix). The
+        padding cascade (`_css_block_end_cascade`) shares the same predicate via
+        `_css_desktop_rules`, so it gains the reach too; it is not asserted here
+        because a `.pricing-card`-specificity mutant is out-ranked by the
+        popular card's (0,2,0) rule on a CORRECT page, which would not
+        distinguish the reach from the specificity.
+        """
+        mutant = ("@media (max-width: 760px), (min-width: 900px) { "
+                  ".pricing-card .btn { margin-top: 0 } }")
+        reached = [(p, v) for p, v in
+                   _css_reaching_decls(self._page_with(mutant), "margin-top", ".btn")]
+        assert any(v.strip() == "0" for _p, v in reached), (
+            "`.pricing-card .btn { margin-top: 0 }` inside "
+            "`@media (max-width: 760px), (min-width: 900px)` applies at "
+            "1440x900 (`min-width: 900px` is true there) but the reach reader "
+            "did not see it, so `test_no_other_rule_takes_the_ctas_slack` "
+            f"stays GREEN over a 3-baseline split. Reached: {reached!r}")
