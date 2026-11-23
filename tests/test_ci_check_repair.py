@@ -4453,9 +4453,9 @@ def test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit():
 # `tests/test_ci_check_repair.py::test_every_git_show_cited_in_the_wall_clock_doc_names_a_real_commit`
 # can only SKIP the resolve arm in the `test` job — it checks out at `fetch-depth: 1`, where an
 # absent ancestor and a bogus sha are both missing objects. The claim therefore also lives in
-# `tools/ci_check_repair.py --check-doc-citations`, which the depth-0 `docs` job runs. These four
+# `tools/ci_check_repair.py --check-doc-citations`, which the depth-0 `docs` job runs. These five
 # cases pin that tool's own verdicts, because a guard whose exit codes nobody asserts is a guard
-# nobody runs.
+# nobody runs. The `rc==2` arm of the first case below records the clone shape each is valid in.
 
 def _citation_tree(tmp_path, cited: str):
     """A throwaway git checkout holding only the document, citing `cited`."""
@@ -4474,6 +4474,24 @@ def test_the_wall_clock_citations_resolve_at_this_head():
     """The tree this pin is written on must be GREEN — else the tool is the defect."""
     from tools.ci_check_repair import doc_citation_defects
     rc, findings = doc_citation_defects(Path(__file__).resolve().parents[1])
+    if rc == 2:
+        # ⛔ rc==2 IS NOT A VERDICT ABOUT THE DOCUMENT, AND THIS FILE RUNS IN THE
+        # DEPTH-1 `test` JOB. `actions/checkout` there grafts the graph, so the doc's
+        # `git show --stat 8abf4844` (5 commits back) is simply an absent object and
+        # the tool answers UNVERIFIED by its own contract — measured in a `--depth 2`
+        # clone of this head: rc=2, "it reports a grafted (shallow) history … 8abf4844
+        # is UNVERIFIED, not disproved". Asserting 0 there is a FALSE BLOCK of a
+        # correct document: the same class the commit one layer down fixed, and it is
+        # the shape the pytest sibling above already skips for. The DEFECT arms here
+        # are unaffected (a placeholder is caught before any history is asked for, so
+        # it still exits 1 in every clone), and the resolve arm is proved where it can
+        # be — the depth-0 `docs` job runs this very function.
+        pytest.skip(
+            "this checkout cannot answer the resolve question (`git rev-parse "
+            "--is-shallow-repository` reports a grafted history), so the wall-clock "
+            f"cites are UNVERIFIED rather than wrong: {findings[0]} The depth-0 `docs` "
+            "job runs `tools/ci_check_repair.py --check-doc-citations`, which is "
+            "where they are proved.")
     assert rc == 0, f"the wall-clock doc's own citations are a defect at this head: {findings}"
 
 
