@@ -102,7 +102,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Collection, Protocol
 
 # ── the measured unit (#14295 / #14343, the fact behind #14275's prior) ──────
 #: Measured tokens spent per MEDIAN document by the real ``extract_session_v2``
@@ -756,6 +756,17 @@ ITEM_LABEL = "IngestBatchItem"
 #: a connection that the read path needs.
 BATCH_QUERY_TIMEOUT_MS = 10_000
 
+#: How many times ONE item may be CLAIMED before the drain stops re-driving it.
+#: ⛔ Without a ceiling, a retry is an infinite loop: `runner_result_to_outcome`
+#: maps a ``retryable`` skip to ``queued`` (deliberately — a held index lock is
+#: not a failure), so an item whose lock never clears would be re-claimed every
+#: retry tick, forever, spending a token each time and never telling anyone.
+#: At the ceiling the item goes ``failed`` with a reason naming the attempt count
+#: — visible on the status surface, terminal, and actionable (re-submit the
+#: item). `recover()` keeps the attempt count across restarts for the same
+#: reason: a poison item must not loop by dying repeatedly either.
+BATCH_MAX_ATTEMPTS = 3
+
 
 class GraphBatchStore:
     """``BatchStore`` over the tenant graph, one statement per method.
@@ -1290,6 +1301,19 @@ class BatchCoordinator:
         # abort the whole drain (found in review; the current production runner
         # never reports `embedded`, which is the only reason it was invisible).
         if fresh.state is BatchItemState.QUEUED:
+            if fresh.attempts >= BATCH_MAX_ATTEMPTS:
+                # ⛔ THE RETRY CEILING (#14415 review B2). A ``retryable`` skip is
+                # mapped to ``queued`` on purpose, but an item whose condition
+                # never clears would be re-claimed on every retry tick for ever —
+                # spending a token per pass and reporting ``pending`` with no
+                # error, which is the inert row this layer exists to prevent. At
+                # the ceiling the item settles ``failed`` with the attempt count
+                # in its reason: terminal, visible, and actionable.
+                return self.advance(
+                    org_id, fresh, BatchItemState.FAILED,
+                    reason=(f"gave up after {fresh.attempts} attempt(s) — the "
+                            "indexer kept reporting a retryable skip; "
+                            "re-submit this item to try again"))
             self.advance(org_id, fresh, BatchItemState.EXTRACTING, attempt=True)
         try:
             outcome = active(fresh)
@@ -1341,10 +1365,25 @@ class BatchCoordinator:
         (``tokens_spent_before_cancel`` on the summary), so "cancel any time"
         (the copy, decision (d)) is a statement about the FUTURE work, which is
         the only thing we can honestly stop.
+
+        ⛔ A batch already in a TERMINAL state is returned UNCHANGED: cancelling
+        cannot un-spend tokens, and relabelling a settled batch would make this
+        surface disagree with its own items.
         """
         batch = self._store.get_batch(org_id, batch_id)
         if batch is None:
             raise KeyError(batch_id)
+        if batch.state in TERMINAL_BATCH_STATES:
+            # ⛔ A SETTLED BATCH IS NOT REWRITTEN (#14415 review B3). Cancel used
+            # to fall through unconditionally, so a cancel arriving after the
+            # last item landed relabelled a fully successful ``completed`` batch
+            # as ``cancelled`` and INVENTED a ``cancelled_at``/``cancel_reason``
+            # for it — while every item stayed ``indexed`` and charged. That is a
+            # status that lies on a billing-visible surface: the customer reads
+            # "work stopped, not charged" over a batch they were charged for.
+            # The record is the truth, so it is reported unchanged (and a repeat
+            # cancel is idempotent rather than a rewrite).
+            return batch, self._store.items(org_id, batch_id)
         stamp = self._now()
         items = self._store.items(org_id, batch_id)
         for item in items:
@@ -1365,7 +1404,8 @@ class BatchCoordinator:
         return batch, self._store.items(org_id, batch_id)
 
     # -- resume (brief item 4) -------------------------------------------
-    def recover(self, org_id: str) -> list[str]:
+    def recover(self, org_id: str, *, live_batches: Collection[str] = ()
+                ) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
 
         ⛔ **What "recoverable" has to mean.** An item found ``extracting`` (or
@@ -1376,10 +1416,30 @@ class BatchCoordinator:
         batch is marked ``resuming`` so the status surface says so (the brief:
         "the batch's own status says what it is resuming"). Nothing is dropped:
         the row survives the process, which is the whole requirement.
+
+        ⛔ **``live_batches`` is what makes that premise CHECKABLE instead of
+        assumed** (#14415 review B1). "On boot" is implemented by the caller as
+        "the first time this process touches the tenant's batch surface", and
+        the first touch in the documented flow is the customer's STATUS POLL —
+        which lands while item 1 is inside the runner call. The row is plainly
+        ``extracting``, this method requeued it, and when the live runner
+        returned its outcome could no longer be applied (``queued`` ->
+        ``indexed`` is not a legal edge), so a completed index was DISCARDED:
+        tokens spent, the document in the graph, and the row reporting
+        ``pending`` with zero tokens for ever. So the caller names the batches a
+        drain in THIS process is working right now, and those claims are not
+        void — they belong to a process that is still alive. They are skipped
+        here and left to the live drain (whose leftovers are re-driven by
+        ``hosted_api._drain_batch``).
         """
         resumed: list[str] = []
         stamp = self._now()
         for batch_id in self._store.pending_batches(org_id):
+            if batch_id in live_batches:
+                # A drain in THIS process owns this batch's claim; see the
+                # `live_batches` note above. Requeueing it would destroy the
+                # outcome of work that is still running.
+                continue
             batch = self._store.get_batch(org_id, batch_id)
             if batch is None:
                 # ⛔ ORPHAN ROWS, not an inconsistency (#14219 review). Acceptance

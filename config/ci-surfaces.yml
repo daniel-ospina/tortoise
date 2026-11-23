@@ -2548,6 +2548,19 @@ surfaces:
   # ⛔ An unregistered file is not merely an `--integrity` red — NO job selects it,
   # so the guard silently stops existing on the very change it pins.
   - test_14232_ingest_ack_split.py
+  # #14219 F4 (PR #14415) — the batch-ingest WIRE suite. DUAL-REGISTERED with
+  # `core` (below) for exactly the #2969/#14232 reason: it drives the `/v1/batches`
+  # handlers in tortoise/hosted_api.py, which is an EXACT `api` SOURCE_PATTERNS
+  # match — and a named-surface match REPLACES the `core` fallback, so a
+  # `hosted_api.py`-only diff would select NEITHER file and a regression in the
+  # route layer would ship behind a green required check. Measured before this
+  # row existed: `tools/ci_selection.py --changed-files tortoise/hosted_api.py`
+  # selects 486 test files and NONE named `14219` (`--surface-audit` reported
+  # the mismatch). The layer suite is registered beside it because both files
+  # also exercise `hosted_api` symbols (`_batch_store_for`, `_drain_batch`,
+  # `_recover_org_batches`), so an api-only diff must run the state machine too.
+  - test_14219_batch_ingest.py
+  - test_14219_batches_api.py
   # #3540 ruling B: the consolidated source-management tool's handlers live in
   # `tortoise/mcp_server.py` + `tortoise/hosted_api.py`; the guard must run on
   # the surface change it guards.
@@ -2972,8 +2985,6 @@ surfaces:
   # (DUAL-registered: matrix + job). ONE row only: this file is `merge=union` in `.gitattributes`,
   # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
   - test_14002_record_only_journal.py
-  - test_14219_batch_ingest.py
-  - test_14219_batches_api.py
   - test_extractor_cost_measure.py
   # #14343: the S4 embed-serialization lever's own pins (`_embed_json_kwargs` in
   # `tortoise/extractor_v2.py` + the `serialization`/`decompose` half of
@@ -9122,6 +9133,12 @@ surfaces:
   # tortoise/session_projection.py, which matches no SOURCE_PATTERNS entry and so
   # selects `core` via the `tortoise/` fallback.
   - test_14232_ingest_ack_split.py
+  # #14219 F4 (PR #14415) — the `core` half of the dual registration documented at
+  # the `api` entry above. `tortoise/batch_ingest.py` is a new product module that
+  # matches NO `SOURCE_PATTERNS` entry, so a layer-only diff selects `core` via the
+  # `tortoise/` fallback and would otherwise run neither suite that pins it.
+  - test_14219_batch_ingest.py
+  - test_14219_batches_api.py
   # #6151: the weight mechanisms live in `tortoise/weights.py`, which matches no
   # SOURCE_PATTERNS entry — so a weights.py change selects `core` via the
   # `tortoise/` fallback and, until now, ran NONE of the three tests that guard
@@ -13220,6 +13237,8 @@ durations:
   # post-merge run that includes the file; do NOT drop it without re-deriving the
   # floor at that head.
   test_14232_ingest_ack_split.py: 2.0  # new in #14232. The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this is the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `api` + `core` registrations above put the file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green over an absent row, so only this row records the weight. The file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed. `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. ⛔ No local timing and no case count are quoted beside it on purpose — a seconds figure next to a shard-layout input re-stales against the run it came from, and the count moves with every review round (`tools/ci_selection.py --integrity` is the authority). What the weight covers is assertion-bound and wall-clock-bound in a way the weight does not show: the offline mock capture plus the two window rows a loaded host makes INCONCLUSIVE (#5049), which is exactly why it is the flat default rather than a local figure. Hermetic: the in-process handler over the embedded graph and a mock extractor — no DB, no docker, no network, no model call.
+  test_14219_batch_ingest.py: 2.0  # new in #14415. Same #3400/#4348 trap as the row above: a file a PR ADDS cannot carry a CI junit reading yet, so this is the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default: the `api` + `core` registrations put the file in `fast_pool()`, and `--integrity` is a 0.90 RATIO check that stays green over an absent row, so only this row records the weight. The file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`. Hermetic and cheap by construction: no DB, no docker, no network — the layer is exercised through `InMemoryBatchStore` and a stubbed runner, with the graph store reached only through a fake `query` callable.
+  test_14219_batches_api.py: 2.0  # new in #14415. The wire half of the same registration (see the row above for why the row must exist). FastAPI `TestClient` over the real handlers with the tenant store replaced by the in-memory one and the batch worker's `submit` stubbed, so acceptance is measured without touching a graph: no DB, no docker, no network, no model call.
   test_7927_epistemic_read_surfaces.py: 11.8  # ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 8.3
   test_session_capture_status.py: 7.3  # #3520: same #3400 flat default; Required for the durations half as well as the surface half (#4348 trap): an unregistered new test file reds `integrity_problems`. Refresh from the first post-merge main run that includes it — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 3.5
   test_served_skills_parity.py: 12.9  # new in #4643; A local timing is deliberately NOT substituted: the weight is a SHARD-LAYOUT input, so only a measured CI junit value for the leg that carries the file models it. Refresh from the first post-merge main run that includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 12.1

@@ -16746,7 +16746,19 @@ def _recover_org_batches(org: dict) -> list[str]:
     try:
         store = _batch_store_for(org)
         coord = _batch_ingest.BatchCoordinator(store)
-        resumed = coord.recover(org_id)
+        # ⛔ A BATCH THIS PROCESS IS DRAINING IS NOT RECOVERABLE (#14415 review
+        # B1). "On boot" is implemented as "the first time this process touches
+        # the tenant's batch surface", and in the documented flow that first
+        # touch is the customer's status poll — which arrives while item 1 is in
+        # the runner call. Requeueing that live claim destroyed the completed
+        # item's outcome (the row is `extracting`, `recover()` requeues it, the
+        # live runner's `indexed` is then an illegal edge and is discarded) and
+        # left the item `queued` with nothing to re-drive it. The claim is only
+        # void when its process is gone, so the live set is passed in and
+        # skipped.
+        with _BATCH_DRAINING_LOCK:
+            live = set(_BATCH_DRAINING)
+        resumed = coord.recover(org_id, live_batches=live)
     except Exception:
         _logger.exception("batch recovery failed for team %s", org_id)
         with _BATCH_RETRY_LOCK:
@@ -16809,6 +16821,17 @@ def _drain_batch(org: dict, batch_id: str) -> None:
                 _logger.exception("batch %s: item %s failed", batch_id,
                                   getattr(item, "item_id", "?"))
         coord.settle(org["org_id"], batch_id)
+        # ⛔ AN ITEM LEFT NON-TERMINAL BY THIS PASS MUST BE RE-DRIVEN IN THIS
+        # PROCESS (#14415 review B2). Nothing did: `_BATCH_RETRY` is filled only
+        # when a SUBMIT is refused, and `recover()` runs once per org per
+        # process — so a `retryable` skip (mapped to `queued` on purpose), a
+        # bookkeeping exception, or the swallowed `IllegalTransition` stranded
+        # the item for the process lifetime: the customer's status surface read
+        # `pending > 0` with no error and no progress. The retry thread re-enters
+        # this same drain on its next tick; `BATCH_MAX_ATTEMPTS` is what bounds
+        # the loop, so a condition that never clears settles `failed` visibly.
+        if any(not item.terminal for item in store.items(org["org_id"], batch_id)):
+            _batch_retry_enqueue(org, batch_id)
     except Exception:
         # The rows are durable; an escaped failure leaves items `extracting`,
         # which the next boot's `recover()` requeues. Never swallow silently.

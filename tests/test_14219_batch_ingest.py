@@ -795,3 +795,115 @@ def test_the_coordinator_reads_one_item_row_per_step_not_the_whole_batch(
         f"the batch was listed {calls['items']} times for 50 items — the drain "
         "must read rows, not re-list the batch")
     assert calls["get_item"] >= 50
+
+
+# ── #14415 review round 1: the four blocking findings, pinned ──────────────
+def test_recover_does_not_requeue_a_batch_a_live_drain_owns():
+    """⛔ B1: a STATUS POLL must not destroy the in-flight item's outcome.
+
+    "On boot" is implemented by the caller as "the first time this process
+    touches the tenant's batch surface", and the first touch in the documented
+    flow is the customer polling `/v1/batches/{id}` — while item 1 is inside the
+    runner call and its row reads `extracting`. Requeueing that claim rewrote the
+    row to `queued`, so when the runner returned, `queued -> indexed` was an
+    illegal edge, the outcome was DISCARDED (tokens spent, document in the graph,
+    row reporting pending with zero tokens) and nothing re-drove it.
+
+    The premise of the resume edge is "the process that claimed this is gone", so
+    the caller now names the batches a live drain owns and those claims are not
+    void.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    live_batch, live_items = coord.submit(ORG, ["/live.md"])
+    dead_batch, dead_items = coord.submit(ORG, ["/dead.md"])
+    coord.advance(ORG, live_items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG, dead_items[0], BatchItemState.EXTRACTING, attempt=True)
+
+    resumed = coord.recover(ORG, live_batches={live_batch.batch_id})
+
+    assert resumed == [dead_batch.batch_id], (
+        "only the batch whose claim belongs to a process that is gone")
+    by_ref = {i.ref: i for i in store.items(ORG, live_batch.batch_id)}
+    assert by_ref["/live.md"].state is BatchItemState.EXTRACTING, (
+        "a live drain's claim must be left exactly as the live drain left it")
+    assert by_ref["/live.md"].reason == "", "no resume reason invented for it"
+
+    # …and the live item's outcome still lands, which is the whole point.
+    coord.advance(ORG, store.items(ORG, live_batch.batch_id)[0],
+                  BatchItemState.INDEXED, tokens_in=7)
+    assert coord.status(ORG, live_batch.batch_id)[1][0].state is (
+        BatchItemState.INDEXED)
+
+
+def test_a_retryable_skip_is_retried_but_a_condition_that_never_clears_settles_failed(
+        monkeypatch):
+    """⛔ B2's ceiling: a retry must be bounded, and its end must be VISIBLE.
+
+    `runner_result_to_outcome` maps a `retryable` skip to `queued` on purpose (a
+    held index lock is not a failure). Without a ceiling the drain re-claims that
+    item for ever — a token per pass, reporting `pending` with no error, which is
+    the inert row this layer exists to prevent.
+    """
+    from tortoise import batch_ingest as bi
+
+    assert bi.BATCH_MAX_ATTEMPTS >= 2, "a ceiling of 1 is not a retry at all"
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    _batch, items = coord.submit(ORG, ["/locked.md"])
+
+    outcomes = []
+
+    def locked(item: BatchItem) -> ItemOutcome:
+        outcomes.append(item.attempts)
+        return ItemOutcome(BatchItemState.QUEUED, reason="index lock held")
+
+    for _ in range(bi.BATCH_MAX_ATTEMPTS + 2):
+        coord.run_item(ORG, store.items(ORG, _batch.batch_id)[0], locked)
+
+    final = store.items(ORG, _batch.batch_id)[0]
+    assert final.state is BatchItemState.FAILED
+    assert f"{bi.BATCH_MAX_ATTEMPTS} attempt" in final.reason
+    assert "re-submit" in final.reason
+    assert len(outcomes) == bi.BATCH_MAX_ATTEMPTS, (
+        "the runner must run exactly the ceiling's number of times — the "
+        f"remaining passes must settle the item, not run it: {outcomes}")
+
+
+def test_cancelling_a_settled_batch_reports_it_unchanged_rather_than_relabelling_it():
+    """⛔ B3: a status that lies on a billing-visible surface.
+
+    Cancel used to fall through unconditionally, so a cancel arriving after the
+    last item landed relabelled a fully successful `completed` batch as
+    `cancelled` and INVENTED a `cancelled_at`/`cancel_reason` — while every item
+    stayed `indexed` and charged. The customer then reads "work stopped, not
+    charged" over a batch they were charged for.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/a.md", "/b.md"])
+    for it in items:
+        coord.advance(ORG, it, BatchItemState.EXTRACTING, attempt=True)
+        coord.advance(ORG, it, BatchItemState.INDEXED, tokens_in=11)
+    settled = coord.settle(ORG, batch.batch_id)
+    assert settled.state is BatchState.COMPLETED
+    charged = sum(i.tokens_in for i in store.items(ORG, batch.batch_id))
+
+    after, after_items = coord.cancel(ORG, batch.batch_id, reason="too late")
+
+    assert after.state is BatchState.COMPLETED, (
+        "cancelling cannot un-spend tokens; the settled state is the truth")
+    assert not after.cancelled_at and after.cancel_reason == "", (
+        "no cancel facts may be invented for a batch that was never cancelled")
+    assert all(i.state is BatchItemState.INDEXED for i in after_items)
+    assert sum(i.tokens_in for i in after_items) == charged
+
+    # A repeat cancel of a genuinely cancelled batch stays idempotent too.
+    store2 = InMemoryBatchStore()
+    coord2 = BatchCoordinator(store2)
+    b2, _ = coord2.submit(ORG, ["/c.md"])
+    first, _ = coord2.cancel(ORG, b2.batch_id, reason="first")
+    second, _ = coord2.cancel(ORG, b2.batch_id, reason="second")
+    assert first.cancelled_at == second.cancelled_at
+    assert second.cancel_reason == "first", (
+        "a second cancel must not rewrite the recorded reason")

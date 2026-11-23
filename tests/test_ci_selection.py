@@ -10742,6 +10742,18 @@ ROWED_BY_THIS_FOLD = (
     # every entry above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
     # file nobody listed has no `durations:` row and nothing reds.
     "test_14232_ingest_ack_split.py",
+    # #14219 F4 (PR #14415) — the batch-ingest pair. A fold this PR ADDED, and the
+    # registration half was incomplete in the FIRST cut of the merge fix: both files
+    # went on `core` only, while they drive `tortoise/hosted_api.py` (an EXACT `api`
+    # SOURCE_PATTERNS match, which REPLACES the `core` fallback), so a
+    # `hosted_api.py`-only diff selected NEITHER — `--surface-audit` names the
+    # mismatch and `--changed-files tortoise/hosted_api.py` selected 486 test files
+    # with none of these two among them. `--integrity` stayed green over it (it reads
+    # classification, not reachability), which is why the pair is listed here: the
+    # ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody listed has no
+    # `durations:` row and nothing reds.
+    "test_14219_batch_ingest.py",
+    "test_14219_batches_api.py",
     # #14185 (PR #14222) — the record fold's OWN loop: the projection worker and the seven
     # conditions under which a write may be deferred (four correctness arms, the
     # unimportable loop, and the two switches). A file this fold ADDED and registered

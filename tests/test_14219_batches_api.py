@@ -755,3 +755,110 @@ def test_the_estimate_reads_the_door_that_declares_the_token_dimension():
         f"the estimate reads {ha._BATCH_ALLOWANCE_RESOURCE!r} but the dimension "
         f"is declared on {sorted(dim.resources)} — the carry would return the org "
         "unchanged and the estimate would report 'no included amount'")
+
+
+# ── #14415 review round 1: the caller halves of B1/B2/B4 ──────────────────
+def test_the_first_touch_does_not_requeue_a_batch_a_live_drain_owns(
+        client, store, monkeypatch):
+    """⛔ B1 (caller half): "on boot" must not claim a LIVE drain's batch.
+
+    `_recover_org_batches` runs on the first touch of the tenant's batch surface,
+    and in the documented flow that touch is the customer's status poll — mid
+    drain. The live set is passed to `recover()` so a claim belonging to a
+    process that is still running is not treated as a dead one. Without this the
+    live runner's `indexed` outcome became an illegal edge and was discarded.
+    """
+    monkeypatch.setattr(ha, "_BATCH_RECOVERED", set())
+    submitted: list[str] = []
+    monkeypatch.setattr(ha, "_BATCH_WORKER", type("W", (), {
+        "ceiling": 2,
+        "submit": staticmethod(lambda fn, *a, **k: submitted.append(a[1]) or True),
+    })())
+    coord = bi.BatchCoordinator(store)
+    batch, items = coord.submit(ORG_ID, ["/d/a.md"])
+    coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
+
+    # The drain for THIS batch is live in this process.
+    ha._BATCH_DRAINING.add(batch.batch_id)
+    try:
+        assert ha._recover_org_batches({"org_id": ORG_ID}) == []
+    finally:
+        ha._BATCH_DRAINING.discard(batch.batch_id)
+
+    row = store.items(ORG_ID, batch.batch_id)[0]
+    assert row.state is bi.BatchItemState.EXTRACTING, (
+        "a live drain's claim must survive the first status poll")
+    assert submitted == [], "a live batch must not be re-submitted by recovery"
+
+    # With no live drain the same row IS recoverable — the hook still works.
+    # (The org was marked recovered by the first call, so it must be cleared:
+    # that idempotence is `recover()`'s own one-scan-per-tenant contract.)
+    ha._BATCH_RECOVERED.discard(ORG_ID)
+    assert ha._recover_org_batches({"org_id": ORG_ID}) == [batch.batch_id]
+    assert store.items(ORG_ID, batch.batch_id)[0].state is (
+        bi.BatchItemState.QUEUED)
+
+
+def test_a_drain_that_leaves_an_item_non_terminal_re_drives_it(store,
+                                                              monkeypatch):
+    """⛔ B2 (caller half): nothing re-scheduled a non-terminal leftover.
+
+    `_BATCH_RETRY` is filled only when a SUBMIT is refused, and `recover()` runs
+    once per org per process — so an item left `queued` by a retryable skip (or
+    `extracting` by a swallowed `IllegalTransition`) sat non-terminal for the
+    process lifetime: the customer's status surface read `pending > 0` with no
+    error and no progress.
+    """
+    monkeypatch.setattr(ha, "_batch_store_for", lambda org: store)
+    monkeypatch.setattr(ha, "_org_sdk_for_credential", lambda org: object())
+    monkeypatch.setattr(ha, "_BATCH_RETRY", [])
+    monkeypatch.setattr(ha, "_batch_item_runner",
+                        lambda sdk, corpus, org_id: (
+                            lambda item: bi.ItemOutcome(
+                                bi.BatchItemState.QUEUED,
+                                reason="index lock held")))
+
+    coord = bi.BatchCoordinator(store)
+    batch, _items = coord.submit(ORG_ID, ["/d/a.md"])
+    ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+
+    assert [bid for _org, bid in ha._BATCH_RETRY] == [batch.batch_id], (
+        "the leftover must be queued for another pass, not stranded")
+    assert store.items(ORG_ID, batch.batch_id)[0].state is (
+        bi.BatchItemState.QUEUED)
+
+    # ⛔ …and the loop is BOUNDED: once the ceiling is spent the same drain
+    # settles the item FAILED, so the retry stops instead of spinning for ever.
+    for _ in range(bi.BATCH_MAX_ATTEMPTS):
+        ha._BATCH_RETRY.clear()
+        ha._drain_batch({"org_id": ORG_ID}, batch.batch_id)
+    assert store.items(ORG_ID, batch.batch_id)[0].state is (
+        bi.BatchItemState.FAILED)
+    assert [bid for _org, bid in ha._BATCH_RETRY] == []
+
+
+def test_both_suites_are_selected_by_a_hosted_api_only_diff():
+    """⛔ B4: registration that no diff class reaches is a guard that never runs.
+
+    Selection is surface -> membership. Both suites pin the `/v1/batches`
+    handlers in `tortoise/hosted_api.py` (an EXACT `api` SOURCE_PATTERNS match,
+    which REPLACES the `core` fallback), so registering them on `core` alone left
+    a `hosted_api.py`-only diff running NEITHER — the route layer could regress
+    behind a green required check. `--integrity` reads classification, not
+    reachability, so it stayed green over the gap.
+    """
+    from tools.ci_selection import load_manifest, select
+
+    selected = set(select(["tortoise/hosted_api.py"], "pull_request",
+                          load_manifest())["test_files"])
+    for name in ("test_14219_batch_ingest.py", "test_14219_batches_api.py"):
+        assert name in selected, (
+            f"{name} is not selected by a tortoise/hosted_api.py diff — the "
+            "suite that pins the route layer would not run on the change it "
+            "guards")
+
+    layer = set(select(["tortoise/batch_ingest.py"], "pull_request",
+                       load_manifest())["test_files"])
+    for name in ("test_14219_batch_ingest.py", "test_14219_batches_api.py"):
+        assert name in layer, (
+            f"{name} is not selected by a tortoise/batch_ingest.py diff")
