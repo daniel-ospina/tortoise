@@ -2950,7 +2950,28 @@ def _strip_shell_comments(script: str) -> str:
                 quote = None
             i += 1
             continue
-        if quote == '"':
+        # ⛔ A `${ … }` OPENED INSIDE A DOUBLE-QUOTED SPAN MUST BE TRACKED TOO (fresh-context
+        # review of #14314, P2, MEASURED). This branch used to treat the whole span as flat
+        # text, so an expansion opened inside it was never pushed onto `brace_quotes` and the
+        # `"` INSIDE that `${ … }` was read as the closer of the ENCLOSING string. The quote
+        # parity then flipped, a later `#` landed "at word start", the rest of the line was
+        # stripped as a comment, and a substitution on it RAN unremarked — the silent pass this
+        # file calls worse than no pin, one level out from the quoted-`}` case below:
+        #
+        #   $ bash -e -c 'echo "${x:-}"} # $(touch /tmp/dq1)"}"'    → '} #', dq1 CREATED
+        #   $ bash -e -c 'echo "${x:-}"} # `touch /tmp/dq2`"}"'     → '} #', dq2 CREATED
+        #   $ _executable_prose_lines(…)                            → []   (BOTH)
+        #
+        # …while the SAME script with the outer `"` removed was already reported (`brace_quotes`
+        # is pushed on the unquoted path), which is why the five expansion cases in the pin went
+        # green and this one did not. `not brace_quotes` is the whole of the ordering fix: once a
+        # level is open the scan falls through to the `${`-consuming branch below, whose
+        # per-level quote state is already correct. It is deliberately the ONLY context named
+        # here: measured, a `$[ … ]` or `$(( … ))` inside a double-quoted span does not execute
+        # what follows the `#` (bash rejects the arithmetic and no marker is created), and a
+        # `$( )`/backtick there survives in `out` and is reported by the token scan — none of the
+        # three is a silent pass today, so modelling them here would be unmeasured code.
+        if quote == '"' and not brace_quotes:
             # A backslash escapes the next byte inside double quotes, so `\"` must not
             # close the quote. The PAIR is kept verbatim here; this lexer does not judge
             # whether it executes — the escape-aware scan in `_executable_prose_lines` does,
@@ -2964,6 +2985,19 @@ def _strip_shell_comments(script: str) -> str:
                 out.append(script[i : i + 2])
                 i += 2
                 continue
+            # The `${` opener INSIDE the span, with the same splice handling as the unquoted
+            # path below (a `$` + `\`⏎ + `{` IS `${`, because bash deletes the pair before it
+            # tokenizes). The pair is copied VERBATIM into the output; only the shell deletes it.
+            if ch == "$":
+                opener = i + 1
+                while script.startswith("\\\n", opener):
+                    opener += 2
+                if script.startswith("{", opener):
+                    out.append(script[i : opener + 2])
+                    brace_quotes.append(None)
+                    at_word_start = False
+                    i = opener + 2
+                    continue
             out.append(ch)
             if ch == '"':
                 quote = None
@@ -3282,7 +3316,16 @@ HIDDEN continues                       rc 0
     `test_an_ESCAPED_backtick_is_inert_and_one_after_an_escape_PAIR_is_not`.
     """
     stripped = _strip_shell_comments(script)
-    physical = stripped.splitlines()
+    # ⛔ SPLIT ON `\n` AND NOTHING ELSE (fresh-context review of #14314, P3, MEASURED).
+    # `str.splitlines()` ALSO splits on `\r`, `\v`, `\f`, `\x1c`-`\x1e`, `\x85` and the Unicode
+    # line separators, while `owners` below advances ONLY on `\n` — so the two indices disagree
+    # and the report quotes a line that does not contain the token. Measured on
+    # `'echo ok\recho `tick` here\n'`: `splitlines()` yields two entries and the report named
+    # `['echo ok']`, while bash reads that `\r` as an ordinary byte of ONE physical line. The
+    # gate still goes RED (no false pass), but it reds a line a human cannot find — the same
+    # unfollowable-output class this PR ends for the canary's own log, and contrary to this
+    # function's promise to quote text that IS in the file.
+    physical = stripped.split("\n")
     joined: list[str] = []
     owners: list[int] = []  # physical line index of each joined character
     line_no = 0
@@ -3756,6 +3799,15 @@ def test_the_prose_pin_does_not_read_a_hash_inside_an_EXPANSION_as_a_comment(tmp
         # treat as the closer — so the rest of the line was stripped as a comment and the
         # substitution ran unpinned. This case is what regress-guards the per-level quote state.
         "quoted brace in expansion": 'echo ${y:-"} # $(touch %s)"}',
+        # ⛔ THE SAME EXPANSION INSIDE A DOUBLE-QUOTED SPAN (fresh-context review of #14314,
+        # P2, MEASURED). Every case above is UNQUOTED at the top level, which is exactly why
+        # the hole survived 22 cycles: the lexer's double-quoted branch was flat text, so the
+        # `${` was never pushed onto `brace_quotes`, the `"` inside it closed the ENCLOSING
+        # string, and the `#` that followed was stripped as a comment over a substitution that
+        # ran. Both the `$( )` and the backtick spelling are pinned, because the hole is in the
+        # quote model and not in either token.
+        "double-quoted span, inner quote": 'echo "${y:-"} # $(touch %s)"}"',
+        "double-quoted span, backtick": 'echo "${y:-"} # `touch %s`"}"',
     }
     for label, template in scripts.items():
         marker = tmp_path / f"marker-{label.replace(' ', '-')}"
