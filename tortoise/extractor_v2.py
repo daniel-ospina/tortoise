@@ -2320,8 +2320,8 @@ def _complete_parsed(model, system: str, user: str, *,
     user_msg = user
     while attempts <= _PARSE_RETRIES:
         attempts += 1
-        response = _complete(model, system, user_msg,
-                             max_tokens=max_tokens, stats=stats)
+        response, _collapse = _base_complete_holding_collapse(
+            model, system, user_msg, max_tokens, stats, escalate)
         if stats is not None:
             total_attempts += int(stats.get("attempts") or 0)
             total_retries += int(stats.get("retries") or 0)
@@ -17162,11 +17162,11 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
             # document, without inventing a retry ladder: the caller's S1/S2/S4
             # handlers already treat an exception as a failed call.
             #
-            # Only the collapse shape is caught. A non-empty length-truncated
-            # response keeps its existing escalation behaviour (a cut tail is
-            # recoverable, #2134 Task 4), and an empty response with
-            # ``finish_reason=stop`` is a legitimate empty answer (the two-phase
-            # prompt abstains in writing) — neither is a reasoning burn.
+            # Only the collapse shape is caught. A NON-EMPTY length-truncated
+            # response keeps the #2134 rung (a cut tail is recoverable); an
+            # EMPTY one is fatal at the BASE budget and deliberately pre-empts
+            # that rung: 2x on a reasoning burn buys no output. An empty
+            # ``finish_reason=stop`` reply is a legitimate empty answer.
             if truncated and not (resp or "").strip():
                 raise _ReasoningCollapse(
                     "empty content with finish_reason=length — the output "
@@ -19551,3 +19551,45 @@ def _embed_json_mode() -> str:
     arm's setting is refused rather than mislabelled (`#14343` review cycle 10).
     """
     return "indent" if _embed_json_kwargs() == {"indent": 1} else "compact"
+
+
+def _base_complete_holding_collapse(model, system, user, max_tokens, stats,
+                                    escalate):
+    """``_complete`` for ``_complete_parsed``'s BASE call, minus the rung loss.
+
+    ``_complete``'s yield guard raises ``_ReasoningCollapse`` on empty content
+    at ``finish_reason="length"``. That raise is right on a TERMINAL path —
+    but the base call is not terminal. The #2134 one-shot escalation rung
+    below it keys on ``finish == "length"`` and never looks at content, so
+    pre-#14357 an EMPTY base response DID escalate to the 2x budget, and a
+    collapse at the 16K S2/S4 cap is exactly the shape a 32K budget can
+    recover (the pilot's collapse was 1500/1500 — budget-starved, not a
+    fundamentally unanswerable prompt). Raising here therefore deleted a
+    recovery path silently.
+
+    So the collapse is HELD and handed back with the empty response, which
+    re-enters that ladder with the same observable shape the pre-#14357 code
+    had. The ladder's own arms still re-raise the original exception — class
+    ``reasoning_collapse``, never the recoverable ``truncated_parse_error`` —
+    when the ESCALATED call collapses too, and this returns nothing when no
+    rung remains (it re-raises, since the ladder's no-headroom arm would
+    otherwise downgrade the class).
+
+    ``escalate=False`` callers (the kind-classifier adjudication) have no rung
+    to spend, so the collapse is re-raised unchanged for them.
+
+    ⛔ Defined at the END of this module on purpose: every cite in the #7949
+    evidence bundle is a LINE NUMBER into this file, and a helper placed
+    beside ``_complete_parsed`` would move every one of them below it (a
+    measured drift of +25 reds nine cite-pinning tests and silently re-stales
+    every cite no test pins). Appending moves none.
+    """
+    try:
+        return _complete(model, system, user, max_tokens=max_tokens,
+                         stats=stats), None
+    except _ReasoningCollapse:
+        if not escalate:
+            raise
+        if _extractor_escalation_tokens(max_tokens) <= (max_tokens or 0):
+            raise
+        return "", True

@@ -470,6 +470,50 @@ def test_empty_stop_response_is_still_returned():
     assert v2._complete(_EmptyStop(), "s", "u", max_tokens=1500) == ""
 
 
+def test_empty_length_base_still_runs_the_escalation_rung():
+    """#14357 review (P1) — the yield guard must not delete the #2134 rung.
+
+    ``_complete`` raises ``_ReasoningCollapse`` on empty content at
+    ``finish_reason="length"`` BEFORE ``_complete_parsed`` can read ``finish``,
+    so an unguarded raise made that response fatal at the BASE budget and the
+    one-shot escalation rung never ran — while PRE-#14357 it did, because the
+    rung keys on ``finish == "length"`` and not on content. A collapse at the
+    S2/S4 16K cap is precisely the shape a 32K budget can recover, so that was
+    a silently deleted recovery path.
+
+    Its sibling ``test_escalated_collapse_stays_fatal_not_a_recoverable_
+    truncation`` pins the other half: a collapse that survives the escalation
+    is still ``reasoning_collapse``, never a recoverable truncation.
+    """
+    class _BaseCollapsesEscRecovers:
+        last_finish_reason = "length"
+        last_prompt_tokens = 10
+        last_completion_tokens = 1500
+
+        def __init__(self):
+            self.budgets: list[int] = []
+
+        def complete(self, *, system: str, user: str, max_tokens=None):
+            self.budgets.append(max_tokens)
+            if (max_tokens or 0) >= 32000:
+                self.last_finish_reason = "stop"
+                self.last_completion_tokens = 12
+                return '{"entities": [{"name": "a", "kind": "object"}]}'
+            self.last_finish_reason = "length"
+            self.last_completion_tokens = 1500
+            return ""  # the collapse: no content at all, finish=length
+
+    m = _BaseCollapsesEscRecovers()
+    stats: dict = {}
+    parsed = v2._complete_parsed(m, "SYSTEM", "USER",
+                                 max_tokens=16000, stats=stats)
+    # base at the S2/S4 cap, then ONE escalated call at the 32K default — the
+    # rung ran, and it took no third call to succeed.
+    assert m.budgets == [16000, 32000], m.budgets
+    assert parsed["entities"][0]["name"] == "a", parsed
+    assert stats["recovery"]["escalated"] == 1, stats.get("recovery")
+
+
 def test_collapsed_extraction_yields_no_document_and_is_recorded(monkeypatch):
     """End to end: a collapsed S1 is a RECORDED failure that extracts nothing.
 

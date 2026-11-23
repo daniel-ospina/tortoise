@@ -1927,7 +1927,7 @@ def compose_report(artifacts: list[dict]) -> dict:
 #:
 #: ⛔ `"S4 failed"` IS DELIBERATELY ABSENT FROM THIS SET (review cycle 15, P3).
 #: `capture_session` appends it from ONE `except` that wraps `run_s4(...)`
-#: (`tortoise/extractor_v2.py:15286`) *and* the post-call merge/shape work that
+#: (`tortoise/extractor_v2.py:15293`) *and* the post-call merge/shape work that
 #: follows it (`:15292`–`:15333`), while `_Recording.complete` appends a call
 #: only after the adapter RETURNS — so the marker is the error TYPE of a
 #: failure, not the fact that no call happened. An S4 whose prompt was rendered,
@@ -1948,7 +1948,7 @@ def compose_report(artifacts: list[dict]) -> dict:
 #: call that WAS measured — a note, not a lost call. Review cycle 13 measured two
 #: members that are exactly that, and refused a complete run for them:
 #:   * `"no embed list produced (S2/S4 empty)"` is appended in the **S5** branch
-#:     (`tortoise/extractor_v2.py:15615`), i.e. only after `run_s2` AND `run_s4`
+#:     (`tortoise/extractor_v2.py:15625`), i.e. only after `run_s2` AND `run_s4`
 #:     returned and merged. It cannot indicate a lost call by construction.
 #:   * `"S2 failed"` is the SAME shape as the `"S4 failed"` this list already
 #:     dropped in cycle 12 — one broad `except` around `run_s2(...)`, whose
@@ -1989,7 +1989,7 @@ def _row_complete(row: dict) -> bool:
     ⛔ AND THE GUARD IS SCOPED TO ERRORS THAT EXPLAIN A LOST CALL (review cycle 9,
     P1 — two independent reviewers). `extractor_v2` records errors on calls that
     RETURNED and were fully measured: rung-4 partial accept appends
-    `"S4 output partial — truncated tail dropped"` (`tortoise/extractor_v2.py:15337`),
+    `"S4 output partial — truncated tail dropped"` (`tortoise/extractor_v2.py:15347`),
     `"S4 output malformed section … kept S2 output"` (`:15292`) and the S2 twin
     (`:17929`) are the same, as are the post-extraction `S5 failed` / `chain …` /
     `entity resolution failed` / `classify(union) failed` entries. Treating ANY
@@ -2019,7 +2019,7 @@ def _row_complete(row: dict) -> bool:
     made = pipe.get("calls")
     # ⛔ `pipeline.calls` is the sum of ATTEMPTS, not of successful calls:
     # `_rollup_llm` does `llm_stats["calls"] += stage_stats.get("attempts", 0)`
-    # (`tortoise/extractor_v2.py:16719`) and `_complete` sets `attempts=attempt`
+    # (`tortoise/extractor_v2.py:16778`) and `_complete` sets `attempts=attempt`
     # only on the SUCCESSFUL attempt. So a transient 429/5xx that succeeds on
     # retry adds +1 here with no call recorded by `_Recording` — and comparing
     # the two WITHOUT the retry count flagged a fully-measured run as INCOMPLETE
