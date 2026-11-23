@@ -100,6 +100,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SPOOL = Path.home() / ".tortoise" / "capture-spool"
+#: The rehearsal's four modes, in the order the evidence documents them. One
+#: tuple so the writer, the merger and the `summary` reader cannot disagree about
+#: which modes a complete artefact set contains.
+MODES = ("head-keyless", "head-mock", "pre-14261", "backpressure")
 ORG_ID = "00000000-0000-4000-8000-0000000000aa"
 ACTOR_ID = "00000000-0000-4000-8000-000000000142"
 #: Extraction latency injected in `pre-14261`, chosen to exceed the transport
@@ -176,8 +180,50 @@ def _org_id(mode: str, nonce: str) -> str:
     not a measurement. Derived from the mode name so it is stable per mode and
     still a valid UUID shape.
     """
+    # ⛔ `:012d` does NOT fit 40 bits in every case: `n` is uniform on
+    # `[0, 2**40-1]` and `2**40 - 10**12 = 99 511 627 776`, so 8.99 % of runs need
+    # a THIRTEENTH digit — and a `:012` minimum width pads, it never truncates.
+    # Measured over 20 000 `(mode, nonce)` pairs: 1 798 tails were not 12 chars
+    # (e.g. `head-mock/nonce15 -> 00000000-0000-4000-8000-1021145458251`), which
+    # is not the UUID shape this docstring promises. Hex fits by construction:
+    # 40 bits is exactly 10 hex digits, so a 12-wide hex field always pads.
     n = int(hashlib.sha256(f"{mode}:{nonce}".encode()).hexdigest()[:10], 16)
-    return f"00000000-0000-4000-8000-{n:012d}"
+    return f"00000000-0000-4000-8000-{n:012x}"
+
+
+def _mode_knobs(mode: str) -> dict[str, str]:
+    """The capture seams THIS mode needs — every one of them, always.
+
+    ⛔ An unset knob is not "the default": it is whatever the operator's shell
+    exported. Both of these are read at MODULE IMPORT (`hosted_api` binds
+    `_CAPTURE_MAX_IN_FLIGHT` from `TORTOISE_CAPTURE_IN_FLIGHT` at :447, and the
+    mock/lane branches read `TORTOISE_SESSION_LLM_MOCK` / `TORTOISE_SESSION_EXTRACTOR`
+    per call), so a child process cannot undo an ambient value after the fact.
+
+    The three measured ways an inherited value made a mode grade the opposite of
+    its own label:
+
+    * an ambient `TORTOISE_SESSION_LLM_MOCK=1` put **`head-keyless`** on the mock
+      extraction path — the mode whose whole claim is "no extraction provider";
+    * an ambient `TORTOISE_CAPTURE_IN_FLIGHT=1` put **`head-mock`** on a 1-slot
+      ceiling and produced `capture_capacity_saturated` 429s in the mode whose
+      claim is ZERO 429s;
+    * an ambient `TORTOISE_SESSION_EXTRACTOR=m2` left **`pre-14261`**'s
+      `_slow_extraction` seam inert, because the method it patches
+      (`_extract_session_v2`) is the v2 lane only.
+
+    Setting all three explicitly is what makes the recorded `<mode>.json`
+    reproducible on another box; the effective trio is written into it
+    (`capture_env`) so a polluted run is distinguishable after the fact.
+    """
+    return {
+        # `head-keyless` IS the store-only lane: extraction must be absent, not mocked.
+        "TORTOISE_SESSION_LLM_MOCK": "0" if mode == "head-keyless" else "1",
+        # `backpressure` is the only mode that asks for a 1-slot ceiling.
+        "TORTOISE_CAPTURE_IN_FLIGHT": "1" if mode == "backpressure" else "8",
+        # `_slow_extraction` patches the v2 lane; m2 would make that seam inert.
+        "TORTOISE_SESSION_EXTRACTOR": "v2",
+    }
 
 
 def _free_port() -> int:
@@ -213,10 +259,12 @@ def _serve(argv: list[str] | None = None) -> int:
     # after `import tortoise.hosted_api` silently leaves the default in force.
     # Measured: `backpressure` set IN_FLIGHT=1 post-import and produced 4/4 200s
     # with the ceiling still at 8 — the mode graded the default, not the mode.
-    if args.mode in ("head-mock", "pre-14261", "backpressure"):
-        os.environ["TORTOISE_SESSION_LLM_MOCK"] = "1"
-    if args.mode == "backpressure":
-        os.environ["TORTOISE_CAPTURE_IN_FLIGHT"] = "1"
+    #
+    # ⛔ Every knob is set for EVERY mode, including the ones that want the
+    # default value: `_mode_knobs` states all three, because an inherited value is
+    # not "the default" — it is the operator's shell. See that function's docstring
+    # for the three measured modes it made grade their own opposite.
+    os.environ.update(_mode_knobs(args.mode))
 
     import uvicorn
 
@@ -639,7 +687,8 @@ def _start_server(mode: str, log_path: Path) -> tuple[subprocess.Popen, int]:
         proc = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), "_serve",
              "--mode", mode, "--port", str(port), "--log", str(log_path)],
-            env={**os.environ, "TORTOISE_API_URL": f"http://127.0.0.1:{port}"},
+            env={**os.environ, **_mode_knobs(mode),
+                 "TORTOISE_API_URL": f"http://127.0.0.1:{port}"},
             stdout=sink, stderr=subprocess.STDOUT)
     if not _wait_health(port):
         out = ""
@@ -652,10 +701,17 @@ def _start_server(mode: str, log_path: Path) -> tuple[subprocess.Popen, int]:
     return proc, port
 
 
-def _drain_env(port: int, key: str, spool: Path, events_dir: Path) -> dict:
-    """The drain's identity: loopback URL, minted key, the COPY as the spool."""
+def _drain_env(port: int, key: str, spool: Path, events_dir: Path,
+               mode: str) -> dict:
+    """The drain's identity: loopback URL, minted key, the COPY as the spool.
+
+    The mode's knobs are applied here too: the client reads the same
+    `TORTOISE_SESSION_EXTRACTOR` branch when it decides what is retryable, so a
+    client left on an ambient `m2` would grade a lane the server is not running.
+    """
     return {
         **os.environ,
+        **_mode_knobs(mode),
         "TORTOISE_API_URL": f"http://127.0.0.1:{port}",
         "TORTOISE_API_KEY": key,
         "TORTOISE_CAPTURE": "1",                      # consent (transmission gate)
@@ -679,7 +735,7 @@ def _one_mode(mode: str, *, spool_src: Path, out_dir: Path,
     proc = None
     try:
         proc, port = _start_server(mode, log_path)
-        env = _drain_env(port, key, spool_copy, events_dir)
+        env = _drain_env(port, key, spool_copy, events_dir, mode)
         passes = [_run_drain(env, work, "drain-1")]
         state_1 = _spool_state(spool_copy)
         graph_1 = _graph_state(org)
@@ -710,6 +766,9 @@ def _one_mode(mode: str, *, spool_src: Path, out_dir: Path,
     after = _source_fingerprint(spool_src)
     result = {
         "mode": mode,
+        # The seams this run actually executed under, so a `<mode>.json` says
+        # whether it measured its own label or an inherited one.
+        "capture_env": _mode_knobs(mode),
         "corpus": {**copied, "source_before": before},
         "invariant_source_untouched": _source_unchanged(before, after),
         "source_after": after,
@@ -811,12 +870,19 @@ def _summarise(results: list[dict], cost: dict) -> str:
     return "\n".join(lines)
 
 
-def _summary_document(results: list[dict], cost: dict) -> str:
+def _summary_document(results: list[dict], cost: dict,
+                      created: str | None = None) -> str:
     """The bytes of SUMMARY.md — a pure projection of the artefacts.
 
     Separate from `_write_summary` so the `summary` verb can re-render the prose
     WITHOUT rewriting `corpus-cost.json` from a live spool no mode measured.
+
+    `created` is the ONE input the artefacts cannot supply: no `<mode>.json`
+    carries a wall-clock date (they carry durations, not instants), so it is
+    passed in — read back from the file being replaced, which is what makes a
+    re-render idempotent and the committed bytes pinnable.
     """
+    stamp = created or time.strftime("%Y-%m-%d", time.gmtime())
     return (
         "---\n"
         'title: "Spool drain rehearsal — measured results (#14232 / #14261)"\n'
@@ -825,9 +891,15 @@ def _summary_document(results: list[dict], cost: dict) -> str:
         "doc_status: live\n"
         "subjects.team: epistemic-team\n"
         "aboutSubjects: capture-spool, session-drain, capture-ingest\n"
-        'aboutObjects: "#14232, #14261, #14342", tortoise, '
+        # ⛔ A quoted scalar followed by `, …` on the SAME line is not YAML, and
+        # every `run`/`summary` wrote it: measured with this box's PyYAML, the
+        # committed file and the generator's output BOTH parsed as
+        # `expected <block end>, but found ','` at the `aboutObjects` line. The
+        # runbook writes the same field correctly one file over (a bare list), so
+        # the generator — not the convention — was the defect.
+        'aboutObjects: tortoise, "#14232", "#14261", "#14342", '
         "tools/spool_drain_rehearsal.py, tortoise/hosted_api.py\n"
-        "created: " + time.strftime("%Y-%m-%d", time.gmtime()) + "\n"
+        f"created: {stamp}\n"
         "---\n\n"
         "# Spool drain rehearsal — results\n\n"
         "Generated by `tools/spool_drain_rehearsal.py`. Every number below is "
@@ -837,19 +909,63 @@ def _summary_document(results: list[dict], cost: dict) -> str:
         + _summarise(results, cost) + "\n")
 
 
-def _write_summary(results: list[dict], cost: dict, out_dir: Path) -> None:
+def _committed_created(path: Path) -> str | None:
+    """The `created:` the file already states, so a re-render does not re-date it.
+
+    `created` is the document's birth date. Reading it back is what makes
+    `summary` idempotent: without it every re-render restamped the file and the
+    committed bytes could never be pinned (which is how the shipped SUMMARY.md
+    drifted two review rounds without anything going red).
+    """
+    if not path.exists():
+        return None
+    m = re.search(r"^created: (\d{4}-\d{2}-\d{2})$",
+                  path.read_text(encoding="utf-8"), re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _merge_results(out_dir: Path, fresh: list[dict]) -> list[dict]:
+    """This run's results, plus every OTHER mode's artefact already on disk.
+
+    ⛔ `run --mode X` is a documented form (the runbook offers it), and the
+    pre-fix tail built `results` from THIS invocation alone and handed it to the
+    single writer — so one single-mode run replaced SUMMARY.md's four sections
+    with the one it had just measured, while the other three `<mode>.json` files
+    stayed on disk. Measured: after `run --mode head-mock`, modes present =
+    `['head-mock']`; `head-keyless`, `pre-14261` and `backpressure` were gone from
+    the prose but not from the directory. `summary` already merges (it reads all
+    four); this makes `run` agree with it instead of deleting evidence it did not
+    re-measure.
+    """
+    by_mode = {r["mode"]: r for r in fresh}
+    for mode in MODES:
+        if mode in by_mode:
+            continue
+        p = out_dir / f"{mode}.json"
+        if p.exists():
+            by_mode[mode] = json.loads(p.read_text(encoding="utf-8"))
+    return [by_mode[m] for m in MODES if m in by_mode]
+
+
+def _write_summary(results: list[dict], cost: dict, out_dir: Path,
+                   *, write_cost: bool = True) -> None:
     """Record a MEASURED corpus cost and render the evidence artefacts.
 
     The ONLY writer of SUMMARY.md. One writer so a formatting fix (e.g. the
     `###` → `##` heading level `MD001` rejects under an H1) never needs a
     re-measure, and so the JSON and the prose cannot disagree about the same run.
-    `corpus-cost.json` is written only here — on the `run`/`all` path, where the
-    cost was just measured against the same spool the modes drained.
+
+    `corpus-cost.json` is written only when the run DRAINED the corpus it claims
+    to describe (`write_cost`): a `--limit` run drains a slice, so re-measuring
+    the live spool there would describe a corpus no mode drained.
     """
-    (out_dir / "corpus-cost.json").write_text(
-        json.dumps(cost, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if write_cost:
+        (out_dir / "corpus-cost.json").write_text(
+            json.dumps(cost, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out_dir / "SUMMARY.md").write_text(
-        _summary_document(results, cost), encoding="utf-8")
+        _summary_document(results, cost,
+                          created=_committed_created(out_dir / "SUMMARY.md")),
+        encoding="utf-8")
 
 
 def _run(argv: list[str] | None = None) -> int:
@@ -895,7 +1011,7 @@ def _run(argv: list[str] | None = None) -> int:
         # 265 entries, spool +30, `summary` → SUMMARY.md reports 295 beside
         # `head-keyless.json`'s 265). Absent is a refusal, not a re-measure.
         results = []
-        for mode in ("head-keyless", "head-mock", "pre-14261", "backpressure"):
+        for mode in MODES:
             p = args.out / f"{mode}.json"
             if not p.exists():
                 raise SystemExit(f"missing artefact: {p}")
@@ -908,7 +1024,9 @@ def _run(argv: list[str] | None = None) -> int:
                 f"run `all` (or `run --mode …`) against this spool first")
         cost = json.loads(cost_path.read_text(encoding="utf-8"))
         (args.out / "SUMMARY.md").write_text(
-            _summary_document(results, cost), encoding="utf-8")
+            _summary_document(results, cost,
+                              created=_committed_created(args.out / "SUMMARY.md")),
+            encoding="utf-8")
         print(_summarise(results, cost))
         return 0
 
@@ -927,17 +1045,34 @@ def _run(argv: list[str] | None = None) -> int:
     # window deliberately disabled. The nonce is what keeps each run's graph its
     # own.
     nonce = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
-    results = []
+    fresh = []
     for mode, limit, replay in plan:
         print(f"[rehearse] mode={mode} limit={limit}", file=sys.stderr)
-        results.append(_one_mode(mode, spool_src=args.spool_src,
-                                 out_dir=args.out, limit=limit, replay=replay,
-                                 nonce=nonce))
+        fresh.append(_one_mode(mode, spool_src=args.spool_src,
+                               out_dir=args.out, limit=limit, replay=replay,
+                               nonce=nonce))
 
-    cost = _corpus_cost(args.spool_src)
-    _write_summary(results, cost, args.out)
+    # A single-mode `run` may not delete the modes it did not re-measure.
+    results = _merge_results(args.out, fresh)
+    # `corpus-cost.json` describes the corpus the modes DRAINED. `pre-14261`
+    # defaults to a 3-entry slice and `backpressure` to 4, so re-measuring the
+    # live spool on such a run describes a corpus no mode drained — the same
+    # defect `162e9cd9` fixed on the `summary` path, still live here.
+    writes_cost = all(limit is None for _, limit, _ in plan)
+    if writes_cost:
+        cost = _corpus_cost(args.spool_src)
+    else:
+        cost_path = args.out / "corpus-cost.json"
+        if not cost_path.exists():
+            sliced = [m for m, lim, _ in plan if lim is not None]
+            raise SystemExit(
+                f"{args.out} records no corpus cost and {sliced} "
+                f"drains only a slice, so it cannot state one — run `all` (or a "
+                f"mode with no --limit) against a full corpus first")
+        cost = json.loads(cost_path.read_text(encoding="utf-8"))
+    _write_summary(results, cost, args.out, write_cost=writes_cost)
     print(_summarise(results, cost))
-    bad = [r["mode"] for r in results if not r["invariant_source_untouched"]]
+    bad = [r["mode"] for r in fresh if not r["invariant_source_untouched"]]
     if bad:
         print(f"\n⛔ INVARIANT BROKEN — the source spool changed under: {bad}",
               file=sys.stderr)

@@ -350,3 +350,222 @@ def test_a_tool_only_diff_selects_this_pin() -> None:
     assert "test_spool_drain_rehearsal.py" in selection["test_files"], (
         "the CORE_ALSO entry is missing: a tool-only diff would run no guard at "
         f"all — got {len(selection['test_files'])} files")
+
+
+# ── the committed artefact must BE the renderer's output ────────────────────
+#
+# ⛔ Measured across two review rounds: the shipped `SUMMARY.md` still printed
+# `extracted points 528 (Δ 2)` under "replay pass" — the exact pre-fix row the
+# replay-delta fix exists to remove — while the generator and its unit test were
+# correct. The suite asserted the RENDERER against a synthetic result and NOTHING
+# asserted the committed bytes, so the deliverable's own evidence drifted green.
+# Same class (`generated-file drift`) as the frontmatter defect below: the durable
+# control is a hermetic byte-equality pin, not a second reading.
+
+EVIDENCE = rehearsal.REPO_ROOT / "docs" / "evidence" / "14232-spool-drain-rehearsal"
+
+
+def _committed_artefacts() -> tuple[list[dict], dict, str]:
+    results = [json.loads((EVIDENCE / f"{mode}.json").read_text(encoding="utf-8"))
+               for mode in rehearsal.MODES]
+    cost = json.loads((EVIDENCE / "corpus-cost.json").read_text(encoding="utf-8"))
+    summary = (EVIDENCE / "SUMMARY.md").read_text(encoding="utf-8")
+    return results, cost, summary
+
+
+def test_the_committed_summary_is_the_render_of_the_committed_artefacts() -> None:
+    """Byte equality, not a re-read: the ship artefact must equal the renderer."""
+    results, cost, committed = _committed_artefacts()
+    created = rehearsal._committed_created(EVIDENCE / "SUMMARY.md")
+    rendered = rehearsal._summary_document(results, cost, created=created)
+    assert rendered == committed, (
+        "docs/evidence/14232-spool-drain-rehearsal/SUMMARY.md is NOT what the "
+        "renderer produces from the artefacts beside it — re-render it with "
+        "`tools/spool_drain_rehearsal.py summary --out <that dir>` and commit the "
+        "result. No re-measure is needed; that is what the verb is for.")
+
+
+def test_the_committed_summary_carries_no_pre_fix_replay_row() -> None:
+    """The one line a reader would misread, stated as its own falsifier."""
+    _, _, committed = _committed_artefacts()
+    replay = [ln for ln in committed.splitlines() if ln.startswith("- replay pass")]
+    assert replay, committed
+    for row in replay:
+        assert "vs settled" in row, row
+
+
+def test_a_rerender_is_idempotent(tmp_path: Path) -> None:
+    """`summary` twice must be a no-op, or the committed bytes cannot be pinned.
+
+    `created` is the one field the artefacts cannot supply, so it is read back
+    from the file being replaced. Before that, every re-render restamped the
+    document to today and no byte-equality pin could ever hold.
+    """
+    out = tmp_path / "evidence"
+    _artefacts(out)
+    spool = _live_spool(tmp_path / "live-spool")
+    args = ["summary", "--out", str(out), "--spool-src", str(spool)]
+    assert rehearsal._run(args) == 0
+    first = (out / "SUMMARY.md").read_text(encoding="utf-8")
+    assert rehearsal._run(args) == 0
+    assert (out / "SUMMARY.md").read_text(encoding="utf-8") == first
+
+
+# ── the frontmatter must be YAML, not a quoted scalar followed by ", …" ─────
+
+
+def test_the_generator_emits_parseable_frontmatter() -> None:
+    """F2: every `run`/`summary` reproduced an unreadable frontmatter."""
+    import yaml
+
+    doc = rehearsal._summary_document(
+        [_result(mode=mode) for mode in rehearsal.MODES], _COST)
+    front, sep, _ = doc.partition("\n---\n")
+    assert sep, doc[:80]
+    assert front.startswith("---\n"), doc[:80]
+    parsed = yaml.safe_load(front[4:])
+    assert parsed["aboutObjects"].startswith("tortoise,"), parsed["aboutObjects"]
+
+
+def test_the_committed_summary_frontmatter_parses_as_yaml() -> None:
+    """The committed evidence must parse, not merely the generator's output."""
+    import yaml
+
+    _, _, committed = _committed_artefacts()
+    front, sep, _ = committed.partition("\n---\n")
+    assert sep, committed[:80]
+    parsed = yaml.safe_load(front[4:])
+    assert parsed["aboutObjects"].startswith("tortoise,"), parsed["aboutObjects"]
+
+
+def test_the_frontmatter_pin_is_not_vacuous() -> None:
+    """Non-vacuity: the shipped spelling MUST fail the reader above."""
+    import yaml
+
+    broken = ('aboutObjects: "#14232, #14261, #14342", tortoise, '
+              "tools/spool_drain_rehearsal.py, tortoise/hosted_api.py")
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(broken)
+
+
+# ── `run --mode X` may not delete the modes it did not re-measure ───────────
+
+
+def _stub_one_mode(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int | None]]:
+    """Drive `_run`'s tail without a graph, a server or a drain."""
+    calls: list[tuple[str, int | None]] = []
+
+    def fake(mode: str, *, spool_src: Path, out_dir: Path, limit: int | None,
+             replay: bool, nonce: str = "") -> dict:
+        calls.append((mode, limit))
+        result = _result(mode=mode)
+        (out_dir / f"{mode}.json").write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(rehearsal, "_one_mode", fake)
+    return calls
+
+
+def test_a_single_mode_run_keeps_the_other_modes_evidence(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """F3: one `run --mode X` used to replace four sections with one.
+
+    Measured before the fix: after `run --mode head-mock`, SUMMARY.md held
+    `['head-mock']` only, while the other three `<mode>.json` files stayed on
+    disk — prose and artefacts disagreed, and the evidence the runbook points the
+    operator at was gone. `pre-14261` is used here because it is also the
+    limited-or-not axis: its default `--limit 3` drains a SLICE, so the same run
+    must not rewrite the recorded corpus cost either.
+    """
+    out = tmp_path / "evidence"
+    before = _artefacts(out)
+    _stub_one_mode(monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379/tortoise_test")
+    spool = _live_spool(tmp_path / "live-spool")
+
+    assert rehearsal._run(["run", "--mode", "pre-14261", "--out", str(out),
+                           "--spool-src", str(spool)]) == 0
+
+    summary = (out / "SUMMARY.md").read_text(encoding="utf-8")
+    for mode in rehearsal.MODES:
+        assert f"## mode `{mode}`" in summary, (
+            f"`run --mode pre-14261` deleted `{mode}`'s section: {summary[:400]}")
+    assert (out / "corpus-cost.json").read_bytes() == before["corpus-cost.json"], (
+        "a run that drained a SLICE rewrote the recorded corpus cost, so the "
+        "artefacts now describe a corpus no mode drained")
+
+
+def test_a_sliced_run_refuses_when_no_corpus_cost_is_recorded(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Absent cost on a sliced run is a refusal, never a live re-measure."""
+    out = tmp_path / "evidence"
+    _artefacts(out)
+    (out / "corpus-cost.json").unlink()
+    _stub_one_mode(monkeypatch)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@127.0.0.1:6379/tortoise_test")
+    spool = _live_spool(tmp_path / "live-spool")
+    with pytest.raises(SystemExit) as exc:
+        rehearsal._run(["run", "--mode", "backpressure", "--out", str(out),
+                        "--spool-src", str(spool)])
+    assert "corpus cost" in str(exc.value)
+    assert not (out / "corpus-cost.json").exists()
+
+
+# ── every mode states its capture seams, so none inherits the operator's ────
+
+
+def test_every_mode_states_all_three_capture_knobs() -> None:
+    """F5: an unset knob is the operator's shell, not the default.
+
+    All three are read at module import (or per call) inside `hosted_api`, so a
+    child process cannot undo an inherited value. Measured: ambient
+    `LLM_MOCK=1` made `head-keyless` mock-extract, ambient `IN_FLIGHT=1` put
+    `head-mock` on a 1-slot ceiling with `capture_capacity_saturated` 429s, and
+    ambient `EXTRACTOR=m2` left `pre-14261`'s v2 seam inert.
+    """
+    assert set(rehearsal.MODES) == {"head-keyless", "head-mock", "pre-14261",
+                                    "backpressure"}
+    for mode in rehearsal.MODES:
+        knobs = rehearsal._mode_knobs(mode)
+        assert set(knobs) == {"TORTOISE_SESSION_LLM_MOCK",
+                              "TORTOISE_CAPTURE_IN_FLIGHT",
+                              "TORTOISE_SESSION_EXTRACTOR"}, mode
+        assert knobs["TORTOISE_SESSION_LLM_MOCK"] == (
+            "0" if mode == "head-keyless" else "1"), mode
+        assert knobs["TORTOISE_CAPTURE_IN_FLIGHT"] == (
+            "1" if mode == "backpressure" else "8"), mode
+        assert knobs["TORTOISE_SESSION_EXTRACTOR"] == "v2", mode
+    # Non-vacuity: the two modes that must NOT get the rehearsal's aggressive
+    # value are the ones an ambient environment polluted.
+    assert rehearsal._mode_knobs("head-keyless")["TORTOISE_SESSION_LLM_MOCK"] == "0"
+    assert rehearsal._mode_knobs("head-mock")["TORTOISE_CAPTURE_IN_FLIGHT"] == "8"
+
+
+# ── the tenant id must always be a UUID-shaped tail ─────────────────────────
+
+
+def test_org_id_tail_is_twelve_characters_where_decimal_is_not() -> None:
+    """F6: `:012d` overflows 40 bits for ~9 % of runs; hex cannot.
+
+    `n` is uniform on `[0, 2**40-1]` and `2**40 - 10**12 = 99 511 627 776`, so
+    8.99 % of `(mode, nonce)` pairs need a THIRTEENTH decimal digit — and a `:012`
+    minimum width pads, it never truncates. Measured over 20 000 pairs: 1 798 bad
+    tails (e.g. `head-mock/nonce15 -> …-8000-1021145458251`).
+    """
+    import hashlib
+    import re
+
+    shape = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$")
+    overflowing = 0
+    for i in range(2000):
+        mode, nonce = "head-mock", f"nonce{i}"
+        org = rehearsal._org_id(mode, nonce)
+        assert shape.match(org), (mode, nonce, org)
+        n = int(hashlib.sha256(f"{mode}:{nonce}".encode()).hexdigest()[:10], 16)
+        if len(f"{n:012d}") > 12:
+            overflowing += 1
+    assert overflowing, (
+        "no swept nonce reaches the decimal overflow, so this pin cannot show "
+        "that the hex field is what fixes the shape")
