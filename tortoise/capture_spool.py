@@ -877,21 +877,31 @@ def capacity_refusal(outcome: PostOutcome) -> dict | None:
     entry's own refusals, which is what makes the epic's ``attempts ≤ 3``
     falsifiable at all.
 
-    ``retry_after`` is parsed out of the body when the server sent one — the
-    drain honours it instead of inventing a cadence. Every field is OPTIONAL in
-    the returned record (a 429 from an older server carries none of them), so a
-    caller must read it with ``.get``.
+    Naming: the server's own category is copied through when it sent one, and
+    the class is named when it did not — ``code`` is always
+    ``capture_capacity_saturated`` because that is what this function just decided
+    the refusal IS; ``detail`` keeps the server's bytes for the operator.
+    ``retry_after`` is parsed out of the body when the server sent one (the drain
+    honours it instead of inventing a cadence), and every field beyond ``status``
+    and ``code`` is OPTIONAL — read it with ``.get``.
     """
     if outcome.ok:
         return None
     detail = outcome.detail if isinstance(outcome.detail, str) else ""
     status = outcome.status
     typed = CAPTURE_CAPACITY_CODE in detail
+    # ⛔ THE STATUS IS THE TRIGGER, THE CODE IS THE NAME. Narrowing this to a
+    # server that emits the category would leave the measured defect alive on
+    # every deployment that does not send one (an older server, an upstream
+    # limiter, a proxy): the entry would be charged for a condition that says
+    # nothing about it, which is exactly the shape this change removes. A 429 IS
+    # a saturation signal by construction.
     if status != 429 and not typed:
         return None
-    refusal: dict = {"status": status if status is not None else 429}
-    if typed:
-        refusal["code"] = CAPTURE_CAPACITY_CODE
+    refusal: dict = {
+        "status": status if status is not None else 429,
+        "code": CAPTURE_CAPACITY_CODE,
+    }
     retry_after = _retry_after_seconds(detail)
     if retry_after is not None:
         refusal["retry_after"] = retry_after
