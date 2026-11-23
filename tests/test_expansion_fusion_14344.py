@@ -4,8 +4,10 @@ concatenated.
 The unit under test is :func:`tortoise.expansion_merge.fuse_expansion_pass`, the
 one merge rule the C2 entity/fact key expansion's two halves now share
 (``sdk._entity_key_expansion_pass`` sparse, ``sdk._entity_key_dense_pass``
-dense). It is pure — no graph, no embedder — so these tests run in every lane,
-including the embedded carve-out.
+dense). It is pure — no graph, no embedder, no network — so it needs no
+`TORTOISE_DB_URI`; ⚠️ that is a property of the FILE, not a claim about CI: it is
+registered on `core` in `config/ci-surfaces.yml` (so the docker shards run it),
+NOT in the `carve_out:` job's own list, which executes only its declared set.
 
 **What the previous rule was, because every assertion below is written against
 it.** The merge used to be::

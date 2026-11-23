@@ -10659,6 +10659,11 @@ ROWED_BY_THIS_FOLD = (
     # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:` row
     # and nothing reds.
     "test_relation_guards_14263.py",
+    # #14344 (PR #14396): same shape again — a `core` row with NO `durations:` row.
+    # Caught in review round 4 by reading the sibling row above rather than the
+    # tuple: `--integrity` was green and the ENTRY-RULE pin was VACUOUS for this
+    # file, because it iterates THIS tuple and nobody had listed it.
+    "test_expansion_fusion_14344.py",
 )
 
 
