@@ -20,6 +20,7 @@ from tortoise import extractor_v2 as v2
 from tortoise.model_adapters import (
     _reset_failover_cooldown,
     build_extractor_model,
+    build_reader_model,
 )
 
 EXTRACT_MODEL = "deepseek/deepseek-v4-flash"
@@ -69,17 +70,18 @@ def _recorder():
 
 # ── the three pool members, wire bodies side by side ──────────────────────
 
-def _three_member_bodies(monkeypatch, model_id: str = EXTRACT_MODEL):
+def _three_member_bodies(monkeypatch, model_id: str = EXTRACT_MODEL, *,
+                         builder=build_extractor_model, max_tokens: int = 4000):
     """Build the PRODUCTION 3-provider pool and post one call on each member.
 
     Returns ``{provider: body}`` — the wire body each pool member sends for the
-    same extraction call, produced by the same builder production uses.
+    same call, produced by the same builder production uses.
     """
     for env, key in (("DEEPSEEK_API_KEY", "ds"),
                      ("OPENROUTER_API_KEY", "or"),
                      ("VENICE_API_KEY", "vn")):
         monkeypatch.setenv(env, key)
-    model = build_extractor_model(model_id, max_tokens=4000, temperature=0.0)
+    model = builder(model_id, max_tokens=max_tokens, temperature=0.0)
     assert len(model.providers) == 3, "expected the 3-member rotation pool"
 
     out: dict[str, dict] = {}
@@ -190,6 +192,35 @@ def test_keyless_build_suppresses_too(monkeypatch):
     (url, body), = bodies
     assert url == "https://openrouter.ai/api/v1/chat/completions"
     assert body["reasoning"] == {"effort": "none"}
+
+
+# ── the ask lane is OUT of #14357's scope ─────────────────────────
+
+def test_reader_lane_wire_body_is_not_suppressed(monkeypatch):
+    """The reader SHARES ``_build_routing_model`` but not this fix's scope.
+
+    ``build_reader_model`` defaults to the same flash family, so a lane-blind
+    suppression silently rewrote the ask lane's serving config — a product
+    change #14357 never names (a 500-token answer is not the extraction
+    collapse) and nothing measured. The lane gate keeps it byte-identical: no
+    ``reasoning`` on the openrouter member, no ``venice_parameters`` on venice.
+
+    Red on the lane-blind builder this test was added against: both bodies
+    carried their suppression field.
+    """
+    bodies = _three_member_bodies(monkeypatch, builder=build_reader_model,
+                                  max_tokens=500)
+    for provider in ("openrouter", "venice"):
+        assert "reasoning" not in bodies[provider], (
+            f"the ask lane's {provider} member gained a reasoning field — "
+            "#14357 is scoped to the extractor")
+        assert "venice_parameters" not in bodies[provider], (
+            f"the ask lane's {provider} member gained a suppression field — "
+            "#14357 is scoped to the extractor")
+    # unchanged pre-existing behaviour: the DIRECT member hardcodes its toggle
+    # in ``DeepSeekDirectModel.complete``, so that assertion holds before and
+    # after #14357 and documents WHICH member the fix ever moved.
+    assert bodies["deepseek-direct"]["thinking"] == {"type": "disabled"}
 
 
 def test_thinking_budget_still_wins_over_suppression(monkeypatch):

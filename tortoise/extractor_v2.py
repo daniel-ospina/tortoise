@@ -16183,10 +16183,12 @@ def _classify_error(e: BaseException) -> str:
     The key-limit test itself is ``_is_key_limit_error`` above (its breadth
     caveat included).
 
-    The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``, or the
-    ``parse_error``/``truncated_parse_error``/``reasoning_collapse`` classes
-    the module's own exception types decide (``_ParseError``'s ``truncated``
-    flag, ``_ReasoningCollapse``'s type).
+    The returned class is always one of ``_LLM_ERROR_CENSUS_CLASSES``, or
+    ``reasoning_collapse`` — the ONE class this function decides by TYPE
+    (``_ReasoningCollapse``). ``parse_error`` / ``truncated_parse_error`` are
+    NOT in its return set: nothing here branches on ``_ParseError``; those two
+    are class-decided in ``_bump_census``, which owns them on
+    ``_ParseError``'s ``truncated`` flag.
 
     KNOWN DIVERGENCES from P2's retry taxonomy (both pre-existing, not
     introduced here, and both tracked on #5525, whose root was restated to

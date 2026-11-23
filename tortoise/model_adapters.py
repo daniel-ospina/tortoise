@@ -1041,11 +1041,20 @@ def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
 
 
 def _build_routing_model(model_id: str, pool_names: list[str], *,
-                         max_tokens, temperature, json_mode):
+                         max_tokens, temperature, json_mode,
+                         suppress_reasoning: bool):
     """Shared private pool-builder (#2069) — both lanes' RoutingModel /
-    RotatingModel construction (extraction behavior byte-identical)."""
+    RotatingModel construction (extraction behavior byte-identical).
+
+    ``suppress_reasoning`` is the LANE's decision (#14357), never inferred
+    here: ``build_extractor_model`` passes ``True``, ``build_reader_model``
+    passes ``False`` so the ask lane's serving config is untouched. The family
+    gate (``_runs_non_thinking``) is applied inside ``_build_single`` on top of
+    it, so the two are independent and a v4-pro extraction keeps its default.
+    """
     providers = [_build_single(p, model_id, max_tokens=max_tokens,
-                               temperature=temperature, json_mode=json_mode)
+                               temperature=temperature, json_mode=json_mode,
+                               suppress_reasoning=suppress_reasoning)
                  for p in pool_names]
     # Pilot #1549: 3+ configured providers → the rotating pool (spread the
     # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
@@ -1367,22 +1376,33 @@ def _direct_wire_id(model_id: str) -> str:
 
 
 def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
-                 json_mode: bool | None = None):
+                  json_mode: bool | None = None,
+                  suppress_reasoning: bool):
+    """One pool member. ``suppress_reasoning`` is REQUIRED and keyword-only on
+    purpose: it is the calling lane's decision, and a default would let the
+    next caller silently land back on the thinking-on body #14357 fixed."""
     if provider == "deepseek-direct":
         return DeepSeekDirectModel(
             _direct_wire_id(model_id),
             max_tokens=max_tokens, temperature=temperature,
             json_mode=json_mode)
-    # #14357: EVERY non-deepseek-direct pool member gets the SAME suppression
-    # the direct member hardcodes. The class default is
-    # ``disable_reasoning=False`` — which is exactly where this rotted: a bare
-    # ``OpenRouterModel(...)`` in this branch sent NO reasoning field, so a
-    # failed-over extraction ran thinking-on and collapsed to
-    # ``finish_reason=length`` with zero content (the failure mode this module
-    # records at ``MODELS`` below). The decision is family-gated, not
-    # lane-gated, so all three members answer to ONE predicate and a v4-pro
-    # extraction still keeps its default on all three (#1790).
-    suppress = _runs_non_thinking(model_id)
+    # #14357: on the EXTRACTION lane, EVERY non-deepseek-direct pool member gets
+    # the SAME suppression the direct member hardcodes. Two gates, one place:
+    #
+    #   * ``suppress_reasoning`` — the LANE's decision. ``build_extractor_model``
+    #     passes True; ``build_reader_model`` passes False, so the ask lane's
+    #     wire body is BYTE-IDENTICAL before and after this change (its scope
+    #     was never #14357's, and a 500-token reader with thinking on is a
+    #     separate, unmeasured product question — not a side effect of this fix).
+    #   * ``_runs_non_thinking(model_id)`` — the FAMILY gate, so a v4-pro
+    #     extraction still keeps its default on all three (#1790).
+    #
+    # The class default is ``disable_reasoning=False`` — which is exactly where
+    # this rotted: a bare ``OpenRouterModel(...)`` in this branch sent NO
+    # reasoning field, so a failed-over extraction ran thinking-on and collapsed
+    # to ``finish_reason=length`` with zero content (the failure mode this module
+    # records at ``MODELS`` below).
+    suppress = suppress_reasoning and _runs_non_thinking(model_id)
     if provider == "venice":
         # Venice's catalog serves the documented flash id: ``GET /models``
         # lists ``deepseek-v4-flash`` (DeepSeek V4 Flash 0423) with
@@ -1823,7 +1843,8 @@ def build_extractor_model(model_id: str | None = None, *,
     if not pool_names:
         pool_names = ["openrouter"]  # lenient no-key default (D3)
     return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
-                                temperature=temperature, json_mode=json_mode)
+                                temperature=temperature, json_mode=json_mode,
+                                suppress_reasoning=True)
 
 
 def build_reader_model(model_id: str | None = None, *,
@@ -1859,4 +1880,11 @@ def build_reader_model(model_id: str | None = None, *,
     model_id = _normalize_ask_model_spec(model_id)
     _primary_name, pool_names = resolve_reader_provider(model_id)
     return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
-                                temperature=temperature, json_mode=False)
+                                temperature=temperature, json_mode=False,
+                                # #14357 is scoped to the EXTRACTOR: the ask
+                                # lane's serving config stays exactly as it
+                                # was. Suppressing thinking here would be a
+                                # real product change on a lane the issue never
+                                # names — its own measured decision, not a side
+                                # effect of the extraction fix.
+                                suppress_reasoning=False)
