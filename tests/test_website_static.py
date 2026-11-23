@@ -10768,7 +10768,11 @@ class TestProductTeamsCopy:
         and every copy row would stay green.
         """
         compute = _element_by_id(_product_teams_html(), "beat-compute")
-        h2 = re.search(r"<h2>(.*?)</h2>", compute, re.S)
+        # `<h2\b[^>]*>` — the title is the ordinary thing to style, and
+        # `<h2 class="beat-title">` is a `<h2>` that must not read as "has no
+        # <h2>". Fail-closed either way, but a message that denies what is on
+        # the page is the same misattribution class as the rest of this round.
+        h2 = re.search(r"<h2\b[^>]*>(.*?)</h2>", compute, re.S)
         assert h2, (
             "#beat-compute has no <h2> — the compute claim reads as a "
             "continuation of the intro above it, which is the defect "
@@ -10818,7 +10822,7 @@ class TestProductTeamsCopy:
         for section_id, heading, paragraph in self.STEPS:
             source = self.STEP_SOURCES[section_id]
             beat = _element_by_id(html, section_id)
-            h2 = re.search(r"<h2>(.*?)</h2>", beat, re.S)
+            h2 = re.search(r"<h2\b[^>]*>(.*?)</h2>", beat, re.S)
             assert h2, f"#{section_id} has no <h2>"
             assert _beat_text(h2.group(1)) == heading, (
                 f"#{section_id}'s heading reads {_beat_text(h2.group(1))!r}; "
@@ -10956,10 +10960,32 @@ class TestProductTeamsPricingCardCtaBaseline:
     ⛔ WHY A STATIC PIN FOR A LAYOUT FIX: the failure is invisible to every
     other row here — no copy, no price and no markup changes — so a revert of
     the two declarations would be green everywhere else and the owner would
-    have to report it a second time. The rows below read the WINNING
-    declaration from the COMMENT-BLANKED sheet (`_effective_decl`), because the
-    rule carries a comment that names `display: flex` and `margin-top: auto`:
-    a substring search would be satisfied by the comment explaining the fix.
+    have to report it a second time.
+
+    ⛔ WHAT THE READER ACTUALLY BUYS (the first draft of this docstring claimed
+    the comment beside the rule says `display: flex` and `margin-top: auto`, so
+    blanking was what stopped the prose satisfying the rows — MEASURED FALSE:
+    the comment says "FLEX COLUMN", and the only `margin-top: auto` in prose is
+    LEADING, above `.pricing-card`, outside any rule body `_effective_decl`
+    reads). Two properties are load-bearing instead: `_effective_decl` returns
+    the LAST declaration in a MATCHED rule body, so an appended override
+    inside the block reds; and matching the prelude keeps the value tied to
+    the selector that owns it.
+
+    ⛔ AND A SUBSTRING SEARCH WOULD BE GREEN ON A BROKEN PAGE: `.pricing-grid`
+    and `.pricing-toggle` both literally carry `display: flex` (`…html:200`,
+    `:204`), so "the sheet contains `display: flex`" is true with
+    `.pricing-card` never made a container at all.
+
+    ⛔ `[-1]` IS LAST-IN-SOURCE-ORDER, NOT THE CASCADE WINNER — specificity is
+    never consulted by `_css_rules_with_scope`, so a higher-specificity rule
+    that names a DIFFERENT selector is invisible here. Measured (#14406 review
+    round 3): appending `.pricing-grid .pricing-card .btn { margin-top: 0 }`
+    — (0,3,0) against the pinned (0,2,0), winning at any order — left all three
+    rows of this class GREEN while the four CTAs split again. `[-1]` is still
+    right for the rule that OWNS the declaration (an appended duplicate of the
+    same selector must win); `test_no_other_rule_takes_the_ctas_slack` closes
+    the competing-selector half.
     """
 
     def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
@@ -10986,6 +11012,48 @@ class TestProductTeamsPricingCardCtaBaseline:
             "wherever its tier's copy ends and the four buttons do not share a "
             "baseline (#13645 item 6). `margin-top: auto` is the mechanism; "
             "without it `display: flex` alone changes nothing a reader sees")
+
+    def test_no_other_rule_takes_the_ctas_slack(self):
+        """No OTHER rule may set the CTA's vertical slack, at ANY specificity.
+
+        `_css_rules_with_scope` matches a prelude that NAMES the exact selector
+        and returns them in source order, so `[-1]` cannot see a rule that
+        reaches the same element through a different, higher-specificity
+        selector. Measured (#14406 review round 3): appending
+        `.pricing-grid .pricing-card .btn { margin-top: 0 }` — (0,3,0) against
+        the pinned (0,2,0), so it wins at any source order — left all three
+        rows of this class GREEN while the rendered CTAs split again. That is a
+        false PASS in the guard whose docstring says the CTA takes the slack.
+
+        So this row reads EVERY top-level rule that can reach a card's CTA and
+        refuses a competing `margin-top` / `margin` shorthand. It does not
+        re-implement the cascade: it states the invariant the page needs — the
+        only rule that may set that slack is the pinned one, and it sets `auto`.
+        """
+        css = _product_teams_html()
+        competing = []
+        for prelude, body, inside_media in _css_all_rules(css):
+            if inside_media:
+                continue
+            targets = [p.strip() for p in prelude.split(",")]
+            if not any(".pricing-card" in t and ".btn" in t for t in targets):
+                continue
+            if "".join(prelude.split()) == ".pricing-card.btn":
+                continue  # the pinned rule itself, asserted above
+            for prop in ("margin-top", "margin"):
+                value = _effective_decl(body, prop)
+                if value is None:
+                    continue
+                if prop == "margin-top" and value == "auto":
+                    continue
+                competing.append((prelude, prop, value))
+        assert not competing, (
+            "another rule sets the pricing CTA's vertical slack, and can starve "
+            f"the pinned `margin-top: auto`: {competing!r}. Specificity, not "
+            "source order, decides which one a browser applies, so a rule like "
+            "`.pricing-grid .pricing-card .btn { margin-top: 0 }` (0,3,0) "
+            "out-ranks the pinned (0,2,0) rule and splits the four baselines "
+            "(#13645 item 6)")
 
     def test_the_popular_cards_thicker_border_does_not_move_its_cta(self):
         """The 2px border eats ONE more px than its siblings' 1px — measured.
@@ -11016,8 +11084,16 @@ class TestProductTeamsPricingCardCtaBaseline:
         footnote added after it would take the slack and the buttons would
         misalign on one path only (JS visitors) or the other (crawlers).
         """
-        for chunk in _static_pricing_grid(_served(_product_teams_html())).split(
-                '<div class="pricing-card')[1:]:
+        chunks = _static_pricing_grid(_served(_product_teams_html())).split(
+            '<div class="pricing-card')[1:]
+        assert len(chunks) == 4, (
+            "the split found " f"{len(chunks)} card chunk(s) for four cards — it "
+            "needs the opening tag to read `<div class=\"pricing-card`, so a "
+            "card written `<div id=\"card-free\" class=\"pricing-card\">` is "
+            "absorbed into the previous chunk and its CTA is never checked. The "
+            "siblings in this class assert their rule count for the same reason; "
+            "this row iterated a shrinking population silently")
+        for chunk in chunks:
             # Cut the chunk at the CARD's own balanced close: the slice handed in
             # ends at the usage paragraph, so the last chunk would otherwise
             # carry `<p class="pricing-usage">` into the tail and the row would
