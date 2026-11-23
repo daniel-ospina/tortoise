@@ -4198,17 +4198,38 @@ def flush_spool(
     claim = None
     if not only_session_id:
         from tortoise.drain_claim import DEFAULT_TTL_S as _CLAIM_TTL_S
-        from tortoise.drain_claim import DrainClaimUnavailable, acquire, holder
+        from tortoise.drain_claim import (
+            DrainClaimUnavailable,
+            acquire,
+            claim_path,
+            holder,
+        )
         try:
             claim = acquire(
                 root, leg="python",
                 ttl_s=_CLAIM_TTL_S if claim_ttl_s is None else claim_ttl_s)
         except DrainClaimUnavailable:
-            # An UNWRITABLE spool root, not contention: a root that cannot hold a
-            # 60-byte claim cannot hold a spool entry either, so this pass can
-            # only report the broken spool — which it must, because the false-PASS
-            # direction (a silent drain) is the worse error here. Stated on the
-            # summary so the exclusion being absent is never invisible.
+            # ⛔ NOT NECESSARILY "nobody": an object at the claim path that could not
+            # be READ (a transient local error, or an unclearable obstruction) may
+            # belong to a holder that is draining right now, and running this pass
+            # UNCLAIMED beside it is the two-drainer defect the claim removes. Fail
+            # CLOSED when anything is at the path; only a path that is EMPTY may be
+            # treated as "the root cannot hold a claim" (which is the broken-spool
+            # report the false-PASS rule requires).
+            try:
+                obstructed = claim_path(root).exists() or claim_path(root).is_symlink()
+            except OSError:
+                # The path cannot even be STAT'ed, which means the root itself is
+                # unusable: this pass can only report the broken spool (nothing in it
+                # is listable either), so there is nothing to serialize. That is the
+                # false-PASS arm below, kept as the documented decision.
+                obstructed = False
+            if obstructed:
+                summary.held_by_claim = True
+                summary.claim_holder = (
+                    "a claim file exists at this spool but could not be read "
+                    "(pid unknown) — nothing attempted")
+                return summary
             summary.claim_unavailable = True
         if claim is None and not summary.claim_unavailable:
             # Another drainer owns this box's spool. Every entry this pass would
@@ -4218,8 +4239,12 @@ def flush_spool(
             # and overwriting the holder's record with an empty one would erase
             # the last thing actually known about the box.
             summary.held_by_claim = True
-            summary.claim_holder = (
-                holder(root).line(root) if holder(root) is not None else None)
+            # ONE read: `holder()` re-reads the claim file, so calling it twice
+            # meant a holder that released in between made the second call return
+            # None and `None.line(root)` raise AttributeError — on the routine
+            # contention path, where the hook's stderr is discarded (review finding).
+            held = holder(root)
+            summary.claim_holder = held.line(root) if held is not None else None
             return summary
     try:
         return _flush_claimed(

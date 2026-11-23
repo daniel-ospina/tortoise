@@ -7819,3 +7819,51 @@ test("#14350: a slow holder's release leaves a SUCCESSOR's claim alone", async (
   assert.equal(successor.renew(1110), true, "and remain renewable");
   successor.release();
 });
+
+test("#14350: an EMPTY onlySessionId is UNTARGETED — it takes the claim", async () => {
+  // The per-entry filter is `opts.onlySessionId && …`, so `""` drains EVERYTHING.
+  // Before this change the claim test (`!== undefined`) called it TARGETED and
+  // skipped the claim, so one empty string bypassed the one-drainer rule.
+  // MUTATION THAT REDS THIS: `if (opts.onlySessionId !== undefined)`.
+  const spool = tmpSpool();
+  const entry = writeSpoolEntry(spool, {
+    sessionId: "empty-id-holder", turns: [{ role: "user", content: "hi" }], nowMs: 1,
+  });
+  const holder = acquireDrainClaim(spool, { leg: "python" });
+  assert.ok(holder);
+  let posts = 0;
+  const { fetchImpl } = mockFetch([{ ok: true }], () => { posts += 1; });
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1, onlySessionId: "" });
+  assert.equal(summary.heldByClaim, true, "an empty session id must not bypass the claim");
+  assert.equal(posts, 0);
+  assert.equal(summary.filed, 0);
+  holder.release();
+  assert.ok(entry);
+});
+
+test("#14350: an UNREADABLE claim file is HONOURED, never drained beside", async (t) => {
+  if (process.getuid && process.getuid() === 0) return t.skip("root reads mode-000");
+  // A regular claim we cannot READ (transient EIO/EACCES, or an object we cannot
+  // parse) belongs to a holder that may be draining right now. The wrapper used to
+  // conclude "no holder" and run the pass UNCLAIMED beside it — the two-drainer
+  // defect (review P0 on the Python twin; this leg had the same shape).
+  // MUTATION THAT REDS THIS: drop the `existsSync(drainClaimPathFor(dir))` arm.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, {
+    sessionId: "unreadable-claim", turns: [{ role: "user", content: "hi" }], nowMs: 1,
+  });
+  // NOT malformed JSON — an unparseable claim is legitimately stale (rule 1). This
+  // is a claim we cannot READ AT ALL, which is the case that must fail closed.
+  const claimPath = join(spool, "drain.claim");
+  writeFileSync(claimPath, `${JSON.stringify({
+    version: DRAIN_CLAIM_VERSION, token: "t", leg: "python", pid: process.pid,
+    host: "x", started_at: 0, expires_at: Date.now() + 60_000,
+  })}\n`);
+  chmodSync(claimPath, 0o000);
+  let posts = 0;
+  const { fetchImpl } = mockFetch([{ ok: true }], () => { posts += 1; });
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+  chmodSync(claimPath, 0o600);
+  assert.equal(summary.heldByClaim, true, "something is at the claim path — fail CLOSED");
+  assert.equal(posts, 0, "nothing may be posted beside an unreadable claim");
+});

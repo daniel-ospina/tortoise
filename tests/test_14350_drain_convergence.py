@@ -51,6 +51,7 @@ from tortoise.capture_spool import (
     Snapshot,
     _age_key,  # noqa: F401  — the ordering the monotonicity argument rests on
     capture_health_line,
+    capacity_refusal,
     count_pending_captures,
     flush_spool,
     read_capture_status,
@@ -867,6 +868,16 @@ def test_the_PI_LEG_honours_a_LIVE_python_claim(tmp_path):
     root = tmp_path / "spool"
     claim = drain_claim.acquire(root, leg="python")
     assert claim is not None
+    before = drain_claim.read_claim(root)
+    # TWICE: a mutation that advances the acquisition time only takes effect on the
+    # NEXT write, so one renewal cannot see it.
+    assert claim.renew(now_s=time.time() + 10) is True
+    assert claim.renew(now_s=time.time() + 30) is True
+    after = drain_claim.read_claim(root)
+    assert after["started_at"] == before["started_at"], (
+        "`started_at` is when the claim was ACQUIRED — a renewal must not move it "
+        "(the Pi leg preserves it; a disagreement here is a field-level divergence "
+        "in a file whose contract is field-level agreement)")
     verdict = _ts_verdict(root)
     assert verdict["readable"] is True, "the Pi leg must be able to read our record"
     assert verdict["version"] == drain_claim.CLAIM_VERSION
@@ -1003,3 +1014,147 @@ def test_a_pass_that_RECOVERS_from_a_capacity_refusal_is_not_recorded_BLOCKED(tm
     status = read_capture_status(root)
     assert (status or {}).get("state") != "blocked", (
         f"a recovered pass recorded {status!r} — the box is not blocked")
+
+
+def test_an_UNREADABLE_regular_claim_is_HONOURED_never_deleted(tmp_path):
+    """⛔ The one place this protocol used to fail OPEN.
+
+    A *transient* read error on a perfectly good regular claim file — EMFILE, EIO,
+    an NFS hiccup, EACCES after a mode drift — made `_read_raw` answer `None`, and
+    `None` routed to "clear the obstruction", which unlinked any regular file it
+    was pointed at. So a live holder's claim could be DELETED and handed to a second
+    process while the first still believed it owned the spool (found in review, with
+    a one-error reproduction), with no attacker needed — only a busy box.
+
+    The doctrine everywhere else here is "unprovable reads as ALIVE"; a claim we
+    cannot read is honoured, not cleared.
+
+    MUTATION THAT REDS THIS: route `existing is None` straight to
+    `_clear_unusable_claim_path` (drop the `S_ISREG` gate).
+    """
+    if os.getuid() == 0:
+        pytest.skip("root can read a mode-000 file")
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    path = root / "drain.claim"
+    path.write_text(json.dumps({
+        "version": drain_claim.CLAIM_VERSION, "token": "live-holder", "leg": "pi",
+        "pid": os.getpid(), "host": drain_claim._host(),
+        "started_at": 0.0,
+        "expires_at": time.time() * drain_claim.TIMESTAMP_UNIT_MS + 600_000,
+    }))
+    os.chmod(path, 0o000)
+    try:
+        claim = drain_claim.acquire(root, leg="python")
+        assert claim is None, (
+            "a claim we could not READ was taken over — that is the fail-open "
+            "direction: the live holder is still draining")
+        assert path.exists(), "a regular claim file must NEVER be deleted unread"
+    finally:
+        os.chmod(path, 0o600)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no mkfifo on this platform")
+def test_a_FIFO_at_the_claim_path_does_not_HANG_the_drain(tmp_path):
+    """Reading a FIFO blocks until a writer appears, so a corrupt object at the
+    claim path used to hang every drain, `renew`, `holder` and health surface
+    forever — the permanent block #14350 forbids, in the one corruption class the
+    code claimed to cover (found in review: measured as a hang, killed at 15 s).
+
+    MUTATION THAT REDS THIS: read the path without the `S_ISREG` gate — this test
+    then TIMES OUT rather than asserting (run it under a watchdog to see it).
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    os.mkfifo(root / "drain.claim")
+    claim = drain_claim.acquire(root, leg="python")
+    assert claim is not None, (
+        "a FIFO is not a holder and must not block the drain (if this test hung, "
+        "the FIFO was READ)")
+    claim.release()
+    # And the reader is safe on its own, which is what renew/holder/health use.
+    assert drain_claim.read_claim(root) is None
+
+
+# ── The refusal's NAME must be the server's, in BOTH legs ──────────────────
+
+_INGEST_BODY = json.dumps({"detail": {
+    "code": "ingest_rate_limited",
+    "message": "ingest rate limited",
+    "retry_after": 60,
+}})
+
+
+def test_the_severed_SECOND_429_keeps_the_servers_own_NAME(tmp_path):
+    """`capture_capacity_saturated` is not the only 429 in the capture lane.
+
+    `hosted_api._ingest_rate_limited` sends `{code: ingest_rate_limited}` for the
+    per-ORG ingest window. Relabelling it "capacity" names a cause the server never
+    sent, disagrees with the server's own `/health` counter, and writes the wrong
+    advice ("wait for a slot" instead of "wait for the org window") into the DURABLE
+    status the other leg also reads.
+
+    MUTATION THAT REDS THIS: hardcode `code = CAPTURE_CAPACITY_CODE`.
+    """
+    root = _spool(tmp_path, sessions=1)
+    outcome = PostOutcome(ok=False, status=429, detail=_INGEST_BODY)
+    refusal = capacity_refusal(outcome)
+    assert refusal is not None, "a 429 is still a box-level refusal (the CHARGING rule)"
+    assert refusal["code"] == "ingest_rate_limited", (
+        "the server named this refusal; the class name must not overwrite it")
+    assert refusal["retry_after"] == 60.0
+    # …and a bare 429 (no typed body) still gets the class name.
+    bare = capacity_refusal(PostOutcome(ok=False, status=429, detail=""))
+    assert bare is not None and bare["code"] == CAPTURE_CAPACITY_CODE
+
+
+@pytest.mark.skipif(_NODE is None, reason="node is not installed on this box")
+def test_BOTH_legs_name_the_same_429_the_same_way(tmp_path):
+    """One refusal body, two legs, ONE answer — the seam the last cycle missed.
+
+    The legs write the SAME `<spool>/status.json`. If they disagree about the
+    refusal's name, whichever ran last overwrites the other's record, and the
+    operator line names a cause the server did not send.
+
+    MUTATION THAT REDS THIS: hardcode the class name on either leg.
+    """
+    root = tmp_path / "spool"
+    root.mkdir(parents=True)
+    script = (
+        'import { capacityRefusal } from %s;\n'
+        'const r = capacityRefusal({ status: 429, detail: process.env.BODY });\n'
+        'process.stdout.write(JSON.stringify(r ?? null));\n' % json_dumps(_TS_LEG.as_posix())
+    )
+    out = subprocess.run([_NODE, "--input-type=module", "-e", script],
+                         capture_output=True, text=True, timeout=120,
+                         env={**os.environ, "BODY": _INGEST_BODY})
+    assert out.returncode == 0, out.stderr[-2000:]
+    ts_refusal = json.loads(out.stdout)
+    py_refusal = capacity_refusal(
+        PostOutcome(ok=False, status=429, detail=_INGEST_BODY))
+    assert ts_refusal is not None and py_refusal is not None
+    assert ts_refusal["code"] == py_refusal["code"], (
+        f"the legs disagree about the same 429: TS {ts_refusal['code']!r} vs "
+        f"Python {py_refusal['code']!r} — whichever writes status.json last wins")
+
+
+def test_an_EMPTY_only_session_id_is_UNTARGETED_and_takes_the_claim(tmp_path):
+    """`""` must not mean "drain the whole spool, unclaimed".
+
+    The claim is taken for an untargeted pass and skipped for a targeted one, and
+    the per-entry filter is `if only_session_id and …` — so `""` drains EVERYTHING
+    while, before this change, the claim test (`is None`) treated it as TARGETED and
+    skipped the claim. One empty string therefore bypassed the one-drainer rule.
+
+    MUTATION THAT REDS THIS: `if only_session_id is None:` for the claim gate.
+    """
+    root = _spool(tmp_path, sessions=3)
+    holder = drain_claim.acquire(root, leg="pi")
+    assert holder is not None
+    posts: list = []
+    summary = flush_spool(root, lambda p: posts.append(p) or PostOutcome(
+        ok=True, status=200, body={}), now=1000.0, only_session_id="")
+    assert summary.held_by_claim is True, (
+        "an empty session id drained a spool another process was draining")
+    assert posts == [], "and it posted nothing"
+    holder.release()

@@ -87,6 +87,7 @@ import math
 import os
 import secrets
 import socket
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -252,7 +253,18 @@ def read_claim(root: Path) -> dict | None:
 
 
 def _read_raw(path: Path) -> bytes | None:
+    """The claim file's bytes, or ``None`` when they cannot be had.
+
+    ⛔ ``lstat`` FIRST: reading a FIFO or a socket BLOCKS until a writer appears, so
+    a corrupt object at the claim path used to hang the drain, ``renew``, ``holder``
+    and every health surface FOREVER (measured: a FIFO never returned; review
+    finding). Only a REGULAR file is ever read, and a non-regular object answers
+    ``None`` immediately — which the caller then handles as "unreadable", never as
+    "read these bytes".
+    """
     try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
         return path.read_bytes()
     except OSError:
         return None
@@ -426,7 +438,10 @@ class DrainClaim:
         written = read_claim(self.path.parent)
         if written is None or written.get("token") != self.token:
             return False
-        self._issued_at = now
+        # ⛔ `_issued_at` is NOT advanced: it is when this claim was ACQUIRED, and
+        # the Pi leg deliberately preserves it across renewals (`started_at:
+        # record.started_at`). Advancing it here made the two legs disagree about a
+        # field in a file whose contract is field-level agreement (review finding).
         self._renewed_at = now
         return True
 
@@ -498,10 +513,16 @@ def _clear_unusable_claim_path(path: Path) -> bool:
     ("run unclaimed, and SAY so") rather than a silent block.
     """
     try:
-        if path.is_symlink() or path.is_file():
-            path.unlink()
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return False
+    try:
+        if stat.S_ISDIR(mode):
+            path.rmdir()  # an EMPTY directory; refuses `ENOTEMPTY` otherwise
             return True
-        path.rmdir()  # an EMPTY directory; refuses `ENOTEMPTY` otherwise
+        # A symlink is unlinked AS A LINK (never followed), and a FIFO/socket too: it
+        # is an object, not content, so `unlink` is the correct removal.
+        os.unlink(path)
         return True
     except OSError:
         return False
@@ -562,15 +583,29 @@ def acquire(
                                 boot_id=boot_id, alive=alive):
                 return None
             if existing is None:
-                # The path EXISTS but cannot be read as a claim (a directory, a
-                # dangling symlink, `EACCES`). Rule 1 already says it is stale, and
-                # the ONE thing this must not do is `continue` into a permanent
-                # block: both attempts would re-`link` into `EEXIST` and the caller
-                # would read `None` as contention forever.
+                # The read failed. ⛔ WHICH KIND OF FAILURE IT WAS DECIDES WHETHER
+                # WE MAY DELETE, and conflating them is how this code once deleted a
+                # LIVE claim (review P0): a transient local error (EMFILE, EIO, an
+                # NFS hiccup, EACCES after a mode drift) on a perfectly good regular
+                # file is NOT evidence that the file is junk. The doctrine everywhere
+                # else in this module is "unprovable reads as ALIVE"; here it must be
+                # the same, so a regular file we could not read is honoured (return
+                # `None` = somebody holds it) and NEVER unlinked.
+                try:
+                    mode = os.lstat(path).st_mode
+                except FileNotFoundError:
+                    continue  # it vanished (a peer released); retry the link
+                except OSError:
+                    return None  # cannot even stat it: honour it
+                if stat.S_ISREG(mode):
+                    return None
+                # A directory, symlink, FIFO, socket or device: corruption, not a
+                # holder. Rule 1 already says stale, and leaving it would `EEXIST`
+                # every future attempt — a permanent block, which #14350 forbids.
                 if not _clear_unusable_claim_path(path):
                     raise DrainClaimUnavailable(
-                        f"{path} exists and cannot be read as a claim, and cannot "
-                        "be cleared — the spool root is not writable by this process")
+                        f"{path} exists and is not a claim, and cannot be cleared — "
+                        "the spool root is not writable by this process")
                 continue
             # ATOMIC TAKEDOWN, then verify in quarantine: see `_takedown`. The
             # previous read-compare-unlink let two contenders delete each other's
