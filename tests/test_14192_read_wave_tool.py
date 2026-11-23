@@ -360,10 +360,16 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     `for`-target arm above is the same argument one statement earlier.
 
     RESIDUALS, stated rather than implied: a value COMPUTED at runtime (`"".join(…)`,
-    `_N + "_x"`, a parameter), a value read out of a container or an attribute
-    (`_CFG["read"]`, `self._read`) and an unpack whose RIGHT-HAND SIDE is an attribute or a
-    call (`_N, _M = cfg.pair`, `_a, _b = pair()`) are not resolved here — nothing about them
-    is statically pairable, and they are named rather than implied (#14326 review P3).
+    `_N + "_x"`, a method call other than `str.format`, a parameter), a value read out of a
+    **NAME-held** container or an attribute (`_CFG["read"]`, `self._read`) and an unpack
+    whose RIGHT-HAND SIDE is an attribute or a call (`_N, _M = cfg.pair`, `_a, _b = pair()`)
+    are not resolved here — nothing about them is statically pairable, and they are named
+    rather than implied (#14326 review P3). ⛔ A value SELECTED out of a **LITERAL** container
+    is NOT residual and IS resolved — `('x', '…')[1]`, `{'k': '…'}['k']`,
+    `'…_extra'[:-6]` — because every element is a `Constant` in the source, the argument that
+    admitted `+`, `*`, `%` and `.format`; see `_subscript_strings` (round 16, the four shapes
+    MEASURED GREEN at `0162ab067e`). The NAME-held form stays declined on purpose: resolving
+    it would false-red the provenance lookup the `_is_read_ref` narrowing keeps green.
 
     ⛔ AN f-STRING WHOSE **CONSTANT FRAGMENT IS THE READ NAME** IS OVER-APPROXIMATED, AND AN
     f-STRING **ASSEMBLED FROM PARTS** IS RESIDUAL — two different classes, and both earlier
@@ -650,6 +656,14 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
         if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Mult):
             return (_repetitions(_values(value.left), _int_literals(value.right))
                     | _repetitions(_values(value.right), _int_literals(value.left)))
+        # ⛔ THE SAME SUBSCRIPT ARM AS `_possible_strings` (#14326 round 16, MEASURED GREEN at
+        # `0162ab067e`): `_N = ('x', '_tortoise_fts_query')[1]` and
+        # `_N = '_tortoise_fts_query_extra'[:-6]` bound nothing, so a `getattr(sdk, _N)` reach
+        # shipped. Values are SELECTED out of a literal container — nothing is computed that
+        # the source does not spell — so this is not the "read out of a container" residual
+        # (that one is a NAME-held mapping: `_CFG["read"]`, declined by the helper).
+        if isinstance(value, ast.Subscript):
+            return _subscript_strings(value, _values)
         return set()
 
     def _store_names(target: ast.AST) -> list[ast.Name]:
@@ -819,6 +833,15 @@ def _int_literals(node: ast.AST) -> frozenset[int]:
         return _int_literals(node.body) | _int_literals(node.orelse)
     if isinstance(node, ast.BoolOp):
         return frozenset().union(*(_int_literals(operand) for operand in node.values))
+    # ⛔ A SIGN IS NOT PART OF THE LITERAL (#14326 round 16, MEASURED GREEN): `-1` parses as
+    # `UnaryOp(USub, Constant(1))`, NOT as `Constant(-1)`, so `('x', '_tortoise_fts_query')[-1]`
+    # and `'_tortoise_fts_query_extra'[:-6]` were declined by every caller of this helper —
+    # the NEGATIVE half of the same static spelling. The sign is applied here so the two
+    # subscript arms (and `_repetitions`' count) see one integer per literal.
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _int_literals(node.operand)
+        return frozenset(-value if isinstance(node.op, ast.USub) else value
+                         for value in inner)
     return frozenset()
 
 
@@ -1052,6 +1075,115 @@ def _format_call_strings(call: ast.Call, resolve) -> set[str]:
     return _format_strings(resolve(call.func.value), operands)
 
 
+def _constant_slice_bounds(slice_node: ast.Slice) -> tuple[int | None, int | None, int | None] | None:
+    """`(start, stop, step)` when every bound is a Constant int or OMITTED; else None.
+
+    An omitted bound is `None` and is statically meaningful (`value[:-6]`); a non-constant
+    one is not, and the caller must then fall back to the fail-closed union.
+    """
+    bounds: list[int | None] = []
+    for part in (slice_node.lower, slice_node.upper, slice_node.step):
+        if part is None:
+            bounds.append(None)
+            continue
+        # ⛔ VIA `_int_literals`, NOT AN ISINSTANCE ON `Constant` (#14326 round 16): a NEGATIVE
+        # bound is a `UnaryOp`, so `value[:-6]` carried no constant bound at all and the arm
+        # declined the spelled slice. A multi-valued bound (a selection) is not a constant.
+        values = _int_literals(part)
+        if len(values) != 1:
+            return None
+        bounds.append(next(iter(values)))
+    if bounds[2] == 0:  # a runtime ValueError, not a string
+        return None
+    return (bounds[0], bounds[1], bounds[2])
+
+
+def _subscript_strings(node: ast.Subscript, resolve) -> set[str]:
+    """Every string a SUBSCRIPT over a STATICALLY-VISIBLE container can select.
+
+    ⛔ THE VERDICT WAS DECIDED BY THE DELIVERY, NOT BY THE VALUE (#14326 round 16, every
+    shape below MEASURED GREEN at `0162ab067e` — `refuses=False`, `m=2 c=2 i=0`, with a third
+    reach carrying `kind="statement"` that executes the product read):
+
+        ('x', '_tortoise_fts_query')[1]        # literal sequence, constant index
+        {'k': '_tortoise_fts_query'}['k']      # literal mapping, constant key
+        '_tortoise_fts_query_extra'[:-6]       # literal string, constant slice
+        [*('_tortoise_fts_query',)][0]         # the same, through a Starred
+
+    None is the declared "computed at runtime" residual: every element is a `Constant` in
+    the source, exactly the argument that admitted `+`, `*`, `%`, `.format` and the
+    placeholder-free f-string. This file ALREADY expands literal sequences — for `for`
+    targets (`_values`), for splats (`_possible_strings`) and for `**{…}` displays
+    (`_dict_display_leaves`) — so declining them here was an in-file asymmetry, not a
+    boundary (the shape the f-string and `.format_map` rounds closed).
+
+    ⛔ THE RESIDUAL IS A NAME-HELD CONTAINER, AND KEEPING IT IS LOAD-BEARING: `_CFG["read"]`
+    and `self._read` are not statically pairable, and resolving a NAME's whole value set here
+    would FALSE RED the provenance lookup the `_is_read_ref` narrowing exists to keep green
+    (`_READ = {"name": "…"}` then `print(f"measuring {_READ['name']}")`, pinned below). Only
+    a `Constant`/`Tuple`/`List`/`Dict` CONTAINER resolves.
+
+    A LITERAL SEQUENCE with a runtime index hands back the union of its elements: the index
+    is runtime-decided but the VALUE is one of them, which is the fail-closed direction this
+    map takes everywhere else. A LITERAL STRING with a runtime index selects ONE CHARACTER,
+    which no read name can be, so it resolves to nothing rather than to the whole string
+    (that would false-red every `_ALPHABET[_i]` in a file).
+    """
+    container, index = node.value, node.slice
+    if isinstance(container, ast.Subscript):
+        # ⛔ A SPLIT BUILD IS THE SAME BUILD (#14326 round 16, MEASURED GREEN):
+        # `'_tortoise_fts_query_x'[::-1][::-1][:-2]` reached the read while each step is a
+        # literal operation over a literal, so the verdict was decided by whether the string
+        # was sliced in ONE step or THREE. Index the values the inner subscript resolved.
+        parts = resolve(container)
+        if isinstance(index, ast.Slice):
+            bounds = _constant_slice_bounds(index)
+            return {value[slice(*bounds)] for value in parts} if bounds is not None else set()
+        return {value[position] for value in parts for position in _int_literals(index)
+                if -len(value) <= position < len(value)}
+    if isinstance(container, ast.Constant) and isinstance(container.value, str):
+        if isinstance(index, ast.Slice):
+            bounds = _constant_slice_bounds(index)
+            return {container.value[slice(*bounds)]} if bounds is not None else set()
+        positions = _int_literals(index)
+        return {container.value[position] for position in positions
+                if -len(container.value) <= position < len(container.value)}
+    if isinstance(container, (ast.Tuple, ast.List)):
+        elements = container.elts
+        if isinstance(index, ast.Slice):
+            bounds = _constant_slice_bounds(index)
+            if bounds is not None:
+                # A constant slice SELECTS, so only the selected elements are candidates —
+                # the precision `_bind`'s unpair rules exist to keep (a false red here is
+                # the direction this file calls expensive).
+                return set().union(*(resolve(elements[position])
+                                     for position in range(len(elements))[slice(*bounds)]))
+            return set().union(*(resolve(element) for element in elements))
+        positions = _int_literals(index)
+        if positions:
+            return {value for position in positions
+                    if -len(elements) <= position < len(elements)
+                    for value in resolve(elements[position])}
+        return set().union(*(resolve(element) for element in elements))
+    if isinstance(container, ast.Dict):
+        # ⛔ NO `value is not None` FILTER (#14326 round 16, this file's own rule: a clause no
+        # mutant can red is deleted, not kept). `ast.Dict.values` holds ONE expression per key
+        # and is never `None` — only `keys` carries `None`, for a `**spread` — so the filter
+        # was unreachable.
+        if (isinstance(index, ast.Constant) and isinstance(index.value, str)
+                and not any(key is None for key in container.keys)):
+            # A fully-literal display with a constant KEY selects exactly that key's value —
+            # and selects NOTHING when the key is absent (the runtime `KeyError`).
+            return set().union(*(
+                resolve(value)
+                for key, value in zip(container.keys, container.values, strict=True)
+                if isinstance(key, ast.Constant) and key.value == index.value))
+        # A `**spread` (`key is None`) or a runtime key selects something this cannot pair:
+        # every VALUE of the display is a candidate.
+        return set().union(*(resolve(value) for value in container.values))
+    return set()
+
+
 def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> frozenset[str]:
     """Every string value `node` can statically hold, a literal container expanded."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -1159,6 +1291,16 @@ def _possible_strings(node: ast.AST, consts: dict[str, frozenset[str]]) -> froze
         return (_repetitions(_possible_strings(node.left, consts), _int_literals(node.right))
                 | _repetitions(_possible_strings(node.right, consts),
                                _int_literals(node.left)))
+    # ⛔ A SUBSCRIPT OF A LITERAL CONTAINER IS THE SAME STATIC LITERAL (#14326 round 16,
+    # MEASURED GREEN at `0162ab067e` for a literal sequence, a literal mapping and a constant
+    # slice of a literal string — `refuses=False`, `m=2 c=2 i=0`, the product read executed by
+    # a third `kind="statement"` reach). The two resolvers must carry the SAME arms or the
+    # bound and inline spellings disagree — the `+`, `%` and `.format` rounds, one delivery
+    # over — so both call the shared `_subscript_strings`. The declared residual is a
+    # subscript of a NAME-held container (`_CFG["read"]`), which the helper declines.
+    if isinstance(node, ast.Subscript):
+        return frozenset(_subscript_strings(
+            node, lambda operand: _possible_strings(operand, consts)))
     return frozenset()  # e.g. a parameter — not statically knowable here, see the docstring
 
 
@@ -5774,6 +5916,38 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         "`.format_map({…})` INLINE": (
             '    getattr(sdk, "{k}".format_map({"k": "_tortoise_fts_query"}))'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        # ⛔ A VALUE SELECTED OUT OF A **LITERAL** CONTAINER (#14326 round 16, every shape
+        # MEASURED GREEN at `0162ab067e` — `refuses=False`, `m=2 c=2 i=0`, the product read
+        # executed by a third `kind="statement"` reach). Every element is a `Constant` in the
+        # source — the argument that admitted `+`, `*`, `%`, `.format` and the f-string — and
+        # this file already expands literal sequences for `for` targets, splats and `**{…}`
+        # displays, so declining them was an in-file asymmetry. The residual stays a
+        # NAME-held container (`_CFG["read"]`), which `_subscript_strings` declines on
+        # purpose; `test_a_value_READ_OUT_of_a_LITERAL_container_is_a_reach` pins both the
+        # SELECTION precision and that boundary. BOUND rows red `_values`, INLINE rows red
+        # `_possible_strings` — both through the one shared helper, so neither resolver can
+        # carry a spelling the other lacks (the `+`/`%`/`.format` lesson).
+        "literal SEQUENCE indexed by a constant BOUND to a name": (
+            '    _N = ("x", "_tortoise_fts_query")[1]\n'
+            f'    {reach.format(name="_N")}\n'),
+        "literal SEQUENCE indexed by a constant INLINE": (
+            '    getattr(sdk, ["x", "_tortoise_fts_query"][1])'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "literal SEQUENCE indexed by a NEGATIVE constant": (
+            '    getattr(sdk, ("_tortoise_fts_query", "x")[-2])'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "literal SEQUENCE through a STARRED element": (
+            '    getattr(sdk, [*("_tortoise_fts_query",)][0])'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+        "literal MAPPING indexed by a constant key": (
+            '    _N = {"k": "_tortoise_fts_query"}["k"]\n'
+            f'    {reach.format(name="_N")}\n'),
+        "literal STRING sliced by a constant NEGATIVE bound": (
+            '    _N = "_tortoise_fts_query_extra"[:-6]\n'
+            f'    {reach.format(name="_N")}\n'),
+        "literal STRING sliced IN STEPS": (
+            '    getattr(sdk, "_tortoise_fts_query_x"[::-1][::-1][:-2])'
+            '(query=queries[0]["query"], limit=10, kind="statement")\n'),
     }
     for label, body in rows.items():
         assert _pin_refuses(_pin_source(body)), (
@@ -5967,6 +6141,87 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
     assert not _pin_refuses(_pin_source(paired_unpack)), (
         "a literal unpack pairs ELEMENT-WISE — `_pair` is the FIRST element and can only "
         "hold `\"a\"`, so binding it the container's whole value set is a FALSE RED")
+
+
+def test_a_value_READ_OUT_of_a_LITERAL_container_is_a_reach() -> None:
+    """A SUBSCRIPT of a literal is a literal — plus the two directions that bound it.
+
+    ⛔ MEASURED BEFORE THIS FIX (#14326 round 16, at `0162ab067e`): `('x', '_tortoise_fts_query')[1]`,
+    `{'k': '_tortoise_fts_query'}['k']`, `'_tortoise_fts_query_extra'[:-6]` and
+    `[*('_tortoise_fts_query',)][0]` all shipped GREEN (`refuses=False`, `m=2 c=2 i=0`) with a
+    third `kind="statement"` reach executing the product read. The row table in
+    `test_EVERY_static_binding_form_is_a_READ_reach` is the fail-open attribution; the asserts
+    here are the directions that keep the new arms from becoming a blunt instrument.
+
+    Measured non-vacuity (each mutant applied in place on this file, suite re-run, restored
+    byte-identically):
+
+      - `_values`' `Subscript` arm deleted -> the BOUND rows of the table go GREEN;
+      - `_possible_strings`' `Subscript` arm deleted -> the INLINE rows go GREEN (so the two
+        arms are each load-bearing for their own delivery, not one for the other);
+      - `_int_literals`' `UnaryOp` arm deleted -> the negative-index, negative-slice and
+        stepped-slice rows go GREEN (a negative literal is a `UnaryOp`, never a `Constant`);
+      - the nested-`Subscript` branch deleted -> the stepped-slice row goes GREEN;
+      - the mapping's constant-KEY selection replaced by the whole value union -> the
+        ABSENT-key control below goes RED (a false red on a display that selects nothing).
+    """
+    reach = 'getattr(sdk, {name})(query=queries[0]["query"], limit=10, kind="statement")'
+    # ⛔ SELECTION, NOT UNION: a constant index picks ONE element, so crediting the container's
+    # whole value set to it is the false red this file calls expensive (the same rule `_bind`'s
+    # unpair arm follows: `_pair, _x = ("a", "_tortoise_fts_query")` stays green above).
+    selected_elsewhere = ('    _N = ("a", "_tortoise_fts_query")[0]\n'
+                          f'    {reach.format(name="_N")}\n')
+    assert not _pin_refuses(_pin_source(selected_elsewhere)), (
+        "a literal sequence indexed at a constant SELECTS that element — `_N` can only hold "
+        "`a`, so resolving it to the container's whole value set is a FALSE RED")
+    # ⛔ …AND A CONSTANT KEY THE DISPLAY DOES NOT CARRY SELECTS NOTHING (the runtime
+    # `KeyError`), so a union of every value there is a false red too.
+    absent_key = ('    _N = {"k": "_tortoise_fts_query"}["other"]\n'
+                  f'    {reach.format(name="_N")}\n')
+    assert not _pin_refuses(_pin_source(absent_key)), (
+        "a literal mapping indexed by a constant key it does not carry selects nothing — "
+        "crediting it every VALUE of the display is a FALSE RED")
+    # ⛔ THE DECLARED RESIDUAL, PINNED GREEN SO THE NOTE CANNOT GO STALE (`_subscript_strings`):
+    # a NAME-held container is not statically pairable, and resolving a name's whole value set
+    # here would false-red the provenance lookup the `_is_read_ref` narrowing exists to keep
+    # green. An author who makes this resolve must DELETE the residual note, not leave it
+    # contradicting the code — the reason `test_a_loop_over_a_NAME_stays_the_DECLARED_residual`
+    # pins its own boundary the same way.
+    name_held = ('    _CFG = {"read": "_tortoise_fts_query"}\n'
+                 '    _N = _CFG["read"]\n'
+                 f'    {reach.format(name="_N")}\n')
+    assert not _pin_refuses(_pin_source(name_held)), (
+        "a value read out of a NAME-held container is the DECLARED residual — nothing about "
+        "it is statically pairable, and resolving it would false-red `_READ['name']`")
+    # ⛔ THE ONE-CHARACTER CASE: a literal STRING indexed at a RUNTIME position selects a
+    # character, which no read name can be, so the arm must not widen to the whole string —
+    # it resolves to nothing. (This cannot be a fail-open either way: the literal IS the read
+    # name and sits in an executed subscript, so the `Constant` arm censuses it — which is why
+    # this is asserted on the RESOLVER rather than through `_pin_refuses`.)
+    assert not _possible_strings(ast.parse('"_tortoise_fts_query"[_i]').body[0].value, {})
+    # ⛔ AND A RUNTIME-BOUND SLICE MUST NOT WIDEN TO THE WHOLE LITERAL (#14326 round 16):
+    # `'…'[i:j]` selects a SUBSTRING this cannot pair, and over-approximating to the whole
+    # string would false-red every `_LABEL[_start:_end]` in a file — the same cost asymmetry
+    # the single-character case above follows. MEASURED: making `_constant_slice_bounds`
+    # return `(None, None, None)` for a non-constant bound left all 38 tests green, so this row
+    # is what makes that clause falsifiable rather than decorative.
+    assert not _possible_strings(ast.parse('"_tortoise_fts_query"[_i:_j]').body[0].value, {})
+    # ⛔ AND THE RESIDUAL THAT SHARES THE CLASS: a METHOD CALL that is not `str.format`/
+    # `str.format_map` (`"".join(…)`, `.replace(…)`, `.lower()`, `str(…)`, `.decode()`).
+    # Measured GREEN here rather than left silent: `_possible_strings`' docstring names the
+    # class, and a shape that starts resolving must red this row so the note is updated with it.
+    for label, expr in (
+            ("str.join over literals", "''.join(['_tortoise', '_fts_query'])"),
+            ("str.strip", "'_tortoise_fts_query '.strip()"),
+            ("str.lower", "'_TORTOISE_FTS_QUERY'.lower()"),
+            ("str() of a literal", "str('_tortoise_fts_query')"),
+            ("bytes.decode", "b'_tortoise_fts_query'.decode()")):
+        body = (f'    _N = {expr}\n'
+                f'    {reach.format(name="_N")}\n')
+        assert not _pin_refuses(_pin_source(body)), (
+            f"[{label}] a method call other than `str.format`/`str.format_map` is a DECLARED "
+            "residual — if this now resolves, update `_possible_strings`' residual note "
+            "instead of leaving it contradicting the code")
 
 
 def test_a_PRODUCT_that_outgrows_its_budget_REFUSES_instead_of_spinning() -> None:
@@ -6205,10 +6460,15 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     ``vars(type(sdk))[...]``), a name BOUND to that literal, and a bare attribute
     mention with no call all left earlier shapes of this pin green while carrying a
     lever (each measured). Residual, stated rather than implied: a name COMPUTED at
-    runtime (``"".join(…)``, a method call other than ``str.format``, an f-string part
-    whose expression this file cannot resolve, a parameter) or READ OUT OF a container or an
-    attribute (``_CFG["read"]``, ``self._read``) cannot be resolved statically, so this pin
-    bounds the static reaches. ⛔ AN f-STRING IS RESOLVED WHEN ITS PARTS ARE (#14326 round
+    runtime (``"".join(…)``, a method call other than ``str.format``/``str.format_map``, an
+    f-string part whose expression this file cannot resolve, a parameter) or READ OUT OF a
+    **NAME-held** container or an attribute (``_CFG["read"]``, ``self._read``) cannot be
+    resolved statically, so this pin bounds the static reaches. ⛔ A value SELECTED out of a
+    LITERAL container or slice IS resolved (#14326 round 16: ``('x', '…')[1]``,
+    ``{'k': '…'}['k']``, ``'…_extra'[:-6]``, ``[*(…,)][0]`` were each measured GREEN at
+    ``m=2 c=2 i=0`` before ``_subscript_strings`` — every element is a `Constant` in the
+    source, like the ``+``/``*``/``%``/``.format`` spellings above), so the residual is the
+    NAME-held form, not the subscript. ⛔ AN f-STRING IS RESOLVED WHEN ITS PARTS ARE (#14326 round
     13, measured: ``f"{'_tortoise_fts_query'}"`` and ``"%s_fts_query" % "_tortoise"`` and
     ``"_tortoise_fts_query".format()`` each reached the read at ``m=2 c=2 i=0``), so the
     residual is the UNRESOLVABLE part, not the spelling — the same narrowing the ``+`` arm
