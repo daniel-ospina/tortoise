@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14371-offline-1795459150-p1928818-261a651c",
+  "_sha": "b0963a36dfde2952e601e172ff1318ba071c1f2c",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14371-offline.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/14371-offline-embed-json"
+    },
+    {
+      "kind": "sha",
+      "value": "e0f6caa3e000a8251113f39f46dfb3baf6fe792d"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14371-offline"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 12186,
+  "ended_at": 1795471336,
+  "exit_code": 0,
+  "heartbeat_at": 1795471336,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14371-offline-1795459150-p1928818-261a651c",
+  "lease_until": 1795507936,
+  "pid": 1928818,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795459150,
+  "state": "DONE",
+  "tag": "14371-offline",
+  "worktree": "/home/cmux/tortoise/.worktrees/14371-offline"
+}
