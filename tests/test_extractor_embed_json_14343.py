@@ -117,17 +117,15 @@ def test_the_layout_flag_is_read_at_call_time(monkeypatch):
     assert compact != indented
 
 
-def test_the_kwargs_helper_is_the_single_source_of_the_shape():
+def test_the_kwargs_helper_is_the_single_source_of_the_shape(monkeypatch):
+    """The call site passes the helper's dict straight to `json.dumps`.
+
+    Pinned as a SHAPE (a kwargs dict `json.dumps` accepts), not as a string
+    comparison — the point is that there is one function deciding it, so an
+    armed flag cannot be half-applied.
+    """
     assert v2._embed_json_kwargs() == {"indent": 1}
-    os_value = "compact"
-    import os as _os
-    saved = _os.environ.get(_TOGGLE)
-    try:
-        _os.environ[_TOGGLE] = os_value
-        assert v2._embed_json_kwargs() == {"separators": (",", ":")}
-    finally:
-        if saved is None:
-            _os.environ.pop(_TOGGLE, None)
-        else:
-            _os.environ[_TOGGLE] = saved
-    assert json.dumps({"a": 1}, **{"indent": 1}) == '{\n "a": 1\n}'
+    assert json.dumps({"a": 1}, **v2._embed_json_kwargs()) == '{\n "a": 1\n}'
+    monkeypatch.setenv(_TOGGLE, "compact")
+    assert v2._embed_json_kwargs() == {"separators": (",", ":")}
+    assert json.dumps({"a": 1}, **v2._embed_json_kwargs()) == '{"a":1}' 

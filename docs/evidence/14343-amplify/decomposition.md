@@ -48,9 +48,15 @@ Solved dynamic regions: the S1 story is **2,656** tokens as the later stages see
 | s1 | 2,798 | 15.7% |
 | s2 | 11,677 | 65.5% |
 | s4 | 3,354 | 18.8% |
-| **total** | **17,830** | 100.0% |
+| **composition total** | **17,830** | 100.0% |
+| *fitted constant (this arm's own intercept)* | 22,802 | — |
+| **unattributed** | 4,972 | — |
 
-⚠️ This table's rows are per STAGE and sum to the emission; the per-SECTION token counts printed by `compose` are re-serializations of each section on their own, so they do not sum to the emission and carry no residual row. Stage totals are the measured `completion_tokens`; section sizes are shape, not an account.
+⚠️ **Two estimators, both reported.** The rows are per-call MEDIANS × measured call counts (the median document's shape); the fitted row is the intercept of this arm's own per-document fit, and output's fit is nearly flat (slope 0.18, R²=0.02) so its intercept sits near the MEAN output per document (24,350), not the median. The mean is above the median because **S4's output is bimodal**: 13 of 50 S4 calls (26.0%) emit more than 6,000 completion tokens (max 24,000 against a median of 2,942) — the delta contract complying on most documents and not on the tail. That tail is where the gap between the two estimators lives, so it is stated rather than smoothed.
+
+Against the fitted constant, S2 carries **51.2%** of output (the composition gives 65.5% of the attributed part). Both are printed because the remainder is not attributable by construction.
+
+⚠️ The per-SECTION token counts printed by `compose` are re-serializations of each section on their own, so they do not sum to the emission and carry no residual row. Stage totals are the measured `completion_tokens`; section sizes are shape, not an account.
 
 S2 emits the whole embed list, and it is the same object that becomes S4's largest input region — so one stage's emission is paid for THREE times: as output, as S1's story is re-read, and as the list is re-serialized. Nothing in this table scales with the document: the item COUNT is what moves, and a document's length barely moves it (R²=0.000 on S2's input fit).
 

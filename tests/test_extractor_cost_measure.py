@@ -841,9 +841,15 @@ def test_the_documented_reproduce_command_regenerates_the_committed_bundle(
     conclude the artifacts had rotted.
     """
     monkeypatch.delenv("TORTOISE_S4_DELTA", raising=False)
-    committed = json.loads(
-        (_REPO_ROOT / "docs" / "evidence" / "14343-amplify"
-         / "decomposition.json").read_text())
+    # ⛔ The other two render switches are AMBIENT too: a dev shell in compact
+    # mode (`TORTOISE_EXTRACTOR_PROMPT=compact`) or in classify-later
+    # (`TORTOISE_CLASSIFY_LATER=1`) renders different S2/S4 statics, and without
+    # these pins the failure would read as a rotted artifact. The bundle was
+    # generated under the production defaults.
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROMPT", raising=False)
+    monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+    bundle = _REPO_ROOT / "docs" / "evidence" / "14343-amplify"
+    committed = json.loads((bundle / "decomposition.json").read_text())
     regenerated = m.decompose(
         m.load_rows(_REPO_ROOT / "docs" / "evidence" / "14277-extractor-cost"
                     / "measurements.jsonl"),
@@ -852,6 +858,12 @@ def test_the_documented_reproduce_command_regenerates_the_committed_bundle(
     assert regenerated == committed, (
         "the documented reproduce command no longer regenerates the committed "
         "decomposition — regenerate the artifact or fix the command")
+    # …and the MARKDOWN too: it is committed and claimed regenerated, so a pin
+    # that only compared the JSON would let it rot in place.
+    assert (m.finalize_markdown(m.render_decompose(regenerated))
+            == (bundle / "decomposition.md").read_text(encoding="utf-8")), (
+        "decomposition.md is stale against the tool — the JSON pin is not "
+        "enough, the markdown is the artifact a reader actually reads")
 
 
 def test_an_explicitly_passed_receipts_path_that_yields_nothing_is_refused(
@@ -921,16 +933,22 @@ def test_the_fitted_constant_is_derived_from_the_arm_not_hardcoded():
     intercept would report the BEFORE constant as the AFTER one and absorb the
     lever's whole saving into `unattributed`."""
     rows = _evidence_rows()
-    cold = m.decompose(rows, arm="cold")
-    # relabel ONLY the cold rows, so the two arms see the same DATA and a
-    # difference can only come from the label (relabelling every arm would
-    # merge cold+warm into one population and change the fit for a real reason)
-    same_data = [dict(r, arm="synthetic") if r.get("arm") == "cold" else r
-                 for r in rows]
-    other = m.decompose(same_data, arm="synthetic")
-    assert cold["fitted_constant"] == other["fitted_constant"]
-    # …and it equals the intercept of this arm's own fit
     docs = [r for r in rows if r.get("arm") == "cold" and r.get("kind") == "doc"
             and not r.get("failed")]
-    expected = m._fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])
-    assert cold["fitted_constant"] == round(expected["intercept"])
+    cold = m.decompose(rows, arm="cold")
+
+    # ⛔ The first revision of this test was VACUOUS: it relabelled the same
+    # data, so both arms saw identical rows, and the expected value happened to
+    # BE the old literal (45,503) — restoring `fitted = 45_503` left it green.
+    # So mutate the DATA instead: dropping the one high-leverage document moves
+    # this arm's own intercept 45,503 → 30,156, which a literal cannot follow.
+    longest = max(docs, key=lambda r: r["item_tokens"])
+    without = [r for r in rows if r is not longest]
+    lean = m.decompose(without, arm="cold")
+    assert lean["fitted_constant"] != cold["fitted_constant"], (
+        "the fitted constant did not move when the data did — it is a literal")
+    assert cold["fitted_constant"] == round(
+        m._fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])["intercept"])
+    assert lean["fitted_constant"] == round(
+        m._fit([(r["item_tokens"], r["prompt_tokens"])
+                for r in docs if r is not longest])["intercept"])

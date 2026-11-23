@@ -87,22 +87,39 @@ document text once **per call**, and 34 of 50 documents take a **second** S1 cal
 
 ## 2. The output constant, decomposed
 
-| stage | completion tokens/doc | share of output | calls/doc |
+| stage | completion tokens/doc | share of the composition | calls/doc |
 |---|---|---|---|
 | s1 | 2,798 | 15.7 % | 1.68 |
 | **s2** | **11,677** | **65.5 %** | 1.16 |
 | s4 | 3,354 | 18.8 % | 1.14 |
-| **total** | **17,830** | 100 % | |
+| **composition total** | **17,830** | 100 % | |
+| *fitted constant (this arm's own intercept)* | *22,802* | — | |
+| **unattributed** | **4,972** | 21.8 % | |
+
+**Two estimators, both reported — the 4,972 is not noise, and it is a result.** The rows are
+per-call **medians** × the measured call counts (the median document's shape). The fitted
+constant is the intercept of this arm's own per-document fit, and output's fit is essentially
+flat (slope 0.180, R² 0.020), so that intercept sits near the **mean** output per document
+(24,350) rather than the median. The gap is the tail described below: **S2 carries 51.2 % of
+the fitted constant** and 65.5 % of the attributed composition, and both are printed because
+the remainder cannot be attributed by construction.
 
 **S4's output is bimodal on a document corpus, and the tail is the constant.** Per call the
 median is 2,942 completion tokens — the shipped delta contract (#1789) holding — but **13 of 50
 documents (26 %) emit more than 6,000, up to 24,000**, and the mean (5,532) is 1.9× the median.
 That tail is why `#14295` reported 7,102 output tokens per S4 call while the median is 2,942:
 it is not "S4 costs 7k", it is "S4 costs 3k on three quarters of documents and 10–24k on the
-other quarter", and a quarter of documents is where the output constant comes from. `#1789`
+other quarter", and a quarter of documents is where the gap between the mean and the median —
+i.e. most of the 4,972 above — comes from. `#1789`
 measured the delta contract's *aggregate* saving on 26-turn sessions; this is the same
 contract on **documents**, and it is not uniformly complying. That is a finding of this bundle,
 not a lever: it is a re-emission of the embed list, which is the `#7949` channel.
+
+⚠️ **Reconciliation with §4a/§5.** §2's 17,830 is `Σ(calls × median per call)`; §4a/§5's
+16,338 is the **median of the per-document totals**. They are different estimators of the same
+quantity and agree to 9 %; neither is a typo, and the fitted constant (22,802) is a third. The
+headline bill in §5 uses the median-of-totals because that is the number `#14295` measured
+a document at.
 
 `#14295`'s per-stage *input* fits say the same thing from the other side: S1 is
 `1,909 + 2.056 × T` (R²=0.995, the only stage that reads the text), S2 is

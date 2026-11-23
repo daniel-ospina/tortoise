@@ -30,12 +30,24 @@
  },
  "median_doc_tokens": 5211.0,
  "output": {
-  "contract_tokens": 951,
+  "fitted_constant": 22802,
+  "fitted_r2": 0.02,
+  "fitted_slope": 0.18,
+  "mean_per_doc": 24350.5,
+  "reemission_tail": {
+   "s4_calls": 50,
+   "s4_calls_over_6000": 13,
+   "s4_max_per_call": 24000,
+   "s4_median_per_call": 2942,
+   "share_over_6000_pct": 26.0
+  },
   "s1_tokens_per_doc": 2798.5,
   "s2_share": 65.5,
+  "s2_share_of_fitted": 51.2,
   "s2_tokens_per_doc": 11677.1,
   "s4_tokens_per_doc": 3353.9,
-  "total_per_doc": 17829.5
+  "total_per_doc": 17829.5,
+  "unattributed": 4972.5
  },
  "per_call": {
   "s1": {

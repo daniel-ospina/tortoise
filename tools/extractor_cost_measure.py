@@ -1540,8 +1540,7 @@ def compose_one(*, doc: dict, master: dict | None = None,
 
     enc = _encoding()
     # Pair each provider call with the render that produced its system
-    # prompt. Identity, not order: a retry re-sends the SAME string, and
-    # every render is captured, so the first unconsumed match is the one.
+    # prompt, by PREFIX and WITHOUT consuming it.
     #
     # ⛔ PREFIX, not equality: `render_s2_prompt` / `render_s4_prompt` append
     # the SOURCE TRANSCRIPT **outside** `_fill_template`
@@ -1549,19 +1548,22 @@ def compose_one(*, doc: dict, master: dict | None = None,
     # whenever the EDUs fit `_SOURCE_TRANSCRIPT_CAP` (8,000 chars). An equality
     # test therefore fails for every SMALL document — and fails silently: the
     # region map comes back empty, the whole prompt is printed as one
-    # `*template prose*` row, and the table still sums. The tail is measured
-    # here as its own region instead of being attributed to the template.
-    consumed: set[int] = set()
+    # `*template prose*` row, and the table still sums.
+    #
+    # ⛔ NOT consumed: a stage RENDERS ONCE and may CALL TWICE — the #1746 parse
+    # re-prompt and the #2134 truncation escalation both re-send the IDENTICAL
+    # system prompt. A one-shot consumption therefore leaves every retry
+    # unmatched (`regions == {}`), which is the same silent misattribution in a
+    # rarer disguise. The last render for the stage is the one, for all calls.
     for call in calls:
         stage = _compose_stage(call["system"])
         call["stage"] = stage
         match = None
-        for i, render in enumerate(renders):
-            if i in consumed or render["stage"] != stage:
+        for render in reversed(renders):
+            if render["stage"] != stage:
                 continue
             if call["system"].startswith(render["prompt"]):
-                match, consumed_i = render, i
-                consumed.add(consumed_i)
+                match = render
                 break
         call["regions"] = ({k: len(enc.encode(v or ""))
                             for k, v in (match["values"].items()
@@ -1582,6 +1584,12 @@ def compose_one(*, doc: dict, master: dict | None = None,
                         enc.encode(slot["text"] or ""))
         call["user_tokens"] = len(enc.encode(call["user"] or ""))
         call["system_tokens"] = len(enc.encode(call["system"] or ""))
+        # ⛔ The USER message is a prompt region like any other, and it is the
+        # BIGGEST one for S1 (the whole document) and a real one for S2 (the
+        # framed story). Leaving it out of the region map did not lose it from
+        # the total — it landed in the `*template prose*` residual, so `compose`
+        # and `decompose` attributed the same tokens to different parties.
+        call["regions"]["user_message"] = call["user_tokens"]
         call["output"] = _output_structure(call.get("response") or "")
         call.pop("response", None)
         call.pop("system", None)
@@ -1745,8 +1753,13 @@ def render_compose(report: dict) -> str:
         lines.append("|---|---|---|---|")
         for stage, acc in sorted(row["stages"].items()):
             total = acc["system_tokens"] + acc["user_tokens"]
-            regions = dict(sorted(acc["regions"].items(),
-                                  key=lambda kv: -kv[1]))
+            # zero-token regions are omitted from the RENDER (a spliced empty
+            # value spends nothing, so printing it at 0.0% would pad a table
+            # that is trying to be an account); they stay in the JSON so a
+            # consumer can tell "empty this run" from "never a slot".
+            regions = {k: v for k, v in
+                       sorted(acc["regions"].items(), key=lambda kv: -kv[1])
+                       if v}
             named = sum(regions.values())
             for name, tokens in regions.items():
                 share = (100.0 * tokens / total) if total else 0.0
@@ -1923,6 +1936,8 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     # lever's whole saving into "unattributed".
     fitted = round(_fit([(r["item_tokens"], r["prompt_tokens"])
                          for r in docs])["intercept"])
+    out_fit = _fit([(r["item_tokens"], r["completion_tokens"]) for r in docs])
+    composition_out = c1 * oc1 + c2 * oc2 + c4 * oc4
     return {
         "arm": arm,
         "documents": len(docs),
@@ -1933,15 +1948,29 @@ def decompose(rows: list[dict], *, arm: str = "cold",
         "per_call": {"s1": {"prompt": pc1, "completion": oc1},
                      "s2": {"prompt": pc2, "completion": oc2},
                      "s4": {"prompt": pc4, "completion": oc4}},
+        #: ⛔ TWO estimators, both reported, because they answer different
+        #: questions and differ by 22% here. The COMPOSITION is per-call MEDIANS
+        #: times the measured call counts (the median document's shape); the
+        #: FITTED constant is the intercept of the arm's own per-document fit,
+        #: and output's fit is nearly flat (R²≈0.02) so its intercept sits near
+        #: the MEAN output per document. The mean is above the median because
+        #: S4's output is bimodal (see `output.reemission_tail`), which is a
+        #: finding, not a discrepancy to smooth away.
         "output": {
             "s1_tokens_per_doc": round(c1 * oc1, 1),
             "s2_tokens_per_doc": round(c2 * oc2, 1),
             "s4_tokens_per_doc": round(c4 * oc4, 1),
-            "total_per_doc": round(c1 * oc1 + c2 * oc2 + c4 * oc4, 1),
-            "s2_share": round(100.0 * c2 * oc2
-                              / max(1e-9, c1 * oc1 + c2 * oc2 + c4 * oc4), 1),
-            "contract_tokens": sum(statics["s2"].get("output_contract", 0)
-                                   for _ in [0]),
+            "total_per_doc": round(composition_out, 1),
+            "s2_share": round(100.0 * c2 * oc2 / max(1e-9, composition_out), 1),
+            "fitted_constant": round(out_fit["intercept"]),
+            "fitted_slope": round(out_fit["slope"], 3),
+            "fitted_r2": round(out_fit["r2"], 3),
+            "unattributed": round(out_fit["intercept"] - composition_out, 1),
+            "mean_per_doc": round(sum(r["completion_tokens"] for r in docs)
+                                  / len(docs), 1),
+            "s2_share_of_fitted": round(100.0 * c2 * oc2
+                                        / max(1e-9, out_fit["intercept"]), 1),
+            "reemission_tail": _output_tail(docs),
         },
         "statics": statics,
         "solved": {"story_tokens": round(story, 1),
@@ -1963,6 +1992,28 @@ def decompose(rows: list[dict], *, arm: str = "cold",
                                           two_call_share, oc2),
         "serialization": serialization_lever(receipts) if receipts else {},
     }
+
+
+def _output_tail(docs: list[dict]) -> dict:
+    """S4's output distribution: the delta contract's compliance tail.
+
+    A median/mean gap in S4's completion tokens is not noise — `#1789` measured
+    the delta contract at −93.8 % on 26-turn sessions, and on a DOCUMENT corpus
+    a quarter of documents still emit a full list. Reported as a distribution
+    because a mean alone would hide it and a median alone would deny it.
+    """
+    per_call = sorted(
+        (r["stages"]["s4"]["completion_tokens"] / r["stages"]["s4"]["calls"])
+        for r in docs
+        if (r["stages"].get("s4") or {}).get("calls"))
+    if not per_call:
+        return {}
+    return {"s4_calls_over_6000": sum(1 for v in per_call if v > 6000),
+            "s4_calls": len(per_call),
+            "share_over_6000_pct": round(
+                100.0 * sum(1 for v in per_call if v > 6000) / len(per_call), 1),
+            "s4_max_per_call": round(max(per_call)),
+            "s4_median_per_call": round(statistics.median(per_call))}
 
 
 def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
@@ -2151,14 +2202,41 @@ def render_decompose(dec: dict) -> str:
             share = (100.0 * tokens / out["total_per_doc"]) \
                 if out.get("total_per_doc") else 0.0
             lines.append(f"| {stage} | {tokens:,.0f} | {share:.1f}% |")
-        lines.append(f"| **total** | **{out['total_per_doc']:,.0f}** | 100.0% |")
+        lines.append(f"| **composition total** | **{out['total_per_doc']:,.0f}** "
+                     f"| 100.0% |")
+        lines.append(f"| *fitted constant (this arm's own intercept)* | "
+                     f"{out['fitted_constant']:,} | — |")
+        lines.append(f"| **unattributed** | {out['unattributed']:,.0f} | — |")
+        lines.append("")
+        tail = out.get("reemission_tail") or {}
+        lines.append(
+            "⚠️ **Two estimators, both reported.** The rows are per-call "
+            "MEDIANS × measured call counts (the median document's shape); the "
+            "fitted row is the intercept of this arm's own per-document fit, and "
+            "output's fit is nearly flat "
+            f"(slope {out['fitted_slope']}, R²={out['fitted_r2']}) so its "
+            "intercept sits near the MEAN output per document "
+            f"({out['mean_per_doc']:,.0f}), not the median. The mean is above the "
+            "median because **S4's output is bimodal**: "
+            f"{tail.get('s4_calls_over_6000', 0)} of {tail.get('s4_calls', 0)} "
+            f"S4 calls ({tail.get('share_over_6000_pct', 0)}%) emit more than "
+            f"6,000 completion tokens (max {tail.get('s4_max_per_call', 0):,} "
+            f"against a median of {tail.get('s4_median_per_call', 0):,}) — the "
+            "delta contract complying on most documents and not on the tail. "
+            "That tail is where the gap between the two estimators lives, so it "
+            "is stated rather than smoothed.")
         lines.append("")
         lines.append(
-            "⚠️ This table's rows are per STAGE and sum to the emission; the "
-            "per-SECTION token counts printed by `compose` are "
-            "re-serializations of each section on their own, so they do not "
-            "sum to the emission and carry no residual row. Stage totals are "
-            "the measured `completion_tokens`; section sizes are shape, not an "
+            f"Against the fitted constant, S2 carries "
+            f"**{out.get('s2_share_of_fitted')}%** of output (the composition "
+            f"gives {out.get('s2_share')}% of the attributed part). Both are "
+            "printed because the remainder is not attributable by construction.")
+        lines.append("")
+        lines.append(
+            "⚠️ The per-SECTION token counts printed by `compose` are "
+            "re-serializations of each section on their own, so they do not sum "
+            "to the emission and carry no residual row. Stage totals are the "
+            "measured `completion_tokens`; section sizes are shape, not an "
             "account.")
         lines.append("")
         lines.append(
