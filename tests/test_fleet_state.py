@@ -3837,8 +3837,12 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: (`on 2 consecutive samples over 2.50s`) and only one sample later from `K = 7` (`K = 8`: count 3,
 #: span 3.15 s), and at `K = 1` nothing at all is attributable — premise (b) below reds the FILE
 #: with no mutant applied, the same `11 failed, 173 passed` either way.)
-#: SO: no static assertion can pin this constant, and the `death_after_streak` ROW pins it only at
-#: the shipped value. Say that here rather than claiming a pin that does not exist.
+#: SO: no static assertion can pin this constant. The `death_after_streak` ROW pins the ORDERING
+#: wherever the gate is satisfied at the death sample — `5 * (2/K + 0.1) >= 2.0`, i.e. `K <= 6` —
+#: MEASURED: `1 failed` at `K` = 2, 3, 4, 5, 6, and `184 passed` (vacuous) at `K` = 7 and 8. A typo
+#: past that boundary therefore retires the guard silently, with nothing static to red. ⛔ SCOPE IT
+#: THAT WAY rather than to "the shipped value": the row covers a RANGE of K, and writing the range
+#: as one point is the same over-claim in the safe direction.
 _LONG_PATH_STREAK_TIME_CALLS = 5
 
 
