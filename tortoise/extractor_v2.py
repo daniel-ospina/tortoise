@@ -1174,42 +1174,6 @@ def _s4_delta_enabled() -> bool:
     return env_flag("TORTOISE_S4_DELTA", True)
 
 
-def _embed_json_kwargs() -> dict:
-    """#14343: how S4's prompt serializes S2's embed list — the ONE lever this
-    issue's composition table points at that is information-neutral.
-
-    The composition of the input constant (#14343, `docs/evidence/14343-amplify`)
-    says the largest single region is **S2's embed list re-sent to S4** —
-    14,164 of the 43,567 **attributed** tokens, i.e. **32.5%** of the
-    composition and **31.1%** of the 45,503 fitted constant (both denominators
-    are printed in the bundle; neither is the other). Measured on the 14 real S2
-    emissions in `tests/eval/write_path/receipts/7947-arms-2026-10-18`
-    (580 items), **32.5% of that JSON is `indent=1` whitespace**: 77,561 tokens
-    indented vs 52,346 with
-    compact separators, i.e. **1,801 tokens per emission** (the ratio is stable —
-    29.6–35.0% across all 14). The list's CONTENT is byte-identical either way;
-    only the layout differs.
-
-    ⛔ DEFAULT = ``indent=1``, i.e. TODAY'S BYTES. The saving is measured; the
-    EFFECT ON EXTRACTION QUALITY IS NOT, because the arbiter for that (`#7949`'s
-    E1/E2/E3/E4 bars) needs a provider key and the box this was measured on has
-    none. Shipping a prompt-bytes change default-ON on an unrun quality bar is
-    the trade `#14343` forbids, so the lever ships ARMED-ABLE, not armed:
-    set ``TORTOISE_S4_EMBED_JSON=compact`` to take the 1,801 tokens/emission
-    and re-run the capstone corpus in the same session to prove the bars hold.
-
-    Returns the ``json.dumps`` keywords — ``{"indent": 1}`` is the pre-#14343
-    call, byte-for-byte, so an unset flag renders identically.
-
-    GARBAGE → the default (indent), per the #4097 tristate contract: a typo can
-    never silently move a production prompt.
-    """
-    mode = (os.environ.get("TORTOISE_S4_EMBED_JSON") or "").strip().lower()
-    if mode == "compact":
-        return {"separators": (",", ":")}
-    return {"indent": 1}
-
-
 def _vet_enabled() -> bool:
     """#5005: the call-time S2.2 VET toggle.
 
@@ -4095,9 +4059,6 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
         "chains_text": chains,
         "anti_routine": _s2s4_rules(master, core_only=core_only),
         "search_results": _render_search_results(search),
-        # #14343: `indent=1` costs 32.5% of this region in whitespace (measured
-        # on 14 real emissions). Default unchanged; `TORTOISE_S4_EMBED_JSON=
-        # compact` arms the saving — see `_embed_json_kwargs`.
         "embed_list_json": json.dumps(embed_list, **_embed_json_kwargs()),
         "date_anchor": _date_anchor(session_date, include_emission_rules=True),
         "output_contract": contract,
@@ -19433,3 +19394,48 @@ def _mitigation_target_warning(t_src, t_dst, target_mech,
         f"{carried!r}, which a mitigation target cannot DECLARE "
         f"(OperatorTarget.op_type is IMPL|coherence) — no bridge of the "
         f"declared mechanism ({target_mech!r}) exists to attach to")
+
+# ── #14343: S4's embed-list serialization ─────────────────────────────────────
+# ⛔ APPENDED AT EOF ON PURPOSE. This module carries ~50 pinned `:NNNN` citations
+# in the #7949 capstone bundle (`README.md`, `PRE-REGISTRATION.md`, the change
+# control log) and in its own message strings, and `tests/test_7949_capstone_measure.py`
+# resolves every one of them against this file. An absolute line number is derived
+# data stored as a literal, so an insertion ABOVE the highest cite (17,917 here)
+# re-points all of them. Placing the helper below every cited line costs nothing
+# at call time (the name resolves at CALL, not at definition) and moves no cite.
+
+
+def _embed_json_kwargs() -> dict:
+    """#14343: how S4's prompt serializes S2's embed list — the ONE lever this
+    issue's composition table points at that is information-neutral.
+
+    The composition of the input constant (#14343, `docs/evidence/14343-amplify`)
+    says the largest single region is **S2's embed list re-sent to S4** —
+    14,164 of the 43,567 **attributed** tokens, i.e. **32.5%** of the
+    composition and **31.1%** of the 45,503 fitted constant (both denominators
+    are printed in the bundle; neither is the other). Measured on the 14 real S2
+    emissions in `tests/eval/write_path/receipts/7947-arms-2026-10-18`
+    (580 items), **32.5% of that JSON is `indent=1` whitespace**: 77,561 tokens
+    indented vs 52,346 with
+    compact separators, i.e. **1,801 tokens per emission** (the ratio is stable —
+    29.6–35.0% across all 14). The list's CONTENT is byte-identical either way;
+    only the layout differs.
+
+    ⛔ DEFAULT = ``indent=1``, i.e. TODAY'S BYTES. The saving is measured; the
+    EFFECT ON EXTRACTION QUALITY IS NOT, because the arbiter for that (`#7949`'s
+    E1/E2/E3/E4 bars) needs a provider key and the box this was measured on has
+    none. Shipping a prompt-bytes change default-ON on an unrun quality bar is
+    the trade `#14343` forbids, so the lever ships ARMED-ABLE, not armed:
+    set ``TORTOISE_S4_EMBED_JSON=compact`` to take the 1,801 tokens/emission
+    and re-run the capstone corpus in the same session to prove the bars hold.
+
+    Returns the ``json.dumps`` keywords — ``{"indent": 1}`` is the pre-#14343
+    call, byte-for-byte, so an unset flag renders identically.
+
+    GARBAGE → the default (indent), per the #4097 tristate contract: a typo can
+    never silently move a production prompt.
+    """
+    mode = (os.environ.get("TORTOISE_S4_EMBED_JSON") or "").strip().lower()
+    if mode == "compact":
+        return {"separators": (",", ":")}
+    return {"indent": 1}
