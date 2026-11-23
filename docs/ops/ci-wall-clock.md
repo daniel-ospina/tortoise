@@ -336,22 +336,26 @@ is byte-identical across `89b2eff808cb`, `f56aac204ca6`, `0f41e95d3664` and this
 `tests/test_extractor_cost_measure.py` (`config/ci-surfaces.yml:2955`), and removing THAT row —
 nothing else — drops the worst back to **721.1** (measured, then restored). So the reading is the
 same shape as every earlier one: NO ARITHMETIC ON THE TWO PARENTS' FIGURES WOULD HAVE PREDICTED IT
-(`721.1` on the parent that merged `10e51693`, `721.3` here). The minute is
-unchanged — `ceil(721.3/60 x 2)` = 25 — so the hand-added 56.6 m / 85.0 m / 5.0 m terms stand. The three
-hand-added figures are re-added from the emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row
-above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 56.64 m,
-x 1.5 = 85.0 m, 5.0 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
-`durations:` row, which repeats 85.0 m against the 90 m cap), which is the 1-decimal restatement of
-the terms' own total, 56.64 m — ⛔ the × 1.5 is taken on the UNROUNDED total, 56.64 → 84.96 →
-**85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying the ROUNDED 56.6 instead reads
-84.9 m / 5.1 m and overstates the headroom by a tenth of a metre, which is how this one sentence came
-to disagree with the row above it — and the `84.9 / 5.1` this sentence itself carried was that same
-re-derivation, withdrawn here: ⛔ **THIS PARAGRAPH WAS RESTATED AT 84.9 m / 5.1 m UNTIL THE `#14183`
+(`721.1` on the parent that merged `10e51693`, `721.3` here). ⛔ **THAT SENTENCE IS HISTORY, AND SO
+ARE THE TERMS IT QUOTES**: at `f56aac204ca6` the minute was
+unchanged — `ceil(721.3/60 x 2)` = 25 — so the hand-added trio stood at 56.6 m / 85.0 m / 5.0 m. The
+**2026-11-23 sweep** then re-packed this pool, so that trio is history too: the committed map now
+emits **28 m** on all eleven shards at a worst `est_seconds` of **835.2**
+(`ceil(835.2/60 x 2)` = 28), and the trio is **59.6 m / 89.5 m / 0.5 m**. The three
+hand-added figures are re-added from the emitted 28 m: 59.6 m / **89.5 m** / **0.5 m** (the row
+above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 59.64 m,
+x 1.5 = 89.5 m, 0.5 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
+`durations:` row, which repeats 89.5 m against the 90 m cap), which is the 1-decimal restatement of
+the terms' own total, 59.64 m — ⛔ the × 1.5 is taken on the UNROUNDED total, 59.64 → 89.46 →
+**89.5 m**, headroom 90 − 89.46 = 0.54 → **0.5 m**: multiplying the ROUNDED 59.6 instead reads
+89.4 m / 0.6 m and overstates the headroom by 0.06 m, which is how this one sentence came
+to disagree with the row above it. At the 56.64 m total that clause read `84.9 / 5.1`
+before the `#14183` re-cut withdrew it: ⛔ **THIS PARAGRAPH WAS RESTATED AT 84.9 m / 5.1 m UNTIL THE `#14183`
 RE-CUT** — exactly the ROUNDED-SUM path the clause just above forbids — and `origin/main` and this
 branch corrected it independently, to the same pair — ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
-first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
+first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) rather than the `0.5 m` S=10 had been clearing by. The 2026-11-23 sweep has since moved the trio to `89.5 m / 0.5 m`, and the other two copies (`config/ci-surfaces.yml`'s S=11 header block and the `test_demo_session_read_exclusion_8290.py` row) were re-cut with it. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
 POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
@@ -726,7 +730,7 @@ committed `durations` map (re-derived from the map, not restated: registering
 `17.28 m` it read before that entry — the `slow_files` membership takes the file out of the fast pool
 and onto the slow pool, which is the whole of the change: the `durations` weight it was given was the
 flat `DEFAULT_FAST_WEIGHT`, so the row then packed identically to no row at all (measured; the 2026-11-16 sweep has since given it a real reading). Since then the 2026-11-23 sweep re-packed the
-slow pool down to `8.59 m` → `17.19 m`, which is what the pin now recomputes. The
+slow pool **up** to `8.59 m` → `17.19 m` (it read `8.18 m` → `16.36 m` at the 2026-11-16 head), which is what the pin now recomputes. The
 `test_the_documented_slow_wall_restates_the_committed_maps_own_projection` pin recomputes it) — and
 `test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
 `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
