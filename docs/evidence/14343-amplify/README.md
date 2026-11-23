@@ -106,7 +106,9 @@ the remainder cannot be attributed by construction.
 
 **S4's output is bimodal on a document corpus, and the tail is the constant.** Per call the
 median is 2,942 completion tokens — the shipped delta contract (#1789) holding — but **13 of 50
-documents (26 %) emit more than 6,000, up to 24,000**, and the mean (5,532) is 1.9× the median.
+documents (26 %) average more than 6,000 completion tokens per S4 call, up to 24,000**, and the
+mean (5,532) is 1.9× the median. (Those are DOCUMENTS, not calls — one entry per document at
+≈1.14 calls each.)
 That tail is why `#14295` reported 7,102 output tokens per S4 call while the median is 2,942:
 it is not "S4 costs 7k", it is "S4 costs 3k on three quarters of documents and 10–24k on the
 other quarter", and a quarter of documents is where the gap between the mean and the median —
@@ -242,8 +244,12 @@ so the re-serialized copy is ~1.3× the emission it copies: the whitespace is *a
 prompt builder, not by the model.
 
 **Before → after, in the measured unit.** The document corpus's embed region is
-12,425 tokens per S4 call (solved in §1) — about twice the receipts' ~5,540, because a
-document yields a longer list. Applying the measured 32.5 % ratio to it:
+**12,425 tokens per S4 call** (solved in §1) — about twice the receipts' ~5,540, because a
+document yields a longer list — which is **14,164 tokens per document** at the measured
+1.14 S4 calls/document. ⚠️ The 32.5 % ratio is applied to the **per-document** figure, because
+the before→after table below is per document: 32.5 % × 14,164 = **4,603**. (Applying it to
+12,425 would give 4,038 — the per-CALL saving — which is a different row, not a different
+answer.)
 
 | | before | after (flag armed) | Δ |
 |---|---|---|---|

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 import sys
 import tomllib
 from pathlib import Path
@@ -952,6 +953,20 @@ def test_the_fitted_constant_is_derived_from_the_arm_not_hardcoded():
     assert lean["fitted_constant"] == round(
         m._fit([(r["item_tokens"], r["prompt_tokens"])
                 for r in docs if r is not longest])["intercept"])
+
+    # ⛔ The SLOPE was the same defect one line later: `fitted` came from
+    # `_fit()` while `document_term.fitted_slope_x_median_doc` stayed a literal
+    # `2.159`, so the bundle's own `--arm after` recipe printed the BEFORE
+    # slope as the AFTER arm's. Pinned separately because a green intercept pin
+    # says nothing about it — cycle 3's reviewer caught exactly that gap.
+    for arm_rows, arm in ((rows, cold), (without, lean)):
+        sel = [r for r in arm_rows if r.get("arm") == "cold"
+               and r.get("kind") == "doc" and not r.get("failed")]
+        want = m._fit([(r["item_tokens"], r["prompt_tokens"])
+                       for r in sel])["slope"]
+        assert arm["document_term"]["fitted_slope_x_median_doc"] == round(
+            want * statistics.median([r["item_tokens"] for r in sel]), 1)
+        assert arm["input_fit"]["slope"] == round(want, 3)
 
 
 def test_a_retried_stage_keeps_its_region_map(monkeypatch):

@@ -1934,13 +1934,8 @@ def decompose(rows: list[dict], *, arm: str = "cold",
     # other arm — the bundle's own completion recipe runs `--arm after`, where a
     # literal would report the BEFORE intercept as the AFTER one and absorb the
     # lever's whole saving into "unattributed".
-    # ⛔ The SLOPE is derived from the SAME fit, for the same reason the
-    # intercept is: a literal 2.159 is the COLD arm's slope alone (warm is
-    # 2.127575), so on `--arm after` — the bundle's own completion recipe — the
-    # document-term row would report the BEFORE slope and read the lever's
-    # effect there as zero (11,250.5 published against the arm's own 11,086.8).
-    doc_fit = _fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])
-    fitted = round(doc_fit["intercept"])
+    in_fit = _fit([(r["item_tokens"], r["prompt_tokens"]) for r in docs])
+    fitted = round(in_fit["intercept"])
     out_fit = _fit([(r["item_tokens"], r["completion_tokens"]) for r in docs])
     composition_out = c1 * oc1 + c2 * oc2 + c4 * oc4
     return {
@@ -1986,12 +1981,24 @@ def decompose(rows: list[dict], *, arm: str = "cold",
         "composition_total": round(total, 1),
         "fitted_constant": fitted,
         "unattributed": round(fitted - total, 1),
+        #: ⛔ BOTH terms are DERIVED from this arm's own fit. The intercept fix
+        #: was half-applied in the first revision: `fitted` came from `_fit()`
+        #: while the slope was a literal `2.159` — so the bundle's own
+        #: completion recipe (`--arm after`) printed the BEFORE slope as the
+        #: AFTER arm's, which is the same mislabel the intercept fix removed.
+        "input_fit": {"slope": round(in_fit["slope"], 3),
+                      "intercept": fitted,
+                      "r2": round(in_fit["r2"], 3)},
         "document_term": {
             "s1_calls_x_median_doc": round(c1 * t_med, 1),
-            "fitted_slope_x_median_doc": round(doc_fit["slope"] * t_med, 1),
-            "note": ("S1 sends the WHOLE document once per call, and 34/50 "
-                     "documents take a second S1 call, so the document is "
-                     "paid for ~2x"),
+            "fitted_slope_x_median_doc": round(in_fit["slope"] * t_med, 1),
+            "documents": len(docs),
+            "documents_taking_two_s1_calls": sum(
+                1 for r in docs
+                if (r["stages"].get("s1") or {}).get("calls", 0) > 1),
+            "note": ("S1 sends the WHOLE document once per call, and a "
+                     "majority of documents take a second S1 call, so the "
+                     "document is paid for ~2x"),
         },
         "levers_offline": _offline_levers(statics, c1, c2, c4, t_med,
                                           two_call_share, oc2),
@@ -2013,12 +2020,16 @@ def _output_tail(docs: list[dict]) -> dict:
         if (r["stages"].get("s4") or {}).get("calls"))
     if not per_call:
         return {}
-    return {"s4_calls_over_6000": sum(1 for v in per_call if v > 6000),
-            "s4_calls": len(per_call),
-            "share_over_6000_pct": round(
+    #: ⛔ These are DOCUMENTS, not calls: each value is that document's
+    #: `completion_tokens / calls`, so one entry per document. The first
+    #: revision called them "S4 calls", which overstated the denominator by the
+    #: call ratio (≈1.14 here) in the JSON, the rendered markdown and the README.
+    return {"s4_docs_over_6000": sum(1 for v in per_call if v > 6000),
+            "s4_docs": len(per_call),
+            "share_docs_over_6000_pct": round(
                 100.0 * sum(1 for v in per_call if v > 6000) / len(per_call), 1),
-            "s4_max_per_call": round(max(per_call)),
-            "s4_median_per_call": round(statistics.median(per_call))}
+            "s4_max_per_doc_per_call": round(max(per_call)),
+            "s4_median_per_doc_per_call": round(statistics.median(per_call))}
 
 
 def _offline_levers(statics: dict, c1: float, c2: float, c4: float,
@@ -2187,7 +2198,9 @@ def render_decompose(dec: dict) -> str:
                  f"({dec['calls_per_doc']['s1']} × "
                  f"{dec['median_doc_tokens']:,}) against the fitted "
                  f"{doc_term['fitted_slope_x_median_doc']:,.0f}. "
-                 f"{doc_term['note']}.")
+                 f"{doc_term['note']} — "
+                 f"{doc_term['documents_taking_two_s1_calls']} of "
+                 f"{doc_term['documents']} documents here.")
     lines.append("")
     solved = dec["solved"]
     lines.append(f"Solved dynamic regions: the S1 story is **{solved['story_tokens']:,.0f}** "
@@ -2223,10 +2236,12 @@ def render_decompose(dec: dict) -> str:
             "intercept sits near the MEAN output per document "
             f"({out['mean_per_doc']:,.0f}), not the median. The mean is above the "
             "median because **S4's output is bimodal**: "
-            f"{tail.get('s4_calls_over_6000', 0)} of {tail.get('s4_calls', 0)} "
-            f"S4 calls ({tail.get('share_over_6000_pct', 0)}%) emit more than "
-            f"6,000 completion tokens (max {tail.get('s4_max_per_call', 0):,} "
-            f"against a median of {tail.get('s4_median_per_call', 0):,}) — the "
+            f"{tail.get('s4_docs_over_6000', 0)} of {tail.get('s4_docs', 0)} "
+            "documents "
+            f"({tail.get('share_docs_over_6000_pct', 0)}%) average more than "
+            f"6,000 completion tokens per S4 call (max "
+            f"{tail.get('s4_max_per_doc_per_call', 0):,} against a median of "
+            f"{tail.get('s4_median_per_doc_per_call', 0):,}) — the "
             "delta contract complying on most documents and not on the tail. "
             "That tail is where the gap between the two estimators lives, so it "
             "is stated rather than smoothed.")
@@ -2245,12 +2260,13 @@ def render_decompose(dec: dict) -> str:
             "account.")
         lines.append("")
         lines.append(
-            "S2 emits the whole embed list, and it is the same object that "
-            "becomes S4's largest input region — so one stage's emission is "
-            "paid for THREE times: as output, as S1's story is re-read, and "
-            "as the list is re-serialized. Nothing in this table scales with "
-            "the document: the item COUNT is what moves, and a document's "
-            "length barely moves it (R²=0.000 on S2's input fit).")
+            "Two objects are each paid more than once, and they are NOT the "
+            "same object. **S2's embed list** is paid twice: once as S2's "
+            "output and once as S4's largest input region. **S1's story** is "
+            "paid three times: as S1's output, as S2's user message and as S4's "
+            "`{story}` slot. Nothing in this table scales with the document: "
+            "the item COUNT is what moves, and a document's length barely "
+            "moves it (R²=0.000 on S2's input fit).")
         lines.append("")
     if dec.get("serialization"):
         lines.append(render_serialization_lever(dec["serialization"]))

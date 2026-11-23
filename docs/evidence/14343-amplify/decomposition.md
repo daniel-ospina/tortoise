@@ -37,7 +37,7 @@ arm `cold` · 50 documents · median document 5,211.0 tokens · calls/doc 3.98 (
 | *fitted constant (this arm's own intercept)* | 45,503 | — |
 | *unattributed (fit intercept − composition)* | 1,936 | — |
 
-The document itself is NOT in that table: it is the fit's slope, 8,754 tokens/doc (1.68 × 5,211.0) against the fitted 11,250. S1 sends the WHOLE document once per call, and 34/50 documents take a second S1 call, so the document is paid for ~2x.
+The document itself is NOT in that table: it is the fit's slope, 8,754 tokens/doc (1.68 × 5,211.0) against the fitted 11,250. S1 sends the WHOLE document once per call, and a majority of documents take a second S1 call, so the document is paid for ~2x — 34 of 50 documents here.
 
 Solved dynamic regions: the S1 story is **2,656** tokens as the later stages see it, and S2's embed list is re-serialized into S4's prompt at **12,425** tokens — 1.23× S2's own emission.
 
@@ -52,13 +52,13 @@ Solved dynamic regions: the S1 story is **2,656** tokens as the later stages see
 | *fitted constant (this arm's own intercept)* | 22,802 | — |
 | **unattributed** | 4,972 | — |
 
-⚠️ **Two estimators, both reported.** The rows are per-call MEDIANS × measured call counts (the median document's shape); the fitted row is the intercept of this arm's own per-document fit, and output's fit is nearly flat (slope 0.18, R²=0.02) so its intercept sits near the MEAN output per document (24,350), not the median. The mean is above the median because **S4's output is bimodal**: 13 of 50 S4 calls (26.0%) emit more than 6,000 completion tokens (max 24,000 against a median of 2,942) — the delta contract complying on most documents and not on the tail. That tail is where the gap between the two estimators lives, so it is stated rather than smoothed.
+⚠️ **Two estimators, both reported.** The rows are per-call MEDIANS × measured call counts (the median document's shape); the fitted row is the intercept of this arm's own per-document fit, and output's fit is nearly flat (slope 0.18, R²=0.02) so its intercept sits near the MEAN output per document (24,350), not the median. The mean is above the median because **S4's output is bimodal**: 13 of 50 documents (26.0%) average more than 6,000 completion tokens per S4 call (max 24,000 against a median of 2,942) — the delta contract complying on most documents and not on the tail. That tail is where the gap between the two estimators lives, so it is stated rather than smoothed.
 
 Against the fitted constant, S2 carries **51.2%** of output (the composition gives 65.5% of the attributed part). Both are printed because the remainder is not attributable by construction.
 
 ⚠️ The per-SECTION token counts printed by `compose` are re-serializations of each section on their own, so they do not sum to the emission and carry no residual row. Stage totals are the measured `completion_tokens`; section sizes are shape, not an account.
 
-S2 emits the whole embed list, and it is the same object that becomes S4's largest input region — so one stage's emission is paid for THREE times: as output, as S1's story is re-read, and as the list is re-serialized. Nothing in this table scales with the document: the item COUNT is what moves, and a document's length barely moves it (R²=0.000 on S2's input fit).
+Two objects are each paid more than once, and they are NOT the same object. **S2's embed list** is paid twice: once as S2's output and once as S4's largest input region. **S1's story** is paid three times: as S1's output, as S2's user message and as S4's `{story}` slot. Nothing in this table scales with the document: the item COUNT is what moves, and a document's length barely moves it (R²=0.000 on S2's input fit).
 
 ### The one information-neutral lever: `indent=1` on S4's embed-list region
 

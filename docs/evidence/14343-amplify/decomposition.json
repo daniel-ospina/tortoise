@@ -8,12 +8,19 @@
  },
  "composition_total": 43567.4,
  "document_term": {
+  "documents": 50,
+  "documents_taking_two_s1_calls": 34,
   "fitted_slope_x_median_doc": 11249.9,
-  "note": "S1 sends the WHOLE document once per call, and 34/50 documents take a second S1 call, so the document is paid for ~2x",
+  "note": "S1 sends the WHOLE document once per call, and a majority of documents take a second S1 call, so the document is paid for ~2x",
   "s1_calls_x_median_doc": 8754.5
  },
  "documents": 50,
  "fitted_constant": 45503,
+ "input_fit": {
+  "intercept": 45503,
+  "r2": 0.715,
+  "slope": 2.159
+ },
  "levers_offline": {
   "compact_master_render": {
    "compact_tokens": 2335,
@@ -35,11 +42,11 @@
   "fitted_slope": 0.18,
   "mean_per_doc": 24350.5,
   "reemission_tail": {
-   "s4_calls": 50,
-   "s4_calls_over_6000": 13,
-   "s4_max_per_call": 24000,
-   "s4_median_per_call": 2942,
-   "share_over_6000_pct": 26.0
+   "s4_docs": 50,
+   "s4_docs_over_6000": 13,
+   "s4_max_per_doc_per_call": 24000,
+   "s4_median_per_doc_per_call": 2942,
+   "share_docs_over_6000_pct": 26.0
   },
   "s1_tokens_per_doc": 2798.5,
   "s2_share": 65.5,
