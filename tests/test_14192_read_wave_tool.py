@@ -382,8 +382,10 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     pin REFUSES it; `_joined_strings` closed that in round 13 and the paragraph was never
     corrected). THE TRUE RESIDUAL is a part that does not resolve: `f"{queries[0]}_fts_query"`
     yields only `{'_fts_query'}`, so the assembled name is absent and a lever over `_N` passes.
-    That is the declared residual, together with `"".join(…)` (measured: `[]`), `_N + "_x"` and
-    a parameter; the fragment over-approximation buys ONE spelling at the cost of a possible
+    That is the declared residual, together with `"".join(…)` (measured: `[]`), a `+` whose
+    operand does not resolve (`_X = _N + "_x"` RESOLVES when `_N` does — only an unresolved
+    operand is residual, the qualifier the sibling notes keep and this sentence had dropped),
+    and a parameter; the fragment over-approximation buys ONE spelling at the cost of a possible
     over-red, it does not close the class. Recorded so the next lane does not read the arm above
     as covering an unresolvable part — and does not read this note as saying a fully-literal
     assembly is open, which it is not.
@@ -1419,8 +1421,7 @@ def _is_namespace_expr(node: ast.AST, namespaces: frozenset[str] = frozenset()) 
                 and node.args[1].value == "__dict__")
 
 
-def _is_module_registry(node: ast.AST | None,
-                        sys_names: frozenset[str] = frozenset({"sys"})) -> bool:
+def _is_module_registry(node: ast.AST | None, sys_names: frozenset[str]) -> bool:
     """`sys.modules` — the IMPORT REGISTRY a deferred `from … import …` resolves THROUGH.
 
     ⛔ THE STORE THE PIN WAS BLIND TO (#14326 review P1, MEASURED GREEN): `run()` imports
@@ -1467,7 +1468,7 @@ def _is_module_registry(node: ast.AST | None,
 
 
 def _sys_names_of(tree: ast.AST) -> frozenset[str]:
-    """Every name in `tree` that denotes the `sys` MODULE — `sys` plus every import alias.
+    """Every name in `tree` that denotes the `sys` MODULE — `sys` plus its ALIASES.
 
     ⛔ `import sys as _s` BINDS `sys` TO ANOTHER NAME, AND THE RESOLVED FORMS FOLLOWED THE
     LITERAL SPELLING ONLY (#14326 round 21, MEASURED GREEN: `import sys as _s` then
@@ -1475,23 +1476,46 @@ def _sys_names_of(tree: ast.AST) -> frozenset[str]:
     [… ] = …` each left the pin GREEN while `_s.modules[…]` was RED). A set threaded into
     `_is_module_registry` is how those three close without widening the rule beyond `sys` —
     which is the narrowing that keeps `other.modules[…]` from red-ing (see that predicate).
+
+    ⛔ AND `_s = sys` IS THE SAME BIND ONE SPELLING OVER (#14326 round 22, MEASURED: pinning
+    this set to IMPORT aliases alone made `_s = sys; _s.modules["tortoise.sdk"] = _Mirror`
+    GREEN — it was RED before the narrowing, so the first version of this function traded a
+    false red for a FAIL-OPEN, the wrong direction). Assignment aliases resolve to a fixpoint
+    (two hops covers `_t = _s`); `os.sys.modules` is accepted by `_is_sys_ref`'s `x.sys` arm.
     """
     names = {"sys"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "sys":
-                    names.add(alias.asname or "sys")
+                if alias.name == "sys" and alias.asname:
+                    names.add(alias.asname)
+    for _ in range(2):
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                continue
+            value = node.value
+            if not (isinstance(value, ast.Name) and value.id in names):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
     return frozenset(names)
 
 
-def _is_sys_ref(node: ast.AST, sys_names: frozenset[str] = frozenset({"sys"})) -> bool:
-    """`sys`, seen through the import aliases `_sys_names_of` collects.
+def _is_sys_ref(node: ast.AST, sys_names: frozenset[str]) -> bool:
+    """`sys`, seen through the aliases `_sys_names_of` resolves.
 
-    ⛔ NARROWER THAN `_aliases_of` ON PURPOSE (#14326 round 20): this decides "the registry"
-    and a false positive reds an unrelated module, so it accepts only a name that IS `sys`.
+    ⛔ NARROWER THAN `_aliases_of` ON PURPOSE (#14326 round 21): this decides "the registry"
+    and a false positive reds an unrelated module, so a bare `Name` must be a name that IS
+    `sys`. A `x.sys` ATTRIBUTE is accepted (round 22): `os.sys.modules` IS the registry, so the
+    over-red is the safe direction — and it is what keeps `_s = sys; _s.modules[…]` from
+    going GREEN, which the import-alias-only version did. What stays rejected is
+    `other.modules`, whose base is neither a `sys` name nor a `sys` attribute.
     """
-    return isinstance(node, ast.Name) and node.id in sys_names
+    if isinstance(node, ast.Name):
+        return node.id in sys_names
+    return isinstance(node, ast.Attribute) and node.attr == "sys"
 
 
 def _is_setattr_like(value: ast.AST) -> bool:
@@ -7592,11 +7616,17 @@ def test_the_ASYNC_for_arms_that_CARRY_the_class_are_pinned_and_the_redundant_on
         `_rebound_after`                       41 passed  redundant (re-measured below)
 
     ⛔ RE-CENSUSED AT `4473c96648ca`, the peer commit that lands ON TOP of this row: still TEN,
-    the same ten arms, every verdict below unchanged. That commit rebuilt
-    `_rebound_callee_names` (+56 lines of registry mutator/receiver spellings), so the census
-    and all ten mutants were re-run rather than assumed — the arm that grew is still
-    `41 passed`, i.e. still redundant. Only the line numbers moved (again), which is why the
-    arms are named by symbol and none is cited by `:NNNN`.
+    the same ten arms, every verdict below unchanged. ⛔ AND THE REASON IS STATED FROM THE DIFF, NOT
+    ASSUMED (#14326 round 22, MEASURED: this paragraph used to say that commit "rebuilt
+    `_rebound_callee_names` (+56 lines …)" — it did NOT. That function is byte-identical across
+    `57735ab47947` → `4473c96648ca` → `ff85c6ab73af` (97 lines, sha1 `9d658a74eb0d`), and that
+    commit's numstat is `113/3` with no hunk mentioning it; a reader following the old sentence
+    inspected an unmodified function). What that commit actually rebuilt is `_is_module_registry`
+    plus the new `_is_sys_ref`, `_aliases_of`'s `ImportFrom` arm, the `_REGISTRY_MUTATORS`
+    vocabulary, and `_str_constants`' `With`/`AsyncWith` bind arm — none of them in this row's
+    census, which is why every one of the ten verdicts below was re-run rather than assumed and
+    all ten are unchanged. Only the line numbers moved (again), which is why the arms are named
+    by symbol and none is cited by `:NNNN`.
 
     ⛔ THIS HEADER SAID "EIGHT code arms" AND "the four that are not" AND WAS FALSE (#14326
     round 19 P2). The census behind it missed `_rebound_callee_names` and `_rebound_after`, so
@@ -7956,6 +7986,10 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'for _x in (*(sys.modules,),):\n    _x |= {"tortoise.sdk": _Mirror}\n',
         "import registry via a `for` target over a `**` dict spread":
             'for _x in {**{sys.modules: 1}}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        # ⛔ …and through a MODULE ALIAS (#14326 round 22, MEASURED RED→GREEN REGRESSION: the
+        # import-alias-only `_sys_names_of` made this GREEN, and it was RED before).
+        "import registry via a `for` target over a `_s = sys` alias":
+            '_s = sys\nfor _x in (_s.modules,):\n    _x |= {"tortoise.sdk": _Mirror}\n',
         # ⛔ THREE BIND FORMS WITH NO `Assign` NODE (#14326 round 19, MEASURED GREEN at
         # `9b48318eedc3`). `_str_constants` already resolved all three; `_aliases_of` did not,
         # so the `AugAssign` store arm received a receiver that never resolved and the exact
@@ -8003,6 +8037,15 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'import sys as _s\nvars(_s)["modules"]["tortoise.sdk"] = _Mirror\n',
         "`__dict__` on an IMPORT ALIAS":
             'import sys as _s\n_s.__dict__["modules"]["tortoise.sdk"] = _Mirror\n',
+        # ⛔ `_s = sys` AND `os.sys.modules` (#14326 round 22, MEASURED RED→GREEN REGRESSION):
+        # the first version of `_sys_names_of` collected IMPORT aliases only, and narrowing the
+        # ATTRIBUTE arm to that set turned these two from RED into GREEN — a fail-open bought
+        # with a false-red fix, the wrong direction. The rows below pin the recovery, and the
+        # `_s = sys` one is the alias a later refactor would most plausibly re-drop.
+        "`_s = sys` MODULE ALIAS":
+            '_s = sys\n_s.modules["tortoise.sdk"] = _Mirror\n',
+        "`os.sys.modules` ATTRIBUTE":
+            'os.sys.modules["tortoise.sdk"] = _Mirror\n',
         # ⛔ AND THE UNBOUND MUTATOR SPELLINGS (#14326 round 21, MEASURED GREEN: all three
         # INSERTED into `sys.modules` with the pin green). This is the asymmetry the file
         # already pins on the NAMESPACE axis — `dict.__setitem__(<ns>, …)` has its own row
