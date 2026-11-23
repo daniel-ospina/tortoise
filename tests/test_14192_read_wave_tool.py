@@ -1469,7 +1469,8 @@ def _builtin_name_aliases(tree: ast.AST) -> frozenset[str]:
 
 
 def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
-                         launderers: frozenset[str]) -> bool:
+                         launderers: frozenset[str],
+                         consts: dict[str, frozenset[str]]) -> bool:
     """True when `node` denotes a `builtins` MODULE's own `__dict__` mapping.
 
     The three compositions `_is_sys_dict_mapping` already resolves one axis over —
@@ -1495,23 +1496,21 @@ def _is_builtins_dict_of(node: ast.AST, names: frozenset[str],
                 and (node.func.id == "getattr" or node.func.id in launderers)
                 and len(node.args) >= 2 and isinstance(node.args[0], ast.Name)
                 and node.args[0].id in names
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value == "__dict__")
+                and "__dict__" in _string_keys_of(node.args[1], consts))
 
 
 #: The mapping METHODS that RETURN the member stored under a key. `get`/`pop`/`setdefault`
 #: all hand back that object, so each is a read of the mapping in the same sense `m[k]` is —
 #: the bounded FAMILY rather than one spelling (`keys`/`items`/`values` take no key and cannot
-#: name a member). `__getitem__` is the SUBSCRIPT'S OWN dunder spelling and belongs here by that
-#: same rule — the registry axis already reds `dict.__getitem__(sys.__dict__, "modules")`
-#: (#14326 round 35). MEASURED GREEN at `a12902a5d4` while the `m["exec"]` subscript of the
-#: identical mapping was RED.
+#: name a member). #14326 round 35, MEASURED GREEN at `a12902a5d4` while the `m["exec"]`
+#: subscript of the identical mapping was RED.
 _BUILTINS_MAPPING_READS = frozenset({"get", "pop", "setdefault", "__getitem__"})
 
 
 def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
                          dict_names: frozenset[str],
-                         launderers: frozenset[str]) -> bool:
+                         launderers: frozenset[str],
+                         consts: dict[str, frozenset[str]]) -> bool:
     """True when `node` denotes a `builtins` MAPPING — its module's `__dict__`, or a name
     statically bound to the literal `__builtins__` (which IS that mapping in an imported
     module). The two arms the SUBSCRIPT case already takes, extracted so the method-call cases
@@ -1528,33 +1527,33 @@ def _is_builtins_mapping(node: ast.AST, names: frozenset[str],
     """
     # ⛔ THE COPY FAMILY IS DECIDED BY SHAPE, NOT BY TWO LITERAL SPELLINGS (#14326 round 35
     # review cycle 4, MEASURED GREEN: `{**builtins.__dict__}`, `builtins.__dict__ | {}`,
-    # `__dict__ | {}`, `dict({**m})` and `_dc = dict; _dc(m)` all executed the read). A `**`
-    # spread, a `|` union and ANY dict-ish callee (including an alias of `dict`) each yield a
-    # new mapping holding the SAME function objects — one launder, several spellings.
-    # ⛔ EACH BRANCH RETURNS ONLY ON A POSITIVE MATCH (#14326 round 35 review cycle 4). An
-    # early `return False` here would SHORT-CIRCUIT the composition arm below: `_v(builtins)`
-    # has a launderer callee and one argument, so a `return <False>` would answer for the whole
-    # predicate and drop the `vars` composition back to GREEN — the same "one arm answers for
-    # another" defect this file deletes on sight. Only a hit returns.
+    # `dict({**m})` and `_dc = dict; _dc(m)` all executed the read). A `**` spread, a `|` union
+    # and ANY dict-ish callee (including an alias of `dict`) each yield a new mapping holding
+    # the SAME function objects — one launder, several spellings.
+    # ⛔ EACH BRANCH RETURNS ONLY ON A POSITIVE MATCH. An early `return False` here SHORT-
+    # CIRCUITS the composition arm below: `_v(builtins)` has a launderer callee and one
+    # argument, so a `return <False>` would answer for the whole predicate and drop the `vars`
+    # composition back to GREEN — the "one arm answers for another" defect this file deletes
+    # on sight.
     if isinstance(node, ast.Dict) and any(
-            k is None and _is_builtins_mapping(v, names, dict_names, launderers)
+            k is None and _is_builtins_mapping(v, names, dict_names, launderers, consts)
             for k, v in zip(node.keys, node.values, strict=True)):
         return True
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr) and (
-            _is_builtins_mapping(node.left, names, dict_names, launderers)
-            or _is_builtins_mapping(node.right, names, dict_names, launderers)):
+            _is_builtins_mapping(node.left, names, dict_names, launderers, consts)
+            or _is_builtins_mapping(node.right, names, dict_names, launderers, consts)):
         return True
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
             and (node.func.id == "dict" or node.func.id in launderers)
             and len(node.args) == 1
-            and _is_builtins_mapping(node.args[0], names, dict_names, launderers)):
+            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
         return True
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
             and node.func.attr == "copy"
-            and _is_builtins_mapping(node.func.value, names, dict_names, launderers)):
+            and _is_builtins_mapping(node.func.value, names, dict_names, launderers, consts)):
         return True
     return ((isinstance(node, ast.Name) and node.id in dict_names)
-            or _is_builtins_dict_of(node, names, launderers))
+            or _is_builtins_dict_of(node, names, launderers, consts))
 
 
 def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
@@ -1587,13 +1586,16 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
     #: raw here was an in-file asymmetry, not a boundary. Widening this set can only ADD reds
     #: (it feeds the bare-subscript branch of `_builtin_lookup_name` and the receiver test).
     _bu_launderers = _builtin_name_aliases(tree)
+    #: The string-key resolver for the `"__dict__"` argument (`_K = "__dict__"`
+    #: resolves like every other key in this file — `_builtin_lookup_name`'s own rule).
+    _bu_consts = _str_constants(tree)
     builtins_dict_names = (frozenset({"__builtins__"})
                            | frozenset(_aliases_of(
                                tree, lambda n: isinstance(n, ast.Name)
                                and n.id == "__builtins__", loops=True))
                            | frozenset(_aliases_of(
                                tree, lambda n: _is_builtins_dict_of(
-                                   n, builtins_names, _bu_launderers),
+                                   n, builtins_names, _bu_launderers, _bu_consts),
                                loops=True))
                            # ⛔ A COPY IS THE MAPPING FOR THIS QUESTION (#14326 round 35,
                            # MEASURED: `_d = dict(builtins.__dict__); _d["exec"](<read>)`
@@ -1604,7 +1606,8 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
                            # answer and `copy_is_alias=True` is the right one.
                            | frozenset(_aliases_of(
                                tree, lambda n: _is_builtins_mapping(
-                                   n, builtins_names, frozenset(), _bu_launderers),
+                                   n, builtins_names, frozenset(), _bu_launderers,
+                                   _bu_consts),
                                loops=True, copy_is_alias=True)))
     return builtins_names, builtins_dict_names
 
@@ -1655,17 +1658,15 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     `__builtins__` is the builtins MODULE in `__main__` and its `__dict__` in an IMPORTED module,
     so `__builtins__["getattr"]` is a live lever in exactly the context a launderer controls —
     and leaving it GREEN while `__builtins__.getattr` is RED would be the in-file asymmetry
-    ("SPELLING IS NOT IDENTITY", round 20) this file deletes on sight. `dict_names` is every
-    name that statically denotes the MAPPING: the literal `__builtins__` and its aliases, plus
-    the resolved compositions `builtins.__dict__` / `vars(builtins)` /
-    `getattr(builtins, "__dict__")` and their COPIES (`_builtins_root_names`, #14326 round 35).
+    ("SPELLING IS NOT IDENTITY", round 20) this file deletes on sight. It is scoped to
+    `dict_names` — the names statically bound to the literal `__builtins__` — deliberately:
     `builtins["getattr"]` is a TypeError (`'module' object is not subscriptable`), so accepting
     a bare subscript on every root name would red code that cannot run.
     """
     _members = members if members is not None else _REGISTRY_BUILTINS
     if isinstance(node, ast.Subscript):
         keys = _string_keys_of(node.slice, consts) & _members
-        if not _is_builtins_mapping(node.value, names, dict_names, launderers):
+        if not _is_builtins_mapping(node.value, names, dict_names, launderers, consts):
             return None
         return sorted(keys)[0] if keys else None
     if not isinstance(node, ast.Call):
@@ -1690,17 +1691,11 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
         # ⛔ THE RECEIVER MAY BE THE MAPPING ITSELF (#14326 review cycle 3, measured):
         # `getattr(_d, "exec")` with `_d = builtins.__dict__` was GREEN. `dict_names` already
         # holds every resolved spelling of that mapping, so the receiver accepts either set.
-        # ⛔ THE RECEIVER DECIDES BY SHAPE TOO (#14326 round 35 review cycle 4, MEASURED:
-        # `getattr(builtins.__dict__, "exec")(<read>)` and
-        # `getattr(vars(builtins), "exec")(<read>)` were GREEN while the SAME receiver bound to a
-        # name (`_d = builtins.__dict__; getattr(_d, "exec")`) was RED). The unbound arm below
-        # already decided by `_is_builtins_mapping`; the fetcher arm takes the same predicate.
-        # The `names` half is kept because the `builtins` MODULE is a legal receiver and is not
-        # a mapping.
         if (len(node.args) >= 2
                 and ((isinstance(node.args[0], ast.Name)
-                      and node.args[0].id in names)
-                     or _is_builtins_mapping(node.args[0], names, dict_names, launderers))):
+                      and node.args[0].id in (names | dict_names))
+                     or _is_builtins_mapping(node.args[0], names, dict_names, launderers,
+                                             consts))):
             keys = _string_keys_of(node.args[1], consts) & _members
             return sorted(keys)[0] if keys else None
         return None
@@ -1715,7 +1710,7 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     if (isinstance(node.func, ast.Attribute)
             and node.func.attr in _BUILTINS_MAPPING_READS
             and len(node.args) >= 2
-            and _is_builtins_mapping(node.args[0], names, dict_names, launderers)):
+            and _is_builtins_mapping(node.args[0], names, dict_names, launderers, consts)):
         keys = _string_keys_of(node.args[1], consts) & _members
         return sorted(keys)[0] if keys else None
     # ⛔ AND THE MAPPING'S OWN METHODS, WHICH ARE THE SUBSCRIPT ONE SPELLING OVER (#14326
@@ -1735,7 +1730,7 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     if (isinstance(node.func, ast.Attribute)
             and node.func.attr in _BUILTINS_MAPPING_READS
             and len(node.args) >= 1
-            and _is_builtins_mapping(node.func.value, names, dict_names, launderers)):
+            and _is_builtins_mapping(node.func.value, names, dict_names, launderers, consts)):
         keys = _string_keys_of(node.args[0], consts) & _members
         return sorted(keys)[0] if keys else None
     return None
@@ -3422,7 +3417,8 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         # nothing that can widen a predicate.
         elif isinstance(node, ast.ImportFrom) and node.module in {"sys", "builtins"}:
             _imported_members = (frozenset({"modules", "__dict__"}) | _PATH_ATTRS
-                                 if node.module == "sys" else _CODE_EXECUTING_CALLEES)
+                                 if node.module == "sys"
+                                 else _CODE_EXECUTING_CALLEES | _REGISTRY_BUILTINS)
             for alias in node.names:
                 # ⛔ `__dict__` IS BOUND THE SAME WAY (#14326 round 28 P2, MEASURED GREEN:
                 # `from sys import __dict__ as _d; _d["modules"] = {…}` and
@@ -6654,6 +6650,33 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    getattr(builtins, "exec")('
             "'results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        # ⛔ THE RECEIVER, THE KEY AND THE IMPORTED FETCHER (#14326 cross-lane review of
+        # `f7f5b763fb`, EACH MEASURED GREEN while the read executed — and each with a RED twin
+        # in this file, which is what makes it an asymmetry rather than a boundary):
+        #
+        #     getattr(builtins.__dict__, "exec")(<read>)              GREEN (dict.get took it)
+        #     _K = "__dict__"; _d = getattr(builtins, _K); _d[..]     GREEN (`_string_keys_of`
+        #                                                              resolves every OTHER key)
+        #     from builtins import getattr as _g; _g(builtins, "exec") GREEN (the `_g = getattr`
+        #                                                              twin is RED)
+        #
+        # Deleting the receiver's `_is_builtins_mapping` disjunct, the `_string_keys_of` key
+        # resolution, or `_REGISTRY_BUILTINS` from the ImportFrom member set reds exactly its
+        # own row below, measured.
+        "INLINE mapping as `getattr`'s receiver": (
+            '    import builtins\n'
+            '    getattr(builtins.__dict__, "exec")('
+            "'results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        "NAME-bound `__dict__` key": (
+            '    import builtins\n'
+            '    _K = "__dict__"\n'
+            '    _d = getattr(builtins, _K)\n'
+            '    _d["exec"]('
+            "'results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
+        "FETCHER imported from the module": (
+            '    from builtins import getattr as _g\n'
+            '    _g(builtins, "exec")('
+            "'results = sdk._tortoise_fts_query(query=queries[0][\"query\"])')\n"),
         "`builtins.__dict__[\"exec\"]` — the mapping SUBSCRIPT": (
             '    import builtins\n'
             '    builtins.__dict__["exec"]('
@@ -6770,36 +6793,25 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    import builtins\n'
             '    _d = builtins.__dict__.copy()\n'
             '    _d.get("exec")("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
-        # ⛔ THE COPY FAMILY BY SHAPE, AND THE FETCHER RECEIVER BY SHAPE (#14326 round 35
-        # review cycle 4, EACH MEASURED GREEN while a third reach executed the read). Resolving
-        # only the two literal copy spellings left the canonical `{**m}` GREEN, and testing the
-        # fetcher receiver with `isinstance(…, ast.Name)` left `getattr(builtins.__dict__, …)`
-        # GREEN while the same receiver bound to a name was RED.
-        "`{**builtins.__dict__}` \u2014 a `**` SPREAD": (
+        # ⛔ THE COPY FAMILY BY SHAPE, AND `__getitem__` (#14326 round 35 review cycle 4,
+        # EACH MEASURED GREEN while a third reach executed the read). Resolving only the two
+        # literal copy spellings left the canonical `{**m}` GREEN; `__getitem__` is the
+        # SUBSCRIPT'S own dunder and `_BUILTINS_MAPPING_READS`' rule ("methods that RETURN the
+        # member stored under a key") names it — the registry axis already reds
+        # `dict.__getitem__(sys.__dict__, "modules")` one axis over.
+        "`{**builtins.__dict__}` — a `**` SPREAD": (
             '    import builtins\n'
             '    _d = {**builtins.__dict__}\n'
             '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
-        "`builtins.__dict__ | {}` \u2014 a UNION copy": (
+        "`builtins.__dict__ | {}` — a UNION copy": (
             '    import builtins\n'
             '    _d = builtins.__dict__ | {}\n'
             '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
-        "`_dc = dict; _dc(builtins.__dict__)` \u2014 an ALIASED constructor": (
+        "`_dc = dict; _dc(builtins.__dict__)` — an ALIASED constructor": (
             '    import builtins\n'
             '    _dc = dict\n'
             '    _d = _dc(builtins.__dict__)\n'
             '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
-        "`getattr(builtins.__dict__, \"exec\")` \u2014 the receiver by SHAPE": (
-            '    import builtins\n'
-            '    getattr(builtins.__dict__, "exec")('
-            "'results = sdk._tortoise_fts_query(query=q, limit=10)')\n"),
-        "`getattr(vars(builtins), \"exec\")` \u2014 the `vars` composition receiver": (
-            '    import builtins\n'
-            '    getattr(vars(builtins), "exec")('
-            "'results = sdk._tortoise_fts_query(query=q, limit=10)')\n"),
-        # ⛔ AND `__getitem__`, THE SUBSCRIPT'S OWN DUNDER (#14326 round 35 review cycle 4):
-        # `_BUILTINS_MAPPING_READS`' own rule is "methods that RETURN the member stored under a
-        # key", which `__getitem__` satisfies exactly — and the registry axis already reds
-        # `dict.__getitem__(sys.__dict__, "modules")` one axis over.
         "`builtins.__dict__.__getitem__(\"exec\")`": (
             '    import builtins\n'
             '    builtins.__dict__.__getitem__("exec")('
@@ -10581,12 +10593,10 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # ⛔ AND THE UNENUMERABLE COPY-CONSTRUCTOR CLASS (#14326 round 35 review cycle 4,
         # EACH MEASURED GREEN with a third reach executing the read). The SHAPE-detectable
         # copies ARE closed — `dict(m)`, `{**m}`, `m | {}`, `m.copy()`, an alias of `dict`.
-        # What is not closable is a copy produced by an arbitrary MAPPING CONSTRUCTOR: the copy
+        # What does not close is a copy produced by an arbitrary MAPPING CONSTRUCTOR: the copy
         # still holds the SAME function objects, so it is a live lever, but "the ways to make a
-        # mapping from a mapping" does not terminate any more than "the ways to name a
-        # callable" does. It is the same DECLARED class as the rows above, not a spelling list
-        # to grow — closing one must EDIT this table rather than leave it contradicting the
-        # code.
+        # mapping from a mapping" terminates no more than "the ways to name a callable" does.
+        # Same DECLARED class as the rows above, not a spelling list to grow.
         "`copy.copy(builtins.__dict__)`": (
             'import builtins, copy', '_d = copy.copy(builtins.__dict__)',
             f'_d["exec"]("results = {read}")'),
