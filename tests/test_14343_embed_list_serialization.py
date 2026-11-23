@@ -222,8 +222,10 @@ def test_the_compact_layout_always_shrinks_and_the_share_is_a_property_of_the_la
     Measured per emission (tokens): 29.6 %–35.0 %, and 17.11 %–21.68 % on characters — the
     two differ because `indent=1` spends characters on whitespace the tokenizer folds into
     single tokens. Asserted on characters here because a tokenizer is unavailable to a
-    deterministic test; the token band is pinned separately, against the recorded cells, in
-    `test_the_recorded_token_cells_encode_the_doc_s_own_deltas`.
+    deterministic test. The per-emission TOKEN spread is **quoted, not enforced** — no
+    assertion in this file checks it, because checking it would need a tokenizer;
+    `test_the_recorded_token_cells_encode_the_doc_s_own_deltas` pins the aggregate ratio
+    (32.51 %) and the published deltas, not a per-emission band.
 
     ⛔ What this test does NOT catch, stated because the earlier wording claimed it did:
     a per-emission regression in PRODUCTION (one list rendered compact, another not). It
@@ -240,9 +242,9 @@ def test_the_compact_layout_always_shrinks_and_the_share_is_a_property_of_the_la
         shares.append(100.0 * (len(ind) - len(comp)) / len(ind))
     assert min(shares) > 15.0 and max(shares) < 25.0, (
         f"character-level share drifted outside its measured band: {min(shares):.1f}–"
-        f"{max(shares):.1f}% (measured 17.11–21.68%); the TOKEN band this file pins is "
-        f"{_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}% and is recorded as the "
-        f"per-emission spread, not re-measured against these characters")
+        f"{max(shares):.1f}% (measured 17.11–21.68%); the measured TOKEN spread for the "
+        f"same corpus is {_SAVING_SHARE_BAND[0]}–{_SAVING_SHARE_BAND[1]}%, quoted, not "
+        f"enforced here (no tokenizer)")
 
 
 # ── the round-trip: same object, key order included ───────────────────────────
