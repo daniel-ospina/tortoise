@@ -542,13 +542,13 @@ class AlertStore:
             _write_json(self._storage, new_key, state)
             try:
                 self._storage.delete(legacy_key)
-            except Exception as e:  # noqa: BLE001 — the move itself succeeded
+            except Exception as e:  # noqa: BLE001, RUF100 — the move itself succeeded
                 logger.warning(
                     "dedup: %s/%s was migrated to %s but the legacy object could "
                     "not be released (%s) — it is inert once the scoped key holds "
                     "the issue", kind, legacy_subject, new_subject, e)
             return True
-        except Exception as e:  # noqa: BLE001 — adoption is best-effort
+        except Exception as e:  # noqa: BLE001, RUF100 — adoption is best-effort
             logger.warning(
                 "dedup: %s/%s could not be migrated to %s (%s) — the caller files "
                 "under the new subject", kind, legacy_subject, new_subject, e)
