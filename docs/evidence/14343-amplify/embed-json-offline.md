@@ -39,7 +39,7 @@ The layout seam resolved to **`indent`** — this measurement counts BOTH layout
 | wp07_bluepeak_followup | narrative | 37 | 4,960 | 3,387 | 1,573 | 31.7 |
 | **total** | 14 emissions | 580 | **77,561** | **52,346** | **25,215** | **32.5** |
 
-**1,801 tokens per emission**, and the share spans 29.64%–34.99% across them — a property of the serialization, not of one session. Per item that is `133.7` tokens in `indent=1` against `90.3` compact, so the `43.5`-token difference between the two layouts IS the indentation. The compact copy is also BELOW S2's own emission of `100.9` completion tokens per item; ⛔ those counts do NOT say why (the gap may be formatting, or content the receipt's parsed list does not carry), and nothing here removes it — the saved `25,215` tokens are the indentation alone.
+**1,801 tokens per emission**, and the share spans 29.64%–34.99% across them — a property of the serialization, not of one session. Per item that is `133.7` tokens in `indent=1` against `90.3` compact, so the `43.4`-token difference between the two layouts IS the indentation. The compact copy is also BELOW S2's own emission of `100.9` completion tokens per item; ⛔ those counts do NOT say why (the gap may be formatting, or content the receipt's parsed list does not carry), and nothing here removes it — the saved `25,215` tokens are the indentation alone.
 
 ### Tokens per document, before → after
 
@@ -64,9 +64,11 @@ The arithmetic, in the order it is applied:
 
 | tier | allowance | documents/month before | after | the floor, shown |
 |---|---|---|---|---|
-| solo | 3,000,000 | 46 | **49** | `49 × 60,199.1 = 2,949,758 ≤ 3,000,000`; `50 × = 3,009,957` overruns |
-| pro | 4,000,000 | 61 | **66** | `66 × 60,199.1 = 3,973,143 ≤ 4,000,000`; `67 × = 4,033,342` overruns |
-| team | 24,000,000 | 370 | **398** | `398 × 60,199.1 = 23,959,257 ≤ 24,000,000`; `399 × = 24,019,457` overruns |
+| solo | 3,000,000 | 46 | **49** | `49 × 60,199.1 = 2,949,755.9 ≤ 3,000,000`; `50 × 60,199.1 = 3,009,955.0` overruns |
+| pro | 4,000,000 | 61 | **66** | `66 × 60,199.1 = 3,973,140.6 ≤ 4,000,000`; `67 × 60,199.1 = 4,033,339.7` overruns |
+| team | 24,000,000 | 370 | **398** | `398 × 60,199.1 = 23,959,241.8 ≤ 24,000,000`; `399 × 60,199.1 = 24,019,440.9` overruns |
+
+The unit above is printed, and multiplied, at 1 dp; the counts are the floors of the exact unit, and the next document overruns by >30k tokens in every tier, so the display precision cannot flip a cell.
 
 That is **+3 / +5 / +28** documents a month (solo / pro / team) — the size of the lever, not a pricing proposal.
 

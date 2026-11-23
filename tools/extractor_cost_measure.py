@@ -3217,9 +3217,14 @@ def render_embed_json_measurement(m: dict) -> str:
     #: pipeline's own whitespace" and then to "the model's JSON is not compact";
     #: both were causal claims this verb cannot observe.)
     items = agg["items"] or 1
-    per_item_indent = agg["indented_tokens"] / items
-    per_item_compact = agg["compact_tokens"] / items
-    per_item_gap = per_item_indent - per_item_compact
+    #: ⛔ The printed difference is taken from the DISPLAYED (1 dp) operands, not
+    #: from the unrounded ones: a reader who re-derives the sentence must get the
+    #: printed number (133.7 − 90.3 = 43.4), and 133.7259 − 90.2517 = 43.4741
+    #: displayed at 1 dp would print 43.5 — an equation that does not evaluate as
+    #: written, which in an artifact whose point is re-derivability reads as rot.
+    per_item_indent = round(agg["indented_tokens"] / items, 1)
+    per_item_compact = round(agg["compact_tokens"] / items, 1)
+    per_item_gap = round(per_item_indent - per_item_compact, 1)
     for r in m["per_emission"]:
         saved = r["indented_tokens"] - r["compact_tokens"]
         share = 100.0 * saved / r["indented_tokens"] if r["indented_tokens"] else 0.0
@@ -3291,14 +3296,25 @@ def render_embed_json_measurement(m: dict) -> str:
         "| tier | allowance | documents/month before | after | the floor, shown |",
         "|---|---|---|---|---|",
     ]
+    #: Same rule as the per-item sentence: the equations multiply the unit AT THE
+    #: PRECISION IT IS DISPLAYED (1 dp), so each line evaluates exactly as printed.
+    #: The counts themselves stay the floors of the EXACT unit (`affordable_count`
+    #: in the verb) — this is the display, not the computation, and the margin to
+    #: the next document is >30k tokens in every tier, so rounding cannot flip one.
+    displayed_unit = round(lev["after_total"], 1)
     for b in m["documents_per_month"]:
         n = b["documents_after"]
         lines.append(
             f"| {b['tier']} | {b['allowance']:,} | {b['documents_before']} | "
-            f"**{n}** | `{n} × {lev['after_total']:,.1f} = "
-            f"{n * lev['after_total']:,.0f} ≤ {b['allowance']:,}`; "
-            f"`{n + 1} × = {(n + 1) * lev['after_total']:,.0f}` overruns |")
+            f"**{n}** | `{n} × {displayed_unit:,.1f} = "
+            f"{n * displayed_unit:,.1f} ≤ {b['allowance']:,}`; "
+            f"`{n + 1} × {displayed_unit:,.1f} = "
+            f"{(n + 1) * displayed_unit:,.1f}` overruns |")
     lines += [
+        "",
+        "The unit above is printed, and multiplied, at 1 dp; the counts are the "
+        "floors of the exact unit, and the next document overruns by >30k tokens "
+        "in every tier, so the display precision cannot flip a cell.",
         "",
         f"That is **{m['documents_per_month'][0]['documents_after'] - m['documents_per_month'][0]['documents_before']:+d} / "
         f"{m['documents_per_month'][1]['documents_after'] - m['documents_per_month'][1]['documents_before']:+d} / "

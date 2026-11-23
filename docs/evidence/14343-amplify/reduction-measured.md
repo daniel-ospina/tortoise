@@ -404,13 +404,16 @@ count is a **floor** (`affordable_count`, §4a's one convention).
 
 | tier | allowance | documents/month before | after (`compact`) | the floor, shown |
 |---|---|---|---|---|
-| solo | 3,000,000 | 46 | **49** | `49 × 60,199.1 = 2,949,758 ≤ 3,000,000`; `50 × = 3,009,957` overruns |
-| pro | 4,000,000 | 61 | **66** | `66 × 60,199.1 = 3,973,143 ≤ 4,000,000`; `67 × = 4,033,342` overruns |
-| team | 24,000,000 | 370 | **398** | `398 × 60,199.1 = 23,959,257 ≤ 24,000,000`; `399 × = 24,019,457` overruns |
+| solo | 3,000,000 | 46 | **49** | `49 × 60,199.1 = 2,949,755.9 ≤ 3,000,000`; `50 × 60,199.1 = 3,009,955.0` overruns |
+| pro | 4,000,000 | 61 | **66** | `66 × 60,199.1 = 3,973,140.6 ≤ 4,000,000`; `67 × 60,199.1 = 4,033,339.7` overruns |
+| team | 24,000,000 | 370 | **398** | `398 × 60,199.1 = 23,959,241.8 ≤ 24,000,000`; `399 × 60,199.1 = 24,019,440.9` overruns |
 
-That is **+3 / +5 / +28** documents a month. (The counts agree with §4a's 49 / 66 / 398;
-the multiplication lines differ in the last few tokens because §4a rounds the unit to
-60,201 and this run does not.)
+That is **+3 / +5 / +28** documents a month. (The counts agree with §4a's 49 / 66 / 398.
+The multiplication lines differ in the last few tokens because §4a multiplies the unit it
+prints — `60,201` — while this run's unit is `60,199.1`; **each table multiplies the unit IT
+DISPLAYS**, so both re-derive as written. An earlier revision of this section multiplied the
+unrounded `60,199.139…` and printed it at 1 dp, which made the printed equations evaluate 2–15
+tokens short — the same display gap §7b reconciles, and now removed at the source.)
 
 ### 7d. The guards that make this quotable
 
