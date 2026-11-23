@@ -132,13 +132,13 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 310 files finds exactly 13 — the verb-at-end-of-line scan alone finds **193**,
+predicate over the same 310 files finds exactly 13 — the verb-at-end-of-line scan alone finds **183**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
-enumerated, and the other **180** are a COMMENT or docstring line that simply ENDS on the word (“any
+enumerated, and the other **170** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
 “(#13330 post-merge” that `#13399` added, …) with nothing following, which the case-insensitive
-predicate counts and which is why the predicate has to be stated — `tortoise/ended.py` carries none of
-the 193, so the count does not ride on that file — and none of the 13 is an executable Cypher literal
+predicate counts and which is why the predicate has to be stated (⛔ and stated WITH its word boundary: `re.compile(r"\b(?:MATCH|MERGE)\s*$", re.IGNORECASE)` reads **183** here, while the same predicate without `\b` reads **193** — it also counts compounds such as “post-merge”, and it would have read **192** at the base where this section published **182**; the `\b` form is the one that reproduces that figure) — `tortoise/ended.py` carries none of
+the 183, so the count does not ride on that file — and none of the 13 is an executable Cypher literal
 split by implicit
 concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is prose or a wrapped Cypher
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
