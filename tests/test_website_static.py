@@ -4064,11 +4064,12 @@ class TestPageHeadingOutline:
     def test_the_niche_product_page_does_not_skip_a_heading_level(self):
         """#13645: same outline contract, one page over.
 
-        The owner's PDF has ONE h1 (the hero) and an h2 per beat, with the intro
-        and compute beats heading-less — the measured outline is exactly
-        `[1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4]`: one hero h1, five h2 (the three
-        steps, onboarding and pricing), the four tier-card h3s under
-        `#pricing-section`, and one h4 on the self-hosted card. No level skips.
+        Measured outline: `[1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4]` — one hero h1;
+        SIX h2 (the compute beat's "Organisational Intelligence" — owner item 1,
+        added 2026-11-23, which is why the intro is the only heading-less beat
+        left — then the three steps, onboarding and pricing); the four
+        tier-card h3s under `#pricing-section`; and one h4 on the self-hosted
+        card. No level skips.
 
         ⛔ A STEP rendered as an h3 — an easy slip when a beat is pasted in — is
         an accessibility regression here exactly as it is on the product page,
@@ -10246,7 +10247,7 @@ class TestProductTeamsIdentity:
 
 
 class TestProductTeamsCopy:
-    """The owner's PDF copy, VERBATIM, section by section — with THREE ruled exceptions.
+    """The owner's copy, section by section — with the departures recorded as departures.
 
     This is the pin the page most needs: the copy is the owner's prose, the
     build was instructed to reproduce it unchanged, and nothing else in this
@@ -10259,10 +10260,20 @@ class TestProductTeamsCopy:
     https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
     It names the two readings as typos and states that, for those two strings
     only, it supersedes the earlier "must survive the build unchanged"
-    instruction. Everything else stays verbatim — except the onboarding
-    heading's trailing full stop, which the owner also asked to remove (#13696
-    item 4). That is a THIRD departure, and it is recorded as one rather than
-    folded into the copy ruling.
+    instruction. The onboarding heading's trailing full stop is a THIRD
+    departure (#13696 item 4), recorded as one rather than folded into the copy
+    ruling.
+
+    ⛔ AND THE OWNER RE-WROTE PART OF THE PAGE ON 2026-11-23 (owner items 1-2):
+    the compute beat gained the title "Organisational Intelligence" and reads
+    "over YOUR context", and step 03 is retitled "03 · Reason & Learn" with its
+    body REPLACED — the PDF's step-03 paragraph no longer appears on the page at
+    all. Those are the owner's EDITS, not a builder's paraphrase, and the pins
+    below assert the NEW text: restoring the PDF's step-03 paragraph is now a
+    revert of an owner edit, exactly as re-spelling `superintelligence` was a
+    revert of a ruling. The ruling on the two typos stands on #13645 for anyone
+    who does restore that paragraph. The edits are relayed onto the artifact at
+    https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7108810457
 
     ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
     (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
@@ -10296,10 +10307,13 @@ class TestProductTeamsCopy:
     #: #13645#issuecomment-7047852104 records it, and the PDF's singular is the
     #: typo it corrects (#14020 review P1 at `73dbbf66ea`).
     COMPUTE = (
-        "Tortoise then computes over this context, analysing hundreds or even "
+        "Tortoise then computes over your context, analysing hundreds or even "
         "millions of variables so you and your agents make decisions with "
         "superintelligence."
     )
+    #: The compute beat's section TITLE — the owner's addition of 2026-11-23
+    #: (owner item 1), not the PDF's: the PDF opens that beat with the claim.
+    COMPUTE_H2 = "Organisational Intelligence"
     OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
     OUTCOMES_DOWN = ("Constant Supervision", "Drift & Regressions", "Slack Noise & Meetings")
 
@@ -10314,11 +10328,11 @@ class TestProductTeamsCopy:
          "and code work, turning loose facts into knowledge. With deduplication and "
          "superseding. This logical model enables your agents to not just retrieve "
          "facts but understand your logic, eliminating drift and regressions."),
-        ("beat-reason", "03 · Reason",
-         "Improve decision-making with superintelligence, grounded in your "
-         "company\u2019s knowledge and fully auditable. Thanks to an algorithm "
-         "inspired by interconnected prediction markets, Tortoise can compute "
-         "hundreds or even millions of data points."),
+        ("beat-reason", "03 · Reason & Learn",
+         "Thanks to an algorithm inspired by interconnected prediction markets, "
+         "Tortoise can compute hundreds or even millions of data points, "
+         "calculating confidence with business logic and learning from new "
+         "evidence."),
     )
     ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI"
     ONBOARD_P = (
@@ -10711,7 +10725,32 @@ class TestProductTeamsCopy:
             f"owner's page 2, as ruled, reads {self.COMPUTE!r}. ⛔ `make "
             "decisions` (plural) is the owner's ruling, recorded on "
             "#13645#issuecomment-7047852104 — restoring the PDF's singular "
-            "re-lands a typo the owner ruled on.")
+            "re-lands a typo the owner ruled on; `your context` is the owner's "
+            "edit of 2026-11-23 (owner item 1).")
+
+    def test_the_compute_beat_carries_the_owners_section_title(self):
+        """Owner item 1: the beat opens on a TITLE, not on the claim.
+
+        The PDF's compute beat has no heading — it opens with the paragraph — so
+        the owner asked for one, and it is an ADDITION to the PDF's text rather
+        than a correction of it. Nothing else here reads it: the copy pin above
+        takes the FIRST `<p>`, which an `<h2>` never displaces, and the heading
+        outline only counts levels. Without this row the title could be deleted
+        and every copy row would stay green.
+        """
+        compute = _element_by_id(_product_teams_html(), "beat-compute")
+        h2 = re.search(r"<h2>(.*?)</h2>", compute, re.S)
+        assert h2, (
+            "#beat-compute has no <h2> — the compute claim reads as a "
+            "continuation of the intro above it, which is the defect the "
+            "owner's item 1 fixes")
+        assert _beat_text(h2.group(1)) == self.COMPUTE_H2, (
+            f"the compute beat's title reads {_beat_text(h2.group(1))!r}; the "
+            f"owner asked for {self.COMPUTE_H2!r} (owner item 1)")
+        assert "beat-num" not in h2.group(1), (
+            "the compute beat's title carries a `.beat-num`. The numbered beats "
+            "are the three STEPS (01/02/03); this one is a claim, and a number "
+            "on it would invent a fourth step")
 
     def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
         compute = _element_by_id(_product_teams_html(), "beat-compute")
@@ -10762,20 +10801,37 @@ class TestProductTeamsCopy:
 
         The ruling that makes the corrected forms correct:
         https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+
+        ⛔ STEP 03'S PARAGRAPH IS NO LONGER ON THE PAGE AT ALL: the owner
+        REPLACED it on 2026-11-23 (owner item 2), so the second typo pair has
+        nothing left to guard. It is pinned ABSENT as a whole sentence instead —
+        both spellings — because a lane that "restores the PDF's copy" would put
+        that paragraph back, and restoring it is now a revert of an owner edit
+        rather than a return to verbatim. The ruling stands on #13645 for anyone
+        who does restore it; the ruled spelling stays asserted here so it is the
+        spelling that comes back.
         """
         served = _served(_product_teams_html())
-        for typo in ("make decision with superintelligence",
-                     "super intelligence, grounded"):
+        # The compute beat is where the ruled typo pair still lives.
+        for typo in ("make decision with superintelligence",):
             assert typo not in served, (
                 f"the rendered page contains the PDF's spelling {typo!r}. The "
                 "owner ruled it a typo and the corrected string is what ships "
                 "(#13645#issuecomment-7047852104) — restoring it is a revert "
                 "of a recorded ruling, not a return to verbatim copy.")
-        for ruled in ("make decisions with superintelligence",
-                      "superintelligence, grounded"):
+        for ruled in ("make decisions with superintelligence",):
             assert ruled in served, (
                 f"the rendered page is missing the ruled string {ruled!r} "
                 "(#13645#issuecomment-7047852104)")
+        for pdf_step_03 in ("super intelligence, grounded",
+                            "superintelligence, grounded",
+                            "Improve decision-making with superintelligence"):
+            assert pdf_step_03 not in served, (
+                f"the rendered page contains {pdf_step_03!r}, part of the "
+                "step-03 paragraph the owner REPLACED on 2026-11-23 (owner "
+                "item 2). The PDF's paragraph is gone from this page by the "
+                "owner's instruction — restoring it reverts an owner edit, not "
+                "a builder's paraphrase.")
         # The onboarding heading is the THIRD departure (#13696 item 4) and its
         # pair-revert was unpinned: `ONBOARD_H2` has no full stop, so reverting
         # page and constant together kept every copy row green. Pinned ABSENT
@@ -10820,3 +10876,108 @@ class TestProductTeamsCopy:
             f"the script's scrubbed beat list {listed.group(1)!r} does not "
             f"match the beat order {order!r}, so the wrong panel fades in for "
             "the scroll position")
+
+
+class TestProductTeamsPricingCardCtaBaseline:
+    """Owner item 3 — the four pricing CTAs share ONE baseline.
+
+    The report (`clipboard-2026-11-23-121001`) was that the buttons sit at
+    different heights because the tier copy has different lengths. The BOXES
+    were never the problem — `.pricing-grid`'s default `align-items: stretch`
+    already gives all four one height (measured 1440x900: every card ran
+    304.33 -> 815.72) — the defect was where the CTA sat INSIDE its box:
+    `.btn` tops read 675.58 / 675.58 / 697.05 / 745.78, three distinct
+    baselines 70.2px apart. After the two declarations pinned below all four
+    read 745.78 at 1440x900 (measured, headless Chromium).
+
+    ⛔ WHY A STATIC PIN FOR A LAYOUT FIX: the failure is invisible to every
+    other row here — no copy, no price and no markup changes — so a revert of
+    the two declarations would be green everywhere else and the owner would
+    have to report it a second time. The rows below read the WINNING
+    declaration from the COMMENT-BLANKED sheet (`_effective_decl`), because the
+    rule carries a comment that names `display: flex` and `margin-top: auto`:
+    a substring search would be satisfied by the comment explaining the fix.
+    """
+
+    def test_each_card_is_a_flex_column_and_its_cta_takes_the_slack(self):
+        css = _product_teams_html()
+        card_rules = [body for body, inside_media
+                      in _css_rules_with_scope(css, ".pricing-card")
+                      if not inside_media]
+        assert card_rules, "`.pricing-card` declares no rule"
+        assert _effective_decl(card_rules[-1], "display") == "flex", (
+            "`.pricing-card` is not a flex container, so `margin-top: auto` on "
+            "its CTA has no free space to absorb and the four buttons go back "
+            "to their content-length heights (three baselines, 70.2px apart at "
+            "1440x900 — owner item 3)")
+        assert _effective_decl(card_rules[-1], "flex-direction") == "column", (
+            "`.pricing-card` is a flex ROW, so its children sit side by side "
+            "instead of stacking — the card renders as one line of text "
+            "(owner item 3)")
+        cta_rules = [body for body, inside_media
+                     in _css_rules_with_scope(css, ".pricing-card .btn")
+                     if not inside_media]
+        assert cta_rules, "`.pricing-card .btn` declares no rule"
+        assert _effective_decl(cta_rules[-1], "margin-top") == "auto", (
+            "the card's CTA does not take the leftover height, so it sits "
+            "wherever its tier's copy ends and the four buttons do not share a "
+            "baseline (owner item 3). `margin-top: auto` is the mechanism; "
+            "without it `display: flex` alone changes nothing a reader sees")
+
+    def test_the_popular_cards_thicker_border_does_not_move_its_cta(self):
+        """The 2px border eats ONE more px than its siblings' 1px — measured.
+
+        With the flex column in place the popular card's CTA landed 1px high
+        (744.78 against 745.78, at 1440x900): `box-sizing: border-box` means the
+        2px border removes one more pixel of content box at the bottom than a
+        1px border does, and `margin-top: auto` aligns to that inner edge. The
+        `padding-bottom` compensation is the thing that makes the four y values
+        EQUAL rather than 1px apart, so a reader who deletes it as a mystery
+        number must red here instead of shipping an alignment that is "close".
+        """
+        css = _product_teams_html()
+        popular = [body for body, inside_media
+                   in _css_rules_with_scope(css, ".pricing-card.popular")
+                   if not inside_media]
+        assert popular, "`.pricing-card.popular` declares no rule"
+        assert _effective_decl(popular[-1], "padding-bottom") == "calc(1.75rem - 1px)", (
+            "the popular card's bottom inset does not compensate for its 2px "
+            "border, so its CTA sits 1px above the other three (measured "
+            "744.78 vs 745.78 at 1440x900 — owner item 3)")
+
+    def test_the_cta_is_the_last_child_in_both_the_static_cards_and_the_render(self):
+        """`margin-top: auto` aligns the LAST item — so nothing may follow the CTA.
+
+        The static cards are the no-JS fallback and `renderPricing()` replaces
+        them on load, so BOTH shapes have to end on the anchor; a link or a
+        footnote added after it would take the slack and the buttons would
+        misalign on one path only (JS visitors) or the other (crawlers).
+        """
+        for chunk in _static_pricing_grid(_served(_product_teams_html())).split(
+                '<div class="pricing-card')[1:]:
+            # Cut the chunk at the CARD's own balanced close: the slice handed in
+            # ends at the usage paragraph, so the last chunk would otherwise
+            # carry `<p class="pricing-usage">` into the tail and the row would
+            # pass by looking past it.
+            depth, body = 1, chunk
+            for tag in re.finditer(r"</?div\b[^>]*>", chunk):
+                depth += -1 if tag.group(0).startswith("</") else 1
+                if depth == 0:
+                    body = chunk[:tag.end()]
+                    break
+            assert depth == 0, "a static pricing card has an unbalanced <div>"
+            cta = re.search(r'<a href="[^"]*" class="btn[^"]*">.*?</a>', body, re.S)
+            assert cta, "a static pricing card has no CTA anchor"
+            tail = body[body.index("</a>", cta.start()) + 4:]
+            assert re.fullmatch(r"(?:\s*</div>)+\s*", tail), (
+                "a static pricing card carries markup after its CTA "
+                f"({tail.strip()!r}). `.pricing-card .btn {{ margin-top: auto }}` "
+                "aligns the last child, so anything below the button steals the "
+                "slack and the four baselines split again (owner item 3)")
+        template = re.search(r"return `<div class=\"pricing-card[^`]*`", _product_teams_html(), re.S)
+        assert template, "renderPricing()'s card template changed shape — re-point this gate"
+        assert re.search(r'</a>\s*</div>`$', template.group(0)), (
+            "renderPricing()'s template does not end on the CTA anchor, so the "
+            "JS-rendered cards (what a real visitor sees) would take the slack "
+            "somewhere other than the button while the static cards stay "
+            "aligned (owner item 3)")

@@ -23,8 +23,10 @@
 
        COPY is the owner's prose from
        `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM,
-       with THREE departures — departures 1-2 RULED ON #13645, departure 3 is
-       #13696 item 4 — recorded here so these are decisions and not assertions:
+       with FIVE departures — departures 1-2 are the TYPO ruling, departure 3 is
+       #13696 item 4, and departures 4-5 are the owner's OWN EDITS of
+       2026-11-23 (owner items 1-2) — recorded here so these are decisions and
+       not assertions:
 
        1. page 2 — "make decision" is written "make decisions";
        2. step 03 — "super intelligence" is written "superintelligence";
@@ -36,6 +38,9 @@
           reverted an earlier correction with "the copy stays verbatim until
           the ruling is ON the artifact". The ruling is now on the artifact, so
           copy and pin move together, as that revert required.
+          ⚠️ Departure 5 below REPLACED step 03's paragraph, so the two-word
+          spelling no longer appears on this page at all. The ruling stands for
+          anyone restoring that paragraph; it is not evidence of a live typo.
 
        3. the onboarding heading — the owner asked for the trailing full stop
           to go (#13696 item 4), so it reads "Onboard in 5 minutes, without
@@ -45,6 +50,23 @@
           pinned by `test_the_pdfs_two_typos_are_absent_from_the_rendered_page`
           rather than left to a comment.
 
+       4. the compute beat — the owner added a TITLE, "Organisational
+          Intelligence", and changed "this context" to "your context" (owner
+          item 1). The title is an ADDITION, not a correction: the PDF opens
+          that beat with the claim alone, so it read as a continuation of the
+          intro above it.
+
+       5. step 03 — the heading is "03 · Reason & Learn" and the BODY is the
+          owner's new sentence: "Thanks to an algorithm inspired by
+          interconnected prediction markets, Tortoise can compute hundreds or
+          even millions of data points, calculating confidence with business
+          logic and learning from new evidence." (owner item 2). The PDF's
+          step-03 paragraph no longer appears on this page at all, so restoring
+          it is now a revert of an OWNER EDIT rather than a return to verbatim.
+
+       Departures 4-5 were relayed onto the artifact as a decision, not left in
+       a conversation:
+       https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7108810457
        Copy is verbatim everywhere else.
 
        PRICING is forked from /tortoise as the PDF instructs, and renders from
@@ -171,8 +193,26 @@
     .pricing-toggle button.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
     .pricing-toggle .badge { display: inline-block; font-size: 0.625rem; font-weight: 700; padding: 0.125rem 0.375rem; border-radius: 9999px; background: var(--green); color: #04121a; margin-left: 0.375rem; }
     .pricing-grid { display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap; max-width: 1100px; margin: 0 auto; }
-    .pricing-card { background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.75rem; position: relative; max-width: 250px; flex: 1; min-width: 230px; transition: border-color 0.2s; }
-    .pricing-card.popular { border: 2px solid var(--accent); }
+    /* ⛔ FLEX COLUMN so the four CTAs share ONE baseline (owner item 3, the
+       `clipboard-2026-11-23-121001` report). `.pricing-grid`'s default
+       `align-items: stretch` already gives the four BOXES one height, so the
+       defect was where the CTA sat INSIDE its box, not the box: measured at
+       1440x900 before this rule, the `.btn` tops read 675.58 / 675.58 / 697.05 /
+       745.78 — three distinct baselines, 70.2px apart — while every card ran
+       304.33 -> 815.72. `margin-top: auto` on `.btn` (below) absorbs each card's
+       leftover height, so every button lands on the same y to the hundredth of
+       a pixel whatever its tier's copy length.
+       ⚠️ Page-scoped on purpose: `/tortoise` shares the pricing SOURCE and the
+       card MARKUP with this page, not this page's card CSS, and the owner's
+       instruction was that `/tortoise` must not change. If that page's cards are
+       ever aligned too, move the two declarations into both `<style>` blocks
+       together rather than editing one. */
+    .pricing-card { display: flex; flex-direction: column; background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.75rem; position: relative; max-width: 250px; flex: 1; min-width: 230px; transition: border-color 0.2s; }
+    .pricing-card.popular { border: 2px solid var(--accent); /* the 2px border eats ONE more px at the bottom than the siblings' 1px, so
+       the popular card's CTA would land 1px high and the four baselines would
+       not be equal (measured 744.78 vs 745.78 at 1440x900). Give the inset
+       back — the border still reads 2px, the four buttons share one y. */
+      padding-bottom: calc(1.75rem - 1px); }
     .popular-tag { position: absolute; top: -0.75rem; left: 50%; transform: translateX(-50%); background: var(--accent); color: #04121a; font-size: 0.75rem; font-weight: 600; padding: 0.25rem 1rem; border-radius: 9999px; white-space: nowrap; }
     .pricing-card h3 { font-size: 1.1rem; margin-bottom: 0.4rem; color: var(--text); }
     .price { font-size: 2rem; font-weight: 700; color: var(--text); }
@@ -188,7 +228,7 @@
        script swaps the markup. */
     .feature .ck { color: #4ade80; flex: 0 0 0.9rem; width: 0.9rem; text-align: center; font-weight: 700; }
     .feature .muted { color: var(--text-dim); opacity: 0.7; }
-    .pricing-card .btn { display: block; text-align: center; background: var(--accent); color: #04121a; padding: 0.6rem 1rem; border-radius: 0.5rem; text-decoration: none; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; }
+    .pricing-card .btn { margin-top: auto; display: block; text-align: center; background: var(--accent); color: #04121a; padding: 0.6rem 1rem; border-radius: 0.5rem; text-decoration: none; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; }
     .pricing-card .btn:hover { background: var(--accent-hover, #0891b2); }
     .pricing-card .btn.secondary { background: #1e293b; color: var(--text); }
     .pricing-usage { text-align: center; color: var(--text); font-size: 0.85rem; margin: 1.75rem auto 0; }
@@ -781,7 +821,12 @@
 
     <!-- ══ 3. Compute claim + the ↑/↓ contrast ═══════════════════════════ -->
     <section id="beat-compute" class="beat workflow">
-      <p>Tortoise then computes over this context, analysing hundreds or even millions of variables so you and your agents make decisions with superintelligence.</p>
+      <!-- The beat's TITLE (owner item 1): the compute claim used to open this
+           beat bare, so it read as a continuation of the intro above it. No
+           `.beat-num` here on purpose — the numbered beats are the three steps,
+           and this one is a claim, not a step. -->
+      <h2>Organisational Intelligence</h2>
+      <p>Tortoise then computes over your context, analysing hundreds or even millions of variables so you and your agents make decisions with superintelligence.</p>
       <!-- investors.html's `.outcomes` component: two lists, green ↑ / gold ↓,
            collapsing to one column on narrow viewports. The PDF's labels. -->
       <div class="outcomes">
@@ -808,8 +853,8 @@
       <p>Our ontology engine builds a logical model of how your business, product, and code work, turning loose facts into knowledge. With deduplication and superseding. This logical model enables your agents to not just retrieve facts but understand your logic, eliminating drift and regressions.</p>
     </section>
     <section id="beat-reason" class="beat workflow">
-      <h2><span class="beat-num">03</span> · Reason</h2>
-      <p>Improve decision-making with superintelligence, grounded in your company&rsquo;s knowledge and fully auditable. Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points.</p>
+      <h2><span class="beat-num">03</span> · Reason &amp; Learn</h2>
+      <p>Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points, calculating confidence with business logic and learning from new evidence.</p>
     </section>
 
     <!-- ══ 7. Onboarding ═════════════════════════════════════════════════ -->
