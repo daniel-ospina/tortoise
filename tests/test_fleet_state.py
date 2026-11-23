@@ -3809,6 +3809,12 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: cannot reach). Only a raise to `>= 20` reds (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED,
 #: `11 failed`, the premise-(b) assertion firing across all 11 params. The behavioural pins are the
 #: `once_slow` and `death_after_streak` ROWS, not a bare assertion on this constant.
+#: ⛔ EVERY TOTAL ABOVE IS `main`'s, MEASURED AT `a7baa98d05` (#14387) — and this tree carries ONE
+#: MORE test than main, so re-measure instead of trusting them: PR #14287 restores
+#: `test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail`, which drives `_verdict_or_fail`
+#: with a STUB and never constructs a child, a census or this constant. Every total therefore
+#: reads one HIGHER here (`185 passed` at `K = 6`, verified), while the FAILING counts are
+#: unchanged — this row cannot see this constant in either direction.
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
