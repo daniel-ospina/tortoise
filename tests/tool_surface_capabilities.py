@@ -434,6 +434,12 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # so nothing about the door changed — only the binding was unchecked. The method
     # has exactly ONE wrap site, so the forward and inverse arms constrain the same
     # site; a "second site for link_entities" is NOT what landed.
+    # ⛔ ONE ENTRY ONLY. The fold of `origin/main` `ff2218b6a7` brought main's own
+    # `link_entities` entry in beside this one — the two sides had added the same pair
+    # with different comments, so the merge produced a literal duplicate key, which is
+    # SILENT to every test in the tree and visible only to `ruff` (`F601 Dictionary
+    # key literal "link_entities" repeated`). The second copy's unique rationale is
+    # folded into this comment; the second `("link_entities", …)` pair is deleted.
     "link_entities": "tortoise_link_entities",
     "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
@@ -445,16 +451,6 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "mine_knowledge_from_session": "tortoise_mine_knowledge_from_session",
     "register_source": "tortoise_register_source",
     "manage_source_trust": "tortoise_manage_source_trust",
-    # ⛔ #11609 lane P7 gave the `tortoise_link_entities` container a SECOND quota-gated
-    # wrap site and the map did not follow: its operator arm wraps
-    # `_quota_gated(sdk._create_operator, …)` — `_create_operator` is mapped above — and
-    # its relation-decided arm wraps `_quota_gated(sdk.link_entities, …)`, which was NOT
-    # mapped, so the forward arm reported it as an unmapped site. The second wrapper
-    # is load-bearing rather than decoration (`mcp_server.py` says so at the wrap:
-    # `sdk.link_entities` reaches the same node/edge writers and is NOT gated inside the
-    # SDK), which is exactly why the pair must be DECLARED here rather than waved
-    # through: an entry is what makes the door's write classification checkable.
-    "link_entities": "tortoise_link_entities",
 }
 
 # Tenant-scoped control-plane labels: a registry mutation whose labels are
