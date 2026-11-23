@@ -1066,15 +1066,27 @@ def test_a_claim_re_entered_from_extracting_counts_towards_the_ceiling(store,
     coord.advance(ORG_ID, items[0], bi.BatchItemState.EXTRACTING, attempt=True)
 
     # The terminal write keeps failing, so the item stays `extracting` and is
-    # re-entered by each pass. The ceiling must bound it.
+    # re-entered by each pass. The ceiling must bound it. ⛔ BOTH write paths are
+    # faulted (#14415 review round 4): the terminal write is a COMPARE-AND-SET
+    # (`put_item_if_state`) now, so patching `put_item` alone injected the fault
+    # into a path this test no longer exercises — the item reached `indexed` and
+    # the ceiling was never asked the question.
     real_put_item = store.put_item
+    real_put_item_if_state = store.put_item_if_state
 
     def failing_terminal_write(org_id, item):
         if item.state in (bi.BatchItemState.INDEXED,):
             raise RuntimeError("put_item timeout")
         return real_put_item(org_id, item)
 
+    def failing_terminal_write_if_state(org_id, item, expected):
+        if item.state in (bi.BatchItemState.INDEXED,):
+            raise RuntimeError("put_item_if_state timeout")
+        return real_put_item_if_state(org_id, item, expected)
+
     monkeypatch.setattr(store, "put_item", failing_terminal_write)
+    monkeypatch.setattr(store, "put_item_if_state",
+                        failing_terminal_write_if_state)
     for _ in range(bi.BATCH_MAX_ATTEMPTS + 2):
         row = store.items(ORG_ID, batch.batch_id)[0]
         # The drain's own per-item guard: a bookkeeping failure must not
@@ -1088,3 +1100,103 @@ def test_a_claim_re_entered_from_extracting_counts_towards_the_ceiling(store,
     final = store.items(ORG_ID, batch.batch_id)[0]
     assert final.state is bi.BatchItemState.FAILED
     assert "gave up" in final.reason
+
+
+def test_a_relative_ref_resolves_under_the_org_root_not_the_server_cwd(
+        sdk_factory, tmp_path, monkeypatch):
+    """⛔ ROUND-4 REVIEW P1: the documented `ref` form was UNREACHABLE.
+
+    The model's own docstring promised a path "under TORTOISE_INGEST_BASE_DIR",
+    which every ordinary caller supplies relative (`a.md`) — but the resolver
+    resolved a relative candidate against the process CWD and refused it, so no
+    customer could use it (they cannot spell an absolute server path, and the API
+    never tells them the base). Measured on the pre-fix tree: `a.md` -> refused.
+
+    The join under the ORG root must not weaken the tenancy bound: `..` still
+    escapes the root and is still refused before any read.
+    """
+    base, root = _corpus(tmp_path)
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
+    sdk = sdk_factory(namespace="test_suite_batch14219rel")
+    runner = ha._batch_item_runner(sdk, "corpus", ORG_ID)
+    store = bi.InMemoryBatchStore()
+    coord = bi.BatchCoordinator(store)
+
+    _, items = coord.submit(ORG_ID, ["a.md"])
+    out = coord.run_item(ORG_ID, items[0], runner)
+    assert out.state is bi.BatchItemState.INDEXED, (
+        f"a relative ref must resolve under <base>/<org_id>; got {out.reason}")
+
+    # The bound still holds: a traversal out of the org root is refused, and
+    # (victim org file exists) it is refused BEFORE any read.
+    victim = base / "org_victim"
+    victim.mkdir()
+    (victim / "secret.md").write_text("another tenant\n", encoding="utf-8")
+    _, escaped = coord.submit(ORG_ID, ["../org_victim/secret.md"])
+    bad = coord.run_item(ORG_ID, escaped[0], runner)
+    assert bad.state is bi.BatchItemState.FAILED
+    assert "not a path under this team's document storage" in bad.reason
+
+
+def test_an_unreadable_usage_ledger_refuses_the_estimate_instead_of_zeroing_it(
+        client, monkeypatch):
+    """⛔ ROUND-4 REVIEW P2: an unreadable ledger used to read as "nothing spent".
+
+    `get_capture_usage` never raises — it degrades to a zero view and NAMES the
+    fault (`read_error`/`period_error`), whose contract says those must REFUSE
+    while `absent` is a real zero. Reading `capture_tokens_total or 0` therefore
+    UNDERSTATED the overage: the one outcome owner §4 forbids ("so the overage is
+    never discovered on the bill"). A fault now refuses with a retryable 503
+    rather than inventing a zero; `absent` still prices as a zero.
+    """
+    async def _with_allowance(org, resource, **kwargs):
+        return {"max_extraction_tokens": 3_000_000}
+
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop", _with_allowance)
+
+    async def _fault(fn, **kwargs):
+        return {"measured": False, "unmeasured_reason": "read_error",
+                "capture_tokens_total": 0}
+
+    monkeypatch.setattr(ha, "_cp_offload", _fault)
+    items = [{"ref": f"/docs/{n}.md"} for n in range(100)]
+    r = client.post("/v1/batches", json={"items": items})
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["error_code"] == "BATCH_ESTIMATE_UNAVAILABLE"
+
+    async def _absent(fn, **kwargs):
+        return {"measured": False, "unmeasured_reason": "absent",
+                "capture_tokens_total": 0}
+
+    monkeypatch.setattr(ha, "_cp_offload", _absent)
+    ok = client.post("/v1/batches", json={"items": items})
+    assert ok.status_code == 402, (
+        "an ABSENT ledger is a legitimate zero, not a fault — it must still be "
+        f"priced and refused for acknowledgement, got {ok.status_code}")
+    assert ok.json()["detail"]["estimate"]["tokens_already_used"] == 0
+
+
+def test_the_acknowledgement_copy_does_not_invent_an_overage_it_cannot_price(
+        client, monkeypatch):
+    """⛔ ROUND-4 REVIEW P2: the 402 told the customer to confirm an overage the
+    same payload reports as $0.00 (no tier publishes `max_extraction_tokens`).
+
+    The owner's disclosure stands — the batch is still refused until
+    acknowledged — but the sentence must say which situation it is: an unpriced
+    allowance is not a $0.00 overage, and an instruction nobody can act on is how
+    a spend surface loses its credibility.
+    """
+    async def _with_allowance(org, resource, **kwargs):
+        return {}          # no published included amount, the real production shape
+
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop", _with_allowance)
+    items = [{"ref": f"/docs/{n}.md"} for n in range(100)]
+    r = client.post("/v1/batches", json={"items": items})
+    assert r.status_code == 402, r.text
+    detail = r.json()["detail"]
+    assert detail["estimate"]["included_tokens"] is None
+    assert detail["estimate"]["overage_usd"] == 0.0
+    assert "confirm the expected overage" not in detail["message"], (
+        "the copy names an expected overage beside a $0.00 estimate")
+    assert "not priced against your plan yet" in detail["message"]
+    assert "acknowledge_overage" in detail["message"]

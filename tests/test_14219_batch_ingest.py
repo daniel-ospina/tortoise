@@ -545,7 +545,14 @@ def test_the_batch_worker_cannot_use_the_capture_pool():
     try:
         worker = BatchWorker(pool)
         assert worker.executor is pool
-        assert worker.executor is not hosted_api._CAPTURE_EXECUTOR
+        # ⛔ AND THE PRODUCTION WORKER IS ASSERTED TOO (#14415 review round 4,
+        # non-vacuity). The `is not _CAPTURE_EXECUTOR` arm below is about the
+        # LOCAL object this test built, so no production edit could falsify it:
+        # `_BATCH_WORKER = BatchWorker(_CAPTURE_EXECUTOR, …)` would have left
+        # this test green. The object that names the claim is the module's own.
+        assert hosted_api._BATCH_WORKER.executor is not (
+            hosted_api._CAPTURE_EXECUTOR), (
+            "the PRODUCTION batch worker was built on the capture pool")
         # ⛔ and the pool is ORDERED BEFORE the ceiling is enforced, so 2 is a
         # real bound rather than an intention.
         assert worker.ceiling == BATCH_ITEMS_IN_FLIGHT >= 1
@@ -1049,3 +1056,120 @@ def test_a_lost_cancel_is_derived_cancelled_not_partial():
     assert settled.state is BatchState.CANCELLED
     assert settled.cancelled_at, "a derived cancel still records when"
     assert settled.cancel_reason == "customer stop"
+
+
+# ── the cancel/claim interleavings (#14415 review round 4, BLOCKING 1) ──────
+def test_a_cancel_between_the_read_and_the_claim_does_not_run_the_runner():
+    """⛔ DIRECTION A, reproduced on the pre-fix tree: an item the customer
+    stopped is INDEXED and CHARGED anyway.
+
+    `run_item` reads the row, then claims it. A cancel landing inside that window
+    used to be overwritten by the claim (an unconditional write), the runner ran,
+    and 60 000 tokens were spent on a document the customer cancelled — against
+    this module's own promise that `queued` → `cancelled` costs "zero tokens".
+
+    The claim is a compare-and-set now, so the cancel wins and the runner is
+    never called. The competing write is fired from inside the storage wrapper,
+    between the read and the write — the exact window, without threads.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+
+    ran: list[str] = []
+
+    def runner(item: BatchItem) -> ItemOutcome:
+        ran.append(item.item_id)
+        return ItemOutcome(BatchItemState.INDEXED, tokens_in=60_000)
+
+    real_cas = store.put_item_if_state
+    fired = {"done": False}
+
+    def cancelling_cas(org_id, item, expected):
+        if (not fired["done"] and expected is BatchItemState.QUEUED
+                and item.state is BatchItemState.EXTRACTING):
+            fired["done"] = True
+            BatchCoordinator(store).cancel(
+                org_id, item.batch_id, reason="cancelled by the customer")
+        return real_cas(org_id, item, expected)
+
+    store.put_item_if_state = cancelling_cas  # type: ignore[method-assign]
+    coord.run_item(ORG, store.items(ORG, batch.batch_id)[0], runner)
+
+    assert fired["done"], "the interleaving did not fire — the test proves nothing"
+    assert ran == [], (
+        "the runner ran for an item the customer had ALREADY cancelled — that is "
+        "a document indexed and charged after a stop")
+    final = store.items(ORG, batch.batch_id)[0]
+    assert final.state is BatchItemState.CANCELLED
+    assert final.tokens_in == 0 and final.tokens_out == 0
+
+
+def test_a_cancel_that_saw_queued_cannot_relabel_a_claim_that_landed(monkeypatch):
+    """⛔ DIRECTION B, reproduced on the pre-fix tree: work that REALLY ran is
+    reported as never done (tokens spent, unbilled, result discarded).
+
+    `cancel()` read the items, the drain claimed and settled one, and cancel then
+    wrote its STALE `cancelled` copy over the settled row. The batch row was
+    relabelled too — "work stopped, not charged" over an `indexed`, charged item.
+
+    Every write in that loop is a compare-and-set now, so a cancel whose snapshot
+    is stale stops nothing — and, since it stopped nothing, it must not relabel
+    the batch either; the row is derived from the items instead.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/d/a.md"])
+    stale = store.items(ORG, batch.batch_id)      # what cancel() reads
+    assert stale[0].state is BatchItemState.QUEUED
+
+    coord.run_item(ORG, store.items(ORG, batch.batch_id)[0],
+                   lambda item: ItemOutcome(BatchItemState.INDEXED,
+                                            tokens_in=60_000))
+    settled = store.items(ORG, batch.batch_id)[0]
+    assert settled.state is BatchItemState.INDEXED   # premise: the claim landed
+
+    monkeypatch.setattr(store, "items", lambda org_id, batch_id: stale)
+    cancelled, _ = coord.cancel(ORG, batch.batch_id, reason="customer cancelled")
+    monkeypatch.undo()
+
+    final = store.items(ORG, batch.batch_id)[0]
+    assert final.state is BatchItemState.INDEXED, (
+        "a cancel whose snapshot predates the claim overwrote the item row — the "
+        "runner's outcome and its token counts were thrown away")
+    assert final.tokens_in == 60_000
+    assert cancelled.state is not BatchState.CANCELLED, (
+        "the batch row was relabelled `cancelled` while every item was indexed "
+        "and charged — the status lies on a billing-visible surface")
+
+
+def test_graph_cas_is_a_match_on_the_expected_state_not_a_merge():
+    """The DB-side compare-and-set, pinned on the statement itself.
+
+    ⛔ This is the PRODUCTION path and the in-memory store cannot prove it: a
+    `MERGE` here would RECREATE the pattern row and silently undo the competing
+    writer, which is the exact defect the CAS exists to close. So the statement
+    must be a `MATCH` carrying the expected state and the tenant scope, and the
+    verdict must be the RESULT SET — empty means "someone else moved it", and a
+    non-atomic implementation that returned True regardless would be the same
+    defect wearing a better name.
+    """
+    item = BatchItem(batch_id="batch_1", item_id="batch_1-00000", ref="/d/a.md",
+                     state=BatchItemState.EXTRACTING, updated_at="t")
+
+    lost = _Recorder(answers=[[]])
+    assert GraphBatchStore(lost).put_item_if_state(
+        ORG, item, BatchItemState.QUEUED) is False
+    cypher, params = lost.statements[-1], lost.params[-1]
+    assert cypher.lstrip().startswith("MATCH"), (
+        "the CAS must be a MATCH — a MERGE would recreate the row it failed to "
+        f"match, undoing the other writer: {cypher[:120]}")
+    assert "MERGE" not in cypher.split("SET", 1)[0]
+    assert params["expect"] == "queued"
+    assert params["org"] == ORG and params["bid"] == "batch_1"
+    assert params["iid"] == "batch_1-00000"
+
+    won = _Recorder(answers=[[["batch_1-00000"]]])
+    assert GraphBatchStore(won).put_item_if_state(
+        ORG, item, BatchItemState.QUEUED) is True
+    assert won.params[-1]["state"] == "extracting"

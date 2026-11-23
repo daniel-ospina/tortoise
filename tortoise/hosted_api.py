@@ -4077,9 +4077,16 @@ app.add_middleware(
         # #14219: a batch carries DOCUMENT text, which the 256 KiB default
         # cannot hold. The handler's own `_BATCH_MAX_INLINE_BYTES` check then
         # applies the batch-specific guidance — which is why the two numbers are
-        # the same constant, not two.
+        # the same constant, not two. ⛔ The env-derived value is computed HERE
+        # too (#14415 review round 4, P3): registering the STATIC constant made
+        # `TORTOISE_BATCH_MAX_INLINE_BYTES` a no-op, because this middleware
+        # refused at 4 MiB before the handler ever saw the raised bound — an
+        # advertised limit nobody could reach. `_BATCH_MAX_INLINE_BYTES` is
+        # defined far below this registration (which runs at import time), so
+        # the same expression is spelled once here rather than referenced.
         "/v1/batches": (
-            _batch_ingest.BATCH_MAX_INLINE_BYTES,
+            max(1024, _int_env("TORTOISE_BATCH_MAX_INLINE_BYTES",
+                               _batch_ingest.BATCH_MAX_INLINE_BYTES)),
             _batch_ingest.BATCH_INLINE_413_DETAIL,
         ),
     },
@@ -16659,8 +16666,16 @@ class BatchItemRequest(BaseModel):
     ref: str = Field(..., min_length=1, max_length=4096)
     name: str | None = Field(None, max_length=512)
     #: The document's text, when the caller already holds it (an upload). When
-    #: absent, ``ref`` names a path under ``TORTOISE_INGEST_BASE_DIR`` (#329) or
-    #: a URL the indexer fetches.
+    #: absent, ``ref`` names a path under this ORG's storage root —
+    #: ``$TORTOISE_INGEST_BASE_DIR/<org_id>/…`` (#329), absolute or relative to
+    #: that root. ⛔ A URL is NOT fetched (#14415 review round 4, P1): this
+    #: docstring used to promise "or a URL the indexer fetches", and no fetch
+    #: exists on this path — the indexer door reads a FILE under the base, and a
+    #: URL arrived at ``resolve_under_base`` and settled the item `failed` with a
+    #: message about the team's document storage. The API deliberately does not
+    #: fetch caller-named URLs: that is an SSRF surface, and the egress
+    #: allow-list is not a substitute for not fetching. An item that names a URL
+    #: is refused with that reason rather than silently failing later.
     text: str | None = None
 
 
@@ -16750,7 +16765,20 @@ def _batch_item_runner(sdk, corpus_name: str, org_id: str):
                 reason="document storage is not configured on this server "
                        "(TORTOISE_INGEST_BASE_DIR is unset) — the batch was "
                        "recorded and nothing was lost")
-        resolved = resolve_under_base(ref, root)
+        # ⛔ A RELATIVE `ref` IS RESOLVED AGAINST THE ORG ROOT, NEVER THE SERVER
+        # CWD (#14415 review round 4, P1). The documented form was a path "under
+        # TORTOISE_INGEST_BASE_DIR", which every ordinary caller supplies
+        # RELATIVE (`contracts/a.md`) — and `resolve_under_base` resolves a
+        # relative candidate against the process CWD, so it was rejected and the
+        # advertised form was unusable by any customer (they cannot spell an
+        # absolute server path, and the API never tells them the base). Joining
+        # under the ORG root first keeps the tenancy bound exactly as it was: the
+        # guard below still refuses anything that escapes `<base>/<org_id>`,
+        # including `..` and a symlink out.
+        candidate = ref
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(root, candidate)
+        resolved = resolve_under_base(candidate, root)
         if resolved is None:
             # #329: a path outside the ORG's own storage is a REFUSAL, never a
             # read. A ref that names another tenant's file lands here too.
@@ -17108,9 +17136,51 @@ async def create_batch(body: BatchRequest,
             usage = await _cp_offload(lambda: _usage_reader(org_id),
                                       op="batch_usage")
             used_tokens = int(usage.get("capture_tokens_total") or 0)
+            # ⛔ A ZERO IS A READING ONLY WHEN THE LEDGER WAS READ (#14415 review
+            # round 4, P2). `get_capture_usage` NEVER raises (#923/#4051) — it
+            # degrades to a zero view and NAMES the fault in
+            # `unmeasured_reason`, whose own contract says `read_error` and
+            # `period_error` must REFUSE while `absent` is a real zero. Reading
+            # `capture_tokens_total or 0` therefore turned an unreadable ledger
+            # into "nothing spent", which UNDERSTATES the overage — the one
+            # outcome owner §4 exists to prevent ("so the overage is never
+            # discovered on the bill"). So refuse the estimate read instead, and
+            # say it is retryable rather than pretending to a number.
+            reason = usage.get("unmeasured_reason")
+            if usage.get("measured") is False and reason in (
+                    "read_error", "period_error"):
+                _logger.warning(
+                    "batch estimate: usage ledger unreadable (%s)", reason)
+                raise HTTPException(
+                    status_code=503,
+                    headers={"Retry-After": "30"},
+                    detail={
+                        "error_code": "BATCH_ESTIMATE_UNAVAILABLE",
+                        "message": "we could not read this team's extraction "
+                                   "usage just now, so the batch's allowance "
+                                   "impact cannot be priced honestly. Nothing "
+                                   "was accepted and nothing was charged — "
+                                   "re-send in a few seconds.",
+                    })
+        except HTTPException:
+            raise
         except Exception:
+            # A reader that RAISED is a different fault class from one that
+            # reported an unreadable window, and it also leaves the figure
+            # unknown — so it takes the same refusal rather than a zero.
             _logger.warning("batch estimate: usage could not be read",
                             exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                headers={"Retry-After": "30"},
+                detail={
+                    "error_code": "BATCH_ESTIMATE_UNAVAILABLE",
+                    "message": "we could not read this team's extraction usage "
+                               "just now, so the batch's allowance impact "
+                               "cannot be priced honestly. Nothing was accepted "
+                               "and nothing was charged — re-send in a few "
+                               "seconds.",
+                })
 
     est = _batch_ingest.estimate_batch(len(body.items),
                                        included_tokens=included_tokens,
@@ -17119,13 +17189,32 @@ async def create_batch(body: BatchRequest,
     if est.acknowledgement_required and not body.acknowledge_overage:
         # The refusal the owner asked for: the number, up front, with the exact
         # remedy. 402 is this repo's "spend past the included amount" class.
+        # ⛔ THE MESSAGE MUST NOT NAME AN OVERAGE THE PAYLOAD SAYS IS $0.00
+        # (#14415 review round 4, P2). `acknowledgement_required` fires on the
+        # ESTIMATE alone, and no tier publishes `max_extraction_tokens` yet
+        # (`product/pricing.json`), so `included_tokens is None` → `overage_tokens
+        # 0`/`overage_usd 0.0`. The old copy told the customer to confirm "the
+        # expected overage" beside an estimate of zero: an instruction nobody can
+        # act on. The disclosure the owner decided (2026-11-23 §4) is kept — the
+        # batch is still refused until acknowledged — and what changes is that the
+        # sentence says which of the two situations it is.
+        if est.included_tokens is None:
+            overage_copy = (
+                " This batch is large enough that it may exceed your plan's "
+                "included extraction allowance, and that allowance is not "
+                "priced against your plan yet — so we cannot show an expected "
+                "overage amount.")
+        else:
+            overage_copy = (
+                f" Expected overage: about {est.overage_tokens:,} tokens "
+                f"(about ${est.overage_usd:,.2f}).")
         raise HTTPException(
             status_code=402,
             detail={
                 "error_code": "BATCH_ACKNOWLEDGEMENT_REQUIRED",
                 "message": _batch_ingest.customer_copy(est.estimated_hours)
-                           + ". Re-send with acknowledge_overage=true to "
-                             "confirm the expected overage.",
+                           + "." + overage_copy + " Re-send with "
+                             "acknowledge_overage=true to confirm.",
                 "estimate": est.as_dict(),
             })
 
@@ -53145,7 +53234,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 205 tracked files (752 distinct
+# ABSOLUTE line number from 205 tracked files (754 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

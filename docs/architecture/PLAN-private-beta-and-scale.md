@@ -131,9 +131,17 @@ publishes the estimate; the scheduler is F4's remaining half.
 
 **Landed:** the layer and the routes (`tortoise/batch_ingest.py`, PR #14415) with the per-item indexer door,
 content-hash dedup, resume, cancel and the proactive estimate against the ONE `capture_extraction` budget (#14275).
-**Not yet:** the LLM-extraction half of a batched item (the document is registered, embedded and searchable, and
-`needs_extraction` routes it through the existing pending-document sweep), the off-peak tick, and a 20/500-document
-scale measurement on the production shape.
+**Not yet:** the LLM-extraction half of a batched item, the off-peak tick, and a 20/500-document scale measurement
+on the production shape. ⛔ **A batched document is registered, embedded and searchable — and it is NOT picked up by
+the pending-document sweep, which an earlier cut of this sentence claimed.** Measured at PR #14415's head:
+`tortoise/sdk.py` never writes `needs_extraction` (`grep -c needs_extraction tortoise/sdk.py` → 0), the fold stamps an
+explicit `s.needs_extraction = coalesce($nx, s.needs_extraction, false)`
+(`tortoise/projection/entities.py:5827`), and `_discover_pending_documents`'s CASE
+(`tortoise/ingest.py:721-735`) reads a STORED `false` as already-extracted — so the document is excluded by both the
+default arm and `include_unstamped`, and `ingest --upgrade-all` reports nothing pending over it. The extraction half is
+therefore an OPEN gap with no route at all until it is wired (follow-up #14431), not a
+quietly-covered half: the honest statement is that a batched document reaches the graph as a searchable Source and
+does not yet reach its semantics.
 
 ### Track S — build the destination *(starts now; spend only when a gate says so; S = scale)*
 

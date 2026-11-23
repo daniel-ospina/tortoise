@@ -604,6 +604,28 @@ class BatchStore(Protocol):
 
     def put_item(self, org_id: str, item: BatchItem) -> None: ...
 
+    def put_item_if_state(self, org_id: str, item: BatchItem,
+                          expected: BatchItemState) -> bool:
+        """COMPARE-AND-SET: write ``item`` only if the stored row is still in
+        ``expected``. Returns True when the write landed.
+
+        ⛔ WHY THIS EXISTS (#14415 review round 4, BLOCKING 1). A plain
+        ``put_item`` is a read-modify-write with the read done by the CALLER, and
+        the two writers of an item row are genuinely concurrent: the drain runs on
+        ``_BATCH_EXECUTOR`` and a cancel on ``_BATCH_DB_EXECUTOR``. With only an
+        unconditional write, a cancel that read ``queued`` could overwrite the
+        drain's ``extracting`` claim — and the drain's runner then ran, spent the
+        tokens and had its result thrown away — while a cancel landing inside the
+        drain's read-to-claim window let the drain claim an item the customer had
+        just stopped, indexing and charging a document they cancelled. Both were
+        REPRODUCED on the pre-fix tree. The compare belongs where the row lives.
+
+        A store that cannot do this atomically must still refuse rather than
+        silently degrade: returning True from a non-atomic implementation is the
+        same defect wearing a better name.
+        """
+        ...
+
     def items(self, org_id: str, batch_id: str) -> list[BatchItem]: ...
 
     def get_item(self, org_id: str, batch_id: str, item_id: str
@@ -682,6 +704,18 @@ class InMemoryBatchStore:
         with self._lock:
             bucket = self._items.setdefault((org_id, item.batch_id), {})
             bucket[item.item_id] = _copy_item(item)
+
+    def put_item_if_state(self, org_id: str, item: BatchItem,
+                          expected: BatchItemState) -> bool:
+        # Atomic by construction: the compare and the write are inside ONE
+        # `self._lock` hold, so no other writer can interleave.
+        with self._lock:
+            bucket = self._items.get((org_id, item.batch_id))
+            current = bucket.get(item.item_id) if bucket else None
+            if current is None or current.state is not expected:
+                return False
+            bucket[item.item_id] = _copy_item(item)
+            return True
 
     def items(self, org_id: str, batch_id: str) -> list[BatchItem]:
         with self._lock:
@@ -872,6 +906,37 @@ class GraphBatchStore:
              "changed": bool(item.content_changed),
              "updated": item.updated_at},
         )
+
+    def put_item_if_state(self, org_id: str, item: BatchItem,
+                          expected: BatchItemState) -> bool:
+        """COMPARE-AND-SET in the DATABASE — `MATCH … {state:$expect}` then SET.
+
+        ⛔ `MATCH` (not `MERGE`) is the whole point: a row that has moved on no
+        longer matches the pattern, so the `SET` applies to ZERO rows and the
+        caller learns it lost the race from an empty result. A `MERGE` would
+        recreate the pattern row and silently undo the other writer — the exact
+        defect this method exists to close.
+        """
+        rows = self._q(
+            f"MATCH (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org, "
+            "state:$expect}}) "
+            "SET i.ref=$ref, i.name=$name, i.staged_path=$staged, "
+            "    i.state=$state, i.reason=$reason, "
+            "    i.content_key=$key, i.tokens_in=$tin, i.tokens_out=$tout, "
+            "    i.attempts=$attempts, i.content_changed=$changed, "
+            "    i.updated_at=$updated "
+            "RETURN i.id",
+            {"iid": item.item_id, "bid": item.batch_id, "org": org_id,
+             "expect": str(expected),
+             "ref": item.ref, "name": item.name, "staged": item.staged_path,
+             "state": str(item.state),
+             "reason": item.reason, "key": item.content_key,
+             "tin": int(item.tokens_in), "tout": int(item.tokens_out),
+             "attempts": int(item.attempts),
+             "changed": bool(item.content_changed),
+             "updated": item.updated_at},
+        )
+        return bool(rows)
 
     def items(self, org_id: str, batch_id: str) -> list[BatchItem]:
         rows = self._q(
@@ -1238,14 +1303,39 @@ class BatchCoordinator:
                 tokens_out: int | None = None,
                 content_key: str | None = None,
                 content_changed: bool | None = None,
-                attempt: bool = False) -> BatchItem:
+                attempt: bool = False,
+                expected: BatchItemState | None = None) -> BatchItem:
         """Move one item, validating the edge. Raises :class:`IllegalTransition`.
 
         Idempotence: a no-op transition (same state, same facts) is accepted and
         writes nothing — a retried write after an ambiguous failure must not be
         an error, because the alternative is a batch that wedges on a duplicate
         write it cannot distinguish from a conflict.
+
+        ``expected`` turns the write into a COMPARE-AND-SET (#14415 review round 4,
+        BLOCKING 1): the caller names the state it believes the row is in, the
+        store writes only while that still holds, and **the returned item is the
+        ROW** — so a caller that lost the race gets the other writer's row back
+        rather than its own stale intent. Callers that must not act on a lost
+        write (the drain's claim, a cancel) pass it and compare
+        ``returned.state``. Without it the write is unconditional, which is only
+        safe for a row with a single writer.
         """
+        if expected is not None:
+            stored = self._store.get_item(org_id, item.batch_id, item.item_id)
+            if stored is None:
+                # No row to race with: the expectation is not a claim about a
+                # competitor, so fall back to a plain write (a MERGE-shaped
+                # recreate) rather than wedging an item whose row vanished.
+                expected = None
+            elif stored.state is not expected:
+                # Someone moved it between the caller's read and here. THEIR
+                # write wins; report the row, write nothing.
+                return stored
+            else:
+                # Work from the row, never from the caller's copy: the copy may
+                # predate another writer's fact-only update (tokens, attempts).
+                item = stored
         if new_state is not item.state:
             allowed = ITEM_TRANSITIONS.get(item.state, frozenset())
             if new_state not in allowed:
@@ -1275,8 +1365,14 @@ class BatchCoordinator:
         if attempt:
             item.attempts += 1
         item.updated_at = self._now()
-        self._store.put_item(org_id, item)
-        return item
+        if expected is None:
+            self._store.put_item(org_id, item)
+            return item
+        if self._store.put_item_if_state(org_id, item, expected):
+            return item
+        # The row moved between the read above and this write. Report IT — the
+        # caller decides whether its own work still applies.
+        return self._fresh(org_id, item)
 
     # -- one item, end to end -------------------------------------------
     def run_item(self, org_id: str, item: BatchItem,
@@ -1337,7 +1433,20 @@ class BatchCoordinator:
                             "which ended without settling the item (a "
                             "retryable skip, or a process that stopped "
                             "mid-item); re-submit this item to try again"))
-            self.advance(org_id, fresh, BatchItemState.EXTRACTING, attempt=True)
+            claimed = self.advance(org_id, fresh, BatchItemState.EXTRACTING,
+                                   attempt=True,
+                                   expected=BatchItemState.QUEUED)
+            # ⛔ THE CLAIM IS A COMPARE-AND-SET, AND A LOST ONE DOES NOT RUN THE
+            # RUNNER (#14415 review round 4, BLOCKING 1). A cancel that landed
+            # between the read above and this write leaves the row `cancelled`;
+            # `advance` then returns the ROW rather than our intent, and running
+            # the runner over it would index and CHARGE a document the customer
+            # stopped — the module's own promise ("`queued` → `cancelled`, zero
+            # tokens") is broken by exactly that interleaving. Reproduced against
+            # the pre-fix tree: item `indexed`, 60 000 tokens, batch `cancelled`.
+            if claimed.state is not BatchItemState.EXTRACTING:
+                return claimed
+            fresh = claimed
         elif fresh.state in (BatchItemState.EXTRACTING,
                              BatchItemState.EMBEDDED):
             # ⛔ A RE-ENTERED CLAIM IS AN ATTEMPT TOO (#14415 review round 3,
@@ -1354,8 +1463,15 @@ class BatchCoordinator:
                     reason=(f"gave up after {fresh.attempts} attempt(s) on an "
                             "unsettled claim — its own bookkeeping write never "
                             "landed; re-submit this item to try again"))
-            self.advance(org_id, fresh, fresh.state,
-                         reason="re-claimed by a retry pass", attempt=True)
+            reclaimed = self.advance(org_id, fresh, fresh.state,
+                                    reason="re-claimed by a retry pass",
+                                    attempt=True, expected=fresh.state)
+            if reclaimed.attempts <= fresh.attempts:
+                # The re-claim did not land (a cancel, or another drain moved or
+                # claimed it): the row is authoritative, so report it instead of
+                # spending tokens over a claim we do not hold.
+                return reclaimed
+            fresh = reclaimed
         try:
             outcome = active(fresh)
         except Exception as exc:  # an escaped exception is a FAILED ITEM
@@ -1372,7 +1488,8 @@ class BatchCoordinator:
                 org_id, latest, outcome.state, reason=outcome.reason,
                 tokens_in=outcome.tokens_in, tokens_out=outcome.tokens_out,
                 content_changed=outcome.content_changed,
-                content_key=outcome.content_key or None)
+                content_key=outcome.content_key or None,
+                expected=latest.state)
         except IllegalTransition:
             # Another writer settled this item while the runner was working (a
             # cancel, or the same item drained twice across processes). The
@@ -1444,16 +1561,42 @@ class BatchCoordinator:
             # truth instead of inventing a cancel over it.
             return self.settle(org_id, batch_id), items
         stamp = self._now()
+        stopped = False
         for item in items:
             if item.state is BatchItemState.QUEUED:
-                self.advance(org_id, item, BatchItemState.CANCELLED,
-                             reason=reason or "cancelled by the customer")
+                # ⛔ COMPARE-AND-SET, or the cancel writes over a claim taken
+                # after this list was read (#14415 review round 4, BLOCKING 1):
+                # the drain would then run an item already reported cancelled,
+                # or — the other direction — a runner that DID run would have its
+                # result overwritten by this stale `queued` copy, so real spend
+                # was reported as never done. Reproduced both ways.
+                halted = self.advance(org_id, item, BatchItemState.CANCELLED,
+                                      reason=(reason or
+                                              "cancelled by the customer"),
+                                      expected=BatchItemState.QUEUED)
+                stopped = stopped or halted.state is BatchItemState.CANCELLED
             elif item.state in (BatchItemState.EXTRACTING,
                                 BatchItemState.EMBEDDED) and item.attempts == 0:
                 # Claimed by nobody: the resume edge left it here, no runner ran.
-                self.advance(org_id, item, BatchItemState.QUEUED)
-                self.advance(org_id, item, BatchItemState.CANCELLED,
-                             reason=reason or "cancelled by the customer")
+                moved = self.advance(org_id, item, BatchItemState.QUEUED,
+                                     expected=item.state)
+                if moved.state is BatchItemState.QUEUED:
+                    halted = self.advance(org_id, moved,
+                                          BatchItemState.CANCELLED,
+                                          reason=(reason or
+                                                  "cancelled by the customer"),
+                                          expected=BatchItemState.QUEUED)
+                    stopped = stopped or halted.state is not BatchItemState.QUEUED
+        if not stopped:
+            # ⛔ NOTHING WAS ACTUALLY STOPPED, SO DO NOT RELABEL THE BATCH (#14415
+            # review round 4, BLOCKING 1 direction B). Every CAS above lost,
+            # which means the items moved on between this call's read and its
+            # write — a drain claimed them, and they are being worked right now
+            # (or are already settled). Stamping `cancelled` then is exactly the
+            # lie B3 forbade, reached through a narrower window: the customer
+            # would read "work stopped, not charged" over rows that are
+            # `indexed` and charged. Derive the truth from the rows instead.
+            return self.settle(org_id, batch_id), items
         batch.state = BatchState.CANCELLED
         batch.updated_at = stamp
         batch.cancelled_at = stamp
@@ -1482,11 +1625,14 @@ class BatchCoordinator:
         for item in self._store.items(org_id, batch_id):
             if item.state in (BatchItemState.EXTRACTING,
                               BatchItemState.EMBEDDED):
-                self.advance(org_id, item, BatchItemState.QUEUED,
-                             reason="cancelled batch, claim released")
-                self.advance(
-                    org_id, item, BatchItemState.CANCELLED,
-                    reason="batch was cancelled before this item completed")
+                released = self.advance(org_id, item, BatchItemState.QUEUED,
+                                        reason="cancelled batch, claim released",
+                                        expected=item.state)
+                if released.state is BatchItemState.QUEUED:
+                    self.advance(
+                        org_id, released, BatchItemState.CANCELLED,
+                        reason="batch was cancelled before this item completed",
+                        expected=BatchItemState.QUEUED)
             elif item.state is BatchItemState.QUEUED:
                 self.advance(org_id, item, BatchItemState.CANCELLED,
                              reason="batch was cancelled")
@@ -1571,7 +1717,8 @@ class BatchCoordinator:
                                   BatchItemState.EMBEDDED):
                     self.advance(org_id, item, BatchItemState.QUEUED,
                                  reason="resumed after a process restart — "
-                                        "requeued for a fresh attempt")
+                                        "requeued for a fresh attempt",
+                                 expected=item.state)
                     moved = True
             if moved or any(not i.terminal for i in items):
                 batch.state = BatchState.RESUMING
