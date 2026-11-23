@@ -324,11 +324,11 @@ answer.)
 | documents / month · pro (4M) | 61 | 66 | +8.2 % |
 | documents / month · team (24M) | 370 | 398 | +7.6 % |
 
-| document / month cells are FLOORS** — `3,000,000/60,201 = 49.83` prints **49**, because
-50 × 60,201 = 3,010,050 overruns the allowance, and a capacity column that cannot be bought at
-that tier is wrong in the direction that flatters us. `round()` printed 50/62/399 here (and 110
-sessions at pro) until review round 4; `tools/extractor_cost_measure.py:affordable_count` is the
-one convention now, pinned by
+⛔ **Every `documents / month` cell is a FLOOR** — `3,000,000/60,201 = 49.83` prints **49**,
+because 50 × 60,201 = 3,010,050 overruns the allowance, and a capacity column that cannot be bought
+at that tier is wrong in the direction that flatters us. `round()` printed 50/62/399 here (and 110
+sessions at pro) until review round 4; `tools/extractor_cost_measure.py`'s `affordable_count()` is
+the one convention now, pinned by
 `test_no_allowance_cell_claims_more_than_its_allowance_can_buy`.
 
 ⚠️ The output column is "unchanged *by construction*" — the input to S4 changed, so what S4
