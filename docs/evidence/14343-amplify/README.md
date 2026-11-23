@@ -334,6 +334,14 @@ the one convention now, pinned by
 ⚠️ The output column is "unchanged *by construction*" — the input to S4 changed, so what S4
 *emits* is the thing the capstone measures, and it has not been measured here.
 
+📄 **Re-measured offline (`#14371`), one command, no provider key** — the same cells, the
+per-document arithmetic spelled out step by step, and the documents-per-month implication:
+`uv run python tools/extractor_cost_measure.py embed-json --receipts
+ tests/eval/write_path/receipts/7947-arms-2026-10-18 --evidence
+ docs/evidence/14277-extractor-cost/measurements.jsonl` → `embed-json-offline.md` (generated)
+and `embed-json-offline.json` in this directory. See `reduction-measured.md` §7 for what it
+closes and what it deliberately leaves open (`#7949`'s quality re-run).
+
 ## 5. Tokens per document, and what it buys
 
 Unchanged by this bundle, and re-stated so the lever's value is on the record. From

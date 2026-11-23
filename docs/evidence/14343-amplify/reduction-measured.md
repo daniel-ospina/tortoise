@@ -327,3 +327,107 @@ test never tokenizes (§1 refuses to fetch an encoder) and `tools/` ships no key
 renderer, so the §3b cells are reproduced by tokenizing `_keys_once()`'s own output with the
 dump named in §3b — that recipe is the producer, and the cells are recorded here because
 their re-derivation is not available to a deterministic leg.
+
+---
+
+## 7. The same lever, re-measured on a box with **no provider key** (`#14371`)
+
+`#14371` carries the two items this bundle's `## Done when` could not run: a measured
+before → after, and the `#7949` quality re-run. **Only the first is arithmetic**, and it was
+reachable all along — that is the correction this section records. The token half is
+`json.dumps(..., indent=1)` versus compact separators over the SAME objects, counted; it
+needs no model, no key, no spend, and no network beyond tiktoken's own local BPE cache. It
+now has a verb of its own, so it is reproducible by one command instead of by hand:
+
+```bash
+uv run python tools/extractor_cost_measure.py embed-json \
+    --receipts tests/eval/write_path/receipts/7947-arms-2026-10-18 \
+    --evidence docs/evidence/14277-extractor-cost/measurements.jsonl
+```
+
+Output: `docs/evidence/14343-amplify/embed-json-offline.md` (generated — do not hand-edit)
+and `embed-json-offline.json`. The verb reuses `serialization_lever` (§1's instrument) and
+`decompose` (§2's solve); a structural pin refuses a second harness.
+
+### 7a. The cells, and their agreement with §1 and §4a
+
+| | this run | §1 / §4a of this bundle |
+|---|---|---|
+| sessions / emissions / items | 7 / 14 / 580 | 7 / 14 / 580 |
+| `indent=1` | **77,561** | 77,561 |
+| compact | **52,346** | 52,346 |
+| saved | **25,215 (32.50 %)** | 25,215 (32.5 %) |
+| per emission | **1,801** | 1,801 |
+| per-emission share span | 29.64 %–34.99 % | 29.6 %–35.0 % |
+
+The instrument and the record agree exactly — the point of re-running it on the same
+corpus rather than quoting it.
+
+### 7b. Before → after per median document, with the arithmetic shown
+
+1. the re-sent embed region is **solved** per S4 call (provider `prompt_tokens` minus the
+   `cl100k` static render): **12,411.5** tokens (this bundle prints `12,412` — the same
+   solve, rendered to the whole token);
+2. S4 takes **1.14** calls per document over 50 documents ⇒
+   `12,411.5 × 1.14` = **14,149.1 tokens/document** (§4a's 14,149 is the same quantity at
+   that display precision);
+3. the measured share, exact: `25,215 / 77,561` = **32.5099 %** ⇒
+   `0.325099 × 14,149.1` = **4,599.9 tokens/document** (**4,035.0 per S4 call**);
+4. the median document is `48,461 in + 16,338 out` = **64,799 tokens** ⇒ after =
+   `64,799 − 4,599.9` = **60,199.1 (−7.1 %)**.
+
+| | before | after (`compact`) | Δ |
+|---|---|---|---|
+| input tokens / median document | 48,461 | 43,861.1 | −4,599.9 |
+| output tokens / median document | 16,338 | 16,338 | 0 (**not measured** — §5.2) |
+| **tokens / median document** | **64,799** | **60,199.1** | **−4,599.9 (−7.1 %)** |
+
+⚠️ **Two rounding paths are published, and they are 2 tokens apart on purpose.** §4a applies
+the ROUNDED `32.5 %` and prints **4,598** → 60,201; this section applies the EXACT
+`32.5099 %` and prints **4,599.9** → 60,199.1 (§2 above also prints 4,600 for the exact
+ratio). Same quantity, three display precisions — stated so a reader comparing the tables
+does not read one of them as rot, and so nobody "fixes" one into agreement with the other.
+
+### 7c. What it buys, at the allowance levels AS GIVEN
+
+⛔ The levels are **inputs** from `#14275` (owner), not re-derived here, and no price is
+computed: this section reports what a saving buys, never what a tier should cost. Every
+count is a **floor** (`affordable_count`, §4a's one convention).
+
+| tier | allowance | documents/month before | after (`compact`) | the floor, shown |
+|---|---|---|---|---|
+| solo | 3,000,000 | 46 | **49** | `49 × 60,199.1 = 2,949,758 ≤ 3,000,000`; `50 × = 3,009,957` overruns |
+| pro | 4,000,000 | 61 | **66** | `66 × 60,199.1 = 3,973,143 ≤ 4,000,000`; `67 × = 4,033,342` overruns |
+| team | 24,000,000 | 370 | **398** | `398 × 60,199.1 = 23,959,257 ≤ 24,000,000`; `399 × = 24,019,457` overruns |
+
+That is **+3 / +5 / +28** documents a month. (The counts agree with §4a's 49 / 66 / 398;
+the multiplication lines differ in the last few tokens because §4a rounds the unit to
+60,201 and this run does not.)
+
+### 7d. The two guards that make this quotable
+
+* **Posture.** The solved region is only comparable to 12,411.5 under the posture the corpus
+  was scored in, so the verb **refuses** to publish under a render-moving ambient switch —
+  and, equally, refuses to refuse a value that RESOLVES to the recorded render
+  (`TORTOISE_S4_DELTA=1` or `garbage`, `TORTOISE_EXTRACTOR_PROMPT=verbose`, a
+  `TORTOISE_PACKS_DIR` at the in-tree `packs/`). Both halves are pinned: a presence test was
+  measured refusing this repo's own suite, which exports `TORTOISE_S4_DELTA=0` from
+  `tests/conftest.py`.
+* **Offline.** The run reports whether it fetched tiktoken's BPE ranks; the recorded run
+  **fetched nothing** (`network_used: false` in the JSON), so "reproducible with no network"
+  is a measurement and not a claim.
+
+`tests/test_14371_offline_embed_json.py` pins the recorded cells against the committed
+artifact, pins both layouts back to the **identical parsed object** on every real emission
+(key order included — the risk is a format change a downstream parser tolerates but reads
+differently), and runs the whole measurement end to end wherever a BPE cache exists, skipping
+rather than downloading where it does not.
+
+### 7e. What this does NOT deliver
+
+⛔ **The quality re-run on `#7949` is NOT delivered here.** What the layout does to what the
+model EMITS (E1 volume / E2 correctness / E3 provenance / E4 operator edges) is unmeasured,
+so `TORTOISE_S4_EMBED_JSON=compact` stays **OFF** — arming takes the variable AND the
+`DOOR_PINNED_OFF` preregistration pin withdrawn in the same change (§5.2). `#14371`'s
+item 2 is still open; this section closes its item 1 only, at the exact position `#14371`
+splits them.
