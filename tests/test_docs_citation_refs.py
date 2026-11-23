@@ -8564,6 +8564,16 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
 #: The pre-fix document typed such a pair at four clauses (#13802 review, finding 1 — the D5
 #: row and the file-table section), so the pattern below is the armed detector for that class.
 _TYPED_INDEX_NUMSTAT = re.compile(
+    # ⛔ THE ALTERNATION IS GROUPED SO THE STAMP EXEMPTION GOVERNS ALL OF IT (#14269
+    # review, P2 — MEASURED). The exemption is stated ONCE, after the group, because a
+    # lookahead sitting beside ONE alternative only exempts that alternative: measured,
+    # "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `2 2` at
+    # `a577d0e25c`" was still REFUSED by the hard-coded literals above while the
+    # span-anchored one let the identical stamped form through — a false red on the
+    # archaeology, open in one spelling and closed in another, which is the split this
+    # exemption exists to end. Every branch here ends in a typed pair, so one trailing
+    # lookahead covers them all.
+    r"(?:"
     r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
     # ⛔ THE UNICODE ARROW IS THE SPELLING THIS CLAUSE ACTUALLY USED (#14038 review, P2 —
     # MEASURED: `… — \`git diff --numstat …\` → \`4\t4\`` left this arm GREEN at
@@ -8587,6 +8597,18 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # each measured GREEN at depth 1 (#13802 review, round 6)
     r"|numstat[^`]{0,160}?(?:prints?|print|returns?|reports?|shows?|gives?|lists?|"
     r"names?|->|\u2192)\s*`\d+\s+\d+`"
+    # ⛔ AND THE COMMAND'S OWN CODE SPAN, WHATEVER PATH IT NAMES (#14269 review, P1 — MEASURED
+    # IN BOTH DIRECTIONS). Every alternative above that reaches a figure by way of the WORD
+    # `numstat` has a window of `[^`]{0,160}?`, which cannot cross the backtick that CLOSES the
+    # command's code span. So "`git diff --numstat` prints `3 3` at this head" — the most
+    # natural spelling of all — was invisible, AND so was the long form for any path but the
+    # one `docs/00_index.md` literal hard-coded above; `05-verify.md`'s D5 row carried BOTH of
+    # those spellings and both walked green (`finditer` over the file returned `[]`).
+    # This alternative anchors on the code span INSTEAD of the word, so it cannot be defeated
+    # by either spelling, and it stays in the numstat family: no `--numstat` in the span, no
+    # match.
+    r"|`[^`]*--numstat[^`]*`\s*(?:prints?|print|returns?|reports?|shows?|gives?|lists?|names?)"
+    r"\s*`\d+\s+\d+`"
     # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
     # document's `both print NOTHING` clauses state the CURRENT reading without repeating
     # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
@@ -8618,7 +8640,8 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # the pair, so no alternative above sees it. The shape is specific on purpose — the
     # numstat pair is TWO NUMBERS and `docs/00_index.md` followed by such a pair is a typed
     # numstat reading by construction, not an English coincidence.
-    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`")
+    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`"
+    r")(?!(?:\s*(?:at|@)\s*`?[0-9a-f]{7,40}`?))")
 
 
 def test_the_document_types_no_numstat_figure_for_the_index_residual():
@@ -8685,6 +8708,15 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
         "and the numstat shows `1 1` here",
         "and the numstat returns `3 3` here",
         "and the numstat -> `1 1` here",
+        # the backtick-closed short form that shipped green in `05-verify.md` (measured: the
+        # window alternatives could not span the closing backtick of `` `git diff --numstat` ``)
+        "`git diff --numstat` prints `3 3` at this head",
+        "`git diff --numstat` returns `3 3` here",
+        # ⛔ AND THE LONG FORM FOR A PATH NO LITERAL ABOVE NAMES (#14269 review, P1 — the
+        # SECOND figure the same row carried, and it walked green too: the only long spelling
+        # the earlier alternatives see is the `docs/00_index.md` one)
+        "`git diff --numstat origin/main...HEAD -- docs/epics/2026-11-04-7949-extractor-v4-"
+        "capstone/04-plan.md` prints `4 4`",
         # the spelling the merge-round reviewer found GREEN (#13802 merge-round review, P2):
         # the pair is typed after the `--name-only` command, not after `--numstat`.
         "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints "
@@ -8702,6 +8734,18 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
     for _allowed in (
         "its numstat printing `1 1` at a head of its own",
         "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING",
+        # ⛔ AND THE HEAD-STAMPED FORM, IN THE NATURAL SPELLING (#14269 review, P2). The rule in
+        # `05-verify.md` lets the archaeology type a figure; the span-anchored alternative read
+        # one as a present-tense claim and refused it — a FALSE RED on a permitted form. The
+        # stamp is what distinguishes them, so the stamp must be honoured, not the verb.
+        "`git diff --numstat` prints `10 2` at `a577d0e25c`",
+        "`git diff --numstat` -> `10 2` at `ef443ea968`",
+        # ⛔ AND THE SAME EXEMPTION FOR THE LITERAL ALTERNATIVES (#14269 review, P2 — MEASURED).
+        # The exemption was first written beside ONE branch, so the identical stamped form was
+        # allowed after the span-anchored spelling and REFUSED after the `docs/00_index.md`
+        # literals — one false red closed, its twin left open. These two pin the hoisted form.
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `2 2` at `a577d0e25c`",
+        "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints `1 1` at `a577d0e25c`",
         # a HISTORICAL quote of a past head's pair, sitting a few characters after the
         # command — must stay allowed without a present-tense verb to bind it
         # (#13802 merge-round review, P2: the unbounded cut of this alternative refused it).
@@ -8712,6 +8756,197 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
         assert not _TYPED_INDEX_NUMSTAT.search(_allowed), (
             f"the numstat detector REFUSES {_allowed!r}, which types no current figure — "
             "refusing a historical reading is the same defect in the other direction")
+
+
+#: ⛔ A `--numstat` PAIR TYPED FOR A RANGE "RE-TAKEN" AT THE HEAD BEING READ — the sibling
+#: defect of the detector above, in the document that STATES the rule (#14249 review, P2).
+#:
+#: `CYPHER-INVENTORY.md`'s §7 re-cut paragraph tells the reader to "re-TAKE, never carry" a
+#: figure, and then broke that rule in the sentence doing the telling: it claimed the re-taken
+#: range "reads `403 401`", which is its own `381 379` plus `#14260`'s 22-line `sdk.py`
+#: insertion applied a SECOND time — a figure no head on the branch's first-parent line produces,
+#: which is why it was the exact class this PR exists to repair, surviving inside the clause
+#: naming it. ⛔ AND NO FIGURE is typed for that population here: the pair and the head count are
+#: both head-bound, and the two earlier cuts of this sentence proved it by each typing one the
+#: tree did not produce. Re-take both at the head you merge (`git log --first-parent --oneline
+#: origin/main..HEAD` for the population, `git diff --numstat <base> <head> --
+#: docs/architecture/CYPHER-INVENTORY.md` for any pair).
+#:
+#: ⛔ WHY NOTHING SAW IT: every alternative in `_TYPED_INDEX_NUMSTAT` above keys on the word
+#: `numstat` within a window that cannot cross a backtick, or on a command span quoted
+#: immediately beside the figure. Here the command span finishes ~250 characters and three
+#: code spans earlier, and the verb is `reads` — absent from that pattern's class. So the
+#: sentence was GREEN in every arm of the file this doc's figures are graded by.
+#:
+#: ⛔ THE FIRST CUT OF THIS PATTERN COULD NOT SEE THE DOCUMENT'S OWN HOUSE STYLE, and the
+#: witness list below was written in the one spelling it happened to catch (#14249 review,
+#: P1). Three independent escapes, each verified against the live document:
+#:   * `printed` — the past tense is how every pair in this doc is introduced (`…` printed
+#:     **`381 379`**`), and `prints?` matches `print`/`prints`, never `printed`;
+#:   * `[^`]` — refusing to cross a BACKTICK also refuses to cross the RANGE the sentence
+#:     names (`the same range `origin/main...HEAD` re-taken here …`), i.e. the commonest
+#:     phrasing of the claim;
+#:   * `\s*` before the pair — refuses the doc's bold form (`printed **`403 401`**`).
+#: A defect written the way this file writes figures missed on all three at once, so the
+#: guard was green over precisely the spellings it exists to catch.
+#:
+#: DECLARED SCOPE: this reads a typed PAIR behind a `range`/`numstat` noun and a verb, within
+#: one line. The ONE exemption is a pair that IS a fenced command's own printed result
+#: (`_TYPED_NUMSTAT_AS_COMMAND_RESULT`) — the form §1/§7 use legitimately for `3 1`, which is
+#: a claim about a DIFF and not a carried figure. It does NOT grade every pair the doc types:
+#: the residual is a paraphrase whose noun or verb is outside both lists, or a pair whose
+#: fenced command sits further than the window (160 chars). Narrow, and it does not describe
+#: itself as complete.
+#:
+#: ⛔ THE PAIR IS READ WITH **OR WITHOUT** BACKTICKS (#14249 review, round 5). Requiring them
+#: missed the shape a hurried sentence actually takes — `the same range re-taken here reads 403
+#: 401` walked through GREEN, an undisclosed false pass in a merge gate. `pair` is a NAMED group
+#: so the exemption anchor below does not have to guess where the pair starts.
+_TYPED_RETAKEN_NUMSTAT = re.compile(
+    r"(?:\brange\b|\bnumstat\b).{0,160}?"
+    r"(?:reads?|read|prints?|print|printed|returns?|returned|reports?|reported"
+    r"|shows?|shown|gives?|given|lists?|named?|names?|->|\u2192|=>)"
+    r"\s*[:=]?\s*\*{0,2}(?P<pair>`?\d+\s+\d+`?)"
+)
+
+#: A pair that is the PRINTED RESULT OF A FENCED COMMAND is a claim about a diff, not a carried
+#: figure — the one form §1/§7 type legitimately. The exemption is anchored at the pair, so it
+#: never excuses a bare figure: `the numstat printed `3 1`` has no fenced command in front of it
+#: and is still graded as a typed pair.
+#:
+#: ⛔ THE VERB CLASS MUST BE THE DETECTOR'S, NOT A SUBSET OF IT (#14249 review, P2). The FIRST
+#: CUT of this exemption listed seven verbs while the detector carried sixteen, so a CORRECT
+#: sentence naming a fenced command and then saying `shows` / `reported` was REFUSED — the same
+#: asymmetry as the P1 above, in the false-red direction. Measured: `` `git diff --numstat …`
+#: shows `3 1` `` and `… reported `381 379` ` both flagged before this widening, both allowed
+#: after it, while EVERY defect witness in this arm's `for _typed in (…)` tuple stays flagged and
+#: the live document still yields 0 hits. Both alternations now carry the same sixteen verbs —
+#: count them with `grep -n -A4 '_TYPED_RETAKEN_NUMSTAT = re\.compile'` and the same for this
+#: pattern — and the witness side is deliberately stated WITHOUT a number: a count in a comment
+#: about a tuple that grows is the head-bound figure this file forbids, and an earlier revision of
+#: this clause read "three" while the tuple carried eight, then "seven" as if a current
+#: alternation carried it when neither did.
+_TYPED_NUMSTAT_AS_COMMAND_RESULT = re.compile(
+    r"`[^`]*\b(?:numstat\b|--stat\b|git diff\b)[^`]*`\s*"
+    r"(?:(?:->|\u2192|=>)|(?:prints?|print|printed|reads?|read|returns?|returned"
+    r"|reports?|reported|shows?|shown|gives?|given|lists?|named?|names?))?\s*[:=]?\s*\*{0,2}$"
+)
+
+
+def _typed_retaken_numstat_pairs(text: str) -> list[str]:
+    """Typed `range`/`numstat` pairs, minus the ones a fenced command printed.
+
+    Split out so BOTH the document arm and the witness arm grade the same predicate: a second
+    copy of "is this a carried figure" is how the two directions drift apart.
+    """
+    bad: list[str] = []
+    for match in _TYPED_RETAKEN_NUMSTAT.finditer(text):
+        # The pair's own start is a NAMED group: the pair may be written with or without
+        # backticks, so it cannot be located by rfind("`").
+        if _TYPED_NUMSTAT_AS_COMMAND_RESULT.search(text[: match.start("pair")]):
+            continue
+        bad.append(match.group(0))
+    return bad
+
+
+def test_the_cypher_inventory_types_no_numstat_pair_for_a_range_re_taken_here():
+    """⛔ §7's re-cut paragraph typed `403 401` — a pair no head in this branch produced.
+
+    The paragraph's own rule is that a numstat names its head and is RE-TAKEN, never carried;
+    its own clause then carried one (`381 379` + `#14260`'s 22 lines, applied twice). A figure
+    that no head produces is the defect class this bundle exists to repair, so it is graded
+    rather than trusted — the same doctrine, one file over, as the `05-verify.md` arm above.
+
+    NON-VACUITY, MEASURED: the pre-fix sentence is the witness list in the sibling arm below;
+    injecting it back into this document reds HERE, and the pair is absent from every head in
+    `git log --first-parent origin/main..HEAD` — ⛔ and no pair and no head count is typed for
+    that population here: two earlier cuts of this sentence each typed one, and the tree produced
+    neither, which is this arm's own defect class one layer up. Re-take both at the head you
+    merge, as the sibling arm's docstring says.
+
+    ⛔ AND THE WITNESS LIST IS NOT THE POPULATION (#14249 review, P1): the first cut of this
+    arm's pattern caught only `reads `<pair>``, so the doc's own `printed **`pair`**` style —
+    and any claim naming the range in a code span — walked through. The five spellings below
+    are the escapes that review measured, and they are graded through the SAME predicate the
+    document arm uses.
+    """
+    doc = (DOCS / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    typed = _typed_retaken_numstat_pairs(doc)
+    assert not typed, (
+        "CYPHER-INVENTORY.md TYPES a numstat pair for a range it says is re-taken here "
+        f"({typed[0]!r}). A numstat is head-bound: state the command and let the reader "
+        "re-derive the pair at the head being merged, or type no figure at all — a carried "
+        "pair is the double-shift §7 exists to record (#14249 review, P2)")
+
+
+def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
+    """Both directions, because a detector whose classes are never exercised is a blacklist.
+
+    MEASURED: replacing `_TYPED_RETAKEN_NUMSTAT` with a never-matching pattern reds the doc
+    arm above only while the defect is present; this arm is the witness that keeps it able to
+    see one, and the allowed list is what keeps it from over-blocking the RETRACTION forms the
+    same paragraph legitimately uses ("no figure is typed here", "re-taken rather than
+    carried").
+    """
+    for _typed in (
+        # ⛔ the sentence that shipped, verbatim from the pre-fix document
+        "so the three-dot form collapses to two-dot and the same range re-taken here "
+        "reads `403 401`",
+        "the same range RE-TAKEN at this head prints `43 39`",
+        "the numstat reads `3 1` at this head",
+        "the range -> `2 0`",
+        # ⛔ the three escapes measured at #14249's review (P1): past tense, a fenced RANGE,
+        # and the doc's bold pair — each missed by the first cut of the pattern.
+        "the same range re-taken here printed `403 401`",
+        "the same range `origin/main...HEAD` re-taken here reads `403 401`",
+        "the same range `70fbd1a27d...HEAD` re-taken here printed **`403 401`**",
+        "the numstat printed `403 401`",
+        # ⛔ A COLON or `=` between the verb and the pair is the same claim (#14249 review, round
+        # 4): the noun, the verb and the pair are all graded ones, and only `\s*` sat between them.
+        "the same range re-taken here reads: `403 401`",
+        "the same range re-taken here reads = `403 401`",
+        # ⛔ and the pair with NO backticks at all — the shape a hurried sentence takes, missed
+        # until round 5 (#14249 review, P2).
+        "the same range re-taken here reads 403 401",
+        "the numstat printed **403 401**",
+    ):
+        assert _typed_retaken_numstat_pairs(_typed), (
+            f"the re-taken-numstat detector does not see {_typed!r} — that spelling of a "
+            "head-bound pair walks through green (#14249 review, P1)")
+    for _allowed in (
+        # the repaired clause: the RULE, with no figure typed for it
+        "so the three-dot form collapses to two-dot, and the range is RE-TAKEN at the head "
+        "you merge rather than carried",
+        # the paragraph's retraction form, which must stay allowed
+        "an earlier cut of this clause typed a pair for the re-taken range, and it was the "
+        "`381 379` above plus `#14260`'s 22-line `sdk.py` insertion applied a SECOND time",
+        "NO figure is typed here; a numstat is head-bound",
+        # the per-hunk form §7 uses for `3 1`: the pair IS that fenced command's own printed
+        # result, which is what `_TYPED_NUMSTAT_AS_COMMAND_RESULT` exempts — NOT "the command's
+        # span closes before the pair", the first cut's rationale, which was wrong: the old
+        # pattern allowed this string only because it could not cross a backtick at all.
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "-> `3 1`)",
+        # the historical form the document actually uses: command span, then `printed`, then
+        # the bolded pair. Legitimate — the command is named beside the figure.
+        "`git diff --numstat 70fbd1a27d 689d21b7e4c1 -- docs/architecture/CYPHER-INVENTORY.md` "
+        "printed **`381 379`** at the head this paragraph was written for",
+        # ⛔ the two SYNONYM spellings the exemption refused before its verb class matched the
+        # detector's (#14249 review, P2). A fenced command whose result is the pair is exempt
+        # whatever verb conjugates it — refusing these was the false-red direction of the same
+        # asymmetry.
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "shows `3 1`)",
+        "`git diff --numstat 70fbd1a27d 689d21b7e4c1 -- docs/architecture/CYPHER-INVENTORY.md` "
+        "reported `381 379`",
+        # …and the colon form of a FENCED command stays exempt too: the widening above must not
+        # turn a legitimate command-result sentence into a red.
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "shows: `3 1`)",
+    ):
+        assert not _typed_retaken_numstat_pairs(_allowed), (
+            f"the re-taken-numstat detector REFUSES {_allowed!r}, which types no current "
+            "pair — refusing a retraction is the same defect in the other direction")
 
 
 def _added_cite_tokens(diff_text: str) -> set[str]:
