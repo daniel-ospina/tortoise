@@ -72,7 +72,7 @@ output is indistinguishable from a measurement is the false pass this bundle mus
 
 Median document 5,211 tokens · 3.98 calls/document (s1 1.68, s2 1.16, s4 1.14).
 
-| region | tokens/doc | share of the constant | what it is |
+| region | tokens/doc | share of the composition (43,567) | what it is |
 |---|---|---|---|
 | **S2's embed list, re-sent to S4** | **14,164** | **32.5 %** | S4's prompt re-serializes S2's *entire* output (`json.dumps(embed_list, indent=1)`) |
 | kind vocabulary (`master_list`) | 7,330 | 16.8 % | the pack kind catalogue + glosses, identical bytes on every S2 **and** S4 call |
@@ -98,8 +98,9 @@ document text once **per call**, and 34 of 50 documents take a **second** S1 cal
    static explains it; S4 reads the list S2 just wrote, re-serialized at **1.23×** S2's own
    emission (the `indent=1` dump plus the post-S2 normaliser's added fields — this bundle
    does not separate those two, because separating them needs a real emission, §0).
-2. **The static instruction set is 23,300 tokens/doc** — 53 % of the constant — and it is
-   the same bytes on every call: the kind vocabulary (7,330) alone is 16.8 %.
+2. **The static instruction set is 23,300 tokens/doc** — 53 % of the composition (51 % of
+   the 45,503 constant) — and it is the same bytes on every call: the kind vocabulary
+   (7,330) alone is 16.8 % of the composition.
 3. **S1's story is charged three times per document**: once as S1's output, once as S2's
    user message, once as S4's `{story}` slot. 6,109 tokens of the input constant are a
    *re-read* of an emission that does not scale with the document (§2).
@@ -297,7 +298,7 @@ Unchanged by this bundle, and re-stated so the lever's value is on the record. F
 | team | 24M | 370 | 533 | 750 |
 
 A 30 % cut — which the composition says is available *in principle* (S2's re-read plus the
-kind vocabulary alone are 49 % of the input constant) — is worth **+43 %** documents per
-allowance. The one lever shipped here (disarmed) is worth **+8 %** on its own. **Neither is
-quotable as a plan until the capstone re-runs green**: what is measured here is the size of
-the lever, not its safety.
+kind vocabulary alone are 49 % of the composition, 47 % of the constant) — is worth
+**+43 %** documents per allowance. The one lever shipped here (disarmed) is worth **+8 %**
+on its own. **Neither is quotable as a plan until the capstone re-runs green**: what is
+measured here is the size of the lever, not its safety.
