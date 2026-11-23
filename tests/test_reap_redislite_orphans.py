@@ -26,7 +26,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -1085,9 +1084,21 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
     `redis-server`, so `/proc/<pid>/comm` is `redis-server` while
     `/proc/<pid>/cmdline` holds a string that does not end in it. The pre-fix
     filter drops this process; the inventory must list it.
+
+    ⛔ THE SOURCE BINARY MUST NOT BE A MULTICALL APPLET (#14335). This fixture
+    copies a binary to the name `redis-server` and relies on the copy still
+    RUNNING under that name. That held for a standalone `cat` and it is false on
+    `ubuntu-26.04`, where coreutils is uutils' multicall binary: it dispatches on
+    the basename of `argv[0]` and refuses an applet it does not know, so the copy
+    exited at once (`coreutils: unknown program 'redis-server'`, in the job's own
+    stderr) and the test enumerated a ZOMBIE — `/proc` keeps the dead child's
+    `comm` but empties its `cmdline`, so `socket_dir` read `None` and a required
+    shard false-redded on every PR. The copy is therefore the INTERPRETER:
+    CPython does not dispatch on `argv[0]`, and with `argc == 1` it reads a
+    program from stdin and blocks, which is the shape under test.
     """
     binary = tmp_path / "redis-server"
-    binary.write_bytes(Path(shutil.which("cat") or "/bin/cat").read_bytes())
+    binary.write_bytes(Path(sys.executable).resolve().read_bytes())
     binary.chmod(0o755)
     gone = tmp_path / "gone-socket-dir"
     line = f"{binary} unixsocket:{gone}/redis.socket"
@@ -1106,6 +1117,25 @@ def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
                 break
             time.sleep(0.02)
         assert seen, "the fixture process never came up with comm == redis-server"
+        # ⛔ ALIVE, NOT A CORPSE — AND NOT MERELY "NOT YET DEAD" (#14335). The
+        # runner failure enumerated a process that had already exited: `comm`
+        # survives death, `cmdline` does not, so `child.pid in rows` stayed true
+        # while `socket_dir` was None — the test could not tell "a live server the
+        # inventory listed" from "a reaped child it listed anyway".
+        # A single `poll()` is not enough: a stand-in that exits at once can still
+        # answer `poll() is None` in the window before its exec lands — measured
+        # with a copy of `/bin/true`, where the guard passed and the assertion
+        # below then redded as `assert None == '/tmp/…'`, i.e. exactly the
+        # confusing red this guard exists to replace. A fixture that BLOCKS is
+        # still running after a short dwell, and one that dies at once is not.
+        for _ in range(20):
+            assert child.poll() is None, (
+                f"the fixture child exited (rc={child.returncode}) instead of blocking on "
+                "stdin, so the inventory below could only enumerate a CORPSE — a zombie "
+                "keeps its `comm` but loses its `cmdline`, which is how this fixture "
+                "false-redded on uutils' multicall coreutils (#14335). The stand-in "
+                "binary must stay alive for the row it asserts to mean anything")
+            time.sleep(0.05)
         inventory = reaper._iter_proc_inventory()
         assert inventory is not None
         # Written against the rows ALONE, so the pre-fix tree fails on the FACT
