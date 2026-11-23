@@ -3738,9 +3738,10 @@ def _row_for_pid(pid: int) -> str | None:
     FAIL, and at site 3 this call is the *witness* that stops a broken `_ps_answers` from skipping
     the very test that must catch it. Its argv is pinned textually by its own guard, because
     `-p <pid>` is the selector EVERY reading of the row rests on; what a `-p`-less witness does
-    is platform-specific (procps-ng rejects the positional pid form outright, so it answers `''`
-    — see `test_ps_answers_is_the_control_it_claims_to_be` for both measured shapes), and every
-    one of those shapes reports a fact that is not the caller's pid.
+    is platform-specific (on procps-ng the pid then precedes `-o command=`, so the trailing
+    tokens are parsed as more pid operands and `ps` exits 1 with EMPTY stdout — the witness
+    answers `''`; see `test_ps_answers_is_the_control_it_claims_to_be` for both measured shapes),
+    and every one of those shapes reports a fact that is not the caller's pid.
 
     ⛔ AND IT MUST CARRY A TIMEOUT (#12039 cycle 14 P1). It had none, which made it the worst kind
     of authority: a `ps` slower than `_ps_answers`'s budget answered HERE while the probe said
@@ -5180,20 +5181,25 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
         '["ps", "-p", str(os.getpid()), "-o", "command="]' in invocation
     ), (
         "`_ps_answers` stopped asking `ps -p <our pid> -o command=`. `-p <our pid>` IS the control: "
-        "drop it and the invocation either stops being a question about our own pid (procps-ng "
-        "rejects the positional pid form outright — empty stdout, so the control reads False on "
-        "EVERY box, and its `assert answers is True` reds for a `ps` that works) or, with the pid "
-        "operand gone too, prints the whole table and answers True for anything — every census "
-        f"error then excused as the box's. Its invocation is: {invocation!r}")
+        "drop it and the invocation no longer asks about our own pid. On procps-ng the pid then "
+        "precedes `-o command=`, so the trailing tokens are read as MORE pid operands and `ps` "
+        "exits 1 with empty stdout — the control reads False on EVERY box and its `assert answers "
+        "is True` reds for a `ps` that works. With the pid operand gone TOO it prints the whole "
+        "table and answers True for anything, excusing every census error as the box's. Its "
+        f"invocation is: {invocation!r}")
 
     # ⛔ AND THE WITNESS'S ARGV, BY THE SAME RULE (#12039 cycle 14 P2; MESSAGE CORRECTED after
     # #14394's P2 — the old one named the wrong shape). `-p <pid>` is the selector every reading
     # of this row rests on, so pin the WHOLE argv rather than two substrings. What a `-p`-less
     # witness actually does is platform-specific, and the pin is what holds across both:
     #
-    #   * procps-ng (this fleet's Linux, 4.0.4): dropping ONLY `-p` leaves the pid as a POSITIONAL
-    #     operand, which is a SYNTAX ERROR — `ps -ww <pid> -o command=` exits 1 with EMPTY stdout
-    #     (measured). The witness then answers `''` for every pid: the `WNOWAIT` site's
+    #   * procps-ng (this fleet's Linux, 4.0.4): dropping ONLY `-p` leaves the pid as the pid
+    #     OPERAND — and options must come BEFORE the operand there, so the trailing `-o command=`
+    #     is itself parsed as more pid operands (`-o` is not a number) and `ps` exits 1 with EMPTY
+    #     stdout (measured: `ps -ww <pid> -o command=` → `error: process ID list syntax error`;
+    #     `ps -o command= <pid>` with the same operand in the accepted position answers normally,
+    #     which is exactly why the pin is the whole argv and not `-p` in isolation). The witness
+    #     then answers `''` for every pid: the `WNOWAIT` site's
     #     `assert row` reds with "no `ps` row" about a `ps` that never ran, and both capability
     #     gates read `not ''` as "cannot answer", which is the cycle-13 SKIP fail-open returning;
     #   * the shape that really reads the WHOLE table is the one that drops the pid OPERAND too
@@ -5208,10 +5214,11 @@ def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
         '["ps", "-ww", "-p", str(pid), "-o", "command="]' in witness_invocation
     ), (
         "`_row_for_pid` stopped selecting ONE pid — `ps -ww -p <pid> -o command=` is the selector "
-        "every reading of this row rests on. Without `-p` the invocation is either REJECTED "
-        "(procps-ng: rc=1, empty stdout, so the gates read 'cannot answer' and the `WNOWAIT` "
-        "`assert row` blames a missing row) or, with the pid operand gone too, a WHOLE-table read "
-        "that satisfies `assert row` for any pid. Its invocation is: "
+        "every reading of this row rests on. Without `-p` the pid becomes the operand and the "
+        "trailing `-o command=` is parsed as more pid operands, so `ps` exits 1 with empty stdout "
+        "(the gates then read 'cannot answer' and the `WNOWAIT` `assert row` blames a missing "
+        "row); with the pid operand gone too it is a WHOLE-table read that satisfies `assert "
+        "row` for any pid. Its invocation is: "
         f"{witness_invocation!r}")
 
     if shutil.which("ps") is None:  # pragma: no cover — no `ps` to ask
