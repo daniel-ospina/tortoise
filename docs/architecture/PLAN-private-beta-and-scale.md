@@ -135,7 +135,6 @@ content-hash dedup, resume, cancel and the proactive estimate against the ONE `c
 `needs_extraction` routes it through the existing pending-document sweep), the off-peak tick, and a 20/500-document
 scale measurement on the production shape.
 
-
 ### Track S — build the destination *(starts now; spend only when a gate says so; S = scale)*
 
 Track S is **not** blocked on Track F. Its first four items (S1–S4) are free and independent, and doing them now is exactly what

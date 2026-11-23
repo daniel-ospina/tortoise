@@ -2972,6 +2972,8 @@ surfaces:
   # (DUAL-registered: matrix + job). ONE row only: this file is `merge=union` in `.gitattributes`,
   # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
   - test_14002_record_only_journal.py
+  - test_14219_batch_ingest.py
+  - test_14219_batches_api.py
   - test_extractor_cost_measure.py
   # #14343: the S4 embed-serialization lever's own pins (`_embed_json_kwargs` in
   # `tortoise/extractor_v2.py` + the `serialization`/`decompose` half of
