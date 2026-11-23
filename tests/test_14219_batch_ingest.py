@@ -17,6 +17,7 @@ from tortoise.batch_ingest import (
     ACKNOWLEDGEMENT_TOKEN_THRESHOLD,
     BATCH_ITEMS_IN_FLIGHT,
     BATCH_LABEL,
+    BATCH_RECLAIM_AFTER_S,
     OVERAGE_USD_PER_MILLION_TOKENS,
     PROVIDER_MECHANICS_WORDS,
     SECONDS_PER_DOCUMENT,
@@ -42,6 +43,9 @@ from tortoise.batch_ingest import (
     normalise_text,
     runner_result_to_outcome,
     status_body,
+)
+from tortoise.batch_ingest import (
+    _age_seconds as bi_age,
 )
 
 ORG = "org_test"
@@ -466,7 +470,10 @@ def test_copy_is_the_owners_sentence_and_leaks_no_provider_mechanics():
 
 def test_copy_never_promises_less_than_an_hour():
     """A sub-hour estimate rounds UP, never down: a late promise beats a broken one."""
-    assert "1 hours" in customer_copy(0.1)
+    assert "in 1 hour," in customer_copy(0.1), (
+        "the sub-hour batch a customer actually sends must not read "
+        f"'1 hours': {customer_copy(0.1)!r}")
+    assert "in 2 hours," in customer_copy(1.2)
     assert "2 hours" in customer_copy(1.01)
 
 
@@ -1081,7 +1088,7 @@ def test_a_cancel_between_the_read_and_the_claim_does_not_run_the_runner():
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
-    batch, items = coord.submit(ORG, ["/d/a.md"])
+    batch, _items = coord.submit(ORG, ["/d/a.md"])
 
     ran: list[str] = []
 
@@ -1092,7 +1099,7 @@ def test_a_cancel_between_the_read_and_the_claim_does_not_run_the_runner():
     real_cas = store.put_item_if_state
     fired = {"done": False}
 
-    def cancelling_cas(org_id, item, expected):
+    def cancelling_cas(org_id, item, expected, expected_attempts=None):
         if (not fired["done"] and expected is BatchItemState.QUEUED
                 and item.state is BatchItemState.EXTRACTING):
             fired["done"] = True
@@ -1126,7 +1133,7 @@ def test_a_cancel_that_saw_queued_cannot_relabel_a_claim_that_landed(monkeypatch
     """
     store = InMemoryBatchStore()
     coord = BatchCoordinator(store)
-    batch, items = coord.submit(ORG, ["/d/a.md"])
+    batch, _items = coord.submit(ORG, ["/d/a.md"])
     stale = store.items(ORG, batch.batch_id)      # what cancel() reads
     assert stale[0].state is BatchItemState.QUEUED
 
@@ -1223,8 +1230,8 @@ def test_recover_does_not_steal_a_live_claim():
     # claim itself is NOT taken — that is the safety property.
     # ⛔ `== []` would be the WRONG contract (#14415 review round 5, BLOCKING 1):
     # "not ours to TAKE" is not "not ours to REPORT". Skipping the batch discards
-    # the decision instead of deferring it, and since `_BATCH_RECOVERED` makes
-    # this scan one-shot per process, the item is then stranded for ever — which
+    # the decision instead of deferring it, and the item is then stranded until
+    # the reclaim window expires with nothing looking again — which
     # is exactly the ordinary redeploy (a runner in flight, a replacement booting
     # a second later). The batch is reported so a later pass revisits it; the
     # drain re-checks the window itself (`run_item`) and leaves the claim alone.
@@ -1283,3 +1290,226 @@ def test_a_rejected_acceptance_discards_its_own_rows_and_staged_files(tmp_path):
     staged = base / "_batches"
     assert not staged.exists() or not any(staged.iterdir()), (
         "the rejected batch's staged files were left on disk")
+
+
+# ── round 5: the claim's IDENTITY, and a cancel over a dead claim ──────────
+def test_two_reclaimers_cannot_both_win_the_same_stale_row():
+    """⛔ ROUND-5 REVIEW P1, reproduced: two drains, one stale claim, TWO charges.
+
+    A re-claim that writes `state = <the state it read>` has a compare key equal
+    to the value it writes back, so BOTH re-claimers matched and both ran the
+    runner — one document extracted twice and billed twice (measured on the
+    pre-fix tree: 2 runner calls, 120 000 tokens charged for 60 000 spent).
+
+    The re-claim is now two state-CHANGING compare-and-sets (void the dead claim,
+    then claim it), so exactly one drain can walk the pair and the loser returns
+    before the runner.
+    """
+    store = InMemoryBatchStore()
+    batch, items = BatchCoordinator(store).submit(ORG, ["/a.md"])
+    claimed = BatchCoordinator(store).advance(
+        ORG, items[0], BatchItemState.EXTRACTING, attempt=True,
+        expected=BatchItemState.QUEUED, expected_attempts=0)
+    stale = store.get_item(ORG, batch.batch_id, claimed.item_id)
+    stale.updated_at = _ancient_stamp()      # the claim's runner died long ago
+    store.put_item(ORG, stale)
+
+    calls: list[str] = []
+
+    def runner(item: BatchItem) -> ItemOutcome:
+        calls.append(item.item_id)
+        return ItemOutcome(BatchItemState.INDEXED, tokens_in=60_000)
+
+    # Two coordinators, as two processes; each reads the SAME stale row.
+    a_row = store.get_item(ORG, batch.batch_id, claimed.item_id)
+    b_row = store.get_item(ORG, batch.batch_id, claimed.item_id)
+    first, second = BatchCoordinator(store), BatchCoordinator(store)
+    first.run_item(ORG, a_row, runner)
+    second.run_item(ORG, b_row, runner)
+
+    assert calls == [claimed.item_id], (
+        "one document was run twice over two drains — the stale claim was "
+        f"re-entered by both (calls={calls}), which bills the customer twice")
+    final = store.items(ORG, batch.batch_id)[0]
+    assert final.state is BatchItemState.INDEXED
+    assert final.attempts == 2, (
+        "the re-claim must count as an attempt, so the ceiling bounds a poison "
+        f"item (attempts={final.attempts})")
+
+
+def test_put_item_if_state_compares_the_claim_identity_in_the_inmemory_store():
+    """The compare, on the store that the concurrency tests actually drive."""
+    store = InMemoryBatchStore()
+    batch, items = store_items_helper(store)
+    row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+    assert row.attempts == 0
+    row.attempts = 1
+    store.put_item(ORG, row)          # the ROW's identity has moved
+    assert store.put_item_if_state(ORG, row, BatchItemState.QUEUED,
+                                   expected_attempts=0) is False, (
+        "the CAS matched a row whose attempt count had already moved")
+    assert store.put_item_if_state(ORG, row, BatchItemState.QUEUED,
+                                   expected_attempts=1) is True
+
+
+def test_the_graph_cas_names_the_attempt_count_only_when_asked():
+    """The production compare, pinned on the statement: identity in the pattern."""
+    item = BatchItem(batch_id="b1", item_id="b1-0", ref="/d/a.md",
+                     state=BatchItemState.EXTRACTING, attempts=1,
+                     updated_at="t")
+    rec = _Recorder(answers=[[]])
+    GraphBatchStore(rec).put_item_if_state(ORG, item, BatchItemState.QUEUED,
+                                           expected_attempts=0)
+    cypher = rec.statements[-1]
+    assert "i.attempts = $expect_attempts" in cypher, cypher
+    assert rec.params[-1]["expect_attempts"] == 0
+
+    rec2 = _Recorder(answers=[[["b1-0"]]])
+    GraphBatchStore(rec2).put_item_if_state(ORG, item, BatchItemState.QUEUED)
+    assert "expect_attempts" not in rec2.statements[-1]
+    assert "expect_attempts" not in rec2.params[-1]
+
+
+def test_a_cancel_stops_a_dead_claim_instead_of_reporting_the_batch_finished(
+        monkeypatch):
+    """⛔ ROUND-5 REVIEW P1, reproduced: `attempts == 0` is UNREACHABLE.
+
+    Every writer of `extracting` increments `attempts`, so the documented
+    "dead claim → stopped for free" arm never ran: a batch whose only
+    non-terminal item was a dead claim cancelled to `stopped = False`, the route
+    answered "already finished", and the next status poll's `recover()` requeued
+    and RAN the document — charging tokens after the customer cancelled.
+
+    The test is the claim's AGE now, so a stale claim is stopped and a fresh one
+    is left alone (its tokens are already being spent).
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    batch, items = coord.submit(ORG, ["/dead.md", "/live.md"])
+    coord.advance(ORG, items[0], BatchItemState.EXTRACTING, attempt=True)
+    coord.advance(ORG, items[1], BatchItemState.EXTRACTING, attempt=True)
+
+    rows = store.items(ORG, batch.batch_id)
+    stale = rows[0]
+    stale.updated_at = _ancient_stamp()
+    store.put_item(ORG, stale)
+
+    stopped_batch, after = coord.cancel(ORG, batch.batch_id, reason="customer")
+    by_ref = {i.ref: i for i in after}
+    assert by_ref["/dead.md"].state is BatchItemState.CANCELLED, (
+        "a dead claim survived a cancel — the batch would run and charge after "
+        "the customer stopped it")
+    assert by_ref["/dead.md"].tokens_in == 0
+    assert by_ref["/live.md"].state is BatchItemState.EXTRACTING, (
+        "a LIVE claim must be left alone: its tokens are already being spent")
+    assert stopped_batch.state is BatchState.CANCELLED
+    assert stopped_batch.cancelled_at, "the row says nothing was stopped"
+
+
+def _ancient_stamp() -> str:
+    """A claim stamp far older than any reclaim window."""
+    from datetime import UTC, datetime, timedelta
+    return (datetime.now(UTC) - timedelta(days=3)).isoformat()
+
+
+def store_items_helper(store):
+    coord = BatchCoordinator(store)
+    return coord.submit(ORG, ["/a.md"])
+# ── round 8: the order the rotation needs, the receipt/ledger equality ─────
+def test_pending_batches_is_ordered_by_the_caller_not_by_cypher():
+    """⛔ BLOCKING 1: a `UNION` followed by `ORDER BY` is IGNORED by FalkorDB.
+
+    Measured: the real query came back in insertion order, byte-identical to the
+    same query without the clause, three runs out of three (the single-arm control
+    sorted correctly). The rotating recovery window is only fair over a
+    DETERMINISTIC list, so the order is imposed in Python — an inert Cypher clause
+    is exactly the "assertion that cannot fail" class this branch keeps removing.
+    """
+    store = InMemoryBatchStore()
+    coord = BatchCoordinator(store)
+    ids = [coord.submit(ORG, [f"/d/{n}.md"])[0].batch_id for n in range(6)]
+    # The consumer sorts, so the window is deterministic whatever the store's
+    # natural order is (the in-memory store is insertion-ordered, the graph store
+    # sorts because FalkorDB ignores the clause).
+    assert sorted(coord._store.pending_batches(ORG)) == sorted(ids)
+    import random
+
+    shuffled = list(ids)
+    random.Random(7).shuffle(shuffled)
+    resumed = []
+    for offset in range(0, len(ids), 2):
+        resumed += coord.recover(ORG, offset=offset, limit=2)
+    assert set(ids) <= set(resumed), (
+        f"{sorted(set(ids) - set(resumed))} were never reached by the rotation")
+
+
+def test_a_future_stamp_is_fresh_within_one_window_and_ancient_beyond_it():
+    """NB1: both failure modes are real, and they point opposite ways.
+
+    `max(0.0, …)` read a stamp months ahead as age 0 → the item was never
+    re-claimed, the ceiling never incremented, the document non-terminal for ever.
+    A 60 s cliff then read ORDINARY two-box skew as ancient and re-ran the runner
+    on a claim seconds old. Inside one reclaim window it is skew (fresh); beyond
+    it, the stamp is not a clock and the item is treated as ancient.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    def stamp(offset_s: float) -> str:
+        return (datetime.now(UTC) + timedelta(seconds=offset_s)).isoformat()
+
+    assert bi_age(stamp(-5)) > 4, "a past stamp is an ordinary age"
+    assert bi_age(stamp(30)) == 0.0, "a minute of skew must read as FRESH"
+    assert bi_age(stamp(BATCH_RECLAIM_AFTER_S + 30)) == float("inf"), (
+        "beyond a window the stamp is not a clock: believing it strands the "
+        "document for ever")
+    assert bi_age("not-a-timestamp") == float("inf"), (
+        "an unreadable claim time is ancient, never permanently fresh")
+
+
+def test_a_receipt_and_the_meter_agree_when_the_row_moved_on():
+    """⛔ BLOCKING 2: the row must record what the meter bills.
+
+    Two arms have a runner call that really spent while the row could not take its
+    outcome: the row went terminal first, and the compare-and-set lost. Both used
+    to leave the spend off the row — the ledger billed 735 against a receipt that
+    said 5, and in the second arm 730 appeared on NEITHER surface.
+    """
+    for variant in ("terminal", "cas-lost"):
+        store = InMemoryBatchStore()
+        assert store is not None
+        coord = BatchCoordinator(store)
+        batch, items = coord.submit(ORG, ["/a.md"])
+
+        def runner(item, _v=variant, _store=store):
+            other = BatchCoordinator(_store)
+            peer = _store.get_item(ORG, item.batch_id, item.item_id)
+            if _v == "terminal":
+                other.advance(ORG, peer, BatchItemState.EXTRACTING, attempt=True)
+                other.advance(ORG, peer, BatchItemState.INDEXED, tokens_in=5)
+            return ItemOutcome(BatchItemState.INDEXED, tokens_in=700,
+                               tokens_out=30)
+
+        if variant == "cas-lost":
+            # The row moves BETWEEN the coordinator's `_fresh` and its write, so
+            # the compare-and-set loses and the outcome cannot be applied.
+            real = coord.advance
+
+            def _advance(org_id, item, new_state, _store=store, _real=real,
+                         **kw):
+                if new_state is BatchItemState.INDEXED:
+                    peer = _store.get_item(org_id, item.batch_id, item.item_id)
+                    BatchCoordinator(_store).advance(
+                        org_id, peer, BatchItemState.EXTRACTING, attempt=True)
+                return _real(org_id, item, new_state, **kw)
+
+            coord.advance = _advance  # type: ignore[method-assign]
+
+        out = coord.run_item(ORG, items[0], runner)
+        billed = out.charge_in + out.charge_out
+        row = store.get_item(ORG, batch.batch_id, items[0].item_id)
+        assert billed == 730, f"{variant}: our call spent 730, billed {billed}"
+        peer_spend = 5 if variant == "terminal" else 0
+        assert row.tokens_in + row.tokens_out == billed + peer_spend, (
+            f"{variant}: the meter bills {billed} (+{peer_spend} by the peer) but "
+            f"the row reports {row.tokens_in + row.tokens_out} — the receipt must "
+            "match the bill")

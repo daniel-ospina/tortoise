@@ -92,9 +92,12 @@ its ``refusal`` token is one of seven. NONE of the seven is exactly a term here:
   ``record_write_failures``, so nothing a replay could restore is missing;
 * ``journal_collision`` is the one CONFLICT-decided token (#9318): the record WAS
   reached and refused to index this record under a journal position that is
-  NOT this write's — a different record type, a different capture instant, or a
+  NOT this write's — a different record type, a different capture instant, a
+  same-instant pair whose payloads name CONTRADICTING identities, or a
   `ts`-less write whose content moved. ⚠️ A payload re-derived at the SAME type
-  and the SAME capture is NOT this token: it is read as the record's own drift
+  and the SAME capture is NOT this token when its identities do not CONTRADICT —
+  `agrees`, `one_sided` (one side names no identity) or `none`: it is read as the
+  record's own drift
   and is SILENT (#12904 P0-1), so an operator hunting this counter for that
   shape finds none. Nothing was
   lost (the journal holds it) and nothing about the store is wrong, so it is an

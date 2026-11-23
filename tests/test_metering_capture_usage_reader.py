@@ -87,7 +87,16 @@ _ALLOWED = {"metering.py", "supabase_control.py", "cost_dimensions.py"}
 # by name. An exemption for ``allowance_gate.py`` would let a SECOND call site (a
 # report, a dashboard, a tool) appear without reddening this pin; an exact equality
 # also reds if the gate stops reading it, which would be a fail-OPEN regression.
-_ENFORCEMENT_CONSUMERS = {"allowance_gate.py"}
+_ENFORCEMENT_CONSUMERS = {"allowance_gate.py", "hosted_api.py"}
+
+# ⚠️ ``hosted_api.py`` joins the pinned set at #14219 (Track F4's batch surface),
+# and it is listed BY NAME for the same reason the pin is exact: a second request
+# path reading this meter is a scope change that must be recorded, not absorbed.
+# The batch route reads it for ONE thing — the acceptance estimate, which reports
+# the customer's own spend against the SAME ``capture_extraction`` dimension the
+# owner mandated ("one budget, not a fourth metered thing", #14275). It does not
+# enforce: a batch is never refused for want of allowance (#4010). A call site
+# anywhere else still reds this pin.
 
 
 def _names_the_reader(path):
@@ -248,7 +257,8 @@ def test_the_gate_is_the_readers_only_consumer():
     which is the fail-OPEN direction (a configured dimension with no reading).
 
     Scans EVERY module under ``tortoise/`` except the modules that DEFINE the
-    reader. A call site in ``hosted_api`` would put it on another request path;
+    reader. A call site in ``hosted_api`` puts it on another request path (the
+    #14219 batch estimate — recorded at ``_ENFORCEMENT_CONSUMERS``, not exempted);
     one in ``tool_registry`` / ``sdk`` / ``hosted_mcp`` would add surface. All
     three are the #4051 exclusions, so the pin covers the whole tree rather than
     the one obvious file (a review finding: a one-file pin stays green while the

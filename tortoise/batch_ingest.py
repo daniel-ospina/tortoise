@@ -45,12 +45,17 @@ path that wrote raw points would produce exactly the bloat the capability audit
     ⚠️ **What is actually metered TODAY, stated plainly** (#14219 review round 2,
     BLOCKING 1): the production per-file indexer this route delegates to spends
     no model tokens — it embeds and files — so ``tokens_in``/``tokens_out`` are 0
-    on every item and :func:`record_item_spend` makes no ledger call. The hook is
-    on the path (:class:`BatchRunner` → :func:`runner_result_to_outcome` carries
-    the counts, ``_drain_batch`` charges them) so that the moment LLM extraction
-    is wired to a batch item, the spend lands on the one meter with no second
-    change. Until then the estimate reports the *ceiling* of what a batch would
-    cost, and the ledger moves only for lanes that actually spend.
+    on every item and :func:`record_item_spend` makes no ledger call. ⛔ **And
+    wiring extraction DOES need a second change** (#14415 review round 5, P3 —
+    this paragraph used to claim the opposite): :func:`runner_result_to_outcome`
+    maps ``status``/``reason`` only, and the per-file indexer's documented result
+    dict (``tortoise/sdk.py``, ``_index_process_unit``) carries **no token keys
+    at all**, so an extracting runner must both report counts and have them
+    mapped here. What exists today is the METER end of that path: the charge
+    happens in ``run_item`` — only for the write that item's own CAS landed, with
+    that pass's deltas — so the ledger cannot be charged twice. Until extraction
+    is wired, the estimate reports the *ceiling* of what a batch would cost, and
+    the ledger moves only for lanes that actually spend.
 
 (c) ⛔ **batch document processing is OFF-PEAK ONLY**; on-demand is for fewer
     than ~5–10 documents' equivalent (owner, 2026-11-23). This layer makes
@@ -117,8 +122,13 @@ from typing import Any, Protocol
 
 # ── the measured unit (#14295 / #14343, the fact behind #14275's prior) ──────
 #: Measured tokens spent per MEDIAN document by the real ``extract_session_v2``
-#: pipeline at the production model: 45,503 constant input + 2.159T input and
-#: 22,802 constant output + 0.180T, summed at T = 5,211 tokens.
+#: pipeline at the production model: **48,461 input + 16,338 output = 64,799**,
+#: the measured median SPLIT (`docs/evidence/14343-amplify/README.md`, #14295).
+#: ⛔ The split is cited, not re-derived (#14415 review round 5, P3): this
+#: comment used to present the pipeline's FITTED form (45,503 constant + 2.159T
+#: input, 22,802 constant + 0.180T output, at T = 5,211) as the source of
+#: 64,799, and that sum is 68,305 BEFORE any T — a derivation beside a money
+#: figure that its own arithmetic refutes.
 #:
 #: ⛔ This is the number the owner ruled the estimate must be built from
 #: ("≈64,799 tokens per median document"), and it is a SPEND figure — not the
@@ -154,9 +164,19 @@ ON_DEMAND_MAX_ITEMS = 10
 #: the handler's copy is unreachable and the env knob is a lie (#14219 review,
 #: BLOCKING 6 then NB1). One number, one owner.
 BATCH_MAX_INLINE_BYTES = 4 * 1024 * 1024
+#: The refusal text names the cap it was CONFIGURED with, not the default: the
+#: bound is env-overridable, and a static "(4 MiB)" told a customer with a 1 MiB
+#: cap that their 2 MiB body was over 4 MiB (#14415 review round 5, P3).
 BATCH_INLINE_413_DETAIL = (
-    "batch request body exceeds the size cap (4 MiB) — send it as several "
+    "batch request body exceeds the size cap ({cap}) — send it as several "
     "batches; nothing is dropped")
+
+
+def inline_413_detail(cap_bytes: int) -> str:
+    """The 413 detail for the RESOLVED cap, not the shipped default."""
+    mib = cap_bytes / (1024 * 1024)
+    cap = f"{mib:g} MiB" if mib >= 1 else f"{cap_bytes} bytes"
+    return BATCH_INLINE_413_DETAIL.format(cap=cap)
 
 #: Above this many tokens of expected spend, the acceptance requires an explicit
 #: acknowledgement (owner, 2026-11-23 §4: "for a large processing batch we should
@@ -436,8 +456,12 @@ def estimate_batch(
 #: ⛔ The customer-facing sentence (owner, #14275 §3, verbatim: *"rather this will
 #: be batch processed and expect completion in X hours, with option to cancel
 #: too"*). The off-peak mechanism NEVER appears here or in any error string.
+#: ⛔ `{unit}` IS A WHOLE UNIT, NOT A SUFFIX (#14415 review round 5, P3): the
+#: template said `{hours} hours`, so the single-document batch a customer sends
+#: returned *"completion expected in **1 hours**"* — and a test pinned that
+#: ungrammatical string, so fixing the copy alone would have gone red.
 ACCEPT_COPY = (
-    "batch processed, completion expected in {hours} hours, cancel any time")
+    "batch processed, completion expected in {hours} {unit}, cancel any time")
 
 #: Vocabulary that would leak provider pricing mechanics into customer copy
 #: (owner ruling (d)). Kept as data so :func:`customer_copy` is testable rather
@@ -456,7 +480,9 @@ def customer_copy(hours: float) -> str:
     batch still says one hour, because the copy must not promise minutes a
     batch worker (off-peak only, owner (c)) has not agreed to.
     """
-    return ACCEPT_COPY.format(hours=max(1, math.ceil(hours)))
+    whole = max(1, math.ceil(hours))
+    return ACCEPT_COPY.format(hours=whole,
+                              unit="hour" if whole == 1 else "hours")
 
 
 # ── records ────────────────────────────────────────────────────────────────
@@ -493,6 +519,14 @@ class BatchItem:
     tokens_in: int = 0
     tokens_out: int = 0
     attempts: int = 0
+    #: ⛔ THE FIGURES THIS PROCESS JUST LANDED, and therefore the ONLY ones that
+    #: may be charged — never ``tokens_in/out``, which are the ROW's totals and
+    #: may describe a runner another process ran, or a pass that was already
+    #: charged (#14415 review round 4, BLOCKING 4). Non-persisted on purpose: it
+    #: is a fact about one `run_item` call, not about the document, so it cannot
+    #: be re-read and charged a second time. `as_dict` never emits them.
+    charge_in: int = field(default=0, compare=False, repr=False)
+    charge_out: int = field(default=0, compare=False, repr=False)
     #: True when this item's content differs from the generation already in the
     #: graph — i.e. it REPLACED a Source rather than duplicating one (#13451's
     #: change-vs-duplicate distinction, made visible on the wire).
@@ -617,6 +651,22 @@ class BatchStore(Protocol):
 
     def put_batch(self, batch: Batch) -> None: ...
 
+    def put_batch_if_state(self, batch: Batch,
+                           expected: Collection[BatchState]) -> bool:
+        """Write ``batch`` only while the stored row is still in ``expected``.
+
+        ⛔ THE ITEM ROW HAS HAD A COMPARE-AND-SET SINCE ROUND 4; THE BATCH ROW
+        HAD NONE, and that asymmetry lost a CANCELLATION PERMANENTLY (#14415
+        review round 5, P2). `settle()` reads the batch, derives a state from the
+        items, and writes — so a `cancel()` landing in that window was
+        overwritten by `partial`, and `partial` is TERMINAL: `pending_batches()`
+        no longer selected it, so nothing ever repaired it. The customer's
+        `cancelled_at`/`cancel_reason` were erased on a billing-visible surface
+        with no trace. ``expected`` is a COLLECTION because a settle may legally
+        land from any non-terminal state.
+        """
+        ...
+
     def get_batch(self, org_id: str, batch_id: str) -> Batch | None: ...
 
     def list_recent_batches(self, org_id: str, *, limit: int = 20
@@ -637,9 +687,21 @@ class BatchStore(Protocol):
     def put_item(self, org_id: str, item: BatchItem) -> None: ...
 
     def put_item_if_state(self, org_id: str, item: BatchItem,
-                          expected: BatchItemState) -> bool:
+                          expected: BatchItemState,
+                          expected_attempts: int | None = None) -> bool:
         """COMPARE-AND-SET: write ``item`` only if the stored row is still in
         ``expected``. Returns True when the write landed.
+
+        ⛔ ``expected_attempts`` EXTENDS THE COMPARE TO THE CLAIM IDENTITY, and
+        without it a CLAIM cannot lose (#14415 review round 5, BLOCKING 1). A
+        re-claim writes ``state = <the state it read>`` — the compare key is the
+        value the caller is about to write back — so two re-claimers over one
+        stale row BOTH match, both run the runner, and the customer is charged
+        twice for one document (reproduced: 2 runner calls, **120 000 tokens
+        billed for 60 000 spent**). `attempts` is what actually distinguishes one
+        claim from the next, so the claim paths pass it and the counter becomes
+        part of the compare instead of a blind SET of a value both writers
+        computed from their own read.
 
         ⛔ WHY THIS EXISTS (#14415 review round 4, BLOCKING 1). A plain
         ``put_item`` is a read-modify-write with the read done by the CALLER, and
@@ -717,6 +779,16 @@ class InMemoryBatchStore:
         self._batches: dict[tuple[str, str], Batch] = {}
         self._items: dict[tuple[str, str], dict[str, BatchItem]] = {}
 
+    def put_batch_if_state(self, batch: Batch,
+                           expected: Collection[BatchState]) -> bool:
+        # Atomic under the same lock as `put_batch`: compare and write together.
+        with self._lock:
+            current = self._batches.get((batch.org_id, batch.batch_id))
+            if current is None or current.state not in expected:
+                return False
+            self._batches[(batch.org_id, batch.batch_id)] = _copy_batch(batch)
+            return True
+
     def put_batch(self, batch: Batch) -> None:
         with self._lock:
             self._batches[(batch.org_id, batch.batch_id)] = _copy_batch(batch)
@@ -739,13 +811,19 @@ class InMemoryBatchStore:
             bucket[item.item_id] = _copy_item(item)
 
     def put_item_if_state(self, org_id: str, item: BatchItem,
-                          expected: BatchItemState) -> bool:
+                          expected: BatchItemState,
+                          expected_attempts: int | None = None) -> bool:
         # Atomic by construction: the compare and the write are inside ONE
         # `self._lock` hold, so no other writer can interleave.
         with self._lock:
             bucket = self._items.get((org_id, item.batch_id))
             current = bucket.get(item.item_id) if bucket else None
             if current is None or current.state is not expected:
+                return False
+            if (expected_attempts is not None
+                    and current.attempts != expected_attempts):
+                # The claim identity moved: a peer re-claimed this row between
+                # our read and here, so this write would run a second runner.
                 return False
             bucket[item.item_id] = _copy_item(item)
             return True
@@ -890,6 +968,26 @@ class GraphBatchStore:
              "corpus": batch.corpus_name},
         )
 
+    def put_batch_if_state(self, batch: Batch,
+                           expected: Collection[BatchState]) -> bool:
+        """A compare-and-set on the BATCH row — `MATCH … state IN $expect`."""
+        rows = self._q(
+            f"MATCH (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
+            "WHERE b.state IN $expect "
+            "SET b.state=$state, b.updated_at=$updated, "
+            "    b.cancelled_at=$cancelled_at, b.cancel_reason=$cancel_reason, "
+            "    b.estimate_json=$estimate, b.corpus_name=$corpus "
+            "RETURN b.id",
+            {"bid": batch.batch_id, "org": batch.org_id,
+             "expect": [str(e) for e in expected],
+             "state": str(batch.state), "updated": batch.updated_at,
+             "cancelled_at": batch.cancelled_at,
+             "cancel_reason": batch.cancel_reason,
+             "estimate": _json_dumps(batch.estimate),
+             "corpus": batch.corpus_name},
+        )
+        return bool(rows)
+
     def get_batch(self, org_id: str, batch_id: str) -> Batch | None:
         rows = self._q(
             f"MATCH (b:{BATCH_LABEL} {{id:$bid, org_id:$org}}) "
@@ -947,7 +1045,8 @@ class GraphBatchStore:
         )
 
     def put_item_if_state(self, org_id: str, item: BatchItem,
-                          expected: BatchItemState) -> bool:
+                          expected: BatchItemState,
+                          expected_attempts: int | None = None) -> bool:
         """COMPARE-AND-SET in the DATABASE — `MATCH … {state:$expect}` then SET.
 
         ⛔ `MATCH` (not `MERGE`) is the whole point: a row that has moved on no
@@ -956,9 +1055,15 @@ class GraphBatchStore:
         recreate the pattern row and silently undo the other writer — the exact
         defect this method exists to close.
         """
+        # `attempts` joins the pattern only when the caller named it, because it
+        # is the claim's IDENTITY: a re-claim compares against a state it is
+        # about to write back, so state alone cannot distinguish two claimers.
+        attempts_clause = ("AND i.attempts = $expect_attempts "
+                           if expected_attempts is not None else "")
         rows = self._q(
             f"MATCH (i:{ITEM_LABEL} {{id:$iid, batch_id:$bid, org_id:$org, "
             "state:$expect}}) "
+            f"WHERE 1=1 {attempts_clause}"
             "SET i.ref=$ref, i.name=$name, i.staged_path=$staged, "
             "    i.state=$state, i.reason=$reason, "
             "    i.content_key=$key, i.tokens_in=$tin, i.tokens_out=$tout, "
@@ -973,7 +1078,11 @@ class GraphBatchStore:
              "tin": int(item.tokens_in), "tout": int(item.tokens_out),
              "attempts": int(item.attempts),
              "changed": bool(item.content_changed),
-             "updated": item.updated_at},
+             "updated": item.updated_at,
+             # Sent only when the pattern above names it, so an unused parameter
+             # is never passed to the query.
+             **({"expect_attempts": int(expected_attempts)}
+                if expected_attempts is not None else {})},
         )
         return bool(rows)
 
@@ -1038,7 +1147,16 @@ class GraphBatchStore:
             {"org": org_id, "terminal": [str(s) for s in TERMINAL_ITEM_STATES],
              "batch_terminal": [str(s) for s in TERMINAL_BATCH_STATES]},
         )
-        return [r[0] for r in rows]
+        # ⛔ SORTED HERE, NOT IN CYPHER (#14415 review round 8, BLOCKING 1,
+        # measured). A `UNION` with a trailing `ORDER BY` is ACCEPTED by FalkorDB
+        # and the clause is then IGNORED — the real query came back in insertion
+        # order, byte-identical to the same query without it, three runs out of
+        # three (the single-arm control sorts correctly, so the engine honours
+        # `ORDER BY` and just not after a union). The rotating recovery window is
+        # only fair over a DETERMINISTIC list, so the order is imposed by the
+        # caller: an inert clause in the Cypher would have been exactly the
+        # "assertion that cannot fail" this branch keeps having to remove.
+        return sorted(r[0] for r in rows)
 
     def batch_counts(self, org_id: str, batch_ids: Sequence[str]
                      ) -> dict[str, dict[str, int]]:
@@ -1179,8 +1297,9 @@ BATCH_ITEMS_IN_FLIGHT = 2
 BATCH_RECLAIM_AFTER_S = 900.0
 
 
-def record_item_spend(org_id: str, item: BatchItem) -> int:
-    """Charge one item's MEASURED tokens to the `capture_extraction` meter.
+def record_item_spend(org_id: str, *, tokens_in: int = 0,
+                      tokens_out: int = 0) -> int:
+    """Charge ONE runner call's MEASURED tokens to the `capture_extraction` meter.
 
     ⛔ **ONE BUDGET, ONE METER** (owner `#14275`: *"one budget, not a fourth
     metered thing"*). A batch item that spends tokens must move the SAME
@@ -1189,31 +1308,82 @@ def record_item_spend(org_id: str, item: BatchItem) -> int:
     the bill, and the NEXT batch's estimate is computed against a headroom that
     no batch can ever consume.
 
-    Returns the tokens recorded (0 when the item spent nothing — the common case
-    today: the per-file indexer this route runs spends no model tokens, and
-    extraction is the `ingest --upgrade-all` sweep's job, declared as a residual).
-    A zero-token call is deliberately NOT made: `record_capture_usage` would
-    mint a `capture_calls` row for a capture that never happened, which is the
-    denominator that keeps a free capture distinguishable from an unmeasured one
-    (#3359) — burning it on a no-op would corrupt that reading on every document.
+    ⛔ **The caller passes the figures it JUST SPENT, never an item row**
+    (#14415 review round 4, BLOCKING 4). A row's ``tokens_in/out`` are the
+    document's totals: another process may have written them, or an earlier pass
+    of this one may already have charged them. Charging from the row therefore
+    double-charges a retried item (measured: pass 1 `queued` with 100 tokens, pass
+    2 `indexed` with 100 → 200 on the meter while the status surface said 100)
+    and re-charges a row a peer settled. :meth:`BatchCoordinator.run_item` puts
+    exactly the landed call's figures on ``item.charge_tokens``, which is not
+    persisted, so the same spend cannot be charged twice.
 
-    The increment's own failure is absorbed and logged at WARNING, exactly as the
-    capture ledger does (#3824/#3981): our bookkeeping fault must never fail a
-    document that was already indexed.
+    ``calls=0``: a batch item is NOT a capture call, and this layer has no
+    measured price for one. That keeps ``capture_calls`` (the denominator that
+    distinguishes a genuinely-free capture from an unmeasured one, #3359) reading
+    true, and it does not add a phantom ``$0`` to the spend ceiling. ⚠️ DECLARED
+    CONSEQUENCE: the cost ceiling therefore does not see batch spend — only the
+    token dimension moves. That is honest while the per-file indexer spends
+    nothing; when the extraction lane is wired here it must pass a real
+    ``cost_usd`` through a sibling call rather than let a token figure imply one.
+
+    Returns the tokens recorded (0 when the call spent nothing — the common case
+    today). A zero-token call is deliberately NOT made: it would mint a row for a
+    capture that never happened.
+
+    A failed increment is REPORTED to the durable operator surface, not merely
+    logged — the capture path's own rule (#3824/#3981): a metering loss must be
+    visible to the surface that exists for it, or the customer's spend silently
+    drifts from the ledger. It never fails a document that was already indexed.
     """
-    tokens_in = int(item.tokens_in or 0)
-    tokens_out = int(item.tokens_out or 0)
+    tokens_in = max(0, int(tokens_in or 0))
+    tokens_out = max(0, int(tokens_out or 0))
     if not org_id or (tokens_in + tokens_out) <= 0:
         return 0
     try:
         from tortoise.metering import record_capture_usage
 
-        record_capture_usage(org_id, tokens_in=tokens_in, tokens_out=tokens_out)
-    except Exception:  # never fail a delivered document
-        _logger.warning("batch metering dropped for item %s (team %s)",
-                        item.item_id, org_id, exc_info=True)
+        record_capture_usage(org_id, calls=0, tokens_in=tokens_in,
+                             tokens_out=tokens_out)
+    except Exception as exc:  # never fail a delivered document
+        _logger.warning("batch metering dropped for team %s", org_id,
+                        exc_info=True)
+        _report_unmetered(org_id, exc)
         return 0
     return tokens_in + tokens_out
+
+
+def _report_unmetered(org_id: str, exc: BaseException) -> None:
+    """Report a dropped token increment to `metering`'s durable surface.
+
+    Mirrors `hosted_api._alert_unmetered`: the same drop class the capture
+    ledger uses, so an operator reads ONE surface and a batch loss cannot hide
+    behind a log line (#14415 review round 4, NB6). Best-effort: this runs on a
+    failure path and must not raise a second time.
+    """
+    try:
+        from tortoise.metering import report_unmetered_increment
+
+        # ⛔ ITS OWN LANE, not `capture_ledger` (#14415 review round 7, N3).
+        # `lane` names the SWALLOW SITE so an alert is attributable to the handler
+        # that dropped the increment; reusing the capture lane made a batch loss
+        # indistinguishable from a capture loss on the surface that exists to
+        # attribute it. The keyword form is required — the swallow-site census
+        # matches `lane="…"` only, so a positional call would be invisible to the
+        # fence that is supposed to enumerate these sites.
+        report_unmetered_increment(lane="batch_ingest", org_id=org_id, error=exc)
+    except Exception:
+        # ⛔ THE FALLBACK STILL ALERTS (#14415 review round 7, N3). A log line on
+        # an ephemeral rootfs is the #3677 loss class; when `metering` itself
+        # cannot be imported, `operator_alert` is the standing fallback — the same
+        # one `hosted_api._alert_unmetered` uses.
+        try:
+            from tortoise.operator_alert import alert_unmetered_increment
+
+            alert_unmetered_increment("batch_ingest", org_id, exc)
+        except Exception:
+            _logger.warning("batch metering loss could not be reported for %s",
+                            org_id, exc_info=True)
 
 
 class BatchWorker:
@@ -1454,8 +1624,37 @@ class BatchCoordinator:
                 content_key: str | None = None,
                 content_changed: bool | None = None,
                 attempt: bool = False,
-                expected: BatchItemState | None = None) -> BatchItem:
+                expected: BatchItemState | None = None,
+                expected_attempts: int | None = None) -> BatchItem:
+        """Move one item and return the ROW (never the caller's intent).
+
+        A thin wrapper over :meth:`_advance_landed`, which also reports whether
+        THIS call's write landed — the one fact a caller cannot infer from the
+        returned row, because a lost race returns the WINNER's row, which can be
+        indistinguishable from a win.
+        """
+        return self._advance_landed(
+            org_id, item, new_state, reason=reason, tokens_in=tokens_in,
+            tokens_out=tokens_out, content_key=content_key,
+            content_changed=content_changed, attempt=attempt,
+            expected=expected, expected_attempts=expected_attempts)[0]
+
+    def _advance_landed(self, org_id: str, item: BatchItem,
+                        new_state: BatchItemState, *,
+                        reason: str = "", tokens_in: int | None = None,
+                        tokens_out: int | None = None,
+                        content_key: str | None = None,
+                        content_changed: bool | None = None,
+                        attempt: bool = False,
+                        expected: BatchItemState | None = None,
+                        expected_attempts: int | None = None
+                        ) -> tuple[BatchItem, bool]:
         """Move one item, validating the edge. Raises :class:`IllegalTransition`.
+
+        Returns ``(row, landed)``. ``landed`` is True iff THIS call's store write
+        was the one that took effect, which is what a caller needs to charge the
+        spend it caused and to refuse work it does not own (#14415 review round
+        5, HIGH).
 
         ⛔ **IT IS A COMPARE-AND-SET ON THE ROW'S STATE, and that is load-bearing**
         (#14219 review round 2, BLOCKING 4). Every caller holds a COPY read some
@@ -1482,6 +1681,13 @@ class BatchCoordinator:
         write (the drain's claim, a cancel) pass it and compare
         ``returned.state``. Without it the write is unconditional, which is only
         safe for a row with a single writer.
+
+        ``expected_attempts`` adds the CLAIM IDENTITY to the compare, and the
+        CLAIM PATHS MUST PASS IT (#14415 review round 5, BLOCKING 1): a re-claim
+        compares against a state it is about to write back, so state alone lets
+        two re-claimers both match one stale row — both run the runner, and one
+        document is extracted twice and billed twice (reproduced: 120 000 tokens
+        charged for 60 000 spent).
         """
         # ONE read, then the write is conditioned on it. `expect` is the state
         # this write is allowed to overwrite: the caller's explicit `expected`
@@ -1498,7 +1704,7 @@ class BatchCoordinator:
         elif stored.state is not expect:
             # Someone moved it between the caller's read and here. THEIR write
             # wins; report the row, write nothing.
-            return _sync_item(caller_item, stored)
+            return _sync_item(caller_item, stored), False
         else:
             # Work from the ROW, never from the caller's copy: the copy may
             # predate another writer's fact-only update (tokens, attempts).
@@ -1517,14 +1723,25 @@ class BatchCoordinator:
             # retried write after an ambiguous failure leaves the row (and its
             # `updated_at`) exactly as it was — the alternative treats a
             # duplicate write it cannot distinguish from a conflict as an error.
-            return _sync_item(caller_item, item)
+            # A pure no-op: nothing was written, so nothing "landed" — but it is
+            # also not a LOSS, and the row is the caller's own. Reported as landed
+            # so an idempotent retry is not mistaken for a race the caller lost.
+            return _sync_item(caller_item, item), True
         item.state = new_state
         if reason or new_state in TERMINAL_ITEM_STATES:
             item.reason = reason
+        # ⛔ THE ROW ACCUMULATES; it does not overwrite (#14415 review round 7,
+        # BLOCKING 2). A retried item has more than one runner call behind it, and
+        # the meter bills every one of them — so a row holding only the LAST
+        # call's figures made `status_body()["tokens_spent"]` report 100 for a
+        # 200-token spend: the bill and the receipt disagreeing about the same
+        # document, which is the very measurement this layer's metering docstring
+        # narrates as the defect it fixes. `tokens_in/out` are therefore the
+        # document's CUMULATIVE spend, which is exactly what the meter sums.
         if tokens_in is not None:
-            item.tokens_in = max(0, int(tokens_in))
+            item.tokens_in = max(0, item.tokens_in) + max(0, int(tokens_in))
         if tokens_out is not None:
-            item.tokens_out = max(0, int(tokens_out))
+            item.tokens_out = max(0, item.tokens_out) + max(0, int(tokens_out))
         if content_key is not None:
             item.content_key = content_key
         if content_changed is not None:
@@ -1534,12 +1751,13 @@ class BatchCoordinator:
         item.updated_at = self._now()
         if expect is None:
             self._store.put_item(org_id, item)
-            return _sync_item(caller_item, item)
-        if self._store.put_item_if_state(org_id, item, expect):
-            return _sync_item(caller_item, item)
+            return _sync_item(caller_item, item), True
+        if self._store.put_item_if_state(org_id, item, expect,
+                                         expected_attempts=expected_attempts):
+            return _sync_item(caller_item, item), True
         # The row moved between the read above and this write. Report IT — the
         # caller decides whether its own work still applies.
-        return _sync_item(caller_item, self._fresh(org_id, item))
+        return _sync_item(caller_item, self._fresh(org_id, item)), False
 
     # -- one item, end to end -------------------------------------------
     def run_item(self, org_id: str, item: BatchItem,
@@ -1589,6 +1807,23 @@ class BatchCoordinator:
         # from `embedded`, so re-claiming it would raise IllegalTransition and
         # abort the whole drain (found in review; the current production runner
         # never reports `embedded`, which is the only reason it was invisible).
+        # ⛔ THE ONE LIVENESS RULE (#14415 review round 4, BLOCKING 3). A row is
+        # CLAIMABLE only if nobody holds it: `queued` (no claimant), or
+        # `extracting`/`embedded` whose claim is STALE — the same window
+        # `recover()` applies. Everything else (`cancel`, `recover`) may be
+        # careful about a live claim, but if the DRAIN is not, the care buys
+        # nothing: a drain iterates every non-terminal item of a batch, so a
+        # fresh `extracting` row was re-claimed seconds after `recover()` had
+        # correctly declined to touch it — a second extraction of a document a
+        # peer was inside, its outcome landing as an illegal edge on top.
+        # Applying the rule HERE closes it for every caller, because every claim
+        # goes through this one arm.
+        if fresh.state in (BatchItemState.EXTRACTING, BatchItemState.EMBEDDED
+                           ) and _age_seconds(fresh.updated_at) < float(
+                               BATCH_RECLAIM_AFTER_S):
+            # Someone else's LIVE claim: not ours to run, and not ours to move.
+            # The caller drains the rest and reports this row as it is.
+            return fresh
         if fresh.state is BatchItemState.QUEUED:
             if fresh.attempts >= BATCH_MAX_ATTEMPTS:
                 # ⛔ THE RETRY CEILING (#14415 review B2). A ``retryable`` skip is
@@ -1606,7 +1841,8 @@ class BatchCoordinator:
                             "mid-item); re-submit this item to try again"))
             claimed = self.advance(org_id, fresh, BatchItemState.EXTRACTING,
                                    attempt=True,
-                                   expected=BatchItemState.QUEUED)
+                                   expected=BatchItemState.QUEUED,
+                                   expected_attempts=fresh.attempts)
             # ⛔ THE CLAIM IS A COMPARE-AND-SET, AND A LOST ONE DOES NOT RUN THE
             # RUNNER (#14415 review round 4, BLOCKING 1). A cancel that landed
             # between the read above and this write leaves the row `cancelled`;
@@ -1620,19 +1856,10 @@ class BatchCoordinator:
             fresh = claimed
         elif fresh.state in (BatchItemState.EXTRACTING,
                              BatchItemState.EMBEDDED):
-            # ⛔ A FRESH CLAIM MAY BELONG TO A LIVE PEER — LEAVE IT ALONE
-            # (#14415 review round 5, BLOCKING 2). The staleness window used to
-            # be consulted only in `recover()`, which decides per BATCH; the CLAIM
-            # is per ITEM, so the moment a batch had any `queued` sibling this
-            # drain re-entered an `extracting` row another instance was inside the
-            # runner call on — two extractions of one document, two graph writes,
-            # charged twice. The guard belongs HERE, where the claim is taken.
+            # The fresh-claim guard is ABOVE and covers this arm too — one rule,
+            # one place (#14415 review round 7, N5: the copy that lived here was
+            # unreachable, proven by line-tracing `run_item`).
             #
-            # ⚠️ DECLARED RESIDUAL (kept from the design): an item that legitimately
-            # runs longer than the window can be re-claimed. A real lease (a
-            # heartbeat on the row) is the fix and needs the drain to refresh it.
-            if _age_seconds(fresh.updated_at) < float(BATCH_RECLAIM_AFTER_S):
-                return fresh
             # ⛔ A RE-ENTERED CLAIM IS AN ATTEMPT TOO (#14415 review round 3,
             # BLOCKING 3). The ceiling above only ran for a `queued` item, so an
             # item re-driven from a DEAD claim (`extracting`/`embedded` — its
@@ -1647,22 +1874,33 @@ class BatchCoordinator:
                     reason=(f"gave up after {fresh.attempts} attempt(s) on an "
                             "unsettled claim — its own bookkeeping write never "
                             "landed; re-submit this item to try again"))
-            # ⛔ COMPARE AGAINST THE PRE-CALL COUNT, captured here: `advance`
-            # updates the caller's own object in place (see `_sync_item`), so
-            # `fresh.attempts` is already the NEW value by the line below and
-            # `reclaimed.attempts <= fresh.attempts` would read a landed re-claim
-            # as lost — an item that `embedded` and then reported itself
-            # unclaimed, forever.
+            # ⛔ A RE-CLAIM IS TWO STATE-CHANGING COMPARE-AND-SETS, NOT ONE
+            # (#14415 review round 5, BLOCKING 1). A single re-claim writes
+            # `state = <the state it read>`, so the compare key is the value being
+            # written back: two re-claimers over one stale row BOTH matched, both
+            # called the runner, and one document was extracted twice and BILLED
+            # TWICE (reproduced: 2 runner calls, 120 000 tokens charged for 60 000
+            # spent). Voiding the dead claim first is a REAL state change
+            # (`extracting` → `queued`), so exactly one re-claimer can win it —
+            # and the pair also makes the loss unambiguous, which an `attempts`
+            # comparison could not: the loser's returned row is the winner's, so
+            # "did MY write land" is only answerable from a state the loser's own
+            # write would have changed.
             attempts_before = fresh.attempts
-            reclaimed = self.advance(org_id, fresh, fresh.state,
-                                    reason="re-claimed by a retry pass",
-                                    attempt=True, expected=fresh.state)
-            if reclaimed.attempts <= attempts_before:
-                # The re-claim did not land (a cancel, or another drain moved or
-                # claimed it): the row is authoritative, so report it instead of
-                # spending tokens over a claim we do not hold.
-                return reclaimed
-            fresh = reclaimed
+            voided = self.advance(org_id, fresh, BatchItemState.QUEUED,
+                                  reason="re-claimed by a retry pass",
+                                  expected=fresh.state,
+                                  expected_attempts=attempts_before)
+            if voided.state is not BatchItemState.QUEUED:
+                # Another drain voided or settled it first: its row is the truth.
+                return voided
+            claimed = self.advance(org_id, voided, BatchItemState.EXTRACTING,
+                                   attempt=True,
+                                   expected=BatchItemState.QUEUED,
+                                   expected_attempts=attempts_before)
+            if claimed.state is not BatchItemState.EXTRACTING:
+                return claimed
+            fresh = claimed
         try:
             outcome = active(fresh)
         except Exception as exc:  # an escaped exception is a FAILED ITEM
@@ -1673,9 +1911,18 @@ class BatchCoordinator:
         # already terminal and must not be resurrected (the customer stopped it).
         latest = self._fresh(org_id, fresh)
         if latest.terminal:
-            return latest
+            # ⛔ OUR CALL STILL SPENT, AND THE ROW MUST SAY SO TOO (#14415 review
+            # rounds 7 and 8, N1 then BLOCKING 2). Reaching here means the runner
+            # RAN and reported tokens, but the row was settled by someone else
+            # first (a peer, or a cancel). The tokens are a real spend of a
+            # genuinely separate call, so they are BILLED — and recorded on the
+            # row as well, because a meter that bills 735 against a receipt that
+            # says 5 is the same bill/receipt disagreement this layer keeps having
+            # to remove (measured: ledger 735 / `tokens_spent` 5).
+            return self._bill(org_id, latest, outcome.tokens_in,
+                              outcome.tokens_out)
         try:
-            return self.advance(
+            settled, landed = self._advance_landed(
                 org_id, latest, outcome.state, reason=outcome.reason,
                 tokens_in=outcome.tokens_in, tokens_out=outcome.tokens_out,
                 content_changed=outcome.content_changed,
@@ -1683,10 +1930,68 @@ class BatchCoordinator:
                 expected=latest.state)
         except IllegalTransition:
             # Another writer settled this item while the runner was working (a
-            # cancel, or the same item drained twice across processes). The
-            # item's row is authoritative — report it rather than crash the
-            # drain, which is what would lose every LATER item.
-            return self._fresh(org_id, fresh)
+            # cancel, or the same item drained twice across processes). The item's
+            # ROW is authoritative — report it rather than crash the drain, which
+            # is what would lose every LATER item. ⛔ AND OUR SPEND IS STILL BILLED
+            # AND RECORDED (#14415 review round 8, BLOCKING 2b): this arm used to
+            # record NOTHING, so tokens that really were spent appeared on neither
+            # surface — the same situation as the terminal arm above, one branch
+            # away, decided the other way.
+            return self._bill(org_id, self._fresh(org_id, fresh),
+                              outcome.tokens_in, outcome.tokens_out)
+        if landed:
+            # ⛔ THE CHARGE RECORD (#14415 review round 4, BLOCKING 4 / round 5,
+            # HIGH). Only a call this process ACTUALLY LANDED may be charged, and
+            # only for the figures it just spent — never the row's totals, which a
+            # peer may have written or an earlier pass may already have charged.
+            # `landed` is `_advance_landed`'s EXPLICIT flag, not "the returned row
+            # has the state I wanted": a peer settling to the same state would
+            # pass that test and be charged a second time.
+            settled.charge_in = max(0, int(outcome.tokens_in or 0))
+            settled.charge_out = max(0, int(outcome.tokens_out or 0))
+            return settled
+        # The write did not land (a peer moved the row first): the row is
+        # authoritative, and our spend is still billed and recorded on it.
+        return self._bill(org_id, settled, outcome.tokens_in,
+                          outcome.tokens_out)
+
+    def _bill(self, org_id: str, item: BatchItem, tokens_in: int | None,
+              tokens_out: int | None) -> BatchItem:
+        """Record one runner call's spend on the ROW and mark it for the meter.
+
+        ⛔ THE ROW AND THE LEDGER MUST HOLD THE SAME NUMBER (#14415 review round
+        8, BLOCKING 2). `tokens_in/out` are the document's cumulative spend, and
+        the meter sums every call, so a call whose outcome could not be written
+        (the row went terminal, or moved under the compare-and-set) still has to
+        accumulate — otherwise the receipt under-reports the bill. The write here
+        is additive and best-effort: if it fails, the ledger is still charged (the
+        spend is real) and the row is left as it was, which is the visible form of
+        the loss rather than a silent one.
+
+        ⚠️ DECLARED RESIDUAL: this is a read-modify-write against a state-based
+        compare-and-set, so two writers that both read before either writes could
+        lose one accumulation. It is not reachable from today's call sites (every
+        token-carrying write through `advance` changes state, and the state CAS
+        then serialises the pair), but a caller that passes tokens on a
+        state-preserving edge would make it reachable — a counter column, or a
+        second CAS on the token total, is the fix.
+        """
+        tokens_in = max(0, int(tokens_in or 0))
+        tokens_out = max(0, int(tokens_out or 0))
+        item.charge_in = tokens_in
+        item.charge_out = tokens_out
+        if not (tokens_in or tokens_out):
+            return item
+        item.tokens_in = max(0, item.tokens_in) + tokens_in
+        item.tokens_out = max(0, item.tokens_out) + tokens_out
+        item.updated_at = self._now()
+        try:
+            self._store.put_item(org_id, item)
+        except Exception:
+            _logger.warning("batch spend not recorded on item %s (team %s): the "
+                            "ledger is charged, the row's total is short",
+                            item.item_id, org_id, exc_info=True)
+        return item
 
     def _fresh(self, org_id: str, item: BatchItem) -> BatchItem:
         stored = self._store.get_item(org_id, item.batch_id, item.item_id)
@@ -1766,11 +2071,26 @@ class BatchCoordinator:
                                               "cancelled by the customer"),
                                       expected=BatchItemState.QUEUED)
                 stopped = stopped or halted.state is BatchItemState.CANCELLED
-            elif item.state in (BatchItemState.EXTRACTING,
-                                BatchItemState.EMBEDDED) and item.attempts == 0:
-                # Claimed by nobody: the resume edge left it here, no runner ran.
+            elif (item.state in (BatchItemState.EXTRACTING,
+                                 BatchItemState.EMBEDDED)
+                  # ⛔ THE TEST IS THE CLAIM'S AGE, NOT ITS ATTEMPT COUNT (#14415
+                  # review round 5, BLOCKING 1). `attempts == 0` is UNREACHABLE in
+                  # production: every writer of `extracting` increments it (the
+                  # claim at `run_item`, and the re-claim), and the resume path
+                  # keeps the counter. So the arm the docstring documents — a dead
+                  # claim, "not claimed by any live runner", stopped for free —
+                  # never ran: a batch whose only non-terminal item was a dead
+                  # claim fell through to `stopped = False`, was reported
+                  # `already finished`, and the next status poll's `recover()`
+                  # requeued and RAN the document, charging tokens AFTER the
+                  # customer cancelled. Staleness is what makes a claim dead.
+                  and _age_seconds(item.updated_at)
+                  >= float(BATCH_RECLAIM_AFTER_S)):
+                # Claimed by nobody LIVE: the process that held it is gone, so no
+                # runner is spending tokens on it and it can be stopped for free.
                 moved = self.advance(org_id, item, BatchItemState.QUEUED,
-                                     expected=item.state)
+                                     expected=item.state,
+                                     expected_attempts=item.attempts)
                 if moved.state is BatchItemState.QUEUED:
                     halted = self.advance(org_id, moved,
                                           BatchItemState.CANCELLED,
@@ -1818,7 +2138,8 @@ class BatchCoordinator:
                               BatchItemState.EMBEDDED):
                 released = self.advance(org_id, item, BatchItemState.QUEUED,
                                         reason="cancelled batch, claim released",
-                                        expected=item.state)
+                                        expected=item.state,
+                                        expected_attempts=item.attempts)
                 if released.state is BatchItemState.QUEUED:
                     self.advance(
                         org_id, released, BatchItemState.CANCELLED,
@@ -1831,7 +2152,7 @@ class BatchCoordinator:
     def recover(self, org_id: str, *,
                 live_batches: Collection[str] | Callable[[str], bool] = (),
                 stale_after_s: float | None = None,
-                limit: int = 50) -> list[str]:
+                limit: int = 50, offset: int = 0) -> list[str]:
         """Re-open every batch with unfinished items. Returns the batch ids.
 
         ⛔ **What "recoverable" has to mean.** An item found ``extracting`` (or
@@ -1871,8 +2192,8 @@ class BatchCoordinator:
             else (lambda batch_id, _live=live_batches: batch_id in _live))
         resumed: list[str] = []
         stamp = self._now()
-        window = (float(BATCH_RECLAIM_AFTER_S) if stale_after_s is None
-                  else float(stale_after_s))
+        reclaim_after = (float(BATCH_RECLAIM_AFTER_S) if stale_after_s is None
+                         else float(stale_after_s))
         # ⛔ TWO independent bounds, and both are needed.
         #
         # `is_live` answers "is a drain in THIS process working this batch right
@@ -1894,85 +2215,132 @@ class BatchCoordinator:
         # tenant's first batch touch, from a request, on the 2-worker bookkeeping
         # pool — a tenant with hundreds of unfinished batches must not turn a
         # `GET /v1/batches` into an unbounded scan of all of them.
-        for batch_id in self._store.pending_batches(org_id)[:max(1, int(limit))]:
+        #
+        # ⛔ AND ROTATING, because a prefix is a STRANDING (#14415 review round 4,
+        # BLOCKING 2): `pending_batches()` order is stable, so a plain
+        # `[:limit]` re-scanned the same first 50 on every call and batches 51+
+        # were NEVER reached by any scan in the process's life — non-terminal for
+        # ever, which is the lost-document class the issue forbids. The caller
+        # advances `offset` per scan and wraps, so every unfinished batch is
+        # reached within `ceil(n / limit)` scans.
+        # ⛔ SORTED HERE, for BOTH stores (#14415 review round 8, BLOCKING 1).
+        # `GraphBatchStore` sorts its own result (Cypher ignores `ORDER BY` after
+        # a `UNION`), and the in-memory store returns insertion order — sorting at
+        # the one place that consumes the list makes the rotation's fairness
+        # independent of the store.
+        pending = sorted(self._store.pending_batches(org_id))
+        width = max(1, int(limit))
+        start = int(offset) % len(pending) if pending else 0
+        # Rotate, then take a window: rotating first means the wrap cannot
+        # repeat a batch (a plain slice-plus-prefix appended the head twice, so
+        # one batch was reported resumed twice in a single call).
+        rotated = pending[start:] + pending[:start]
+        for batch_id in rotated[:width]:
+            # ⛔ ONE BATCH'S FAULT MUST NOT ABORT THE SCAN (#14415 review round 8,
+            # NB3). A row whose own read raises (`get_batch`/`items` on a corrupt
+            # or vanished row — `settle()`'s `KeyError`, a malformed
+            # `estimate_json`) used to propagate out of `recover()`, so the
+            # caller lost the whole window and the failure throttle was written
+            # against an offset that never moved: that batch was retried for ever
+            # and every batch behind it was never inspected at all. The scan goes
+            # on; the fault is logged and the next scan covers it again.
             if is_live(batch_id):
-                # A drain in THIS process owns this batch's claim; see the
-                # `live_batches` note above. Requeueing it would destroy the
-                # outcome of work that is still running.
+                # A drain in THIS process owns this batch's claim; requeueing it
+                # would destroy the outcome of work that is still running.
                 continue
-            batch = self._store.get_batch(org_id, batch_id)
-            if batch is None:
-                # ⛔ ORPHAN ROWS, not an inconsistency (#14219 review). Acceptance
-                # writes the items BEFORE the batch row (so an ACK never names a
-                # document we did not record); a crash between the two leaves
-                # items with no batch. Skipping them would strand those rows on
-                # every boot, invisible on every surface. Adopt them: the items
-                # ARE the record of accepted work.
-                orphan_items = self._store.items(org_id, batch_id)
-                if not orphan_items:
+            try:
+                moved = self._resume_batch(org_id, batch_id,
+                                           reclaim_after=reclaim_after,
+                                           stamp=stamp)
+            except Exception:
+                _logger.exception("batch %s: recovery of this batch failed; "
+                                  "continuing the scan", batch_id)
+                continue
+            if moved is not None:
+                resumed.append(batch_id)
+        return resumed
+
+    def _resume_batch(self, org_id: str, batch_id: str, *,
+                      reclaim_after: float, stamp: str) -> bool | None:
+        """Re-open ONE batch. Returns ``True`` when reported, ``None`` when not.
+
+        Split out of :meth:`recover` so ONE batch's read fault cannot abort the
+        tenant's whole scan (see the caller's note).
+        """
+        batch = self._store.get_batch(org_id, batch_id)
+        if batch is None:
+            # ⛔ ORPHAN ROWS, not an inconsistency (#14219 review). Acceptance
+            # writes the items BEFORE the batch row (so an ACK never names a
+            # document we did not record); a crash between the two leaves items
+            # with no batch. Skipping them would strand those rows on every boot,
+            # invisible on every surface. Adopt them: the items ARE the record of
+            # accepted work.
+            orphan_items = self._store.items(org_id, batch_id)
+            if not orphan_items:
+                return None
+            batch = Batch(batch_id=batch_id, org_id=org_id,
+                          state=BatchState.RESUMING,
+                          created_at=orphan_items[0].updated_at,
+                          updated_at=orphan_items[0].updated_at)
+            self._store.put_batch(batch)
+        if batch.state is BatchState.CANCELLED:
+            # A cancelled batch is NOT resumed: the customer stopped it, and a
+            # restart is not a reason to spend their allowance. But an item left
+            # non-terminal by a crash AFTER the cancel must not sit non-terminal
+            # for ever (it would be re-listed as pending on every boot and never
+            # resolved — an inert row). At boot nothing is running, so its claim
+            # is void: settle it ``cancelled``, without inventing token counts for
+            # a run we cannot observe.
+            self.abandon_dead_claims(org_id, batch_id)
+            return None
+        items = self._store.items(org_id, batch_id)
+        moved = False
+        for item in items:
+            if item.state in (BatchItemState.EXTRACTING,
+                              BatchItemState.EMBEDDED):
+                if _age_seconds(item.updated_at) < reclaim_after:
+                    # A LIVE claim: not ours to TAKE — but the batch is still
+                    # ours to REPORT (#14415 review round 5, BLOCKING 1). Skipping
+                    # the whole batch here discarded the decision instead of
+                    # deferring it: an item in flight when the process died is
+                    # SECONDS old at the restart that recovers it, so the ordinary
+                    # redeploy stranded it for the process lifetime. The drain
+                    # re-checks the window itself (`run_item`) and leaves a fresh
+                    # claim alone, so listing the batch is safe.
                     continue
-                batch = Batch(batch_id=batch_id, org_id=org_id,
-                              state=BatchState.RESUMING,
-                              created_at=orphan_items[0].updated_at,
-                              updated_at=orphan_items[0].updated_at)
-                self._store.put_batch(batch)
-            if batch.state is BatchState.CANCELLED:
-                # A cancelled batch is NOT resumed: the customer stopped it, and
-                # a restart is not a reason to spend their allowance. But an item
-                # left non-terminal by a crash AFTER the cancel must not sit
-                # non-terminal for ever (it would be re-listed as pending on
-                # every boot and never resolved — an inert row). At boot nothing
-                # is running, so its claim is void: settle it ``cancelled``,
-                # without inventing token counts for a run we cannot observe.
-                self.abandon_dead_claims(org_id, batch_id)
-                continue
-            items = self._store.items(org_id, batch_id)
-            moved = False
-            for item in items:
-                if item.state in (BatchItemState.EXTRACTING,
-                                  BatchItemState.EMBEDDED):
-                    if _age_seconds(item.updated_at) < window:
-                        # A LIVE claim: not ours to TAKE — but the batch is still
-                        # ours to REPORT (#14415 review round 5, BLOCKING 1).
-                        # Skipping the whole batch here discarded the decision
-                        # instead of deferring it: an item in flight when the
-                        # process died is SECONDS old at the restart that
-                        # recovers it, so the ordinary redeploy stranded it for
-                        # the process lifetime (`_BATCH_RECOVERED` makes this scan
-                        # one-shot). The drain re-checks the window itself
-                        # (`run_item`) and leaves a fresh claim alone, so listing
-                        # the batch is safe: it works the `queued` siblings,
-                        # re-drives the leftover, and the tick revisits until the
-                        # claim is stale enough to reclaim.
-                        continue
-                    self.advance(org_id, item, BatchItemState.QUEUED,
-                                 reason="resumed after a process restart — "
-                                        "requeued for a fresh attempt",
-                                 expected=item.state)
-                    moved = True
-            # ⛔ Report a batch as RESUMED when this call gave it work, found
-            # unclaimed work, OR found only a fresh claim that a later pass must
-            # revisit (#14415 review round 5, BLOCKING 1 — defer, never discard).
-            # `_drain_batch` refuses to re-enter a fresh claim on its own
-            # (`run_item`), so the peer a fresh claim may belong to is not raced.
-            if moved or any(not i.terminal for i in items):
+                # ⛔ The requeue carries the CLAIM IDENTITY too (review round
+                # 5): a peer that re-claimed this row between our read and this
+                # write leaves the row at a new `attempts`, so a state-only
+                # compare would requeue work somebody is inside the runner call
+                # on. And `moved` follows the WRITE, not the call: a lost compare
+                # must not report the batch as resumed.
+                requeued = self.advance(
+                    org_id, item, BatchItemState.QUEUED,
+                    reason="resumed after a process restart — "
+                           "requeued for a fresh attempt",
+                    expected=item.state,
+                    expected_attempts=item.attempts)
+                moved = moved or requeued.state is BatchItemState.QUEUED
+        if moved or any(not i.terminal for i in items):
+            # ⛔ BUT ONLY RELABEL A BATCH THIS SCAN GAVE WORK TO (#14415 review
+            # round 7, N7). A batch whose only non-terminal item is a FRESH claim
+            # may be running in a PEER process right now; writing `resuming` over
+            # its row made the customer's status surface say "resuming" over work
+            # in progress, until the peer's own `settle()` repaired it — hours for
+            # a 500-item batch. Return it (a later pass must revisit it) without
+            # touching its state.
+            if moved or any(i.state is BatchItemState.QUEUED for i in items):
                 batch.state = BatchState.RESUMING
                 batch.updated_at = stamp
                 self._store.put_batch(batch)
-                resumed.append(batch_id)
-            elif items:
-                # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2,
-                # B1 arm 2 / B2's root). Every item is terminal but the batch row
-                # is not: `settle()`'s own write timed out, or the process died
-                # between the last item write and the settle. Nothing else ever
-                # re-derived it — `pending_batches()` selected on ITEM state, so
-                # such a row was invisible even to a fresh boot, and
-                # `cancel()` was the only call that would move it (which is how
-                # a charged, fully-indexed batch came to be relabelled
-                # `cancelled`). `settle()` is idempotent and derives the terminal
-                # state from the rows, so this is the repair.
-                self.settle(org_id, batch_id)
-        return resumed
+            return True
+        if items:
+            # ⛔ A LAGGING BATCH ROW IS REPAIRED HERE (#14415 review round 2, B1
+            # arm 2 / B2's root). Every item is terminal but the batch row is not:
+            # `settle()`'s own write timed out, or the process died between the
+            # last item write and the settle. Nothing else ever re-derived it.
+            self.settle(org_id, batch_id)
+        return None
 
     # -- batch settlement -------------------------------------------------
     def settle(self, org_id: str, batch_id: str) -> Batch:
@@ -1991,11 +2359,27 @@ class BatchCoordinator:
         if batch.state is BatchState.CANCELLED:
             return batch
         if not items or any(not i.terminal for i in items):
-            if batch.state is not BatchState.RESUMING:
+            # ⛔ `resuming` is a TRANSIENT label, not a second `running`
+            # (#14415 review round 4, NB11). It used to persist for the whole
+            # life of a resumed batch, because nothing but the terminal write
+            # could move it — so the status surface said "resuming" over a batch
+            # that had been working for an hour. Once a worker has claimed an
+            # item (or any item has settled), the resume is OVER.
+            started = any(i.state in (BatchItemState.EXTRACTING,
+                                      BatchItemState.EMBEDDED) or i.terminal
+                          for i in items)
+            if batch.state is not BatchState.RUNNING and (
+                    batch.state is not BatchState.RESUMING or started):
                 batch.state = BatchState.RUNNING
                 batch.updated_at = self._now()
                 self._store.put_batch(batch)
             return batch
+        # ⛔ THE TERMINAL WRITE IS A COMPARE-AND-SET (#14415 review round 5, P2).
+        # `batch` above was read BEFORE `items()`, so a `cancel()` landing in
+        # between wrote CANCELLED and this write overwrote it with `partial` —
+        # erasing `cancelled_at`/`cancel_reason` on a billing-visible surface AND
+        # hiding the row from `pending_batches()`, so nothing ever repaired it.
+        # A cancel is never overwritten by a derived state.
         ok = sum(1 for i in items if i.state is BatchItemState.INDEXED)
         if not ok and all(i.state is BatchItemState.CANCELLED for i in items):
             # ⛔ ``cancelled`` IS DERIVED, NOT ONLY RECORDED (#14415 review round
@@ -2014,11 +2398,25 @@ class BatchCoordinator:
             batch.updated_at = self._now()
             self._store.put_batch(batch)
             return batch
-        batch.state = (BatchState.COMPLETED if ok == len(items)
-                       else BatchState.PARTIAL)
+        derived = (BatchState.COMPLETED if ok == len(items)
+                   else BatchState.PARTIAL)
+        batch.state = derived
         batch.updated_at = self._now()
-        self._store.put_batch(batch)
-        return batch
+        # ⛔ A DERIVED TERMINAL STATE MAY NOT OVERWRITE A CUSTOMER CANCEL
+        # (#14415 review round 5, P2): the row read at the top of this method may
+        # predate a `cancel()` that landed while `items()` was being read, and
+        # `partial`/`completed` is terminal — `pending_batches()` would no longer
+        # select the row, so nothing would ever repair it and the customer's
+        # `cancelled_at`/`cancel_reason` would be gone. On a lost compare the ROW
+        # is returned, unmodified.
+        # `CANCELLED` is deliberately NOT in the expected set: a cancel that
+        # landed in the window is exactly what this compare exists to respect.
+        if self._store.put_batch_if_state(
+                batch,
+                (BatchState.ACCEPTED, BatchState.RUNNING, BatchState.RESUMING,
+                 derived)):
+            return batch
+        return self._store.get_batch(batch.org_id, batch.batch_id) or batch
 
 
 # ── receipt shape ──────────────────────────────────────────────────────────
@@ -2126,7 +2524,24 @@ def _age_seconds(stamp: str) -> float:
         return float("inf")
     if then.tzinfo is None:
         then = then.replace(tzinfo=UTC)
-    return max(0.0, (datetime.now(UTC) - then).total_seconds())
+    delta = (datetime.now(UTC) - then).total_seconds()
+    if delta < 0:
+        # ⛔ A FUTURE STAMP IS FRESH ONLY WITHIN ONE RECLAIM WINDOW (#14415 review
+        # round 8, NB1 — measured both ways). The two failure modes are opposite:
+        #
+        # * `max(0.0, delta)` (the original) read a stamp months in the future as
+        #   age 0 — permanently "someone is working on it": never re-claimed, the
+        #   retry ceiling never incremented, the document non-terminal for ever.
+        # * a 60 s cliff read 61 s of ORDINARY two-box clock skew as ANCIENT and
+        #   re-ran the runner on a claim that was seconds old — a second
+        #   extraction, a second graph write, a second charge.
+        #
+        # So: within one reclaim window it is just clock skew (age 0, i.e. FRESH —
+        # the safe direction, nobody is robbed); beyond that the stamp is not a
+        # clock, it is corruption or a huge jump, and it is treated as ANCIENT
+        # because the outcome of believing it is a lost document.
+        return 0.0 if (-delta) <= float(BATCH_RECLAIM_AFTER_S) else float("inf")
+    return delta
 
 
 def _utc_now() -> str:

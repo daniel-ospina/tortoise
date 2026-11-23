@@ -1858,9 +1858,11 @@ SWEEP_NAMES = 66
 #: before this branch is involved at all. This cut re-derives the pair from the MERGED tree, so it repairs
 #: that red. ⛔ Those two are RECORDED, not attributed: resolving which rows came from where is
 #: `--report --base`'s work, and this block does not claim it (the blocks above state the same convention).
-#: THIS BRANCH'S OWN CONTRIBUTION IS EXACTLY ONE ROW, measured by `--report --base 28ca66878d` on BOTH
-#: trees — `main` `0fbfbb5b210c` reads **11898** over **861** rows, the merged tree reads **11899** over
-#: **862** — and no row was absorbed in either direction:
+#: THIS BRANCH'S OWN CONTRIBUTION IS EXACTLY ONE OCCURRENCE INSIDE ONE EXISTING ROW, measured by
+#: `--report --base 28ca66878d --top 3000` on BOTH trees and diffed row by row: `main` `0fbfbb5b210c`
+#: reads **11898** over **861** distinct rows, and the merged tree reads **11899** over the SAME **861**
+#: rows — `store.list_batches` was REMOVED by this branch (`b59b38787f3a`, below), so the row count does not move
+#: and no row is absorbed in either direction.
 #:   * `proj.g.query` **3650 → 3651** (+1), `tortoise/hosted_api.py::_batch_store_for`:
 #:     `_batch_ingest.GraphBatchStore(proj.g.query)`. #14219's batch layer is handed the project handle's
 #:     own door instead of opening a second one — the ordinary-word receiver shape this pin exists to
@@ -1874,7 +1876,17 @@ SWEEP_NAMES = 66
 #: `list_recent_batches` (the REST handler keeps the route's own name, which is not a receiver call site).
 #: Re-pin only from a tree whose covering suites are green: `--check` exits 0 on the pair below with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11899, "527d305da858bb14")
+#: ⛔ RE-CUT AGAIN AT `4b7be98fb38b` — ONE OCCURRENCE, NOT A NEW SHAPE, and the row count does not move.
+#: `--report --base 28ca66878d --top 3000` on the previous head (`1cd022aa06cc`) and on this one, diffed
+#: row by row, yields exactly one difference out of an UNCHANGED **861**-row set:
+#:   * `seen.update` **101 → 102** (+1) — an ordinary-word receiver on a Python SET (`.update(...)` in the
+#:     meter bookkeeping), which is the class this pin exists to DECLARE and deliberately leaves alone: the
+#:     sweep cannot type the receiver, and a `set` is not an SDK method, so "fixing" it would mean renaming
+#:     a builtin method call. `untyped receivers left alone (deliberate, reported): 11900`, and
+#:     `typed references still pointing at a public name` stays **0**, so no typed call site is legitimised
+#:     by this re-cut — that is the property `--check` gates, and the pin only records where the edge sits.
+#: Re-pinned by `--repin` on THIS tree, never by arithmetic on the last pair: `(11900, "79e3ca9943a7dfee")`.
+SWEEP_RESIDUE = (11900, "79e3ca9943a7dfee")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
