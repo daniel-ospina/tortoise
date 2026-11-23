@@ -2436,11 +2436,21 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     # hole — `builtins.getattr(sys, "modules")` reds there — so this was an in-file
     # asymmetry. Accept the attribute spelling, and let the mapping lookup resolve a subscript
     # spelling through the SAME `_builtin_lookup_name` the rest of the file uses.
+    # ⛔ AND THE DOTTED MODULE RECEIVER OF THE FETCHER (#14326 review cycle 29, MEASURED GREEN:
+    # `getattr(builtins.dict, "pop")(_d, "exec")(<read>)` while `getattr(dict, "pop")` is refused
+    # by the disjunct below — `builtins.dict` IS `dict`, and the module member is already a
+    # resolved spelling everywhere else in this file).
     if (isinstance(node.func, ast.Name) and node.func.id in getattr_fetchers) \
             or (isinstance(node.func, ast.Attribute)
                 and node.func.attr in getattr_fetchers
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id in (names | dict_names)) \
+            or (isinstance(node.func, ast.Attribute)
+                and node.func.attr in getattr_fetchers
+                and isinstance(node.func.value, ast.Attribute)
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id in names
+                and node.func.value.attr in names) \
             or (_builtin_lookup_name(node.func, names, consts, dict_names, launderers,
                                      members=getattr_fetchers,
                                      getattr_fetchers=getattr_fetchers) in getattr_fetchers):
@@ -2455,6 +2465,15 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
         if (len(_positions) < 2
                 or not ((isinstance(_positions[0], ast.Name)
                          and _positions[0].id in (names | dict_names))
+                        # ⛔ AND THE DOTTED MODULE RECEIVER (#14326 review cycle 29, MEASURED
+                        # GREEN: `getattr(builtins.dict, "pop")(_d, "exec")(<read>)` while
+                        # `getattr(dict, "pop")` is refused one disjunct up — `builtins.dict`
+                        # IS `dict`, and the RECEIVER test was the missing half, not the fetcher
+                        # test: it required a bare `ast.Name`).
+                        or (isinstance(_positions[0], ast.Attribute)
+                            and isinstance(_positions[0].value, ast.Name)
+                            and _positions[0].value.id in names
+                            and _positions[0].attr in names)
                         or _is_builtins_mapping(_positions[0], names, dict_names,
                                                 launderers, consts))):
             return None
@@ -2468,8 +2487,25 @@ def _builtin_lookup_name(node: ast.AST, names: frozenset[str],
     # the same conclusion at its round 26 after rounds 24-25 chased an unbounded callee list (a
     # lambda, `operator.getitem`, `_dg = dict.get`, an alias of an alias): the shape is the
     # identity. `_d = dict; _d.pop(...)` and `builtins.dict.pop(...)` come free.
-    if (isinstance(node.func, ast.Attribute)
-            and node.func.attr in _BUILTINS_MAPPING_READS):
+    # ⛔ AND THE CALLEE FETCHED WITH `getattr` (#14326 review cycle 29, EACH MEASURED GREEN
+    # **and LIVE**: `getattr(dict, "pop")(_d, "exec")(<read>)` and its `get` / `setdefault` /
+    # `__getitem__` / `getattr(builtins.dict, …)` twins executed the read, while EVERY direct
+    # spelling — `dict.pop(m, "exec")`, `_d = dict; _d.pop(…)`, `builtins.dict.pop(…)`,
+    # `vars(dict)["pop"](…)` — is a REFUSED row). The callee is a `Call` here, so the
+    # Attribute test below never saw it; `_builtin_lookup_name` already resolves
+    # `getattr(dict, "pop")` to `"pop"` under this very `members=` set — the SAME disjunct the
+    # namespace half of `_is_builtins_mapping` got in cycle 28, one call site over.
+    if ((isinstance(node.func, ast.Attribute)
+         and node.func.attr in _BUILTINS_MAPPING_READS)
+            # ⛔ AND THE `getattr_fetchers` SEAM, so the DOTTED module receiver resolves too
+            # (#14326 review cycle 29, MEASURED GREEN: `getattr(builtins.dict, "pop")(_d, "exec")`
+            # while `getattr(dict, "pop")` is refused by the same arm — the fetcher set is what
+            # the resolver needs to read `getattr` as a fetcher at all, and `builtins.dict` is
+            # the module spelling this file already resolves elsewhere).
+            or _builtin_lookup_name(node.func, names | {"dict", "copy"}, consts,
+                                    dict_names, launderers,
+                                    members=_BUILTINS_MAPPING_READS,
+                                    getattr_fetchers=frozenset({"getattr"})) is not None):
         # ⛔ AND THE MULTI-ELEMENT LITERAL SPLICE (#14326 review cycle 14, MEASURED GREEN
         # **and LIVE**: `dict.get(*(_m, "exec"))(<read>)` while `dict.get(_m, "exec")` is
         # REFUSED). The raw `args` count the splice as one position, so the key was never read.
@@ -8243,6 +8279,11 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         # KEPT (#14326 review cycle 25, MEASURED: it raises AttributeError — `getattr` reads an
         # ATTRIBUTE and a namespace mapping has no `__builtins__` attribute). Its row claimed
         # "MEASURED GREEN **and LIVE**" for a shape that cannot execute the read.
+        "a KEYED READ out of an UNBOUND `getattr` on the dotted module": (
+            '    import builtins\n'
+            '    _d = dict.copy(builtins.__dict__)\n'
+            '    getattr(builtins.dict, "pop")(_d, "exec")'
+            '("results = sdk._tortoise_fts_query(query=q)")\n'),
         "a KEYED READ out of the UNBOUND fetch, `getattr` callee": (
             '    getattr(dict, "get")(globals(), "__builtins__")["exec"]'
             '("results = sdk._tortoise_fts_query(query=q)")\n'),
