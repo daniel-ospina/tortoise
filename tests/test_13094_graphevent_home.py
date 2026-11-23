@@ -1518,6 +1518,32 @@ def test_the_export_scan_cites_open_on_the_statements_they_name():
             f"line reads {actual.strip()[:100]!r}. RE-DERIVE BY CONTENT, never by "
             "delta: grep -n 'def _export_graph_snapshot' tortoise/hosted_api.py, then "
             "the branch and the append inside its body")
+    # ⛔ EVERY carrier in the README, not only the graded sentence (round 7, P2). The same
+    # address is named in three places — §1's exclusion paragraph, the sentence above, and §5's
+    # step 4, which is the ACTIONABLE one ("a re-point driven by this census alone would leave
+    # the export endpoint reading the old home"). Re-pointing only `:75` or only `:393` leaves
+    # every other gate green: `hosted_api_cite_census.py --check` moves only when the bad number
+    # is a NEW distinct target (so a re-point onto an address cited elsewhere in the tree is
+    # invisible to it), and `test_docs_citation_refs.py` is presence-only. Asserted as the
+    # population it is, so a carrier cannot be dropped silently either.
+    all_cites = [int(n) for n in re.findall(r"hosted_api\.py:(\d+)", readme)]
+    assert len(all_cites) == 3, (
+        f"the README names `hosted_api.py:<n>` {len(all_cites)}x ({all_cites}), not 3x — "
+        "either a carrier was dropped or one was added. Both are fine, but this arm scopes the "
+        "export-scan claim to the carriers that exist: re-word it deliberately.")
+    expected_anywhere = (
+        "def _export_graph_snapshot", '"GraphEvent" in labels', "events.append(d)",
+    )
+    for address in all_cites:
+        assert 0 < address <= len(lines), (
+            f"`hosted_api.py:{address}` is out of range ({len(lines)} lines)")
+        assert any(token in lines[address - 1] for token in expected_anywhere), (
+            f"the README names `hosted_api.py:{address}` as an export-scan reader, but that "
+            f"line reads {lines[address - 1].strip()[:100]!r} — neither the def, the "
+            "`:GraphEvent` branch nor the append. Every carrier of this cite must open on the "
+            "statement it claims; re-derive each by content with "
+            "`grep -n 'def _export_graph_snapshot' tortoise/hosted_api.py`.")
+
     # ⛔ AND THE OTHER CARRIER: `readers.json` is generated from `tools/graphevent_home.py`,
     # which carries the same three numbers as PROSE. A re-point applied to one carrier and
     # not the other is the split-carrier failure this PR's own body names, and the
