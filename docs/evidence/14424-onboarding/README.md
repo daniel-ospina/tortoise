@@ -221,19 +221,31 @@ Re-running is safe with this attempt's --dedup: the server folds identical conte
 22:02 UTC — the original 4, the 2 from the hosted probe, and exactly **one** of the two
 above (created 22:02:05). So the `504` → committed relationship is **nondeterministic**,
 which is precisely why the refusal is unactionable without a reconciliation path: the
-caller cannot infer from the status whether the write landed. (The `--dedup` fold itself
-stays **code-verified only** — the second attempt had nothing to fold onto.)
+caller cannot infer from the status whether the write landed. (In *this* window the
+`--dedup` fold had nothing to fold onto — the second attempt's content was never
+re-sent against a landed copy. §1.2 is the experiment that verified the fold
+host-side; this line is not a claim that the fold is unproven.)
 
 ```console
 $ tortoise doctor --offline      # clean HOME holding ONLY a credential, no local graph
   ⚠️ Graph: health: not used by this setup — you have a hosted credential (credentials.json,
      https://api.premiselabs.co), so your memory lives there and a local graph is not required.
-     Your next step is `tortoise create-point "…"` — the `Hosted` row below says whether that
-     will work. Override: run `tortoise init` only if you ALSO want a local graph.
+     Your next step is `tortoise create-point "…"` — the `Hosted` row below shows whether that
+     will work, or why it could not be checked. Override: run `tortoise init` only if you ALSO
+     want a local graph.
   ✅ Credentials: …/.tortoise/credentials.json — tt_…436f (fingerprint fa5dbb0654f2), …
   ⚠️ Hosted: … not probed (`--offline`); hosted reachability and key validity were NOT tested
 5 pass, 7 warn, 0 fail
 ```
+
+⛔ **The pair above is the point, not an aside.** Read the two rows together: the Graph row
+points at the Hosted row for a verdict, and the Hosted row — in the very mode this bundle
+runs — declines to give one (`not probed … NOT tested`). An earlier cut of the Graph row
+claimed the Hosted row "says whether that will work", which resolves to nothing here; it
+now says *shows whether that will work, or why it could not be checked*, which is true in
+all three states (probed, `--offline`, ungraded). Re-captured after this commit's wording
+change, with a fresh `HOME` holding only `credentials.json`, `--offline` so no request
+leaves the box.
 
 ---
 

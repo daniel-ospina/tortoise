@@ -217,6 +217,17 @@ class TestCreatePointRetrySafety:
         assert "Created point: p1" in out
         assert "/v1/search?q=" in out
         assert "tortoise_search" in out
+        # ⛔ THE NAMED DOOR MUST BE RUNNABLE, or it is the same dead end it exists
+        # to close. `/v1/search` is gated (`hosted_api.py:15653`
+        # `Depends(get_current_org_gated)` -> 401 "Missing Authorization header"
+        # at `hosted_api.py:9747`), so a hint that omits the header sends a
+        # first-run user straight into a refusal. Mutation: drop the header
+        # clause and this REDs.
+        assert "Authorization: Bearer" in out
+        # ...and the printed URL must survive a paste. An unquoted `<` is a shell
+        # REDIRECT, so a `<a word from it>` placeholder fails before any request
+        # is made. Mutation: restore an angle-bracket placeholder and this REDs.
+        assert "<" not in out
 
     def test_wait_bound_refusal_names_the_delay_and_the_safe_retry(
             self, tmp_path, capsys):

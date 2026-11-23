@@ -4145,6 +4145,14 @@ class TestDoctorPreInit:
         assert "⚠️" in line and "❌" not in line   # hosted-only is not a failure
         assert "not used by this setup" in line
         assert "create-point" in line               # the mode's own next action
+        # ⛔ THE POINTER MUST NOT PROMISE A VERDICT THE HOSTED ROW CAN DECLINE.
+        # Under `--offline` (this very test's mode) the Hosted row prints `not
+        # probed (--offline) … NOT tested`, and on a raising probe it prints `the
+        # hosted check could not run … UNGRADED`; a sentence claiming that row
+        # "says whether that will work" therefore resolves to nothing in the mode
+        # the evidence bundle itself exercised. Mutation: restore "says whether
+        # that will work" and this REDs.
+        assert "could not be checked" in line
         # ...and the self-hosted remedy is demoted to the named override
         assert "init` only if you ALSO want a local graph" in line
 
