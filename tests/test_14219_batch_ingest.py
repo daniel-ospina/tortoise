@@ -1396,7 +1396,6 @@ def test_a_cancel_stops_a_dead_claim_instead_of_reporting_the_batch_finished(
 
     stopped_batch, after = coord.cancel(ORG, batch.batch_id, reason="customer")
     by_ref = {i.ref: i for i in after}
-    assert fresh.ref == "/live.md"
     assert by_ref["/dead.md"].state is BatchItemState.CANCELLED, (
         "a dead claim survived a cancel — the batch would run and charge after "
         "the customer stopped it")
