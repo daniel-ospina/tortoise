@@ -153,17 +153,21 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
-    # so the header counts it as drifted rather than compared, and it is ONE OF THIRTEEN that are
-    # incomparable at the pin — measured at this head, and stated by the header itself: 221 comparable,
-    # 128 of them drifted, plus EIGHT of those thirteen = 136 of the 234. ⛔ THIS SENTENCE HAS NOW SHIPPED
-    # WRONG TWICE, both times with figures that were right about an EARLIER edition: `211 comparable, 119
-    # of them drifted, plus those three = 122 of the 214` (the pre-`#14246` corpus), then `223 / 130 /
-    # eight of eleven / 138` (the `#14246` corpus — still what this branch inherited, and no longer true
-    # of the document AFTER its own re-point moved two pairs past the pin's EOF and two more past
-    # `main`'s). Neither edition was graded: `_SPLIT_*` reads the DOCUMENT, and a comment beside a pin is
-    # prose to every arm in this file. The lesson this repetition states is the file's own: a figure
-    # quoted from a header rots the moment the header moves, so quote it at the level of "stated by the
-    # header" and let `_PIN_FILE_LENGTHS` grade the header instead of transcribing it here. ⛔ The
+    # so the header counts it as drifted rather than compared, and it is ONE OF THE TWELVE that are
+    # incomparable at the pin — counted, not narrated: `len(_PIN_EOF_PAIRS)` is the population, and the
+    # header's own arms (`_SPLIT_COMPARABLE` / `_SPLIT_NONCOMPARABLE` / `_SPLIT_DRIFT`) grade it against
+    # the document. ⛔ THIS SENTENCE HAS SHIPPED WRONG FOUR TIMES, every time with figures that were right
+    # about an EARLIER edition: `211 comparable, 119 of them drifted, plus those three = 122 of the 214`
+    # (the pre-`#14246` corpus), then `223 / 130 / eight of eleven / 138`, then `221 comparable, 128 of
+    # them drifted, plus EIGHT of those thirteen = 136 of the 234` — that last one arrived with the
+    # `origin/main` `ff2218b6` fold, byte-identical to `main`'s edition, beside a header that states
+    # twelve non-comparable / 215 comparable / 155 of them drifted / 167 of the 227. None of the four was
+    # graded, because `_SPLIT_*` reads the DOCUMENT and a comment beside a pin is prose to every arm in
+    # this file. The lesson is the file's own: a figure quoted from a header rots the moment the header
+    # moves, so DO NOT transcribe one here — `_PIN_FILE_LENGTHS` grades the header, and
+    # `_re_derived_drift` re-measures it at every run. The only thing this comment may assert is the
+    # RELATION, which is edition-free: a pair past the pin's EOF is non-comparable, the header counts it
+    # among the non-comparable, and the drift total is the comparable drifters plus all of them. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
