@@ -1611,14 +1611,25 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
     #: The string-key resolver for the `"__dict__"` argument (`_K = "__dict__"`
     #: resolves like every other key in this file — `_builtin_lookup_name`'s own rule).
     _bu_consts = _str_constants(tree)
-    builtins_dict_names = (frozenset({"__builtins__"})
-                           | frozenset(_aliases_of(
-                               tree, lambda n: isinstance(n, ast.Name)
-                               and n.id == "__builtins__", loops=True))
-                           | frozenset(_aliases_of(
-                               tree, lambda n: _is_builtins_dict_of(
-                                   n, builtins_names, _bu_launderers, _bu_consts),
-                               loops=True))
+    #: ⛔ THE ROOTS OF THIS WALK, HOISTED (#14326 round 35 review cycle 6, MEASURED GREEN:
+    #: `_d = dict(__builtins__); _d["exec"](<read>)`, `__builtins__.copy()`,
+    #: `dict.copy(__builtins__)` and `copy.copy(__builtins__)` all executed the read). The
+    #: COPY walk used to pass `frozenset()` here, on the theory that `_aliases_of`'s fixpoint
+    #: would have collected every mapping name already — but `_aliases_of` collects a name that
+    #: a STATEMENT BINDS to the mapping, and `__builtins__` is INJECTED into module globals by
+    #: CPython and never bound, so neither it nor an alias of it can ever enter that fixpoint.
+    #: The `Name` arm of `_is_builtins_mapping` could therefore never match it. Passing the
+    #: in-progress set is what makes the copy predicate answer about the SAME roots the
+    #: composition walk is building.
+    _bu_dict_roots = (frozenset({"__builtins__"})
+                      | frozenset(_aliases_of(
+                          tree, lambda n: isinstance(n, ast.Name)
+                          and n.id == "__builtins__", loops=True))
+                      | frozenset(_aliases_of(
+                          tree, lambda n: _is_builtins_dict_of(
+                              n, builtins_names, _bu_launderers, _bu_consts),
+                          loops=True)))
+    builtins_dict_names = (_bu_dict_roots
                            # ⛔ A COPY IS THE MAPPING FOR THIS QUESTION (#14326 round 35,
                            # MEASURED: `_d = dict(builtins.__dict__); _d["exec"](<read>)`
                            # executed the read with the pin GREEN). `_aliases_of`'s default
@@ -1628,7 +1639,7 @@ def _builtins_root_names(tree: ast.AST) -> tuple[frozenset[str], frozenset[str]]
                            # answer and `copy_is_alias=True` is the right one.
                            | frozenset(_aliases_of(
                                tree, lambda n: _is_builtins_mapping(
-                                   n, builtins_names, frozenset(), _bu_launderers,
+                                   n, builtins_names, _bu_dict_roots, _bu_launderers,
                                    _bu_consts),
                                loops=True, copy_is_alias=True)))
     return builtins_names, builtins_dict_names
@@ -6837,6 +6848,16 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             '    _dc = dict\n'
             '    _d = _dc(builtins.__dict__)\n'
             '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        # ⛔ AND THE SAME COPIES OVER `__builtins__`, WHICH IS INJECTED AND NEVER BOUND (#14326
+        # round 35 review cycle 6, EACH MEASURED GREEN): the copy walk passed `frozenset()` for
+        # `dict_names`, and `_aliases_of` only collects names a STATEMENT binds — CPython
+        # injects `__builtins__` into module globals, so it can never enter that fixpoint.
+        "`dict(__builtins__)` — the copy of the INJECTED root": (
+            '    _d = dict(__builtins__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
+        "`__builtins__.copy()` and `dict.copy(__builtins__)`": (
+            '    _d = dict.copy(__builtins__)\n'
+            '    _d["exec"]("results = sdk._tortoise_fts_query(query=q, limit=10)")\n'),
         "`builtins.__dict__.__getitem__(\"exec\")`": (
             '    import builtins\n'
             '    builtins.__dict__.__getitem__("exec")('
@@ -7956,7 +7977,12 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     # explains why is on `_read_reach`, which owns the ordering).
     assert not indirect, (
         f"the tool reaches the read through "
-        f"{getattr(indirect[0].func, 'id', None) or indirect[0].func.attr}() by name — that bypasses "
+        # ⛔ THREE SHAPES, NOT TWO (#14326 round 35 review cycle 6, MEASURED: a `Subscript`
+        # callee raised `AttributeError: 'Subscript' object has no attribute 'attr'` INSTEAD of
+        # this diagnosis). The rows in this file use `vars(type(sdk))["…"](…)`, so the
+        # failing shape is one of its own — fail-closed, but it reads as a pin bug and names
+        # nothing, which is the class the #14335 settle assert exists to remove.
+        f"{getattr(indirect[0].func, 'id', None) or getattr(indirect[0].func, 'attr', None) or ast.unparse(indirect[0].func)}() by name — that bypasses "
         "every check in this pin")
     # Anti-vacuity: TWO mentions, both calls, both the reads this pin is about (the
     # warm-up and the per-query measurement), and both inside `run()`.
