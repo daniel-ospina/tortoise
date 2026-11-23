@@ -18588,7 +18588,41 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                 _base_absorbed = (
                     _absorbed_copy.returncode == 0 and _I7_TARGET in _absorbed_copy.stdout
                 )
-                if _base_absorbed:
+                # ⛔ THE HATCH IS CONDITIONAL ON THE PROSE IT PROTECTS (#14269 review, P0 —
+                # MEASURED, and this is the false-PASS class the whole PR line exists to
+                # remove). The base-absorbed reading alone grades the BASE's blob and never
+                # looks at the sentence this arm exists to protect: MEASURED at the head before
+                # this fix, `git diff --numstat origin/main...HEAD -- …/04-plan.md` was EMPTY
+                # and `05-verify.md` still said "What THIS diff's `04-plan.md` DOES carry is the
+                # `capstone_verdict_check.py` pair" — a PRESENT-TENSE membership this head does
+                # not have. The hatch passed it, so the arm was green over the exact falsehood
+                # it exists to catch. An acceptance that does not read the claim is a false
+                # PASS, so the history reading is granted ONLY when the row also states, in the
+                # present tense, that the file is NOT in this diff.
+                _present_tense_membership = (
+                    "What THIS diff's `04-plan.md` DOES carry is the" in text)
+                _states_absent_here = (
+                    "AND AT THIS HEAD `04-plan.md` IS NOT IN THIS DIFF" in text)
+                if _base_absorbed and _present_tense_membership:
+                    failures.append(
+                        f"`{_base}` already carries {_I7_TARGET} in `{_MEMBER_DOC}`, so the "
+                        f"`{_base}...HEAD` numstat is EMPTY and the re-point is the base's — "
+                        f"but D5 still claims in the PRESENT TENSE that THIS diff's "
+                        f"`04-plan.md` carries the `capstone_verdict_check.py` pair. That is "
+                        f"FALSE at the head it ships on, and accepting it is the false PASS "
+                        f"this arm exists to catch. State that `04-plan.md` is NOT in this "
+                        f"diff at this head (and why), or drop the present-tense claim "
+                        f"(#14269 review, P0)")
+                elif _base_absorbed and not _states_absent_here:
+                    failures.append(
+                        f"`{_base}` absorbed the re-point, so the `{_base}...HEAD` numstat "
+                        f"for `{_MEMBER_DOC}` is EMPTY — but D5 never SAYS so: the "
+                        f"base-absorbed acceptance requires the row to state "
+                        f"'AND AT THIS HEAD `04-plan.md` IS NOT IN THIS DIFF'. Without that "
+                        f"sentence the history reading is indistinguishable to a reader from "
+                        f"a live membership claim, which is what made this hatch a false PASS "
+                        f"(#14269 review, P0)")
+                elif _base_absorbed:
                     _measured.append(
                         f"the merged state from the branch side (`{_base}` already carries "
                         f"{_I7_TARGET} in `{_MEMBER_DOC}`, so the re-point is the base's)"
