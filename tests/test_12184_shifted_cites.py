@@ -439,7 +439,6 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4950-4954'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7193'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7600'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7602'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7599-7602`'): 1,
@@ -501,7 +500,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24626'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7226'): 2,  # measured: `grep -o 'search_engine.py:7226' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 2. A second `: 1` row for this SAME key sat ~60 lines above and is what F601 flagged: Python kept this one, so that row was a DEAD pin (it could never fail) and was removed — the runtime value was already 2, so this is a dead-line removal, not a re-pin.
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3508'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37547'): 1,

@@ -2953,6 +2953,22 @@ surfaces:
   # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
   - test_14002_record_only_journal.py
   - test_extractor_cost_measure.py
+  # #14343: the S4 embed-serialization lever's own pins (`_embed_json_kwargs` in
+  # `tortoise/extractor_v2.py` + the `serialization`/`decompose` half of
+  # `tools/extractor_cost_measure.py`). Same class as the `test_s4_reeemit_tax.py`
+  # row below — a measurement artifact whose pins ARE its credibility — and the
+  # same recorded failure mode applies: the file landed with NO manifest row, so
+  # `tools/ci_selection.py --integrity` redded ('manifest drift:
+  # [\'test_extractor_embed_json_14343.py\']') and `manifest-integrity`, which is in
+  # `python-ci-gate.needs`, went red with it — while the disarmed-lever pins never
+  # ran in any leg (#1349/#2938). `core` is LOAD-BEARING, not a default: the
+  # toggle lives in `tortoise/extractor_v2.py`, a `core` SOURCE_PATTERN, so a diff
+  # that touches only the lever selects `core` alone — without this row that diff
+  # grades nothing. Hermetic (the file renders prompts and reads committed
+  # artifacts; a stub model, no DB, no graph, no network, no provider call), so it
+  # is deliberately NOT carve_out-registered, for the same reason
+  # `test_journal_growth.py` and `test_s4_reeemit_tax.py` are not.
+  - test_extractor_embed_json_14343.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
   # added with its own rationale. This branch registered it here first; the
