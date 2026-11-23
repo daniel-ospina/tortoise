@@ -87,6 +87,9 @@ class _RecordingStore:
     def open_incident(self, kind, org_id="", detail=None, writer=None):
         return self.store.open_incident(kind, org_id, detail, writer)
 
+    def incident_record(self, kind, org_id=""):
+        return self.store.incident_record(kind, org_id)
+
 
 @pytest.fixture
 def delivered(monkeypatch):
@@ -135,11 +138,6 @@ def test_one_incident_is_one_push_for_its_whole_lifecycle(delivered):
 
 
 def test_the_incident_subject_is_rule_scoped(delivered):
-    """R1 and R2 breaches of one org are different incidents (#2313 precedent).
-
-    The incident body is create-once, so a shared subject would let the first
-    rule to fire own the record for the whole lifecycle of the second.
-    """
     import tortoise.notify as notify
 
     _flag(notify, rule="point_create")
@@ -148,6 +146,34 @@ def test_the_incident_subject_is_rule_scoped(delivered):
     assert len(delivered.filed) == 2, delivered.filed
     assert "point_create" in delivered.filed[0][0]
     assert "key_create" in delivered.filed[1][0]
+
+
+def test_an_open_episode_re_alarms_at_most_once_per_window(delivered, monkeypatch):
+    """A persistent breach must not page every window, and must not go silent.
+
+    Measured shape (#10576): ONE org stayed over its R1 threshold for 21 days
+    behind ONE open issue, while the pre-fix code re-claimed the alert hourly —
+    ~24 messages/day, none of them naming the issue that already tracked it.
+    """
+    import tortoise.notify as notify
+
+    clock = [1_000.0]
+    monkeypatch.setattr(notify, "_delivery_now", lambda: clock[0])
+
+    _flag(notify)  # FILED: the store's create-once push opens the window
+    assert len(delivered.pushes) == 1
+
+    for _ in range(5):  # same window → folded, no message
+        clock[0] += 60.0
+        _flag(notify)
+    assert len(delivered.pushes) == 1, delivered.pushes
+
+    clock[0] += notify._INCIDENT_DELIVERY_WINDOW_S
+    _flag(notify)
+    assert len(delivered.pushes) == 2, delivered.pushes
+    assert "Still open" in delivered.pushes[-1]
+    assert "issue #1" in delivered.pushes[-1], "a reminder must name the incident"
+    assert len(delivered.filed) == 1, "a re-alarm must never re-file"
 
 
 # ── 2. the bound is the EPISODE, never a mute ────────────────────────────────

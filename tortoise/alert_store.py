@@ -496,6 +496,19 @@ class AlertStore:
         """
         return bool(self._alias_states(kind, org_id))
 
+    def incident_record(self, kind: str, org_id: str = "") -> dict[str, Any]:
+        """The sentinel this store tracks for ``(kind, org_id)``, or ``{}`` (#14407).
+
+        A read-only view for a caller that must REFER to an incident it did not
+        just create — the abuse path needs the issue number on the ``DEDUP``
+        outcome so a bounded re-alarm can name the open incident instead of
+        paging with no reference at all. Returning the same dict the dedup path
+        reads keeps "what is on record" one answer; it is a snapshot, never an
+        authority (nothing here may be written back).
+        """
+        states = self._alias_states(kind, org_id)
+        return states[0][1] if states else {}
+
     def open_incident(self, kind: str, org_id: str = "", detail: dict | None = None,
                       writer: str | None = None) -> bool:
         """Open (or re-use) an incident. True if this call is the filer.
