@@ -3800,12 +3800,32 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: `poll_started`) plus FIVE inside the sample (`sample_started`, the duration read,
 #: `streak_started`, the span read, the error branch's deadline check) is SEVEN; this is
 #: deliberately BELOW the true count, so a step derived from it still carries the clock with one
-#: read of slack. ⛔ Not a guess — it is the divisor, so typoing it must red the premise (F1).
+#: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1): "typoing it
+#: must red the premise" is true in only ONE direction, and this file measures the other. RAISING
+#: it 6 -> 7 leaves all 184 green — as a DIVISOR of `once_slow`'s second term it LOWERS that term,
+#: so the `max()` absorbs the typo (premise (a)'s term dominating; measured at `:4659`), and in
+#: `death_after_streak`'s premise (b) it is a MULTIPLIER, where `7 * 0.5 = 3.5 < 10` passes exactly
+#: as `6 * 0.5 = 3.0` does. Only a raise to `>= 20` (`20 * 0.5 = 10.0` is no longer `< 10`) or a
+#: lowering large enough to move the `max()` reds. The behavioural pins are the `once_slow` and
+#: `death_after_streak` ROWS, not a bare assertion on this constant.
 _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 
 #: How many `time()` reads span the STREAK at the sample where the count+span conjunction fires
 #: (`death_after_streak`'s premise (a)): `sample_started` -> the span read is FIVE reads, which
 #: is what `_CENSUS_ERROR_MIN_SPAN_S / 5 + 0.1` is derived from.
+#: ⛔ AND IT HAS NO STATIC PIN (#12039 cycle 13, F1): the guard that looks like one —
+#: `_LONG_PATH_STREAK_TIME_CALLS * death_step_s >= _CENSUS_ERROR_MIN_SPAN_S` — expands to
+#: `0.1 * K >= 0` and is true for every K, because the divisor cancels against its own product.
+#: A typo here is therefore INVISIBLE TO THE PREMISES: 5 -> 8 makes `death_step_s` 0.35 s, the
+#: streak spans `5 * 0.35 = 1.75 s < 2.0` at the death sample, and both premises stay green
+#: (MEASURED: 184 passed, implementation unmutated).
+#: ⛔ BUT THE ARM DOES **NOT** GO VACUOUS, which is the part worth knowing before "fixing" this
+#: by assuming it does. This arm's census errors on EVERY sample and the fixture dies from sample
+#: 2 on, so a span the typo cannot clear at the death sample is cleared one sample later and the
+#: conjunction fires anyway — the ordering stays observable, one sample further out. MEASURED at
+#: `K = 8`: the ordering mutant (`_child_exited` moved below the conjunction) still REDS the row
+#: (`2 failed`), exactly as it does at `K = 5`. The typo moves WHEN the row discriminates, not
+#: WHETHER it does. So the behaviour is the pin here — the assertion was only ever dead weight.
 _LONG_PATH_STREAK_TIME_CALLS = 5
 
 
@@ -4660,22 +4680,40 @@ def test_long_path_census_error_is_the_census_only_when_it_persists(
     # ⛔ `death_after_streak` NEEDS ITS OWN STEP, from its own premise (#12039 cycle 10, P2): the
     # child dies on the sample where the streak QUALIFIES, so the span the conjunction would read
     # there is five `time()` calls long and must already clear the bound — otherwise the ordering
-    # this arm exists to pin is never exercised and the arm is vacuous. Derived, so raising the
-    # constant cannot silently make it so. The `+ 0.1` is margin for the reads taken before the
-    # loop.
+    # this arm exists to pin is never exercised and the arm is vacuous. The `+ 0.1` is margin for
+    # the reads taken before the loop.
     death_step_s = _CENSUS_ERROR_MIN_SPAN_S / _LONG_PATH_STREAK_TIME_CALLS + 0.1
-    # ⛔ BOTH PREMISES ARE ASSERTED, NOT ASSUMED (#12039 cycle 11, F2). Premise (a) had no
-    # assertion and premise (b) — "the death sample must arrive BEFORE the poll's deadline" — had
-    # none either, so at `_CENSUS_ERROR_MIN_SPAN_S >= 7.84` the poll broke on the FIRST sample
-    # (clock 11.68 vs deadline 11.67), `child.die_with()` never ran, `healthy_samples == 0` and
-    # the NEVER-ANSWERED skip satisfied the row's family-only marker: the ordering pin retired
-    # itself on the one axis a maintainer actually moves — UP. The row's marker is arm-specific
-    # now (see the parametrization), and these two lines red the FILE with the derivation to
-    # repair rather than letting the arm grade a different exit.
-    assert _LONG_PATH_STREAK_TIME_CALLS * death_step_s >= _CENSUS_ERROR_MIN_SPAN_S, (
-        "premise (a): the streak's own reads must SPAN the bound at the death sample, or the "
-        "count+span conjunction has not qualified when the child dies and the ordering this arm "
-        "pins is never exercised")
+    # ⛔ PREMISE (a) IS **STATED, NOT ASSERTED** — AND THE CONSTANT IT LEANS ON IS UNPINNED
+    # (#12039 cycle 13, F1). The obvious guard here is
+    # `_LONG_PATH_STREAK_TIME_CALLS * death_step_s >= _CENSUS_ERROR_MIN_SPAN_S`, and it is a
+    # TAUTOLOGY: expand the left side and it reduces to
+    # `_CENSUS_ERROR_MIN_SPAN_S + 0.1 * _LONG_PATH_STREAK_TIME_CALLS >= _CENSUS_ERROR_MIN_SPAN_S`,
+    # i.e. `0.1 * K >= 0` — true for EVERY span and every positive read count, because the divisor
+    # cancels against its own product. It was shipped that way under the claim "Derived, so raising
+    # the constant cannot silently make it so", which is exactly inverted: deriving the step FROM
+    # the constant is what makes the assertion unfalsifiable on that axis (agent-infra#3442 rule 3
+    # — an assertion that cannot vary under ANY mutation of the diff is dead weight that actively
+    # misleads the next reader into thinking the guard is covered).
+    # ⛔ SO `_LONG_PATH_STREAK_TIME_CALLS` (:3823) HAS NO STATIC PIN — and that is a NON-FINDING for
+    # the guard, which is why this premise is stated rather than "fixed" with a cleverer assertion.
+    # MEASURED on copies at this head: typo it 5 -> 8 and the file stays at `184 passed` (the
+    # assertion is blind to it, exactly as the algebra above says), BUT the ordering mutant still
+    # REDS the `death_after_streak` row (`2 failed`, the same count as at `K = 5`). This arm's census
+    # errors on EVERY sample and the fixture dies from sample 2 on, so a span that one sample cannot
+    # clear is cleared on the next and the conjunction fires anyway: the typo moves WHEN the row
+    # discriminates, never WHETHER. The ROW is therefore a real pin and it survives the typo; the
+    # removed assertion pinned nothing and only told the next reader otherwise.
+    # WHAT IS FALSIFIABLE IS THE BEHAVIOUR: move `_child_exited` below the conjunction and the
+    # `death_after_streak` row REDS (the PR body records `1 failed`). That is this premise's pin —
+    # stated here instead of shadowed by a tautology, exactly as `once_slow`'s premise (b) was
+    # corrected one cycle ago (block above). Premise (b) below DOES stay an assertion: there both
+    # sides are independent constants, so it can fail.
+    # (#12039 cycle 11, F2, still honoured for (b): at `_CENSUS_ERROR_MIN_SPAN_S >= 7.84` the poll
+    # broke on the FIRST sample (clock 11.68 vs deadline 11.67), `child.die_with()` never ran,
+    # `healthy_samples == 0` and the NEVER-ANSWERED skip satisfied the row's family-only marker —
+    # the ordering pin retired itself on the one axis a maintainer actually moves, UP. The row's
+    # marker is arm-specific now (see the parametrization), and this line reds the FILE with the
+    # derivation to repair rather than letting the arm grade a different exit.)
     assert _LONG_PATH_ERROR_SAMPLE_TIME_CALLS * death_step_s < _LONG_PATH_POLL_BUDGET_S, (
         "premise (b): the death sample must arrive BEFORE the poll's deadline, or the fixture is "
         "never killed where the gate would fire and this row grades the never-answered skip "
