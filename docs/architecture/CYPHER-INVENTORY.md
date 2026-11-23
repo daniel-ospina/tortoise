@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **309** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **311** files scanned |
 | files carrying at least one statement site | **102** |
 | **statement sites (this census)** | **1327** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **875** (589 read, 286 write) |
@@ -109,17 +109,17 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (309 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (311 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 308 files>` → **1,643** across **111** files: exactly the
-tool's number. A bare `rg … tortoise/` gives **1,649 / 112**, the 6 extra occurrences living in
-the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,643 / 111 on
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 311 files>` → **1,647** across **112** files: exactly the
+tool's number. A bare `rg … tortoise/` gives **1,653 / 112**, the 6 extra occurrences living in
+the one `tortoise/test_*.py` that exists; `--glob '!tortoise/test_*.py'` reproduces 1,647 / 112 on
 this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 308 files>` → **2,368** across **148** files, while the tool
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 311 files>` → **2,368** across **148** files, while the tool
 reports 2,381 / 149. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
@@ -132,7 +132,7 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 309 files finds exactly 13 — the verb-at-end-of-line scan alone finds **182**,
+predicate over the same 311 files finds exactly 13 — the verb-at-end-of-line scan alone finds **182**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
 enumerated, and the other **169** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
@@ -418,6 +418,8 @@ halves:
 2. **Re-run `--check`** and commit the regenerated doc in the same PR that added or removed the
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
+
+**The cut this PR (#14220, `fix/14186-embedder-seam-batching`) makes — `files_scanned` 309→**311** and NOTHING else.** The embedder seam adds two product-surface modules, `tortoise/embed_seam.py` (the backing arbiter, its bounded collection window and its two remote clients) and `tortoise/embed_worker.py` (the out-of-process encoder). ⛔ Neither issues a Cypher statement — they hand text to `EmbeddingModel`/an HTTP endpoint, not to a query door — so they are scanned and carry no site: `files` stays **102** and every shape pin below is untouched. This is the same class of move `#14222`'s `projection_worker.py` and `#14284`'s `relation_guards.py` made, and it is the reason `files_scanned` is pinned: the population can grow without a single statement moving, and before that pin existed `--check` stayed green through it (`#13098` review P3). §1's reconciliation is re-derived on this merged tree (`main` `0fbfbb5b`): `ast_door_calls` **1,593** = **1,327** classified Cypher + **266** non-Cypher, door pattern **1,647 / 112**, verb **2,381 / 149**. ⛔ None of that movement is this PR's: the two new modules match no door predicate and add no site, so `sites` **1,327**, `files` **102**, `non_cypher_door_calls` **266** and every shape pin come from `main` — `tortoise/capacity_notice.py` (#14038) landed four non-Cypher door calls in one new scanned file after the block above was last cut, which is why §1's door figure reads 1,647 / 112 here and not the 1,643 / 111 it carried.
 
 **The cut this PR (#14232, `fix/14232-ingest-ack-async`) makes — TWO new statement sites, both `plain` WRITEs, and nothing else moves.** Re-cut at this PR-level merge with `origin/main` `a7baa98d05` by RUNNING the tool on the merged tree, never by arithmetic on the markers. `tortoise/hosted_api.py::_write_capture_phase` is the phase write the ACK/complete split needs (`MATCH (s:Session {id:$sid}) SET s.capture_extraction_phase=$p, s.capture_extraction_phase_at=$at`) — a single indexed `SET` by session id, no traversal, no adjacency, no fulltext, no EP — and `_clear_capture_phase` is the phase retirement the RAISE arm of `_capture_tail_failed` needs (`MATCH (s:Session {id:$sid}) SET s.capture_extraction_phase=null, s.capture_extraction_phase_at=null`), without which a capture whose tail raised left every read surface publishing `extracting` with `outcome_known: false` for work nothing was doing. Both stay `graph-maintenance`, because they write graph state rather than a record row (`#13083`'s `record_only` shape is what would eventually move them). Measured on the merged tree against `origin/main` `a7baa98d05`'s own reading (`1325` / `plain` `873`, write `284`) by running the same tool in a detached worktree there: `sites` 1325→**1327**, `plain` 873→**875** (read **589** unchanged, write 284→**286**), and `ast_door_calls` 1587→**1589** (= 1327 + the unchanged 262 non-Cypher calls). `unresolved` **105**, `candidates` **589**, `partial` **321**, `files` **102**, `files_scanned` **308**, `adjacency` **293**, `ep` **32**, `ddl` **17**, `traversal` **3**, `fulltext` **2** and `non_cypher_door_calls` **262** are ALL unchanged — no existing statement was removed, re-classified or re-shaped, and neither new site is a candidate (the migration metric §0 is about does not move). §1's `rg` reconciliation moves with exactly the two new door calls and the two new `MATCH (`: door **1,641 / 111**→**1,643 / 111** whole-text, bare **1,649 / 112**, on call lines **1,587**→**1,589**, verb **2,379 / 149**→**2,381 / 149**; the line-based forms are re-measured there and read 2,095 / 2,368 / 2,097 / 2,371. Appendix A is regenerated with `--markdown` at this merged tree: it gains these two rows, and every `tortoise/hosted_api.py` row after them is re-derived rather than carried, because this branch also moves ~1 100 lines of that file.
 **The two earlier re-cuts of this same cut are HISTORY, kept and not re-stated as the table's numbers.** Each was taken on its own tree as the site landed — `_write_capture_phase` first (`sites` 1324→1325, `plain` 872→873, write 284→285, at `origin/main` `5e83c2a2f6`), then `_clear_capture_phase` on the round-3 review fix (1325→1326, write 285→286) — and both typed `files_scanned` **306**, which is that base's figure and not this head's (**308**: `main` added two scanned `.py` files between those bases and this merge, and this branch adds none). ⛔ The pair is NOT added to the merged base's `1325`: that would double-count main's `_endpoint_kind_map` read (`candidates` 588→589, `plain` read 588→589, `partial` 320→321 — main's, measured at `a7baa98d05` and already inside its `1325`), which is exactly the arithmetic-across-parents this section forbids. The figures above are `--repin`-style readings of the tree that ships.
@@ -991,7 +993,7 @@ one.
 
 <!-- cypher-inventory:sites = 1327 -->
 <!-- cypher-inventory:files = 102 -->
-<!-- cypher-inventory:files_scanned = 309 -->
+<!-- cypher-inventory:files_scanned = 311 -->
 <!-- cypher-inventory:unresolved = 105 -->
 <!-- cypher-inventory:candidates = 589 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->

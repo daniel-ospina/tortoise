@@ -15585,7 +15585,6 @@ durations:
   test_13674_embedder_load_bound_and_reclaim.py: 9.5
   test_13829_cache_cap_at_fold.py: 0.8
   test_14002_record_only_journal.py: 65.8
-  test_14186_embedder_seam_batching.py: 2.0  # new in #14186 — a file a PR ADDS can never carry a CI junit reading yet (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so this row takes the header's flat `DEFAULT_FAST_WEIGHT`; a local reading must never be the WEIGHT (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): it is what puts the file in `fast_pool()` alongside the core/api/eval rows above. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file.
   test_9559_blocked_release_conditions.py: 0.7
   test_capstone_state_value_13038.py: 0.2
   test_embedding_boundary_8419_8430.py: 5.0
