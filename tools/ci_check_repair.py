@@ -2816,8 +2816,9 @@ def main(argv: list[str] | None = None) -> int:
 # in the `test` job, which checks out at the DEFAULT `fetch-depth: 1` — a grafted
 # graph in which a REAL ancestor and a BOGUS sha are both simply absent. There the pin
 # can only SKIP, and "a provenance gate that runs only where it cannot answer is a
-# no-op gate" (python-ci.yml:4234-4244, #11057 review P2 — the note that put that
-# job at `fetch-depth: 0`; #9075 review r6 P1 made the same call at `:487-492`).
+# no-op gate" (the `#11057 review P2` note inside `python-ci.yml`'s own checkout step —
+# the one that put that job at `fetch-depth: 0`; #9075 review r6 P1 made the same call
+# at `:487-492`).
 #
 # So the history half lives HERE too, and runs in the `docs` job — the depth-0 job
 # this repo already keeps for exactly this: `substrate_map_check.py`,

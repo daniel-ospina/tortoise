@@ -927,8 +927,9 @@ jobs:
           # `fetch-depth: 1`. In a grafted graph an ABSENT ANCESTOR and a BOGUS SHA are
           # both simply missing objects, so there the pin can only SKIP — and a provenance
           # gate that runs only where it cannot answer is a no-op gate (#11057 review P2,
-          # `python-ci.yml:4234-4244` — the note that put that file's own gate at
-          # `fetch-depth: 0`; #9075 review r6 P1 made the same call at `:487-492`). This
+          # the `#11057 review P2` note inside `python-ci.yml`'s own checkout step — the
+          # one that put that file's gate at `fetch-depth: 0`; #9075 review r6 P1 made the
+          # same call at `:487-492`). This
           # job checks out
           # at `fetch-depth: 0`, so this is where the claim is actually proved. Stdlib
           # only, one file, no network; exit 0 = verified, 1 = a defect in the document,
