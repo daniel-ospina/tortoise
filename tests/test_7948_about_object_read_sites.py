@@ -150,8 +150,10 @@ WHAT THIS PINS
    builtin name; a repeated function-local VARIABLE target no longer resolves
    (`#9817` — the NAME of a nested `def`/`class` still does, and that residue is
    declared in the note at `_DOOR_REACH_HOPS`), the
-   budget is a BOUND (3, with two
-   measured exceptions), and its acceptance COUNT is pinned by (22) so it cannot
+   budget is a BOUND (3, plus every `_DISTANCE_EXCEPTIONS` entry — each equal to
+   its reader's deepest measured door; a typed COUNT here is exactly the rot this
+   file spends its arms on, so the register is the authority on how many there
+   are), and its acceptance COUNT is pinned by (22) so it cannot
    loosen again silently. **The REST door is keyed on `(verb, path)`, not path
    alone** — a cell naming the sibling `GET` of a `POST` route is a different
    door, and was green before the verb was checked.
@@ -584,6 +586,14 @@ _PROJECTS_EVERYTHING = "*"
 _WALK_SLOT = re.compile(r"[-<]\s*\[([^\]]*)\]")
 #: The Cypher name a relationship pattern binds (`r` in `[r]`, `[r {c:$c}]`).
 _REL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: An f-string interpolation inside a source-spelled FACT. The census resolver renders an
+#: unresolvable leaf as `""`, so a query the code spells `(m:{label})` reaches the walk net
+#: as `(m:)`. A fact is located in that corpus after the SAME elision — see
+#: `_unbounded_walks` for why that is the only spelling that lets this shape be grounded.
+#: ⚠️ It must match a BARE (optionally dotted) NAME only: a Cypher property map also wears
+#: braces (`{url:$u}`, `{: k}` — a `$` parameter and a `:` key are what separate them), and
+#: eliding one of those would delete the ground from every entry that states it.
+_FACT_INTERPOLATION = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\}")
 
 #: A table row: `| 3 | `module.py::Symbol.attr` | reads for | **reach** |`.
 _ROW = re.compile(
@@ -1598,10 +1608,23 @@ def _unbounded_walks(query: str, facts: tuple[str, ...]) -> list[tuple[str, str]
         window = query[low:high]
         bounded = False
         for fact in facts:
-            fact_at = query.find(fact, low, high)
-            if fact_at == -1 or fact_at + len(fact) > high:
+            # ⚠️ The fact is elided of its OWN interpolations before it is located, and
+            # that mirrors what the resolver already did to the QUERY: an unresolvable
+            # leaf contributes `_UNKNOWN` (`""`, census), so a walk the code spells
+            # `(m:{label})` reaches this corpus as `(m:)` while the fact that grounds it
+            # must be spelled as the CODE spells it (`_site_fact_text` reads the source,
+            # and the source-currency arm requires the fact there). Without the elision
+            # a legitimate ground is UNWRITABLE for that shape — the two spellings can
+            # share no contiguous substring that also contains the rendered binding — and
+            # the only ways out would be a fabricated exemption or a §13 row asserting a
+            # read the walk cannot perform. It does not loosen the net: the fact must
+            # still sit inside the walk's own window and still name its own binding, so a
+            # second `UNION` arm or a chained hop reds exactly as before.
+            grounded = _FACT_INTERPOLATION.sub("", fact)
+            fact_at = query.find(grounded, low, high)
+            if fact_at == -1 or fact_at + len(grounded) > high:
                 continue
-            if _names_binding(fact, binding) and _scope_survives(
+            if _names_binding(grounded, binding) and _scope_survives(
                 query, fact_at, start, binding
             ):
                 bounded = True
@@ -2610,11 +2633,23 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     included — accepts the COUNT the arm below pins (`_ACCEPTED_PAIRS_AT_THIS_HEAD`
 #     over the derived population), because a figure restated in prose rots: this
 #     sentence still read 63/340 = 18.5 % after the table grew.
-#     Depth still trades both ways — at a UNIFORM 2 hops nine legitimate rows
-#     false-red (seven if the `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e.
-#     only the global budget is lowered) — and the only two true attributions
-#     beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
-#     that earns each. ⚠️ This is why the bound is pinned on BOTH sides: the
+#     Depth still trades both ways — at that SAME 2026-11-03 measurement a UNIFORM 2
+#     hops left nine legitimate rows false-red (seven if the
+#     `_DISTANCE_EXCEPTIONS` budgets are honoured, i.e. only the global budget is
+#     lowered) — and every true attribution beyond 3 belonged to a reader named in
+#     `_DISTANCE_EXCEPTIONS`, with the code fact that earns each. ⛔ DATED ON PURPOSE:
+#     the pair is HISTORY for the decision it records, and the LIVE figures are the
+#     arm's own — a lane that re-measures at HEAD and finds no discrimination there
+#     has not refuted it.
+#     ⚠️ But the pair is NOT uniformly stale, and the wording here used to say it was
+#     (`#14249` review P2-2). Re-measured at this head, a uniform 2 with the
+#     `_DISTANCE_EXCEPTIONS` budgets HONOURED still refuses the own cell door of
+#     exactly SEVEN customer-callable rows — rows 1, 2, 3, 5, 28, 30 and 45 — so
+#     `seven` REPRODUCES and only `nine` has moved (the exceptions-DISABLED arm counts
+#     more rows today, because this file's fourth exception and `#13899`'s re-cut of
+#     the door occurrences change how many the budgets rescue). Do not read a
+#     re-measured `7` as a stale figure: it is the half that still holds.
+#     ⚠️ This is why the bound is pinned on BOTH sides: the
 #     acceptance count is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
 #     predicate cannot quietly go permissive again.
@@ -2646,14 +2681,21 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: column this note carried before the scope fix (2026-10-24 at `d07c9e99e`) was
 #: `24/34/43/52` — SUPERSEDED, quoted only so an older figure met elsewhere reads
 #: as superseded rather than as a contradiction of this one. The SHIPPED predicate
-#: — the two exceptions in
-#: `_DISTANCE_EXCEPTIONS` added — accepts 36, i.e. the exceptions are worth exactly
-#: the 34 -> 36 above, stated separately so neither figure hides the other. Every
-#: one of the 31 true attributions is within 3 hops except the two named in
+#: — the `_DISTANCE_EXCEPTIONS` budgets applied — accepted 36 AT THAT
+#: MEASUREMENT, i.e. the exceptions were worth exactly the 34 -> 36 above, stated
+#: separately so neither figure hides the other; at that measurement every one of
+#: the 31 true attributions was within 3 hops except the readers named in
 #: `_DISTANCE_EXCEPTIONS`. (Counts, not percentages, on purpose: this file's own
 #: rule is that a rate restated against a fixed denominator rots on the next table
 #: growth — a sentence two screens up still read `63/340 = 18.5 %` after the table
-#: grew. The denominator is 19 rows x 22 doors at this head.)
+#: grew. The denominator at that measurement was 19 rows x 22 doors.)
+#: ⛔ **EVERY FIGURE IN THIS PARAGRAPH IS THE 2026-11-03 MEASUREMENT, NOT A CLAIM
+#: ABOUT THIS HEAD.** Re-derived at `#14249`'s head the same sweep accepts 27 of
+#: 270 pairs (18 rows x 15 doors) and the exceptions are worth 21 -> 27 — the table
+#: has been re-cut twice since, and `#13899` re-cut the door occurrences (its own
+#: size is recorded by the arm's floor note further down rather than re-derived
+#: here). The pin below is the live figure; this paragraph is the evidence for a
+#: decision (the rejected uniform-2 bound), so it is dated rather than re-counted.
 #: ⚠️ **The figures an earlier wording here carried were re-measured, not merely
 #: re-labelled.** It reported `16.5 %` for a uniform 5 and `15.6 %` for a uniform 3,
 #: and justified the tighter number with three substitutions it said stayed green
@@ -2718,10 +2760,25 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
         "weaker chain: the declaring symbol is one reference further than the "
         "method that used to spell the query inline",
     ),
+    "mcp_server.py::_preview_delete_edges": (
+        4,
+        "#11609 lane P7 renamed the KEPT delete entry to `tortoise_delete_knowledge` "
+        "(`tool_registry.py`: 'the kept entry takes the target's own name') and left "
+        "`tortoise_delete` as a #3883 FORWARDING shim (`mcp_server.py`: 'The kept "
+        "delete entry took the approved target's spelling'; 'this name forwards to it "
+        "so a caller of the old spelling keeps the SAME preview-then-confirm "
+        "protocol'). The row's cell names the spelling callers use, so its chain is "
+        "`tortoise_delete` -> "
+        "`tortoise_delete_knowledge` -> `_preview_delete` -> `_preview_delete_entity` "
+        "-> `_preview_delete_edges`: one reference longer than the live door's own "
+        "three. The extra hop IS the shim, not a weaker chain — and dropping the "
+        "retired spelling from the cell would drop the fact that it still serves "
+        "this read",
+    ),
 }
 
-#: How far the search itself may walk. Above every BUDGET in play (3, plus the
-#: two exceptions whose budgets are 4 and 5) — which is NOT the same as above
+#: How far the search itself may walk. Above every BUDGET in play (3, plus every
+#: `_DISTANCE_EXCEPTIONS` budget) — which is NOT the same as above
 #: every CHAIN, and the difference is measured, not assumed: at this head
 #: `MCP tortoise_search` reaches `hosted_backup.py::_independent_counts` and
 #: `_DUMP_EDGE_PAGE_QUERY` in 15 hops and `_COUNT_ALL_EDGES_QUERY` in 16, so
@@ -3412,14 +3469,28 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: collision hop of the chain the note above records. Nothing else moved: no row,
 #: no door, no exception. Both the scope rule and the seam change tighten, so the
 #: pin reads the same either way — and the uniform-3 sweep stays at 34.
-_ACCEPTED_PAIRS_AT_THIS_HEAD = 36
+#: ⛔ 36 -> 27 at `#14249`'s head, and the FALL is the TABLE, not the predicate. The table
+#: was re-cut twice after that derivation (19 rows x 22 doors = 418 pairs -> 18 rows x 15
+#: doors = 270), so the SAME relation now runs over a smaller population and accepts 27
+#: of 270 instead of 36. The arm's own rule above is that a FALL means the new figure is
+#: RE-DERIVED and the reason recorded — this is that re-derivation, replicated against
+#: `_rows()` / `_doors()` / `_door_reaches()` rather than assumed. ⚠️ The worst-row
+#: ceiling is deliberately NOT moved with it: its note below says it is a BOUND, and the
+#: measured worst row is 3 against that ceiling of 4.
+_ACCEPTED_PAIRS_AT_THIS_HEAD = 27
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches
 #: more of a larger set. It is the same relation over a larger population, not a
 #: looser predicate — no door was added to any row's own reach cell.
 #: ⛔ 17 -> 4 on 2026-10-24, with the pair count above and for the same reason: a
 #: row's accepted set was measured over collision hops as well as references, so
-#: the old 17 counted the defect too. Rows 2 and 17 now lead at 4 accepted doors.
+#: the old 17 counted the defect too. ⚠️ The ceiling stays 4 (it is the tripwire
+#: this note describes) while the MEASURED worst row is 3 at this head — rows 2,
+#: 17 and 24 all sit at three accepted doors (rows 2 and 17:
+#: `MCP tortoise_recall`, `MCP tortoise_search`, `SDK search_knowledge`; row 24:
+#: the three delete doors) — not four. The earlier wording
+#: here said rows 2 and 17 "lead at 4", which the measurement refutes; the number is a
+#: BOUND, so the pin is left where the accepted count says it belongs.
 _WORST_ROW_AT_THIS_HEAD = 4
 
 
@@ -3489,8 +3560,12 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     )
     # The tripwire must not be satisfied by a predicate that accepts NOTHING:
     # every true attribution is inside this set by construction.
-    # ⛔ #13899 moved this floor with the table (31 -> 21): the batch retired ten
+    # ⛔ #13899 moved this floor with the table (29 -> 21): the batch retired ten
     # SDK-door occurrences and re-pointed two, and this figure IS that count.
+    # MEASURED at the pre-#13899 tree (`127294ccadf9^`) the §13 table carried 29
+    # occurrences, and the arithmetic is 29 - 10 + 2 = 21 — the `31` this line used
+    # to read is the value TWO retirements earlier (the SDK traversal row took
+    # 31 -> 30, `#11609` batch 1 another).
     assert total >= 21, (
         f"only {total} pairs are accepted although §13's cells name 21 door "
         "occurrences (the count the table arm pins) — the predicate has broken the "
@@ -3638,6 +3713,78 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         "§13 classes these rows customer-callable without naming a door that "
         "exists AND reaches the row's own reader:\n  " + "\n  ".join(broken)
     )
+    # ⛔ EVERY EXCEPTION BUDGET IS EXACT, not a ceiling (`#14249` review P2-2).
+    # `distance <= hops` above is satisfiable by a budget that GROWS: measured on this
+    # head, raising `ranking.py::fetch_entity_signals`'s budget 4 -> 5 left every arm in
+    # this file green — including the 27-pair pin and the falsifiability arm — and it
+    # moved NO row's accepted set (re-measured: total 27 -> 27, and rows 17 and 24 both
+    # stay at 3 doors). So the loosening is invisible to the reach arms rather than
+    # visible through a widened row: there is no widened row to see. What it breaks is
+    # the budget's own claim. The budget's own text says
+    # it is "the measured distance", so assert THAT: the deepest door of each exception
+    # reader must need exactly its budget. (MAX over the reader's doors, not per door:
+    # `_preview_delete_edges`'s three doors are ALL retired #3883 spellings —
+    # `tortoise_delete_point` and `tortoise_delete_entity` at distance 2, and the
+    # `tortoise_delete` forwarding shim at 4 (the chain the register entry below
+    # describes); the LIVE door, `tortoise_delete_knowledge`, is not one of this row's
+    # doors at all. Only the deepest is what the budget was raised for.)
+    for exception_reader, (exception_budget, _why) in _DISTANCE_EXCEPTIONS.items():
+        exception_doors = [
+            door
+            for row in _rows()
+            if f"{row['module']}::{row['symbol']}" == exception_reader
+            for door in _doors(str(row["reach"]))
+        ]
+        assert exception_doors, (
+            f"`_DISTANCE_EXCEPTIONS` carries {exception_reader!r}, but no row in the table "
+            "names that reader — a budget for a row that no longer exists is debt. (This "
+            "comprehension deliberately admits ANY reach class, not only "
+            "`customer-callable`: a reader can be re-pointed off §13's customer-callable "
+            "cells, and the clause below reports that as an unresolved door rather than as "
+            "a missing row.)"
+        )
+        # ⛔ `or 0` would be WRONG here: `_door_distance` returns `None` for "not found
+        # within `_DISTANCE_SEARCH_CAP` hops", and `0` is a LEGITIMATE distance (a door
+        # that IS the reader) — see `_door_distance:3043-3047` (the docstring that states
+        # `None` as a TRUNCATION, not an absence) and the cap loop at `:3063`, plus
+        # `_DISTANCE_SEARCH_CAP`'s docstring, which requires "every message that consumes
+        # the value [to say] which of the two it is". Collapsing `None` into `0` reports a
+        # capped search as a zero-hop door, which is the exact confusion the sibling arm
+        # above (`if distance is None:` → "is not found within the … search cap") was
+        # written to prevent.
+        #
+        # ⚠️ THIS CLAUSE IS LIVE, and it was nearly deleted on a false negative. A
+        # reviewer argued it was dead because `assert not broken` above covers "the same
+        # door set" — it does NOT: that loop walks only `_reach(row) ==
+        # "customer-callable"` rows, while `exception_doors` above admits ANY reach
+        # class on purpose. The state needs BOTH halves: an `_DISTANCE_EXCEPTIONS` entry
+        # for a reader re-pointed off §13's customer-callable cells (row 39
+        # `domain_validators.py::validate_portfolio_shape`, reach class `ops audit`, both
+        # its doors `None` at the cap), AND those doors beyond the cap. Given that entry,
+        # the loop below reaches this line and produces `None` here — without the entry
+        # the loop never sees the reader at all.
+        # MEASURED both ways: with this clause, an entry for such a reader reds with
+        # "2 of 2 door(s) are not found within the 12-hop search cap …"; without it, the
+        # same entry crashes with a bare `TypeError: '>' not supported between instances
+        # of 'NoneType' and 'NoneType'` naming neither the reader nor the remedy.
+        distances = [_door_distance(door, exception_reader) for door in exception_doors]
+        unresolved = sum(1 for distance in distances if distance is None)
+        assert not unresolved, (
+            f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]`: {unresolved} of "
+            f"{len(distances)} door(s) are not found within the "
+            f"{_DISTANCE_SEARCH_CAP}-hop search cap, so they are UNVERIFIED here — this "
+            "arm cannot tell 'no chain' from 'a chain longer than it looked'. Raise "
+            "`_DISTANCE_SEARCH_CAP` (and re-derive the pinned figures) or shorten the "
+            "chain. ⛔ A `_DISTANCE_EXCEPTIONS` entry cannot help: it raises the reader's "
+            "BUDGET, and the search stops at the cap before any budget is consulted."
+        )
+        deepest = max(distances)
+        assert deepest == exception_budget, (
+            f"`_DISTANCE_EXCEPTIONS[{exception_reader!r}]` budgets {exception_budget} "
+            f"references, but its deepest door needs {deepest} — the entry must state the "
+            "MEASURED distance, or it hands every row that reader touches one extra hop "
+            "of unverified attribution"
+        )
 
 
 #: A stated door count: `SIXTEEN distinct doors`, `sixteen doors`, `SIXTEEN
@@ -5554,8 +5701,26 @@ def test_the_module_filter_admits_a_split_traversal():
     # untyped `MATCH ()-[r]->() RETURN count(r)`, so retiring the method (and the
     # §13 row that owned it) removes exactly one symbol key and one walk. The
     # move is re-derived from the tree, not retyped to match a hoped-for total.
-    assert (len(sites), sum(len(lines) for lines in sites.values())) == (27, 41), (
-        "the empty-pattern derivation moved off 27 symbol keys / 41 site rows "
+    # ⛔ 27/41 -> 29/43 with `#14161` (`e74cf1d13da7`, "keep this resident"):
+    # `tortoise/resident_pin.py` arrived carrying TWO untyped closure walks —
+    # `read` and `_closure_for`, one site each, both `OPTIONAL MATCH (n)--(m:{label})`
+    # — so the corpus gains exactly two keys and two rows. Each is registered
+    # (`EMPTY_PATTERN`) rather than given a §13 row, because neither reads a
+    # REFERENT: the pattern returns only neighbour identity, never `type(r)` or an
+    # edge property. ⛔ NOT because the walk cannot SEE the edge — it does (a
+    # multi-labelled `:Point:Object` target puts both ends on `Point`), and the
+    # entries say so rather than resting on a false endpoint argument.
+    # ⚠️ NOT `#14169`'s P7 batch — this was attributed to it when the move was
+    # found, and the measurement refutes that: the pre-P7 tree `605d9ebffbe1`
+    # already derives 29/43, `e74cf1d13da7`'s parent `dea00903b50f` derives 27/41,
+    # and the two keys the move adds live in `tortoise/resident_pin.py`, a file
+    # P7 never touches. P7's delta is `audit.py`, `hosted_api.py`,
+    # `mcp_server.py`, `tool_registry.py`, and every key the derived set already
+    # carries in those files — `_export_graph_snapshot`,
+    # `_load_commit_graph_state`, `_preview_supersede`, `_preview_delete_edges` —
+    # is PRE-EXISTING, so P7 added none of them.
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (29, 43), (
+        "the empty-pattern derivation moved off 29 symbol keys / 43 site rows "
         f"({len(sites)} keys, "
         f"{sum(len(lines) for lines in sites.values())} rows). The register's "
         "`sites` counts and BOTH completeness directions are stated against "

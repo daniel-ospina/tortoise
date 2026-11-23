@@ -252,12 +252,22 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1066 lines at this head, measured through THIS function's own
-    walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
-    line inside the run and it silently shrank to 22 until the #14188 repair; and PR #14258's own
-    two prose commits grew it to 1066 while this sentence still said 985, which was true at
-    `04afeb811d` and 1010 at `main` `70fbd1a27dd5` — review of #14258, P3), AND THE ARMS GRADE
-    ALL OF IT
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1327 lines at this head, measured through THIS function's own
+    walk — and GRADED, see `test_the_extent_figure_is_the_walks_own_count`: a prose edit that
+    moves the run REDS naming both numbers instead of quietly publishing a stale figure, which is
+    what the sentence this one replaces asked a reader to do by hand. `#14086` left one blank
+    line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
+    prose commits grew it to 1066 while this sentence still said 985, which was true at
+    `04afeb811d` and 1010 at `main` `70fbd1a27dd5` (review of #14258, P3), and this re-cut's
+    restoration of the branch's dropped blocks took the merged run to 1079, a peer's prose to 1084,
+    dropping the duplicated `#:` separator that restoration had left to 1083, the measured erratum
+    rework below to 1087, and the merge with `origin/main` `10e51693` — which KEPT both sides'
+    blocks and added the re-measure note — to 1122; THIS re-cut merges `origin/main` `0467ba32`
+    (base `70fbd1a2`) and then a PEER's own copy of that same re-cut, KEEPING both sides' blocks at
+    each merge for the same reason: the peer's copy read 1185 and then 1196 as its prose grew
+    while this lane's read 1197, and the per-line difference between the two LIVES is exactly what
+    a merged run is — so the figure above is RE-MEASURED here rather than inherited from either
+    side, and the next reflow repeats that), AND THE ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
@@ -350,6 +360,30 @@ _ARM_REFSPECS: dict[str, str] = {
     RESIDUE_INTERVAL_END: _PR_HEAD_REFSPEC,
     RESIDUE_PR_HEAD: _PR_HEAD_REFSPEC,
     "origin/main": "+main:refs/remotes/origin/main",
+    # ⛔ THE RECUT BLOCK'S OWN ADDRESSES (#14282 review, P3). Three revs the block publishes an
+    # OWN PIN for, so `_requires(...)` can name them — and an unmapped rev RAISES instead of
+    # printing an inert command, which is the round-12/13 defect this map exists to prevent.
+    # GitHub serves a commit reachable from ANY ADVERTISED REF, by FULL SHA — `main`'s ancestry, or
+    # `refs/pull/<n>/head` (`efe5605e976a` is served via `refs/pull/14270/head`: the rebase left it
+    # no longer an ancestor of `main`, so an ancestry-only rule does NOT explain that entry) — and a
+    # DESTINATION is required (round 13), so each maps to `+<sha>:refs/pi/<abbrev>`.
+    # ⛔ NOT `refs/remotes/origin/<abbrev>` (#14282 review, P3): `git fetch --prune origin` DELETES a
+    # remote-tracking ref the remote does not advertise — measured in a scratch clone, the destination
+    # was removed with ` - [deleted] (none) -> origin/<abbrev>` — so a routine prune silently disarmed
+    # the re-arm this map prints. `refs/pi/*` is what every sibling sha want here uses, and `--prune`
+    # does not touch it.
+    # Measured on this repo: each fetch created its destination ref at the named sha.
+    "5e83c2a2f6": "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/pi/5e83c2a2f6",
+    "10e51693f1": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f1",
+    "efe5605e976a": "+efe5605e976af24ea45cc66d2015861d30d3a39c:refs/pi/efe5605e976a",
+    #
+    # ⛔ AND #14258's TWO, FROM THE OTHER SIDE OF THIS MERGE. They are kept alongside the
+    # three above rather than replacing them: all five are an `OWN_PINS` key on the MERGED
+    # tree, and `test_every_addressed_rev_names_a_fetchable_refspec` requires an address for
+    # every one — so this is the union of two independently-correct maps, not a choice. The
+    # shape guards below grade every entry in the map identically, by deriving the population
+    # from the map rather than restating its size — a size typed in prose here goes stale on the
+    # next entry added, and nothing grades it (#14282 review cycle 2, P3).
     # ⛔ PR #14258's `OWN_PINS` GREW BY TWO AND THE MAP DID NOT FOLLOW, so
     # `test_the_own_pin_map_matches_each_revs_own_tree`'s `_requires(*sorted(OWN_PINS))` raised
     # `KeyError` instead of SKIPPING in the sharded `test` job — which checks out at
@@ -380,6 +414,34 @@ _ARM_REFSPECS: dict[str, str] = {
     # checks it where it does — on the SOURCE.
     "0351fe856942": "+refs/pull/14160/head:refs/pull/14160/head",
     "10e51693f166": "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/pi/10e51693f166",
+    # ⛔ FULL-SHA WANTS, because neither rev has an ADVERTISED ref: `27cd81d55ebd` sits in no ref at
+    # all and `8889f1140105`'s only ref is a local branch (`refs/pull/14086/head` contains neither),
+    # so `+<40-hex>:refs/pi/<rev>` is the only address that resolves — naming a branch would be the
+    # lie this map exists to forbid. ⛔ DURABILITY, not fetchability, is the caveat: an unadvertised
+    # sha is subject to the server's GC, so a re-arm can stop resolving; the pairs stay graded.
+    "8889f1140105": "+8889f1140105677add2c7c4dd60d0c8c5080ea26:refs/pi/8889f1140105",
+    "27cd81d55ebd": "+27cd81d55ebd42948c27051d821df970bbc0ba2f:refs/pi/27cd81d55ebd",
+    # `1b0db0489408` is an ANCESTOR of `origin/main` (measured: `git merge-base --is-ancestor
+    # 1b0db0489408 origin/main` exits 0), so an advertised ref DOES carry it — but the full-sha
+    # want is kept for the same reason as its neighbours above: it does not depend on how deep the
+    # clone checked out, and the FORM is what this map grades.
+    "1b0db0489408": "+1b0db0489408e1e817688f83cef0d7c1ee33be5d:refs/pi/1b0db0489408",
+    "2c0d66e2ec": "+2c0d66e2ec07d673b17e31b76dc24fbdd57f8e14:refs/pi/2c0d66e2ec",
+    "e74cf1d13d": "+e74cf1d13da76ba7176c73ebacd96cef843378f5:refs/pi/e74cf1d13d",
+    # ⛔ `2fe01fc775e` is NOT listed here: it is `RESIDUE_REWRITE_PARENT`, already mapped at the top of
+    # this map to `_PR_HEAD_REFSPEC`. A second literal entry bound the SAME key, so Python kept the last
+    # one and the constant's row became dead data — and the printed remedy silently changed from a
+    # refspec that creates `refs/pull/14108/head` to a sha want that creates only `refs/pi/2fe01fc775e`
+    # (#14282 review, P2). One key, one row.
+    "e0accb8fe6": "+e0accb8fe6362942a0c847c7daa1829e272296a9:refs/pi/e0accb8fe6",
+    "72c104bcbb": "+72c104bcbb1cbcef901476a535ed35262d167e02:refs/pi/72c104bcbb",
+    # `8889f1140105` is a MERGE on a deleted feature branch, so no depth-1 REF arms it — but a sha
+    # want does, measured from a clone holding neither object: `git fetch --dry-run --depth=1
+    # https://github.com/daniel-ospina/tortoise.git 8889f1140105677add2c7c4dd60d0c8c5080ea26` →
+    # `* branch … -> FETCH_HEAD`, while the same command with an invented sha prints
+    # `fatal: remote error: upload-pack: not our ref` (the negative control that makes the first
+    # line evidence rather than a coincidence). This map grades the FORM of the remedy; the
+    # want-ability behind it is what that pair of commands measures.
 }
 
 
@@ -475,6 +537,40 @@ def test_the_residue_block_is_a_real_block_and_publishes_its_addresses():
     assert not _misattributions("the red `test (a)` reported on `#13994`'s shard `a`"), (
         "`#13994` is a legitimate statement elsewhere in the block; forbidding the NUMBER "
         "instead of the ATTRIBUTION would red it")
+
+
+def test_the_extent_figure_is_the_walks_own_count():
+    """The line count `_residue_block()` publishes must be what its OWN walk returns.
+
+    ⛔ THE FIGURE WAS ADVICE, NOT A GATE (#14282 review cycle 3, P3), AND IT WAS CARRIED WRONG
+    REPEATEDLY BECAUSE OF IT. An instruction to re-derive is not a check, and a figure read off a
+    sentence is exactly the class this PR exists to repair — so the sentence is graded here, and
+    a prose edit that changes the extent REDS, naming both numbers, instead of quietly publishing
+    a stale one.
+
+    ⛔ NO COUNT OF THE READINGS IS RESTATED HERE, OR ANYWHERE (#14282 review, P3). An earlier
+    cut of this docstring carried its OWN count of how often the extent figure had been re-derived,
+    and it disagreed with the count `_residue_block`'s docstring carried — two numbers for one
+    population, both authored by this PR, so a reader auditing the count had to re-derive it
+    instead of trusting either. Those numbers survive only as the history of that disagreement,
+    which is why this header says a count is not restated rather than that none is mentioned:
+    neither docstring publishes a total now. The readings are listed in one place
+    (`_residue_block`'s docstring, beside the figures they name) and their count is deliberately
+    left unasserted — publishing it here would be the same stale-restatement defect this gate
+    exists to close, one level up. That is why this arm asserts the FIGURE and not the history.
+
+    Scoped to THIS sentence's figure: the docstring legitimately quotes other counts (`shrank to
+    22`, `round 17`), and a looser match would grade those against the walk and red an honest edit.
+    """
+    m = re.search(r"ITS EXTENT IS THE ENTIRE RUN \((\d+) lines", _residue_block.__doc__ or "")
+    assert m, (
+        "the docstring must still publish the extent figure — deleting the sentence is not the "
+        "fix for a wrong one")
+    published = int(m.group(1))
+    actual = len(_residue_block().splitlines())
+    assert published == actual, (
+        f"the block publishes its extent as {published} lines; its own walk returns {actual} — a "
+        "prose edit changed the run, so re-derive the figure instead of carrying it forward")
 
 
 #: The PRs that legitimately OWN `RESIDUE_REWRITE_PARENT`: its squash subject reads
@@ -1084,11 +1180,23 @@ _PR_REF_AS_TREE = re.compile(
 #: ⛔ PRESENT TENSE ON PURPOSE: `this branch's tree printed at `72c104bcbb`` is a MEASUREMENT with
 #: its rev named and must not red, while the unqualified present tense is the binding that the
 #: next re-pin falsifies — the same measurement-vs-binding line clause 1 already draws.
+#: ⛔ THE REVERSED ORDER — CLAUSE 1's OWN BLIND SPOT (#14282 fix lane, P3-class, measured).
+#: Clause 1 puts the `pair`/`pin` noun BEFORE the relative head, so the sentence `At THIS head the
+#: committed pair is `11861`` graded NOTHING and shipped GREEN on the merged head — where the
+#: committed pair is `11864` and `--check` exits 0 against it, so the sentence asserted a pair the
+#: head it ships on does not carry, the exact defect clause 1 exists to charge. The passive
+#: "committed pair"/"committed pin" is a BINDING (it states what the head commits), never the
+#: honest measurement qualifier `--check` exits 0 `on THIS tree` / `on the SAME pair` — which is
+#: why this clause keys on that noun instead of on every `pair` within reach of a relative head:
+#: that widening would charge `main`'s stale-marked `on the SAME pair` sentence, whose refutation
+#: sits in the paragraph BELOW it and so outside `_refuted`'s forward window.
 _RELATIVE_PIN_ADDRESS = re.compile(
     r"(?i)\b(?:pair|pin)\b[^.\"]{0,40}\b(?:THIS|this)\s+head\b"
     r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|tree|revision|rev)\s+pins?\b"
     r"|\b(?:THIS|this)\s+(?:branch|commit|PR|pr)'?s\s+(?:tree|tip)\s+(?:pins?|prints?)\b"
-    r"|\bthis\s+commit'?s\s+`?origin/main`?")
+    r"|\bthis\s+commit'?s\s+`?origin/main`?"
+    r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|revision|rev)\b[^.\"]{0,40}"
+    r"\bcommitted\s+(?:pair|pin)\b")
 
 #: The rewrite's PARENT claim: `83e94826a8a` is the pre-rebase DRAFT of the commit that landed as
 #: `1b82cc7063`; the rewrite's PARENT — the tree every row above is measured against — is
@@ -1322,6 +1430,14 @@ def test_the_recut_pair_is_bound_to_its_rev_never_to_a_relative_head():
         f"{flow} and the pair THIS COMMIT pins, `{RESIDUE_ABBREV}` over"), (
         "a relative pin spelled `THIS COMMIT pins` is the same defect as `THIS head pins` — the "
         "arm must refuse the SHAPE, not one spelling of it")
+    # ⛔ THE REVERSED ORDER, ADDED WITH THE MERGE-INTRODUCED FALSEHOOD IT MISSED (#14282 fix
+    # lane, P3-class). Clause 1 sees the noun only BEFORE the head, so `At THIS head the committed
+    # pair is `11861`` left this arm GREEN on a head whose committed pair is `11864`. Non-vacuity
+    # is the mutation itself: reinstall the shipped wording and the arm must bite.
+    assert _relative_pin_addresses(
+        f"{flow} At THIS head the committed pair is `11861`, and `--check` exits 0 against it"), (
+        "`At THIS head the committed pair is <pair>` must be refused: it binds the pin to the tree "
+        "the reader is standing on, which is how a merge re-cut falsified it silently")
 
 
 def test_a_pair_bound_to_the_pair_below_is_the_pins_own_pair():
@@ -1517,6 +1633,25 @@ def test_the_mutation_anchors_do_not_red_an_honest_rewording(monkeypatch):
         "the moment its anchor is reworded")
 
 
+def _arm_refspecs_literal_keys() -> list[str]:
+    """Every KEY EXPRESSION written in the `_ARM_REFSPECS` dict literal, in source order.
+
+    Read from THIS file's own source rather than from the imported mapping, because the defect it
+    grades is invisible in the imported mapping: a duplicate key does not raise, it is silently
+    collapsed by Python, so `_ARM_REFSPECS` reports only the survivor. The literal is the only place
+    the shadowed row still exists (#14282 review cycle 12, P3).
+    """
+    body = Path(__file__).read_text().split("_ARM_REFSPECS: dict[str, str] = {", 1)[1].splitlines()
+    keys: list[str] = []
+    for line in body:
+        if line == "}":
+            break
+        matched = re.match(r'^    ("[^"]+"|[A-Z_]+):', line)
+        if matched:
+            keys.append(matched.group(1))
+    return keys
+
+
 def test_every_addressed_rev_names_a_fetchable_refspec():
     """Review round 12 (P2): every rev a skip names must be FETCHABLE, or the skip is a lie.
 
@@ -1524,37 +1659,233 @@ def test_every_addressed_rev_names_a_fetchable_refspec():
     printing an inert `git fetch origin <abbreviation>`. This arm keeps the map honest for
     the revs a skip can name today.
 
-    ⛔ AND FOR EVERY `OWN_PINS` KEY (review of PR #14258, P1). The fixed tuple below used to be the
-    WHOLE population, so `OWN_PINS` could grow — it did, by `10e51693f166` and `0351fe856942` — and
-    this arm stayed green over the map that just gained two unmapped revs. The consequence was not
-    a red here but a `KeyError` at SKIP time in `test_the_own_pin_map_matches_each_revs_own_tree`
-    on a `fetch-depth: 1` checkout. Iterating `OWN_PINS` too is what turns that class into the RED
-    this arm is for.
+    ⛔ EVERY ENTRY IS GRADED, NOT A HARDCODED SIX (#14282 review, P3 residual). This arm used
+    to iterate a literal tuple of the revs then in the map, so the three addresses the re-cut
+    paragraph publishes (`5e83c2a2f6`, `10e51693f1`, `efe5605e976a`) were added to the map and
+    graded by NOTHING: an ABBREVIATION or a SOURCE-ONLY refspec on any of them passed silently,
+    which is exactly the round-12/round-13 inert remedy one level down. The first assertion still
+    requires the revs a skip can name today, so deleting an entry is caught; the loop grades the
+    SHAPE of every entry the map holds, so folding a new rev in cannot buy an ungraded line.
+
+    ⛔ PRESENCE AND NON-VACUITY ARE ONE PREDICATE (#14282 review, P3). These used to be a
+    per-rev `rev in _ARM_REFSPECS` loop followed by `assert _ARM_REFSPECS, "non-vacuity: …"`.
+    Once the loop has proven six keys the map is provably non-empty, so nothing could ever make
+    THAT line the one that reds: it was an assertion whose value cannot vary — the round's
+    own rule 2, a catch not attributable to the guard it claims to prove. A superset assert
+    carries both facts and stays reachable: delete any key and it names the rev that went
+    missing, empty the map and that same line reds naming every rev in `expected` — the fixed
+    tuple UNION `OWN_PINS`. ⛔ ITS SIZE IS DERIVED, NEVER TYPED (#14282 review cycle 2, P3, the
+    same class the map's own note repairs): this sentence published a figure — "the six", then
+    "ELEVEN" — and each went stale the moment `OWN_PINS` gained a key, because no arm grades the
+    size restated in THIS sentence. ⛔ SCOPED TO THIS SENTENCE, DELIBERATELY (#14282 review, P3):
+    an earlier cut of this clause said "no arm grades a size restated in prose", which is FALSE of
+    the tree and its wrong outcome is deletion of a live arm — `tools/sdk_privatise.py`'s `SIX`/`EIGHT`
+    are graded through this file's `RESIDUE_INTERVAL_COMMITS`/`RESIDUE_CARRIER_COUNT` constants (they
+    are defined HERE, not in the tool), by the arms here, because the numerals there are load-bearing. The rule is about a
+    figure published HERE without a grader, never about prose generally. A reader who needs the
+    population's size reads `expected`.
+
+    ⛔ AND THAT UNION IS THE MERGE ITSELF (#14282 merged with #14258), WHICH IS WHY THE FIGURE
+    CHANGED FROM A FIXED ONE TO A DERIVED ONE. #14258 independently added two `OWN_PINS` keys,
+    `10e51693f166` and `0351fe856942`, and its own reason for iterating `OWN_PINS` here is
+    the same one:
+    a fixed tuple leaves a newly-added key ungraded, and the failure surfaces not as a red
+    but as a `KeyError` at SKIP time in `test_the_own_pin_map_matches_each_revs_own_tree` on
+    a `fetch-depth: 1` checkout — an ERROR where a SKIP was designed. Both spellings and
+    both key sets are kept, because a union that drops one side re-opens the hole it closed.
+
+    ⛔ THE REQUIRED SET INCLUDED ONLY THE FIXED TUPLE, SO A RE-CUT ADDRESS'S DELETION WAS STILL
+    UNGRADED (#14282 review cycle 2, P3). The three addresses the re-cut paragraph publishes were
+    in the map and their SHAPE was graded below, but they were absent from `expected`, so deleting
+    one left this arm GREEN — the loss surfacing at best as a `KeyError` out of `_rearm_command` on
+    the skip path, never as an assertion. `expected` is now that tuple UNION every `OWN_PINS` key,
+    because a rev the block publishes an OWN PIN for is exactly a rev a skip may name.
+
+    ⛔ AND AN ABBREVIATED SOURCE IS THE SAME HOLE ONE SHAPE OVER (#14282 review, P3). The
+    wrong-source guard AT THAT TIME matched `[0-9a-f]{7,40}`, which admitted a 7-to-39-char prefix,
+    and `startswith(rev)` is TRUE for the key's OWN abbreviation — so
+    `+5e83c2a2f6:refs/remotes/origin/5e83c2a2f6` satisfied EVERY assertion in this arm while
+    `git fetch --dry-run origin "+5e83c2a2f6:…"` returns
+    `fatal: couldn't find remote ref 5e83c2a2f6`. A source that IS a sha must therefore be the
+    full 40 hex, never in between. ⛔ THAT SENTENCE IS PAST TENSE ON PURPOSE (#14282 review
+    cycle 4, P3): it records the predicate that WAS here — this docstring said "matches
+    `[0-9a-f]{7,40}`" in the present tense, a few lines above a comment saying the predicate is
+    NOT that, so a lane reconciling the two in the wrong direction would re-open this hole. ⛔ NO
+    LINE OFFSET IS TYPED (#14282 review cycle 2, P3): this read "33 lines above", which is
+    ungraded and rots on the next insertion — see this file's own rule that an address is named by
+    its TEXT and never by a line number. The
+    guard now decides "is a sha" by a CASE-INSENSITIVE HEX PREFIX with a floor of 4 (git's
+    minimum abbreviation) and then requires the full 40 LOWERCASE hex — see the comment above
+    `if re.match(` below, which is the one place the rule is stated. The negative control drives
+    this very arm over each inert shape so the hole cannot quietly reopen.
     """
-    addressed = (RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
-                 RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main",
-                 *sorted(OWN_PINS))
-    for rev in addressed:
-        assert rev in _ARM_REFSPECS, f"{rev} has no fetchable address — a skip naming it is inert"
-        assert not re.fullmatch(r"[0-9a-f]{7,39}", _ARM_REFSPECS[rev]), (
+    expected = {RESIDUE_ABBREV, RESIDUE_REWRITE_PARENT, RESIDUE_DELETING_COMMIT,
+                RESIDUE_INTERVAL_END, RESIDUE_PR_HEAD, "origin/main"} | set(OWN_PINS)
+    missing = sorted(expected - set(_ARM_REFSPECS))
+    assert not missing, (
+        f"{missing} have no fetchable address — a skip naming one is inert, and an empty map "
+        "is not a vacuous pass")
+    for rev, refspec in _ARM_REFSPECS.items():
+        assert not re.fullmatch(r"[0-9a-f]{7,39}", refspec), (
             f"{rev} is mapped to an ABBREVIATION, which git cannot `want`")
-        src, _, destination = _ARM_REFSPECS[rev].lstrip("+").partition(":")
+        source, _, destination = refspec.lstrip("+").partition(":")
         assert destination, (
             f"{rev} is mapped to a SOURCE-ONLY refspec: git records it in `FETCH_HEAD` and "
             "creates no local ref, so a skip printing it re-arms the object DB and leaves the "
             "ADDRESS assertion UNCHECKED — the round-13 inert remedy")
-        # ⛔ A HEX SOURCE MUST BE A FULL SHA (review of PR #14258, P2). The whole-entry `fullmatch`
-        # above cannot see this: a refspec contains `+` and `:`, so it never matches hex-only at ANY
-        # length — which left an abbreviated SHA SOURCE ungraded. Measured before this assertion
-        # existed: mutating this entry to a 12-hex source (`+10e51693f166:refs/pi/…`) kept the arm
-        # GREEN, while the remedy it would print is `fatal: couldn't find remote ref` (rc=128).
-        if re.fullmatch(r"[0-9a-f]+", src):
-            assert len(src) == 40, (
-                f"{rev} is mapped to a hex SOURCE of {len(src)} characters — git cannot `want` an "
-                "abbreviated sha, so the printed remedy is inert; use the full 40-character sha")
+        # ⛔ A WRONG SOURCE SHA UNDER A CORRECT KEY (#14282 review cycle 2, P3 residual). Grading
+        # only the DESTINATION lets `+<another-sha>:refs/remotes/origin/<rev>` pass, so the map
+        # would fetch rev B under rev A's address and every `_ref_sha` premise reading that ref
+        # would be a premise about the WRONG TREE — the same "address that resolves to a different
+        # tree" defect this block exists to catch, one level down in the re-arm path. The source is
+        # graded ONLY where it IS a sha: the older entries address `refs/pull/14108/head`
+        # (a live pointer rather than an abbreviation of the key — measured: `83e94826a8a`,
+        # `2fe01fc775e`, `aee14c5ceb`, `d5ecef0d72`, `d523c9be8c`), `origin/main` addresses a
+        # branch name, and `0351fe856942` (added by #14258) addresses `refs/pull/14160/head` — so
+        # every entry whose source is a ref NAME is excused; the sha sources are graded by both
+        # assertions below. ⛔ THESE COUNTS ARE NOT TYPED (#14282 review cycle 2, P3): the split
+        # was published as "FIVE … SEVEN of … ELEVEN … the remaining FOUR" and nothing graded it —
+        # mutating that split's numerals left the whole suite green — so the population is named by
+        # TEXT and its SIZE comes from the map, which is the only form that survives an entry
+        # being added.
+        # ⛔ THE PREDICATE IS A HEX PREFIX, CASE-INSENSITIVE AND UNBOUNDED — NOT
+        # `[0-9a-f]{7,40}` (#14282 review cycle 3, P3). The bounded-lowercase band graded only
+        # what it admitted, so every sha-shaped source OUTSIDE it fell into the ref-NAME
+        # exemption and was graded by NEITHER assertion — measured GREEN on four shapes, of which
+        # TWO `git fetch` REFUSES (`rc=128`, `fatal: couldn't find remote ref`): the 41-hex source
+        # and `<40 hex>g`; and TWO it RESOLVES (`rc=0`) — the UPPERCASE form of THIS key's own
+        # commit (to the RIGHT tree, so refusing it is a deliberate over-block) and the UPPERCASE
+        # form of a DIFFERENT commit, which re-arms the WRONG tree under this key's address, i.e.
+        # verbatim the defect the block above exists to close.
+        # ⛔ THE SPLIT IS 2 REFUSED + 2 RESOLVED, AND IT WAS MEASURED TWICE (#14282 fix lane, P3).
+        # Three earlier drafts of this sentence got it wrong in three different ways — "refuses
+        # them" over a list whose last item RESOLVES; then "THREE refused + the FOURTH resolves",
+        # which counted a 10-char UPPERCASE ABBREVIATION (`5E83C2A2F6`, refused) that is NOT one of
+        # the four shapes, instead of the 40-char uppercase source that IS and that RESOLVES. Each
+        # draft invited a reader to run `git fetch --dry-run` and watch the sentence fail. The
+        # enumeration in the negative control below is the authoritative one; this paragraph now
+        # agrees with it. What IS graded — by that control — is that all four shapes RAISE.
+        # A source whose LEADING HEX RUN is 4+ characters is a sha attempt, so it is graded; a
+        # source with no such prefix (`main`, `origin/main`, `refs/pull/<n>/head`) is a ref NAME
+        # and is exempt by construction. ⛔ THE FLOOR IS 4, NOT 7, AND IT IS SAID HERE BECAUSE THE
+        # PROSE USED TO CLAIM MORE THAN THE CODE DID (#14282 review cycle 4, P3): the previous
+        # predicate said `{7,}` while the sentence above it said "merely STARTS with a hex run",
+        # so a 1-6-hex source was graded by NEITHER assertion — measured GREEN for `+5e83c2:` and
+        # `+5e83:` while `git fetch` refuses both (`fatal: couldn't find remote ref`). 4 is git's
+        # own minimum abbreviation, so every abbreviation git could be handed is now graded.
+        # A future ref name that genuinely begins with 4+ hex characters would be flagged —
+        # accepted deliberately: a refused re-arm is cheaper than an inert one.
+        if re.match(r"[0-9a-fA-F]{4,}", source):
+            assert re.fullmatch(r"[0-9a-f]{40}", source), (
+                f"{rev} is mapped to SOURCE {source!r}, which is not the full 40-hex lowercase "
+                "sha git can `want` (an abbreviation, a case-mangled sha, or an over-long hex "
+                "run) — a full 40-hex sha or a ref NAME, never in between")
+            assert source.startswith(rev), (
+                f"{rev} is mapped to a refspec whose SOURCE is {source[:12]} — a DIFFERENT "
+                "commit, so a skip re-arming off it fetches the wrong tree")
     assert _ARM_REFSPECS[RESIDUE_PR_HEAD].lstrip("+").partition(":")[2] == "refs/pull/14108/head", (
         "the destination must be the ref `_ref_sha` reads, or the fix re-arms a different ref")
     assert _ARM_REFSPECS["origin/main"].lstrip("+").partition(":")[2] == "refs/remotes/origin/main"
+    # ⛔ TWO EDITS ON THIS MAP WERE UNGRADED (#14282 review cycle 12, P3 both). Reverting either one
+    # to its pre-review text left all 35 other tests green, so the map could silently lose the very
+    # property the commit that fixed it argued for. Both are graded here, once.
+    #
+    # (1) THE DESTINATION NAMESPACE. `git fetch --prune origin` DELETES a remote-tracking ref the
+    # remote does not advertise, so a `refs/remotes/origin/<abbrev>` destination arms a ref the very
+    # next routine prune removes — an inert re-arm that reads as a live one. `origin/main` is the one
+    # legitimate `refs/remotes/` row: `main` IS advertised, so prune leaves it alone.
+    assert not [
+        (rev, dest) for rev, dest in _ARM_REFSPECS.items()
+        if re.fullmatch(r"\+[0-9a-f]{40}", dest.partition(":")[0]) and ":refs/remotes/" in dest
+    ], (
+        "a sha-want row arms a `refs/remotes/origin/…` destination — `git fetch --prune origin` "
+        "removes it, so the printed re-arm is inert. Use `refs/pi/<abbrev>`, which prune does not touch")
+    #
+    # (2) ONE KEY, ONE ROW. A literal key that spells an abbreviation ALREADY bound by one of the
+    # constant keys (`RESIDUE_REWRITE_PARENT` is `2fe01fc775e`) does not raise — Python keeps the LAST
+    # duplicate — so the constant's row becomes dead data and the printed remedy silently changes.
+    # The literal-key count is the mechanical tell: every key expression in the dict literal must
+    # survive into the mapping, so a duplicate (two literals, or a literal shadowing a constant) makes
+    # the two numbers disagree.
+    assert len(_ARM_REFSPECS) == len([
+        line for line in _arm_refspecs_literal_keys()
+    ]), (
+        "`_ARM_REFSPECS` states a key more than once — a duplicate literal (or a literal spelling an "
+        "abbreviation a constant key already binds) shadows an earlier row, so the map's printed "
+        "remedy is not the one it looks like it states")
+    assert _ARM_REFSPECS[RESIDUE_REWRITE_PARENT] == _PR_HEAD_REFSPEC, (
+        "`RESIDUE_REWRITE_PARENT` no longer maps to `_PR_HEAD_REFSPEC` — a later duplicate key "
+        "shadowed the row that creates `refs/pull/14108/head`")
+
+
+def test_the_refspec_shape_guards_red_every_inert_shape_and_pass_every_live_one(monkeypatch):
+    """The negative control for the shape guards in
+    `test_every_addressed_rev_names_a_fetchable_refspec` (#14282 review, P3).
+
+    A guard whose negative case cannot be reached proves the code ran, not that the map is
+    FETCHABLE, so this drives the REAL arm over mutated copies of `_ARM_REFSPECS` held in memory:
+    every inert shape must red and every live shape must pass. The abbreviation case is the one
+    that satisfied every assertion in the arm while `git fetch` refused it, which is why it is
+    pinned here rather than only described in the docstring.
+    """
+    original = dict(_ARM_REFSPECS)
+
+    def arm_with(refspec: str) -> None:
+        mutated = {**original, "5e83c2a2f6": refspec}
+        monkeypatch.setattr(sys.modules[__name__], "_ARM_REFSPECS", mutated)
+        test_every_addressed_rev_names_a_fetchable_refspec()
+
+    for refspec in (
+        # ⛔ THIS CASE'S DESTINATION CHANGED (#14282 review cycle 12, P3). It was
+        # `…:refs/remotes/origin/5e83c2a2f6` and listed as LIVE — but `git fetch --prune origin`
+        # removes a remote-tracking ref the remote does not advertise, so that destination was the
+        # INERT shape wearing the live case's clothes, and the arm accepted it. A sha want now must
+        # arm `refs/pi/…`; the `refs/remotes/` form is graded as inert below.
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/pi/5e83c2a2f6",            # full sha
+        "+main:refs/remotes/origin/main",                                            # ref NAME
+        "+refs/pull/14108/head:refs/pull/14108/head",                                # ref NAME
+    ):
+        arm_with(refspec)  # must not raise
+
+    for refspec in (
+        "+5e83c2a2f6:refs/remotes/origin/5e83c2a2f6",  # ABBREVIATED SOURCE + destination: the hole
+        "5e83c2a2f6",                                  # bare abbreviation
+        "+5e83c2a2f6",                                 # source-only abbreviation
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616",    # source-only full sha: creates no local ref
+        "+10e51693f1668e98fe62f3ee1293668a1f2f21a8:refs/remotes/origin/5e83c2a2f6",  # wrong sha
+        # ⛔ THE FOUR SHAPES A BOUNDED-LOWERCASE PREDICATE LET THROUGH (#14282 review cycle 3,
+        # P3). Each was GREEN before this fix, and the guard refuses all four because a sha
+        # source must be the full 40 LOWERCASE hex. What `git fetch --dry-run` does with them is
+        # NOT uniform, re-measured on this repo (#14282 fix lane, P3 — the sentence that stood
+        # here said "THREE are refused; the FOURTH resolves", and that count was false):
+        #   * 41 hex and `<40 hex>g` are REFUSED — `rc=128`, `fatal: couldn't find remote ref`;
+        #   * the UPPERCASE form of THIS key's own commit RESOLVES — `rc=0`, and to the RIGHT
+        #     tree, so refusing it is a deliberate over-block: lowercase is this map's convention
+        #     and the case-insensitivity it relies on is git's leniency, not a contract to lean on;
+        #   * the UPPERCASE form of a DIFFERENT commit RESOLVES — `rc=0` — and re-arms the WRONG
+        #     tree under this key's address, which is the one that matters.
+        # ⛔ THE ORDINAL IS MEASURED, NOT GRADED (#14282 fix lane, P3). Cycle 4 caught this
+        # comment saying "the third one" for a fact belonging to the fourth and fixed the ordinal —
+        # but no assertion here can grade WHICH shape a remote resolves (that needs a live fetch),
+        # and the claim that it was "graded here rather than described" was itself ungradeable. It
+        # is a measurement, cited as one; what IS graded is that all four shapes raise.
+        "+5E83C2A2F697D5879DD47D1204A2BE88D6AFF616:refs/remotes/origin/5e83c2a2f6",  # CASE
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff6166:refs/remotes/origin/5e83c2a2f6",  # 41 hex
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616g:refs/remotes/origin/5e83c2a2f6",  # hex+g
+        "+10E51693F1668E98FE62F3EE1293668A1F2F21A8:refs/remotes/origin/5e83c2a2f6",  # CASE+wrong
+        # ⛔ AND THE FLOOR ITSELF (#14282 review cycle 4, P3). The predicate's floor is 4 — git's
+        # own minimum abbreviation — not 7, so a source truncated BELOW git's default display
+        # width is graded too. Both were GREEN under `{7,}` while `git fetch` refused them.
+        "+5e83c2:refs/remotes/origin/5e83c2a2f6",      # 6 hex
+        "+5e83:refs/remotes/origin/5e83c2a2f6",        # 4 hex: git's minimum abbreviation
+        # ⛔ AND THE PRUNE-DELETABLE DESTINATION (#14282 review cycle 12, P3). A FULL sha sources
+        # this one, so every abbreviation guard passes it — it was the LIVE case above until the
+        # namespace became graded. `git fetch --prune origin` deletes the ref it creates, so the
+        # re-arm it prints is inert, which is the failure the map's own comment argues against.
+        "+5e83c2a2f697d5879dd47d1204a2be88d6aff616:refs/remotes/origin/5e83c2a2f6",
+    ):
+        with pytest.raises(AssertionError):
+            arm_with(refspec)
 
 
 def test_the_skip_instruction_is_a_command_git_can_actually_run(monkeypatch):
@@ -1679,7 +2010,51 @@ def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
 # prose arms. So the block is graded against `OWN_PINS`, an object-FREE map, and the map is
 # graded against each rev's committed pin by the premise arm that follows it.
 _OWN_PIN_CLAIM_RE = re.compile(
-    r"(?:Its own pin[\s#:]+is|commits)[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+    r"(?i:(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits))[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+#: ⛔ THE PHRASE IS `(?i:…)` BECAUSE THE BLOCK WRITES IT IN CAPITALS WHERE IT EMPHASISES (#14282
+#: review cycle 6, P1, measured). This block's own convention is to set the operative verb in caps
+#: — `origin/main` `1b0db0489408` **COMMITS** `(11843, "6aed5368ffa10513")` — and a case-sensitive
+#: pattern silently skipped that clause while BOTH new guards passed: parity saw 8 clauses and 8
+#: claims (the clause was invisible to the loose pattern too, because it carries the same phrase),
+#: and the orphan arm saw no missing key because the rev was never in `OWN_PINS` either. So a wrong
+#: pair typed into that clause would have passed everything. Scoped to the PHRASE, deliberately:
+#: the digest class stays `[0-9a-f]{16}` lowercase, so a capitalised HEX DIGEST is still a RED —
+#: the uppercase-digest mutant reds the claims-vs-clauses parity arm (one clause with no claim).
+#: GRADED, not restated: `test_the_scoped_case_fold_still_reds_a_capitalised_digest` asserts the
+#: loose clause pattern counts one MORE clause than the claim pattern parses, which is what fires
+#: that arm. This sentence used to publish the mutant's two observed counts, measured at cycle 6's
+#: head; cycle 7 added two clauses and made the figure FALSE without touching the sentence — the
+#: same drift the extent figure is graded against (#14282), so no count is typed here at all.
+#: How many clauses the pattern must match is NOT typed: it is counted off the block below.
+#: ⛔ THE WRAP IS GRADED HERE BECAUSE A RE-WRAP SILENTLY DISARMS THIS ARM (#14282 review cycle 4,
+#: P1, measured). The pattern was `Its own pin[\s#:]+is` — it tolerated a wrap between `pin` and
+#: `is` but NOT between `Its` and `own`, so re-wrapping one sentence put `Its` at the end of a line
+#: and the clause stopped matching. `10e51693f1`'s published pair then passed a mutant that set it
+#: to `(99999, "aaaaaaaaaaaaaaaa")`: the whole suite stayed green, which is a FALSE PASS — the
+#: exact failure this file exists to catch, introduced by a prose edit. The pattern now breaks at
+#: ANY of those word boundaries, AND the parity assertion below makes a silent drop impossible
+#: however the sentence is wrapped next.
+_OWN_PIN_CLAUSE_TEXT_RE = re.compile(
+    r"(?i:(?:Its[\s#:]+own[\s#:]+pin[\s#:]+is|commits))[\s#:]*`\(")
+#: ⛔ THE PARITY PARTNER IS DELIBERATELY LOOSER THAN `_OWN_PIN_CLAIM_RE` IN EXACTLY ONE DIMENSION: it
+#: stops after the OPENING BACKTICKED PAREN, so it does not grade the pair's CONTENTS. It therefore
+#: catches a failure the matcher's own tolerances cannot — a PAIR that was wrapped or malformed (the
+#: digest split across lines, or `[\"']` lost) still reads as a clause to the loose form and not to
+#: the strict one. A bare `commits` in prose does NOT count, because the loose form requires the
+#: opening paren: `commits` appears as an ordinary word many times in this block, in several
+#: positions relative to a pair, and an earlier cut of this assertion counted every one of them and
+#: reded an honest block with `6 == 18` — the arm grading the WRONG POPULATION, which is the same
+#: defect class as the wrap it was written to catch, one level up. ⛔ AND NO POPULATION COUNT IS
+#: PUBLISHED HERE (#14282 review, P3): this sentence published one and a fresh reader measured it
+#: wrong at the same head. Publishing the correction would be the same defect with a newer number,
+#: and nothing in this file grades a number written in prose — measured: adding one more such
+#: claim would leave this sentence wrong with every arm still green, the same shape as the
+#: orphaned `OWN_PINS` entry above. So the shape is described and left uncounted, and the
+#: assertion below measures it directly instead of trusting a number written here.
+#: ⛔ AND IT USES `[\s#:]+` BETWEEN
+#: THE PHRASE'S OWN WORDS, not `\s+`: this block's line breaks are `\n#: `, so the `#:` is INSIDE the
+#: gap and `\s+` alone matched one claim fewer than the matcher did — measured, and that asymmetry
+#: is why the word-level separator must match the matcher's while only the pair body is relaxed.
 _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 
 #: rev -> the `(rows, digest)` pair the block publishes AS that rev's own pin.
@@ -1690,6 +2065,23 @@ _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
 #: re-derives every entry from the repository wherever the objects exist.
 OWN_PINS: dict[str, tuple[int, str]] = {
     "d523c9be8c": (11838, "de5664dc98549d56"),
+    # ⛔ THE RECUT PARAGRAPH'S MEASUREMENT ADDRESSES (#14282 review, P3). It publishes each rev's
+    # own COMMITTED pair — deliberately NOT the pair that rev's `--repin` prints, which is the
+    # re-derivation and would claim another tree's figures. Recording them here is what makes the
+    # addresses REACHABLE: the object-free arm above reds on a rev this map lacks, and the premise
+    # arm below re-derives every entry from the repository. The mutant the review named — naming
+    # `94d75667dc`, which COMMITS (11857, "ed40203dbbf32b87") and whose own `--repin` prints
+    # (11860, '57e0960ca6f20f5a'), ONE row short of the re-cut pair, so it is never a correct
+    # address — therefore reds instead of passing as prose.
+    "5e83c2a2f6": (11858, "a1552662bf07a10b"),
+    "10e51693f1": (11858, "a1552662bf07a10b"),
+    "efe5605e976a": (11858, "a1552662bf07a10b"),
+    # ⛔ AND #14258's TWO, UNCHANGED BY THE MERGE. Both sides reached the same pair from
+    # the same +3, and all five of the added keys commit `(11858, "a1552662bf07a10b")`, so the
+    # union is a fact about the tree rather than a reconciliation. Dropping either side would
+    # leave a published `commits (N, "digest")` claim — or this branch's three `Its own pin is`
+    # claims — with no map entry, which is what
+    # `test_a_revs_published_own_pin_is_the_pin_that_rev_commits` reds on.
     # ⛔ THE `commits` SPELLING IS GRADED TOO (review of PR #14258, P3). The regex above used to key
     # on `Its own pin is` alone, so the re-pin block's `10e51693f166` (#14160) `commits
     # (11858, "a1552662bf07a10b")` — the same class of claim, written in a different honest form —
@@ -1704,8 +2096,52 @@ OWN_PINS: dict[str, tuple[int, str]] = {
     # excluding it by PROVENANCE rather than by a measurement difference (review round 3, P2). ⛔ AND NOT `c5e84ad180f2`, where
     # `origin/fix/14125-census-p1s` stands today: it is a DESCENDANT of `0351fe856942`, pushed
     # after the squash, and its content never landed.
+    # `8889f1140105` is the merge that PINS 11835 and MEASURES 11843 — the block's example of the
+    # rule. Its pair is verified against the tree like every other entry
+    # (`git show 8889f1140105:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`), and its want-ability
+    # by full sha is measured in `_ARM_REFSPECS`'s comment. The CLAIM in the block must therefore
+    # keep `8889f1140105` as the nearest backticked token before the word `commits`: the digest
+    # `891187f5a4636487` is itself a backtick-hex candidate, so a reordering binds the pair to it.
     "10e51693f166": (11858, "a1552662bf07a10b"),
     "0351fe856942": (11858, "a1552662bf07a10b"),
+    # ⛔ THE CAPS-SPELLING CLAUSE, WHICH BOTH GUARDS WERE BLIND TO (#14282 review cycle 6, P1). The
+    # block writes `origin/main` `1b0db0489408` **COMMITS** `(11843, "6aed5368ffa10513")` — in
+    # capitals, its own emphasis convention. Every pattern here keyed on a lowercase `commits`, so
+    # that clause was invisible to the matcher AND to the parity partner (which looks for the same
+    # phrase), and this map lacked the key, so the orphan arm had nothing to report either: three
+    # guards, one silent hole. The phrase is `(?i:…)` now, and this entry is what makes the clause
+    # gradeable. Pair verified the way every other entry is
+    # (`git show 1b0db0489408:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`).
+    "1b0db0489408": (11843, "6aed5368ffa10513"),
+    # ⛔ TWO MORE CLAUSES THE GUARDS COULD NOT SEE (#14282 review cycle 7, P2), both of the same
+    # shape the CAPS entry above documents: the pair is published, the rev is named, and NEITHER the
+    # pattern NOR the orphan arm reaches it — the pattern because the sentence puts the pair first
+    # ("the `(N, …)` PAIR is committed at `<rev>`"), the orphan arm because the rev was never in this
+    # map, so there was no key to orphan. MEASURED: corrupting either pair left 35 tests green.
+    # Both sentences now use the graded spelling (`<rev>` COMMITS `(N, "digest")`), and these entries
+    # are what the orphan arm then enforces. Pairs verified the way every other entry is
+    # (`git show <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`).
+    "2c0d66e2ec": (11835, "891187f5a4636487"),
+    "e74cf1d13d": (11857, "ed40203dbbf32b87"),
+    # ⛔ THREE MORE, SAME DOORWAY (#14282 review cycle 8, P2). Each published a rev's own pin in a
+    # spelling the register does not grade — `which pins`, `pinned`, `still satisfies its own pin` —
+    # and each rev was absent from this map, so the orphan arm had no key to report. MEASURED, on the
+    # head before this commit: falsifying any of the three pairs left 35 tests green. All three are
+    # now written in the graded register (`<rev>` COMMITS `(N, "digest")`) and recorded here.
+    "2fe01fc775e": (11839, "0a7e60fa05aa31b9"),
+    "e0accb8fe6": (11844, "70d6cfdcd8b769e4"),
+    "72c104bcbb": (11843, "6aed5368ffa10513"),
+    # ⛔ THE RUN-5 ILLUSTRATION'S TWO REVS (review of PR 14183, P2). The `#:` block publishes the
+    # merge `8889f1140105` as committing `(11835, "891187f5a4636487")` while its own tree measures
+    # `11843`, and `27cd81d55ebd` as re-pinning to that measured pair. Both pairs are true
+    # (`git show <rev>:tools/sdk_privatise.py | grep '^SWEEP_RESIDUE'`), so BOTH revs belong here:
+    # a merge of `origin/main` had dropped them from the graded spelling, which left the pairs
+    # ungraded and this arm's coverage quietly narrower than the block claims. ⛔ BOTH LANES added
+    # `8889f1140105` here independently while merging, so ONE entry is kept: a duplicate literal
+    # key in this dict is SILENT (last wins) and would make the pair look double graded when it is
+    # graded once. Measured: `(11835, "891187f5a4636487")` and `(11843, "6aed5368ffa10513")`.
+    "8889f1140105": (11835, "891187f5a4636487"),
+    "27cd81d55ebd": (11843, "6aed5368ffa10513"),
 }
 
 
@@ -1727,6 +2163,31 @@ def _own_pin_claims(block: str) -> list[tuple[str, int, str]]:
     return claims
 
 
+def test_the_scoped_case_fold_still_reds_a_capitalised_digest():
+    """`(?i:…)` is scoped to the PHRASE, so a capitalised HEX DIGEST stays a RED.
+
+    ⛔ WHY THIS IS AN ASSERTION AND NOT A SENTENCE. The comment above `_OWN_PIN_CLAIM_RE` used to
+    publish this mutant's observed counts, and the commit that added the next two clauses made
+    that figure FALSE without touching the sentence (#14282 review cycle 7: the same mutant then
+    counted two more on each side). A typed observation of a mutant goes stale exactly like the
+    extent figure does — this file's own subject — so the CLAIM is graded instead of restated: the
+    loose clause pattern must count one clause MORE than the claim pattern parses, which is what
+    reds the parity arm rather than letting a capitalised digest pass ungraded. Widening the digest
+    class to `[0-9a-fA-F]` — the reason `(?i:…)` is scoped and not global — makes the two counts
+    AGREE and this arm red.
+    """
+    block = _residue_block()
+    claim = _OWN_PIN_CLAIM_RE.search(block)
+    assert claim, "non-vacuity: the block still carries a graded claim to mutate"
+    mutated = block[:claim.start(2)] + claim.group(2).upper() + block[claim.end(2):]
+    assert mutated != block, "non-vacuity: the digest class is already case-insensitive"
+    assert len(_OWN_PIN_CLAUSE_TEXT_RE.findall(mutated)) > len(_own_pin_claims(mutated)), (
+        "a CAPITALISED digest must still be RED: the loose clause pattern counts the clause, the "
+        "pair-grading pattern does not, so the parity arm fires. These two agreeing means the "
+        "digest class was widened (or the phrase widened to a global `(?i)`) and a capitalised "
+        "digest now passes ungraded.")
+
+
 def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
     """A `(rows, digest)` published AS a rev's own pin must be that rev's committed pair.
 
@@ -1740,6 +2201,16 @@ def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
     assert claims, (
         "non-vacuity: the block still publishes at least one rev's OWN pin — deleting the "
         "sentence is not the fix for a wrong pair")
+    #: ⛔ COUNT PARITY, so a RE-WRAP cannot silently disarm this arm (#14282 review cycle 4, P1).
+    #: Every textual `Its own pin is` / `commits` clause in the block must yield a claim; a wrap
+    #: that broke the match already caused one false pass once, and this makes the next such edit
+    #: RED instead of green without anybody having to notice the regex.
+    published_clauses = len(_OWN_PIN_CLAUSE_TEXT_RE.findall(block))
+    assert len(claims) == published_clauses, (
+        f"the block publishes {published_clauses} \"Its own pin is\"/\"commits\" clause(s) but "
+        f"only {len(claims)} parsed as a graded claim — a WRAP (or a spelling) has disarmed this "
+        "arm, and every pair in the unparsed clause(s) is passing ungraded. Re-wrap so the "
+        "phrase is contiguous, or widen `_OWN_PIN_CLAIM_RE`")
     # ⛔ THE `commits` SPELLING MUST BE FOUND, not merely tolerated (#14258 review, P3 and the
     # mutation-attribution rule). Widening `_OWN_PIN_CLAIM_RE` ADDED an assertion surface — two
     # block clauses that were ungraded became graded — and without this arm REVERTING the
@@ -1752,6 +2223,21 @@ def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
         "it, or a rev published with another tree's pair passes in that spelling — which is the "
         "defect the widening exists for. Findings found: "
         f"{sorted(rev for rev, _r, _d in claims)}")
+    # ⛔ AND EVERY `OWN_PINS` KEY MUST BE REACHED BY SOME CLAUSE (#14282 review cycle 5, P3). The
+    # loop below grades each CLAIM against the map, so a key no clause attributes to is graded by
+    # NOTHING — and `_own_pin_claims` attributes a clause to the nearest backticked hex token
+    # BEFORE it, so a parenthetical naming another rev between a rev and its clause silently
+    # re-attributes the clause and orphans the first rev's entry. MEASURED: with `... 705 s BEFORE
+    # `5e83c2a2f6`` written between `10e51693f1` and its own clause, DELETING the `10e51693f1` map
+    # key left every arm GREEN while deleting `5e83c2a2f6` reded. This assertion is the one that
+    # names the dropped key.
+    orphans = sorted(set(OWN_PINS) - {rev for rev, _rows, _digest in claims})
+    assert not orphans, (
+        f"`OWN_PINS` carr{'ies' if len(orphans) == 1 else 'y'} {orphans} but NO clause in the "
+        "block attributes a published pair to it — the entry is graded by nothing, so a wrong "
+        "pair recorded under it would pass. Either the block dropped that rev's clause, or an "
+        "edit put ANOTHER backticked rev between it and its clause (`_own_pin_claims` attributes "
+        "to the nearest preceding token). Fix the block, not this map")
     for rev, rows, digest in claims:
         assert rev in OWN_PINS, (
             f"the block publishes `{rev}`'s own pin, but `{rev}` is not in `OWN_PINS`, so "

@@ -3296,6 +3296,53 @@ def _d5_grep_verdict(ran: subprocess.CompletedProcess, name: str, grep: str = "g
     if ran.returncode in (0, 1):
         return True
     if ran.returncode == 2:
+        # ⛔ rc 2 IS A REFUSAL ONLY IF THE SPELLING IS OTHERWISE RECOGNIZED (#14303 review round 15,
+        # P2 — MEASURED, and the fail-open this file's own residual used to RECORD rather than
+        # close). A grep that RUNS the alias but fails that one invocation for an unrelated reason
+        # also exits 2, and reading it as "refused" empties the allowance with nothing red. grep
+        # PARSES OPTIONS BEFORE IT HANDLES `--version`, so the version pairing separates the two
+        # shapes by exit code alone, with no reliance on grep's (translated) message: recognized
+        # spelling -> `--version` answers 0 -> the count failure is a NON-ANSWER and must RAISE;
+        # refused spelling -> `--version` answers 2 as well -> a genuine refusal. Any THIRD answer
+        # is neither, and is handled as the error this docstring already says it is.
+        #
+        # ⛔ THE PROBE'S OWN ANSWER SET IS `{0, 2}` — ITS THIRD CODE IS AN ERROR TOO (#14327 review,
+        # P2 — MEASURED). An `if rc == 0: raise` followed by an unconditional `return False` reads
+        # EVERY other code as "refused", which is the very fail-open this pairing exists to close,
+        # one call deeper: a grep that refuses the spelling on the count probe (rc 2) and answers a
+        # third code to `--version` (rc 3 — the code the `confused` stub uses for "this probe did
+        # not answer") would still empty the allowance with NO cell red. The rule this docstring
+        # states at the top — a third exit code is an ERROR, not a refusal — is applied here to the
+        # probe as well, so both runs of this discriminator answer only in `{0, 1, 2}`-terms.
+        #
+        # ⛔ AND IT MUST NOT INHERIT STDIN (#14327 review, P2 — MEASURED; the masking mechanism
+        # corrected in round 2, P3 — MEASURED, it is capture rather than CI's fd 0). The stubs this
+        # arm is driven with begin `cat >/dev/null`, so with a READABLE inherited fd 0 they block
+        # until `timeout=60` and raise `TimeoutExpired`, which is NOT an `AssertionError`: the cell
+        # ERRORS instead of asserting. What masks it is pytest's DEFAULT `fd` capture, which points
+        # fd 0 at `/dev/null` — so the default run cannot see it, and the shape appears only with
+        # `--capture=no` / `-s`, or outside pytest entirely. MEASURED: with the kwarg deleted, the
+        # default-capture run of this cell still PASSES (no hang), and the same run under `-s`
+        # raises `TimeoutExpired` after 65.93 s — which is why the reproduction carries `-s`.
+        # MEASURED with the `grep-refuses` stub body at a 2 s bound: `sleep 4 | <stub>
+        # --unix-byte-offsets --version` -> rc 124 (no answer), and the
+        # same run `< /dev/null` -> rc 2, the answer this arm expects.
+        recognized = subprocess.run([grep, name, "--version"], capture_output=True, text=True,
+                                    stdin=subprocess.DEVNULL, timeout=60)
+        if recognized.returncode not in (0, 2):
+            raise AssertionError(
+                f"`{grep} {name} --version` exited {recognized.returncode}, which is neither 0 "
+                "(recognized) nor 2 (refused) — grep parses options before it handles "
+                "`--version`, so only those two codes answer whether the spelling is recognized. "
+                "A NON-ANSWER cannot decide the reader's option universe, and reading it as "
+                "'refused' is the fail-open direction (#14138, #14327 review, P2)")
+        if recognized.returncode == 0:
+            raise AssertionError(
+                f"`{grep} -c {name} '^[+-]$'` exited 2, but `{grep} {name} --version` exited 0 — "
+                "grep parses options before it handles `--version`, so this spelling IS RECOGNIZED "
+                "and the count invocation failed for another reason. That is a NON-ANSWER, not a "
+                "refusal: reading it as 'refused' empties the allowance silently (#14138, #14303 "
+                "review round 15)")
         return False
     raise AssertionError(
         f"`{grep} -c {name} '^[+-]$'` exited {ran.returncode}, which is neither a count (0/1) nor "
@@ -3324,18 +3371,27 @@ def _d5_grep_runs_long_option(name: str, grep: str = "grep") -> bool:
     concluded from the second run. Discriminating this way is locale-proof, unlike matching grep's
     translated `unrecognized option` text.
 
-    ⛔ STATED RESIDUAL — THE CONTROL PROVES grep ANSWERS, NOT THAT rc 2 ON THE SPELLING UNDER TEST IS
-    A REFUSAL (#14303 review, P2 — MEASURED). A grep that RUNS the alias but fails that one
-    invocation for an unrelated reason is read as "refused", the allowance empties, and NO CELL
-    REDS: the alias cell's `runs == (grep_probe(…).returncode in (0, 1))` compares this helper
-    against the same raw exit code, so the two agree on the wrong answer. Measured on a `PATH`
-    `grep` that delegates every other spelling (the control answers `2`, rc 0) and exits 2 for
-    `--unix-byte-offsets` and its four prefixes: this file stays GREEN (37 passed at head
-    `f61447b0b09`), which is the same shape GNU grep 3.12 presents LEGITIMATELY — so there is no
-    exit-code discriminator to close it with, and grep's own message is translated (which is why
-    matching text is refused above). Recorded rather than papered over: the gap is real, it is the
-    same fail-open direction the control narrows, and the control narrows it to "grep answered
-    `--count` and refused this" instead of "grep is broken".
+    ⛔ THE CONTROL PROVES grep ANSWERS — IT DID NOT, ON ITS OWN, PROVE rc 2 ON THE SPELLING UNDER
+    TEST IS A REFUSAL (#14303 review round 15, P2 — MEASURED, then CLOSED). A grep that RUNS the
+    alias but fails that one invocation for an unrelated reason exits 2, was read as "refused", and
+    emptied the allowance with NO CELL RED: the alias cell's `runs == (grep_probe(…).returncode in
+    (0, 1))` compared this helper against the same raw exit code, so the two agreed on the wrong
+    answer. MEASURED at head `f61447b0b09` on a `PATH` grep that delegates every other spelling (the
+    control answers `2`, rc 0) and exits 2 only for `-c` plus the alias: `37 passed` — the fail-open
+    is silent by construction.
+
+    ⛔ AND AN EXIT-CODE DISCRIMINATOR DOES EXIST FOR THAT SHAPE — `--version` (#14303 review round
+    15, P2 — an earlier revision of this paragraph said there was none, which was false for the case
+    the paragraph itself describes, and which suppressed the fix). grep PARSES OPTIONS BEFORE IT
+    HANDLES `--version`, so `grep <spelling> --version` answers `0` exactly when the spelling is
+    RECOGNIZED. The two shapes are therefore separable by exit code alone, with no reliance on
+    grep's translated message: a grep that refuses the spelling in every position answers `2` to
+    both probes (a genuine refusal, GNU 3.12's shape), and a grep that recognizes the spelling but
+    failed the count answers `2` then `0` (a NON-ANSWER, and now an AssertionError rather than an
+    emptied allowance). MEASURED over all five spellings — `3.11 -> 0`, `3.12 shim -> 2`, and the
+    runs-but-fails stub -> `0` — so the discriminator keeps GNU 3.12 a legitimate refusal while it
+    closes the fail-open. The control above is still needed: it catches a grep that is broken
+    outright, which the `--version` pairing cannot distinguish from a refusal.
 
     ⛔ A THIRD EXIT CODE IS AN ERROR, NOT A REFUSAL: reading it as "refused" would silently empty
     the allowance, so a real prescription in the alias spelling would go unread.
@@ -3542,11 +3598,31 @@ def _d5_documented_long_options(completed: subprocess.CompletedProcess) -> set[s
     if len(documented) >= _D5_LONG_OPTION_FLOOR:
         return documented
     if completed.returncode != 0:
+        # ⛔ THE "NOT A TOTAL ABSENCE" CLAUSE IS CONDITIONAL ON THERE BEING SOMETHING TO BE
+        # ABSENT (#14327 review round 3, P3 — MEASURED). The branch fires for 0 <= count < floor,
+        # not 1 <= count, so an UNCONDITIONAL denial that grep publishes none renders "published
+        # only 0 long options … It does not publish NO long options" at count 0 — the same
+        # self-contradiction this message was rewritten to remove, at the other end of its range.
+        # Count 0 is reachable and already driven here: the short-flag-only usage fixture, and a
+        # hostile grep whose `--help` prints nothing.
+        shape = (
+            "BSD grep 2.6.0-FreeBSD prints its `usage:` line on stderr and exits 2, which is read "
+            "above — the stream is not the problem; the list is too short for the floor")
+        if documented:
+            shape += (
+                f". It does not publish NO long options: macOS/BSD grep's usage names "
+                f"`--binary-files`, `--color`, `--context`, … and merely fewer of them than GNU "
+                f"grep — this host documented {len(documented)}")
+        else:
+            shape += (
+                ". This host published none at all, which is the same short-list shape and not a "
+                "stream problem either — a usage line that carries no long options is counted, "
+                "it just cannot reach the floor")
         raise _D5NoDocumentedUniverse(
             f"`grep --help` published only {len(documented)} long options and exited "
-            f"{completed.returncode} — this grep answers its usage on another stream or not at "
-            "all (BSD grep 2.6.0-FreeBSD writes usage to stderr and exits 2), so this host has no "
-            "documented universe to pin the option set against (#14303 review, P2)")
+            f"{completed.returncode} — its usage lists fewer than {_D5_LONG_OPTION_FLOOR} long "
+            f"options, so this host has no documented universe to pin the option set against "
+            f"({shape}) (#14303 review round 15, P3; #14327 review, P3)")
     raise AssertionError(
         f"only {len(documented)} long options were parsed out of a `grep --help` that exited 0 — "
         "the derivation is broken, and a broken derivation must not be able to certify anything "
@@ -5229,12 +5305,17 @@ def test_the_d5_count_reader_knows_every_long_option_grep_documents():
 
 
 def _d5_pinned_universe(completed: subprocess.CompletedProcess) -> set[str]:
-    """Read the documented universe from a `grep --help` run, or SKIP where it published none.
+    """Read the documented universe from a `grep --help` run, or SKIP where there is none to pin.
 
     ⛔ THE SKIP IS THE PORTABILITY FIX, AND IT NEEDED ITS OWN WITNESS (#14303 review round 14, P2 —
-    MEASURED). BSD grep 2.6.0-FreeBSD answers `--help` with a `usage:` line on STDERR and exit 2, so
-    there is no option list to pin and this cell must SKIP rather than ERROR — which is what made it
-    runnable on macOS at all (#14306's handover). Pinning `_d5_documented_long_options` on its own
+    MEASURED; BSD described correctly in round 16, P3 — MEASURED). BSD grep 2.6.0-FreeBSD answers
+    `--help` with a `usage:` line on STDERR and exit 2, and that line DOES name long options
+    (`--binary-files`, `--color`, `--context`, …) — simply fewer of them than GNU grep's 48, so
+    there is no universe AT OR ABOVE THE FLOOR to pin and this cell must SKIP rather than ERROR.
+    That is what made it runnable on macOS at all (#14306's handover). "No option list at all"
+    would be the wrong reason and is what `_D5NoDocumentedUniverse`'s own message refuses to say:
+    the STREAM is not the problem and neither is a total absence — the list is too short.
+    Pinning `_d5_documented_long_options` on its own
     did not pin THIS conversion: replacing the `pytest.skip` below with a bare `raise` left this
     file at `37 passed` on every platform CI runs, because no shipped GNU grep fails `--help`, so
     the cell would error on a BSD box with a green rail — the regression this fix exists to close,
@@ -5277,7 +5358,7 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
             f"  --opt-{'a' * n} <x>" for n in range(1, count + 1))
 
     def not_a_skip(fn, *args):
-        """Call `fn`, turning a `pytest.skip` into a FAILURE.
+        """Call `fn`, turning a `pytest.skip`/`pytest.xfail` into a FAILURE.
 
         ⛔ THE SKIP IS THE LAUNDERING HOLE (#14303 review round 5, P2 — MEASURED). `pytest.skip`
         raises `Skipped`, which is NOT an `AssertionError`, so it escapes every `pytest.raises`
@@ -5287,15 +5368,46 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
         `36 passed, 1 skipped` (exit 0) against a baseline of `37 passed`. `pytest.fail` raises
         `Failed`, which is not an `AssertionError` either, so it escapes the `pytest.raises` and
         reds the cell.
+
+        ⛔ AND THE IMPERATIVE `pytest.xfail` IS THE SAME HOLE WITH A DIFFERENT REPORT (#14328 review,
+        P3 — MEASURED, pre-existing). `XFailed` subclasses `Failed`, so it is neither `Skipped` nor
+        `AssertionError`: it escaped this arm, and it escaped the `pytest.raises(pytest.skip.Exception)`
+        witness the silent-grep arm used to be — which THIS change replaced with the
+        outcome-enumerating form that pins the exception KIND instead. The cell was then
+        merely reported `xfailed` — exit 0. MEASURED at `16e6afbf`: the helper's body replaced by
+        `pytest.xfail(...)` left `35 passed, 2 xfailed` at exit 0, the same deletion-the-fix
+        signature as the skip. An `xfail` raised by the HELPER is caught here; one raised on the
+        silent-grep arm is caught by that arm's own kind assertion, not here. `pytest.xfail()` is
+        never how a platform fact is declared, and `pytest.mark.xfail` (a decorator, not a raise) is
+        unaffected.
+
+        ⛔ EVERY CALL TO `_d5_documented_long_options` / `_d5_pinned_universe` IN THIS CELL GOES
+        THROUGH THIS HELPER — the ONE exception being the silent-grep arm, which calls
+        `_d5_pinned_universe` bare ON PURPOSE because witnessing the skip is its entire job (and it
+        pins the exception KIND in return). Nothing else may be bare (#14328 review round 2, P2 —
+        MEASURED). FOUR call sites used to be, not three: the floor-40 arm, the stderr arm, and BOTH
+        sides of the comparison below — its LHS `_d5_pinned_universe(full_help)` is the #14324 site
+        this PR is named after, and an earlier draft of this sentence omitted it.
+        `_d5_pinned_universe` calls `_d5_documented_long_options`, so a
+        `pytest.skip`/`pytest.xfail` anywhere in that chain reaches the FLOOR-40 arm FIRST — every
+        other arm, including the call-site pins this cell exists for, then never runs. MEASURED at
+        `6f1c9a5bb3` on THIS cell alone (`-k documented_universe_floor`) with
+        `_d5_documented_long_options` replaced by `lambda c: pytest.skip(...)`: `1 skipped in 0.03s`,
+        **exit 0**; with `lambda c: pytest.xfail(...)`: `1 xfailed`, **exit 0**. The WHOLE FILE reads
+        `35 passed, 2 skipped` / `35 passed, 2 xfailed` for the same mutants, because the
+        count-reader cell's own `_d5_pinned_universe(completed)` skips with it — that bare call must
+        STAY, since a BSD box has to be able to skip that cell. So the invariant is load-bearing, not
+        decorative: a new bare call anywhere in THIS cell re-opens the exact hole the cell closes.
         """
         try:
             return fn(*args)
-        except pytest.skip.Exception as exc:  # the shape under test
+        except (pytest.skip.Exception, pytest.xfail.Exception) as exc:  # the shapes under test
             pytest.fail(
-                "the derivation SKIPPED where it must RAISE — a skip makes every assertion below "
-                f"it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
+                "the derivation SKIPPED/XFAILED where it must RAISE — a skip makes every assertion "
+                f"below it unreachable and moves this floor from RED to GREEN (#14303): {exc}")
 
-    assert len(_d5_documented_long_options(reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
+    assert len(not_a_skip(
+        _d5_documented_long_options, reported(0, usage(_D5_LONG_OPTION_FLOOR)))) == (
         _D5_LONG_OPTION_FLOOR), (
         "a successful `grep --help` carrying exactly the floor's worth of long options must be a "
         "universe, or the floor is not a floor (#14303 review, P2)")
@@ -5304,27 +5416,116 @@ def test_the_documented_universe_floor_REDS_a_broken_derivation_and_skips_only_a
     # ⛔ THE STDERR HALF, READ RATHER THAN TOLERATED: a FAILED `--help` whose usage still yields the
     # floor is a universe, which is the whole point of dropping `check=True`. This arm is the
     # mutant-killer for "parse `stdout` only": with `completed.stdout` alone it raises.
-    assert len(_d5_documented_long_options(
-        reported(2, usage(_D5_LONG_OPTION_FLOOR)))) == _D5_LONG_OPTION_FLOOR, (
+    assert len(not_a_skip(
+        _d5_documented_long_options, reported(
+            2, usage(_D5_LONG_OPTION_FLOOR)))) == _D5_LONG_OPTION_FLOOR, (
         "a `--help` that exited non-zero but PUBLISHED a full option list on stderr must still be "
         "read — BSD grep's usage goes to stderr, and ignoring that stream is what made this cell "
         "unrunnable on macOS (#14303 review, P2)")
     with pytest.raises(_D5NoDocumentedUniverse, match="exited 2"):
         not_a_skip(_d5_documented_long_options, reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    # ⛔ AND THAT MESSAGE MAY NOT REFUTE ITS OWN INTERPOLATED COUNT (#14327 review, P3 — MEASURED).
+    # It used to render "published only 15 long options … its usage lists no long options": a
+    # self-contradiction, and wrong about the platform it cites — macOS/BSD grep's usage DOES name
+    # long options (`--binary-files`, `--color`, `--context`, …), just fewer of them than the floor.
+    # The causable fact is the SHORTFALL, so the text has to say `fewer than <floor>`; asserting on
+    # the rendered message is what makes the wording non-revertible. This branch is reached whenever
+    # `0 <= len(documented) < _D5_LONG_OPTION_FLOOR`, so `usage(15)` is ONE shape in that range and
+    # not the shortest of them — counts 1 and 2 reach it and render the same shortfall wording, which
+    # is why the assertions below pin the RENDERING rather than claiming this count is special
+    # (#14327 review round 5, P3 — MEASURED: counts 1, 2 and 15 all render `fewer than 40`, none
+    # rendering `none at all` or `lists no long options`).
+    with pytest.raises(_D5NoDocumentedUniverse) as short_universe:
+        _d5_documented_long_options(reported(2, usage(15)))
+    short_message = str(short_universe.value)
+    assert "15 long options" in short_message and (
+        f"fewer than {_D5_LONG_OPTION_FLOOR} long options" in short_message), (
+        "the no-universe message must name the SHORTFALL against the floor beside the count it "
+        f"interpolated — got {short_message!r} (#14327 review, P3)")
+    assert "lists no long options" not in short_message, (
+        "the no-universe message claims the usage lists NO long options while interpolating a "
+        f"count of 15 of them — it refutes itself: {short_message!r}. BSD grep publishes fewer "
+        "long options than the floor, not none (#14327 review, P3)")
+    # ⛔ AND THE CONDITIONAL IS WITNESSED IN BOTH DIRECTIONS, NOT ONE (#14327 review round 4, P3 —
+    # MEASURED). The arm above forbids the "lists no long options" wording, which the ZERO branch no
+    # longer contains — so flipping `if documented:` to `if False:` left this cell GREEN while the
+    # count-15 render gained "This host published none at all" beside its interpolated 15. One
+    # direction pinned and the other not is how the original self-contradiction got in.
+    assert "published none at all" not in short_message, (
+        "the no-universe message says the host published NONE while interpolating a count of 15 — "
+        f"the same self-refutation at the other end of the range: {short_message!r} "
+        "(#14327 review round 4, P3)")
     # ⛔ AND THE CELL'S OWN TURNING OF THAT RAISE INTO A SKIP IS WITNESSED HERE (#14303 review round
     # 14, P2 — MEASURED). Every arm above pins the DERIVATION; none of them ran the call site that
     # converts "no universe published" into `pytest.skip`, so replacing that skip with a bare `raise`
     # left this file at `37 passed` and only a BSD-grep box would ever have noticed. That is the same
     # P2-whose-fix-has-no-call-site-witness shape this PR catalogues, so it is pinned in both
-    # directions: a silent grep SKIPS, a real universe is RETURNED.
-    with pytest.raises(pytest.skip.Exception):
+    # directions: a silent grep SKIPS, a real universe is RETURNED — and the exception KIND is the
+    # datum, so an `XFailed` cannot pass for a `Skipped` here (#14328 review, P3 — MEASURED).
+    try:
         _d5_pinned_universe(reported(
             2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    except (pytest.skip.Exception, pytest.xfail.Exception, pytest.fail.Exception) as outcome:
+        # ⛔ A TERMINAL SIGNAL IS NOT A VERDICT, SO THE ARM CATCHES ONLY THE OUTCOMES IT PINS (#14328
+        # review, P3 — MEASURED). This arm pins the exception KIND, so it must catch the pytest
+        # OUTCOMES and nothing else. An earlier form in this PR caught `BaseException` and re-raised a
+        # hand-written `(KeyboardInterrupt, SystemExit)` tuple, and its comment said that had restored
+        # the propagation the removed `pytest.raises(pytest.skip.Exception)` arm gave. It had not:
+        # `pytest.exit()` raises `_pytest.outcomes.Exit`, which subclasses `Exception` and NOT
+        # `SystemExit`, so it was still swallowed into an `AssertionError` claiming the platform branch
+        # misbehaved. MEASURED on THIS cell alone (`-k documented_universe_floor`; the selection
+        # matters, see below) with the mutant `pytest.exit("MUTANT-exit", returncode=7)`: that run
+        # reported `AssertionError: the platform-fact branch must SKIP with `Skipped`, not raise
+        # Exit` and CONTINUED to the next cell at exit 1, where the pre-fix `pytest.raises` shape
+        # aborted with the caller's exit code — 7 for that mutant, and 2 for a bare
+        # `pytest.exit("…")`, which is what a `returncode=None` becomes; it aborts either way. Run
+        # the WHOLE file instead and that same shape aborts at exit 7 rather than continuing,
+        # because the count-reader cell above calls `_d5_pinned_universe(completed)` bare — the one
+        # bare call that must STAY — and it reaches the mutant first.
+        # Enumerating the three outcomes this cell
+        # can legitimately see removes both the hole and the tuple: Ctrl-C, `SystemExit`, `pytest.exit`
+        # and a genuine bug in the helper all propagate untouched, and there is no re-raise arm for the
+        # next editor to keep in sync.
+        assert type(outcome) is pytest.skip.Exception, (
+            f"the platform-fact branch must SKIP with `Skipped`, not raise "
+            f"{type(outcome).__name__} — a `pytest.xfail()` is reported as xfailed and exits 0, so "
+            "it launders this cell exactly like a skip does (#14328)")
+    else:
+        pytest.fail("a silent grep must SKIP the cell, and it returned instead")
     full_help = reported(0, usage(_D5_LONG_OPTION_FLOOR))
-    assert _d5_pinned_universe(full_help) == _d5_documented_long_options(full_help), (
+    # ⛔ BOTH ARMS NOW RUN THROUGH THE CALL SITE, NOT ONLY THE DERIVATION (#14324, P2 — MEASURED).
+    # The returning arm used to read `assert _d5_pinned_universe(full_help) == …`, and `pytest.skip`
+    # raises `Skipped` — which is NOT an `AssertionError` — so a skip inside the helper made that
+    # assert UNREACHABLE and skipped the WHOLE cell, with the suite exiting 0. That is the very hole
+    # `not_a_skip` exists for, one call site over from where it was being applied. MEASURED at
+    # `7bd8d74f`: the helper's body replaced by an unconditional `pytest.skip(...)` — the banned
+    # "skip on the platform that failed", which also deletes this fix's call-site behaviour — left
+    # `35 passed, 2 skipped` at exit 0 against a baseline of `37 passed`, so a mutant that DELETED
+    # the fix was green. Through `not_a_skip` the same mutant reds this cell by name, and the arm
+    # above pins that a broken derivation stays an `AssertionError` rather than becoming a skip.
+    with pytest.raises(AssertionError, match="broken derivation must not be able to certify"):
+        not_a_skip(_d5_pinned_universe, reported(0, usage(_D5_LONG_OPTION_FLOOR - 1)))
+    assert not_a_skip(_d5_pinned_universe, full_help) == not_a_skip(
+        _d5_documented_long_options, full_help), (
         "a `grep --help` that PUBLISHED a universe must be RETURNED, not skipped — the skip excuses "
         "only the platform that published nothing (#14303)")
+
+    # ⛔ AND THE SKIP MESSAGE MUST NOT REFUTE ITSELF AT EITHER END OF ITS RANGE (#14327 review
+    # round 3, P3 — MEASURED). The branch fires for `0 <= count < floor`, so an UNCONDITIONAL denial
+    # that grep publishes none rendered "published only 0 long options … It does not publish NO
+    # long options" at count 0. Count 0 is reachable twice over — this short-flag-only fixture, and
+    # a hostile grep whose `--help` prints nothing (`/tmp/fx3`, rc 3) — so the clause is now emitted
+    # only when there IS something to be absent, and the zero render is asserted directly rather
+    # than left to the other arm's wording.
+    with pytest.raises(_D5NoDocumentedUniverse) as zero_universe:
+        _d5_documented_long_options(reported(
+            2, "usage: grep [-abcdDEFGHhIiJLlMmnOoqRSsUVvwxZ] pattern [file ...]\n"))
+    assert "published only 0 long options" in str(zero_universe.value), (
+        "the count-0 skip message must still report the count and the exit code it measured")
+    assert "not publish NO long options" not in str(zero_universe.value), (
+        "at count 0 the message claimed grep does NOT publish no long options — it published none, "
+        "so that clause contradicts the number in the same sentence (#14327 review round 3, P3)")
 
     # ⛔ THE TWO STREAMS ARE JOINED WITH A SEPARATOR, AND THAT SEPARATOR HAS ITS OWN WITNESS (#14303
     # review round 6, P2 — MEASURED). Reading "whichever stream carried it" is not enough when a
@@ -5569,11 +5770,16 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     ⛔ THE FAIL-OPEN ARM (#14138). The allowance is what keeps a prescription in the alias spelling
     visible, so a probe that answered `False` whenever it was confused would EMPTY it — a second
     blank-class prescription goes unread and nothing reds. grep exits 2 for an invalid option and
-    0/1 for a real count, so this cell drives SEVEN stub greps: one that COUNTS, one that REFUSES
+    0/1 for a real count, so this cell drives NINE stub greps: one that COUNTS, one that REFUSES
     the alias (and answers `--count` normally), one that answers a THIRD code, one that is BROKEN
     for every spelling, one that answers `--count` with rc 0 and NO OUTPUT, one that PRINTS the
-    count but still fails the run (rc 2 with stdout `2`), and one that answers a REAL count and
-    exits 1 — grep RAN the spelling and selected nothing, which is an ANSWER, not a refusal.
+    count but still fails the run (rc 2 with stdout `2`), one that answers a REAL count and
+    exits 1 — grep RAN the spelling and selected nothing, which is an ANSWER, not a refusal —
+    one that RUNS the alias but fails THOSE invocations while answering `--version`, which is a
+    NON-ANSWER and must not be read as a refusal either, and one that refuses the spelling on the
+    count run but answers a THIRD code to `--version`, so the probe's OWN non-answer is graded the
+    way the count run's is (#14327 review round 2, P3 — the count said EIGHT and the enumeration
+    omitted this last arm, i.e. the PR's load-bearing new witness went undescribed).
     The `broken`, `silent` and `counts_then_fails` stubs must raise on the CONTROL run — a bare
     rc 2 is grep's generic error code, a wrapper that swallows stdin prints nothing, and a wrapper
     that counts and then fails is not a refusal either — because reading any of them as "refused"
@@ -5671,11 +5877,90 @@ def test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer(tmp_pa
     # a grep that reports a count and then fails is not a grep that refused the spelling.
     with pytest.raises(AssertionError, match="control probe"):
         _d5_grep_runs_long_option("--unix-byte-offsets", counts_then_fails)
+    #: ⛔ rc 2 IS A REFUSAL ONLY IF THE SPELLING IS OTHERWISE RECOGNIZED (#14303 review round 15,
+    #: P2 — MEASURED, and this arm makes the closure of that fail-open a WITNESSED behaviour rather
+    #: than a claim in a docstring). This stub answers the control, answers `--version` with rc 0 —
+    #: so grep DOES recognize `--unix-byte-offsets` — and exits 2 for that one invocation anyway.
+    #: Before the `--version` pairing the allowance EMPTIED silently here (the whole fail-open live,
+    #: suite GREEN); now it must RAISE, because a recognized spelling whose count failed is a
+    #: NON-ANSWER. Removing the pairing reds this arm, which is the point of pinning it.
+    runs_but_fails = stub("grep-runs-but-fails", "cat >/dev/null; " + answers_count
+                          + 'if [ "$2" = "--version" ]; then exit 0; fi\nexit 2')
+    with pytest.raises(AssertionError, match="NON-ANSWER"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", runs_but_fails)
+    #: ⛔ AND THE PROBE'S OWN THIRD CODE IS NOT A REFUSAL EITHER (#14327 review, P2 — MEASURED).
+    #: The `--version` pairing is only a discriminator if both of its ANSWERS are the two it names;
+    #: an `if rc == 0: raise` followed by an unconditional `return False` reads every other code as
+    #: "refused" — the same fail-open one call deeper. This stub refuses the spelling on the count
+    #: run (rc 2, the shape that reaches the probe at all) and answers a THIRD code to `--version`,
+    #: which no arm reached before: the `confused` stub raises on the count run and never gets here.
+    #: Without the `not in (0, 2)` clause this arm reads `False` and the allowance EMPTIES silently,
+    #: so removing the clause reds HERE.
+    version_confused = stub("grep-version-confused", "cat >/dev/null; " + answers_count
+                            + 'if [ "$2" = "--version" ]; then exit 3; fi\nexit 2')
+    with pytest.raises(AssertionError, match="neither 0"):
+        _d5_grep_runs_long_option("--unix-byte-offsets", version_confused)
+    # …and the GENUINE refusal still answers False above (`refuses`), because a grep that refuses
+    # the spelling answers 2 to the `--version` probe as well — GNU 3.12's shape, unchanged.
     # …and a binary that is not there at all is a NON-ANSWER too, which is why it is pinned rather
     # than left to `subprocess` to raise something nobody counted on: the allowance must never be
     # emptied by a probe that could not run (#14138 review, P3).
     with pytest.raises(OSError):
         _d5_grep_runs_long_option("--unix-byte-offsets", str(tmp_path / "grep-that-is-not-here"))
+
+
+def test_the_version_probe_answers_without_reading_stdin(monkeypatch):
+    """The `--version` probe feeds NOBODY its fd 0, because the stubs it drives `cat` (#14327 review, P2).
+
+    ⛔ MEASURED ON THE SHAPE THIS CLOSES. `_d5_grep_verdict`'s `--version` probe fed no `input=` and
+    no `stdin=`, unlike every other COUNT/ALIAS run the discriminator drives (the count runs above
+    and below, and `_d5_grade_alias_spelling`, all pass `input=`). The one other grep run that feeds
+    neither is `_d5_documented_long_options`'s `grep --help` at the alias cell — harmless, because
+    `--help` never reads stdin, and named here rather than left as an unstated exception. The THREE
+    stubs this probe is driven with (`refuses`, `runs_but_fails`, and `version_confused`, which
+    reaches it only through the third exit code) all begin `cat >/dev/null`, so an
+    inherited fd 0 made each block until `timeout=60` and raise `TimeoutExpired`, which is NOT an
+    `AssertionError`: the cell ERRORS instead of asserting. pytest's DEFAULT `fd` capture points
+    fd 0 at `/dev/null`, so the default run cannot expose it; the shape appears with
+    `--capture=no` / `-s`, or outside pytest — which is why the reproduction carries `-s`.
+    MEASURED with the `refuses` stub body at a 2 s bound: inherited stdin -> rc 124, `< /dev/null`
+    -> rc 2.
+
+    ⛔ IT RECORDS RATHER THAN EXECUTES ON PURPOSE. A recorder answers every run with a
+    `CompletedProcess`, so the MUTANT (no `stdin=` kwarg) reds on the missing kwarg WITHOUT anyone
+    waiting out the 60 s timeout the real stub would block for — a witness that costs a timeout to
+    observe is a witness nobody runs. The recorder does not weaken the claim: this cell is about the
+    CALL SHAPE, and the three-way reading of the answers is pinned separately, against real stub
+    binaries, in `test_the_undocumented_allowance_probe_tells_refusal_from_a_non_answer`.
+    """
+    calls: list[dict] = []
+
+    def recorder(args, **kwargs):
+        argv = list(args)
+        calls.append({"argv": argv, **kwargs})
+        if argv[-1] == "--version":
+            # the shape under test: the probe is reached because the count run said `refused`
+            return subprocess.CompletedProcess(args=argv, returncode=2, stdout="", stderr="")
+        if "--count" in argv:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="2\n", stderr="")
+        return subprocess.CompletedProcess(args=argv, returncode=2, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", recorder)
+    assert _d5_grep_runs_long_option("--unix-byte-offsets", "grep") is False, (
+        "the recorder answers `2` to the count run and `2` to `--version`, which is a genuine "
+        "refusal — anything else here means the probe path under test was not reached "
+        "(#14138)")
+    probes = [call for call in calls if call["argv"][-1] == "--version"]
+    assert probes, (
+        "the `--version` probe was never reached, so this cell would pin nothing: the recorder's "
+        "count run must answer the control and then a refusal (#14327 review, P2)")
+    for call in probes:
+        assert call.get("stdin") is subprocess.DEVNULL, (
+            f"the `--version` probe ran as {call['argv']!r} with stdin={call.get('stdin')!r} — its "
+            "stubs begin `cat >/dev/null`, so an inherited fd 0 blocks them until the 60 s timeout "
+            "and raises TimeoutExpired (not an AssertionError), turning the cell into an ERROR on "
+            "any box whose fd 0 is a tty or an open pipe. Pass `stdin=subprocess.DEVNULL` "
+            "(#14327 review, P2)")
 
 
 def test_a_prefix_spelling_that_does_not_answer_is_not_a_refusal(tmp_path: Path):
@@ -8276,6 +8561,16 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
 #: that at four clauses (#13802 review, finding 1 — the D5 row and the file-table section),
 #: so the pattern below is the armed detector for that defect class.
 _TYPED_INDEX_NUMSTAT = re.compile(
+    # ⛔ THE ALTERNATION IS GROUPED SO THE STAMP EXEMPTION GOVERNS ALL OF IT (#14269
+    # review, P2 — MEASURED). The exemption is stated ONCE, after the group, because a
+    # lookahead sitting beside ONE alternative only exempts that alternative: measured,
+    # "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `2 2` at
+    # `a577d0e25c`" was still REFUSED by the hard-coded literals above while the
+    # span-anchored one let the identical stamped form through — a false red on the
+    # archaeology, open in one spelling and closed in another, which is the split this
+    # exemption exists to end. Every branch here ends in a typed pair, so one trailing
+    # lookahead covers them all.
+    r"(?:"
     r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
     r"\s*(?:->|prints)\s*`\d+\s+\d+`"
     # ⛔ THE SHORT FORM TOO (#13802 review, P2). The document's own spelling of this
@@ -8295,6 +8590,18 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # each measured GREEN at depth 1 (#13802 review, round 6)
     r"|numstat[^`]{0,160}?(?:prints?|print|returns?|reports?|shows?|gives?|lists?|"
     r"names?|->|\u2192)\s*`\d+\s+\d+`"
+    # ⛔ AND THE COMMAND'S OWN CODE SPAN, WHATEVER PATH IT NAMES (#14269 review, P1 — MEASURED
+    # IN BOTH DIRECTIONS). Every alternative above that reaches a figure by way of the WORD
+    # `numstat` has a window of `[^`]{0,160}?`, which cannot cross the backtick that CLOSES the
+    # command's code span. So "`git diff --numstat` prints `3 3` at this head" — the most
+    # natural spelling of all — was invisible, AND so was the long form for any path but the
+    # one `docs/00_index.md` literal hard-coded above; `05-verify.md`'s D5 row carried BOTH of
+    # those spellings and both walked green (`finditer` over the file returned `[]`).
+    # This alternative anchors on the code span INSTEAD of the word, so it cannot be defeated
+    # by either spelling, and it stays in the numstat family: no `--numstat` in the span, no
+    # match.
+    r"|`[^`]*--numstat[^`]*`\s*(?:prints?|print|returns?|reports?|shows?|gives?|lists?|names?)"
+    r"\s*`\d+\s+\d+`"
     # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
     # document's `both print NOTHING` clauses state the CURRENT reading without repeating
     # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
@@ -8326,7 +8633,8 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # the pair, so no alternative above sees it. The shape is specific on purpose — the
     # numstat pair is TWO NUMBERS and `docs/00_index.md` followed by such a pair is a typed
     # numstat reading by construction, not an English coincidence.
-    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`")
+    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`"
+    r")(?!(?:\s*(?:at|@)\s*`?[0-9a-f]{7,40}`?))")
 
 
 def test_the_document_types_no_numstat_figure_for_the_index_residual():
@@ -8390,6 +8698,15 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
         "and the numstat shows `1 1` here",
         "and the numstat returns `3 3` here",
         "and the numstat -> `1 1` here",
+        # the backtick-closed short form that shipped green in `05-verify.md` (measured: the
+        # window alternatives could not span the closing backtick of `` `git diff --numstat` ``)
+        "`git diff --numstat` prints `3 3` at this head",
+        "`git diff --numstat` returns `3 3` here",
+        # ⛔ AND THE LONG FORM FOR A PATH NO LITERAL ABOVE NAMES (#14269 review, P1 — the
+        # SECOND figure the same row carried, and it walked green too: the only long spelling
+        # the earlier alternatives see is the `docs/00_index.md` one)
+        "`git diff --numstat origin/main...HEAD -- docs/epics/2026-11-04-7949-extractor-v4-"
+        "capstone/04-plan.md` prints `4 4`",
         # the spelling the merge-round reviewer found GREEN (#13802 merge-round review, P2):
         # the pair is typed after the `--name-only` command, not after `--numstat`.
         "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints "
@@ -8407,6 +8724,18 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
     for _allowed in (
         "its numstat printing `1 1` at a head of its own",
         "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING",
+        # ⛔ AND THE HEAD-STAMPED FORM, IN THE NATURAL SPELLING (#14269 review, P2). The rule in
+        # `05-verify.md` lets the archaeology type a figure; the span-anchored alternative read
+        # one as a present-tense claim and refused it — a FALSE RED on a permitted form. The
+        # stamp is what distinguishes them, so the stamp must be honoured, not the verb.
+        "`git diff --numstat` prints `10 2` at `a577d0e25c`",
+        "`git diff --numstat` -> `10 2` at `ef443ea968`",
+        # ⛔ AND THE SAME EXEMPTION FOR THE LITERAL ALTERNATIVES (#14269 review, P2 — MEASURED).
+        # The exemption was first written beside ONE branch, so the identical stamped form was
+        # allowed after the span-anchored spelling and REFUSED after the `docs/00_index.md`
+        # literals — one false red closed, its twin left open. These two pin the hoisted form.
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `2 2` at `a577d0e25c`",
+        "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints `1 1` at `a577d0e25c`",
         # a HISTORICAL quote of a past head's pair, sitting a few characters after the
         # command — must stay allowed without a present-tense verb to bind it
         # (#13802 merge-round review, P2: the unbounded cut of this alternative refused it).
@@ -8417,6 +8746,197 @@ def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures()
         assert not _TYPED_INDEX_NUMSTAT.search(_allowed), (
             f"the numstat detector REFUSES {_allowed!r}, which types no current figure — "
             "refusing a historical reading is the same defect in the other direction")
+
+
+#: ⛔ A `--numstat` PAIR TYPED FOR A RANGE "RE-TAKEN" AT THE HEAD BEING READ — the sibling
+#: defect of the detector above, in the document that STATES the rule (#14249 review, P2).
+#:
+#: `CYPHER-INVENTORY.md`'s §7 re-cut paragraph tells the reader to "re-TAKE, never carry" a
+#: figure, and then broke that rule in the sentence doing the telling: it claimed the re-taken
+#: range "reads `403 401`", which is its own `381 379` plus `#14260`'s 22-line `sdk.py`
+#: insertion applied a SECOND time — a figure no head on the branch's first-parent line produces,
+#: which is why it was the exact class this PR exists to repair, surviving inside the clause
+#: naming it. ⛔ AND NO FIGURE is typed for that population here: the pair and the head count are
+#: both head-bound, and the two earlier cuts of this sentence proved it by each typing one the
+#: tree did not produce. Re-take both at the head you merge (`git log --first-parent --oneline
+#: origin/main..HEAD` for the population, `git diff --numstat <base> <head> --
+#: docs/architecture/CYPHER-INVENTORY.md` for any pair).
+#:
+#: ⛔ WHY NOTHING SAW IT: every alternative in `_TYPED_INDEX_NUMSTAT` above keys on the word
+#: `numstat` within a window that cannot cross a backtick, or on a command span quoted
+#: immediately beside the figure. Here the command span finishes ~250 characters and three
+#: code spans earlier, and the verb is `reads` — absent from that pattern's class. So the
+#: sentence was GREEN in every arm of the file this doc's figures are graded by.
+#:
+#: ⛔ THE FIRST CUT OF THIS PATTERN COULD NOT SEE THE DOCUMENT'S OWN HOUSE STYLE, and the
+#: witness list below was written in the one spelling it happened to catch (#14249 review,
+#: P1). Three independent escapes, each verified against the live document:
+#:   * `printed` — the past tense is how every pair in this doc is introduced (`…` printed
+#:     **`381 379`**`), and `prints?` matches `print`/`prints`, never `printed`;
+#:   * `[^`]` — refusing to cross a BACKTICK also refuses to cross the RANGE the sentence
+#:     names (`the same range `origin/main...HEAD` re-taken here …`), i.e. the commonest
+#:     phrasing of the claim;
+#:   * `\s*` before the pair — refuses the doc's bold form (`printed **`403 401`**`).
+#: A defect written the way this file writes figures missed on all three at once, so the
+#: guard was green over precisely the spellings it exists to catch.
+#:
+#: DECLARED SCOPE: this reads a typed PAIR behind a `range`/`numstat` noun and a verb, within
+#: one line. The ONE exemption is a pair that IS a fenced command's own printed result
+#: (`_TYPED_NUMSTAT_AS_COMMAND_RESULT`) — the form §1/§7 use legitimately for `3 1`, which is
+#: a claim about a DIFF and not a carried figure. It does NOT grade every pair the doc types:
+#: the residual is a paraphrase whose noun or verb is outside both lists, or a pair whose
+#: fenced command sits further than the window (160 chars). Narrow, and it does not describe
+#: itself as complete.
+#:
+#: ⛔ THE PAIR IS READ WITH **OR WITHOUT** BACKTICKS (#14249 review, round 5). Requiring them
+#: missed the shape a hurried sentence actually takes — `the same range re-taken here reads 403
+#: 401` walked through GREEN, an undisclosed false pass in a merge gate. `pair` is a NAMED group
+#: so the exemption anchor below does not have to guess where the pair starts.
+_TYPED_RETAKEN_NUMSTAT = re.compile(
+    r"(?:\brange\b|\bnumstat\b).{0,160}?"
+    r"(?:reads?|read|prints?|print|printed|returns?|returned|reports?|reported"
+    r"|shows?|shown|gives?|given|lists?|named?|names?|->|\u2192|=>)"
+    r"\s*[:=]?\s*\*{0,2}(?P<pair>`?\d+\s+\d+`?)"
+)
+
+#: A pair that is the PRINTED RESULT OF A FENCED COMMAND is a claim about a diff, not a carried
+#: figure — the one form §1/§7 type legitimately. The exemption is anchored at the pair, so it
+#: never excuses a bare figure: `the numstat printed `3 1`` has no fenced command in front of it
+#: and is still graded as a typed pair.
+#:
+#: ⛔ THE VERB CLASS MUST BE THE DETECTOR'S, NOT A SUBSET OF IT (#14249 review, P2). The FIRST
+#: CUT of this exemption listed seven verbs while the detector carried sixteen, so a CORRECT
+#: sentence naming a fenced command and then saying `shows` / `reported` was REFUSED — the same
+#: asymmetry as the P1 above, in the false-red direction. Measured: `` `git diff --numstat …`
+#: shows `3 1` `` and `… reported `381 379` ` both flagged before this widening, both allowed
+#: after it, while EVERY defect witness in this arm's `for _typed in (…)` tuple stays flagged and
+#: the live document still yields 0 hits. Both alternations now carry the same sixteen verbs —
+#: count them with `grep -n -A4 '_TYPED_RETAKEN_NUMSTAT = re\.compile'` and the same for this
+#: pattern — and the witness side is deliberately stated WITHOUT a number: a count in a comment
+#: about a tuple that grows is the head-bound figure this file forbids, and an earlier revision of
+#: this clause read "three" while the tuple carried eight, then "seven" as if a current
+#: alternation carried it when neither did.
+_TYPED_NUMSTAT_AS_COMMAND_RESULT = re.compile(
+    r"`[^`]*\b(?:numstat\b|--stat\b|git diff\b)[^`]*`\s*"
+    r"(?:(?:->|\u2192|=>)|(?:prints?|print|printed|reads?|read|returns?|returned"
+    r"|reports?|reported|shows?|shown|gives?|given|lists?|named?|names?))?\s*[:=]?\s*\*{0,2}$"
+)
+
+
+def _typed_retaken_numstat_pairs(text: str) -> list[str]:
+    """Typed `range`/`numstat` pairs, minus the ones a fenced command printed.
+
+    Split out so BOTH the document arm and the witness arm grade the same predicate: a second
+    copy of "is this a carried figure" is how the two directions drift apart.
+    """
+    bad: list[str] = []
+    for match in _TYPED_RETAKEN_NUMSTAT.finditer(text):
+        # The pair's own start is a NAMED group: the pair may be written with or without
+        # backticks, so it cannot be located by rfind("`").
+        if _TYPED_NUMSTAT_AS_COMMAND_RESULT.search(text[: match.start("pair")]):
+            continue
+        bad.append(match.group(0))
+    return bad
+
+
+def test_the_cypher_inventory_types_no_numstat_pair_for_a_range_re_taken_here():
+    """⛔ §7's re-cut paragraph typed `403 401` — a pair no head in this branch produced.
+
+    The paragraph's own rule is that a numstat names its head and is RE-TAKEN, never carried;
+    its own clause then carried one (`381 379` + `#14260`'s 22 lines, applied twice). A figure
+    that no head produces is the defect class this bundle exists to repair, so it is graded
+    rather than trusted — the same doctrine, one file over, as the `05-verify.md` arm above.
+
+    NON-VACUITY, MEASURED: the pre-fix sentence is the witness list in the sibling arm below;
+    injecting it back into this document reds HERE, and the pair is absent from every head in
+    `git log --first-parent origin/main..HEAD` — ⛔ and no pair and no head count is typed for
+    that population here: two earlier cuts of this sentence each typed one, and the tree produced
+    neither, which is this arm's own defect class one layer up. Re-take both at the head you
+    merge, as the sibling arm's docstring says.
+
+    ⛔ AND THE WITNESS LIST IS NOT THE POPULATION (#14249 review, P1): the first cut of this
+    arm's pattern caught only `reads `<pair>``, so the doc's own `printed **`pair`**` style —
+    and any claim naming the range in a code span — walked through. The five spellings below
+    are the escapes that review measured, and they are graded through the SAME predicate the
+    document arm uses.
+    """
+    doc = (DOCS / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    typed = _typed_retaken_numstat_pairs(doc)
+    assert not typed, (
+        "CYPHER-INVENTORY.md TYPES a numstat pair for a range it says is re-taken here "
+        f"({typed[0]!r}). A numstat is head-bound: state the command and let the reader "
+        "re-derive the pair at the head being merged, or type no figure at all — a carried "
+        "pair is the double-shift §7 exists to record (#14249 review, P2)")
+
+
+def test_the_re_taken_numstat_detector_sees_the_spelling_that_shipped():
+    """Both directions, because a detector whose classes are never exercised is a blacklist.
+
+    MEASURED: replacing `_TYPED_RETAKEN_NUMSTAT` with a never-matching pattern reds the doc
+    arm above only while the defect is present; this arm is the witness that keeps it able to
+    see one, and the allowed list is what keeps it from over-blocking the RETRACTION forms the
+    same paragraph legitimately uses ("no figure is typed here", "re-taken rather than
+    carried").
+    """
+    for _typed in (
+        # ⛔ the sentence that shipped, verbatim from the pre-fix document
+        "so the three-dot form collapses to two-dot and the same range re-taken here "
+        "reads `403 401`",
+        "the same range RE-TAKEN at this head prints `43 39`",
+        "the numstat reads `3 1` at this head",
+        "the range -> `2 0`",
+        # ⛔ the three escapes measured at #14249's review (P1): past tense, a fenced RANGE,
+        # and the doc's bold pair — each missed by the first cut of the pattern.
+        "the same range re-taken here printed `403 401`",
+        "the same range `origin/main...HEAD` re-taken here reads `403 401`",
+        "the same range `70fbd1a27d...HEAD` re-taken here printed **`403 401`**",
+        "the numstat printed `403 401`",
+        # ⛔ A COLON or `=` between the verb and the pair is the same claim (#14249 review, round
+        # 4): the noun, the verb and the pair are all graded ones, and only `\s*` sat between them.
+        "the same range re-taken here reads: `403 401`",
+        "the same range re-taken here reads = `403 401`",
+        # ⛔ and the pair with NO backticks at all — the shape a hurried sentence takes, missed
+        # until round 5 (#14249 review, P2).
+        "the same range re-taken here reads 403 401",
+        "the numstat printed **403 401**",
+    ):
+        assert _typed_retaken_numstat_pairs(_typed), (
+            f"the re-taken-numstat detector does not see {_typed!r} — that spelling of a "
+            "head-bound pair walks through green (#14249 review, P1)")
+    for _allowed in (
+        # the repaired clause: the RULE, with no figure typed for it
+        "so the three-dot form collapses to two-dot, and the range is RE-TAKEN at the head "
+        "you merge rather than carried",
+        # the paragraph's retraction form, which must stay allowed
+        "an earlier cut of this clause typed a pair for the re-taken range, and it was the "
+        "`381 379` above plus `#14260`'s 22-line `sdk.py` insertion applied a SECOND time",
+        "NO figure is typed here; a numstat is head-bound",
+        # the per-hunk form §7 uses for `3 1`: the pair IS that fenced command's own printed
+        # result, which is what `_TYPED_NUMSTAT_AS_COMMAND_RESULT` exempts — NOT "the command's
+        # span closes before the pair", the first cut's rationale, which was wrong: the old
+        # pattern allowed this string only because it could not cross a backtick at all.
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "-> `3 1`)",
+        # the historical form the document actually uses: command span, then `printed`, then
+        # the bolded pair. Legitimate — the command is named beside the figure.
+        "`git diff --numstat 70fbd1a27d 689d21b7e4c1 -- docs/architecture/CYPHER-INVENTORY.md` "
+        "printed **`381 379`** at the head this paragraph was written for",
+        # ⛔ the two SYNONYM spellings the exemption refused before its verb class matched the
+        # detector's (#14249 review, P2). A fenced command whose result is the pair is exempt
+        # whatever verb conjugates it — refusing these was the false-red direction of the same
+        # asymmetry.
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "shows `3 1`)",
+        "`git diff --numstat 70fbd1a27d 689d21b7e4c1 -- docs/architecture/CYPHER-INVENTORY.md` "
+        "reported `381 379`",
+        # …and the colon form of a FENCED command stays exempt too: the widening above must not
+        # turn a legitimate command-result sentence into a red.
+        "(`git diff --numstat origin/main HEAD -- docs/architecture/CYPHER-INVENTORY.md` "
+        "shows: `3 1`)",
+    ):
+        assert not _typed_retaken_numstat_pairs(_allowed), (
+            f"the re-taken-numstat detector REFUSES {_allowed!r}, which types no current "
+            "pair — refusing a retraction is the same defect in the other direction")
 
 
 def _added_cite_tokens(diff_text: str) -> set[str]:

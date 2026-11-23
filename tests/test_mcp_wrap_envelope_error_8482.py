@@ -438,21 +438,27 @@ async def test_no_registry_tool_can_deliver_a_payload_its_schema_rejects(
     # therefore reds on a recorded decision, and accidental surface shrinkage is
     # already the canonical gate's verdict (`tools/surface-guard.py` against the
     # frozen baseline, plus `config/surface-manifest.yml`) — not this file's.
-    #
-    # ⛔ 11 -> 10 at #11609 lane P7, and MEASURED rather than inferred: the wrap set
-    # at `b4da1f5c018d^` (the commit before P7 landed on main) held ELEVEN names and
-    # the extra one was `tortoise_list_graphs` — the door P7 retired FORWARD into
-    # `tortoise_graph_overview`. A retired door keeps answering through its shim
-    # (#3883) but is no longer ADVERTISED, and this sweep reads the advertised
-    # registry, so the population legitimately lost that row. The floor moves WITH
-    # the record because its job is non-vacuity (the population #8482 lives in is
-    # still measured, and it is still ten doors), not volume: main was RED here from
-    # b4da1f5c018d until this re-pin — the same squash-merge residue `e9efc38ddc2c`
-    # landed for P6.
+    # ⛔ 11 -> 10 on 2026-11-21 (#11609 lane P7). The door that LEFT this population is
+    # `tortoise_list_graphs`: it carried the array wrap envelope
+    # (`x-fastmcp-wrap-result`, `{items: string, type: array}`) and P7 retired it forward
+    # into `tortoise_graph_overview(section="graphs")`, whose schema declares no
+    # envelope at all. Its #3883 shim still answers and STILL carries the wrap schema,
+    # but a shim is not advertised and this sweep reads the advertised registry — the
+    # same distinction the `unions` floor below records for the retired `anyOf` door.
+    # ⛔ NOT the linking verb: `tortoise_create_edge` and `tortoise_create_operator`
+    # never carried a wrap envelope (both are `additionalProperties: true, type: object`
+    # doors), and `tortoise_link_entities` that replaced them is object-shaped too — so
+    # the linking-verb swap moved neither term. Measured both ways at the merge: the
+    # sweep reports 10 wrap-envelope tools, and a set-diff of the pre-P7 population has
+    # exactly one line, `tortoise_list_graphs`. The floor moves to the MEASUREMENT
+    # (11 -> 10), which is the same re-cut shape the `unions` floor took for P6 — a floor
+    # left one above the measurement is a red on a recorded decision, and a floor
+    # lowered WITHOUT the measurement is the drift this file exists to catch.
     assert repaired >= 10, (
         f"sweep saw only {repaired} wrap-envelope tools; 10 is the measured "
-        "baseline after #11609 P7 retired `tortoise_list_graphs` (11 before it), "
-        "and they are the population #8482 actually occurs in")
+        "population at the #11609 P7 merge (11 before it, while "
+        "`tortoise_list_graphs` — a retired-forward, array-wrapped listing door — was "
+        "still advertised), and they are the population #8482 actually occurs in")
 
 
 def test_the_sweep_helper_can_reject_a_non_wrap_payload():
@@ -640,22 +646,23 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # floor, and the copy is what goes stale — this message still claimed "10 + 2"
     # long after P6 took `unions` to 1, which steered the next operator to a
     # population that no longer existed (review finding, #13648).
-    # `unions` 2 -> 1 came with P6 and `typed` 10 -> 9 with P7; BOTH are recorded here
-    # because a floor that moves without its reason is indistinguishable from a gate
-    # quietly widened to pass.
-    # ⛔ `typed` 10 -> 9 at #11609 lane P7, MEASURED: the same retirement moved BOTH
-    # numbers, because `tortoise_list_graphs` (`-> list[dict]`, i.e. a typed
-    # wrap envelope) was the door P7 retired forward into `tortoise_graph_overview`.
-    # The sweep reads the ADVERTISED registry, so a shim-only retired name is out of
-    # this population. Verified end to end rather than assumed: the wrap-name set at
-    # `b4da1f5c018d^` is this head's ten plus `tortoise_list_graphs`, and the whole
-    # module passes there (21 passed) — main went RED here at `b4da1f5c018d`.
+    # ⛔ `typed` 10 -> 9 on 2026-11-21 (#11609 lane P7), for the SAME reason and by the
+    # same measurement as the wrap floor above: `tortoise_list_graphs` was the one
+    # typed-array door that left the advertised registry (retired forward into
+    # `tortoise_graph_overview(section="graphs")`, which declares no envelope). The
+    # linking verb P7 added is object-shaped and enters neither population, so the
+    # 10 -> 9 is NOT the `create_edge`/`create_operator` swap. The number is the sweep's
+    # own output at that merge (9 typed + 1 union), not a target.
+    # `unions` 2 -> 1 came with P6 and `typed` 10 -> 9 with P7; BOTH are recorded because a
+    # floor that moves without its reason is indistinguishable from a gate quietly widened
+    # to pass.
     floor_typed, floor_unions = 9, 1
     assert typed >= floor_typed and unions >= floor_unions, (
         f"sweep found {typed} typed + {unions} union envelopes; the floors are "
         f"{floor_typed} + {floor_unions}, each sitting ON its measured value "
         "(#11609 P6 retired the second `anyOf` door, so `unions` moved 2 -> 1; P7 "
-        "retired `tortoise_list_graphs`, so `typed` moved 10 -> 9). "
+        "then retired the array-wrapped `tortoise_list_graphs` forward, so `typed` "
+        "moved 10 -> 9). "
         "Shrinkage is what this floor guards, so it follows a deliberate "
         "removal; growth is covered by the loop itself.")
 
@@ -997,8 +1004,12 @@ async def test_a_repaired_error_is_never_message_less(quiet):
     kept content is empty the repair must SYNTHESISE a message naming the tool
     and the violated schema.
 
-    No typed registry tool has this return path today (AST-checked across all
-    11) — the test pins the class, not a live producer.
+    No typed registry tool has this return path today (measured at the #14248
+    head: no typed handler RETURNS `None` on its own path — the only `return
+    None` among the nine sits inside the nested `_with_claim_class` helper that
+    `tortoise_search`'s handler calls, a sentinel on THAT helper's degraded path
+    rather than the handler's result) — the test pins the class, not a live
+    producer.
     """
     def _none() -> list[dict]:
         return None  # type: ignore[return-value]

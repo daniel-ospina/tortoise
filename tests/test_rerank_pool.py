@@ -26,10 +26,13 @@ never filters.** Everything below is a consequence or a failure mode of that:
 """
 from __future__ import annotations
 
+import ast
 import inspect
+import re
 import sys
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -1274,6 +1277,1113 @@ def test_search_sessions_re_owns_the_order_and_does_NOT_pay_for_a_rerank(sdk, mo
         f"PRE-rerank score and slices (loads={loads})")
 
 
+class _SeamFlow(NamedTuple):
+    """What the value-flow walk attributed, and whether it had to give up.
+
+    ``calls``  — every ``ast.Call`` the mention can reach: the READS.
+    ``opaque`` — the mention (or a name carrying it) flows out through a binding
+                 shape this walk does NOT model, so **deadness is not proven**.
+                 A caller that skips an opaque mention reports a live read as
+                 dead, which is #14278 F1's fail-open — so it must count it.
+    """
+
+    calls: list
+    opaque: bool
+
+
+def _seam_modelled_binding(node):
+    """``(values, targets)`` for a name-binding form this walk MODELS, else None.
+
+    A closed enumeration of the shapes a seam read actually takes: plain
+    assignment (the ``_opt = SEAM`` hop), an annotation, a ``for`` target
+    (``for fn in (SEAM,): fn(…)``), a comprehension target, a ``with … as``
+    target and a walrus. Every form NOT listed here is caught by
+    ``_seam_opaque_values``, so a spelling nobody thought of fails closed instead
+    of being read as "provably dead" (#14278 F1).
+    """
+    if isinstance(node, ast.Assign):
+        return [node.value], list(node.targets)
+    if isinstance(node, ast.AnnAssign):
+        return ([node.value] if node.value is not None else []), [node.target]
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [node.iter], [node.target]
+    if isinstance(node, ast.comprehension):
+        return [node.iter], [node.target]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        values, targets = [], []
+        for item in node.items:
+            values.append(item.context_expr)
+            targets.append(item.optional_vars)
+        return values, targets
+    if isinstance(node, ast.NamedExpr):
+        return [node.value], [node.target]
+    return None
+
+
+def _seam_object_targets(*targets):
+    """Targets that WRITE THROUGH an object, rather than binding a plain name.
+
+    ``_bag[SEAM] = 1`` and ``obj.attr = SEAM`` store the value into a container
+    or a namespace this walk does not follow, so a mention in such a TARGET is an
+    escape — not a binding it can certify dead. Measured before this existed:
+    ``d[sdk._tortoise_fts_query] = 1`` returned ``calls=0, opaque=False``, i.e. the
+    "PROVEN dead" arm, although ``for k in d: k(query=…)`` then calls it
+    (round-23 review).
+
+    ⛔ PLAIN NAME TARGETS ARE EXCLUDED ON PURPOSE. A name that is already a CARRIER
+    would otherwise be reported as an escape and make every modelled one-hop
+    binding opaque — ``_opt = SEAM; _opt(…)`` would stop resolving, which is the
+    opposite defect (a false block on every pin row of the `one-hop` family).
+    """
+    found = []
+    for target in targets:
+        if target is None:
+            continue
+        if any(isinstance(sub, (ast.Subscript, ast.Attribute))
+               for sub in ast.walk(target)):
+            found.append(target)
+    return found
+
+
+def _seam_enclosing_repeat(node, parents):
+    """The nearest enclosing REPEAT of ``node``, or ``None``.
+
+    A repeat is anything that re-EXECUTES the expression it encloses, which is
+    what a read-count of ``1 + N`` (one warm-up, plus one per query) is asserting
+    over: a ``for``/``async for``/``while`` body, and — since round-25 review — a
+    COMPREHENSION.
+
+    ⛔ WHY A COMPREHENSION COUNTS. A comprehension's element, its ``if`` clauses
+    and every INNER generator execute once per iteration, so
+    ``[SEAM(query=q) for q in queries]`` issues N reads exactly like a loop does.
+    Counting only ``For``/``While`` was measured doing BOTH things wrong at once:
+    a warm-up rewritten as
+    ``[_w for _w in (SEAM(query=…) for _i in range(len(queries)))]`` issues N
+    warm-up reads and stayed GREEN (a false PASS — the fail-open direction,
+    measured against ``tools/read_wave_latency.py``), while the legitimate
+    refactor ``_ONE = [SEAM(query=q["query"], leg_trace=[]) for q in queries]``
+    — still exactly one traced read per query — was refused as "not inside a
+    loop" (a false BLOCK).
+
+    ⛔ AND THE OUTERMOST ``generators[0].iter`` IS *NOT* A REPEAT, which is the
+    half that keeps this from over-blocking: ``[x for x in SEAM(query="once")]``
+    evaluates its iterable ONCE, so the read is a single read. Only descendants
+    of that one expression execute once; everything else in the comprehension
+    tree is per-iteration. The test is positional, not a parent identity check —
+    ``ast`` interposes a ``comprehension`` node between the comprehension and its
+    ``iter``, so the path's child is that node, never the expression itself:
+    ``node`` is inside the ONCE slot exactly when it IS ``generators[0].iter`` or
+    something under it.
+
+    One predicate, two callers (the arm over the real tool, and the synthetic pin
+    that grades every shape below) for the reason round-17 established for
+    ``_seam_opts_out``: a pin over a COPY of the rule grades the copy.
+    """
+    up = parents.get(id(node))
+    while up is not None:
+        if isinstance(up, (ast.For, ast.AsyncFor, ast.While)):
+            return up
+        if isinstance(up, (ast.ListComp, ast.SetComp, ast.GeneratorExp,
+                          ast.DictComp)):
+            first_iter = up.generators[0].iter if up.generators else None
+            once = first_iter is not None and (
+                first_iter is node
+                or any(sub is node for sub in ast.walk(first_iter)))
+            if not once:
+                return up
+        up = parents.get(id(up))
+    return None
+
+
+def _seam_opaque_values(node):
+    """Value positions of a binder this walk does NOT model (#14278 F1).
+
+    The binder/escape kinds of the CURRENT grammar that take a value expression
+    and hand it somewhere this walk does not follow: an augmented assignment, a
+    value escaping its function (``return``/``yield``), a parameter default or a
+    decorator, a class base/keyword, a ``match`` subject or pattern expression, an
+    ``except`` clause's exception TYPE (Python EVALUATES it and matches by class —
+    it is not a call), a ``type`` statement's value, and every ANNOTATION — the
+    target of an ``AnnAssign`` and a function's parameter/return annotations.
+    When the mention reaches one of these the walk cannot say what happens to it —
+    so "no call found" is NOT deadness and the caller must fail closed.
+
+    ⛔ WHY ANNOTATIONS ARE AN ESCAPE RATHER THAN A MODELLED BINDING. A mention
+    that appears only in an annotation reaches no call, which is the negative this
+    walk reports — but "no call" is not deadness for every annotation SCOPE, and
+    this walk has no scope model to tell them apart:
+
+    * module- and class-scope: the annotation IS evaluated and stored in
+      ``__annotations__`` (measured: a module-level or class-body ``y: 1/0``
+      raises ``ZeroDivisionError``), so its value travels somewhere the walk does
+      not follow. Admitting it is the fail-closed direction.
+    * function-local: PEP 526 does NOT evaluate a local's annotation (measured:
+      ``def f(): x: 1/0`` does not raise and ``locals()`` stays empty), so a
+      mention there is genuinely dead and admitting it is an OVER-block.
+
+    That over-block is accepted deliberately (doctrine: a false block is B, a
+    deadness claim about an evaluated annotation is A), and it is why the pin
+    carries BOTH a module-scope row (``ann-module`` — the evaluated shape the
+    escape exists for) and a function-local one (``ann-only`` — the shape it
+    over-blocks). Before this fix all three annotation POSITIONS (four rows, since
+    the ``AnnAssign`` position is graded at both scopes) returned
+    ``calls=0, opaque=False``, read as PROVABLY DEAD — the exact direction this
+    function exists to forbid (round-18 review).
+
+    ⛔ THE BULLETS ABOVE ARE FOR A MODULE WITHOUT ``from __future__ import
+    annotations``, and BOTH files in this arm's blast radius opt IN
+    (``tools/read_wave_latency.py:46``, and this test module at ``:27``): under
+    PEP 563 no annotation is evaluated at all (measured: ``z: 1/0`` and
+    ``def f(_x: 1/0)`` raise without the future import and do not raise with it;
+    the values land in ``__annotations__`` as STRINGS). There the mention is
+    genuinely DEAD — nothing is evaluated, so no call can be reached — and
+    admitting it is therefore an OVER-block, not a correctness win: measured on a
+    PEP-563 tree (two live reads plus one annotation-only mention) the walk
+    reports ``calls=2 live=3 unresolved=1``, i.e. a third read that does not
+    exist — and THOSE THREE COUNTS ARE GRADED, not quoted:
+    ``test_the_pep563_over_block_is_graded_and_the_walk_has_no_scope_model``
+    recomputes them on that tree and also pins that the SAME source without the
+    future import reports the SAME counts, which is what makes "the walk has no
+    scope model" a checked claim rather than a rationale. ⛔ So the behaviour is
+    NOT "right either way" — the PEP-563 case costs a real false read. The cost
+    is accepted deliberately and in the fail-closed
+    direction (a false block is class B; a deadness claim about an annotation a
+    tree DOES evaluate is class A), because the walk has no scope model to tell
+    the two trees apart — which is also why the scope clause is load-bearing
+    rather than a rationale only: dropping it lets the next reader correct it
+    back to the inverted claim (round-20 review; residual closed here).
+
+    ⛔ KNOWN RESIDUALS, named rather than claimed closed: ``raise SEAM`` and
+    ``await SEAM`` are value positions that evaluate the mention (``await`` even
+    calls ``__await__``) and are still read as dead. Neither can hide a real seam
+    READ — the seam is a bound method, so no call to it can occur there — so they
+    are documented, not modelled. (A mention in an assignment TARGET is now an
+    escape rather than a residual — see ``_seam_object_targets``.)
+
+    ⛔ This is an enumeration, not a proof about future syntax: it is every binder
+    kind in the Language Reference's list ("Naming and binding", §4.2.1) that this
+    walk does not model, as of this grammar — including ``type`` parameter lists
+    (`def f[T: SEAM]()`). Adding a binding kind to Python is a change to this
+    function, and the pin's ``escapes``/``except-as``/``type-param`` rows are the
+    tripwire that says so. The one kind deliberately omitted is ``import``, which
+    binds module paths (strings and dotted ``Name``s), never an expression that
+    could be a seam mention.
+
+    ``kw_defaults`` may hold ``None`` for a required keyword-only parameter; the
+    walk treats ``None`` as an expression it does not carry.
+    """
+    if isinstance(node, ast.AugAssign):
+        return [node.value, *_seam_object_targets(node.target)]
+    if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)):
+        return [node.value]
+    if isinstance(node, ast.AnnAssign):
+        return [node.annotation, *_seam_object_targets(node.target)]
+    if isinstance(node, ast.Assign):
+        return _seam_object_targets(*node.targets)
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return _seam_object_targets(node.target)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return _seam_object_targets(*(i.optional_vars for i in node.items))
+    if isinstance(node, ast.Lambda):
+        return [*node.args.defaults, *node.args.kw_defaults]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = node.args
+        annotated = [a.annotation for a in (
+            *getattr(args, "posonlyargs", ()), *args.args, *args.kwonlyargs,
+            args.vararg, args.kwarg) if a is not None]
+        return [*node.decorator_list, *args.defaults,
+                *args.kw_defaults, node.returns, *annotated,
+                *(getattr(node, "type_params", None) or [])]
+    if isinstance(node, ast.ClassDef):
+        return [*node.decorator_list, *node.bases,
+                *(k.value for k in node.keywords),
+                *(getattr(node, "type_params", None) or [])]
+    if isinstance(node, ast.ExceptHandler):
+        return [node.type]
+    if isinstance(node, ast.TypeAlias):
+        return [node.value, *(getattr(node, "type_params", None) or [])]
+    if isinstance(node, ast.Match):
+        values = [node.subject]
+        for case in node.cases:
+            for sub in ast.walk(case.pattern):
+                if isinstance(sub, ast.expr):
+                    values.append(sub)
+        return values
+    return []
+
+
+def _seam_read_calls(tree, mention) -> _SeamFlow:
+    """Every call `mention` can REACH in `tree`, plus whether the walk gave up.
+
+    ⛔ DEADNESS MUST BE PROVEN, never inferred from a shape this resolver does not
+    model (#14278 F1). A mention reaches a call through more shapes than a direct
+    call or a one-hop `Name` binding: a container (`_reads = [SEAM]` then
+    `_reads[0](…)`), a subscript or attribute dispatch, a second alias hop
+    (`_n = _m`), a `for`/comprehension/`with … as` target, a walrus, or being
+    handed to something as an argument. Measured at head `59e701977a`: the
+    one-hop form skipped the container and two-hop mutants, so both stayed GREEN —
+    an undocumented read inheriting a PERMANENT exemption, which is the exact
+    failure the arm this feeds exists to catch.
+
+    So the carriers are the mention plus every name bound to an expression that
+    CARRIES it (assignment RHS, container element, subscript or attribute
+    target, loop/comprehension/with target, walrus value), closed to a fixpoint; a
+    call is a read when its CALLEE or one of its ARGUMENTS carries a carrier. A
+    call boundary stops the RHS walk — `results = SEAM(…)` carries the call's
+    RESULT, not the seam (that call is its own row) — so ordinary result plumbing
+    cannot make a name a carrier.
+
+    ⛔ A CARRIER REACHES AN ATTRIBUTE OF THE SAME NAME, because a class body IS its
+    class's attribute dictionary (Language Reference §4.2.2): `class _Tbl: seamfn =
+    SEAM` then `_Tbl.seamfn(…)` is a real read, and a walk that only matched
+    `Name.id` read it as provably dead (round-10 review, P2). For the spelling an
+    attribute match still misses — the class name fetched by STRING, `getattr(_Tbl,
+    "seamfn")` — a class-body binding whose read the walk could NOT attribute is
+    reported ``opaque`` (its name escaped into a namespace we can only then follow
+    by string), so that residual is counted rather than exempted.
+
+    ⛔ AND `calls == []` ALONE IS NOT DEADNESS. `59e701977a`'s one-hop walk learnt
+    to follow four shapes and still read every untaught shape as dead: measured at
+    `96b93db293`, a third read written as `for _fn in (SEAM,): _fn(…)` inside the
+    granted owner yielded `[]` and the arm stayed GREEN on three reads (round-9
+    review, P2). So a mention that reaches a binding form this walk does not model
+    is returned with ``opaque=True``, and the caller must count it as a read.
+
+    ⛔ SO THE ONE THING THIS RETURN VALUE PROVES IS NEGATIVE — AND ONLY ABOUT THE
+    SHAPES THIS WALK MODELS: ``calls == [] and not opaque`` means no call this
+    resolver can FOLLOW reaches the mention. It is not a statement about the whole
+    file: a name dispatched by a string the walk cannot read (`globals()["fn"]`,
+    `getattr(obj, "x")`) reaches the mention without ever naming it, which is why
+    the class-body case admits rather than denies (round-11 review, P3).
+    ``opaque`` is an admission, not a verdict — the caller must not let an opt-out
+    on the calls it DID find suppress a mention that also escaped, or the admission
+    buys nothing (round-10 review, P3: ``_o = SEAM; _o(…,
+    _rerank_candidates=False); return _o`` was skipped as "all opted out" while
+    ``opaque`` was True).
+
+    ⛔ KNOWN RESIDUAL: FILE-SCOPED BARE-NAME CARRIERS, and it cuts BOTH WAYS. The
+    carrier set is keyed on bare names, so a name the file already uses for
+    something else is attributed to the mention — and the count assertion is a
+    TOTAL (`len(reads) == 2`), not a set, so the residual produces two different
+    defects:
+
+    (a) OVER-ATTRIBUTION blocks a correct tree. `for q in (SEAM,): pass` where
+        `run` already loops `for q in queries:` makes every `q`-rooted call look
+        like a read (round-10 review, P3). The doctrine rates a false block B and
+        this is the direction the gate must err in, so it is accepted.
+    (b) ⛔ THE SAME COLLISION ALSO FAILS OPEN, and that is NOT covered: an
+        unattributed same-named call elsewhere in the file can STAND IN for a read
+        that has gone missing. Measured: replace the warm-up with a dead
+        `_search = SEAM` and add a module-level
+        `def _first(_search, q): return _search(query=q, limit=1)` — one real read
+        remains inside `run`, the tool's two reads (a discarded warm-up and the
+        per-query loop) are not both live, and the
+        count still reads `2`, so the arm is GREEN. `unresolved` is `0` throughout;
+        the count row cannot see this at all.
+
+    It is not repaired here: a file-scoped walk cannot tell the two `q`s apart
+    without a scope model, and a cheap guess would re-open the (b) class that
+    `_seam_opaque_values` exists to close. ⛔ AND THE RED'S ROUTE DEPENDS ON WHERE
+    THE COLLIDING NAME LANDS — in a modelled binder it is `resolved` (plain
+    call-site count mismatch, no named cause; round-12 review, P3), in an escape
+    shape it makes the mention `opaque` and the red becomes the unresolved row with
+    a message that names an escape (measured: `_m` collides with the tool's own
+    comprehension target in the `member_table` comprehension, `unresolved == 1`).
+    Neither route names the
+    collision, so the message is a DIRECTION, not a diagnosis: find the spurious
+    mention by walking `_seam_read_calls`, not by reading it.
+    """
+    carriers: set = set()
+    parent = {id(child): node for node in ast.walk(tree)
+              for child in ast.iter_child_nodes(node)}
+
+    def _in_class_body(node) -> bool:
+        """Is `node` a statement of a class BODY (so its name IS an attribute)?
+
+        ⛔ The walk STOPS at the first function boundary: §4.2.2 says "the scope of
+        names defined in a class block is limited to the class block; it does not
+        extend to the code blocks of methods", so a binding inside a method is a
+        LOCAL, not an attribute — treating it as a class-body name counted a dead
+        local as a live read (round-11 review, P3).
+        """
+        up = parent.get(id(node))
+        while up is not None:
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return False
+            if isinstance(up, ast.ClassDef):
+                return True
+            up = parent.get(id(up))
+        return False
+
+    def _carries(expr) -> bool:
+        stack = [expr]
+        while stack:
+            node = stack.pop()
+            if node is None:
+                continue
+            if node is mention:
+                return True
+            if isinstance(node, ast.Name) and node.id in carriers:
+                return True
+            if isinstance(node, ast.Attribute) and node.attr in carriers:
+                return True
+            if isinstance(node, ast.Call):
+                continue        # a call is its own row; its VALUE is a result
+            stack.extend(ast.iter_child_nodes(node))
+        return False
+
+    class_bound = False
+    grown = True
+    while grown:
+        grown = False
+        for node in ast.walk(tree):
+            parts = _seam_modelled_binding(node)
+            if parts is None:
+                continue
+            values, targets = parts
+            if not any(_carries(value) for value in values):
+                continue
+            if _in_class_body(node):
+                class_bound = True
+            for target in targets:
+                if target is None:
+                    continue
+                for sub in ast.walk(target):
+                    # ⛔ `add`, never `update`: `.update(` is an ordinary-word
+                    # receiver the SDK residue sweep counts, and a test-only diff
+                    # must not move that pin (measured at `59e701977a`).
+                    if isinstance(sub, ast.Name) and sub.id not in carriers:
+                        carriers.add(sub.id)
+                        grown = True
+
+    reads: list = []
+    opaque = False
+    for node in ast.walk(tree):
+        # ⛔ NO ``_seam_modelled_binding(node) is None`` GUARD HERE. It used to
+        # stand in front of this test, and it is why an ``AnnAssign``'s annotation
+        # was never examined: every MODELLED binder returns ``[]`` from this
+        # function (checked — Assign/For/With/comprehension/NamedExpr are all
+        # absent from the branches above), so the guard excluded exactly one node
+        # kind that DOES have an escape value, and exempted it instead of
+        # admitting it (round-18 review).
+        if any(_carries(value) for value in _seam_opaque_values(node)):
+            opaque = True
+        if not isinstance(node, ast.Call):
+            continue
+        if _carries(node.func) or any(
+                _carries(arg) for arg in
+                (*node.args, *(k.value for k in node.keywords))):
+            reads.append(node)
+    # ⛔ A CLASS-BODY BINDING IS ALWAYS AN ADMISSION, even when a read was found:
+    # the name has escaped into a namespace the walk can only then follow by
+    # STRING (`getattr(_Tbl, "seamfn")`), so letting a found read suppress the
+    # admission hides a second, unattributed read on the same binding — the exact
+    # shape the opt-out paragraph above condemns (round-11 review, P2).
+    # ⛔ ITS KNOWN COST, accepted: a class-bound mention whose every ATTRIBUTED
+    # call opted out is still counted, because the escape is precisely the read no
+    # opt-out can cover (round-12 review, P3). That is an over-block (B) against the
+    # escape it prevents from being exempted (A), and the caller's message no
+    # longer calls the counted sites "un-opted-out", so the red stays truthful.
+    return _SeamFlow(calls=reads, opaque=opaque or class_bound)
+
+
+def _seam_opts_out(call) -> bool:
+    """`_sites`' own opt-out rule, so the grant's grader counts what it exempts.
+
+    Hoisted out of the census test so the synthetic pin grades the SAME predicate
+    the arm runs — a grant's grader that is only exercised against the one tree it
+    happens to sit on can be vacuous in every other direction.
+    """
+    if call is None:
+        return False
+    for k in call.keywords:
+        if (k.arg == "_rerank_candidates"
+                and isinstance(k.value, ast.Constant)
+                and k.value.value is False):
+            return True
+        if k.arg != "_search_kwargs":
+            continue
+        try:
+            opts = ast.literal_eval(k.value)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(opts, dict) and opts.get("_rerank_candidates") is False:
+            return True
+    return False
+
+
+def _seam_live_reads(tree, seam_mentions):
+    """The grant's grader: (live mentions, resolved, unresolved, distinct calls).
+
+    ⛔ TWO COUNTS, BECAUSE THE TWO UNITS DIFFER. `live` is the
+    CENSUS's unit — the mentions an owner-granular grant would absorb — and
+    `calls` is the READ's: the tool issues one discarded warm-up and one
+    per-query measurement loop. One binding
+    driven twice is ONE mention and TWO reads, so a grader asserting mentions
+    alone left three reads in the tool with the row GREEN — measured at
+    `7d18f1c824` on `_w = SEAM; _w(…); _w(…)`: mentions 2, distinct calls 3
+    (round-9 review, F1-B). Both are returned; the arm asserts both.
+    """
+    live: list = []
+    resolved: list = []
+    unresolved: list = []
+    calls: dict = {}
+    for mention in seam_mentions:
+        flow = _seam_read_calls(tree, mention)
+        fed = flow.calls
+        if not fed and not flow.opaque:
+            continue        # PROVEN dead: nothing here can reach a call
+        if not flow.opaque and all(_seam_opts_out(c) for c in fed):
+            continue        # the census's sanctioned alternative, no grant needed
+        live.append(mention)
+        (unresolved if flow.opaque else resolved).append(mention)
+        for call in fed:
+            # ONE call node reached from two mentions is ONE call site, because
+            # the row it feeds counts the READ's unit — a call site the tool
+            # issues (its discarded warm-up and its per-query loop) — not the
+            # walk's paths. ⛔ The offsets are NOT quoted: an earlier cut of this
+            # note cited `tools/read_wave_latency.py` by line, which nothing
+            # grades and which rots on the first edit above it (round-25 review).
+            calls.setdefault(id(call), call)
+    return live, resolved, unresolved, list(calls.values())
+
+
+def _seam_check_read_sites(expected, live, calls, resolved, unresolved, where):
+    """The grant's count row, as a function so a synthetic tree can grade IT.
+
+    ⛔ THE ROW ITSELF IS THE MECHANISM THAT CLOSES THE FAIL-OPEN, so grading the
+    counts it reads (above) is not enough: swapping its `read_sites` for `live`
+    put the arm back to counting mentions and left every pin green — the same
+    "what was unpinned" class round-11 raised. Extracted from the arm so the
+    synthetic pin drives the SAME predicate and sees it RED for a count it must
+    reject, instead of a second copy of the arithmetic that can drift.
+
+    ⛔ MENTIONS ARE NOT ASSERTED. A mention that reads nothing is not a read, so
+    a `len(mentions)` row would false-block a correct tree — a mention bound and
+    left unused beside the two that are actually called. `live` already drops a
+    PROVEN-dead mention AND a fully opted-out one, so `len(live)` is not
+    `len(mentions)` either — but that is NOT why the row counts CALL SITES. It
+    counts call sites because ONE live mention can feed TWO reads (`live == 1,
+    read_sites == 2`; `_seam_live_reads`' own docstring: "One binding driven
+    twice is ONE mention and TWO reads"). The filter and the multiplicity are
+    different facts, and the row exists for the second.
+
+    ⛔ AND THE CALL-SITE ROW ALONE IS A FAIL-OPEN, which is why it does not stand
+    alone. A mention that ESCAPED into a shape the walk cannot follow adds no call
+    of its own, so replacing `len(live) == expected` with this row (rather than
+    ADDING it) silently stopped grading the whole escape family: measured at
+    `93178a6495`, `type _A = SEAM`, `return SEAM` and `except SEAM as _e` inside
+    the granted owner each left `read_sites == expected` and the arm GREEN
+    (round-12 review, P2). An unattributable mention may be a read, so it is never
+    something this row may ignore — `not unresolved` is the second half of the
+    same property, and it does not re-introduce the mention-count false block
+    (one binding feeding both reads is `live == 1, read_sites == 2,
+    unresolved == 0`, which stays GREEN).
+    """
+    read_sites = {id(call) for call in calls}
+    assert not unresolved, (
+        f"{len(unresolved)} seam mention(s) of `tortoise_fts_query` in {where} "
+        "escaped into a binding shape the walk cannot follow, so their reads "
+        "CANNOT be counted — an unresolvable mention may be a read, and this "
+        f"row may not report a tree where {expected} call sites are visible but "
+        "another read may be hiding. ⛔ THIS RED HAS EXACTLY ONE FIX: the read "
+        "must be SPELLED so the walk can follow it (a name binding, a loop or "
+        "comprehension target, a `with … as`, a walrus). Opting out does not "
+        "clear it — the opt-out is only consulted for a mention the walk "
+        "ATTRIBUTED — and neither does re-deriving `intentional_keep`: this "
+        "assert never reads `expected` or that comment, so no value of either "
+        "can turn it green (round-15 review, P3).")
+    assert len(read_sites) == expected, (
+        f"{len(read_sites)} seam CALL SITE(s) of `tortoise_fts_query` "
+        f"in {where}, reached from {len(live)} mention(s) "
+        f"({len(resolved)} attributed by the walk, all of them counted), but the "
+        f"read count this row is CALLED with says {expected!r} (the tool issues a "
+        "discarded warm-up and a per-query measurement loop) and the grant is "
+        "owner-granular — a "
+        "further read inside the granted owner is exempted with no recorded "
+        "reason. ⛔ RE-DERIVING A COMMENT ALONE CANNOT CLEAR THIS RED: this "
+        "assert compares the tree against the expected count it is CALLED "
+        f"with ({expected!r}, a literal at the call site) and never reads "
+        "`intentional_keep`. So the two fixes are (a) re-derive BOTH that "
+        "literal AND the grant's recorded ground in `intentional_keep`, or (b) "
+        "opt the new read out, which needs no grant and no re-derivation.")
+    return read_sites
+
+
+def test_the_grant_grader_counts_CALL_SITES_across_ONE_mention():
+    """#14278 (round 9, F1-B) — one binding driven twice is ONE mention, TWO reads.
+
+    `_seam_live_reads` reports both facts because the two units differ: the census
+    (`_sites`) counts MENTIONS, which is the unit an
+    owner-granular grant absorbs, while the READ's count is the tool's own CALL
+    SITES (the tool's discarded warm-up and its per-query loop, cited by ROLE —
+    an earlier cut of this note cited them by line offset, which nothing grades). Measured at `7d18f1c824`, binding the warm-up once and calling it twice
+    gave 2 mentions / 3 distinct calls and the arm stayed GREEN — the third read
+    inherited a PERMANENT exemption with no recorded reason. The call-site row is
+    what closes it, so this pin exists to make that row's subject visible without
+    mutating `tools/read_wave_latency.py`.
+    """
+    source = '''
+def run(sdk):
+    _w = sdk._tortoise_fts_query
+    _w(query="warm1", limit=10)
+    _w(query="warm2", limit=10)
+    for q in ("q",):
+        sdk._tortoise_fts_query(query=q, limit=10, leg_trace=[])
+'''
+    tree = ast.parse(source)
+    mentions = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute)
+                and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+    live, resolved, unresolved, calls = _seam_live_reads(tree, mentions)
+    assert (len(live), len(resolved), len(unresolved), len(calls)) == (
+        2, 2, 0, 3), (
+        "the grant's grader mis-counted the one-binding-two-calls shape: "
+        f"live={len(live)} resolved={len(resolved)} "
+        f"unresolved={len(unresolved)} calls={len(calls)}")
+    # ⛔ NO `len(calls) > len(live)` ROW HERE. It is IMPLIED by the exact tuple
+    # above (3 > 2 whenever that assert passes), so it could never be the red. An
+    # assertion no mutation of the diff can redden is dead weight
+    # (agent-infra#3442 rule 3) — the counts tuple is the guard.
+    # ⛔ AND THE DEDUP IS UNGRADED, stated rather than claimed: no fixture in this
+    # file has ONE call node reached from two mentions, so replacing
+    # `calls.setdefault(id(call), call)` with an append-style key leaves every test
+    # green (measured, round-25 review). The docstring's "one call node reached
+    # from two mentions is ONE call site" is therefore a property this pin does not
+    # exercise; its failure direction is an over-count (a false block), not a
+    # deadness claim — residual, not closed.
+    # ⛔ AND THE ROW'S OWN PREDICATE, not only the counts it reads. `expected=3`
+    # holds for this shape and the pre-fix verdict (`2`, the mention count) must
+    # RAISE — so replacing the row's `read_sites` with `live` reds HERE instead of
+    # silently restoring the fail-open.
+    _seam_check_read_sites(3, live, calls, resolved, unresolved,
+                           "the synthetic one-binding-two-calls module")
+    with pytest.raises(AssertionError, match="CALL SITE"):
+        _seam_check_read_sites(2, live, calls, resolved, unresolved,
+                               "the synthetic one-binding-two-calls module")
+
+    # ⛔ AND THE ROW'S FAIL-CLOSED HALF, which is the OTHER way it can be defeated.
+    # `not unresolved` is unfalsifiable if every caller passes 0 — and all three
+    # call sites did, so three one-line edits to the CHAIN (send an opaque mention
+    # to `resolved`, stop skipping on `opaque`, or let an opt-out ignore `opaque`)
+    # emptied `unresolved` for good and brought the escape family back GREEN with
+    # the whole suite passing (round-13 review, P2). Driving the row with a
+    # nonzero `unresolved` is what makes it a graded predicate: `expected` is
+    # correct here, so ONLY the admission can raise.
+    with pytest.raises(AssertionError, match="escaped into a binding shape"):
+        _seam_check_read_sites(3, live, calls, resolved, [*unresolved, live[0]],
+                               "the synthetic one-binding-two-calls module")
+    # …and the count must still be right when nothing escaped, or the two halves
+    # would mask each other: a wrong `expected` raises for the COUNT reason.
+    with pytest.raises(AssertionError, match="CALL SITE"):
+        _seam_check_read_sites(1, live, calls, resolved, unresolved,
+                               "the synthetic one-binding-two-calls module")
+
+    # ⛔ AND END-TO-END THROUGH THE CHAIN, which is the half a row-only pin cannot
+    # reach. Three one-line edits to `_seam_live_reads` — sending an opaque mention
+    # to `resolved`, skipping on `fed` alone, or letting an opt-out ignore `opaque`
+    # — each empty `unresolved` for good and bring the whole escape family back
+    # GREEN. A test that hands the row a non-empty `unresolved` by hand cannot see
+    # that; this one makes the chain produce it, so each of those edits reds HERE
+    # (measured: all three, round-13 review, P2).
+    escaped = '''
+def run(sdk):
+    sdk._tortoise_fts_query(query="a", limit=10)
+    sdk._tortoise_fts_query(query="b", limit=10)
+    return sdk._tortoise_fts_query
+'''
+    etree = ast.parse(escaped)
+    ements = [n for n in ast.walk(etree)
+              if isinstance(n, ast.Attribute)
+              and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+    e_live, e_res, e_unres, e_calls = _seam_live_reads(etree, ements)
+    assert (len(e_live), len(e_res), len(e_unres), len(e_calls)) == (3, 2, 1, 2), (
+        "the chain must ADMIT the escaping mention rather than resolve it away: "
+        f"live={len(e_live)} resolved={len(e_res)} "
+        f"unresolved={len(e_unres)} calls={len(e_calls)}")
+    # The call-site count is exactly the tool's TWO here (a discarded warm-up, and
+    # the per-query loop), so ONLY the
+    # admission can red this — which is precisely what a tree with a third,
+    # unfollowable read looks like.
+    with pytest.raises(AssertionError, match="escaped into a binding shape"):
+        _seam_check_read_sites(2, e_live, e_calls, e_res, e_unres,
+                               "the synthetic escape module")
+
+
+def test_the_pep563_over_block_is_graded_and_the_walk_has_no_scope_model():
+    """The ``_seam_opaque_values`` PEP-563 paragraph, as a claim this test checks.
+
+    ⛔ THE PARAGRAPH THERE QUOTED ``calls=2 live=3 unresolved=1`` AS A
+    MEASUREMENT AND NOTHING RECOMPUTED IT — the same ungraded-numeral class the
+    sum-bound test's ``OBSERVED`` paragraph was corrected for (cycle-2 review,
+    residual 2). Two facts are graded here, and the second is the paragraph's
+    load-bearing claim rather than decoration:
+
+    1. the walk's report on a PEP-563 tree (two live reads plus one
+       annotation-only mention) is exactly ``(live=3, resolved=2, unresolved=1,
+       calls=2)`` — the annotation mention is LIVE-COUNTED, i.e. the arm charges
+       a read for a mention that PEP 563 never evaluates; and
+    2. the SAME source WITHOUT the future import reports the SAME counts — the
+       walk has no scope model, so it cannot tell the evaluated tree from the
+       non-evaluated one. Teach it to consult the import and these two trees
+       diverge, which reds here and asks for the paragraph to be rewritten.
+
+    The over-block is ACCEPTED on purpose (a false block is class B; a deadness
+    claim about an annotation a tree DOES evaluate is class A), so this row pins
+    the cost; it does not demand a fix.
+    """
+    body = '''
+def a(sdk):
+    _a = sdk._tortoise_fts_query
+    _a(query="a", limit=10)
+
+def b(sdk):
+    _b = sdk._tortoise_fts_query
+    _b(query="b", limit=10)
+
+def c(sdk):
+    _ann: sdk._tortoise_fts_query = None
+'''
+    counts = {}
+    for label, src in (("pep563", "from __future__ import annotations\n" + body),
+                       ("no-future", body)):
+        tree = ast.parse(src)
+        mentions = [n for n in ast.walk(tree)
+                    if isinstance(n, ast.Attribute)
+                    and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+        live, resolved, unresolved, calls = _seam_live_reads(tree, mentions)
+        counts[label] = (len(live), len(resolved), len(unresolved), len(calls))
+    # ⛔ THE NUMERALS ARE READ BACK OUT OF THE PARAGRAPH, not restated here: a
+    # literal-only row leaves the sentence free to rot (patch the docstring to
+    # 9/9/9 and a literals-only assert stays green — the exact defect).
+    para = " ".join((_seam_opaque_values.__doc__ or "").split())
+    quoted = re.search(
+        r"reports ``calls=(\d+) live=(\d+) unresolved=(\d+)``", para)
+    assert quoted, (
+        "the `_seam_opaque_values` PEP-563 paragraph no longer quotes the counts "
+        "in the graded form ('reports ``calls=N live=N unresolved=N``') — "
+        "restore the wording or re-point this row, but do not leave the "
+        "measurement ungraded again")
+    doc_calls, doc_live, doc_unresolved = (int(p) for p in quoted.groups())
+    measured = (counts["pep563"][0], counts["pep563"][2], counts["pep563"][3])
+    assert (doc_live, doc_unresolved, doc_calls) == measured, (
+        "the paragraph's counts no longer match the walk: docstring says "
+        f"live={doc_live} unresolved={doc_unresolved} calls={doc_calls}, THIS "
+        f"tree measures {counts['pep563']} (live, resolved, unresolved, calls)")
+    assert counts["pep563"] == (3, 2, 1, 2), (
+        "the PEP-563 arm's counts moved: the docstring quotes calls=2 live=3 "
+        f"unresolved=1, this walk reports {counts['pep563']} "
+        "(live, resolved, unresolved, calls)")
+    assert counts["pep563"] == counts["no-future"], (
+        "the walk now DISTINGUISHES the two trees "
+        f"(pep563={counts['pep563']} no-future={counts['no-future']}) — it has "
+        "gained a scope model, and the `_seam_opaque_values` paragraph that says "
+        "it has none (so the annotation mention is an accepted over-block) has "
+        "to be rewritten together with this row")
+    # ⛔ AND THIS ROW'S OWN PROSE, which restated the same measurement TWICE and
+    # graded neither copy (review P2, measured at the head that added the row:
+    # rewriting the tuple below to ``(live=99, resolved=98, unresolved=97,
+    # calls=96)``, or the ``calls=7 live=8 unresolved=9`` inside the first
+    # paragraph, left this row GREEN). A copy nothing reads is the same
+    # ungraded-figure class this row closes one level out — so the row that
+    # grades it for ``_seam_opaque_values`` must not carry two of them itself.
+    # Both copies are read back out of this function's own ``__doc__`` and
+    # compared to the SAME ``counts`` computed above, so a wrong numeral in
+    # either one reds here rather than sitting in the file looking checked.
+    own = " ".join(
+        (test_the_pep563_over_block_is_graded_and_the_walk_has_no_scope_model
+         .__doc__ or "").split())
+    own_tuple = re.search(
+        r"exactly ``\(live=(\d+), resolved=(\d+), unresolved=(\d+), "
+        r"calls=(\d+)\)``", own)
+    assert own_tuple, (
+        "this row's docstring no longer states the walk's report as "
+        "'exactly ``(live=N, resolved=N, unresolved=N, calls=N)``' — restore "
+        "the wording or re-point this check, but do not leave the copy ungraded")
+    asserted = tuple(int(group) for group in own_tuple.groups())
+    assert asserted == counts["pep563"], (
+        "this row's docstring claims the walk reports"
+        f" {asserted} (live, resolved, unresolved, calls), THIS walk reports"
+        f" {counts['pep563']} — the sentence a reader takes the over-block's size"
+        " from no longer matches the emission")
+    own_para = re.search(r"QUOTED ``calls=(\d+) live=(\d+) unresolved=(\d+)``", own)
+    assert own_para, (
+        "this row's docstring no longer quotes `_seam_opaque_values`'s paragraph "
+        "as 'QUOTED ``calls=N live=N unresolved=N``' — restore the wording or "
+        "re-point this check, but do not leave the copy ungraded")
+    para_calls, para_live, para_unresolved = (
+        int(group) for group in own_para.groups())
+    assert (para_live, para_unresolved, para_calls) == measured, (
+        "this row's paraphrase of `_seam_opaque_values`'s paragraph no longer "
+        f"matches it: paraphrase says live={para_live}"
+        f" unresolved={para_unresolved} calls={para_calls}, the graded paragraph"
+        f" measures {measured} (live, unresolved, calls)")
+
+
+def test_the_grant_grader_follows_EVERY_shape_a_seam_read_can_take():
+    """#14278 F1 — the resolver is not vacuous, and it does not free-ride either.
+
+    The census grant on `tools/read_wave_latency.py` is PERMANENT and its only
+    recorded reason is a comment, so this resolver is the one thing that grades
+    it. A one-hop `Name` resolver read the container and two-hop shapes as "reads
+    nothing" and skipped them (measured GREEN at `59e701977a`, RED at its
+    parent); the other direction matters just as much — a genuinely dead binding
+    must stay dead, or the count silently absorbs a read that went missing. So
+    each shape is pinned here by the query its fed call carries, and the synthetic
+    module is not in any census tree.
+
+    ⛔ AND THE SHAPES NOBODY TAUGHT IT. The `escapes` mention below is bound by no
+    modelled form at all (`return SEAM`), so the walk cannot say what happens to
+    it. It must come back `opaque=True` and be COUNTED as a read by the arm: at
+    `96b93db293` an untaught spelling (`for _fn in (SEAM,): _fn(…)`) returned `[]`
+    and the arm stayed green on three reads (round-9 review). Graded in both
+    directions so neither "skip it as dead" nor "call everything dead" can pass.
+
+    ⛔ THESE ROWS EXIST SO THE PIN CANNOT PASS WITHOUT THE MECHANISM IT CLAIMS
+    (named by role, not counted — a numeral here is the same rotted claim this
+    block exists to stop, and it already drifted once):
+    `class-attr` needs the attribute carrier (a class body IS the class's
+    attribute dict — round-10 P2 read it as dead); `two-hop` is written in REVERSE
+    textual order so a single pass cannot resolve it (without it, deleting the
+    `while grown` fixpoint left every row green); `except-as` needs the ``except``
+    clause's exception TYPE treated as an escape, because Python EVALUATES it and
+    matches the raised exception by class/mro (§8.4.1 — a non-class raises
+    `TypeError`, so it is not a call); and `type-alias`, `match-subject`,
+    `type-param` and `class-dead` grade the enumerations and the class-body
+    admission ADDED for round 10; `helper-arg` is the one row that exercises the
+    argument-carrier branch (a seam handed to ANOTHER call rather than called),
+    which nothing else reached — deleting that branch left every row GREEN
+    (measured at `62fb081200`); `ann-module`/`ann-only`/`ann-param`/`ret-ann`
+    grade the four ANNOTATION escapes added for round 18 — a mention there
+    reaches no call, so reading it as provably dead is the fail-open the
+    enumeration forbids. Which of them Python EVALUATES is not uniform, which is
+    why the `AnnAssign` position is graded at BOTH scopes: `ann-module`,
+    `ann-param` and `ret-ann` are all evaluated — measured at 3.12.3,
+    `def f(_x: 1/0)` and `def f() -> 1/0` both raise at def time and land in
+    `f.__annotations__` — while `ann-only` is a function-local `AnnAssign`, which
+    PEP 526 neither evaluates nor stores (`def f(): x: 1/0` does not raise;
+    `locals()` is empty). The local case is carried as an accepted OVER-block
+    because this walk has no scope model. ⛔ AND IT IS THE SCOPE THAT WAS ALREADY
+    COVERED: at `6f52c22` the pin had NO module-scope `AnnAssign` row at all
+    (`git show 6f52c22:tests/test_rerank_pool.py | grep -c _bare_module` → `0`),
+    so the scope whose escape prevents the fail-open was the ungraded one —
+    `ann-module` closes it.
+
+    ⛔ WHICH BRANCHES HAVE A ROW — named, because the previous sentence claimed
+    "EVERY BRANCH" and that was false at this head (round-25 review measured nine
+    clauses still deletable with all 73 tests green):
+
+      GRADED (each deletion reds the pin): `Assign`/`AnnAssign`/`AugAssign` value
+      and OBJECT target, `For` target (plain and object), comprehension target,
+      `With` target (plain and object), walrus, `Lambda` and `FunctionDef`
+      POSITIONAL and KEYWORD-ONLY defaults, decorator (def and class), class
+      base/keyword/type-param, `type` statement, `match` subject and value
+      pattern, `except` type, `return`, `yield`, `yield from`, module-scope and
+      function-local `AnnAssign` annotations, `args.args` annotations, and the
+      `Return` value.
+
+      ⛔ NOT GRADED — NAMED RESIDUALS, not claimed closed: the `AsyncFunctionDef`,
+      `AsyncFor` and `AsyncWith` members of the same isinstance tuples, and the
+      `posonlyargs`/`kwonlyargs`/`vararg`/`kwarg` annotation positions of
+      `FunctionDef`. Deleting any of those leaves every row green, and the async
+      members turn a real shape into the PROVEN-dead verdict: an `async def`
+      default, decorator or annotation; an `async for` target or object target;
+      an `async with` target or object target — the fail-open this walk exists to
+      forbid. ⛔ NOT COUNTED, on purpose: the parenthetical IS the claim, and a
+      numeral restating a list beside it is the drift this block exists to stop
+      (an earlier cut of this sentence said "six of them" beside seven named
+      shapes, which is why the count is gone rather than corrected).
+      They are residuals because that is what they measured as; a pin that
+      claimed them closed would be the defect this paragraph is fixing. A
+      decorator row IS graded and is a REAL read, since Python CALLS a decorator
+      (round-13 review, P3); `method-local` is the row that must stay DEAD.
+    """
+    source = '''
+class SDK:
+    def _tortoise_fts_query(self, **kw):
+        return []
+
+def run(sdk):
+    sdk._tortoise_fts_query(query="warm", limit=10)
+    _reads = [sdk._tortoise_fts_query]
+    _reads[0](query="container", limit=10)
+    _opt = sdk._tortoise_fts_query
+    _opt(query="one-hop", limit=10)
+    _n = _m
+    _m = sdk._tortoise_fts_query
+    _n(query="two-hop", limit=10)
+    for _fn in (sdk._tortoise_fts_query,):
+        _fn(query="for-target", limit=10)
+    [_c(query="comprehension", limit=10)
+     for _c in [sdk._tortoise_fts_query]]
+    if (_w := sdk._tortoise_fts_query):
+        _w(query="walrus", limit=10)
+    class _Tbl:
+        seamfn = sdk._tortoise_fts_query
+    _Tbl.seamfn(query="class-attr", limit=10)
+
+def dead(sdk):
+    _dead = sdk._tortoise_fts_query
+
+def escapes(sdk):
+    return sdk._tortoise_fts_query
+
+def exc(sdk):
+    try:
+        pass
+    except sdk._tortoise_fts_query as _e:
+        _e(query="except-as", limit=10)
+
+def typealias(sdk):
+    type _T = sdk._tortoise_fts_query
+
+def matched(sdk):
+    match sdk._tortoise_fts_query:
+        case _:
+            pass
+
+def classbodydead(sdk):
+    class _C:
+        deadfn = sdk._tortoise_fts_query
+
+def generic[T: sdk._tortoise_fts_query]():
+    pass
+
+def with_target(sdk):
+    with sdk._tortoise_fts_query as _v:
+        _v(query="with-target", limit=10)
+
+def annassign(sdk):
+    _ann: object = sdk._tortoise_fts_query
+    _ann(query="ann", limit=10)
+
+def augassign(sdk):
+    _acc = []
+    _acc += [sdk._tortoise_fts_query]
+
+def lambdadefault(sdk):
+    _lam = lambda _x=sdk._tortoise_fts_query: _x
+
+def funcdefault(sdk):
+    def _g(_x=sdk._tortoise_fts_query):
+        return _x
+
+def classbase(sdk):
+    class _B(sdk._tortoise_fts_query):
+        pass
+
+def classtypeparam(sdk):
+    class _C[T: sdk._tortoise_fts_query]:
+        pass
+
+def typestmttypeparam(sdk):
+    type _A[T: sdk._tortoise_fts_query] = int
+
+class _M:
+    def m(self, s):
+        _dead_local = s._tortoise_fts_query
+
+def decorated(sdk):
+    @sdk._tortoise_fts_query
+    def _g():
+        pass
+
+def classdecorated(sdk):
+    @sdk._tortoise_fts_query
+    class _K:
+        pass
+
+def classkw(sdk):
+    class _K2(metaclass=sdk._tortoise_fts_query):
+        pass
+
+def matchvalue(sdk):
+    match 1:
+        case sdk._tortoise_fts_query:
+            pass
+
+def helperarg(sdk):
+    _helper(sdk._tortoise_fts_query, query="helper-arg")
+
+def annotonly(sdk):
+    _bare: sdk._tortoise_fts_query
+
+_bare_module: sdk._tortoise_fts_query
+
+def subscripttarget(sdk):
+    _bag = {}
+    _bag[sdk._tortoise_fts_query] = 1
+
+def augtarget(sdk):
+    _bag2 = {}
+    _bag2[sdk._tortoise_fts_query] += 1
+
+def anntarget(sdk):
+    _bag3 = {}
+    _bag3[sdk._tortoise_fts_query]: int = 1
+
+def fortargetobj(sdk):
+    for _bag4[sdk._tortoise_fts_query] in []:
+        pass
+
+def withtargetobj(sdk):
+    with open("x") as _bag5[sdk._tortoise_fts_query]:
+        pass
+
+def comptargetobj(sdk):
+    [1 for _bag6[sdk._tortoise_fts_query] in []]
+
+def attribtarget(sdk):
+    class _Obj:
+        pass
+    _Obj.attr = sdk._tortoise_fts_query
+
+def subscriptname(sdk):
+    _fn2 = sdk._tortoise_fts_query
+    _bag7 = {}
+    _bag7[_fn2] = 1
+
+def yieldescape(sdk):
+    yield sdk._tortoise_fts_query
+
+def yieldfromescape(sdk):
+    yield from sdk._tortoise_fts_query
+
+def func_kwonly(sdk):
+    def _g(*, _x=sdk._tortoise_fts_query):
+        return _x
+
+def lambda_kwonly(sdk):
+    _lam2 = lambda *, _x=sdk._tortoise_fts_query: _x
+
+def resultplumbing(sdk):
+    _r = sdk._tortoise_fts_query(query="plumbing", limit=10)
+    _r(query="result-plumbing", limit=10)
+
+def annotparam(sdk):
+    def _g(_x: sdk._tortoise_fts_query):
+        pass
+
+def retann(sdk) -> sdk._tortoise_fts_query:
+    pass
+'''
+    tree = ast.parse(source)
+    mentions = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute)
+                and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+    observed = []
+    for mention in mentions:
+        flow = _seam_read_calls(tree, mention)
+        observed.append((len(flow.calls), flow.opaque, sorted(
+            k.value.value for call in flow.calls for k in call.keywords
+            if k.arg == "query" and isinstance(k.value, ast.Constant))))
+    assert sorted(observed) == [
+        (0, False, []),                 # the dead binding: provably no call
+        (0, False, []),                 # `method-local`: a class METHOD's local
+        (0, True, []),                  # `return SEAM`: NOT provably dead
+        (0, True, []),                  # `except SEAM as e`: Python EVALUATES it
+        (0, True, []),                  # `type _T = SEAM`
+        (0, True, []),                  # `match SEAM:` subject
+        (0, True, []),                  # dead name bound in a CLASS body
+        (0, True, []),                  # PEP 695 `def f[T: SEAM]()` bound
+        (0, True, []),                  # `_acc += [SEAM]`
+        (0, True, []),                  # `lambda _x=SEAM: …` default
+        (0, True, []),                  # `def _g(_x=SEAM)` default
+        (0, True, []),                  # `class _B(SEAM)` base
+        (0, True, []),                  # `class _C[T: SEAM]` bound
+        (0, True, []),                  # `type _A[T: SEAM] = int`
+        (0, True, []),                  # `@SEAM` on a def: Python CALLS it
+        (0, True, []),                  # `@SEAM` on a class
+        (0, True, []),                  # `class _K2(metaclass=SEAM)`
+        (0, True, []),                  # `case SEAM.attr:` VALUE pattern
+        (0, True, []),                  # `_bag[SEAM] = 1` — a mention in an OBJECT target
+        (0, True, []),                  # `_bag2[SEAM] += 1` — OBJECT target of an AugAssign
+        (0, True, []),                  # `_bag3[SEAM]: int = 1` — OBJECT target of an AnnAssign
+        (0, True, []),                  # `for _bag4[SEAM] in []` — OBJECT target of a For
+        (0, True, []),                  # `with open() as _bag5[SEAM]` — OBJECT target of a With
+        (0, True, []),                  # `[… for _bag6[SEAM] in []]` — OBJECT target of a comprehension
+        (0, True, []),                  # `_Obj.attr = SEAM` — ATTRIBUTE target
+        (0, True, []),                  # `_bag7[_fn2] = 1` — SUBSCRIPT target indexed by a carrier NAME
+        (0, True, []),                  # `yield SEAM` — a value escaping as a generator result
+        (0, True, []),                  # `yield from SEAM` — the ``YieldFrom`` member
+        (0, True, []),                  # `def _g(*, _x=SEAM)` — a KEYWORD-ONLY default
+        (0, True, []),                  # `lambda *, _x=SEAM` — its lambda counterpart
+        (0, True, []),                  # MODULE-scope `_bare_module: SEAM` — evaluated + stored
+        (0, True, []),                  # `_bare: SEAM` annotation, no value (func-local: over-block)
+        (0, True, []),                  # `def _g(_x: SEAM)` parameter annotation
+        (0, True, []),                  # `def f() -> SEAM` return annotation
+        (1, False, ["ann"]),            # `_ann: object = SEAM; _ann(…)`
+        (1, False, ["comprehension"]),  # `for _c in [SEAM]: _c(…)`
+        (1, False, ["container"]),      # `_reads = [SEAM]; _reads[0](…)`
+        (1, False, ["for-target"]),     # `for _fn in (SEAM,): _fn(…)`
+        (1, False, ["helper-arg"]),     # `_helper(SEAM, query=…)` — an ARGUMENT
+        (1, False, ["one-hop"]),        # `_opt = SEAM; _opt(…)`
+        (1, False, ["plumbing"]),       # `_r = SEAM(…); _r(…)` — the CALL boundary
+        (1, False, ["two-hop"]),        # `_n = _m` ABOVE `_m = SEAM`
+        (1, False, ["walrus"]),         # `if (_w := SEAM): _w(…)`
+        (1, False, ["warm"]),           # the direct call
+        (1, False, ["with-target"]),    # `with SEAM as _v: _v(…)`
+        (1, True, ["class-attr"]),      # `class _Tbl: f = SEAM; _Tbl.f(…)`
+    ], f"the resolver mis-graded a shape: {sorted(observed)}"
+
+
+def test_the_grant_grader_honours_ONLY_a_real_opt_out_VALUE():
+    """#14278 (round-17, P2) — the opt-out is keyed on the VALUE, and nothing pinned it.
+
+    `_seam_opts_out` is `_sites`' own exemption rule, hoisted so the grant's arm
+    consults the predicate the census does. Measured at `62fb081200`: making it
+    `return False` — i.e. exempting NOTHING — left this whole file GREEN (71
+    passed), and so did the mirror regression the next reader would write,
+    replacing its `k.value.value is False` with a presence test on the kwarg
+    NAME. Both fail in the direction the arm exists to catch: a read spelled
+    ``_rerank_candidates=True`` re-picks the pool, and a presence test would
+    exempt it.
+
+    Every direction is graded here, because each is a different code path:
+    the kwarg branch's value check (``False`` exempts, ``True`` does NOT), the
+    ``_search_kwargs`` dict branch's value check (same two ways), and the fact
+    that a mention with NO opt-out at all is still counted (that last one is
+    what makes `return False` red rather than merely noisy).
+    """
+    source = '''
+def run(sdk):
+    sdk._tortoise_fts_query(query="on", limit=10, _rerank_candidates=False)
+    sdk._tortoise_fts_query(query="not-off", limit=10, _rerank_candidates=True)
+    sdk._tortoise_fts_query(query="dict-on", limit=10,
+                            _search_kwargs={"_rerank_candidates": False})
+    sdk._tortoise_fts_query(query="dict-not-off", limit=10,
+                            _search_kwargs={"_rerank_candidates": True})
+    sdk._tortoise_fts_query(query="bare", limit=10)
+'''
+    tree = ast.parse(source)
+    mentions = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute)
+                and n.attr in ("tortoise_fts_query", "_tortoise_fts_query")]
+    live, resolved, unresolved, calls = _seam_live_reads(tree, mentions)
+    # TWO of the five opt out — exactly the two literal `False` values and
+    # nothing else. A presence test on either branch exempts a `True` too, and
+    # `return False` exempts none of them.
+    assert (len(live), len(resolved), len(unresolved), len(calls)) == (3, 3, 0, 3), (
+        "only a literal `False` may exempt a seam read: `_rerank_candidates=True` "
+        "and `{'_rerank_candidates': True}` RE-PICK the pool, so counting them "
+        "as opted out is the fail-open the grant exists to close. "
+        f"live={len(live)} resolved={len(resolved)} "
+        f"unresolved={len(unresolved)} calls={len(calls)}")
+    # ⛔ AND THE COUNTS ALONE CANNOT GRADE THE VALUE, because the fixture is
+    # symmetric: one `False` and one `True` on EACH branch. Inverting either
+    # value test (`is False` -> `is True`) swaps WHICH read is exempted and
+    # leaves all four counts identical — measured green at `216e2ef66b`, the
+    # exact fail-open this test exists to close. So the verdict is pinned per
+    # READ, keyed on the fixture's unique `query=`.
+    verdicts = {k.value.value: _seam_opts_out(c)
+                for c in ast.walk(tree) if isinstance(c, ast.Call)
+                for k in c.keywords if k.arg == "query"}
+    assert verdicts == {"on": True, "not-off": False, "dict-on": True,
+                        "dict-not-off": False, "bare": False}, (
+        "the opt-out must be keyed on the VALUE, per read — a `True` on either "
+        f"branch re-picks the pool and is NOT an opt-out: {verdicts}")
+
+
 def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     """The half of the guard that ``order_by``/recency cannot reach.
 
@@ -1407,32 +2517,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                         or any(node is k.value for k in c.keywords)):
                     call = c
                     break
-            # ⛔ THE VALUE, NOT THE NAME. A presence test accepted
-            # ``_rerank_candidates=True`` as an opt-out at every site here
-            # (measured: the one-word flip at the volunteer seam left all 58
-            # tests green while the armed gate re-picked that pool), which is
-            # exactly the edit this census exists to catch.
-            opted_out = bool(call) and any(
-                k.arg == "_rerank_candidates"
-                and isinstance(k.value, _ast.Constant)
-                and k.value.value is False
-                for k in call.keywords)
-            if call is not None and not opted_out:
-                # a read BOUND as a seam (``_search_fn=sdk.tortoise_fts_query``):
-                # the flag rides in the adjacent ``_search_kwargs`` dict, so the
-                # call itself carries no keyword for it — and the DICT is
-                # evaluated, not grepped, for the reason above
-                for k in call.keywords:
-                    if k.arg != "_search_kwargs":
-                        continue
-                    try:
-                        opts = _ast.literal_eval(k.value)
-                    except (ValueError, SyntaxError):
-                        continue        # not a literal: cannot be proven, so not
-                    if isinstance(opts, dict) and opts.get(
-                            "_rerank_candidates") is False:
-                        opted_out = True
-                        break
+            # ⛔ THE VALUE, NOT THE NAME — and ⛔ THE SAME PREDICATE THE GRANT'S
+            # ARM GRADES. A presence test accepted ``_rerank_candidates=True``
+            # as an opt-out at every site here (measured: the one-word flip at
+            # the volunteer seam left all 58 tests green while the armed gate
+            # re-picked that pool), which is exactly the edit this census exists
+            # to catch.
+            #
+            # This rule used to be COPIED inline here while `_seam_opts_out`
+            # (the predicate `_seam_live_reads` — and therefore the synthetic
+            # pin — exercises) held a SECOND copy: the pin then graded a
+            # duplicate, so that same one-word flip could land in either copy
+            # without the other noticing, and the docstring's claim that the pin
+            # grades "the SAME predicate the census runs" was false (round-17
+            # review, P2 1). ONE predicate, called from both places — a spelling
+            # this census learns is a spelling the pin grades, and a defect in
+            # it reds both.
+            opted_out = _seam_opts_out(call)
             owner = ""
             parent = parents.get(id(node))
             while parent is not None:
@@ -1641,6 +2742,8 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # and with the gate armed the re-picked page is exactly what the
         # rank-identity check exists to catch — the same ground
         # `window_quality_m2.py` and `tools/miss_rate_m5.py` hold.
+        # The read itself names no lever: the two calls are `query=`, `limit=10` and,
+        # on the measured one, `leg_trace=` (`tools/read_wave_latency.py:297`, `:306-307`).
         # ⛔ AND THE MIRROR IS ASSERTED, not declared: `tests/test_14192_read_wave_tool.py::
         # test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags` DERIVES the
         # allowed arguments from the `/v1/search` door's own call site
@@ -1692,6 +2795,188 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     assert len(seen_external) >= 12, (
         f"the derived census saw only {sorted(seen_external)} — the trees moved")
 
+    # ⛔ THE GRANT'S GROUND IS GRADED, not merely written down (#14278
+    # F2). The grant names the OWNER (`run`), so a read added inside it inherits
+    # the exemption with no recorded reason, and the tool's own shape — a
+    # discarded warm-up plus a per-query loop, the latter carrying `leg_trace` —
+    # is a COVERAGE property: a third read inside the owner inherits the
+    # exemption silently and nothing else in this file would notice. (Measured
+    # before this arm existed: an earlier comment said "twice", which reads as
+    # two EXECUTIONS while the loop executes once per query.) ⛔ NOTE WHAT THIS
+    # ARM IS *NOT* FOR: the door pin main landed (`tests/test_14192_read_wave_tool.py`,
+    # `test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags`) already
+    # detects a third reach through the STATIC spellings this walk cannot follow
+    # — a literal `getattr`, an alias, a string literal — and it pins every read's
+    # owner to the literal `"run"`. ⛔ BUT NOT ALL OF THEM: a name COMPUTED at
+    # runtime (`_nm = "_tortoise_" + "fts_query"; getattr(sdk, _nm)(…)`) is
+    # GREEN in main's pin and GREEN here — main's pin declares it its own
+    # "computed at runtime" residual, in the docstring of the pin itself
+    # (`test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags`), and
+    # this walk returns the same 2 live / 2 calls. ⛔ NO LINE NUMBER IS CITED HERE
+    # ON PURPOSE: an earlier cut of this note pointed at an offset in this other
+    # file that resolved to a different owner entirely — the orphaned-attribution
+    # class this same commit closes elsewhere. Naming the owner survives a rebase;
+    # an offset does not, and that one was already wrong at the head it was
+    # written at.
+    # That spelling is therefore
+    # covered by NEITHER pin, and it is named here rather than listed as detected
+    # so the lane that closes it does not read it as closed. This arm otherwise
+    # grades the GRANT: it reads
+    # `intentional_keep` rather than hardcoding an owner, so a grant the census
+    # ACCEPTS is not false-blocked here. If this reds, the grant and the tool
+    # disagree: re-derive this row's literal and the grant's ground above, do not
+    # delete this arm.
+    harness = _ast.parse((root / "tools" / "read_wave_latency.py").read_text())
+    harness_parent = {id(child): parent for parent in _ast.walk(harness)
+                      for child in _ast.iter_child_nodes(parent)}
+
+    def _enclosing(node):
+        parent = harness_parent.get(id(node))
+        while parent is not None:
+            if isinstance(parent, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                return parent
+            parent = harness_parent.get(id(parent))
+        return None
+
+    # ⛔ MENTIONS, NOT CALLS — the census's own granularity. `_sites` above counts
+    # every ``ast.Attribute`` spelling of the seam (both names; the census is
+    # about the SEAM), so a third read added inside `run` as a BOUND METHOD
+    # (``_m = sdk._tortoise_fts_query``) or under the PUBLIC spelling is absorbed
+    # by the owner-granular grant and would be invisible to a ``Call``-only
+    # predicate (measured: both mutants stayed GREEN against the Call form, which
+    # is the gap this line closes).
+    # ⛔ AND ONLY THE MENTIONS THE GRANT IS WHAT EXEMPTS. `_sites` records a row for
+    # every mention, but it asserts only on the ones that did NOT opt out —
+    # opting out is the census's own sanctioned alternative ("name it or opt it
+    # out"), so counting an opted-out read here would FALSE-BLOCK the correct fix
+    # (measured: a `_rerank_candidates=False` read in `main()` passes the census
+    # and reddened this arm — round 4's defect, mirrored).
+    # `_seam_opts_out` above is `_sites`' own rule, hoisted so the synthetic pin
+    # grades the predicate this arm actually runs.
+    seam_mentions = [n for n in _ast.walk(harness)
+                     if isinstance(n, _ast.Attribute)
+                     and n.attr in ("tortoise_fts_query",
+                                    "_tortoise_fts_query")]
+    # ⛔ RESOLVE THE ALIAS, and count only what is actually a READ. A mention can
+    # feed a call (`sdk._tortoise_fts_query(…)`), reach one through a binding, a
+    # container, a loop/comprehension/`with` target, a walrus or a second hop, or
+    # read nothing at all (a dead binding). Those cases must NOT share a verdict:
+    # the census records a row for every mention, but what this row's expected
+    # count describes is READS — a dead binding is not one, and a read that opts
+    # out needs
+    # no grant at all. `_seam_read_calls` follows the value flow to a fixpoint so
+    # that "no fed call" means PROVEN dead (#14278 F1: a one-hop resolver read the
+    # container and two-hop mutants as dead, so a third undocumented read was
+    # exempted with the arm GREEN).
+    # ⛔ AND "NO FED CALL" IS ONLY DEAD WHEN THE WALK COULD FOLLOW THE MENTION. A
+    # mention bound by a shape the walk does not model comes back `opaque`, and it
+    # must be COUNTED, not skipped: at `96b93db293` a third read spelled
+    # `for _fn in (SEAM,): _fn(…)` returned `[]`, was skipped as "provably dead",
+    # and the arm passed with three reads inside the granted owner (round-9
+    # review, P2). Skipping an opaque mention IS the fail-open this arm exists to
+    # catch, so the count row fires instead.
+    # ⛔ AND AN OPT-OUT MUST NOT SWALLOW AN ADMISSION. The opt-out skip below is
+    # keyed on the calls the walk FOUND; an opaque mention also escaped somewhere
+    # the walk could not follow, so its opt-out cannot speak for the part it did
+    # not see — `_o = SEAM; _o(…, _rerank_candidates=False); return _o` was skipped
+    # as "all opted out" while `opaque` was True (round-10 review, P3). The
+    # predicate is therefore `not opaque` FIRST, and the count is split into what
+    # the walk RESOLVED versus what it had to COUNT unresolved, so the message
+    # never claims a read it did not attribute.
+    live, resolved, unresolved, seam_calls = _seam_live_reads(
+        harness, seam_mentions)
+    # ⛔ COUNT CALL SITES, NOT MENTIONS. The object this row's expected count
+    # describes is
+    # a set of READS (the tool's discarded warm-up and its measured loop, cited by
+    # role), and one
+    # mention can feed several calls — `_w = SEAM; _w(a); _w(b)` is one mention and
+    # TWO reads. While this row asserted on mentions, that spelling kept `live` at
+    # 2 and the arm passed with THREE call sites inside the granted owner (round-11
+    # review, P2 — the remaining half of round 9's F1-B). Distinct by identity, so a
+    # mention and the call that consumes it are not double-counted.
+    # The row lives in `_seam_check_read_sites` so the synthetic pin grades that
+    # predicate itself (a lenient row is otherwise only detectable by mutating the
+    # tool, which no test does). That function also carries the round-12 property
+    # this arm needed: a call-site count alone leaves the ESCAPE family ungraded,
+    # so the row refuses an `unresolved` mention as well.
+    _seam_check_read_sites(2, live, seam_calls, resolved, unresolved,
+                           "tools/read_wave_latency.py")
+    owners = {(_enclosing(m).name if _enclosing(m) else None) for m in live}
+    # ⛔ THE GRANT, NOT A LITERAL. `owners == {"run"}` pinned the owner SET as a
+    # constant while its own message claimed it was "the only owner the grant
+    # names", so the row did not read the grant it described: a legitimate
+    # re-cut that moved the warm-up into a `_warm` helper and widened the grant to
+    # `frozenset({"run", "_warm"})` — which the census above ACCEPTS — red this
+    # row with `['_warm', 'run'] == {'run'}`, and the message was then simply
+    # false (measured at `d4729e151f`). Reading the grant keeps exactly what the
+    # row is FOR — a live read outside EVERY granted owner still reds — and stops
+    # it asserting a fact the grant does not state.
+    # ⛔ THIS ROW'S MESSAGE NAMES THE DIRECTION IT CAN ACTUALLY FIRE IN. The census
+    # above already reds a live read outside every granted owner, so by the time
+    # this row is reached `owners ⊆ granted_owners` holds; a non-empty `live`
+    # rules out an EMPTY `owners` but does NOT make the sets equal, so the only
+    # mode left is a grant naming an owner with NO live read (round-21/22 pass, measured: moving the warm-up
+    # into a `_warm` helper WITHOUT widening the grant reds the CENSUS, not this
+    # row; moving it AND widening the grant is green for THIS row and the census.
+    # ⛔ But that re-cut is NOT green for the suite: main's door pin
+    # (`tests/test_14192_read_wave_tool.py::test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags`)
+    # asserts every read's owner is the literal `"run"` and knows nothing about
+    # this grant, so it REDS on `_warm` — such a re-cut needs BOTH edits). The old message
+    # claimed "the exempted reads are not all inside an owner the grant names"
+    # — false in that mode, which is the same prose-contradicts-code defect this
+    # PR exists to close, in the same arm where `d4729e151f` fixed its sibling.
+    granted_owners = set(intentional_keep["tools/read_wave_latency.py"])
+    assert owners == granted_owners, (
+        "the grant and the live reads disagree: the reads sit in "
+        f"{sorted(owners, key=str)} but the grant names "
+        f"{sorted(granted_owners, key=str)} — a grant naming an owner with NO "
+        "live read over-exempts (the opposite direction, a read outside every "
+        "granted owner, is the CENSUS's red in this test's derived half, above). "
+        "Re-derive the grant — narrow it to the owners the live reads sit in. "
+        "Re-deriving the recorded reason ALONE cannot clear this red: this "
+        "assert reads the grant's OWNER SET, never its comment.")
+    traced = [c for c in seam_calls
+              if any(k.arg == "leg_trace" for k in c.keywords)]
+    assert len(traced) == 1, (
+        "this row's expected count says exactly ONE of the two reads is the MEASURED "
+        f"loop and attaches `leg_trace`: {len(traced)} of {len(seam_calls)} do")
+
+    # ⛔ THE REPEAT PREDICATE IS THE MODULE-LEVEL `_seam_enclosing_repeat`, NOT A
+    # COPY: `for`/`async for`/`while` AND comprehensions (bar the outermost
+    # iterable) are what make a read execute once per query. It was a local
+    # closure counting only the three loop nodes until round-25, and that missed
+    # a comprehension in BOTH directions — a warm-up rewritten as a comprehension
+    # issues N warm-up reads and stayed GREEN (measured against this tool: one
+    # mutation of `tools/read_wave_latency.py`, the whole row passed), while one
+    # traced read per query written as a comprehension was refused as "not
+    # inside a loop". The synthetic row
+    # `test_the_repeat_grader_counts_a_COMPREHENSION_and_not_its_outer_iterable`
+    # grades every shape of it, so this call site is not its only tripwire.
+    assert _seam_enclosing_repeat(traced[0], harness_parent) is not None, (
+        "the `leg_trace` read is not inside a repeat (a loop or a "
+        "comprehension), so it does not execute once per query and this "
+        "row's `1 + N` is wrong")
+    # ⛔ AND THE `1` HALF OF `1 + N`. The row above only proves the TRACED read
+    # runs once per query; nothing proved the OTHER site runs ONCE, which is the
+    # whole difference between `1 + N` and `2N`. Measured at `d4729e151f`:
+    # deleting the warm-up and adding an untraced read inside the same `for` left
+    # the arm GREEN at `{mentions: 2, live: 2, calls: 2}` while this row went on
+    # describing a site that no longer existed, and moving the
+    # warm-up into a `while` was GREEN too. The tool's shape is "the warm-up issued
+    # BEFORE the per-query loop (result discarded)", so every non-traced site
+    # must sit outside every loop — that is what makes `1 + N` true rather than
+    # merely `traced in for`.
+    for call in seam_calls:
+        if call is traced[0]:
+            continue
+        repeat = _seam_enclosing_repeat(call, harness_parent)
+        assert repeat is None, (
+            "this row's `1 + N` says the OTHER seam read is the "
+            "warm-up issued BEFORE the per-query loop and discarded, but this "
+            f"one sits inside a repeat ({type(repeat).__name__}) at line "
+            f"{repeat.lineno}: every iteration adds a read, so the row's "
+            "`1 + N` is wrong")
+
     # ⛔ AND THE CENSUS MUST SEE THE SEAM. A read bound as ``_search_fn=`` (the
     # volunteer pipeline does exactly that) is not an ``ast.Call`` on
     # ``tortoise_fts_query``, so the census above was BLIND to it while the
@@ -1723,6 +3008,110 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
             "_rerank_candidates") is False, (
             "_search_kwargs at line "
             f"{kw.lineno} does not opt out of the rerank: {opts!r}")
+
+
+def test_the_repeat_grader_counts_a_COMPREHENSION_and_not_its_outer_iterable():
+    """``_seam_enclosing_repeat``, graded on every branch the fixture exercises.
+
+    ⛔ NOT "every shape it could classify": the function's isinstance tuples also
+    carry ``SetComp`` and ``AsyncFor``, and the fixture below grades neither, so
+    deleting either member would leave this row green (round-27 review, measured).
+    They are NAMED here as ungraded rather than claimed covered — the same
+    treatment ``_seam_opaque_values`` gives its own residuals one function away,
+    and for the same reason: a coverage sentence one word wider than the fixture
+    is this PR's defect class. The branches it does grade are ``ListComp``,
+    ``GeneratorExp``, ``DictComp``, ``For`` and ``While``.
+
+    The `1 + N` row reads a repeat off the REAL tool, so it can only ever exercise
+    the shapes that tool happens to contain — and ``tools/read_wave_latency.py``
+    contains a plain ``for`` and nothing else, which is why the comprehension
+    clause could be deleted with every row green. This row is that clause's own
+    tripwire, and it grades both directions (round-25 review):
+
+    * every per-iteration position — a comprehension's element, an ``if`` clause,
+      an inner generator, a dict ``value`` — is a REPEAT, because each executes
+      once per item. Miss it and a warm-up rewritten as a comprehension issues N
+      reads while the row describing it as "issued once" stays green; measured
+      against this tool before the fix, that mutation passed the whole row.
+    * the OUTERMOST ``generators[0].iter`` is NOT a repeat: it is evaluated once,
+      so ``[x for x in SEAM(query="once")]`` is a single read. Counting it would
+      false-block a perfectly good rewrite, which is the over-block direction of
+      the same bug. ⛔ ONLY that one. The Python 3.12 reference, **§6.2.4**
+      (Displays for lists, sets and dictionaries — the section that defines
+      comprehensions; §6.2.9 is Yield expressions), says *"the iterable
+      expression in the leftmost ``for`` clause is evaluated directly in the
+      enclosing scope and then passed as an argument to the implicitly nested
+      scope"*, and adds that *"subsequent ``for`` clauses and any filter
+      condition in the leftmost ``for`` clause cannot be evaluated in the
+      enclosing scope as they may depend on the values obtained from the leftmost
+      iterable"* — so everything BUT that one
+      iterable runs in the nested scope, once per iteration. A SECOND generator's
+      iterable is therefore a repeat, and row `subseq` grades it. ⛔ QUOTED FROM
+      THE DOCUMENT, not paraphrased inside quotation marks, and the section is
+      named by its OWN heading: an earlier cut of this bullet attributed a
+      synthesised sentence to §6.2.9, and the fix for that mistake then cited the
+      WRONG heading for a correctly-quoted sentence — a reader who opened §6.2.9
+      found *Yield expressions* (round-26 review, fetched and checked).
+
+    The returned NODE is graded, not a bare truthiness, so "it is a repeat" and
+    "it is a repeat FOR THE RIGHT REASON" are different assertions.
+    """
+    src = '''
+from __future__ import annotations
+def reads(queries, sdk):
+    [sdk._tortoise_fts_query(query="elem") for _q in queries]
+    [w for w in (sdk._tortoise_fts_query(query="nwarm")
+                 for _i in range(len(queries)))]
+    [x for x in sdk._tortoise_fts_query(query="once")]
+    [x for _q in queries for x in sdk._tortoise_fts_query(query="subseq")]
+    (sdk._tortoise_fts_query(query="gen") for _q in queries)
+    {"k": sdk._tortoise_fts_query(query="dictval") for _q in queries}
+    [sdk._tortoise_fts_query(query="ifbody") for _q in queries
+     if sdk._tortoise_fts_query(query="ifclause")]
+    for _q in queries:
+        sdk._tortoise_fts_query(query="loop")
+    while queries:
+        sdk._tortoise_fts_query(query="whilst")
+'''
+    tree = ast.parse(src)
+    parents = {id(child): parent for parent in ast.walk(tree)
+               for child in ast.iter_child_nodes(parent)}
+    calls = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_tortoise_fts_query"):
+            tag = node.keywords[0].value.value
+            assert tag not in calls, f"duplicate fixture tag {tag!r}"
+            calls[tag] = node
+    expected = {
+        "elem": ast.ListComp,        # element: once per item
+        "nwarm": ast.GeneratorExp,   # inner generator's element: once per item
+        "once": None,                # OUTERMOST iterable of the generator: ONCE
+        "subseq": ast.ListComp,      # a SUBSEQUENT `for` clause's iterable: per item
+        "gen": ast.GeneratorExp,     # a generator's element: once per item
+        "dictval": ast.DictComp,     # the dict VALUE: once per item
+        "ifbody": ast.ListComp,      # the element, beside an `if` clause
+        "ifclause": ast.ListComp,    # the `if` clause itself: once per item
+        "loop": ast.For,             # the shape the tool actually has
+        "whilst": ast.While,
+    }
+    assert sorted(calls) == sorted(expected), (
+        "the fixture and the expectation disagree — this row would grade a "
+        f"shape it does not parse: calls={sorted(calls)}, "
+        f"expected={sorted(expected)}")
+    observed = {
+        tag: (type(repeat).__name__ if repeat is not None else None)
+        for tag, node in calls.items()
+        for repeat in [_seam_enclosing_repeat(node, parents)]
+    }
+    want = {tag: (kind.__name__ if kind is not None else None)
+            for tag, kind in expected.items()}
+    assert observed == want, (
+        "`_seam_enclosing_repeat` mis-graded a shape: the `1 + N` arm's "
+        "read-count is only true if a repeat is recognised exactly where an "
+        "expression re-executes (comprehension element / `if` / inner "
+        "generator / dict value) and NOT at the outermost iterable, which "
+        f"runs once. observed={observed}, want={want}")
 
 
 def test_a_non_relevance_order_by_is_never_re_picked_by_the_rerank(sdk, monkeypatch):
