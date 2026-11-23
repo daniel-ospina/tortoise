@@ -1584,7 +1584,7 @@ def test_a_retried_stage_is_not_mistaken_for_lost_calls():
     """⛔ The OVER-BLOCK: `pipeline.calls` counts ATTEMPTS, not successes.
 
     `_rollup_llm` does `llm_stats["calls"] += stage_stats.get("attempts", 0)`
-    (`tortoise/extractor_v2.py:16719`) and `_complete` sets `attempts=attempt`
+    (`tortoise/extractor_v2.py:16778`) and `_complete` sets `attempts=attempt`
     only on the SUCCESSFUL attempt, so a transient 429/5xx that succeeds on
     retry adds +1 to `pipeline.calls` with no call recorded by `_Recording`.
     Comparing the two without the retry count flagged a fully-measured run as
@@ -2055,8 +2055,8 @@ def test_a_post_call_S4_failure_is_a_note_when_the_call_was_measured():
     """⛔ THE OVER-BLOCK ONE MARKER OVER from cycle 9's (review cycle 15, P3).
 
     `capture_session` appends `"S4 failed: …"` from ONE `except` that wraps
-    `run_s4(...)` (`tortoise/extractor_v2.py:15286`) *and* the post-call
-    merge/shape work that follows it (`:15292`–`:15333`), while
+    `run_s4(...)` (`tortoise/extractor_v2.py:15293`) *and* the post-call
+    merge/shape work that follows it (`:15292`–`:15340`), while
     `_Recording.complete` appends a call only after the adapter RETURNS. So an
     S4 whose prompt was rendered, sent and measured and whose output then failed
     to parse or merge carries the marker on a call that WAS measured — and
@@ -2109,8 +2109,8 @@ def test_a_content_level_error_is_a_note_not_an_incompleteness():
 
     `extractor_v2` records errors on calls that RETURNED and were measured: the
     rung-4 partial accept appends "S4 output partial — truncated tail dropped"
-    (`tortoise/extractor_v2.py:15337`), a malformed section appends
-    "S4 output malformed section … kept S2 output" (`:15292`), as do S2's twin
+    (`tortoise/extractor_v2.py:15347`), a malformed section appends
+    "S4 output malformed section … kept S2 output" (`:15302`), as do S2's twin
     and the post-extraction S5/chain/entity-resolution/classify steps. Treating
     ANY error as "did not measure" refused a COMPLETE composition and exited 1 —
     and not clearably by re-running, because README §2's 13 of 50 documents

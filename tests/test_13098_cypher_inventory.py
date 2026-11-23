@@ -8,7 +8,10 @@ things are therefore pinned here:
 
 1. **The census reconciles and the doc matches it** — `tools/cypher_inventory.py
    --check` re-runs the enumeration and compares every pinned count; drift is a
-   red, not a footnote.
+   red, not a footnote. ⚠️ Those doc-vs-tree arms are `@requires_doc_pin`: they
+   do NOT gate a merge (#2148/B1) and run at full strength in the path-filtered,
+   non-required `cypher-diff` job — see the block comment below the imports for
+   the measured reason (a ten-PR re-cut chain from one product move).
 2. **The classifier's precedence is the thing that decides a verdict**, so it is
    tested directly rather than through the doc: a statement that needs a walk and
    also matches "plain" must be `traversal`; a fulltext QUERY must not be
@@ -26,6 +29,7 @@ than report agreement.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import os
 import re
@@ -46,8 +50,43 @@ from tools import cypher_inventory as census  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
+# WHERE THE DOC-VS-TREE PIN RUNS (#2148/B1)
+# --------------------------------------------------------------------------- #
+# The arms below marked `@requires_doc_pin` compare a COMMITTED census document
+# against the live tree. Any product commit can move those counts, so in the
+# pre-merge matrix (where this file is `core`-registered and rides the REQUIRED
+# `python-ci-gate`) each of them redded PRs that touched neither the census tool
+# nor its doc — #14296 reconciled NINE open PRs / 115 files over exactly this and
+# still failed, and #13879 → #14088 → #14087 → #14064 → #13992 → #13887 → #13755 →
+# #13750 → #13746 → #13589 is a ten-PR chain from one product move.
+#
+# The pin is therefore DECOUPLED from the merge gate and kept at full strength:
+# `TORTOISE_CYPHER_DOC_PIN=1` is set ONLY by `.github/workflows/cypher-diff.yml`,
+# which is not a required context AND is already path-filtered to exactly the
+# diffs that can move a count (`tortoise/**`, `supabase/migrations/**`,
+# `tools/cypher_inventory.py`, `tools/cypher_diff_harness.py`,
+# `docs/architecture/CYPHER-INVENTORY.md`, this file). Nothing was deleted: the
+# arms, the tool and `cypher_inventory.py --check` all still run there, and a
+# genuinely wrong census still reds a job — just not somebody else's merge.
+#
+# The classifier/harness arms below stay UNGATED: they pin behaviour (precedence,
+# diff semantics, the refusal exit codes), not a number that rots with the tree.
+_DOC_PIN_ENV = "TORTOISE_CYPHER_DOC_PIN"
+requires_doc_pin = pytest.mark.skipif(
+    os.environ.get(_DOC_PIN_ENV) != "1",
+    reason=(
+        f"doc-vs-tree census pin: DECOUPLED from the required merge gate by "
+        f"#2148/B1 — a count that moves with any product commit must not block an "
+        f"unrelated PR. It runs at full strength in the path-filtered `cypher-diff` "
+        f"job, which sets {_DOC_PIN_ENV}=1 (see the block comment above)."
+    ),
+)
+
+
+# --------------------------------------------------------------------------- #
 # the census
 # --------------------------------------------------------------------------- #
+@requires_doc_pin
 def test_the_doc_counts_match_the_census():
     """The pinned counts in CYPHER-INVENTORY.md are the census's own numbers."""
     proc = subprocess.run(
@@ -57,6 +96,7 @@ def test_the_doc_counts_match_the_census():
     assert proc.returncode == 0, f"census drift:\n{proc.stdout}\n{proc.stderr}"
 
 
+@requires_doc_pin
 def test_the_doc_appendix_is_the_tools_own_output():
     """Appendix A is DERIVED from the tree, so the doc must carry the tool's output.
 
@@ -122,6 +162,7 @@ def test_the_doc_appendix_is_the_tools_own_output():
         f"{len(stale)} row(s) differ.\n" + shown)
 
 
+@requires_doc_pin
 def test_the_doc_appendix_row_count_is_the_census_site_count():
     """The appendix's row count is §0's `sites` pin — one row per classified site.
 
@@ -377,6 +418,7 @@ def _grade_doc_text(doc_text: str, *, sites: int, non_cypher: int, candidates: i
         f"measured={sites} / {files_with_sites}")
 
 
+@requires_doc_pin
 def test_the_published_decomposition_names_the_measured_operands():
     """§0/§1 reconcile ARITHMETICALLY over operands, and the operands are the claim.
 
@@ -442,6 +484,7 @@ def test_the_published_decomposition_names_the_measured_operands():
     _grade_doc_text(doc_text, sites=sites, non_cypher=non_cypher,
                     candidates=candidates, files_with_sites=result["files_with_sites"])
 
+@requires_doc_pin
 def test_the_narrative_pin_refuses_an_in_section_decoy():
     """A SECOND occurrence INSIDE §0 must red the arm, not re-point it (`#13424` P2-1).
 
@@ -579,6 +622,7 @@ def test_every_graded_lookup_has_a_coverage_row():
         "own justification written down where the bounds are established")
 
 
+@requires_doc_pin
 @pytest.mark.parametrize("arm, what, bounds, pattern", _GRADED_LOOKUPS,
                          ids=[row[0] for row in _GRADED_LOOKUPS])
 def test_every_anchored_arm_refuses_a_duplicate(arm, what, bounds, pattern, measured_census):
@@ -666,6 +710,7 @@ def test_the_census_reconciles_arithmetically():
     )
 
 
+@requires_doc_pin
 def test_the_census_pin_can_report_drift(tmp_path):
     """The pin's FAILURE path is asserted, not just its happy path.
 
@@ -1482,11 +1527,22 @@ def test_bootstrap_tolerates_a_partial_apply_that_does_build_the_record(monkeypa
     assert calls["n"] > 1
 
 
+@requires_doc_pin
 def test_the_files_scanned_count_is_pinned_too(tmp_path):
     """§0 publishes "295 files scanned", which `files` (the files WITH a site) is not.
 
     `check()` compared only the keys it computed, so the doc's scanned count could
     drift by any amount while `--check` stayed green (`#13098` review P3).
+
+    ⛔ `@requires_doc_pin` (#2148/B1), and the NON-VACUITY assert is what makes
+    that safe. This arm's mutation is a `str.replace` of the pin AT THE MEASURED
+    VALUE, so once the committed pin is stale the replace is a NO-OP and
+    `check()` answers 1 — and prints `DRIFT files_scanned` — for the STALE PIN
+    ITSELF, so every assertion below passes while the drift path this arm exists
+    for was never reached. Measured on the pre-fix arm: `files_scanned`
+    simulated `+3` gave `rc=1` and `DRIFT files_scanned: doc=308 tool=311`, i.e.
+    GREEN under drift. The mutation is therefore asserted to have CHANGED the
+    document before it is graded.
     """
     result = census.census(("tortoise",))
     doc_text = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
@@ -1496,6 +1552,10 @@ def test_the_files_scanned_count_is_pinned_too(tmp_path):
         f"<!-- cypher-inventory:files_scanned = {result['files_scanned']} -->",
         f"<!-- cypher-inventory:files_scanned = {result['files_scanned'] + 1} -->", 1),
         encoding="utf-8")
+    assert path.read_text(encoding="utf-8") != doc_text, (
+        "the mutation did not change the document, so `check()` below would be "
+        "grading the STALE PIN rather than the mutated one — this arm's own "
+        "failure class, one level in")
     assert census.check(path, result) == 1
     # ⛔ AND it is reported as a COUNT MISMATCH, not as a pin the tool stopped
     # computing: dropping the key from `check()`'s `actual` still reddens through
@@ -1693,6 +1753,79 @@ def test_the_store_targets_are_named_never_inherited_from_the_environment(monkey
 # change, and a one-line edit that removes it would otherwise be invisible.
 
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "cypher-diff.yml"
+
+
+def test_the_doc_pin_env_has_a_producer_and_that_producer_RUNS_this_file():
+    """#2148/B1: the `@requires_doc_pin` skip is default-OFF, so its producer is a GATE.
+
+    The doc-vs-tree arms above skip unless `TORTOISE_CYPHER_DOC_PIN=1`, and the ONE
+    place that sets it is a step of `cypher-diff.yml` — a workflow this module does
+    not control. Delete, rename or detach that `env:` entry and every gated arm
+    (7 single + the 7 parametrized duplicate-arm cases) goes back to SKIPPING in
+    every job in the repo, with no red anywhere to notice: a pin that appears to
+    protect the census and enforces nothing, which is the INERT-ENFORCER class the
+    decoupling was allowed to create only because this pin closes it.
+
+    Pinned HERE, beside the arms that depend on it, for the same reason the
+    `psql`-install step below is pinned rather than trusted: that file has already
+    shipped a step whose removal would have left the suite green.
+    """
+    steps = yaml.safe_load(WORKFLOW_PATH.read_text())["jobs"]["differential"]["steps"]
+    runners = [s for s in steps
+               if "pytest" in (s.get("run") or "")
+               and "tests/test_13098_cypher_inventory.py" in (s.get("run") or "")]
+    assert len(runners) == 1, (
+        "expected EXACTLY ONE `cypher-diff` step to run this file; got "
+        f"{[(s.get('name'), s.get('run')) for s in runners]} — with none, the "
+        "doc-vs-tree arms skip in every job and nothing reds")
+    env = runners[0].get("env") or {}
+    assert env.get(_DOC_PIN_ENV) == "1", (
+        f"the step that runs this file does not set {_DOC_PIN_ENV}=1 (its env is "
+        f"{env!r}) — every `@requires_doc_pin` arm would skip silently, so the "
+        "census document would be graded by NOTHING")
+    # ⛔ AND THE SESSION GATE MUST BE SATISFIED, or the step errors before a single
+    # arm runs: `tests/conftest.py::_p4_uri_required` refuses a URI-less session
+    # unless `TORTOISE_DB_URI` or `TORTOISE_TEST_CARVE_OUT` is set, and this job
+    # exports no `TORTOISE_DB_URI` (its stores reach the harness through
+    # `--graph-uri`/`--record-dsn`). Measured at this head: with the doc-pin env set
+    # and this flag absent the file reports `90 errors, 0 skipped` — every case,
+    # including this pin. So both halves of "the step RUNS" are asserted, and a
+    # future edit that drops either one reds HERE rather than in a job nobody
+    # watches.
+    assert env.get("TORTOISE_DB_URI") or env.get("TORTOISE_TEST_CARVE_OUT") == "1", (
+        "the step that runs this file satisfies neither half of the session URI gate "
+        f"(`TORTOISE_DB_URI` or `TORTOISE_TEST_CARVE_OUT=1`; its env is {env!r}), so "
+        "pytest errors in session setup and no census arm runs at all")
+    # …and the arms it produces for are still here. A structural count, not a
+    # reading of the file's content: the decorator is applied at 7 arms + 1
+    # parametrized one (7 cases), and an arm leaving this module is a diff a
+    # reviewer sees — what is invisible is the ENV disappearing, which is above.
+    #
+    # ⛔ COUNTED AS DECORATORS, never as the raw token: `str.count("@requires_doc_pin")`
+    # is 15 at this head — the 8 decorator lines PLUS 7 prose/format mentions (the
+    # module docstring, the block comment above the imports, two arm docstrings, one
+    # f-string and the two literals of this very assertion). Measured, not assumed:
+    # under the previous `>= 8` form, deleting SEVEN of the eight gated arms left the
+    # count at `1 decorator + 7 prose = 8` and this row stayed GREEN, so the arm it
+    # claims to protect ("the arms this pin exists for are gone") did not fire until
+    # seven eighths of them were gone. The AST cannot see prose; `== 8` rather than
+    # `>= 8` means a NINTH gated arm is a red a reviewer reads instead of slack that
+    # a silently-deleted arm can absorb.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    decorated = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and any(
+            isinstance(dec.func if isinstance(dec, ast.Call) else dec, ast.Name)
+            and (dec.func if isinstance(dec, ast.Call) else dec).id == "requires_doc_pin"
+            for dec in node.decorator_list
+        )
+    ]
+    assert len(decorated) == 8, (
+        "expected EXACTLY 8 `@requires_doc_pin` arms (7 single + 1 parametrized); got "
+        f"{len(decorated)}: {decorated} — the arms this pin exists for are gone; "
+        "delete this pin with them, or restore them")
 
 
 def _psql_install_run() -> str:
@@ -1947,4 +2080,76 @@ def test_no_error_line_command_substitutes_a_backticked_word():
     assert not offenders, (
         "a double-quoted echo with a backtick COMMAND-SUBSTITUTES it; single-quote the "
         "message instead:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_docs_tables_are_not_broken_across_physical_lines():
+    """A table row is ONE physical line — a hard wrap inside one reds the `docs` gate.
+
+    ⛔ THIS IS NOT HYPOTHETICAL (`#14038`). A lane re-cut one prose cell of §1's
+    `--all-surface` row — the longest row in the document — and the editor wrapped
+    it across three physical lines. `docs` is a REQUIRED context, and the pinned
+    linter reported SIX findings on that single row, all of them the same defect:
+
+    ```
+    CYPHER-INVENTORY.md:69:5170 error MD055 leading_only        (Missing trailing pipe)
+    CYPHER-INVENTORY.md:70:1    error MD055 no_leading_or_trailing
+    CYPHER-INVENTORY.md:70:102  error MD056 Expected: 4; Actual: 1
+    CYPHER-INVENTORY.md:71:1    error MD055 trailing_only
+    CYPHER-INVENTORY.md:71:2377 error MD056 Expected: 4; Actual: 1
+    ```
+
+    ⚠️ `tools/cypher_inventory.py --check` stayed GREEN throughout, and it had to:
+    the pins are scalars and a line break is not a statement. The appendix arm
+    above does not see it either — it compares ROWS, and every row was intact. So
+    the gate that READ the break was the linter, in CI, on the required check —
+    after the push. This arm is the same two rules the linter applies
+    (`MD055` `leading_and_trailing` and `MD056` column count, both enabled by
+    `.markdownlint-cli2.jsonc`'s `default: true`), narrowed to the rows it can
+    decide without the linter: a line that STARTS with `|` must also END with one
+    (a line that starts with `|` is unambiguously a row), and each row of a table
+    must carry the column count its own separator row declares.
+
+    Measured non-vacuous: on the pre-fix blob (`a642d54b8678`) this fails at line
+    69 with `no-trailing` AND `colcount` (4 pipes where the separator declares 5).
+    """
+    doc = (ROOT / "docs" / "architecture" / "CYPHER-INVENTORY.md").read_text(encoding="utf-8")
+    lines = doc.split("\n")
+
+    def pipes(text: str) -> int:
+        # `\|` renders a literal pipe and does not delimit a cell — the doc uses
+        # that spelling inside an inline `git ls-tree … | grep` command.
+        return re.sub(r"\\\|", "", text).count("|")
+
+    offenders: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip().startswith("|"):
+            i += 1
+            continue
+        # A table is a maximal run of rows; the line after it is prose again.
+        j = i
+        while j < len(lines) and lines[j].strip().startswith("|"):
+            if not lines[j].rstrip().endswith("|"):
+                offenders.append(
+                    f":{j + 1}: row starts with '|' but does not end with one "
+                    f"(MD055 leading_and_trailing) — {lines[j].strip()[-70:]!r}"
+                )
+            j += 1
+        # The separator row (`|---|---|`) declares how many cells every row has.
+        sep = i + 1
+        if sep < j and set(lines[sep].strip()) <= set("|-: "):
+            declared = pipes(lines[sep])
+            for k in range(i, j):
+                if pipes(lines[k]) != declared:
+                    offenders.append(
+                        f":{k + 1}: {pipes(lines[k]) - 1} cells, separator declares "
+                        f"{declared - 1} (MD056) — {lines[k].strip()[:70]!r}"
+                    )
+        i = j
+
+    assert not offenders, (
+        "a markdown table row in docs/architecture/CYPHER-INVENTORY.md is broken across "
+        "physical lines, which reds the REQUIRED `docs` check as MD055/MD056. A row is "
+        "one line — re-join it rather than re-wrapping it:\n" + "\n".join(offenders)
     )

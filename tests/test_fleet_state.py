@@ -3882,26 +3882,35 @@ _LONG_PATH_POLL_BUDGET_S = 10.0
 #: deliberately BELOW the true count, so a step derived from it still carries the clock with one
 #: read of slack. ⛔ NOT A GUESS, BUT NOT A STATIC PIN EITHER (#12039 cycle 13, F1) — for a TYPO
 #: in either direction. MEASURED on copies at this head, implementation unmutated, only this
-#: constant moved:
-#: `6 -> 7` leaves `184 passed`, `19` leaves `184 passed`, and `1` and `2` also leave `184 passed`
-#: (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red nothing, because the step
-#: has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict, which this integer domain
-#: cannot reach). Only a raise to `>= 20` reds (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED,
-#: `11 failed`, the premise-(b) assertion firing across all 11 params. The behavioural pins are the
-#: `once_slow` and `death_after_streak` ROWS, not a bare assertion on this constant.
+#: constant moved: `6 -> 7` leaves `186 passed`, `19` leaves `186 passed`, and `1` and `2` also
+#: leave `186 passed` (they DO move the `max()` below — `10/1 + 0.1 = 10.1` — and still red
+#: nothing, because the step has to pass `_CENSUS_SAMPLE_TIMEOUT_S = 30.0` to change a verdict,
+#: which no positive value of this integer can reach). A raise to `>= 20` reds, by the premise-(b)
+#: assertion (`20 * 0.5 = 10.0` is no longer `< 10`) — MEASURED, `12 failed, 174 passed` across
+#: all 12 params; `0` reds the SAME 12, but by `ZeroDivisionError` rather than premise (b), so `0`
+#: is not a silent typo but a crash. Every OTHER value tried stayed green (`7`, `18`, `19`, `1`,
+#: `2`). ⚠️ THE TOTALS ABOVE ARE THIS HEAD's, AND `origin/main`'s TOO: the `184` in the prose
+#: below was measured at `a7baa98d05`, BEFORE #14287 merged, so every TOTAL here was re-measured
+#: rather than inherited. The behavioural pins are the `once_slow` and `death_after_streak` ROWS,
+#: not a bare assertion on this constant.
 #: ⛔ EVERY `184 passed` / `173 passed` TOTAL IN THIS WHOLE FILE — ABOVE *AND* BELOW, in this
-#: block, in the `_LONG_PATH_STREAK_TIME_CALLS` commentary, in `test_...` bodies and in the
-#: `:51xx` measured notes — IS `main`'s, MEASURED AT `a7baa98d05` (#14387). This tree carries TWO
-#: MORE tests than main, so those totals are NOT inheritable — RE-MEASURE EACH SITE, because the
-#: delta differs by site (two measured below): PR #14287 restores
+#: block, in the `_LONG_PATH_STREAK_TIME_CALLS` commentary, and in `test_...` bodies (one of them
+#: records it beside the `ps -p <pid>` argv pin) — IS `main`'s AS OF `a7baa98d05` (#14387), BEFORE
+#: #14287 merged. #14287 adds TWO tests, so those totals are NOT inheritable on ANY tree carrying
+#: it: this branch, and `origin/main` since `9d6d2e347fd4` — RE-MEASURE EACH SITE, because the delta
+#: differs by site (two measured below): PR #14287 restores
 #: `test_verdict_or_fail_turns_an_unexpected_skip_into_a_fail`, which drives `_verdict_or_fail`
 #: with a STUB and never constructs a child, a census or these constants, and adds the `blip` census
 #: ROW (a prior error, a recovery, then a derived late burst — #14287 review P3). So `184 passed` ->
-#: `186 passed` (verified at `K = 6`), and the site that records `11 failed, 173 passed` at `K = 1`
-#: reads `12 failed, 174 passed` here (verified) — the passed delta is ONE there, not two, because
-#: that site's run already fails the peer's row as well. The FAILING count at `K >= 20` is `12`, not
-#: `11`: the peer's `blip` row joins the failure set (it jumps the simulated clock by the bound +
-#: 1 s). ⛔ It does NOT red through the `calls["n"] > burst_state["started_at"] + burst` assertion —
+#: `186 passed` (verified at `_LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6` — this block's constant, which
+#: every bare `K` in THIS note means), and the OTHER site measured in this sentence —
+#: `_LONG_PATH_STREAK_TIME_CALLS = 1`, which records `11 failed, 173 passed` at `a7baa98d05` — reads
+#: `12 failed, 174 passed` here (verified); its passed delta is ONE, not two, because that site's run
+#: already fails the peer's row as well — whereas the streak `K = 8` sites below move by TWO
+#: (`184` -> `186 passed`), because that run fails nothing. The FAILING count at
+#: `_LONG_PATH_ERROR_SAMPLE_TIME_CALLS >= 20` is `12`, not `11`: the peer's `blip` row joins the
+#: failure set (it jumps the simulated clock by the bound + 1 s). ⛔ It does NOT red through the
+#: `calls["n"] > burst_state["started_at"] + burst` assertion —
 #: at `K = 20` EVERY one of the 12 params, `blip` included, reds at the GLOBAL premise (b) above
 #: ("the death sample must arrive BEFORE the poll's deadline"), which runs BEFORE the poll, so no
 #: arm-specific assertion is reached at all (measured with `--tb=line` at `K = 20`: `12 failed, 174
@@ -3922,8 +3931,8 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: `_LONG_PATH_STREAK_TIME_CALLS * death_step_s >= _CENSUS_ERROR_MIN_SPAN_S` — expands to
 #: `0.1 * K >= 0` and is true for every positive K, because the divisor cancels against its own
 #: product. MEASURED at this head, on copies, restored after each run:
-#:   K = 8, implementation unmutated      -> `184 passed`  (the deleted assertion saw nothing)
-#:   K = 8, `_child_exited` moved BELOW the conjunction -> `184 passed`  (the row goes VACUOUS)
+#:   K = 8, implementation unmutated      -> `186 passed`  (the deleted assertion saw nothing)
+#:   K = 8, `_child_exited` moved BELOW the conjunction -> `186 passed`  (the row goes VACUOUS)
 #:   K = 5, same mutant                    -> `1 failed`   (the row reds — it IS the real pin)
 #: ⛔ MEASURE THE MUTANT YOU NAME (#12039 cycle 13). An earlier version of this paragraph reported
 #: "still `2 failed` at `K = 8`" from a mutant that made the check UNREACHABLE rather than moving it
@@ -3933,19 +3942,36 @@ _LONG_PATH_ERROR_SAMPLE_TIME_CALLS = 6
 #: WHY the typo is NOT survivable: with the gate not yet qualified at the death sample the poll
 #: keeps going; a moved-below check then meets the already-dead child on that same sample and
 #: breaks to the same outside-signal SKIP the shipped order produces — both orderings agree, and
-#: the arm can no longer distinguish them. (Deleting the check instead reds the row on every K at
-#: which the file is green unmutated — for a DIFFERENT reason, since nothing observes the death at
-#: all — which is exactly why the wrong mutant looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS
-#: MEASURED AT: the deletion raises on the death sample itself at the shipped `K = 5`
-#: (`on 2 consecutive samples over 2.50s`) and only one sample later from `K = 7` (`K = 8`: count 3,
-#: span 3.15 s), and at `K = 1` nothing at all is attributable — premise (b) below reds the FILE
-#: with no mutant applied, the same `11 failed, 173 passed` either way.)
+#: the arm can no longer distinguish them. (Deleting the check instead reds the row for a DIFFERENT
+#: reason — nothing observes the death at all — at every K at which the file is green unmutated
+#: that has been measured: 2, 3, 5, 6, 7, 8, 12, 16, 17, 19, 37, 38, 50, 113, 114. That is exactly
+#: why the wrong mutant looked reassuring. ⛔ SCOPE A CLAIM TO THE K IT WAS MEASURED AT: the
+#: deletion raises on the death sample itself at the shipped `K = 5` (`on 2 consecutive samples
+#: over 2.50s`), and the count it needs GROWS with `K`, so it is a RANGE carrying its endpoints —
+#: never a bare "from K = …": 2 at `K = 2..6` (2.50 s at the shipped `K = 5`), 3 at `7..16` (3.47 /
+#: 3.15 / 2.40 / 2.03 s at 7 / 8 / 12 / 16), 4 at `17..37` (2.83 / 2.67 / 2.00 s at 17 / 19 / 37),
+#: 5 at `38..113` (2.59 / 2.38 / 2.00 s at 38 / 50 / 113), 6 at `K >= 114` (2.47 s at 114). Every
+#: bracketed value is MEASURED with the deletion mutant, and each boundary is the PAIR where the
+#: count crosses (`6|7`, `16|17`, `37|38`, `113|114`). ⛔ THE LAST SEGMENT HAS NO UPPER END, so
+#: writing it as the point `6 at K = 114` would be the same over-claim in the safe direction: past
+#: 114 the count SATURATES at `6` (MEASURED: 6 samples, 2.47 s at `K = 115` and 2.31 s at `K = 200`),
+#: which is the ceiling the derivation below explains: the model is the one the `time()`-read
+#: note already documents — `step_s + 4(k - 1) * step_s`, i.e.
+#: `(4k - 3) * step_s` with `step_s = 2/K + 0.1` — so `k` is the FIRST `k >= 2` clearing
+#: `(4k - 3) * (2/K + 0.1) >= 2.0`. That reproduces every span above, and `6` is the CEILING
+#: because the step never falls below `0.1` (`17 * 0.1 = 1.7 < 2.0` at `k = 5`), so the count rises
+#: as the STEP shrinks. ⛔ The point `4 from K = 17` stood here and is FALSE at `K = 50` (5 samples,
+#: 2.38 s) — a K this same comment lists as measured. And at `K = 1` nothing at all is
+#: attributable: premise (b) below reds the FILE with no mutant applied — all 12 params on the
+#: same assertion, MEASURED at this head — the same `12 failed, 174 passed` either way.)
 #: SO: no static assertion can pin this constant. The `death_after_streak` ROW pins the ORDERING
 #: wherever the gate is satisfied at the death sample — `5 * (2/K + 0.1) >= 2.0`, i.e. `K <= 6` —
-#: MEASURED: `1 failed` at `K` = 2, 3, 4, 5, 6, and `184 passed` (vacuous) at `K` = 7 and 8. A typo
+#: MEASURED: `1 failed` at `K` = 2, 3, 4, 5, 6, and `186 passed` (vacuous) at `K` = 7 and 8. A typo
 #: past that boundary therefore retires the guard silently, with nothing static to red. ⛔ SCOPE IT
 #: THAT WAY rather than to "the shipped value": the row covers a RANGE of K, and writing the range
-#: as one point is the same over-claim in the safe direction.
+#: as one point is the same over-claim in the safe direction. Same discipline on the other side:
+#: state a range with its derivation and its endpoints, never a bare "from K = 7" — that phrase
+#: was written once here and was already false by `K = 17`.
 _LONG_PATH_STREAK_TIME_CALLS = 5
 
 

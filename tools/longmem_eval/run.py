@@ -1831,7 +1831,11 @@ def _session_worker_spec_tuning(spec: str) -> tuple[str, int | None, float, str]
     actually serves. REFUSES entries the ingest_v2 factory cannot express
     (``thinking_budget`` / ``disable_reasoning`` — ``_build_single``
     forwards only max_tokens/temperature): loud, never a silent reasoning
-    flip."""
+    flip. ⛔ Scope of that promise: it covers an entry that DECLARES such a
+    knob. An entry declaring neither (``deepseek-flash``) can still be served
+    SUPPRESSED, because the factory's flash-family gate is not the entry's
+    declaration and this refusal cannot see it (#14368).
+    """
     from tests.model_adapters import MODELS
     from tortoise.model_adapters import REGISTRY_KEY_TO_ID
     if spec not in MODELS:
