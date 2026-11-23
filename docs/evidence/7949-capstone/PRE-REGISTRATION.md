@@ -3235,9 +3235,11 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   OUTSIDE §10 is a claim about the
   tree, and `tests/test_7949_capstone_measure.py` resolves them, so a live cite moves with the code or
   the suite reds. Inside §10 that holds only for the NEWEST entry: §10.1–§10.39 are frozen history, no
-  pin reads them (§10.14), and none may be re-pointed — but §10.40 IS read, by
-  `test_the_newest_change_control_entry_describes_the_shipped_tree`, which resolves this entry's two
-  `if items:` gates, its two fail-open `except` arms and its `_run_vet_pass` calls. Only the ARROW
+  pin reads them (§10.14), and none may be re-pointed — §10.40 **was** read, by
+  `test_the_newest_change_control_entry_describes_the_shipped_tree`, which resolves the newest
+  entry's two `if items:` gates, its two fail-open `except` arms and its `_run_vet_pass` calls; that
+  test reads `entries[-1]` (`tests/test_7949_capstone_measure.py:10798`) so the duty passes to §10.41
+  with the successor, and §10.40's cites are now frozen history with no reader. Only the ARROW
   cites here (`:15239`→`:15244`, `:15701`→`:15706`, `:17894`→`:17970`) are hand-checked.
 - **What moved: cites and nothing that is a protocol value.** No metric, denominator, threshold,
   class set, corpus pin, split or salience pin is touched — §1–§9's criterion VALUES and the E4
@@ -3285,18 +3287,29 @@ the declaration half hermetically; `--write-probe` is what fills `written`, and
   `_run_vet_pass` calls are `:18056` (S2) and `:15383` (union).
 - **⛔ The cites were re-derived, not `+10`-ed.** `git diff -U0` over
   `tortoise/extractor_v2.py` was turned into a line map and every cite was re-resolved through it;
-  `19,383` of `19,396` base lines map to a byte-identical head line, and the 13 that do not are
-  the edited hunk boundaries themselves — so a cite that lands on edited code was caught rather
+  `19,386` of `19,396` base lines map to a byte-identical head line, and the 10 that do not are
+  `:16092`–`:16097`, `:16157`, `:16158`, `:16184`, `:16233` — the EDITED blocks themselves, so a
+  cite that lands on edited code was caught rather
   than silently moved. **Counting convention**, stated so a re-measurer reproduces the pair rather
-  than a near neighbour: for EVERY base line `n`, compare `base[n]` with `head[shift(n)]`; on that
-  convention 13 lines differ, and they are exactly `:2435`, `:16092`–`:16097`, `:16157`, `:16158`,
-  `:16184`, `:16200`, `:16233` and `:17092` — the hunk edges.
-- **⛔ The bundle's frozen cites stayed frozen, and NOT because the map spares them.** `:8278-8285`,
-  `:8288-8292` and `:8534-8538` sit ABOVE the first hunk (which inserts after `:2435`), so the line
+  than a near neighbour: for EVERY base line `n`, compare `base[n]` with `head[n + d]`, where `d` is
+  the number of lines the change inserts or deletes ABOVE `n` — a pure insertion *after* `n` does not
+  shift `n`. An earlier revision of this paragraph reported `19,383`/`13` and added `:2435`, `:16200`
+  and `:17092` to the differing set; all three are byte-identical at their own positions
+  (`base[2435] == head[2435]`, `base[16200] == head[16226]`, `base[17092] == head[17151]`) and
+  appeared only because the insertion immediately after them was charged to them — a boundary
+  off-by-one, corrected here.
+- **⛔ The bundle's frozen cites stayed frozen, and NOT because the map spares them.** `:8278-8285`
+  and `:8288-8292` sit BELOW the first hunk (which inserts after `:2435`), so the line
   map DOES move them `+10`. They are left alone because they live inside a `_BUNDLE_HISTORICAL`
   paragraph (`"no longer\s+resolve"`) — numbers deliberately frozen at the head they name — and
-  `tests/test_7949_capstone_measure.py` pins that exclusion set, so shifting them would red its
-  `skipped` arm instead of passing silently. An earlier revision of this lane's commit message gave
+  `tests/test_7949_capstone_measure.py` pins that exclusion set (`_BUNDLE_HISTORICAL`,
+  `tests/test_7949_capstone_measure.py:5418-5423`), so shifting them would red its
+  `skipped` arm instead of passing silently. `:8534-8538` is NOT part of that protection and is not a
+  citation of ours: `README.md:254-255` records it as the number #9919 *predicted* and the bundle did
+  not use, it is written with no file prefix, so neither `_BUNDLE_CITE` nor `_BUNDLE_SIBLING_CITE`
+  matches it and the README's own paragraph says a bare number there "is read by no pin" — but the line
+  map does move it `+10`, so if it is ever promoted into a real cite it must be re-derived first.
+  An earlier revision of this lane's commit message gave
   the opposite (false) reason; the mechanism above is the measured one. The bundle's documents (`README.md`, `E1-E5-PROOFS.md`,
   `A4-PER-LAYER.md`, both probes, `docs/00_index.md`, the S2.1 row in
   `EXTRACTOR-V4-ARCHITECTURE.md`) and the hand-typed pin tables in
