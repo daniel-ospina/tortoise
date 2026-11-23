@@ -1366,7 +1366,15 @@ _MAPPING_MUTATORS = frozenset({"update", "setdefault"})
 #: the same operation on the other namespace mapping). Kept SEPARATE from `_MAPPING_MUTATORS`
 #: because that set is also consulted with `_is_namespace_expr`, where a `__setitem__` receiver is
 #: a dict-like namespace and the key vocabulary differs; widening the shared set would move both.
-_REGISTRY_MUTATORS = frozenset({"update", "setdefault", "__setitem__", "__ior__"})
+# ⛔ AND `__init__` MERGES, SO IT IS A STORE (#14326 round 32 P2, MEASURED GREEN end-to-end:
+# `sys.modules.__init__({"tortoise": _pkg})`, the unbound `dict.__init__(sys.modules, ...)` and
+# the registry-alias twin each re-executed a planted `pkg/mod.py` after `del sys.modules["pkg.mod"]`
+# with the pin GREEN. `dict.__init__` MERGES ({1:2}.__init__({3:4}) -> {1:2, 3:4}), so this is an
+# ancestor-key STORE, not the whole-registry REPLACEMENT — which is its own declared
+# residual, in the note above `_registry_replacement`. ⛔ NOT "residual (a)": this file
+# has no lettered residual list, so that reference pointed at nothing (#14326 round 33
+# P3, `grep`-verified — the same dangling-cross-reference class as "the note below").)
+_REGISTRY_MUTATORS = frozenset({"update", "setdefault", "__setitem__", "__ior__", "__init__"})
 #: `setdefault(key, default)` takes ONE key positionally; `update(mapping, …)` takes every
 #: positional as a mapping. The split is what keeps a setdefault DEFAULT (a value) out of the
 #: key census — `_COUNTS.setdefault(literal, 0)` is the accepted false red this file states.
@@ -1592,8 +1600,10 @@ def _is_dunder_dict_key(node: ast.AST | None, ctx: _RegistryCtx) -> bool:
 # ⛔ AND A CALLEE OBTAINED BY A NON-ENUMERATED ROUTE (#14326 round 28 P3, MEASURED GREEN:
 # a lambda and `operator.attrgetter("modules")` both reach `getattr(sys, "modules")`). The bound
 # `getattr(sys, "modules")` read still identifies its callee by an enumerated NAME, so any
-# route outside that set escapes. This is the same unbounded class as (a) and (b) — the list
-# of ways to name a callable does not terminate either.
+# route outside that set escapes. This is the same unbounded class as the two above it — the
+# call-spelling residual of the REPLACEMENT note and this callee-route one, which the note
+# numbered (a)/(b) with no lettered list behind it (#14326 round 33 P3); the list of ways to
+# name a callable does not terminate either.
 #
 # ⛔ TWO OF THE ROUTES THIS NOTE ORIGINALLY LISTED ARE CLOSED, AND THE NOTE IS CORRECTED
 # RATHER THAN LEFT (the file's own rule: a marker that a claim was corrected is not evidence
@@ -7769,6 +7779,11 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
     which is the premise.
 
     ⛔ THE RESIDUAL IS DECLARED HERE, NOT ASSUMED INTO SOMEONE ELSE'S (#14326 round 32 P3).
+    "The note below" had no referent: the peer commit at `22ad6aa2c5` rewrote this
+    cross-reference to point at a lettered residual list, and `grep` finds no such list (the
+    two other `residual (a)`/`(b)` citations in this file were dangling for the same reason
+    and are NAMED instead now). The reference the sentence needs is THIS one, and the pin
+    that keeps it honest is the test named at the end of it.
     Rounds 31 and 32 both said "the unbounded class this file already declares as residual" and
     `grep` disproves it: this file declares residuals for CALLEE computation (a lambda,
     `operator.attrgetter`, `partial(getattr, …)`) and for string resolution, and nothing at all
@@ -7793,45 +7808,28 @@ def _is_import_path_mutation(node: ast.AST, ctx: _RegistryCtx,
         # directory, and red-ing them redded ordinary teardown
         # (`sys.path.remove(_REPO_ROOT); del sys.modules["tortoise.sdk"]`) while the identical
         # `sys.path.pop(0)` stayed GREEN — so the verdict was an accident of vocabulary, not a
-        # decision. `__init__`/`__setitem__`/`__iadd__` ARE additions and stay.
+        # decision. Every member of this set is an ADDITION (or a wholesale refill).
+        # ⛔ ONE ARM, BOTH POSITIONS, ONE PREDICATE (#14326 round 33). The spelling has two
+        # places to name the path object — the RECEIVER (`sys.path.insert(…)`,
+        # `_p.__setitem__(…)`) and `args[0]` (`list.insert(sys.path, …)`,
+        # `list.__init__(_p, …)`) — and rounds 31-32 kept closing one position at a time:
+        # the alias was resolved for the receiver and not for `args[0]` (named OPEN at
+        # `22ad6aa2c5`), `insert`/`append`/`extend` were in the receiver set and `__init__`/
+        # `__setitem__`/`__iadd__` in the arguments set, so the CROSS-PRODUCT was twice missed.
+        # `_is_path_expr` answers "is this the path" the same way in both positions, and the
+        # sets are one set, so the product cannot be half-covered again.
         if (isinstance(func, ast.Attribute)
-                # ⛔ `__init__` IS NOT HERE: mutation-tested VACUOUS (#14326 round 31), because the
-                # `sys.path.__init__(…)` / `list.__init__(sys.path, …)` spellings are caught by
-                # the arguments-first arm below. The first set is ADDITIONS by receiver.
-                and func.attr in {"insert", "append", "extend"}
-                # ⛔ A NAME ALIAS OF THE PATH IS THE PATH (#14326 round 31 P2, MEASURED
-                # GREEN end-to-end: `_p = sys.path; _p.insert(0, "/tmp/evil")` resolved a
-                # planted class). This is NOT a "finder/path shape" — it is the plain
-                # one-bind alias axis `_aliases_of` already resolves for the registry and
-                # every other object here.
-                # ⛔ AND IT IS THE SAME OBJECT IN EVERY OTHER SPELLING (#14326 round 32 P1,
-                # MEASURED GREEN at the round-31 head): round 31 resolved the alias for
-                # `insert`/`append`/`extend` and LEFT IT RAW one form over, so
-                # `_p[0:0] = ["/tmp/evil"]`, `_p.__setitem__(0, …)`, `_p.__init__([…])`,
-                # `list.__init__(_p, […])`, `_p.__iadd__([…])` and `_p += […]` each resolved a
-                # planted `tortoise/sdk.py` end-to-end with the pin GREEN. One accessor,
-                # `_is_path_expr`, so the next form cannot be half-covered again.
-                and _is_path_expr(func.value, ctx, path_names)):
+                and func.attr in {"insert", "append", "extend",
+                                  "__init__", "__setitem__", "__iadd__"}
+                and ((node.args and _is_path_expr(node.args[0], ctx, path_names))
+                     or _is_path_expr(func.value, ctx, path_names))):
             return True
         # ⛔ `setattr(sys, "path", …)` IS THE SAME WRITE (#14326 round 31 P2, MEASURED GREEN
         # end-to-end). The file already owns a `launderers` axis for exactly this spelling on
         # the attribute-set axis; the search path needs it too.
-        if (_callee_names_of(func) & ({"setattr"} | ctx.builtin_aliases)
-                and len(node.args) >= 2 and _is_sys_ref(node.args[0], ctx.sys_names)
-                and (_string_keys_of(node.args[1], ctx.consts) & _PATH_ATTRS)):
-            return True
-        # `sys.path.__setitem__(…)` / `list.__init__(sys.path, […])` are the same write.
-        # ⛔ TWO SPELLINGS, ONE PREDICATE: the UNBOUND form names the path in `args[0]`
-        # (`list.__init__(sys.path, …)`), the RECEIVER form as `func.value`
-        # (`sys.path.__init__(…)`). Both go through `_is_path_expr`, so the alias axis is
-        # covered in BOTH positions — measured GREEN one form over before round 32.
-        if (isinstance(func, ast.Attribute)
-                and func.attr in {"__init__", "__setitem__", "__iadd__"}):
-            if node.args and _is_path_expr(node.args[0], ctx, path_names):
-                return True
-            if _is_path_expr(func.value, ctx, path_names):
-                return True
-        return False
+        return bool(_callee_names_of(func) & ({"setattr"} | ctx.builtin_aliases)
+                    and len(node.args) >= 2 and _is_sys_ref(node.args[0], ctx.sys_names)
+                    and (_string_keys_of(node.args[1], ctx.consts) & _PATH_ATTRS))
     # ⛔ `ast.AugAssign` IS IN THIS TUPLE DELIBERATELY, and a SEPARATE `AugAssign` arm was
     # measured VACUOUS (#14326 round 30, mutation-tested): `sys.path += […]` is an AugAssign
     # whose target is the same `sys.path` Attribute, so this branch already covers it once the
@@ -7889,7 +7887,10 @@ def _empties_the_registry(node: ast.AST, ctx: _RegistryCtx,
     `_PATH_ATTRS` covers `sys.path` / `sys.meta_path` / `sys.path_hooks` only, so a package's own
     `tortoise.__path__ = ["/tmp/evil"] + tortoise.__path__` paired with a `del` is a lever this
     arm does not see. That is the SAME axis (where a re-created entry is read from), just one
-    receiver over, and it is declared with the rest of the unbounded class rather than chased.
+    receiver over, and it is DECLARED as residual in `_is_import_path_mutation`'s docstring
+    (pinned GREEN by `test_the_IMPORT_PATH_axis_residuals_are_NAMED_and_pinned_GREEN`) rather than
+    chased. ⛔ NOT "residual (e) in the note below": that wording named a lettered list this file
+    does not contain, so it was a cross-reference to nothing — the same defect one hop over.
 
     ⛔ BUT "EMPTIED" IS NOT `ast.Delete` (#14326 round 30 P2, MEASURED GREEN): `clear()` and
     `pop()` empty the registry just as completely while being no `Delete` node at all —
@@ -9322,6 +9323,34 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
         "a plain ALIAS `_p = sys.path` then `_p.insert` + `del`":
             '_p = sys.path\n_p.insert(0, "/tmp/evil")\n'
             'del sys.modules["tortoise.sdk"]\n',
+        # ⛔ ROUND 32: `__init__` MERGES so it is an ancestor STORE; and the UNBOUND
+        # insert/append/extend on the path was the cross-product member two individually
+        # complete sets both missed.
+        # ⛔ THE UNBOUND `insert`/`append`/`extend` ON THE PATH (#14326 round 32 P2): the
+        # cross-product member of two sets that were each individually complete.
+        # ⛔ AND THE ALIAS IN THAT POSITION IS NOW CLOSED RATHER THAN "STILL OPEN AND NAMED"
+        # (this lane, round 33, MEASURED GREEN at `22ad6aa2c5` and RED here): the unbound
+        # spelling takes the path as `args[0]`, so it needs the SAME `_is_path_expr` the
+        # receiver arm uses — threading it by hand is what left the two arms asymmetric. The
+        # three rows below are the alias twins of the three above.
+        "`list.insert(sys.path, ...)` unbound + `del`":
+            'list.insert(sys.path, 0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`list.append(sys.path, ...)` unbound + `del`":
+            'list.append(sys.path, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`list.extend(sys.path, ...)` unbound + `del`":
+            'list.extend(sys.path, ["/tmp/evil"])\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`_p = sys.path` then `list.insert(_p, ...)` unbound alias + `del`":
+            '_p = sys.path\nlist.insert(_p, 0, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`_p = sys.path` then `list.append(_p, ...)` unbound alias + `del`":
+            '_p = sys.path\nlist.append(_p, "/tmp/evil")\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`_p = sys.path` then `list.extend(_p, ...)` unbound alias + `del`":
+            '_p = sys.path\nlist.extend(_p, ["/tmp/evil"])\n'
+            'del sys.modules["tortoise.sdk"]\n',
         "`sys.path = [...] + sys.path` + `del`":
             'sys.path = ["/tmp/evil"] + sys.path\n'
             'del sys.modules["tortoise"], sys.modules["tortoise.sdk"]\n',
@@ -9411,6 +9440,12 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     ancestor_stores = {
         "ancestor registry STORE + `del` of the target":
             'sys.modules["tortoise"] = _pkg\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "ancestor registry `__init__` store + `del`":
+            'sys.modules.__init__({"tortoise": _pkg})\n'
+            'del sys.modules["tortoise.sdk"]\n',
+        "`dict.__init__(sys.modules, ...)` unbound + `del`":
+            'dict.__init__(sys.modules, {"tortoise": _pkg})\n'
             'del sys.modules["tortoise.sdk"]\n',
         "ancestor registry `|=` + `del` of the target":
             'sys.modules |= {"tortoise": _pkg}\n'
