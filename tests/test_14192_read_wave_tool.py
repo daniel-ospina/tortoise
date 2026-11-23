@@ -12347,8 +12347,14 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     MAPPING READ to a literal member name (`… .get("get")` → `dict.get`) and then applying THAT
     result to the mapping. The closure resolves one hop per node, so a callee built by CALLING a
     resolved read with a literal key is the CALLEE-COMPOSITION class, not the non-enumerable one.
-    Closing it needs a two-step application in the census, which is new machinery rather than a
-    threaded set; it is DECLARED here (a row below pins it GREEN) rather than left reading as
+    ⛔ CLOSING IT IS **NOT** "NEW MACHINERY", which is what this paragraph claimed until the
+    round-4 review MEASURED it: the census's `copies` arm already performs that two-step — which is
+    why `_g = dict.__dict__.get; _f = _g("get"); _f(builtins.__dict__, "exec")` is REFUSED today —
+    and a composed callee only has to join the `launderers` set that every `_is_builtins_mapping`
+    call consults. MEASURED, the same chain REDS once the alias is a launderer: `_f = copy.copy;
+    _d = _f(__builtins__); _d["exec"](<read>)`. That is the alias closure this PR's own
+    `_mapping_read_aliases` widening applies one member over, filed as `#14449`. It is DECLARED
+    here (rows below pin it GREEN) rather than left reading as
     covered. Its ONE-hop twins, EACH BOUND FIRST — `_g = vars(dict).get; _g("get")`,
     `_g = dict.__dict__.get; _g("get")`, and every `[…"get"]`/`dict.get` spelling OF THE MODULE
     SPELLED `dict` — are REFUSED and pinned by rows. ⛔ THE SCOPE OF THAT WORD "EVERY" IS MEASURED,
@@ -12364,10 +12370,12 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
     two that raise — read GREEN on `origin/main` as well (MEASURED through `origin/main`'s OWN
     `_pin_refuses` at `b2d1e9086a`: 7 of 7, bound-first as this paragraph spells them, and the two
     inline twins named below are RED there too), so the class is PRE-EXISTING and is FILED rather
-    than claimed closed here (`#14315`, whose root is exactly that a spelling list cannot be
-    completed); the arm is a receiver the `{"dict", "copy"}` union cannot supply, because the
-    module is reached through the namespace and not named. While the inline
-    `builtins.dict.get(m, "exec")` and `builtins.dict.__dict__["get"]` are RED.
+    than claimed closed here (`#14449` — ⛔ **NOT** `#14315`: that issue and `#14316` are the
+    page/rank-IDENTITY axis and cannot close a callee route to `exec`, which the round-4 review
+    found when it went looking for this class's home, and this file elsewhere records `#14315` as
+    "a duplicate of the same direction" itself); the arm is a receiver the `{"dict", "copy"}`
+    union cannot supply, because the module is reached through the namespace and not named. While
+    the inline `builtins.dict.get(m, "exec")` and `builtins.dict.__dict__["get"]` are RED.
     ⛔ THE INLINE FORM OF THE SAME COMPOSITION IS **NOT** REFUSED, and it is rowed BELOW with the
     class rather than here: `dict.__dict__.get("get")(m, "exec")` applies the resolved read to a
     literal key and then applies THAT, in one expression, which is the two-step application and
@@ -12472,8 +12480,9 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # a callee produced by APPLYING a resolved mapping read to a literal key and then
         # applying that result to the mapping — a CALLEE COMPOSITION, which the closure's one-hop
         # resolution does not follow. Statically enumerable, so it is named HERE rather than
-        # filed under the non-enumerable sentence; closing it needs a two-step application in the
-        # census, not another threaded set.
+        # filed under the non-enumerable sentence; closing it is the census's EXISTING two-step
+        # (`copies`) plus the composed name joining `launderers`, MEASURED and filed as `#14449`
+        # — not new machinery and not another threaded set.
         # ⛔ ONE STATEMENT, NOT THREE LINES (#14395 review P2, MEASURED at `29fa4e295245`):
         # `body()` joins with "\n", so the three-line form was TWO statements — the resolved
         # read was produced and DISCARDED, and the read name sat in a bare string expression.
@@ -12541,8 +12550,10 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # `import … as` alias alike**, so it is the SAME callee-composition class one member
         # over, not the receiver-spelling asymmetry this PR fixes: `_g = copy.__dict__.get;
         # _f = _g("copy")` produces the copy callee by applying a resolved mapping read to a
-        # literal key, then applies it. Closing that is the two-step application in the census,
-        # not another threaded set. Pinned here so a future partial closure must edit the table.
+        # literal key, then applies it. Closing that is the census's existing two-step plus the
+        # composed name joining `launderers` (`#14449`; MEASURED — the `copy.copy` alias path
+        # already reds), not new machinery and not another threaded set. Pinned here so a future
+        # partial closure must edit the table.
         "`_g = <copy namespace>.get; _f = _g(\"copy\")` — a copy callee COMPOSED": (
             'import builtins, copy', '_g = copy.__dict__.get', '_f = _g("copy")',
             '_d = _f(builtins.__dict__)', f'_d["exec"]("results = {read}")'),
@@ -12570,11 +12581,12 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         # MEASURED GREEN — `refused=False` — at this head and on `origin/main`). The two rows
         # above pinned the `.get` member for the literal namespace and for its `import … as`
         # alias, so the paragraph's guarantee (closing the class must EDIT this table) held for
-        # FOUR of the class's spellings and not the other EIGHT: the module's other mapping
-        # reads (`.pop`, `.setdefault`) and the `vars(...)` / `getattr(..., "__dict__")`
-        # receivers of both the literal module and its alias resolve the SAME two-step
-        # composition — `_g("copy")` yields the copy callee, `_f(builtins.__dict__)` the
-        # builtins one — and a future partial closure of any one of them would have red no row.
+        # TWO of the class's eighteen spellings and not the other SIXTEEN — THREE members
+        # (`.get`, `.pop`, `.setdefault`) × SIX receivers (literal/alias × `.__dict__`, `vars`,
+        # `getattr(…, "__dict__")`). The round-4 review found the eight below still missing (and
+        # MEASURED them GREEN, two spot-checked LIVE: `vars(copy).setdefault("copy") is
+        # copy.copy` → True, and the `getattr` twin likewise), so all sixteen now have rows and a
+        # future partial closure of ANY of them reds one. The class's home is `#14449`.
         # ⛔ THE BOUNDARY, STATED RATHER THAN IMPLIED: this is the class's spelling set for the
         # `copy` module at the two bind depths the refused read-method rows above also pin. An
         # alias of an alias is the same class one bind further and is NOT rowed, for the reason
@@ -12604,6 +12616,38 @@ def test_the_CODE_EXECUTION_axis_residuals_are_NAMED_and_pinned_GREEN() -> None:
         "`_g = getattr(_z, \"__dict__\").get; _f = _g(\"copy\")` — IMPORT ALIAS via `getattr`": (
             'import builtins, copy as _z', '_g = getattr(_z, "__dict__").get',
             '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = vars(copy).setdefault; _f = _g(\"copy\")` — `vars` + `setdefault`": (
+            'import builtins, copy',
+            '_g = vars(copy).setdefault', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = getattr(copy, \"__dict__\").setdefault; _f = _g(\"copy\")` — `getattr` + `setdefault`": (
+            'import builtins, copy',
+            '_g = getattr(copy, "__dict__").setdefault', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = _z.__dict__.setdefault; _f = _g(\"copy\")` — IMPORT ALIAS + `setdefault`": (
+            'import builtins, copy as _z',
+            '_g = _z.__dict__.setdefault', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = vars(_z).setdefault; _f = _g(\"copy\")` — IMPORT ALIAS via `vars` + `setdefault`": (
+            'import builtins, copy as _z',
+            '_g = vars(_z).setdefault', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = getattr(_z, \"__dict__\").setdefault; _f = _g(\"copy\")` — IMPORT ALIAS via `getattr` + `setdefault`": (
+            'import builtins, copy as _z',
+            '_g = getattr(_z, "__dict__").setdefault', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = vars(_z).pop; _f = _g(\"copy\")` — IMPORT ALIAS via `vars` + `pop`": (
+            'import builtins, copy as _z',
+            '_g = vars(_z).pop', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = getattr(copy, \"__dict__\").pop; _f = _g(\"copy\")` — `getattr` + `pop`": (
+            'import builtins, copy',
+            '_g = getattr(copy, "__dict__").pop', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
+            f'_d["exec"]("results = {read}")'),
+        "`_g = getattr(_z, \"__dict__\").pop; _f = _g(\"copy\")` — IMPORT ALIAS via `getattr` + `pop`": (
+            'import builtins, copy as _z',
+            '_g = getattr(_z, "__dict__").pop', '_f = _g("copy")', '_d = _f(builtins.__dict__)',
             f'_d["exec"]("results = {read}")'),
         # ⛔ AND THE NAMESPACE-BOUND RECEIVERS OF THAT SAME TWO-STEP COMPOSITION (#14395 round-4
         # P2). The BOUNDARY sentences above named "the levels the closure rows distinguish" but
