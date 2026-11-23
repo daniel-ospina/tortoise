@@ -235,6 +235,17 @@ KIND_COHORT_CAP_UNENFORCEABLE = "COHORT_CAP_UNENFORCEABLE"
 KIND_COHORT_COST_CAP = "COHORT_COST_CAP"
 KIND_ABUSE_DECISION_FAULT = "ABUSE_DECISION_FAULT"
 KIND_ABUSE_ENFORCEMENT_FAULT = "ABUSE_ENFORCEMENT_FAULT"
+#: #14407: an org was FLAGGED (abuse rule stage 1). The stage-1 flag used to be
+#: notification-only, which is why the human channel could receive a message that
+#: no incident, runbook or search could attribute (measured while filing: 0
+#: abuse-titled issues in either tracker, while the owner kept receiving the
+#: alerts). It is an incident kind now for the same reason its two siblings are:
+#: a flag IS a state change (#10156 puts ``EVENT_FLAG`` in the ALERT register),
+#: and the durable, assignable artifact is what makes the notification
+#: answerable. SCREAMING_CASE because it is added long after #4780 — the two
+#: grandfathered lowercase spellings below are FROZEN keys and are not a
+#: precedent for a new one.
+KIND_ABUSE_FLAG_RAISED = "ABUSE_FLAG_RAISED"
 KIND_ABUSE_REVIEW_NEEDED = "abuse_review_needed"
 KIND_ABUSE_SUSPENDED = "abuse_suspended"
 KIND_BILLING_NOTIFY_REFUSED = "BILLING_NOTIFY_REFUSED"
@@ -382,6 +393,15 @@ SPECS: dict[str, KindSpec] = {
     KIND_ABUSE_REVIEW_NEEDED: _spec(
         WRITER_UNSPECIFIED, manual_close=True, legacy_lowercase=True,
         meaning="persistent breach: human review, not suspension (#5425)"),
+    #: #14407: the stage-1 flag's incident. ``manual_close`` stays TRUE for the
+    #: same reason as its siblings: the engine closes it at episode end
+    #: (``AbuseEngine._end_alert_episode``), but an org that simply stops sending
+    #: traffic never produces the clean evaluation that ends the episode, so the
+    #: operator procedure remains a real path.
+    KIND_ABUSE_FLAG_RAISED: _spec(
+        WRITER_UNSPECIFIED, manual_close=True,
+        meaning="an abuse rule FLAGGED the org (stage 1); alert is deduped per "
+                "episode, and the engine resolves it at episode end (#14407)"),
     KIND_ABUSE_SUSPENDED: _spec(
         WRITER_UNSPECIFIED, manual_close=True, legacy_lowercase=True,
         meaning="operator-initiated suspension (no automatic lane since #5425)"),
