@@ -3675,6 +3675,40 @@ def test_render_md_emits_one_emphasis_style() -> None:
     )
 
 
+def _gfm_cells(line: str) -> list[str]:
+    r"""The cells a GFM table parser reads out of one `| a | b | c |` row.
+
+    A pipe is a LIVE delimiter unless it follows an ODD run of backslashes: cmark-gfm
+    consumes escapes PAIRWISE, so `\|` is an escaped pipe (content) while `\\|` is an
+    escaped backslash followed by a live delimiter. A single-backslash lookbehind —
+    `re.split(r"(?<!\\)\|", line)`, which this test used until #14366 review P3-2 —
+    cannot tell those apart: it reads a 4-cell row as 3, i.e. it models the failure to
+    agree with the gate it stands in for. Same rule, same reason, as
+    `tests/test_attest_census.py::test_no_cell_is_injected`'s local `escaped()` (#10687
+    cycle 2), which was fixed for exactly this blind spot.
+    """
+
+    def escaped(text: str, i: int) -> bool:
+        n = 0
+        while i - n - 1 >= 0 and text[i - n - 1] == "\\":
+            n += 1
+        return n % 2 == 1
+
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|") and not escaped(body, len(body) - 1):
+        body = body[:-1]
+    cells: list[str] = []
+    start = 0
+    for i, ch in enumerate(body):
+        if ch == "|" and not escaped(body, i):
+            cells.append(body[start:i])
+            start = i + 1
+    cells.append(body[start:])
+    return cells
+
+
 def _code_spans(md: str) -> list[str | None]:
     """CommonMark code spans in `md`, scanned LEFT TO RIGHT (#1477).
 
@@ -3802,14 +3836,22 @@ def test_the_flake_table_fences_a_nodeid_that_contains_backticks() -> None:
 
 
 def test_a_flake_id_with_a_pipe_or_control_byte_cannot_break_the_table_row() -> None:
-    r"""#14366 cycle-4 review P2: a cell cannot hold a control byte or a `|`.
+    r"""#14366 cycle-4 review P2: a cell cannot hold a raw pipe or a control byte.
 
-    A nodeid is parametrize-controlled, and a real value in this repo carries both
-    (`tests/test_attest_census.py` parametrizes `"a\nb|c"`). A raw newline splits the
-    markdown row in two; a raw `|` is worse, because it does not split the ROW — it
-    adds a CELL, so the table stays "valid" to the eye while `MD056/table-column-count`
-    reds the required `docs` check. Measured: the bare pipe gives
-    `MD056 … [Expected: 3; Actual: 4]`; `\|` gives `0 issues in 0 files`.
+    A nodeid is parametrize-controlled. What pytest actually EMITS is the pivot here, and
+    it is narrower than the parametrize VALUE (#14366 review P3-3): `pytest` escapes
+    control bytes in a collected id (`\n` reaches the nodeid as the two characters
+    backslash-n, so it cannot arrive raw), while a `|` passes through UNESCAPED. The
+    repo's own hostile parametrize (`tests/test_attest_census.py:1422`) is the live shape:
+    value `"a\nb|c"` → emitted id `a\nb|c` (newline escaped, pipe raw), and it is the RAW
+    PIPE that redded the required `docs` check. The control-byte arms below are therefore
+    defence for the byte CLASS, not a reproduction of that id — which is why the fixture
+    carries a raw newline on purpose: it is the worst case the renderer must survive.
+
+    A raw newline splits the markdown row in two; a raw `|` is worse, because it does not
+    split the ROW — it adds a CELL, so the table stays "valid" to the eye while
+    `MD056/table-column-count` reds the required `docs` check. Measured: the bare pipe
+    gives `MD056 … [Expected: 3; Actual: 4]`; `\|` gives `0 issues in 0 files`.
 
     The JSON keeps the id VERBATIM (it is the lookup key, and the escaped form is the
     one pytest collects); only the DISPLAY escapes. It escapes the PIPE but NOT the
@@ -3833,10 +3875,10 @@ def test_a_flake_id_with_a_pipe_or_control_byte_cannot_break_the_table_row() -> 
         f"the flake row was split across {len(rows)} lines — a raw newline landed in "
         "the markdown table cell, which breaks the row and reds the `docs` check")
     row = rows[0]
-    # ⛔ Count UNESCAPED pipes only: `\\|` is cell CONTENT, and a naive
-    # `row.count(" | ")` reads the 4-cell row as a 3-cell one (measured), which is
-    # why the previous arm's assertion passed on the broken row.
-    cells = [c for c in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
+    # ⛔ Count LIVE delimiters, not every `|`. `\\|` is an ESCAPED backslash followed by
+    # a live delimiter, so "preceded by a backslash means escaped" is wrong (#14366 P3-2);
+    # `_gfm_cells` applies cmark-gfm's parity rule and is itself pinned below.
+    cells = _gfm_cells(row)
     assert len(cells) == 3, (
         f"the row is {len(cells)} cells, not 3 — an unescaped `|` in the nodeid added "
         f"a cell and reds `MD056`: {row!r}")
@@ -3847,6 +3889,45 @@ def test_a_flake_id_with_a_pipe_or_control_byte_cannot_break_the_table_row() -> 
     # The published VALUE keeps the id verbatim: it is the lookup key, so neither the
     # display escaping nor a decode may have leaked into it.
     assert flakes[0]["test"] == nodeid
+
+    # #14366 review P3-1: `_CONTROL_DISPLAY`'s `\t`/`\r` entries were UNPINNED — dropping
+    # them reddened nothing, because the generic `ord(ch) < 0x20` arm escapes the same
+    # bytes to `\x09`/`\x0d`. Both forms are valid table cells, so a cell-count check
+    # cannot see the difference; only the exact display text can. The entries exist so a
+    # control byte renders as the escape a reader recognises, and this pins it.
+    for raw, display in (("\t", "\\t"), ("\r", "\\r"), ("\n", "\\n"),
+                         ("\x00", "\\x00"), ("\x1f", "\\x1f"), ("\x7f", "\\x7f"),
+                         ("|", "\\|")):
+        assert ci_timing._md_display_text(raw) == display, (
+            f"_md_display_text({raw!r}) renders {ci_timing._md_display_text(raw)!r}, "
+            f"not {display!r} — either the named `_CONTROL_DISPLAY` entry or the "
+            "generic control arm was dropped, and nothing else reds for it")
+
+
+def test_the_gfm_cell_model_agrees_with_cmark_on_even_backslash_runs() -> None:
+    r"""#14366 review P3-2: the cell model must apply cmark-gfm's escape PARITY.
+
+    `_gfm_cells` stands in for the pinned markdownlint gate in the row-count arm above, and
+    a model that disagrees with its gate certifies the wrong thing. The shapes that
+    discriminate it from a single-backslash lookbehind are the ODD-run cases: `\|` is one
+    escaped pipe (3 cells), `\\|` is an escaped backslash then a LIVE delimiter (4 cells).
+
+    The even-run case is reachable only through the documented trade-away in
+    `tools/ci_timing.py` (`_md_display_text` escapes the pipe and adds one more backslash,
+    so an id carrying an odd run before a pipe loses its cell) — which is why this pins the
+    MODEL rather than feeding that id through `render_md`: pytest doubles every backslash
+    in a collected id, so no real nodeid reaches it. Recording it here is what keeps the
+    next reader from "simplifying" the parity scan back into a regex.
+    """
+    assert _gfm_cells("| a | b | c |") == [" a ", " b ", " c "]
+    assert _gfm_cells("| a\\|b | c | d |") == [" a\\|b ", " c ", " d "]
+    assert _gfm_cells("| a\\\\|b | c | d |") == [" a\\\\", "b ", " c ", " d "]
+    # …and the pre-fix model must MIS-count the even-run shape, or this pin is vacuous.
+    pre_fix = re.split(r"(?<!\\)\|", "a\\\\|b | c | d".strip("|"))
+    assert len(pre_fix) == 3, (
+        f"the single-backslash lookbehind counted {len(pre_fix)} cells; it is expected to "
+        "read the 4-cell even-run row as 3 — if it agrees with `_gfm_cells` the parity "
+        "scan is not what this test is measuring")
 
 
 def test_refresh_durations_is_reproducible(tmp_path: Path) -> None:
