@@ -916,12 +916,12 @@ def _concatenations(left: frozenset[str], right: frozenset[str]) -> frozenset[st
     and the reason this arm was the asymmetry worth deleting: the bind path and the inline
     path now share one budgeted implementation, so neither can drift from the other again.
 
-    Returning the empty set when either side is unresolvable is what keeps the declared
-    residual (`_N + "_x"` with a parameter `_N`) out of the census without a guard clause
-    restating it (#14326 round 11) — the same rule `_string_products` keeps.
+    An unresolvable side (`_N + "_x"` with a parameter `_N`) yields the EMPTY SET because the
+    comprehension below iterates an empty operand set — there is no guard clause restating
+    it, and the one that sat here was deleted (#14326 delta review P3, MEASURED: deleting it
+    left the suite byte-identically green, since `frozenset(a + b for a in ∅ …)` is already
+    `frozenset()`) — the same rule `_string_products` keeps.
     """
-    if not left or not right:
-        return frozenset()
     if len(left) * len(right) > _PRODUCT_MAX_COMBINATIONS:
         raise _ResolutionDidNotConverge(
             f"the `+` resolver would build more than {_PRODUCT_MAX_COMBINATIONS} "
@@ -1161,6 +1161,131 @@ def _constant_slice_bounds(slice_node: ast.Slice) -> tuple[int | None, int | Non
     return (bounds[0], bounds[1], bounds[2])
 
 
+def _literal_chain(node: ast.Subscript) -> list[ast.AST] | None:
+    """`X[a][b]…` as `[X, a, b, …]` when `X` is SPELLED IN THE SOURCE, else `None`.
+
+    `None` is the DECLARED residual, not a gap: a chain rooted at a NAME, an attribute or a
+    call (`_CFG["read"][0]`, `self._read[0]`, `_mk()[0]`) is not statically pairable, and
+    that is the boundary `_subscript_strings` already declines one level down.
+    """
+    indices: list[ast.AST] = []
+    base: ast.AST = node
+    while isinstance(base, ast.Subscript):
+        indices.append(base.slice)
+        base = base.value
+    if not (isinstance(base, (ast.Tuple, ast.List, ast.Dict))
+            or (isinstance(base, ast.Constant) and isinstance(base.value, str))):
+        return None
+    return [base, *reversed(indices)]
+
+
+def _spread_elements(elements: list[ast.AST]) -> list[ast.AST]:
+    """A display's elements with every `Starred` over a SOURCE-SPELLED sequence SPLICED in.
+
+    ⛔ A STAR IS A POSITION OFFSET, NOT ONE ELEMENT (#14326 delta review P2, measured at
+    `2692b9d3`): `[*("_tortoise_fts_query",)][0]` was RED because the star sat at position 0
+    of a one-element display, while `[*("x", "_tortoise_fts_query")][1]` — the SAME value at
+    the same displayed position, one element over — was GREEN (`refuses=False`, `m=2 c=2
+    i=0`) with a third `kind="statement"` reach executing the read. Counting the star as one
+    element makes every index after it select the wrong (or no) candidate.
+
+    Only a literal operand can be spliced: `[*(_rest)]` is the declared residual (the NAME
+    is not statically enumerable), so it stays a single unresolved candidate.
+    """
+    out: list[ast.AST] = []
+    for element in elements:
+        if (isinstance(element, ast.Starred)
+                and isinstance(element.value, (ast.Tuple, ast.List))):
+            out.extend(_spread_elements(element.value.elts))
+        else:
+            out.append(element)
+    return out
+
+
+def _indexed_values(values: list, index: ast.AST) -> list:
+    """Apply ONE index step to every statically possible value of the container.
+
+    A value is either a `str` already computed (a literal string, a slice of one) or an AST
+    node standing for a container SPELLED IN THE SOURCE — the distinction that lets a chain
+    index a TUPLE and then a STRING inside it without flattening the tuple to its elements.
+
+    A RUNTIME index over a literal sequence selects ONE OF its elements (the union rule the
+    single-level arms already state); a CONSTANT SLICE of a sequence selects a SUB-SEQUENCE —
+    a container in its own right, so it is wrapped rather than flattened, because the next
+    index digs into the selection (`("x", "…")[1:][0]`) and flattening there read the
+    element as if it were the sliced tuple's value (measured: `{'…'[0]}` — a character of the
+    READ NAME's own spelling — instead of the name). A literal mapping with a constant key
+    selects exactly that key's value and NOTHING when the key is absent (the runtime
+    `KeyError`), and a `**`-spread or a runtime key selects among its values.
+    """
+    out: list = []
+    bounds = _constant_slice_bounds(index) if isinstance(index, ast.Slice) else None
+    positions = [] if isinstance(index, ast.Slice) else _int_literals(index)
+    for value in values:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            # A literal STRING selected by an earlier step is the same value as a computed
+            # one (`("x", "…")[1:]` selects a `Constant`, and the next index digs into IT).
+            value = value.value
+        if isinstance(value, ast.Starred):
+            out.extend(_indexed_values([value.value], index))
+        elif isinstance(value, str):
+            if isinstance(index, ast.Slice):
+                if bounds is not None:
+                    out.append(value[slice(*bounds)])
+            else:
+                out.extend(value[position] for position in positions
+                           if -len(value) <= position < len(value))
+        elif isinstance(value, (ast.Tuple, ast.List)):
+            elements = _spread_elements(list(value.elts))
+            if isinstance(index, ast.Slice):
+                if bounds is not None:
+                    out.append(ast.Tuple(
+                        elts=elements[slice(*bounds)], ctx=ast.Load()))
+            elif positions:
+                out.extend(elements[position] for position in positions
+                           if -len(elements) <= position < len(elements))
+            else:
+                out.extend(elements)
+        elif isinstance(value, ast.Dict):
+            if (isinstance(index, ast.Constant) and isinstance(index.value, str)
+                    and not any(key is None for key in value.keys)):
+                out.extend(candidate for key, candidate
+                           in zip(value.keys, value.values, strict=True)
+                           if isinstance(key, ast.Constant) and key.value == index.value)
+            else:
+                out.extend(value.values)
+    return out
+
+
+def _chain_strings(chain: list[ast.AST]) -> set[str]:
+    """The strings a CHAIN of subscripts over a SOURCE-SPELLED literal can yield.
+
+    Resolved STRUCTURALLY, one index per step, because the value an inner subscript selects
+    may be a CONTAINER that the next index digs into. Resolving each step to STRINGS instead
+    (`resolve(inner)` then index the strings) is what made the depth-1 spelling RED and the
+    depth-2 spelling of the same static value GREEN (#14326 delta review P2, measured at
+    `2692b9d3`): `(('x', '_tortoise_fts_query'),)[0][1]` gave `{'t'}` — a character of the
+    INNER SEQUENCE read as if it were the selected value — so the read name never entered
+    the census and the third `kind="statement"` reach executed it.
+
+    A chain that ENDS on a container selects a container, which is not a string and cannot be
+    a callable's name: it contributes nothing, the same precision the single-level arms keep
+    for `('a', '…')[0]` (the false red this file calls expensive).
+    """
+    values: list = [chain[0]]
+    for index in chain[1:]:
+        values = _indexed_values(values, index)
+        if not values:
+            return set()
+    out: set[str] = set()
+    for value in values:
+        if isinstance(value, str):
+            out.add(value)
+        elif isinstance(value, ast.Constant) and isinstance(value.value, str):
+            out.add(value.value)
+    return out
+
+
 def _subscript_strings(node: ast.Subscript, resolve) -> set[str]:
     """Every string a SUBSCRIPT over a STATICALLY-VISIBLE container can select.
 
@@ -1192,6 +1317,13 @@ def _subscript_strings(node: ast.Subscript, resolve) -> set[str]:
     which no read name can be, so it resolves to nothing rather than to the whole string
     (that would false-red every `_ALPHABET[_i]` in a file).
     """
+    # ⛔ A CHAIN OF SUBSCRIPTS IS RESOLVED STRUCTURALLY, NOT STRING-BY-STRING (#14326 delta
+    # review P2). Two or more index steps over a source-spelled literal go through
+    # `_chain_strings`; ONE step keeps the arms below byte-for-byte, because they are the
+    # measured precision boundary (`('a', '…')[0]` selects `a` and must stay GREEN).
+    chain = _literal_chain(node)
+    if chain is not None and len(chain) > 2:
+        return _chain_strings(chain)
     container, index = node.value, node.slice
     if isinstance(container, ast.Subscript):
         # ⛔ A SPLIT BUILD IS THE SAME BUILD (#14326 round 16, MEASURED GREEN):
@@ -1212,7 +1344,7 @@ def _subscript_strings(node: ast.Subscript, resolve) -> set[str]:
         return {container.value[position] for position in positions
                 if -len(container.value) <= position < len(container.value)}
     if isinstance(container, (ast.Tuple, ast.List)):
-        elements = container.elts
+        elements = _spread_elements(list(container.elts))
         if isinstance(index, ast.Slice):
             bounds = _constant_slice_bounds(index)
             if bounds is not None:
@@ -3289,7 +3421,23 @@ def _extra_bindings(tree: ast.AST, names: set[str]) -> list[str]:
     return out
 
 _NON_MUTATING = {"list", "tuple", "len", "sorted", "id", "str", "bool", "any", "all",
-                 "isinstance"}
+                 "isinstance",
+                 # ⛔ ITERATORS AND INDEX PAIRERS READ, THEY DO NOT MUTATE (#14326 round 35
+                 # review cycle 6, EACH MEASURED FALSE-RED at `42776e22`: with these absent,
+                 # `list(reversed(results))`, `[i for i, _r in enumerate(results)]`,
+                 # `iter(results)` and `list(zip(results, results))` each redded the pin with
+                 # "an in-place sort/clear" while mutating nothing). A false red is a false
+                 # diagnosis here — the message names a mutation that is not happening — and
+                 # this pin's whole claim is that it stops red-ing on inert edits.
+                 #
+                 # ⛔ `iter` IS DELIBERATELY ABSENT (#14326 round 35 review cycle 6, MEASURED:
+                 # exempting it made `_it = iter(results); _r = next(_it); _r["id"] = "X"`
+                 # PASS — 43 passed with the recorded page mutated). `iter` does not mutate,
+                 # but it HANDS THE SAME MUTABLE ELEMENTS to `next`, so exempting it is a
+                 # fail-open one hop out. `_it = iter(results)` therefore reds as an ACCEPTED
+                 # FALSE RED (named in `Accepted FALSE-REDs`): a false red costs an edit, a
+                 # false green ships a permuted page as `rank_identical: True`.
+                 "reversed", "enumerate", "zip"}
 
 #: Callees that only READ their argument, so a name handed to one is not handed to a
 #: mutation. `print(f"nhits={len(results)}")` is the natural next edit to `run()`'s
@@ -4618,7 +4766,14 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return isinstance(arg, (ast.ListComp, ast.GeneratorExp, ast.SetComp,
                                     ast.DictComp))
 
-        handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+        # ⛔ THE EXEMPTION MUST AGREE WITH THE ARM BELOW (#14326 round 35 review cycle 6,
+        # MEASURED FALSE-RED: `for _r in results: _i = _result_id(_r)` redded, while the
+        # COMPREHENSION spelling of the same call was GREEN — `_element_handed` exempts
+        # `_ID_MAPPERS` and this line tested `_PURE_READS`, which does not contain them, and
+        # `_aliases_of(loops=True)` puts the `for` target in `watched` so the two spellings
+        # diverge). `_PURE_CALLEES` is that union; using it here makes the one-hop and the
+        # `for`-target hop the same decision.
+        handed = isinstance(node, ast.Call) and callee not in _PURE_CALLEES and any(
             _names_handed(arg) & watched and not _element_only(arg) and not _derived(arg)
             for arg in list(node.args) + [k.value for k in node.keywords])
 
@@ -4674,9 +4829,18 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
             return (isinstance(arg, (ast.Subscript, ast.Attribute))
                     and bool(_names_in(arg) & holders))
 
-        row_handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+        # ⛔ THE SAME EXEMPTION AS `handed`, FOR THE OTHER TWO TAINT SETS (#14326 round 35
+        # review cycle 7, MEASURED FALSE-RED: these two are the same question over `rows` and
+        # `holders` — `_row_ref`'s own docstring says "`handed` tests `watched` … the recorded
+        # rows are a SECOND collection" — and they were left at `_PURE_READS` when `handed`
+        # moved to `_PURE_CALLEES`). Measured: `_result_id(per_query[-1])` and a holder slot
+        # holding `results[0]` redded with "an in-place sort/clear" while the IDENTICAL read
+        # through a page ELEMENT was blessed — a false red plus a false diagnosis, and an
+        # in-file asymmetry between three arms that claim one job. Not weakened: an unknown
+        # callee (`def _scrub(row): row["order"].sort(); _scrub(per_query[-1])`) is still RED.
+        row_handed = isinstance(node, ast.Call) and callee not in _PURE_CALLEES and any(
             _row_ref(arg) for arg in list(node.args) + [k.value for k in node.keywords])
-        slot_handed = isinstance(node, ast.Call) and callee not in _PURE_READS and any(
+        slot_handed = isinstance(node, ast.Call) and callee not in _PURE_CALLEES and any(
             _slot_ref(arg) for arg in list(node.args) + [k.value for k in node.keywords])
         # ⛔ EVERY `receiver` ARM ABOVE IS ALREADY RESOLVED AGAINST THE SET IT BELONGS TO
         # (`muts`, or `muts | holders` for a container slot), so this is a truthiness
@@ -4686,6 +4850,23 @@ def _mutated_after(run_def: ast.AST, var: str, lineno: int,
                 or _element_handed(node, callee)):
             hits.append(node.lineno)
     return hits
+
+
+def _own_body_nodes(fn: ast.AST):
+    """Every node in `fn`'s own body, NOT descending into nested function/class scopes.
+
+    The nested scopes are yielded THEMSELVES (so a `Def` is still visible) but their bodies
+    are not walked: a `return` inside a local helper belongs to that helper, not to `run()`
+    (#14326 round 35 review cycle 6).
+    """
+    nested = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    stack = list(getattr(fn, "body", []))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, nested):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
 
 
 def _per_query_element_mutations(run_def: ast.AST, after_lineno: int) -> list[int]:
@@ -7970,6 +8151,15 @@ def test_a_value_READ_OUT_of_a_LITERAL_container_is_a_reach() -> None:
       - `_int_literals`' `UnaryOp` arm deleted -> the negative-index, negative-slice and
         stepped-slice rows go GREEN (a negative literal is a `UnaryOp`, never a `Constant`);
       - the nested-`Subscript` branch deleted -> the stepped-slice row goes GREEN;
+      - `_literal_chain` made to return `None` -> the eight NESTED-selection rows go GREEN
+        (1 failed, MEASURED: `_chain_strings` is what resolves a chain structurally);
+      - `_chain_strings`' constant-slice WRAP flattened to its elements -> the slice-then-index
+        row goes GREEN (1 failed, MEASURED: its next index would otherwise read a CHARACTER of
+        the selected element);
+      - `_chain_strings` reduced to an empty set -> two nested-selection rows go GREEN (MEASURED);
+      - `_spread_elements` reduced to `list(elements)` in the SINGLE-LEVEL arm -> the starred
+        rows go GREEN (1 failed, MEASURED: a star counted as ONE element offsets every index
+        after it); in the CHAIN arm -> the starred-chain row goes GREEN (1 failed, MEASURED);
       - the mapping's constant-KEY selection replaced by the whole value union -> the
         ABSENT-key control below goes RED (a false red on a display that selects nothing).
     """
@@ -7989,6 +8179,61 @@ def test_a_value_READ_OUT_of_a_LITERAL_container_is_a_reach() -> None:
     assert not _pin_refuses(_pin_source(absent_key)), (
         "a literal mapping indexed by a constant key it does not carry selects nothing — "
         "crediting it every VALUE of the display is a FALSE RED")
+    # ⛔ A CHAIN OF SUBSCRIPTS OVER A LITERAL IS THE SAME STATIC VALUE, ONE LEVEL DEEPER
+    # (#14326 delta review P2, each MEASURED GREEN at `2692b9d3` — `refuses=False`, `m=2
+    # c=2 i=0` — with a third `kind="statement"` reach that EXECUTES the product read). The
+    # container arms resolved the SELECTED element through `_values`/`_possible_strings`,
+    # which have no arm for a `Tuple`/`List`/`Dict` LITERAL, so an element that is itself a
+    # display resolved to nothing and the outer index selected nothing — the depth-1 spelling
+    # RED and the depth-2 spelling of the SAME value GREEN, which is precisely the in-file
+    # asymmetry the paragraph above claims closed. `_literal_chain`/`_chain_strings` resolve
+    # the chain STRUCTURALLY, one index per step, and a constant SLICE of a sequence is
+    # WRAPPED (a sub-sequence, not a flattened value) because the next index digs into it.
+    for label, body in (
+            ("tuple of tuple",
+             '    getattr(sdk, (("x", "_tortoise_fts_query"),)[0][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("dict of tuple",
+             '    getattr(sdk, {"k": ("x", "_tortoise_fts_query")}["k"][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("tuple of dict",
+             '    getattr(sdk, ({"k": "_tortoise_fts_query"},)[0]["k"])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("three levels deep",
+             '    getattr(sdk, ((("x", "_tortoise_fts_query"),),)[0][0][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("list of list, negative index",
+             '    getattr(sdk, [["x", "_tortoise_fts_query"]][0][-1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("slice then index",
+             '    getattr(sdk, ("x", "_tortoise_fts_query")[1:][0])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("starred tuple, index past the star",
+             '    getattr(sdk, [*("x", "_tortoise_fts_query")][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("starred CHAIN, index past the star and into the next container",
+             '    getattr(sdk, [*("x", ("y", "_tortoise_fts_query"))][1][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n')):
+        assert _pin_refuses(_pin_source(body)), (
+            f"[{label}] a nested literal selection is a STATIC value — the chain must resolve "
+            "structurally, one index per step, or the depth-2 spelling of a depth-1 RED "
+            "stays GREEN")
+    # ⛔ AND THE TWO PRECISION BOUNDS OF THE CHAIN, each GREEN on purpose: a chain whose
+    # selected element is not the read name stays GREEN, a starred sequence of non-reads
+    # stays GREEN, and a chain rooted at a NAME-held container is the DECLARED residual
+    # below, not a gap. (A chain that ENDS on a container holding the literal is RED by the
+    # Constant arm's mention census — MEASURED, identically RED before this change — so it is
+    # not a row here: it would pin the census, not the chain.)
+    for label, body in (
+            ("nested selection of a non-read element",
+             '    _N = (("a", "x"),)[0][0]\n'
+             f'    {reach.format(name="_N")}\n'),
+            ("starred sequence of non-reads",
+             '    getattr(sdk, [*("x", "y")][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n')):
+        assert not _pin_refuses(_pin_source(body)), (
+            f"[{label}] this chain cannot hold the read name — refusing it is the FALSE RED "
+            "direction this file calls expensive")
     # ⛔ THE DECLARED RESIDUAL, PINNED GREEN SO THE NOTE CANNOT GO STALE (`_subscript_strings`):
     # a NAME-held container is not statically pairable, and resolving a name's whole value set
     # here would false-red the provenance lookup the `_is_read_ref` narrowing exists to keep
@@ -8083,13 +8328,23 @@ def test_a_PRODUCT_that_outgrows_its_budget_REFUSES_instead_of_spinning() -> Non
     # refusal, while the JOIN forms refused the identical operand shape). Both paths are
     # asserted because BOTH were unbudgeted and they are separate functions; a mutation that
     # only re-opens one of them must red here rather than pass on the other's coverage.
+    #
+    # ⛔ AND THE ROW PINS THE CLAUSE, NOT THE EXCEPTION TYPE (#14326 review cycle 7, MEASURED).
+    # The BIND row was VACUOUS as first written: reverting ONLY `_values`' budget left all 43
+    # green, because `_check_budget` (:719) refuses the same shape by COUNT (4913 >
+    # `_VALUE_MAX_PER_NAME`=512) with the SAME exception class — so `pytest.raises(...)` was
+    # satisfied by a different clause than the one the comment above claims. Both rows now
+    # match the budget's own message, and with that `match=` the reverted `_values` reds here
+    # (measured: `DID NOT MATCH`), while the two messages stay distinguishable
+    # ("would build more than 4096" vs "has more statically possible values than …").
     _plus_many = ",".join(f"'v{i}'" for i in range(17))
-    with pytest.raises(_ResolutionDidNotConverge):
+    _budget_msg = rf"would build more than {_PRODUCT_MAX_COMBINATIONS} concatenations"
+    with pytest.raises(_ResolutionDidNotConverge, match=_budget_msg):
         _read_reach(_pin_source(
             f"    _N = {{{_plus_many}}}\n"
             '    getattr(sdk, _N + _N + _N)'
             '(query=queries[0]["query"], limit=10, kind="statement")\n'))
-    with pytest.raises(_ResolutionDidNotConverge):
+    with pytest.raises(_ResolutionDidNotConverge, match=_budget_msg):
         _read_reach(_pin_source(
             f"    _N = {{{_plus_many}}}\n"
             "    _s = _N + _N + _N\n"
@@ -8316,7 +8571,11 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     (``"order": _ids(results)``) or the leg table into a helper, hoisting the artifact dict
     to a local (``row = {…}; per_query.append(row)``), ``per_query.extend([{…}])``, and
     RENAMING the collected list (this pin hard-codes the collector's name ``per_query`` on
-    purpose — it is what stops ``_p = list(reversed(per_query)); return {"per_query": _p}``).
+    purpose — it is what stops ``_p = list(reversed(per_query)); return {"per_query": _p}``),
+    and
+    ``_it = iter(results)`` — ``iter`` only reads, but it hands the SAME mutable elements to
+    ``next``, and exempting it was measured to let ``_r = next(_it); _r["id"] = "X"`` PASS
+    (#14326 round 35 review cycle 6). A false red here is the cheap direction.
     A red there costs an edit to this pin, which is the cheap direction — the expensive
     direction is a sorted page reaching the verdict as ``rank_identical: True`` (measured
     green against earlier shapes of this check).
@@ -8595,7 +8854,13 @@ def test_the_harness_reads_the_SHIPPED_door_and_names_NO_lever_flags():
     # for, and the shape is statically visible, so it is not the declared "a name COMPUTED
     # at runtime" residual. `per_query[:-1]`, `list(reversed(per_query))` and
     # `_reordered(per_query)` are green the same way.
-    returns = [n for n in ast.walk(run_defs[0]) if isinstance(n, ast.Return)]
+    # ⛔ ONLY `run()`'s OWN RETURNS (#14326 round 35 review cycle 6, MEASURED FALSE-RED: a
+    # local helper with a `return` redded this clause with "`run()` has 2 `return`
+    # statements" while `run()` still had exactly one and the report dict was intact —
+    # `ast.walk` descends into the nested `FunctionDef`). The two controls that isolate it:
+    # the same helper with no `return` is GREEN, and at MODULE level it is GREEN. The clause
+    # exists to bind the ONE dict that carries the report, not to forbid local helpers.
+    returns = [n for n in _own_body_nodes(run_defs[0]) if isinstance(n, ast.Return)]
     assert len(returns) == 1, (
         f"`run()` has {len(returns)} `return` statements — this pin follows the ONE dict "
         "that carries the report")
