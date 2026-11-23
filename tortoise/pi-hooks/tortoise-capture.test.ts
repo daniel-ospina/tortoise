@@ -6412,5 +6412,70 @@ test("#14359: a kill between the quarantine and the write keeps the entry (orpha
     "an orphan beside the meta must not read as provably empty");
   assert.ok(readSpoolEntry(spool, sid), "the entry was deleted although its bytes are on disk");
   assert.equal(readDiscards(spool).at(-1)?.reason, "transcript_torn");
-  assert.deepEqual(readFileSync(orphan), kept, "the drain reads an orphan, it never deletes one");
+  // ⛔ KEEPING THE ENTRY IS ONLY HALF OF IT (#14359 review cycle 4): the bytes used
+  // to stay in the ORPHAN class, which `pruneSpool` byte-evicts once the ceiling
+  // binds — the entry survived as a husk whose log died one write later. The drain
+  // puts them BACK as the log, where an UNFILED entry's log is never evicted and
+  // `spoolEntryBytes` counts it.
+  assert.deepEqual(readFileSync(log), kept,
+    "the drain recorded 'kept' but left the bytes in the evictable orphan class");
+  assert.equal(existsSync(orphan), false, "an adopted orphan leaves no second name behind");
+  // The ledger must describe the arm that actually ran: there is no turn log at
+  // this point, so a "turn log has bytes" detail would assert a state that is false
+  // (the twin of `capture_spool._flush_one`, which splits them for this reason).
+  assert.match(readDiscards(spool).at(-1)!.detail as string, /no turn log, but an `.orphan`/,
+    "the ledger must not claim a turn log has bytes when none exists");
+});
+
+test("#14359: the restore cannot clobber a log that landed IN BETWEEN", () => {
+  // ⛔ The restore was a two-syscall TOCTOU (#14359 review cycle 4). Both legs
+  // write ONE spool directory; `stat`-then-`renameSync` let this happen: our
+  // writer quarantines the log, its write fails, it checks "absent" and the answer
+  // is yes — then the PYTHON leg writes the new turn, and our `renameSync`
+  // overwrites it with the pre-quarantine bytes. That leg reported `written: true`
+  // and its newest turn is gone, silently, caused by the code that exists to
+  // prevent exactly this. `linkSync` fails with EEXIST the moment any log exists.
+  //
+  // MUTATION THAT REDS THIS: restore with an UNCONDITIONAL
+  // `renameSync(quarantined, logPath)` — the other leg's turn is destroyed and the
+  // stale bytes take its place.
+  //
+  // ⚠️ STATED LIMITATION, measured (the twin of the Python test's note): a
+  // black-box fixture cannot separate `linkSync` from
+  // `if (!turnLogHasContent(...)) renameSync(...)` — that form reads "present" and
+  // skips, so it stays GREEN here (verified). `linkSync` is the mechanism AND the
+  // guarantee: it cannot be lied to because it does not ask. Do not "simplify" this
+  // back to a stat+rename on the strength of a green suite.
+  const spool = tmpSpool();
+  const sid = "raced-restore";
+  writeSpoolEntry(spool, snapshot(sid));
+  const log = join(spool, "entries", `${entryKey(sid)}.turns.jsonl`);
+  const stale = '{"note": "pre-quarantine bytes"}\n';
+  const newer = '{"role":"user","content":"the turn the other leg just wrote"}\n';
+  writeFileSync(log, stale);
+
+  const failed = writeSpoolEntry(
+    spool,
+    { ...snapshot(sid), turns: [{ role: "user", content: "replacement" }] },
+    undefined,
+    {
+      atomicWrite(path, text) {
+        if (path === log) {
+          // The other leg lands while we are "failing".
+          writeFileSync(log, newer);
+          throw new Error("simulated full disk");
+        }
+        writeFileSync(path, text);
+      },
+    },
+  );
+  assert.equal(failed.written, false);
+  assert.equal(
+    readFileSync(log, "utf8"),
+    newer,
+    "the restore overwrote a log that landed after the quarantine — the newest turn is gone",
+  );
+  const orphans = readdirSync(join(spool, "entries")).filter((n) => n.includes(".orphan"));
+  assert.equal(orphans.length, 1, "the stale bytes stay in the orphan, not in the live log");
+  assert.equal(readFileSync(join(spool, "entries", orphans[0]), "utf8"), stale);
 });

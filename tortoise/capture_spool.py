@@ -987,9 +987,11 @@ def _sibling_orphan_exists(root: Path, session_id: str) -> bool:
     ``<key>.turns.jsonl.orphan[N]``. So an entry whose log is ABSENT while an
     orphan for its own key exists is not provably empty — it is the state a
     process killed between the quarantine and the replacement write leaves behind,
-    and the only copy of that conversation is the orphan (which nothing can file
-    back). Cheaper and more precise than scanning: `_orphan_paths` is filtered to
-    this one key, so a spool full of unrelated orphans costs one directory read.
+    and the only copy of that conversation is the orphan.
+
+    Unlike :func:`_orphan_paths` (which sorts the WHOLE spool by mtime), this
+    filters to one key, so a spool full of unrelated orphans costs one directory
+    read. That matters: it is called from the drain's per-entry path.
     """
     prefix = f"{entry_key(session_id)}.turns.jsonl.orphan"
     d = _entries_dir(root)
@@ -1000,6 +1002,53 @@ def _sibling_orphan_exists(root: Path, session_id: str) -> bool:
         # An unlistable directory is not proof of absence, and this predicate
         # only ever WIDENS the safe reading (keep, do not unlink).
         return True
+
+
+def _adopt_sibling_orphan(root: Path, session_id: str) -> Path | None:
+    """Put a same-key orphan's bytes BACK as the turn log, and return the log.
+
+    The second half of the #14359 kill-window fix. Recording `transcript_torn` and
+    keeping the ENTRY is not enough: the bytes would stay in the orphan class, and
+    the orphan class is exactly what `prune_spool` BYTE-evicts once `max_total_bytes`
+    binds (the filed-entry pass runs first, the orphan pass second). So the entry
+    would survive as a husk whose log was deleted — the loss deferred by one write
+    instead of prevented (measured by review: the retained entry's orphan was gone
+    after the next prune at the ceiling).
+
+    Adopting makes the bytes a LOG, which an UNFILED entry's log never loses to the
+    prune (capture-loss: only a filed entry is evictable), and which `_entry_bytes`
+    counts toward the ceiling so it is visible rather than invisible.
+
+    ``os.link`` for the same reason the failed-write restore uses it: the log slot
+    is absent, but the other leg shares this directory, and only an atomic
+    create-or-fail can tell "still absent" from "someone just wrote it". A hard
+    link is created under the orphan's own inode, so the bytes are never copied and
+    cannot be half-written; the orphan name is then dropped. Any failure leaves the
+    orphan exactly as it was — nothing is lost by trying.
+    """
+    log = _log_path(root, session_id)
+    prefix = f"{entry_key(session_id)}.turns.jsonl.orphan"
+    try:
+        with os.scandir(_entries_dir(root)) as entries:
+            names = sorted(e.name for e in entries if e.name.startswith(prefix))
+    except OSError:
+        return None
+    for name in names:
+        orphan = _entries_dir(root) / name
+        try:
+            os.link(orphan, log)
+        except FileExistsError:
+            # A log exists after all — `_turn_log_has_content` would have been
+            # true and this arm unreachable. Nothing to do, nothing lost.
+            return None
+        except OSError:
+            # Hard links unsupported / no space for the directory entry: leave
+            # the bytes in the orphan rather than risk a copy.
+            continue
+        with contextlib.suppress(OSError):
+            os.unlink(orphan)
+        return log
+    return None
 
 
 def _quarantine_log(log: Path) -> Path | None:
@@ -1044,11 +1093,21 @@ def _quarantine_log(log: Path) -> Path | None:
     defect (#14359 review).
 
     ⚠️ AN ORPHAN CARRIES THE MTIME OF THE TRANSCRIPT IT HOLDS (a rename preserves
-    it), and `_orphan_paths` evicts oldest-first — correct for the corrupt-meta
-    class, whose age is real. Nothing else creates an orphan any more: the
-    window-shift class that would have carried a GOOD log's newest mtime is the
-    one the #14359 gate deliberately excludes, so this ordering cannot be
-    inverted by routine rewrites.
+    it), and `_orphan_paths` evicts oldest-first — correct only while every
+    producer's age is REAL. TWO producers remain:
+
+    * the corrupt-meta path (age is the transcript's own — exactly right); and
+    * the write path — the readable-meta zero-parse shape and the TORN TAIL
+      (`_log_has_complete_records` is False), one orphan per such rewrite. Its
+      mtime is also the transcript's own, i.e. recent, so the ordering still
+      holds.
+
+    What the #14359 gate deliberately EXCLUDES is the class that would break it:
+    a DELIBERATE rewrite (a MAX_TURNS window shift, a branch, a compaction) has a
+    good log whose mtime is the NEWEST possible, so quarantining those would put
+    the freshest bytes at the BACK of a fresh log's worth of litter — and spend a
+    whole log of the byte ceiling per turn. That class is why the gate asks
+    ``unusable_bytes`` rather than "not extends".
     """
     if _file_size(log) <= 0:
         with contextlib.suppress(OSError):
@@ -2322,14 +2381,20 @@ def write_spool_entry(
         # `transcript_empty` and UNLINKS the entry), so leaving it absent would
         # let our own failed write convert a fileable capture into a deletion
         # that reports "there was nothing to keep" — the false-reason class this
-        # module exists to close (#14359 review). Taken only while the log is
-        # still absent: a replacement that DID land is never clobbered by the
-        # old bytes, and a restore that itself fails leaves the bytes in the
-        # orphan (still better than deleting them).
-        if quarantined is not None \
-                and not _turn_log_has_content(root, snapshot.session_id):
+        # module exists to close (#14359 review).
+        #
+        # ⛔ `os.link`, NOT `stat`-then-`os.replace`. Both legs write this ONE
+        # directory, so the bytes can appear from the other leg at any moment; a
+        # check-then-replace is a two-syscall TOCTOU that would OVERWRITE a
+        # replacement which landed in between — silently dropping the newest
+        # turn while its meta claims the write succeeded. `link` is atomic and
+        # fails with `EEXIST` the moment ANY log exists, so the old bytes can
+        # only ever fill an ABSENT slot. On any failure the bytes stay in the
+        # orphan, which is still better than overwriting live data.
+        if quarantined is not None:
             with contextlib.suppress(OSError):
-                os.replace(quarantined, log_path)
+                os.link(quarantined, log_path)
+                os.unlink(quarantined)
         # A filesystem failure (full disk, read-only home) is a LOSS — record
         # it with a reason rather than returning an empty discard list.
         discards.append(record_discard(root, {
@@ -3446,21 +3511,31 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # `<key>.turns.jsonl.orphan[N]`. Unlinking here would then delete a
         # capture whose bytes this module itself moved, and the ledger would say
         # `transcript_empty` — "there was nothing to keep" — about bytes we had
-        # just decided were worth keeping. A sibling orphan makes the empty arm
-        # UNPROVABLE, so the torn arm (KEEP + terminal, reversible with
-        # `--retry-terminal`) is the only safe reading. Fail-closed in the one
-        # direction that costs nothing: an old orphan from an earlier corruption
-        # of the same key can only make an entry retained, never destroyed.
+        # just decided were worth keeping.
+        #
+        # Keeping the ENTRY is only half of it, which the first version of this
+        # arm missed: the bytes would still be in the ORPHAN class, and that class
+        # is what `prune_spool` byte-evicts once the ceiling binds — so the entry
+        # survived as a husk whose log was deleted one write later (measured by
+        # review). `_adopt_sibling_orphan` puts them back as the LOG, which an
+        # UNFILED entry never loses to the prune and which `_entry_bytes` counts.
+        # The consequence is unchanged (torn → record, keep, terminal): this arm
+        # restores the BYTES, it does not decide to deliver — the entry is still
+        # terminal, and `--retry-terminal` clears the marker so a later drain
+        # re-attempts (it will re-terminalise while the bytes are still torn).
         if _turn_log_has_content(root, sid):
             summary.discarded.append(_quarantine_entry(
                 root, meta, DISCARD_TRANSCRIPT_TORN,
                 "turn log has bytes but no parseable turn — kept", now_ms,
             ))
         elif _sibling_orphan_exists(root, sid):
+            restored = _adopt_sibling_orphan(root, sid)
             summary.discarded.append(_quarantine_entry(
                 root, meta, DISCARD_TRANSCRIPT_TORN,
-                "no turn log, but an `.orphan` for this key exists — a writer"
-                " moved the bytes aside before its replacement landed; kept",
+                ("no turn log, but an `.orphan` for this key held its bytes —"
+                 " put back as the log and kept" if restored is not None else
+                 "no turn log, but an `.orphan` for this key exists — a writer"
+                 " moved the bytes aside before its replacement landed; kept"),
                 now_ms,
             ))
         else:

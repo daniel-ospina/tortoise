@@ -1,4 +1,4 @@
-// tortoise-hook-version: 26
+// tortoise-hook-version: 27
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -286,6 +286,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -1805,15 +1806,6 @@ function quarantineLog(log: string): string | undefined {
   }
 }
 
-/** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
- *
- *  `quarantineLog` moves an unusable transcript aside as
- *  `<key>.turns.jsonl.orphan[N]`. Nothing else reads that name, so without this
- *  accounting the bytes are invisible to `spoolEntryBytes` and to the meta scan:
- *  the spool could grow past `maxTotalBytes` without bound the moment a meta was
- *  quarantined — one full transcript per corrupt meta. A rename preserves mtime,
- *  so an orphan carries the age of the transcript it holds and oldest-first
- *  eviction is deterministic. */
 /** Does THIS entry key already have a quarantined log beside its meta?
  *
  *  The ordering witness for the drain's empty-transcript arm (#14359, the twin of
@@ -1822,6 +1814,17 @@ function quarantineLog(log: string): string | undefined {
  *  present" is the state a process killed between the quarantine and the
  *  replacement write leaves. A sibling orphan therefore makes the empty arm
  *  UNPROVABLE and the torn arm (keep + terminal) the only safe reading. */
+/** Does THIS entry key already have a quarantined log beside its meta?
+ *
+ *  The ordering witness for the drain's empty-transcript arm (#14359, the twin of
+ *  `capture_spool._sibling_orphan_exists`): `writeSpoolEntry` moves an unusable
+ *  log aside rather than deleting it, so "log absent, orphan for this key
+ *  present" is the state a process killed between the quarantine and the
+ *  replacement write leaves.
+ *
+ *  Unlike `orphanPaths` (which sorts the WHOLE spool by mtime), this filters to
+ *  one key, so a spool full of unrelated orphans costs one directory read — it is
+ *  called from the drain's per-entry path. */
 function siblingOrphanExists(dir: string, sessionId: string): boolean {
   const prefix = `${entryKey(sessionId)}.turns.jsonl.orphan`;
   try {
@@ -1833,6 +1836,59 @@ function siblingOrphanExists(dir: string, sessionId: string): boolean {
   }
 }
 
+/** Put a same-key orphan's bytes BACK as the turn log, and return the log.
+ *
+ *  The second half of the #14359 kill-window fix (twin of
+ *  `capture_spool._adopt_sibling_orphan`). Recording `transcript_torn` and keeping
+ *  the ENTRY is not enough: the bytes would stay in the orphan class, and that
+ *  class is exactly what `pruneSpool` BYTE-evicts once `maxTotalBytes` binds. The
+ *  entry would survive as a husk whose log was deleted one write later.
+ *
+ *  Adopting makes the bytes a LOG — which an UNFILED entry's log never loses to
+ *  the prune (capture-loss) and which `spoolEntryBytes` counts.
+ *
+ *  `linkSync` for the same reason the failed-write restore uses it: the slot is
+ *  absent, but the Python leg shares this directory, and only an atomic
+ *  create-or-fail can tell "still absent" from "someone just wrote it". A hard
+ *  link shares the inode, so the bytes are never copied. Any failure leaves the
+ *  orphan exactly as it was. */
+function adoptSiblingOrphan(dir: string, sessionId: string): string | undefined {
+  const log = logPathFor(dir, sessionId);
+  const prefix = `${entryKey(sessionId)}.turns.jsonl.orphan`;
+  let names: string[];
+  try {
+    names = readdirSync(entriesDir(dir)).filter((n) => n.startsWith(prefix)).sort();
+  } catch {
+    return undefined;
+  }
+  for (const name of names) {
+    const orphan = join(entriesDir(dir), name);
+    try {
+      linkSync(orphan, log);
+    } catch {
+      // EEXIST (a log exists after all) or hard links unsupported: leave the bytes
+      // in the orphan rather than risk a copy.
+      continue;
+    }
+    try {
+      unlinkSync(orphan);
+    } catch {
+      // the adopted name stays; the log now holds the same inode
+    }
+    return log;
+  }
+  return undefined;
+}
+
+/** Quarantined turn logs in the entries dir, OLDEST first (#8531 review).
+ *
+ *  `quarantineLog` moves an unusable transcript aside as
+ *  `<key>.turns.jsonl.orphan[N]`. Nothing else reads that name, so without this
+ *  accounting the bytes are invisible to `spoolEntryBytes` and to the meta scan:
+ *  the spool could grow past `maxTotalBytes` without bound the moment a meta was
+ *  quarantined — one full transcript per corrupt meta. A rename preserves mtime,
+ *  so an orphan carries the age of the transcript it holds and oldest-first
+ *  eviction is deterministic. */
 function orphanPaths(dir: string): string[] {
   const root = entriesDir(dir);
   let names: string[];
@@ -2607,11 +2663,25 @@ export function writeSpoolEntry(
     writeAtomic(metaPath, metaText);
     sweepStaleTempFiles(dir);
   } catch (err) {
-    if (quarantined !== undefined && !turnLogHasContent(dir, snapshot.sessionId)) {
+    // ⛔ `linkSync`, NOT `stat`-then-`renameSync`. Both legs write this ONE
+    // directory, so the bytes can appear from the Python leg at any moment; a
+    // check-then-rename is a two-syscall TOCTOU that would OVERWRITE a
+    // replacement which landed in between — silently dropping the newest turn
+    // while its meta claims the write succeeded. `link` is atomic and fails with
+    // EEXIST the moment ANY log exists, so the old bytes can only ever fill an
+    // ABSENT slot. On any failure they stay in the orphan, which is strictly
+    // better than overwriting live data.
+    if (quarantined !== undefined) {
       try {
-        renameSync(quarantined, logPath);
+        linkSync(quarantined, logPath);
+        try {
+          unlinkSync(quarantined);
+        } catch {
+          // the orphan name stays; the log holds the same inode
+        }
       } catch {
-        // the orphan remains the only copy if restoration also fails
+        // EEXIST (a log landed first) or hard links unsupported: leave the bytes
+        // in the orphan rather than risk clobbering or copying.
       }
     }
     // A filesystem failure (full disk, read-only home) is a LOSS — record it
@@ -2680,9 +2750,9 @@ function compareAge(a: SpoolMeta, b: SpoolMeta): number {
  *
  * A quarantined turn log (`quarantineLog`) is absent from BOTH accounting
  * paths — `orphanPaths` is not `metas`, and `spoolEntryBytes` addresses only
- * meta scan and from `spoolEntryBytes`: its bytes are counted HERE and it is
- * evicted (oldest first, by mtime) AFTER the filed-entry pass and before any
- * UNFILED live entry. Without this, the byte ceiling stopped applying the moment
+ * `<key>.meta.json` + `<key>.turns.jsonl`, never an `.orphan` — so its bytes are
+ * counted HERE and it is evicted (oldest first, by mtime) AFTER the filed-entry
+ * pass and before any UNFILED live entry. Without this, the byte ceiling stopped applying the moment
  * a meta was quarantined and the spool could grow past it without bound (#8531
  * review). A quarantined log goes LAST of the evictable classes, not first: a
  * FILED entry's content is already on the wire, so reclaiming it is a CERTAIN
@@ -3901,14 +3971,31 @@ export async function flushSpool(
         // `transcript_empty`, i.e. "there was nothing to keep". The torn arm KEEPS
         // it, which is reversible (`--retry-terminal`); the only cost of being
         // wrong here is a retained entry.
-        summary.discarded.push(
-          turnLogHasContent(dir, meta.session_id) || siblingOrphanExists(dir, meta.session_id)
-            ? quarantineEntry(
-                dir, meta, DISCARD_TRANSCRIPT_TORN,
-                "turn log has bytes but no parseable turn — kept", nowMs,
-              )
-            : discardEntry(dir, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty"),
-        );
+        if (turnLogHasContent(dir, meta.session_id)) {
+          summary.discarded.push(
+            quarantineEntry(
+              dir, meta, DISCARD_TRANSCRIPT_TORN,
+              "turn log has bytes but no parseable turn — kept", nowMs,
+            ),
+          );
+        } else if (siblingOrphanExists(dir, meta.session_id)) {
+          const restored = adoptSiblingOrphan(dir, meta.session_id);
+          summary.discarded.push(
+            quarantineEntry(
+              dir, meta, DISCARD_TRANSCRIPT_TORN,
+              restored !== undefined
+                ? "no turn log, but an `.orphan` for this key held its bytes —" +
+                  " put back as the log and kept"
+                : "no turn log, but an `.orphan` for this key exists — a writer" +
+                  " moved the bytes aside before its replacement landed; kept",
+              nowMs,
+            ),
+          );
+        } else {
+          summary.discarded.push(
+            discardEntry(dir, meta, DISCARD_TRANSCRIPT_EMPTY, "turn log is empty"),
+          );
+        }
         continue;
       }
 

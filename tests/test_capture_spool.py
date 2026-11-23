@@ -5576,17 +5576,26 @@ def test_a_kill_between_the_quarantine_and_the_write_keeps_the_entry(tmp_path):
     itself had just moved aside because they were worth keeping.
 
     An orphan for the SAME key makes that arm unprovable, so it is read as torn:
-    recorded, marked terminal and KEPT (reversible with `--retry-terminal`). The
-    asymmetry is the point — a stale orphan can only make an entry retained,
-    never destroyed.
+    recorded, marked terminal and KEPT. The asymmetry is the point — a stale
+    orphan can only make an entry retained, never destroyed.
+
+    ⚠️ `--retry-terminal` CLEARS THE MARKER; it does not make a torn log
+    deliverable. The next drain re-attempts and re-terminalises while the bytes
+    are still torn (the repo records this for the byte-bearing torn case at
+    `test_a_terminal_transcript_torn_...`), so the marker is a "try again" flag,
+    not the recovery. What this arm does recover is the BYTES: it adopts the
+    orphan back as the log, where an unfiled entry's log is never evicted.
 
     MUTATION THAT REDS THIS: drop the ``elif _sibling_orphan_exists(...)`` arm —
     the entry is unlinked and the ledger says ``transcript_empty``.
     """
     from tortoise.capture_spool import (
         DISCARD_TRANSCRIPT_TORN,
+        Bounds,
+        _entry_bytes,
         _log_path,
         _orphan_paths,
+        prune_spool,
         read_discards,
         read_spool_meta,
     )
@@ -5612,5 +5621,85 @@ def test_a_kill_between_the_quarantine_and_the_write_keeps_the_entry(tmp_path):
     meta = read_spool_meta(root, sid)
     assert meta is not None, "the entry was deleted although its bytes are on disk"
     assert meta["terminal_failure"]["reason"] == DISCARD_TRANSCRIPT_TORN
-    # The bytes are untouched — the drain reads an orphan, it never deletes one.
-    assert _orphan_paths(root)[0].read_bytes() == orphan_bytes
+
+    # ⛔ KEEPING THE ENTRY IS ONLY HALF OF IT (#14359 review cycle 4). The bytes
+    # stayed in the ORPHAN class, and that class is exactly what `prune_spool`
+    # byte-evicts once the ceiling binds — so the entry survived as a husk whose
+    # log the very next write deleted. The drain must put them BACK as the log:
+    # an UNFILED entry's log is never evicted (capture-loss), and `_entry_bytes`
+    # then counts it, so the bytes are protected AND visible.
+    assert _log_path(root, sid).read_bytes() == orphan_bytes, (
+        "the drain recorded 'kept' but left the bytes in the evictable orphan class")
+    assert _orphan_paths(root) == [], "an adopted orphan must not leave a second name behind"
+
+    # The consequence, measured: a prune at a ceiling tight enough to bind reaps
+    # the orphan class first — and must now find nothing to reap. Without the
+    # restore this is where the bytes died (measured by review).
+    live = _entry_bytes(root, sid)
+    prune_spool(root, None, Bounds(max_total_bytes=max(1, live - 1)))
+    assert _log_path(root, sid).read_bytes() == orphan_bytes, (
+        "the prune deleted the very bytes the torn record says are kept")
+
+
+def test_the_restore_cannot_clobber_a_log_that_landed_IN_BETWEEN(tmp_path, monkeypatch):
+    """#14359 review cycle 4 — the restore was a two-syscall TOCTOU.
+
+    Both legs write ONE spool directory. `stat`-then-`os.replace` let this
+    sequence destroy live data: writer A quarantines the log and its write fails;
+    A checks "absent" and the answer is yes; the OTHER leg writes the new turn
+    into `<key>.turns.jsonl`; A's `os.replace` overwrites it with the
+    pre-quarantine bytes. The other leg reported `written: true`, its newest turn
+    is gone, and the log now contradicts its meta — a silent loss caused by the
+    very code that exists to prevent one.
+
+    `os.link` cannot do that: it fails with EEXIST the moment any log exists, so
+    the old bytes can only ever fill an ABSENT slot. On failure they stay in the
+    orphan, which is strictly better than overwriting live data.
+
+    MUTATION THAT REDS THIS: restore with an UNCONDITIONAL
+    ``os.replace(quarantined, log_path)`` — the other leg's turn is destroyed and
+    the stale bytes take its place.
+
+    ⚠️ STATED LIMITATION, measured: a black-box fixture cannot separate `link`
+    from ``if not <absent>: os.replace`` — that form reads "present" and skips for
+    exactly the reason the check exists, so `stat`-then-`replace` stays GREEN under
+    this test (verified). The property it would break is only observable in the
+    gap between its read and its move, which a fixture cannot enter. `os.link` is
+    therefore the mechanism AND the guarantee: it cannot be lied to, because it
+    does not ask. The check-then-act form is caught by reading the syscall, not by
+    a test — do not "simplify" this back to a stat+replace on the strength of a
+    green suite.
+    """
+    import tortoise.capture_spool as capture_spool
+    from tortoise.capture_spool import (
+        _entries_dir,
+        _log_path,
+        _orphan_paths,
+    )
+
+    root = tmp_path / "toctou"
+    sid = "14359-raced-restore"
+    write_spool_entry(root, _snapshot(sid))
+    stale = b'{"note": "pre-quarantine bytes"}\n'
+    _log_path(root, sid).write_bytes(stale)
+    newer = b'{"role":"user","content":"the turn the OTHER leg just wrote"}\n'
+
+    def _write_then_fail(path, text):
+        """The other leg's write lands, then OUR write fails."""
+        if path == _log_path(root, sid) and not _log_path(root, sid).exists():
+            _log_path(root, sid).write_bytes(newer)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(capture_spool, "_atomic_write", _write_then_fail)
+    result = write_spool_entry(root, _snapshot(sid, turns=[
+        {"role": "user", "content": "a fresh turn"}]))
+    assert result["written"] is False
+
+    assert _log_path(root, sid).read_bytes() == newer, (
+        "the restore overwrote a log that landed after the quarantine — the newest"
+        " turn is gone and the log now contradicts its meta")
+    # The stale bytes are not lost either: they are still in the orphan.
+    assert [p.read_bytes() for p in _orphan_paths(root)] == [stale]
+    assert [p.name for p in _entries_dir(root).iterdir()
+            if ".turns.jsonl.orphan" in p.name] == [f"{_log_path(root, sid).name}.orphan"]
+
