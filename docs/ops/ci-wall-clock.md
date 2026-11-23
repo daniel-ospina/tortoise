@@ -396,8 +396,8 @@ was re-cut. Re-derive it with the emission rather than restating it, exactly lik
 the committed `config/ci-surfaces.yml` S=11 header block's `0.5 m` of headroom; summing the
 UNROUNDED terms instead gives `60 − 51.6467` = 8.35, which moves no verdict and would put this
 sentence 0.01 m away from the instrument it cites.)
-`tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pinned
-that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`) until that arithmetic arm was cut, and the watchdog comes from
+`tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
+that shape — no implicit `actions/cache@` post step anywhere in the job, `~/.cache/uv` written by exactly one `actions/cache/save@` that is time-bounded, `cache-hit`-gated and preceded by a bounded `uv cache prune`, and `~/.cache/pip` restore-only (two other jobs own that key) — and it also holds this section's emitted-watchdog figure to the emission. The watchdog itself comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
 clamp the carve-out shards land on, not the fast shards' budget, and restating a clamp as a budget
 is how a constant goes stale. At the first pass FOUR rows did NOT clear it, and all four were

@@ -12672,6 +12672,144 @@ def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
         f"this work is exactly the defect #3239 reports")
 
 
+
+
+#: §2 of `docs/ops/ci-wall-clock.md` states the emitted per-shard watchdog as
+#: "the emitted **<N> m** per-shard watchdog" — two spellings, both read.
+_EMITTED_WATCHDOG_CLAIM_RE = re.compile(
+    r"the emitted \*\*(\d+) m\*\* per-shard|the emitted (\d+) m per-shard")
+
+
+def test_the_test_job_carries_no_unbounded_cache_post_step():
+    """#11063: the `test` job must carry NO unbounded cache post step, and its
+    `~/.cache/uv` writer must be bounded twice — in SIZE and in TIME.
+
+    MEASURED (run 42000057137, job `test (d)` 127165076497, runner
+    `pi-runner-vm-6`, 90 m cap): the uv+pip restore MISSED where the other EIGHT
+    shards HIT it in 5.7-32.7 s, and the `actions/cache` POST step then tarred
+    4 m 07 s and uploaded a 3,882,423,064 B payload — `Sent 3019898880 of
+    3882423064 (77.8%), 0.9 MBs/sec` at 11:51:52, i.e. 3,412 s. Every WORK step
+    was green (suite 10:28:58 -> 10:45:07) and the job ended `cancelled`, which
+    `python-ci-gate` reads as RED by design (#5219), so a REQUIRED check was
+    WITHHELD by a cache upload on a passing shard.
+
+    The payload is TWO payloads and that is what the shape rests on
+    (`actions/caches`, same key, different refs): `pip-Linux-8755d72f…` is
+    3,616,385,308 B in a PR scope and 397,897,273 B on `refs/heads/main`, while
+    `uv-pip-Linux-8755d72f…` is 662,393,744 B on main — so pip (the torch wheel
+    set, #7612's own payload) is 93% of the upload on its own, and TWO other
+    jobs write `pip-<os>-<hash uv.lock>`: this job READS pip and writes nothing.
+    The uv half has no other writer, so this job keeps ONE writer and its save
+    archives `~/.cache/uv` ALONE.
+
+    Bounded twice, because a time bound alone on an unbounded payload is the
+    shape #11065 cycle 2 already rejected:
+      * SIZE — `uv cache prune` runs BEFORE the save, itself bounded and
+        `continue-on-error` (a leg that failed before `uv` was installed has
+        nothing to prune, and a prune that cannot run is not an error);
+      * TIME — the save is bounded at 7 m, `continue-on-error`, and gated on
+        `cache-hit != 'true'` (the output is `'true'` only on an exact
+        primary-key match, `'false'` on a `restore-keys` match). An aborted save
+        is a MISS: it can never red this leg and can never withhold a check.
+
+    This pin ALSO holds §2 of `docs/ops/ci-wall-clock.md` to the emission (its
+    `the emitted **<N> m** per-shard watchdog`), which is the citation
+    `python-ci.yml` makes about it: prose restating a computed constant is
+    exactly how `df8adb90a` restated 27 m while `--emit-push-matrix` emitted
+    26 m (#11065 cycle 2, finding 3).
+
+    Non-vacuous in both directions, and asserted so: the writer, the restore and
+    the prune must all be FOUND below, so a renamed step reds this instead of
+    turning it into a no-op gate over an empty subject set.
+    """
+    job = _load_python_ci()["jobs"]["test"]
+    steps = job.get("steps") or []
+
+    def _uses(step: dict) -> str:
+        return str(step.get("uses") or "").split("@")[0].strip().lower()
+
+    def _path(step: dict) -> str:
+        return str((step.get("with") or {}).get("path") or "")
+
+    # (a) no IMPLICIT save. `actions/cache@` installs a post step whose payload
+    # and duration nothing here bounds; `restore@` + `save@` is the split
+    # spelling that makes both boundable.
+    implicit = [str(s.get("name") or s.get("uses")) for s in steps
+                if _uses(s) == "actions/cache"]
+    assert implicit == [], (
+        "the `test` job carries an IMPLICIT `actions/cache@` post-step save — the "
+        f"unbounded upload that cancelled `test (d)` for 3,412 s (#11063): {implicit}")
+
+    # (b) …and a `setup-*` `cache:`-family input is the SECOND way to acquire a
+    # save this job does not bound.
+    armed = [str(s.get("name")) for s in steps
+             if any(str(k).strip().lower() == "cache"
+                    for k in (s.get("with") or {}))]
+    assert armed == [], (
+        "a `cache:`-family input on a setup action installs that action's own "
+        f"post-step save, which nothing here bounds (#11063): {armed}")
+
+    # (c) ONE bounded writer on `~/.cache/uv`, and it is the EXPLICIT save.
+    uv_writers = [(i, s) for i, s in enumerate(steps)
+                  if _path(s) == "~/.cache/uv" and _uses(s) != "actions/cache/restore"]
+    assert len(uv_writers) == 1, (
+        "exactly ONE step may write `~/.cache/uv` — it has no other writer in "
+        "this workflow, and a writerless key only survives until expiry or the "
+        f"next `uv.lock` bump (#7612), found: "
+        f"{[(i, str(s.get('name'))) for i, s in uv_writers]}")
+    save_i, save = uv_writers[0]
+    assert _uses(save) == "actions/cache/save", (
+        f"the uv writer must be the EXPLICIT `actions/cache/save@`, not {save.get('uses')!r}")
+    bound = save.get("timeout-minutes")
+    assert isinstance(bound, int) and save.get("continue-on-error") is True, (
+        "the uv save must be bounded in TIME and unable to red the leg: "
+        f"timeout-minutes={bound!r}, continue-on-error={save.get('continue-on-error')!r}")
+    assert "cache-hit" in str(save.get("if") or ""), (
+        "the uv save must be gated on `cache-hit != 'true'` — a `restore-keys` "
+        "HIT leaves that output `'false'`, so an ungated save re-uploads a cache "
+        f"it just restored (#11063): if={save.get('if')!r}")
+    prunes = [(i, s) for i, s in enumerate(steps)
+              if "uv cache prune" in str(s.get("run") or "")]
+    assert prunes, (
+        "no step runs `uv cache prune` before the uv save — that is the SIZE half "
+        "of the bound, and without it the save archives `archive-v0` entries no "
+        "current environment reaches (#11063)")
+    prune_i, prune = prunes[0]
+    assert prune_i < save_i, (
+        "the uv prune must run BEFORE the save; saving first archives exactly the "
+        "accumulated entries the prune exists to drop (#11063)")
+    assert isinstance(prune.get("timeout-minutes"), int) and prune.get("continue-on-error") is True, (
+        "the prune must be bounded in time and unable to red the leg — a leg that "
+        "failed before `uv` was installed has nothing to prune: "
+        f"timeout-minutes={prune.get('timeout-minutes')!r}, "
+        f"continue-on-error={prune.get('continue-on-error')!r}")
+
+    # (d) the payload SPLIT: pip is restore-only HERE, because two other jobs
+    # write its key and it is 93% of the payload that cancelled the shard.
+    pip_writers = [str(s.get("name")) for s in steps
+                   if _path(s) == "~/.cache/pip" and _uses(s) != "actions/cache/restore"]
+    assert pip_writers == [], (
+        "this job must READ the pip cache and write nothing — two other jobs own "
+        "that key and it is 93% of the 3.8 GB payload that cancelled a green "
+        f"shard (#7612/#11063): {pip_writers}")
+
+    # (e) §2's stated emitted watchdog must BE the emission (docstring, last ¶).
+    wall = (Path(__file__).resolve().parents[1] / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    stated = _EMITTED_WATCHDOG_CLAIM_RE.search(wall)
+    assert stated, (
+        "docs/ops/ci-wall-clock.md §2 no longer states the emitted per-shard "
+        "watchdog in a form this pin can read (`the emitted <N> m per-shard`) — "
+        "restore the phrase or move this arm with it, rather than leaving a pin "
+        "that reads nothing")
+    emitted = max(s["watchdog_minutes"] for s in cs.push_legs(cs.load_manifest())["shards"])
+    assert int(stated.group(1) or stated.group(2)) == emitted, (
+        f"docs/ops/ci-wall-clock.md §2 states the emitted per-shard watchdog as "
+        f"{stated.group(1) or stated.group(2)} m, but `--emit-push-matrix` emits "
+        f"{emitted} m. §2's SUM and the room the workflow comment quotes from it "
+        "are computed from this term: a doc that restates it wrongly makes the "
+        "arithmetic unfalsifiable (#11065 cycle 2, finding 3)")
+
+
 def test_every_required_merge_check_carries_an_outer_cap():
     """A job EMITTING a required merge context must carry a literal cap.
 
