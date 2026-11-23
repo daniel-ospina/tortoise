@@ -445,11 +445,19 @@ def _str_constants(tree: ast.AST) -> dict[str, frozenset[str]]:
     #: one that under-approximates: the first reds every PR, the second is named here.
     #:
     #: SO THE CLASS IS NAMED, NOT SILENT, and it is wider than "a loop": the applied count is
-    #: not enumerated for a `For`/`AsyncFor` body, a comprehension's element OR `if` clause, a
-    #: `while` body, or a loop whose iterable is a NAME, an attribute, a call or a STARRED
-    #: literal (`for _p in (*("_fts","_query"),)`). Each is pinned GREEN below by
+    #: not enumerated for a `For` body (`AsyncFor` is the same arm one node type over), a
+    #: comprehension's element OR `if` clause, a `while` body, or a loop whose iterable is a
+    #: NAME, an attribute, a call or a STARRED literal (`for _p in (*("_fts","_query"),)`).
+    #: Each of those is pinned GREEN by
     #: `test_an_accumulation_over_several_iterations_is_the_DECLARED_residual`, so a later
     #: change that starts resolving them must edit the note instead of leaving it stale.
+    #: ⛔ THE `AsyncFor` *BIND* IS PINNED SOMEWHERE ELSE, AND SAYING "EACH IS PINNED BELOW"
+    #: WAS FALSE FOR IT (#14326 round 17, MEASURED at `689708686b`: deleting `ast.AsyncFor`
+    #: from the bind tuple below left the whole file at **39 passed**). The residual test
+    #: cannot carry it — its rows are wrapped in a plain `def run(…)`, where `async for` is a
+    #: SyntaxError — so the arm is pinned by the `async for target` assertion in
+    #: `test_EVERY_static_binding_form_is_a_READ_reach`, which REDS when that member is
+    #: dropped. Both properties are pinned; neither is claimed here as the other's.
     accruals: list[tuple[int, int, str, ast.Name, ast.AST]] = []
 
     for node in ast.walk(tree):
@@ -4987,6 +4995,21 @@ def _pin_source(body: str) -> ast.AST:
         "leg_trace=None)\n" + body + "    return results\n")
 
 
+def _pin_source_async(body: str) -> ast.AST:
+    """`_pin_source`'s wrapper for the shapes that only parse inside an `async def`.
+
+    ⛔ SAME TWO REAL READS, ONE KEYWORD APART (#14326 round 17). `_pin_source` opens a plain
+    `def run(…)`, and `async for` under a plain `def` is a SyntaxError, so the `AsyncFor`
+    target row cannot ride the shared table without a second wrapper. Nothing else differs:
+    the census walks the AST and never looks at the enclosing function's kind.
+    """
+    return ast.parse(
+        "async def run(sdk, queries):\n"
+        "    sdk._tortoise_fts_query(query=queries[0]['query'], limit=10)\n"
+        "    results = sdk._tortoise_fts_query(query=queries[0]['query'], limit=10, "
+        "leg_trace=None)\n" + body + "    return results\n")
+
+
 def _pin_refuses(source: ast.AST) -> bool:
     """True when the pin's OWN three reach assertions on `source` would be RED.
 
@@ -5138,6 +5161,16 @@ def test_an_accumulation_over_several_ITERATIONS_is_the_DECLARED_residual() -> N
                                  '        _S += _p\n'),
         "loop over a NAME": ('    _SEQ = ("_fts", "_query")\n    _S = "_tortoise"\n'
                              '    for _p in _SEQ:\n        _S = _S + _p\n'),
+        # ⛔ THE OTHER TWO ITERABLE KINDS THE DOCSTRING NAMES (#14326 round 17). The note at
+        # the bind arm lists "a NAME, an attribute, a call or a STARRED literal", but only
+        # NAME and STARRED had a row — the sentence claimed coverage the row set did not
+        # have, which is the drift class round 5 fixed one commit earlier. MEASURED under
+        # BOTH implementations: neither flips (an attribute/call iterable resolves to nothing,
+        # so `_S` is `{'_tortoise'}` either way) — these are boundary pins, not detectors.
+        "loop over an ATTRIBUTE": ('    _S = "_tortoise"\n    for _p in _cfg.parts:\n'
+                                   '        _S = _S + _p\n'),
+        "loop over a CALL": ('    _S = "_tortoise"\n    for _p in _parts():\n'
+                             '        _S = _S + _p\n'),
         "STARRED literal iterable": ('    _S = "_tortoise"\n'
                                      '    for _p in (*("_fts", "_query"),):\n'
                                      '        _S = _S + _p\n'),
@@ -5228,6 +5261,9 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
         Reverting that function's `with` arm to the whole-node walk instead REDS the
         with-body control, which is why both directions carry a row: the same arm decided a
         false PASS and a false RED.
+      - delete `ast.AsyncFor` from `_str_constants`' bind tuple -> the `async for target`
+        row goes GREEN (round 17, MEASURED at `689708686b`: the deletion left the whole file
+        at **39 passed**, so the member was an unpinned clause; with the row, 1 failed);
       - the three clauses a fresh-context review MEASURED unpinned at `bb89a48cee7e` each
         leave the whole file **25 passed** when reverted, and each now reds exactly one row
         (applied in place, restored byte-identically — sha256 `c52c28a4cf65`): the
@@ -6002,6 +6038,20 @@ def test_EVERY_static_binding_form_is_a_READ_reach() -> None:
             f"[{label}] a third reach executes the product read with `kind=\"statement\"` and "
             "the pin is GREEN on it — every static binding of the literal must resolve, or "
             "the `intentional_keep` grant for `run()` stands on a pin that cannot go red")
+
+    # ⛔ AN `async for` TARGET IS THE SAME BIND ARM AND IT WAS UNPINNED (#14326 round 17,
+    # MEASURED at `689708686b`: deleting `ast.AsyncFor` from `_str_constants`' bind tuple —
+    # `elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension))` — left this whole
+    # file at **39 passed**, so the member was a clause no mutant could red, which is the
+    # defect this table exists to delete clauses for). It cannot ride the table above: the
+    # wrapper there is a plain `def run(…)`, where `async for` is a SyntaxError. Same shape,
+    # same verdict, `_pin_source_async`.
+    assert _pin_refuses(_pin_source_async(
+        '    async for _N in ("_tortoise_fts_query",):\n'
+        f'        {reach.format(name="_N")}\n')), (
+        "an `async for` target carrying the read name is a reach — `ast.AsyncFor` is in the "
+        "same bind arm as `ast.For`, and removing it must red this row rather than leave "
+        "the arm unpinned")
 
     # ⛔ THE CONTROL, in the false-red direction: a constant that only NAMES the read.
     inert = ('    _NOTE = "_tortoise_fts_query"\n'
