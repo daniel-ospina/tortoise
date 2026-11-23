@@ -916,12 +916,12 @@ def _concatenations(left: frozenset[str], right: frozenset[str]) -> frozenset[st
     and the reason this arm was the asymmetry worth deleting: the bind path and the inline
     path now share one budgeted implementation, so neither can drift from the other again.
 
-    Returning the empty set when either side is unresolvable is what keeps the declared
-    residual (`_N + "_x"` with a parameter `_N`) out of the census without a guard clause
-    restating it (#14326 round 11) — the same rule `_string_products` keeps.
+    An unresolvable side (`_N + "_x"` with a parameter `_N`) yields the EMPTY SET because the
+    comprehension below iterates an empty operand set — there is no guard clause restating
+    it, and the one that sat here was deleted (#14326 delta review P3, MEASURED: deleting it
+    left the suite byte-identically green, since `frozenset(a + b for a in ∅ …)` is already
+    `frozenset()`) — the same rule `_string_products` keeps.
     """
-    if not left or not right:
-        return frozenset()
     if len(left) * len(right) > _PRODUCT_MAX_COMBINATIONS:
         raise _ResolutionDidNotConverge(
             f"the `+` resolver would build more than {_PRODUCT_MAX_COMBINATIONS} "
@@ -1161,6 +1161,131 @@ def _constant_slice_bounds(slice_node: ast.Slice) -> tuple[int | None, int | Non
     return (bounds[0], bounds[1], bounds[2])
 
 
+def _literal_chain(node: ast.Subscript) -> list[ast.AST] | None:
+    """`X[a][b]…` as `[X, a, b, …]` when `X` is SPELLED IN THE SOURCE, else `None`.
+
+    `None` is the DECLARED residual, not a gap: a chain rooted at a NAME, an attribute or a
+    call (`_CFG["read"][0]`, `self._read[0]`, `_mk()[0]`) is not statically pairable, and
+    that is the boundary `_subscript_strings` already declines one level down.
+    """
+    indices: list[ast.AST] = []
+    base: ast.AST = node
+    while isinstance(base, ast.Subscript):
+        indices.append(base.slice)
+        base = base.value
+    if not (isinstance(base, (ast.Tuple, ast.List, ast.Dict))
+            or (isinstance(base, ast.Constant) and isinstance(base.value, str))):
+        return None
+    return [base, *reversed(indices)]
+
+
+def _spread_elements(elements: list[ast.AST]) -> list[ast.AST]:
+    """A display's elements with every `Starred` over a SOURCE-SPELLED sequence SPLICED in.
+
+    ⛔ A STAR IS A POSITION OFFSET, NOT ONE ELEMENT (#14326 delta review P2, measured at
+    `2692b9d3`): `[*("_tortoise_fts_query",)][0]` was RED because the star sat at position 0
+    of a one-element display, while `[*("x", "_tortoise_fts_query")][1]` — the SAME value at
+    the same displayed position, one element over — was GREEN (`refuses=False`, `m=2 c=2
+    i=0`) with a third `kind="statement"` reach executing the read. Counting the star as one
+    element makes every index after it select the wrong (or no) candidate.
+
+    Only a literal operand can be spliced: `[*(_rest)]` is the declared residual (the NAME
+    is not statically enumerable), so it stays a single unresolved candidate.
+    """
+    out: list[ast.AST] = []
+    for element in elements:
+        if (isinstance(element, ast.Starred)
+                and isinstance(element.value, (ast.Tuple, ast.List))):
+            out.extend(_spread_elements(element.value.elts))
+        else:
+            out.append(element)
+    return out
+
+
+def _indexed_values(values: list, index: ast.AST) -> list:
+    """Apply ONE index step to every statically possible value of the container.
+
+    A value is either a `str` already computed (a literal string, a slice of one) or an AST
+    node standing for a container SPELLED IN THE SOURCE — the distinction that lets a chain
+    index a TUPLE and then a STRING inside it without flattening the tuple to its elements.
+
+    A RUNTIME index over a literal sequence selects ONE OF its elements (the union rule the
+    single-level arms already state); a CONSTANT SLICE of a sequence selects a SUB-SEQUENCE —
+    a container in its own right, so it is wrapped rather than flattened, because the next
+    index digs into the selection (`("x", "…")[1:][0]`) and flattening there read the
+    element as if it were the sliced tuple's value (measured: `{'…'[0]}` — a character of the
+    READ NAME's own spelling — instead of the name). A literal mapping with a constant key
+    selects exactly that key's value and NOTHING when the key is absent (the runtime
+    `KeyError`), and a `**`-spread or a runtime key selects among its values.
+    """
+    out: list = []
+    bounds = _constant_slice_bounds(index) if isinstance(index, ast.Slice) else None
+    positions = [] if isinstance(index, ast.Slice) else _int_literals(index)
+    for value in values:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            # A literal STRING selected by an earlier step is the same value as a computed
+            # one (`("x", "…")[1:]` selects a `Constant`, and the next index digs into IT).
+            value = value.value
+        if isinstance(value, ast.Starred):
+            out.extend(_indexed_values([value.value], index))
+        elif isinstance(value, str):
+            if isinstance(index, ast.Slice):
+                if bounds is not None:
+                    out.append(value[slice(*bounds)])
+            else:
+                out.extend(value[position] for position in positions
+                           if -len(value) <= position < len(value))
+        elif isinstance(value, (ast.Tuple, ast.List)):
+            elements = _spread_elements(list(value.elts))
+            if isinstance(index, ast.Slice):
+                if bounds is not None:
+                    out.append(ast.Tuple(
+                        elts=elements[slice(*bounds)], ctx=ast.Load()))
+            elif positions:
+                out.extend(elements[position] for position in positions
+                           if -len(elements) <= position < len(elements))
+            else:
+                out.extend(elements)
+        elif isinstance(value, ast.Dict):
+            if (isinstance(index, ast.Constant) and isinstance(index.value, str)
+                    and not any(key is None for key in value.keys)):
+                out.extend(candidate for key, candidate
+                           in zip(value.keys, value.values, strict=True)
+                           if isinstance(key, ast.Constant) and key.value == index.value)
+            else:
+                out.extend(value.values)
+    return out
+
+
+def _chain_strings(chain: list[ast.AST]) -> set[str]:
+    """The strings a CHAIN of subscripts over a SOURCE-SPELLED literal can yield.
+
+    Resolved STRUCTURALLY, one index per step, because the value an inner subscript selects
+    may be a CONTAINER that the next index digs into. Resolving each step to STRINGS instead
+    (`resolve(inner)` then index the strings) is what made the depth-1 spelling RED and the
+    depth-2 spelling of the same static value GREEN (#14326 delta review P2, measured at
+    `2692b9d3`): `(('x', '_tortoise_fts_query'),)[0][1]` gave `{'t'}` — a character of the
+    INNER SEQUENCE read as if it were the selected value — so the read name never entered
+    the census and the third `kind="statement"` reach executed it.
+
+    A chain that ENDS on a container selects a container, which is not a string and cannot be
+    a callable's name: it contributes nothing, the same precision the single-level arms keep
+    for `('a', '…')[0]` (the false red this file calls expensive).
+    """
+    values: list = [chain[0]]
+    for index in chain[1:]:
+        values = _indexed_values(values, index)
+        if not values:
+            return set()
+    out: set[str] = set()
+    for value in values:
+        if isinstance(value, str):
+            out.add(value)
+        elif isinstance(value, ast.Constant) and isinstance(value.value, str):
+            out.add(value.value)
+    return out
+
+
 def _subscript_strings(node: ast.Subscript, resolve) -> set[str]:
     """Every string a SUBSCRIPT over a STATICALLY-VISIBLE container can select.
 
@@ -1192,6 +1317,13 @@ def _subscript_strings(node: ast.Subscript, resolve) -> set[str]:
     which no read name can be, so it resolves to nothing rather than to the whole string
     (that would false-red every `_ALPHABET[_i]` in a file).
     """
+    # ⛔ A CHAIN OF SUBSCRIPTS IS RESOLVED STRUCTURALLY, NOT STRING-BY-STRING (#14326 delta
+    # review P2). Two or more index steps over a source-spelled literal go through
+    # `_chain_strings`; ONE step keeps the arms below byte-for-byte, because they are the
+    # measured precision boundary (`('a', '…')[0]` selects `a` and must stay GREEN).
+    chain = _literal_chain(node)
+    if chain is not None and len(chain) > 2:
+        return _chain_strings(chain)
     container, index = node.value, node.slice
     if isinstance(container, ast.Subscript):
         # ⛔ A SPLIT BUILD IS THE SAME BUILD (#14326 round 16, MEASURED GREEN):
@@ -1212,7 +1344,7 @@ def _subscript_strings(node: ast.Subscript, resolve) -> set[str]:
         return {container.value[position] for position in positions
                 if -len(container.value) <= position < len(container.value)}
     if isinstance(container, (ast.Tuple, ast.List)):
-        elements = container.elts
+        elements = _spread_elements(list(container.elts))
         if isinstance(index, ast.Slice):
             bounds = _constant_slice_bounds(index)
             if bounds is not None:
@@ -7913,6 +8045,15 @@ def test_a_value_READ_OUT_of_a_LITERAL_container_is_a_reach() -> None:
       - `_int_literals`' `UnaryOp` arm deleted -> the negative-index, negative-slice and
         stepped-slice rows go GREEN (a negative literal is a `UnaryOp`, never a `Constant`);
       - the nested-`Subscript` branch deleted -> the stepped-slice row goes GREEN;
+      - `_literal_chain` made to return `None` -> the eight NESTED-selection rows go GREEN
+        (1 failed, MEASURED: `_chain_strings` is what resolves a chain structurally);
+      - `_chain_strings`' constant-slice WRAP flattened to its elements -> the slice-then-index
+        row goes GREEN (1 failed, MEASURED: its next index would otherwise read a CHARACTER of
+        the selected element);
+      - `_chain_strings` reduced to an empty set -> two nested-selection rows go GREEN (MEASURED);
+      - `_spread_elements` reduced to `list(elements)` in the SINGLE-LEVEL arm -> the starred
+        rows go GREEN (1 failed, MEASURED: a star counted as ONE element offsets every index
+        after it); in the CHAIN arm -> the starred-chain row goes GREEN (1 failed, MEASURED);
       - the mapping's constant-KEY selection replaced by the whole value union -> the
         ABSENT-key control below goes RED (a false red on a display that selects nothing).
     """
@@ -7932,6 +8073,61 @@ def test_a_value_READ_OUT_of_a_LITERAL_container_is_a_reach() -> None:
     assert not _pin_refuses(_pin_source(absent_key)), (
         "a literal mapping indexed by a constant key it does not carry selects nothing — "
         "crediting it every VALUE of the display is a FALSE RED")
+    # ⛔ A CHAIN OF SUBSCRIPTS OVER A LITERAL IS THE SAME STATIC VALUE, ONE LEVEL DEEPER
+    # (#14326 delta review P2, each MEASURED GREEN at `2692b9d3` — `refuses=False`, `m=2
+    # c=2 i=0` — with a third `kind="statement"` reach that EXECUTES the product read). The
+    # container arms resolved the SELECTED element through `_values`/`_possible_strings`,
+    # which have no arm for a `Tuple`/`List`/`Dict` LITERAL, so an element that is itself a
+    # display resolved to nothing and the outer index selected nothing — the depth-1 spelling
+    # RED and the depth-2 spelling of the SAME value GREEN, which is precisely the in-file
+    # asymmetry the paragraph above claims closed. `_literal_chain`/`_chain_strings` resolve
+    # the chain STRUCTURALLY, one index per step, and a constant SLICE of a sequence is
+    # WRAPPED (a sub-sequence, not a flattened value) because the next index digs into it.
+    for label, body in (
+            ("tuple of tuple",
+             '    getattr(sdk, (("x", "_tortoise_fts_query"),)[0][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("dict of tuple",
+             '    getattr(sdk, {"k": ("x", "_tortoise_fts_query")}["k"][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("tuple of dict",
+             '    getattr(sdk, ({"k": "_tortoise_fts_query"},)[0]["k"])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("three levels deep",
+             '    getattr(sdk, ((("x", "_tortoise_fts_query"),),)[0][0][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("list of list, negative index",
+             '    getattr(sdk, [["x", "_tortoise_fts_query"]][0][-1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("slice then index",
+             '    getattr(sdk, ("x", "_tortoise_fts_query")[1:][0])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("starred tuple, index past the star",
+             '    getattr(sdk, [*("x", "_tortoise_fts_query")][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n'),
+            ("starred CHAIN, index past the star and into the next container",
+             '    getattr(sdk, [*("x", ("y", "_tortoise_fts_query"))][1][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n')):
+        assert _pin_refuses(_pin_source(body)), (
+            f"[{label}] a nested literal selection is a STATIC value — the chain must resolve "
+            "structurally, one index per step, or the depth-2 spelling of a depth-1 RED "
+            "stays GREEN")
+    # ⛔ AND THE TWO PRECISION BOUNDS OF THE CHAIN, each GREEN on purpose: a chain whose
+    # selected element is not the read name stays GREEN, a starred sequence of non-reads
+    # stays GREEN, and a chain rooted at a NAME-held container is the DECLARED residual
+    # below, not a gap. (A chain that ENDS on a container holding the literal is RED by the
+    # Constant arm's mention census — MEASURED, identically RED before this change — so it is
+    # not a row here: it would pin the census, not the chain.)
+    for label, body in (
+            ("nested selection of a non-read element",
+             '    _N = (("a", "x"),)[0][0]\n'
+             f'    {reach.format(name="_N")}\n'),
+            ("starred sequence of non-reads",
+             '    getattr(sdk, [*("x", "y")][1])'
+             '(query=queries[0]["query"], limit=10, kind="statement")\n')):
+        assert not _pin_refuses(_pin_source(body)), (
+            f"[{label}] this chain cannot hold the read name — refusing it is the FALSE RED "
+            "direction this file calls expensive")
     # ⛔ THE DECLARED RESIDUAL, PINNED GREEN SO THE NOTE CANNOT GO STALE (`_subscript_strings`):
     # a NAME-held container is not statically pairable, and resolving a name's whole value set
     # here would false-red the provenance lookup the `_is_read_ref` narrowing exists to keep
