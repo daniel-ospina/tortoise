@@ -10700,6 +10700,18 @@ ROWED_BY_THIS_FOLD = (
     # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:` row
     # and nothing reds.
     "test_relation_guards_14263.py",
+    # #14343 increment 2 (this PR) — the embed list's SHAPE pinned on the REAL emissions
+    # (character tripwire + round-trip + the keys-declared-once traps). Same defect its
+    # three sibling rows above record, on its third occurrence in this fold: the file first
+    # landed with NO manifest row, so `--integrity` redded the required `manifest-integrity`
+    # leg AND — the larger half — selection is surface->membership, so a file in no surface
+    # is selected by no diff class and the pin would never have run, not even on a diff to
+    # the `tortoise/extractor_v2.py` line it guards. Listed here for the reason every row
+    # above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
+    # listed has no `durations:` row and nothing reds. ⛔ The row is the flat
+    # `DEFAULT_FAST_WEIGHT`, not a local reading — the refresher samples push-to-main runs,
+    # so a file a PR ADDS cannot have a junit figure yet (#3400/#4348).
+    "test_14343_embed_list_serialization.py",
 )
 
 
