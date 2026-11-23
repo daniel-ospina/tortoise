@@ -73,19 +73,35 @@ dependencies = [
     # Optional-but-declared Sentry integration for the hosted API (#2444): the
     # dependency is hard (declared) but activation is gated on SENTRY_DSN being
     # set — local SDK / self-host / tests never initialize it (tortoise/sentry.py).
-    # ⛔ BOUNDED `<3` — A CONTRACT, NOT A CONVENIENCE. `tortoise/sentry.py` passes
-    # `send_default_pii=...` to `sentry_sdk.init()`, and `sentry-sdk` 3.0.0
-    # REMOVED that option (it is now `data_collection`), so `init()` raises
-    # `TypeError: Unknown option 'send_default_pii'` and the module's own
-    # `except Exception` turns it into `sentry init failed — continuing without`:
-    # telemetry silently DISABLED on every host that resolves 3.x, and every test
-    # that drives a REAL client reds. Measured on python-ci `test (a)` at
-    # 2026-11-23: `pip install -e '.[test,embeddings]'` resolved `sentry-sdk 3.0.0`
-    # (the range had no upper bound) while `uv.lock` — and therefore anything that
-    # installs from it — carries 2.68.1, so the tested tree and the declared tree
-    # were different versions of the same import. Adapting the call site to 3.0
-    # is a behaviour change with its own review; this bound is the contract the
-    # code already relies on.
+    #
+    # ⛔ CEILING AT THE MAJOR (`<3`), measured 2026-11-23 on PR #14347's required
+    # `python-ci-gate` (shard `test (k)`, job `137636625187`, run `45157626615`):
+    #   1. `pip install -e '.[test,embeddings]'` resolved `sentry_sdk-3.0.0`
+    #      (an UNBOUNDED resolve; `uv.lock` holds 2.68.1, so a leg that resolves
+    #      through the lock never sees this — same mechanism as the `pyyaml`
+    #      exclusion above), and
+    #   2. `tortoise/sentry.py:249` passes `send_default_pii=False`, which 3.x
+    #      REMOVED in favour of `data_collection` (vendor migration guide,
+    #      "Migrate from 2.x to 3.x": *"Sentry SDK 3.x removes `send_default_pii`,
+    #      `include_local_variables`, and `include_source_context`"*) — so `init()`
+    #      returned `False`:
+    #      `WARNING tortoise.sentry:sentry.py:348 sentry init failed — continuing
+    #      without: Unknown option 'send_default_pii'`.
+    # That refusal is FAIL-OPEN and silent by design (`_log.debug`/WARNING, request
+    # serving continues), so on any env that resolves fresh — the CI legs above, and
+    # the `Dockerfile.hosted`/`Dockerfile.selfhost` `pip install` path — HOSTED ERROR
+    # CAPTURE WOULD BE DISABLED with nothing turning red. The ceiling restores the
+    # last validated major; it is #11157's own stated target ("Either an upper bound
+    # on the `sentry-sdk` pin or a test that reds when a used entry point is
+    # deprecated"), NOT a reversal of its objective.
+    #
+    # ⚠️ The ceiling is a HOLD, not the fix. Lifting it is the 3.x migration
+    # (`send_default_pii`/`include_source_context`/`include_local_variables` →
+    # `data_collection`, plus the `push_scope` replacement) in its OWN change, its
+    # own full-suite run, and its own review — #11157 — which must also move
+    # `tests/test_11092_sentry_loop_stall.py::test_the_pin_keeps_every_option_our_init_passes_inside_the_ceiling`
+    # (the row that pins THIS ceiling; it reds on the re-loosened declaration, so the
+    # migration cannot drop the bound without deleting the test in the same change).
     "sentry-sdk>=2.0,<3",
     # Session-JWT verification (session_auth.py, #1460). Was transitive via
     # `mcp` — promoted to a direct dep so a future mcp bump can't drop it
