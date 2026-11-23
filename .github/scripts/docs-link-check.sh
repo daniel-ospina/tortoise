@@ -217,6 +217,16 @@ fi
 STDERR_LOG="${OUTPUT}.stderr"
 TMP_REPORT="${OUTPUT}.tmp"
 
+# ⛔ LOCAL LINKS ONLY (#2148/B5). `--exclude '^https?://'` drops every REMOTE
+# http(s) target from the population. The gate that runs here is REQUIRED, and a
+# remote host's answer is not a property of the diff: #14230 reddened main's own
+# merged tree because a citation's host 403'd CI's bot user agent, and the class
+# also covers rate limits, TLS and DNS — the run-property variance the snapshot's
+# own `variance` note records. A relative/fragment target IS a property of the
+# tree, so it stays checked here (and `docs_lint_baseline.py sweep` covers the
+# whole-tree form network-free). To sweep remote liveness on demand, run lychee
+# WITHOUT this flag — never add it back to this producer.
+#
 # `--mode task` / `--format json` / `--files-from`: the same invocation
 # `tools/docs_lint_baseline.py::_run_lychee` uses to GENERATE the snapshot, so the
 # producer and the generator cannot drift apart in what they ASK for. They do
@@ -225,6 +235,7 @@ TMP_REPORT="${OUTPUT}.tmp"
 # here without any test noticing — it is pinned in this script (see the exit-code
 # table in the header), not in the generator.
 "$LYCHEE_BIN" --mode task --no-progress --format json \
+  --exclude '^https?://' \
   --files-from "$FILES_FROM" >"$TMP_REPORT" 2>"$STDERR_LOG"
 rc=$?
 

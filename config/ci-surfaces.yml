@@ -7553,6 +7553,12 @@ surfaces:
   # with the store and `subprocess` seams patched — no DB, no graph, no docker, no
   # network, no model call. The DB-backed legs are their own job
   # (`.github/workflows/cypher-diff.yml`).
+  #
+  # ⛔ #2148/B1: the DOC-vs-TREE arms in this file are `@requires_doc_pin` — they
+  # skip in the pre-merge matrix and run at full strength in that same path-filtered
+  # `cypher-diff` job, because a committed count that any product commit can move
+  # must not red somebody else's merge. The `core` registration here stays: the
+  # classifier/harness arms are behaviour pins and still gate.
   - test_13098_cypher_inventory.py
   # #13436 P7 (PR #13445): the write-path-cost instrument's own pins. `core` because
   # its subject is a `tools/` path (`measure_13436_write_costs.py`) that matches no
@@ -12831,6 +12837,42 @@ durations_floors:
   test_lane_stash.py: {value: 355.0, pinned: true}
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
+# ── THE ROW IS OPTIONAL (#2148/B9) ─────────────────────────────────────────
+# A fast-pool test file with NO row in this map is not a
+# `python3 tools/ci_selection.py --integrity` failure and not a coverage defect:
+# it packs at the header's flat `DEFAULT_FAST_WEIGHT`, exactly as it would with a
+# row that carried that number, and `tools/ci_timing.py --refresh-durations`
+# writes the row from the first push-to-main junit sweep that measures the file.
+#
+# ⚠️ SOME SUITE PINS STILL NAME A SPECIFIC FAST-POOL FILE'S ROW — `ROWED_BY_THIS_FOLD`'s
+# 36-entry frozen tuple, the `#2818` row, and the self-pin several suites carry
+# for their own file (e.g. `tests/test_tool_risk_tiers.py`, `tests/test_mcp_rename_table.py`).
+# Each DOES red required CI if its named row is dropped — they are pins about
+# THOSE files, not a rule a new file joins, and this block relaxes none of them.
+# What it retires is the obligation on a file that is merely NEW.
+#
+# The retired rule was "the row must EXIST, not merely default" — it obliged
+# every author who ADDED a test file to hand-write a row plus a note into this
+# `merge=union` file, and the failure it prevented was a weight of 2.0 s, which
+# is the number the default already supplies. MEASURED at `ee589b4dfd90`: a
+# fast file with no row leaves that command GREEN — `duration_coverage_issues`
+# is a 0.90 RATIO whose budget is 131 files (130 free at this head: 1313 fast
+# files, 1487 rows, and `test_longmem_failure_record_coherence.py` already
+# unrowed), and `duration_issues` only validates keys that EXIST. So the rule was
+# enforced by convention and review, never by the gate. ⛔ Do NOT re-add it as a
+# requirement, and do not copy the sentence "The row must EXIST" into a new row:
+# the row notes that still carry it record the retired rule and are history.
+#
+# TWO ROW-MUST-EXIST RULES SURVIVE IN THE GATE, and both are about a DECLARED
+# BUDGET rather than coverage bookkeeping, so both are kept:
+#   * `durations_floors` above — a declared CAP whose row is missing cannot bind
+#     anything, so `ci_manifest.floor_issues` reds it;
+#   * the test-slow legs' own `assert not unmeasured` — an unmeasured SLOW file
+#     weighs 0.0 s there, so the leg's watchdog bound would stop being a lower
+#     bound on its work and the budget could rot past it unseen.
+# "A default is not a reading" is still true — it is why the refresher exists —
+# but it is no longer a reason to refuse a PR for a fast-pool file.
+# Pinned by tests/test_ci_manifest.py::test_a_fast_file_with_no_row_is_a_default_not_a_defect.
 durations:
   test_extractor_embed_json_14343.py: 2.0  # new in #14343 (this PR) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed. What the weight covers, hermetic (no DB, no graph, no network, no model call, no provider key — `tortoise.extractor_v2` is imported for its renderers and the lever is an env read): the default render is BYTE-identical to the pre-change `json.dumps(embed, indent=1)` for unset, blank and garbage values (a typo can never move a production prompt), `compact` changes the LAYOUT and nothing else, an unrecognised value FALLS BACK to the shipped default (it is never refused, and that fallback is what the file pins), and the flag is read per CALL rather than at import (a hoisted constant reds). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_13036_capstone_v2.py: 78.9  # new in #13036 row V2 (PR #13886); The row must EXIST, not merely default ("a default is not a reading"): the `api`/`core` registrations above put the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers: one real invocation through the authenticated tenant MCP transport per live tool — 36 driven tools plus the 4 `UNDRIVEN` entries the registry's own `http_policy=False` justifies — asserting the SEEDED content out of each payload rather than the status code, each `=`/`type`/`kind`/`section`/`mode` discriminator arm separately, the write arms' created ids read back through the get lane, and an accounting gate that binds `_DRIVEN_BY_TEST` to the `door.call(...)` literals this module actually executes (an AST read, so deleting a case reds instead of silently un-covering a tool). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority) — ci-timing junit-census+top-15 2026-11-23 (run 45071394329); was 2.0
