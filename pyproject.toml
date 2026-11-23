@@ -99,7 +99,9 @@ dependencies = [
     # (`send_default_pii`/`include_source_context`/`include_local_variables` →
     # `data_collection`, plus the `push_scope` replacement) in its OWN change, its
     # own full-suite run, and its own review — #11157 — which must also move
-    # `tests/test_11092_sentry_loop_stall.py::test_the_pin_keeps_sentry_on_the_major_it_was_validated_on`.
+    # `tests/test_11092_sentry_loop_stall.py::test_the_pin_keeps_every_option_our_init_passes_inside_the_ceiling`
+    # (the row that pins THIS ceiling; it reds on the re-loosened declaration, so the
+    # migration cannot drop the bound without deleting the test in the same change).
     "sentry-sdk>=2.0,<3",
     # Session-JWT verification (session_auth.py, #1460). Was transitive via
     # `mcp` — promoted to a direct dep so a future mcp bump can't drop it
