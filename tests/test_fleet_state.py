@@ -3907,8 +3907,8 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
 
     ⚠️ THE COUNT IS PART OF THE CONTRACT. Four `raise` sites and two skip paths; a header that
     states a different count is the drift `test_the_long_path_test_header_names_the_census_error_fail_arm`
-    CANNOT see, because that guard pins three NAMES (`_CENSUS_ERROR_STREAK`, `_ps_answers`,
-    `_CENSUS_ERROR_MIN_SPAN_S`) and not a number. (Measured drift: this block said "THREE" while
+    CANNOT see, because that guard pins four TOKENS (`_CENSUS_ERROR_STREAK`, `_ps_answers`,
+    `_CENSUS_ERROR_MIN_SPAN_S`, and the word `OVERRIDES`) and not a number. (Measured drift: this block
     omitting the ALIVE arm, in the same docstring that says "FOUR classifications" — two
     contradictory counts, in the block a guard exists to keep honest.)
 
@@ -4652,6 +4652,69 @@ def test_the_long_path_test_header_names_the_census_error_fail_arm() -> None:
         "turns it into a skip — the permanent green this file's arms exist to prevent (#12039)")
 
 
+def test_ps_answers_is_the_control_it_claims_to_be(monkeypatch) -> None:
+    """`_ps_answers` must ANSWER in both directions — nothing else ran its body (#12039 cycle 8).
+
+    This one function decides the two verdicts the census-error arm can reach: `False` skips
+    ("the box cannot read its process table") and `True` FAILs ("the census's own invocation is
+    what failed") — which is the regression this PR exists to catch. No test exercised it: the
+    arm stubs it (`monkeypatch.setattr(module, "_ps_answers", lambda: ps_answers)`), so measured
+    on copies, forcing the body to `return False` (EVERY persistent census error becomes a skip —
+    the permanent green this PR removes) or to `return True` (the rule-1 inversion on a box with
+    no `ps`) left the whole file passing. The realistic breakage is the silent one: spelling the
+    field `-o "commandx="` makes `ps` exit non-zero with EMPTY stdout and raise NOTHING, so the
+    `except (OSError, SubprocessError)` arm never fires and `bool("")` decides.
+
+    So the BODY is pinned here rather than stubbed, in all three shapes: empty stdout (the silent
+    non-zero exit), a real row, and a `ps` that cannot be executed at all. Hermetic on purpose —
+    stubbing `subprocess.run` pins the parsing and every arm without depending on the box's `ps`,
+    which is exactly what `test_child_exited_reads_the_status_without_reaping_the_row` does for
+    `_child_exited`'s real branch.
+    """
+    import subprocess
+
+    class _Completed:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+
+    def _raise(*_a, **_k):
+        raise OSError(2, "No such file or directory")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", lambda *a, **k: _Completed(""))
+        assert _ps_answers() is False, (
+            "a `ps` that exits non-zero with empty stdout must read as `no usable ps`: it raises "
+            "nothing, so `bool('')` is the only thing that decides, and `True` here FAILs a "
+            "required shard on a box whose `ps` cannot read the table")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", lambda *a, **k: _Completed("python -c pass\n"))
+        assert _ps_answers() is True, (
+            "a `ps` that DOES answer our own pid must read as `ps works`, or every census error "
+            "is excused as the box's and the regression stays green forever")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", _raise)
+        assert _ps_answers() is False, (
+            "a `ps` that cannot be executed at all is `no usable ps`, not an exception from the "
+            "control that is supposed to classify the census's error")
+
+    # ⛔ AND THE REAL INVOCATION MUST STILL ANSWER (the half a stub cannot see). The breakage this
+    # arm most plausibly suffers is a source-level typo in the `ps` ARGUMENTS — `-o command=`
+    # spelled one character wrong exits non-zero with empty stdout and raises NOTHING — and every
+    # stub above replaces that invocation, so a stubbed test cannot red it. Measured on a copy:
+    # with `commandx=` the stubbed directions all pass. This direction is why it reds.
+    import shutil
+
+    if shutil.which("ps") is None:  # pragma: no cover — no `ps` to ask
+        pytest.skip("no `ps` on this box: the positive direction cannot be measured")
+    assert _ps_answers() is True, (
+        "`ps -p <our pid> -o command=` answered nothing on a box that HAS `ps`, so every census "
+        "error would be excused as the box's and the regression this file pins stays green "
+        "forever. Read the INVOCATION first: a mistyped field exits non-zero with empty stdout "
+        "and raises nothing, so the `except` arm never fires")
+
+
 def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
     """`_child_exited` must NOT collect the status: the `ps` row is the diagnosis's evidence.
 
@@ -4662,9 +4725,11 @@ def test_child_exited_reads_the_status_without_reaping_the_row() -> None:
     ⛔ NOTHING ELSE IN THIS FILE EXERCISES THE REAL BRANCH (review cycle 6, P2). Every hermetic arm
     drives `_FakeChild`, whose pid `4_000_001` makes `os.waitid` raise `ChildProcessError`, so all
     of them take the documented `poll()` fallback — measured: mutating this helper to
-    `return proc.poll() is not None` (i.e. reaping the evidence away) left the suite fully GREEN,
-    `10 passed, 163 deselected`. So the property is pinned here with a REAL, short-lived child:
-    exited, row still readable, and only THEN `poll()` returns the code.
+    `return proc.poll() is not None` (i.e. reaping the evidence away) left the suite fully GREEN.
+    (No totals quoted: every one this block has carried has gone stale within one commit, which is
+    the same drift class the rest of this file keeps repairing.) So the property is pinned here
+    with a REAL, short-lived child: exited, row still readable, and only THEN `poll()` returns the
+    code.
     """
     import shutil
     import subprocess
