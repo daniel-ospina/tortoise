@@ -2409,6 +2409,34 @@ def _builds_new_container(value: ast.AST, rebound: frozenset[str] = frozenset())
     return isinstance(value, ast.BinOp) and isinstance(value.op, (ast.Add, ast.Mult))
 
 
+def _loop_target_sources(iterable: ast.AST) -> list[ast.AST]:
+    """What a `for`/`AsyncFor` TARGET binds — one entry per possible value.
+
+    ⛔ A LOOP TARGET TAKES AN ELEMENT, NOT THE CONTAINER (#14326 round 17, MEASURED).
+    Binding `target ↔ node.iter` is right for a NAME iterable (the target may be any
+    element, so treating it as the collection itself over-approximates) but WRONG for a
+    literal one: `for _x in (sys.modules,):` bound `_x` to the TUPLE, so the predicate
+    that recognises the import registry never fired and the alias axis lost the name —
+    measured GREEN at `689708686ba6` for
+
+        for _x in (sys.modules,): _x |= {"tortoise.sdk": _Mirror}   # GREEN
+        for _x in [sys.modules]:  _x |= {"tortoise.sdk": _Mirror}   # GREEN
+        for _x in (_t.__dict__,): _x |= {"TortoiseSDK": _Mirror}    # GREEN
+
+    while the direct store and the pre-bound alias (`_R = sys.modules; for _x in _R:`)
+    were RED. CPython's grammar gives `iter` an arbitrary `expr`, so a literal sequence
+    is statically expanded — the SAME rule `_str_constants`/`_values` already applies to
+    a `for` target over a literal (there it unions the elements' VALUES, which is why the
+    string axis was never affected). Iterating a dict yields its KEYS, `None` being a
+    `**spread` and no key at all; anything else binds the iterable itself.
+    """
+    if isinstance(iterable, (ast.Tuple, ast.List, ast.Set)):
+        return list(iterable.elts)
+    if isinstance(iterable, ast.Dict):
+        return [key for key in iterable.keys if key is not None]
+    return [iterable]
+
+
 def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
                 copy_is_alias: bool = False,
                 rebound: frozenset[str] = frozenset()) -> set[str]:
@@ -2449,7 +2477,15 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
 
     Both are the same defect — the resolver had no arm for the one bind spelling that
     carries no assignment — so the target names join the fixpoint exactly as an `Assign`
-    target does. `comprehension` is deliberately NOT included: the artifact's own
+    target does. ⛔ THE FIRST OF THE TWO IS A CONTAINING LITERAL, AND BINDING THE TARGET
+    TO THE ITERABLE DID NOT CLOSE IT (#14326 round 17, MEASURED GREEN at `689708686ba6`:
+    `_x |= {"tortoise.sdk": _Mirror}` inside `for _x in (sys.modules,)`, while the same
+    store one spelling over red); the shape only works for the ENV axis because
+    `_environ_mutations` passes the wider `_mentions_mapping` predicate, which matches a
+    container that HOLDS the mapping. The registry axis passes a shape predicate, so the
+    target has to reach the ELEMENT — `_loop_target_sources` below expands a literal
+    iterable, which is CPython's own semantics (the target takes each element in turn).
+    `comprehension` is deliberately NOT included: the artifact's own
     `[_result_id(r) for r in results]` hands each ELEMENT to a call, and treating a
     comprehension target as an alias of the collection would red the tool the pin exists
     to protect (measured before adding the arm).
@@ -2462,7 +2498,9 @@ def _aliases_of(tree: ast.AST, predicate, loops: bool = False,
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
             targets, value = [node.target], node.value
         elif loops and isinstance(node, (ast.For, ast.AsyncFor)):
-            targets, value = [node.target], node.iter
+            for source in _loop_target_sources(node.iter):
+                binds.append((node.target, source))
+            continue
         else:
             continue
         for target in targets:
@@ -7485,6 +7523,28 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
             'sys.modules |= {"tortoise.sdk": _Mirror}\n',
         "import registry, MODULE key, via a name alias":
             '_sm = sys.modules\n_sm |= {"tortoise.sdk": _Mirror}\n',
+        # ⛔ A `for` TARGET OVER A CONTAINING LITERAL (#14326 round 17, MEASURED GREEN at
+        # `689708686ba6` for all three, while the direct store and the PRE-BOUND alias
+        # (`_R = sys.modules; for _x in _R:`) both red). The loop target binds an ELEMENT,
+        # and binding it to the ITERABLE instead handed the alias axis the tuple, so the
+        # registry predicate never fired. The env axis was never affected because it passes
+        # the wider `_mentions_mapping` predicate, which matches a container HOLDING the
+        # mapping — an in-file asymmetry, not a boundary. One row per container SHAPE and
+        # per KEY VOCABULARY, because the receiver and the key are separate disjuncts.
+        "import registry via a `for` target over a TUPLE literal":
+            'for _x in (sys.modules,):\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "import registry via a `for` target over a LIST literal":
+            'for _x in [sys.modules]:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "namespace via a `for` target over a TUPLE literal":
+            'for _x in (_t.__dict__,):\n    _x |= {"TortoiseSDK": _Mirror}\n',
+        # …and the SET and DICT iterables are their OWN rows: `_loop_target_sources`
+        # carries an arm per container type (a `Dict` iteration yields its KEYS, `None`
+        # being a `**spread`), and a clause no row can red is the defect this file deletes
+        # on sight.
+        "import registry via a `for` target over a SET literal":
+            'for _x in {sys.modules}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
+        "import registry via a `for` target over a DICT literal (keys)":
+            'for _x in {sys.modules: 1}:\n    _x |= {"tortoise.sdk": _Mirror}\n',
     }
     for name, lever in aug_levers.items():
         got = ctor_findings(shipped + "class _Mirror:\n    pass\n" + lever)
@@ -7494,7 +7554,17 @@ def test_the_read_is_pinned_to_the_SDK_OBJECT_not_only_its_name() -> None:
     # binding, so the receiver scope is what keeps this green (measured `35 passed`).
     for inert in ('_ctr = {}\n_ctr |= {"TortoiseSDK": "label"}\n',
                   'sys.modules |= {"tortoise.other": _M}\n',
-                  '_copy = _t.__dict__.copy()\n_copy |= {"TortoiseSDK": _Mirror}\n'):
+                  '_copy = _t.__dict__.copy()\n_copy |= {"TortoiseSDK": _Mirror}\n',
+                  # …and the element-wise `for` rule stays GREEN on ordinary loops: an
+                  # ORDINARY container reached through a containing literal, a literal of
+                  # unrelated NAMES, and the artifact's own tuple-of-tuples loop shape
+                  # (`for label, arm in (("baseline", base), ("after", new)):` in
+                  # `read_wave_latency.run`) — the loop spelling is not itself the store.
+                  'for _c in ({},):\n    _c |= {"TortoiseSDK": "label"}\n',
+                  'for _e in (_OTHER,):\n    _e |= {"tortoise.sdk": _Mirror}\n',
+                  '_pairs = (("baseline", _base), ("after", _new))\n'
+                  'for _lbl, _arm in (("baseline", _base), ("after", _new)):\n'
+                  '    _arm |= {"tortoise.sdk": "label"}\n'):
         assert ctor_findings(shipped + "class _Mirror:\n    pass\n" + inert) == [], inert
 
     # ⛔ THE `asname` HALF IS ITS OWN CLAUSE (#14326 review P2, measured: deleting it left
