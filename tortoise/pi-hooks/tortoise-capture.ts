@@ -5360,16 +5360,28 @@ export function disposeQuarantine(
  * A symlink is removed WITHOUT following it, so this cannot reach outside the
  * spool. A non-empty directory is left alone (`ENOTEMPTY`): deleting unknown
  * content is the worse error, and the caller's answer is to run unclaimed and SAY
- * so. Mirrors `drain_claim._clear_unusable_claim_path`.
+ * so. Mirrors `drain_claim._clear_unusable_claim_path`, which discriminates on
+ * `S_ISDIR` and `unlink`s EVERYTHING else.
+ *
+ * ⛔ THE DISCRIMINATOR IS `isDirectory()`, NOT `isFile()` — the previous cut sent
+ * every non-file, non-symlink object to `rmdirSync`, and for a FIFO, a socket or a
+ * device that raises `ENOTDIR` (POSIX `rmdir(2)`). The `catch` then answered
+ * `false`, the caller answered `undefined` = "somebody else holds it", and NOTHING
+ * on this leg could ever remove the object: every later pass reported "another
+ * drainer holds this spool … pid unknown" with zero POSTs, forever — the exact
+ * permanent block #14350 forbids, clearable only by a PYTHON drain. The Python
+ * twin never had this arm wrong (#14423 cycle-6 review, P1).
  */
 function clearUnusableClaimPath(path: string): boolean {
   try {
     const st = lstatSync(path);
-    if (st.isSymbolicLink() || st.isFile()) {
-      unlinkSync(path);
+    if (st.isDirectory()) {
+      rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
       return true;
     }
-    rmdirSync(path);  // an EMPTY directory; refuses ENOTEMPTY otherwise
+    // A symlink is unlinked AS A LINK (never followed), and a FIFO, a socket or a
+    // device too: it is an object, not content, so `unlink` is the correct removal.
+    unlinkSync(path);
     return true;
   } catch {
     return false;
@@ -5502,6 +5514,13 @@ export function acquireDrainClaim(
         markRaced();
         return undefined;
       }
+      // The stale claim IS gone and our own `linkSync` never landed, so the path is
+      // empty for the same reason as every other lost takeover: a peer is
+      // installing. ⛔ THIS ARM WAS MISSED by the first cut of `state.raced`
+      // (#14423 cycle-6 review, P2) — it fell through to the loop-end `undefined`,
+      // which `flushSpool` read as "the root cannot hold a claim" and ran the pass
+      // UNCLAIMED beside that peer.
+      markRaced();
       continue;
     }
     try { unlinkSync(tmp); } catch { /* best effort */ }
@@ -5582,19 +5601,38 @@ export function acquireDrainClaim(
         return this.renew(at);
       },
       release(): boolean {
-        // Atomic takedown: the old read-compare-unlink could delete a successor
-        // installed between the compare and the unlink (review finding).
-        const moved = takedownClaim(path, token);
-        if (!moved) return false;
+        // ⛔ A NOT-OURS RELEASE TOUCHES NOTHING — it reads and compares BEFORE it
+        // moves anything (mirror of `tortoise/drain_claim.py`'s `release`, added in
+        // the same review cycle: the two legs must not diverge on the property the
+        // module docstring states). Taking the successor's claim aside first made
+        // this promise false in a THREE-process interleaving: a third process
+        // installing into the momentarily-empty path made the restore `linkSync`
+        // fail `EEXIST`, and the successor's quarantined bytes were then unlinked —
+        // a live claim destroyed by a release that was trying to be polite
+        // (#14423 cycle-6 review, P2; reproduced with these seams).
+        let rawNow: string;
+        try {
+          if (!lstatSync(path).isFile()) return false;
+          rawNow = readFileSync(path, "utf8");
+        } catch {
+          return false;  // gone, unreadable, or not a regular file: nothing to release
+        }
         let parsed: unknown;
         try {
-          parsed = JSON.parse(moved.raw);
+          parsed = JSON.parse(rawNow);
         } catch {
-          parsed = undefined;
+          return false;
         }
         if (!parsed || typeof parsed !== "object"
             || (parsed as Record<string, unknown>).token !== token) {
-          // Not ours any more: put its bytes back exactly as we took them.
+          return false;  // not ours: leave it exactly where it is
+        }
+        // Ours. The takedown's quarantine compare is what makes the disposal safe
+        // against a peer that replaces the record between the read above and the
+        // rename below.
+        const moved = takedownClaim(path, token);
+        if (!moved) return false;
+        if (moved.raw !== rawNow) {
           disposeQuarantine(moved.quarantine, moved.raw, path, "\u0000<not-ours>");
           return false;
         }

@@ -4928,23 +4928,34 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: head — updated in place during the PR rather than spending a generation 34 on
 #: a refinement of the same unreleased seam. From the moment 33 appears on main,
 #: the entries are frozen: the next byte change needs a NEW generation.
-#: ⚠️ 33's CAPTURE digest was re-cut once, by the same never-shipped exception: the
-#: #14423 review found the takedown's restore arm had no test (the sibling row in
-#: `tortoise-capture.test.ts` claimed a mutant that did not red it), so
-#: `takedownClaim` / `disposeQuarantine` are now exported as the test seam — an
-#: EXPORT-ONLY edit, no behaviour change, but a comment IS bytes here. The READ
-#: half is untouched (`904d2742…`), exactly as generation 31's re-cut did.
-#: ⚠️ 33's CAPTURE digest was re-cut a SECOND time, on the merge that united TWO
-#: cycle-5 reviews of the same head, and both halves are behaviour, not exports:
-#: one found the FIFO/release/lease-format fail-open directions closed below, the
-#: other found that `renew` could overwrite a successor (read → `replace`, with a
-#: read-back that re-read the writer's own bytes), so renewal is now the takeover's
-#: own compare-and-swap — takedown, verify in quarantine, install by `link`. The
-#: digest pinned here is the MERGED tree's, measured by this suite (neither parent's
-#: value: each was a true reading of its own tree), and the READ half stays
-#: `904d2742…`.
+#: ⚠️ 33's CAPTURE digest has been re-cut more than once under that same
+#: never-shipped exception, and NOT all of them are comment-only edits — say so,
+#: because this is the note a later re-pinner reads to justify reusing 33:
+#:
+#: 1. the #14423 review found the takedown's restore arm had no test (the sibling
+#:    row in `tortoise-capture.test.ts` claimed a mutant that did not red it), so
+#:    `takedownClaim` / `disposeQuarantine` became the exported test seam — an
+#:    export-only edit, but a comment IS bytes here;
+#: 2. a later cycle found the Pi leg's `release()` still took a claim it did not
+#:    own, and that `clearUnusableClaimPath` could not clear a FIFO/socket at the
+#:    claim path (a permanent drain block) — BEHAVIOUR on shipped bytes;
+#: 3. independently, and on the merge that united those two reviews, another
+#:    reviewer found `renew` could overwrite a successor (read → `replace`, with a
+#:    read-back that re-read the writer's own bytes), so renewal is now the
+#:    takeover's own compare-and-swap: takedown, verify in quarantine, install by
+#:    `link`. Also BEHAVIOUR on shipped bytes.
+#:
+#: The digest covers the whole file (`sha256` of `tortoise-capture.ts`, graded at
+#: `test_a_shipped_pi_seam_byte_change_moves_the_generation`), so it moved with
+#: each of them. ⛔ The value pinned here is the MERGED tree's, measured by this
+#: suite — never either parent's (each was a true reading of its own tree) and
+#: never arithmetic on the last one. Reusing an unreleased generation for a
+#: behaviour fix is the same exception, not a licence: from the moment 33 reaches
+#: `main` the entries are FROZEN and the next byte change needs a NEW generation.
+#:
+#: The READ half is untouched (`904d2742…`), exactly as generation 31's re-cut did.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    33, "314c4dc70b0067fefa74f8fa12870c09ec01152c30df5cbbbea6a3f25d7271e0")
+    33, "0b24d362fbf7bcddedbd41884a032aa275fbd09d52da30db15a4fc2217e7b32b")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -5116,7 +5127,15 @@ _GENERATION_DIGESTS = {
     # keeps draining concurrently with the Python leg and keeps charging the
     # box's refusals to per-entry exponential backoff — the 908-entry /
     # attempts-10-17 shape #14342 starts from — so it must read STALE.
-    33: "314c4dc70b0067fefa74f8fa12870c09ec01152c30df5cbbbea6a3f25d7271e0",
+    # ⛔ RE-CUT IN PLACE, before it shipped: this same unmerged generation gained
+    # the cycle-5/6 Pi-leg fixes (`clearUnusableClaimPath` discriminating on
+    # `isDirectory()`, so a FIFO/socket at the claim path can actually be cleared;
+    # `release()` reading our token before it moves anything) AND the compare-and-
+    # swap `renew` from the independent review of the same head. Generation 33 has
+    # never been on `main`, so no installed copy carries it and no "local edit"
+    # verdict can be falsified — the one rewrite the rule below permits.
+    # Measured on the MERGED tree by this suite, not inherited from a parent.
+    33: "0b24d362fbf7bcddedbd41884a032aa275fbd09d52da30db15a4fc2217e7b32b",
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
     5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
