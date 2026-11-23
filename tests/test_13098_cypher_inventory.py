@@ -48,6 +48,39 @@ sys.path.insert(0, str(ROOT))
 from tools import cypher_diff_harness as harness  # noqa: E402
 from tools import cypher_inventory as census  # noqa: E402
 
+# --------------------------------------------------------------------------- #
+# WHERE THE DOC-VS-TREE PIN RUNS (#2148/B1)
+# --------------------------------------------------------------------------- #
+# The arms below marked `@requires_doc_pin` compare a COMMITTED census document
+# against the live tree. Any product commit can move those counts, so in the
+# pre-merge matrix (where this file is `core`-registered and rides the REQUIRED
+# `python-ci-gate`) each of them redded PRs that touched neither the census tool
+# nor its doc — #14296 reconciled NINE open PRs / 115 files over exactly this and
+# still failed, and #13879 → #14088 → #14087 → #14064 → #13992 → #13887 → #13755 →
+# #13750 → #13746 → #13589 is a ten-PR chain from one product move.
+#
+# The pin is therefore DECOUPLED from the merge gate and kept at full strength:
+# `TORTOISE_CYPHER_DOC_PIN=1` is set ONLY by `.github/workflows/cypher-diff.yml`,
+# which is not a required context AND is already path-filtered to exactly the
+# diffs that can move a count (`tortoise/**`, `supabase/migrations/**`,
+# `tools/cypher_inventory.py`, `tools/cypher_diff_harness.py`,
+# `docs/architecture/CYPHER-INVENTORY.md`, this file). Nothing was deleted: the
+# arms, the tool and `cypher_inventory.py --check` all still run there, and a
+# genuinely wrong census still reds a job — just not somebody else's merge.
+#
+# The classifier/harness arms below stay UNGATED: they pin behaviour (precedence,
+# diff semantics, the refusal exit codes), not a number that rots with the tree.
+_DOC_PIN_ENV = "TORTOISE_CYPHER_DOC_PIN"
+requires_doc_pin = pytest.mark.skipif(
+    os.environ.get(_DOC_PIN_ENV) != "1",
+    reason=(
+        f"doc-vs-tree census pin: DECOUPLED from the required merge gate by "
+        f"#2148/B1 — a count that moves with any product commit must not block an "
+        f"unrelated PR. It runs at full strength in the path-filtered `cypher-diff` "
+        f"job, which sets {_DOC_PIN_ENV}=1 (see the block comment above)."
+    ),
+)
+
 
 # --------------------------------------------------------------------------- #
 # WHERE THE DOC-VS-TREE PIN RUNS (#2148/B1)
