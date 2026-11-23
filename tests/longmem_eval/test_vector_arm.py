@@ -1483,10 +1483,13 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         # fingerprints legitimately DIFFER — a toggle is REFUSED (safe).
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=4))
-        # #14357: the RESOLVED route carries the suppression too — this is the
-        # same production router as session_workers=1, only on the resolved
-        # wire id, so the sw>1 path suppresses identically (the pre-#14357
-        # divergence between the two paths is gone).
+        # #14357: the RESOLVED route carries the suppression — the sw>1 path
+        # is the PRODUCTION ROUTER on the resolved wire id, so it suppresses
+        # exactly as the unset router does and fingerprints the same. ⛔ This is
+        # NOT "the same as session_workers=1": the sw=1 spec path is the bare
+        # registry adapter (`MODELS['deepseek-flash-direct']`, a direct-only
+        # `DeepSeekDirectModel`, thinking-ON on that route — #14368), which is
+        # why the two fingerprints differ and the toggle is refused below.
         assert runner._model_id(adapters[-1]) == _FLASH_FP
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=1))

@@ -248,7 +248,7 @@ def test_failover_call_is_the_suppressed_one(monkeypatch):
 
 def test_keyless_build_suppresses_too(monkeypatch):
     """A bare environment takes the ``["openrouter"]`` pool and NOTHING else —
-    so on that path the thinking-on adapter is the ONLY adapter."""
+    so the sole member is the very adapter that used to run thinking-ON."""
     bodies, fake = _recorder()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     model = build_extractor_model(EXTRACT_MODEL, max_tokens=4000,
@@ -267,8 +267,11 @@ def test_reader_lane_wire_body_is_not_suppressed(monkeypatch):
     ``build_reader_model`` defaults to the same flash family, so a lane-blind
     suppression silently rewrote the ask lane's serving config — a product
     change #14357 never names (a 500-token answer is not the extraction
-    collapse) and nothing measured. The lane gate keeps it byte-identical: no
-    ``reasoning`` on the openrouter member, no ``venice_parameters`` on venice.
+    collapse) and nothing measured. The lane gate keeps the two HOP members
+    byte-identical: no ``reasoning`` on the openrouter member, no
+    ``venice_parameters`` on venice. (The ``deepseek-direct`` member is not a
+    hop member: it hardcodes its toggle, and its family gate was widened here —
+    the assertion below holds for the canonical id before and after.)
 
     Red on the lane-blind builder this test was added against: both bodies
     carried their suppression field.
@@ -385,6 +388,31 @@ def test_escalated_collapse_stays_fatal_not_a_recoverable_truncation(monkeypatch
             raise
     assert census == {"reasoning_collapse": 1}, census
     assert m.calls == 2  # base + one escalated call, no third
+
+
+def test_reasoning_collapse_is_not_a_recoverable_census_class():
+    """The FAIL-CLOSED half of #14357's contract, pinned where it lives.
+
+    ``_ReasoningCollapse``'s docstring and the PR body both claim the longmem
+    eval gate VETOES on ``reasoning_collapse`` rather than rate-limiting it.
+    That is a property of ``tools/longmem_eval/report.py``, a file this PR does
+    not otherwise touch — so without this assertion a one-line edit there
+    re-opens the exact fail-open #14357 closes (a zero-content extraction
+    certified as recoverable), with the suite green. Measured before this test:
+    adding ``"reasoning_collapse"`` to ``RECOVERABLE_CENSUS_CLASSES`` flipped
+    the grade ``hard`` -> ``recoverable`` and redded nothing (163 passed).
+    """
+    from tools.longmem_eval import report
+
+    assert "reasoning_collapse" not in report.RECOVERABLE_CENSUS_CLASSES
+    assert report._outcome_grade(
+        {"valid": False, "error_classes": {"reasoning_collapse": 1}}
+    ) == "hard"
+    # …and the recoverable side of the same seam still behaves, so the pin
+    # above is distinguishing the two, not just asserting a constant.
+    assert report._outcome_grade(
+        {"valid": False, "error_classes": {"truncated_parse_error": 1}}
+    ) == "recoverable"
 
 
 def test_non_empty_length_response_is_still_returned():

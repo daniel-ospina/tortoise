@@ -1910,9 +1910,17 @@ def build_reader_model(model_id: str | None = None, *,
     return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
                                 temperature=temperature, json_mode=False,
                                 # #14357 is scoped to the EXTRACTOR: the ask
-                                # lane's serving config stays exactly as it
-                                # was. Suppressing thinking here would be a
-                                # real product change on a lane the issue never
-                                # names — its own measured decision, not a side
-                                # effect of the extraction fix.
+                                # lane's two HOP members keep the wire body they
+                                # had before this change, and suppressing them
+                                # would be a real product change on a lane the
+                                # issue never names — its own measured decision,
+                                # not a side effect of the extraction fix.
+                                # ⛔ Its ``deepseek-direct`` member is NOT a hop
+                                # member and is not governed by this flag: it
+                                # hardcodes ``thinking: disabled``, and the gate
+                                # that decides WHICH ids get it was widened here
+                                # to the whole flash family (#4129), so an ask
+                                # spec naming ``deepseek-flash`` — the id the
+                                # provider serves for the retired
+                                # ``deepseek-v4-flash`` — newly gains the field.
                                 suppress_reasoning=False)
