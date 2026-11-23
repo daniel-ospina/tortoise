@@ -1164,8 +1164,8 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
         "#13802 review, finding 2)")
 
     # A re-point's NEW side has to resolve in the file it lands in, whatever the diff
-    # did: the cites the document presents as the row's CURRENT values must name the
-    # content the sentence says they name, at this head.
+    # did: the cites `docs/00_index.md` carries must name the content the row is about,
+    # at this head.
     # ⛔ SCOPED TO WHAT IT ACTUALLY GRADES (#13802 review, finding 2 — P2). This loop
     # used to REQUIRE both cites to be present and to blame `05-verify.md` for
     # "present[ing] them as the row's current value" — a claim the document explicitly
@@ -1173,20 +1173,66 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     # sentence"), and a requirement that reds every PR the moment `main` re-derives that
     # row again (the document records that happening four times). The invariant that IS
     # the tree's: WHEREVER `docs/00_index.md` carries one of these cites, the line it
-    # names must be the content that cite is for. A row `main` has moved is then not a
-    # false accusation against this document — the cite is simply no longer there.
+    # names must be the content that cite is for.
+    #
+    # ⛔ AND THE NUMBER IS DERIVED, NOT TYPED — BECAUSE A TYPED ONE WENT INERT (#14386
+    # review, P2 — MEASURED). Until this fix the tuple above named two LITERALS,
+    # `sdk.py:21715` / `sdk.py:28178`, and `continue`d when a cite was absent. `main`
+    # re-derived both rows (`:21715`->`:22074`, `:28178`->`:28582`), so BOTH entries
+    # skipped on every run and the loop body became dead code: re-pointing the index's
+    # `#12296` cite to `sdk.py:28583` — a non-blank line (`"AND n.status = 'draft' "`)
+    # that does not name that row's filter — left `485 passed`. The guard suite held NO
+    # assertion that `docs/00_index.md` still points at the content the `05-verify.md:108`
+    # clause says it names, i.e. the file-side half of that sentence was graded by
+    # nothing.
+    #
+    # A typed number here is the very rot this PR exists to close, so the stable
+    # identity is the ROW (its own `#ref` marker), the line number is READ OFF the row at
+    # this head, and what is ASSERTED is the CONTENT. `main` re-deriving a row therefore
+    # moves the number without reddening anything — the property #13802 review accepted
+    # above — while a cite moved to a WRONG line reds, which is the property that was
+    # missing. This is also the convergent practice for repository citations
+    # (`path:line` is a drifting navigation hint; the quoted content span is the id).
+    # ⚠️ Residual, stated not hidden: this binds the row to ONE cite that names its
+    # content, so a row that grows a SECOND, wrong `sdk.py` cite beside the right one is
+    # not reddened here. That is deliberate — requiring EVERY cite in the row would
+    # red on a row `main` re-derives while keeping the old number as history, which is the
+    # false block #13802 review rejected; the absence leg and the blank/out-of-range leg
+    # below still cover the delete and the dead-address shapes.
     _sdk = (REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8").splitlines()
-    for _cite, _needle in (
-            ("sdk.py:21715", "_capture_stats_with_step_witness("),
-            ("sdk.py:28178", "dedup_reviewed IS NULL")):
-        if _cite not in index:
-            continue
-        _n = int(_cite.rsplit(":", 1)[-1])
-        assert _needle in _sdk[_n - 1], (
-            f"`docs/00_index.md` carries `{_cite}`, but `tortoise/sdk.py:{_n}` is "
-            f"{_sdk[_n - 1].strip()!r} — that cite does not name the content it is "
-            "for, so a reader who follows it lands on an unrelated line "
-            "(#13746 review, round 3, P2; scoped by #13802 review, finding 2)")
+    _numbered_sdk_cite = re.compile(r"sdk\.py:(\d+)")
+    _index_lines = index.splitlines()
+    for _row_marker, _needle in (
+            ("#12296", "dedup_reviewed IS NULL"),
+            ("#7949",
+             '"stats": _capture_stats_with_step_witness(out, len(extracted)),')):
+        _rows = [row for row in _index_lines
+                 if _row_marker in row and _numbered_sdk_cite.search(row)]
+        assert len(_rows) == 1, (
+            f"`docs/00_index.md` must carry exactly ONE `{_row_marker}` row with a "
+            f"numbered `sdk.py` cite, found {len(_rows)} — the row lost its cite "
+            "(delete it and the address a reader follows is whatever the prose says), "
+            "or the marker moved. Restore the row's cite; do not delete this arm "
+            "(#14386 review, P2)")
+        _cites = [int(n) for n in _numbered_sdk_cite.findall(_rows[0])]
+        for _n in _cites:
+            _in_range = 0 < _n <= len(_sdk)
+            assert _in_range and _sdk[_n - 1].strip(), (
+                f"`docs/00_index.md`'s `{_row_marker}` row cites `sdk.py:{_n}`, which "
+                f"is {'outside `tortoise/sdk.py` (' + str(len(_sdk)) + ' lines)' if not _in_range else 'BLANK'} — "
+                "that is a dead address, so re-derive it by CONTENT at this head "
+                "(#14386 review, P2)")
+        _naming = [_n for _n in _cites if _needle in _sdk[_n - 1]]
+        _cited = [f"sdk.py:{_n}" for _n in _cites]
+        _landed_on = [_sdk[_n - 1].strip()[:70] for _n in _cites]
+        assert _naming, (
+            f"`docs/00_index.md`'s `{_row_marker}` row cites {_cited}, "
+            f"but NONE of those lines names the content that row is about ({_needle!r}) "
+            f"— they are {_landed_on}. A reader who "
+            "follows that cite lands on an unrelated line, and the `05-verify.md:108` "
+            "clause presents it as current. Re-derive the row's cite by CONTENT "
+            "(`grep -n`), never by carrying the number forward (#14386 review, P2 — "
+            "MEASURED: `sdk.py:28582` -> `:28583` left `485 passed`)")
 
     # ⛔ THE RETIRED SIDE OF THE SAME PAIR, AND IT NEEDS NO BASE REF EITHER (#13802
     # review, P2 — the leg `main`'s deleted arm carried, measured open at the pre-fix head:
@@ -9081,6 +9127,14 @@ _RETIRED_INDEX_CITES = (
 #: a comment beside a deleted function), because a reader must be able to see WHY `main`'s
 #: arm is gone without diffing two heads.
 _ATTRIBUTION_PHRASES = (
+    # ⛔ THE SPELLINGS THIS PR'S OWN DIFF INTRODUCED, ADDED SO THE NEXT ONE CANNOT REPEAT
+    # THEM (#14386 review, P2 — the arm was ACTIVE at that head, `_may_attribute` was
+    # `False` because the cite sets are IDENTICAL, and it stayed GREEN because neither
+    # spelling was in this tuple: `grep -cF 'DO move at this head'` was `1` in
+    # `05-verify.md` and `0` here). The claim those two sentences make is exactly what
+    # `_basis` refuses, so the tuple has to know the words it was made of.
+    "DO move at this head",
+    "copy of the index carries the OLD pair",
     "re-pointing that row's `sdk.py` cite from",
     "and THAT shift is this repair",
     "re-points it once more, to",
@@ -9091,6 +9145,14 @@ _ATTRIBUTION_PHRASES = (
 
 
 _INDEX_REPOINT_CLAIMS = (
+    # ⛔ The two spellings `_ATTRIBUTION_PHRASES` gained at #14386 review P2, added here in
+    # the SAME commit because the two arms are not interchangeable: on a head whose cite
+    # sets DIFFER and whose base is readable the attribution arm stands down, and this is
+    # then the ONLY arm that still reads the document. Each entry is its own counterpart
+    # (`claim in phrase` holds for the identical string), which is what
+    # `test_every_attribution_spelling_is_also_a_live_diff_claim` requires.
+    "DO move at this head",
+    "copy of the index carries the OLD pair",
     "this diff carries ONE `docs/00_index.md` change — the capstone row's",
     "it IS in the set, for ONE cite",
     "for exactly ONE cite",
