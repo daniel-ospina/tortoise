@@ -5121,10 +5121,11 @@ def test_an_accumulation_over_several_ITERATIONS_is_the_DECLARED_residual() -> N
     guard that refuses ordinary code reds every PR; one that under-approximates is named.
 
     ⛔ WHAT EACH ROW CAN AND CANNOT CATCH (round-5 review P2, MEASURED both ways). The two
-    literal-`for` rows FLIP when the applied count is enumerated again — replayed against the
-    reverted enumerating implementation, `absent` becomes False for them and only them — so
-    they are regression detectors for the enumeration class. The remaining rows return the
-    SAME set under both implementations: they are not detectors, they pin the boundary AS IT
+    literal-`for` rows and the comprehension `if` clause FLIP when the applied count is
+    enumerated again — replayed against the reverted enumerating implementation (a version of
+    this file that never shipped), `absent` becomes False for exactly those THREE — so they
+    are regression detectors for the enumeration class. The remaining rows return the SAME
+    set under both implementations: they are not detectors, they pin the boundary AS IT
     STANDS, so the docstring cannot drift without a red. Both jobs are stated here rather
     than implied, and the docstring's residual note is scoped to match.
     """
