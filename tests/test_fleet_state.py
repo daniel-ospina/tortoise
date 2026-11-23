@@ -3819,22 +3819,26 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                     break
                 time.sleep(0.1)
             if proc.pid not in pids:
-                # ⛔ TWO EXITS, SPLIT ON THE FIXTURE'S OWN LIVENESS (#5049 rule 1, measured on
-                # `pi-runner-cell3-x64-1` 2026-11-23). A wall-clock expiry must never produce a
-                # FAIL, but the pin's discriminating power is "a `-ww`-less census misses a
-                # LIVE child" — which the assert at the bottom still fails. Those two are
-                # different facts, and before this split the test could not tell them apart:
+                # ⛔ THREE EXITS, SPLIT ON WHAT HAPPENED TO THE FIXTURE (#5049 rules 1 and 4;
+                # measured on `pi-runner-cell3-x64-1` 2026-11-23). A wall-clock expiry must
+                # never produce a FAIL, but the pin's discriminating power is "a `-ww`-less
+                # census misses a LIVE child" — which the `rc is None` exit below still fails.
+                # Those are different facts, and before this split the test could not tell them
+                # apart:
                 #
                 #   FAILED … test_pi_processes_sees_a_real_long_path_lane — … invisible to the
                 #   census for 10s of polling (pids seen: [1104635]; the table's row for the
                 #   fixture pid read '[python] <defunct>')
                 #
-                # `[python] <defunct>` is the row a REAPED child leaves, and `pids seen`
-                # matching some OTHER `pi` (the runner box itself runs one) is a healthy
-                # census. Ten seconds of polling cannot make a dead process visible, so that
-                # red measured machine load, not the `-ww` flag — and it redded a REQUIRED
+                # `[python] <defunct>` is the row a DEAD child leaves, and `pids seen` matching
+                # some OTHER `pi` (the runner box itself runs one) is a healthy census. Ten
+                # seconds of polling cannot make a dead process visible, so that red measured
+                # what happened to the FIXTURE, not the `-ww` flag — and it redded a REQUIRED
                 # shard on a diff (`tests/test_12184_shifted_cites.py`) that cannot reach this
-                # file at all.
+                # file at all. WHICH exit a dead child gets depends on WHY it died, which is the
+                # returncode's sign: a SIGNAL is the box's doing (skip), a clean exit is the
+                # test substrate's (FAIL) — see the two exits below and the class the docstring
+                # above records as CAUGHT.
                 row = _row_for_pid(proc.pid)
                 rc = proc.poll()
                 if rc is None:
@@ -3864,7 +3868,7 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                 # the fixture never slept at all — a HARNESS defect, which
                 # `tests/_verdict.py` rule 4 keeps a FAIL on purpose. The docstring above cites
                 # exactly this class as a CAUGHT bug (the `ubuntu-26.04` uutils multi-call
-                # `sleep` that printed `coreutils: unknown program 'pi'` and exited 1). 
+                # `sleep` that printed `coreutils: unknown program 'pi'` and exited 1).
                 # Skipping it here would make a permanently-refusing fixture green-by-skip on
                 # every run: a false PASS, and nothing reds it — neither static manifest carries
                 # this file, and the INCONCLUSIVE family deliberately trips no skip-guard.
